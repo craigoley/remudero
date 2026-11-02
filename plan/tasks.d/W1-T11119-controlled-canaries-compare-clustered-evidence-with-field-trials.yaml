@@ -17,6 +17,7 @@
     - src/lib/model-canary-cluster-analysis.ts
     - src/lib/model-canary-field-comparison.ts
     - src/lib/model-canary-proposal-export.ts
+    - src/lib/model-canary-command.ts
     - test/routing/model-canary-cluster-analysis.test.ts
     - test/routing/model-canary-field-comparison.test.ts
     - test/routing/model-canary-proposal-export.test.ts
@@ -27,7 +28,9 @@
     inform a bounded improvement proposal without executing that proposal.
   design: >-
     Add pure private post-processing helpers over immutable manifests and existing canary and
-    field-trial evidence contracts. Match serving configuration, scaffold, corpus/scorer pins,
+    field-trial evidence contracts. Preserve observational versus registered randomized
+    field-trial design, assignment probabilities and audit provenance; neither may be silently
+    relabeled or pooled with descriptive benchmark cohorts. Match serving configuration, scaffold, corpus/scorer pins,
     role and observation window. Keep benchmark and observational denominators separate and
     label unmatched/unknown evidence. Resample paired independent task/incident families,
     carrying repeats and variants together with a pinned deterministic analysis seed and
@@ -40,6 +43,8 @@
     scope, unmeasured outcome and rollback/verification requirements. Do not write field-trial
     counts, ledger events, new tasks, schedules, routing policy or promotion state. Reuse the
     existing proposal/experiment contract only where compatible; otherwise return unavailable.
+    Add bounded private analysis and proposal-export modes to the existing offline command that
+    call all three helpers directly. Serialize these command edits after W1-T11118.
   note: >-
     The operator approved coordinated implementation on 2026-11-02. Proposal export is an
     inert artifact, not an approval, autonomous self-modification or new allowance. Native source
@@ -55,6 +60,16 @@
       proof: 'unit test: field comparison withholds attribution for mismatched serving identity or scaffold'
     - claim: Improvement drafts remain unmeasured and have no promotion or policy side effects
       proof: 'unit test: experiment proposal export stays unmeasured and writes no promotion event'
+    - claim: Field-trial experiment designs and assignment provenance are not conflated
+      proof: 'unit test: field comparison preserves observational and randomized design provenance'
+    - claim: Improvement export invokes no ledger task schedule routing or activation writers
+      proof: 'unit test: improvement proposal export is pure and invokes no writer or activation effects'
+    - claim: Native offline analysis actually consumes clustered paired evidence
+      proof: 'grep: analyzeClusterPairedCanaries( in src/lib/model-canary-command.ts'
+    - claim: Native offline comparison actually consumes separate field-trial evidence
+      proof: 'grep: compareCanaryToFieldTrials( in src/lib/model-canary-command.ts'
+    - claim: Native offline export actually builds the private unmeasured proposal
+      proof: 'grep: buildExperimentProposal( in src/lib/model-canary-command.ts'
   falsifier: >-
     Use paired positive controls and known missing/mismatched inputs. Duplicate repeats within
     each family and require the independent-family count to stay fixed. Remove identity/split
