@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { withTempDir } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -95,8 +96,18 @@ test("temporary state is refused across os temp roots and rmd fixture ancestors"
   });
 });
 
-test("a hand-built env cannot restore a temporary state's manifest into the default scratch root", async () => {
-  await withTempDir("scratch-fixture-restore", async (state) => {
+function accountOwnedFixtureRoot(t: TestContext, parent: string, prefix: string): string {
+  const previous = process.umask(0o022);
+  t.after(() => { process.umask(previous); });
+  return realpathSync(mkdtempSync(join(parent, prefix)));
+}
+
+test("a hand-built env cannot restore a temporary state's manifest into the default scratch root", async (t) => {
+  const root = accountOwnedFixtureRoot(t, tmpdir(), "rmd-scratch-fixture-restore-");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  {
+    const state = join(root, "state");
+    mkdirSync(state);
     const fx = host(state);
     const target = join(fx.sentinel, "rmd", "fixture", "worktrees");
     writeFileSync(join(state, ".scratch-mounts"), `${target}\n`);
@@ -107,5 +118,5 @@ test("a hand-built env cannot restore a temporary state's manifest into the defa
     writeFileSync(join(state, ".scratch-mounts"), `${own}\n`);
     assert.match(fx.probe(state, "remudero-daemon", "restore", { RMD_SCRATCH_ROOT: fx.scratch }), /restored/);
     assert.ok(existsSync(own));
-  });
+  }
 });
