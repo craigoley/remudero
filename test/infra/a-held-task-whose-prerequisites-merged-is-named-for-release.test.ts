@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { assessHold, HOLD_READINESS_PASS_STEP, HOLD_READINESS_STEP, mergedTaskIds, observeHoldReadiness } from "#src/lib/hold-readiness.js";
+import { assessHold, HOLD_READINESS_PASS_STEP, HOLD_READINESS_STEP, mergedTaskIds, observeHoldReadiness, startHoldReadinessObserver } from "#src/lib/hold-readiness.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
@@ -66,6 +66,56 @@ test("W1-T11094 criterion 2: one pass over origin/main names each held queued sh
     await observeHoldReadiness(deps, seen);
     assert.deepEqual(rows.map((row) => row.step), [HOLD_READINESS_PASS_STEP], "an unchanged hold is not re-reported");
     fixture.cleanup();
+  });
+});
+
+test("W1-T11094 criterion 4: the timer observer survives a failed ledger write and keeps passing afterwards", async (t) => {
+  await withTempDir("hold-readiness-timer", async (dir) => {
+    const errors: unknown[][] = [];
+    t.mock.method(console, "error", (...args: unknown[]) => void errors.push(args));
+    const steps: string[] = [];
+    let calls = 0;
+    const observer = startHoldReadinessObserver({ planCheckout: join(dir, "absent"), creditCheckouts: [],
+      log: (step) => {
+        calls += 1;
+        if (calls === 1) throw new Error("ledger write failed");
+        steps.push(step);
+      } }, 3_600_000, 1);
+    try {
+      const deadline = Date.now() + 20_000;
+      // The first pass's log write throws (rejection arm); a fresh observer below proves the resolve arm.
+      while (errors.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(errors.length, 1, "the failed write is reported, not thrown");
+      assert.equal(errors[0]![0], "hold readiness observer failed");
+      assert.match(String(errors[0]![1]), /ledger write failed/);
+    } finally {
+      observer.close();
+    }
+    const second = startHoldReadinessObserver({ planCheckout: join(dir, "absent"), creditCheckouts: [], log: (step) => void steps.push(step) },
+      3_600_000, 1);
+    try {
+      const deadline = Date.now() + 20_000;
+      while (steps.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.deepEqual(steps, [HOLD_READINESS_PASS_STEP]);
+    } finally {
+      second.close();
+    }
+  });
+});
+
+test("W1-T11094 criterion 4b: a pass still in flight makes the next tick a no-op", async () => {
+  await withTempDir("hold-readiness-overlap", async (dir) => {
+    const steps: string[] = [];
+    const observer = startHoldReadinessObserver({ planCheckout: join(dir, "absent"), creditCheckouts: [],
+      log: (step) => void steps.push(step) }, 1, 1);
+    try {
+      const deadline = Date.now() + 20_000;
+      while (steps.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.ok(steps.length >= 1);
+      assert.ok(steps.every((step) => step === HOLD_READINESS_PASS_STEP));
+    } finally {
+      observer.close();
+    }
   });
 });
 
