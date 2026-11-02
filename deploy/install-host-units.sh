@@ -524,6 +524,7 @@ DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliati
   src/lib/baked-runtime-inputs.ts src/lib/clock.ts src/lib/config-schema.ts src/lib/config.ts
   src/lib/deploy-judge.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts
   src/lib/fs-race-safe.ts src/lib/host-identity.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
+  src/lib/instance-registry-selection.ts src/lib/instance-registry.ts src/lib/selected-registry-consumers.ts
   src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/loop-bounded-child.ts
   src/lib/plan-scope.ts src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/state-backup-engine-links.ts src/lib/worker-containment.ts)
 

@@ -1317,7 +1317,8 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
-import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, observeSelectedRegistrySync,
+  selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -28442,6 +28443,10 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
+      selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
+        settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+        record: (step, fields) => appendLedger(ledgerPathFor(effectiveConfig), { run_id: "DEPLOY", task_id: "DEPLOY", step, ...fields }),
+      } : undefined,
       ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig), { stateDir: join(effectiveConfig.root, "state"), host: hostname() }),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
@@ -28465,7 +28470,12 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
-  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root }) }, {
+  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root,
+    selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
+      settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+      record: (step, fields) => deps.log(step, fields),
+    } : undefined,
+  }) }, {
     dryRun: rest.includes("--dry-run"),
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
@@ -33527,7 +33537,9 @@ async function pauseCommand(rest: string[]): Promise<number> {
   }
   const target = pauseTargetOrRefuse("pause", rest, config);
   if (!target) return 2;
-  const info = requestPause(target.root, reason, undefined, { instance: target.instance });
+  const info = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "pause", {
+    instanceName: target.instance, stateRoot: target.root, namespace: "host",
+  }, () => requestPause(target.root, reason, undefined, { instance: target.instance }));
   appendLedger(ledgerPathFor({ ...config, root: target.root }), {
     run_id: runId,
     task_id: "FLEET",
@@ -33579,7 +33591,9 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
   }
   const target = pauseTargetOrRefuse("resume", rest, config);
   if (!target) return 2;
-  const result = resumeFleet(target.root);
+  const result = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "resume", {
+    instanceName: target.instance, stateRoot: target.root, namespace: "host",
+  }, () => resumeFleet(target.root));
   appendLedger(ledgerPathFor({ ...config, root: target.root }), {
     run_id: runId,
     task_id: "FLEET",
