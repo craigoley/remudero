@@ -203,8 +203,8 @@ test("escalation reply intent records once without claiming completed work", asy
     const receipt = await first.json() as Record<string, unknown>;
     assert.deepEqual(receipt.saved, { intentId: "reply-fixture-01", seq: 2, text: body.text });
     assert.equal(receipt.work, "not_observed");
-    const after = await f.read(URL); assert.equal(after.state, "served");
-    if (after.state === "served") { assert.equal(after.conversation.attention, "waiting_for_agent"); assert.equal(after.conversation.messages.at(-1)?.text, body.text); }
+    const readback = await f.read(URL); assert.equal(readback.state, "served");
+    if (readback.state === "served") { assert.equal(readback.conversation.attention, "waiting_for_agent"); assert.equal(readback.conversation.messages.at(-1)?.text, body.text); }
     const repeat = await post(); assert.equal(repeat.status, 200);
     assert.equal((await repeat.json() as { duplicate: boolean }).duplicate, true);
     assert.equal((await post({ ...body, text: "Different direction" })).status, 409);
