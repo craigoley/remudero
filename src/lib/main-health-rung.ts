@@ -52,24 +52,18 @@ import {
   type RollupCheckEntry,
 } from "./sweep.js";
 
-// W1-T8042: the red signature moved to sweep.ts, which classifies a red shared across open PRs by it and
-// cannot import this module back; re-exported so every existing importer keeps its path.
+// W1-T8042: re-export sweep.ts's shared-red signature to preserve import paths without a cycle.
 export { describeMainRed, mainRedSignature, mainRedSignaturesMatch, type MainRedSignature };
 
 /** Stable referent for the one repo-wide default-branch health incident. */
 export const MAIN_HEALTH_TASK_ID = "MAIN-HEALTH";
 
-/** W1-T4472 — the stable, NON-REQUIRED check name `.github/workflows/main-tripwire.yml` posts once
- *  per merged commit on `main` (see that workflow's own header for why: ci.yml's push lane groups
- *  every push under one concurrency key, so a red can sit superseded-then-live for the better part
- *  of an hour). It is never added to `readRequiredChecks()` — ci-gate's REQUIRED list stays the
- *  sole BLOCKING authority for a merge — so it is read separately, below, from the gate-required
- *  judgment {@link mainHealthFromRollup} already performs. */
+/** W1-T4472: per-merge `.github/workflows/main-tripwire.yml` check, read separately from
+ *  {@link mainHealthFromRollup}. Never add it to `readRequiredChecks()`: ci-gate alone blocks merges.
+ *  Unlike main's shared push concurrency group, the tripwire cannot be superseded by another merge. */
 export const MAIN_TRIPWIRE_CHECK_NAME = "main-tripwire";
 
-/** True when the deduped rollup carries a {@link MAIN_TRIPWIRE_CHECK_NAME} entry for this head that
- *  concluded with a failing conclusion. An absent or still-running tripwire reads `false` here —
- *  this predicate only ever fires on a genuinely concluded red. */
+/** Only a concluded red {@link MAIN_TRIPWIRE_CHECK_NAME} in the deduped head rollup fires. */
 function tripwireIsRed(rollup: readonly RollupCheckEntry[]): boolean {
   const entry = dedupeRollupByLatestAttempt(rollup).find((c) => (c.name ?? c.context) === MAIN_TRIPWIRE_CHECK_NAME);
   if (!entry) return false;
@@ -77,17 +71,12 @@ function tripwireIsRed(rollup: readonly RollupCheckEntry[]): boolean {
   return TRIPWIRE_RED.has(state);
 }
 
-/** Only a tripwire that RAN and failed reads red. A cancelled, timed-out or stale one is no evidence
- *  either way: 17 of 21 runs on 2026-09-26..28 hit the job timeout and paged a false "main is red". */
+/** Cancelled, timed-out and stale tripwires prove nothing (17/21 false timeout pages, 2026-09-26..28). */
 const TRIPWIRE_RED: ReadonlySet<string> = new Set(["FAILURE", "ERROR"]);
 
-/** W1-T4472 design (ii) — a RED main-tripwire on main's newest head reads main red AT ONCE, layered
- *  onto whatever {@link mainHealthFromRollup} already found rather than replacing its reasoning: the
- *  full required run may still be minutes away from its own verdict. The asymmetry is deliberate and
- *  one-directional — a GREEN or absent tripwire never touches `observation`, because a fast check
- *  over a SUBSET of the suite is never evidence the whole tree is healthy; only the full required
- *  run may report green. Idempotent: a second call once `main-tripwire` is already named in
- *  `failingChecks` (main-tripwire is itself in the required set) changes nothing. */
+/** W1-T4472 (ii): a red head tripwire immediately augments {@link mainHealthFromRollup}'s reasoning.
+ *  Green or absent tripwires change nothing: a subset cannot prove the whole tree healthy.
+ *  Idempotent once `failingChecks` already names the tripwire. */
 export function withTripwireOverride(
   observation: MainHealthObservation,
   rollup: readonly RollupCheckEntry[],
@@ -105,15 +94,12 @@ export function withTripwireOverride(
   };
 }
 
-/** W1-T5630 — PRIMARY CONTROL: how long one head's completed run history (and the fallback jobs
- *  read under it) is reused. The key already refetches on a new head or a newly completed head
- *  check; this bounds staleness from runs finishing on OTHER commits while the head sits still.
- *  Read 2026-10-04: 72 observations over 7 heads in 88 minutes, so each head's page refetched ~10x. */
+/** W1-T5630 — PRIMARY CONTROL: completed history/fallback-job TTL; bounds other commits' staleness.
+ *  New heads or completed head checks also refetch. Evidence: ~10 reads/head, 2026-10-04. */
 export const MAIN_HEALTH_RUN_HISTORY_TTL_MS = 5 * 60_000;
 
-/** The run-history cache key: the head sha plus each COMPLETED head rollup entry's name:verdict,
- *  sorted. A check run carries a conclusion only once completed; a commit status counts once it
- *  leaves `PENDING`. A guard workflow finishing on the head therefore changes the key. */
+/** Head sha plus sorted completed name:verdict pairs; statuses count after leaving `PENDING`.
+ *  A guard completing on the head changes the key. */
 function runHistoryCacheKey(sha: string, rollup: readonly RollupCheckEntry[]): string {
   const completed = rollup
     .map((c) => [c.name ?? c.context, c.conclusion || (c.state !== "PENDING" ? c.state : undefined)] as const)
@@ -133,8 +119,7 @@ interface RunHistoryCache {
   recentShas?: MainFirstParentWindow;
 }
 
-/** W1-T6023 — main's newest first-parent commits from its head, as {@link readMainFirstParentWindow}
- *  reads them. */
+/** W1-T6023: newest first-parent commits read by {@link readMainFirstParentWindow}. */
 export interface MainFirstParentWindow {
   /** Newest first: the head at index 0, each next entry its first parent. */
   readonly order: readonly string[];
@@ -143,10 +128,8 @@ export interface MainFirstParentWindow {
   readonly committedAtMs: ReadonlyMap<string, number>;
 }
 
-/** How old the evidence that decided main's state is. `head`: main's own head decided. `fresh`: an
- *  older commit decided, and the oldest merge since it has waited no longer than main's own observed
- *  evidence latency. `stale`: it has waited longer. `unmeasured`: a commit time or a latency sample
- *  was missing, so no age can be claimed either way. */
+/** `head`: head decided; `fresh`/`stale`: oldest subsequent merge's wait within/beyond observed
+ *  evidence latency; `unmeasured`: missing commit time or latency sample prevents an age claim. */
 export type MainEvidenceFreshness = "head" | "fresh" | "stale" | "unmeasured";
 
 export interface MainEvidenceAge {
@@ -159,8 +142,7 @@ export interface MainEvidenceAge {
   readonly lagMs?: number;
   /** The longest wait main's own evidence-bearing runs show: see {@link mainEvidenceAge}. */
   readonly latencyBoundMs?: number;
-  /** The median gap between consecutive first-parent merges in the window. Reported, so a reader can
-   *  turn the lag into merges; the verdict is made in time, which the merge cadence cannot move. */
+  /** Median first-parent merge gap, for context only; cadence cannot change the time-based verdict. */
   readonly mergeCadenceMs?: number;
 }
 
@@ -175,16 +157,10 @@ function medianGapMs(window: MainFirstParentWindow): number | undefined {
   return gaps.length === 0 ? undefined : gaps[Math.floor(gaps.length / 2)];
 }
 
-/**
- * PRIMARY CONTROL — how old main's deciding evidence may be before a green reads `stale`, derived
- * from main's own runs, never a fixed number. Main's push runs share one concurrency group: a merge
- * landing just after a run started waits for that run and then for its own (or a later merge's),
- * so a healthy merge waits up to two run lengths for evidence. The bound is the larger of twice the
- * longest observed run (start to completion) and the longest observed merge-to-verdict wait, over
- * every completed, non-cancelled run of an evidence-bearing workflow whose head sits in the window.
- * The oldest merge after the deciding commit waiting longer than that is outside anything main's
- * pipeline has been seen to do: its evidence stopped arriving, so the old green is not reported.
- */
+/** PRIMARY CONTROL: green becomes stale when the oldest subsequent merge waits beyond the larger
+ *  of twice the longest run and the longest merge-to-verdict wait. Sample completed, non-cancelled
+ *  evidence-workflow runs within the window, never a fixed bound. Shared push concurrency makes
+ *  healthy merges wait up to two run lengths; beyond observed latency, suppress the old green. */
 export function mainEvidenceAge(
   decidedBySha: string,
   window: MainFirstParentWindow,
@@ -221,8 +197,7 @@ export function mainEvidenceAge(
 const minutes = (ms: number): string => `${Math.round(ms / 60_000)} min`;
 
 export interface MainHealthRungDeps {
-  /** Every read is awaited: production passes the async `gh` transport, because a sync `ghJson`
-   *  here held the core daemon's loop 144 s (E36, 2026-10-02). A sync fetcher still works. */
+  /** Await every read; production uses async `gh` (sync held the loop 144 s: E36, 2026-10-02). */
   fetch: GhApiFetcher;
   /** W1-T5283: every issue call is awaited, for the same reason as `fetch`; a sync gateway still works. */
   issues: AsyncIssueGateway;
@@ -259,14 +234,11 @@ export interface MainHealthRungDeps {
 
 type Awaitable<T> = T | Promise<T>;
 
-/** W1-T6403 — PRIMARY CONTROL: red observations a fix PR may sit through with no new head and no
- *  merge before the lane opens the revert PR (the operator ruling's "two daemon ticks"). */
+/** W1-T6403 — PRIMARY CONTROL: unchanged, unmerged fix PR's red ticks before revert (operator: two). */
 export const MAIN_REPAIR_STALL_TICKS = 2;
 
-/** W1-T6403 — PRIMARY CONTROL: the least time since a fix PR last moved before it counts as stalled.
- *  A daemon tick is 60 s (`pollIntervalMs`) and one CI run on a fix PR takes far longer, so two
- *  ticks alone would revert while the fix PR's own CI was still running. #10092's red lasted 40
- *  minutes before a hand fix merged. */
+/** W1-T6403 — PRIMARY CONTROL: minimum fix-PR stall age; two 60 s ticks alone would revert during CI.
+ *  #10092 waited 40 minutes for a hand fix. */
 export const MAIN_REPAIR_STALL_MS = 30 * 60_000;
 
 /** W1-T6403 — what the priority fix PR's worker is told: the failing checks, their failing test
@@ -344,9 +316,8 @@ function headWithOmission(text: string, chars: number): string {
   return [...shown, `(${lines.length - shown.length} more diff lines omitted)`].join("\n");
 }
 
-/** W1-T9665 — the brief's "Merges since the last green main" section: reaching merges first with their
- *  diffs, the rest with their diff stat. Past `budget`, whole non-reaching merges are cut first (newest
- *  last-ranked first), then each reaching diff keeps its head; every cut is counted. */
+/** W1-T9665: brief reaching merges with diffs, others with stats. Over budget, count every cut:
+ *  drop newest last-ranked non-reaching merges first, then retain each reaching diff's head. */
 export function renderMainRepairMergesSinceGreen(since: MainRepairMergesSinceGreen | undefined, budget = MAIN_REPAIR_LOG_EXCERPT_CHARS): string {
   if (!since) return "Merges since the last green main: not read for this brief.";
   const title = `Merges since the last green main${since.afterGreenSha ? ` \`${short(since.afterGreenSha)}\`` : ""}:`;
@@ -459,10 +430,8 @@ export interface MainRepairLane {
   reproduceAt?(sha: string, testFiles: readonly string[]): Awaitable<BaseProbeResult>;
 }
 
-/** W1-T7760 — the workflow a probe runs. It carries ci-gate's required checks, has a
- *  `workflow_dispatch` trigger, and its `push` trigger is `branches: [main]`, so creating a probe's
- *  ref fires no workflow's push trigger (read from .github/workflows/*.yml: every `push:` there is
- *  filtered to main). */
+/** W1-T7760: dispatchable workflow carrying required checks; all workflow push triggers filter to
+ *  main, so creating a probe ref triggers none (see .github/workflows/*.yml). */
 export const MAIN_PROBE_WORKFLOW = "ci.yml";
 
 /** W1-T7760 — a probe's ref lives under this prefix: its concurrency group (`ci-refs/heads/<ref>`)
@@ -561,16 +530,10 @@ export type MainBisectionPlan =
       readonly alternativeProbes: number;
     };
 
-/**
- * W1-T7760 — where main turned red, from verdicts only. The sequence is `green`, the `span` oldest
- * first, `red`. Verdicts are the completed runs and concluded probes; the newest proven green and the
- * oldest proven red above it bound the open interval. The first red is PROVEN when those two are
- * adjacent: a completed red whose first parent is a completed green.
- *
- * With `concurrency` probes allowed in flight, the open commits are probed newest first (a linear
- * walk from the known red) while that costs no more than a bisection would, and at split points once
- * it costs more. Cost is worst-case probes, each priced alike, so the comparison needs no constant.
- */
+/** W1-T7760: completed runs/concluded probes bound `green`, oldest-first `span`, `red`.
+ *  First red is proven only adjacent to its proven green first parent. With `concurrency` probes,
+ *  walk newest first while worst-case probe cost <= bisection; otherwise probe split points.
+ *  Equal probe prices make the comparison constant-free. */
 export function planMainBisection(input: {
   readonly green: string;
   readonly red: string;
@@ -634,9 +597,7 @@ export interface MainBisectionState {
   readonly located: boolean;
 }
 
-/** The ledger, not memory, is the dedupe: a restarted daemon (or a rotated ledger) must not
- *  dispatch a probe that is already running, nor re-run one that concluded. Keyed by the first red
- *  `firstRedSha` the walk named. */
+/** Ledger dedupe by `firstRedSha`: restart/rotation must not redispatch running or concluded probes. */
 export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[], firstRedSha: string): MainBisectionState {
   const inFlight = new Map<string, MainProbeHandle>();
   const verdicts = new Map<string, MainProbeVerdict>();
@@ -682,11 +643,8 @@ export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[
   return { inFlight, verdicts, evidence, localAttempts, started, located };
 }
 
-/**
- * W1-T7760 — why `sha` may NOT be written as a located offender, or undefined when it may. A sha is
- * nameable only when a COMPLETED run of it whose required checks concluded red exists in main's push
- * run history, or a concluded probe of it read red. A cancelled run concluded nothing.
- */
+/** W1-T7760: refusal reason, or undefined when main history proves completed required-check red
+ *  or a concluded probe proves red. Cancelled runs prove nothing. */
 export function locatedWriterRefusal(
   sha: string,
   history: readonly MainHealthRunHistoryEntry[] | undefined,
@@ -707,9 +665,8 @@ interface BranchRunsResponse {
   workflow_runs?: ReadonlyArray<{ id?: unknown; html_url?: unknown; status?: unknown; head_sha?: unknown }>;
 }
 
-/** GitHub answers a workflow dispatch and a ref delete with 204 No Content: `gh` exits 0 and prints nothing, which
- *  the JSON fetcher reports as an unreadable body. For these writes that is the request's success. Every probe
- *  dispatch on 2026-10-16 was logged failed this way, so the red at bd42ca367 was never attributed. */
+/** Dispatch/ref-delete 204s exit 0 without JSON: success for these writes, despite the fetcher's
+ *  unreadable-body report (2026-10-16: every dispatch falsely failed; bd42ca367 stayed unattributed). */
 async function writeWithNoContent(write: () => unknown): Promise<void> {
   try {
     await write();
@@ -1445,13 +1402,9 @@ function isMainHealthIssue(issue: OpenIssue): boolean {
   return /^\*\*Task:\*\*\s+MAIN-HEALTH\s*$/m.test(issue.body ?? "");
 }
 
-/**
- * Build the default-branch observer once per daemon process, then invoke it from settled check
- * events and every FULL sweep. The branch name is stable enough to cache for that process; the
- * head SHA and its rollup are re-read after the brief event-settlement freshness window. All
- * errors are named and swallowed here so neither GitHub nor issue transport can stop the PR
- * reconciler that follows this rung.
- */
+/** Build once per daemon; invoke on settled checks and every FULL sweep. Cache the branch name;
+ *  refresh head/rollup after the settlement window. Name and swallow errors so failed GitHub/issue
+ *  transport cannot stop the following PR reconciler. */
 export function buildMainHealthRung(
   owner: string,
   repo: string,
@@ -1463,9 +1416,8 @@ export function buildMainHealthRung(
   let lastSuccessfulObservationAtMs: number | undefined;
   let inFlight: Promise<void> | undefined;
   const localProbes = new Set<string>();
-  // W1-T9930 — a red decided BELOW the head, re-judged at the head by its own failing test files run
-  // locally there: outcomes per (head, file), the files each deciding commit's red named, the files in
-  // flight. Only main's current head is kept: a new head is a new question.
+  // W1-T9930: re-judge older reds locally at the head; track per-file outcomes, red files and in-flight
+  // files for the current head only. A new head is a new question.
   let headRepro: { head: string; outcomes: Map<string, BaseProbeFile>; filesBy: Map<string, readonly string[]>; running: Set<string>; noted: Set<string> } | undefined;
   const headReproFor = (head: string) => {
     if (headRepro?.head !== head) headRepro = { head, outcomes: new Map(), filesBy: new Map(), running: new Set(), noted: new Set() };
@@ -1515,11 +1467,9 @@ export function buildMainHealthRung(
   };
   let runHistoryCache: RunHistoryCache | undefined;
   let metPrCache: { sha: string; lookup: MetPrLookup } | undefined;
-  // Which push workflows carry ci-gate's required checks, learned from the jobs pages read below and
-  // kept across heads: CodeQL, Semgrep, Scorecard and main-tripwire finish minutes before CI, so
-  // they crowd the newest completed history, and each one read costs a jobs read. A workflow is
-  // passed over only once a run of it with jobs held no required check, and never once one did.
-  // Keyed by the required set, so a changed ci-gate list relearns from scratch.
+  // Learn required-check workflows from jobs across heads, keyed by the required set (changes reset).
+  // Skip only after jobs prove a workflow carries none, never after it carried one. Faster guard
+  // workflows crowd history; this avoids repeatedly fetching their jobs before reaching CI.
   let workflowEvidence: WorkflowEvidence | undefined;
   const learnedFor = (required: ReadonlySet<string>): WorkflowEvidence => {
     const key = [...required].sort().join(",");
@@ -1547,9 +1497,8 @@ export function buildMainHealthRung(
   const freshMs = Math.max(0, deps.freshMs ?? 0);
   const now = deps.now ?? Date.now;
 
-  // W1-T6403 — the red-main repair lane: locate the offending merge, open ONE fix PR for it, then ONE
-  // revert PR if main stays red, then close out once main is green on its own head. The ledger rows
-  // are the dedupe across daemon restarts; the stall counters below are this process's own.
+  // W1-T6403: locate, open ONE fix then ONE revert if still red; close out on head green.
+  // Ledger rows dedupe across restarts; stall counters belong to this process.
   let repairedSignature: string | undefined;
   // The red this observation repairs, and the run history a culprit is proven against: set on each
   // red observation before the lane runs, so a repair the lane already owns is advanced on them too.
@@ -1788,12 +1737,9 @@ export function buildMainHealthRung(
     }
     return undefined;
   };
-  /**
-   * A located merge is the culprit only when that is PROVEN: its own completed run is red on this
-   * repair's red, and its first parent's completed run is green. The locator's answer alone is not
-   * proof — on 2026-10-10 it named a different merge on each of seven passes. `unreadable` means a
-   * read failed, which decides nothing: the next observation asks again.
-   */
+  /** Culprit proof: its completed run matches this red and its first parent's run is green.
+   *  Location alone proves nothing (2026-10-10: seven passes named seven merges).
+   *  `unreadable` decides nothing; retry next observation. */
   const proveCulprit = async (
     record: MainRepairRecord,
     red: MainRedSignature,
@@ -2433,15 +2379,12 @@ export function buildMainHealthRung(
       const judgedAgainst = required.size > 0 ? required : undefined;
       const judging = { cancelledIsPending: true } as const;
       let observation = mainHealthFromRollup(sha, rollup, judgedAgainst, undefined, judging);
-      // W1-T4472 (ii): applied BEFORE `advisoryFailing` is derived below, so a red main-tripwire
-      // (never itself in `required`) is counted once, as a genuine failing check, rather than also
-      // spilling into the advisory list `mainHealthFromRollup(sha, rollup, undefined)` would
-      // otherwise place it on.
+      // W1-T4472 (ii): apply before `advisoryFailing` so red tripwire counts once, as genuine red,
+      // rather than also as advisory (it is never in `required`).
       observation = withTripwireOverride(observation, rollup);
-      // W1-T5490: the completed push-run history is shared with the red-path enrichment below: it
-      // supplies fallback evidence and the guard workflows' verdicts. W1-T5630: it is read once per
-      // head (see {@link runHistoryCacheKey}) and reused until MAIN_HEALTH_RUN_HISTORY_TTL_MS, aged
-      // on the injected clock; a negative age (a clock stepping back) or an unreadable read refetches.
+      // W1-T5490/W1-T5630: share fallback/guard history with red enrichment; cache per
+      // {@link runHistoryCacheKey} until MAIN_HEALTH_RUN_HISTORY_TTL_MS on the injected clock.
+      // Negative age or unreadable data refetches.
       let runHistory: MainHealthRunHistoryEntry[] | undefined;
       let runHistoryUnavailable: string | undefined;
       const cacheKey = runHistoryCacheKey(sha, rollup);
@@ -2497,11 +2440,9 @@ export function buildMainHealthRung(
           };
         }
       }
-      // The walk back: main's head concluded nothing genuine (no required check yet, still pending,
-      // cancelled by the next push, or every one skipped or known-vacuous on a plan-only merge), so
-      // the NEWEST main commit whose completed run genuinely executed a required check decides. Runs
-      // whose required jobs were themselves skipped, vacuous or cancelled are walked past, never
-      // allowed to decide. The window (W1-T6023) bounds how far back; nothing else does.
+      // Without genuine head evidence, walk to the NEWEST commit whose run executed required checks.
+      // Pending, cancelled, skipped and known-vacuous jobs cannot decide; only W1-T6023's window
+      // bounds the walk, including after a plan-only merge.
       let evidenceAge: MainEvidenceAge | undefined;
       let walkedPast = 0;
       const headReason = observation.reason;
@@ -2665,12 +2606,9 @@ export function buildMainHealthRung(
       const everyCheck = mainHealthFromRollup(decidedBySha, evidenceRollup, undefined, undefined, judging);
       const advisoryFailing =
         required.size === 0 ? [] : everyCheck.failingChecks.filter((name) => !observation.failingChecks.includes(name));
-      // Only CONCLUDED checks are a census `decideBaseRed` may read: a pending or skipped one is
-      // not evidence that main ran it green. The census spans EVERY check, not only ci-gate's
-      // required aggregates: a PR's red names a shard ("coverage-shard (2/8)") that the required
-      // set ("ci", "test-slow") never names, so a required-only census read every shard red "absent"
-      // and held it as main's whenever main was red for any reason (2026-10-10, eight PRs held on
-      // dbca9031a, whose only failing shard was test-slow-shard (2/2)).
+      // `decideBaseRed` needs EVERY concluded check, including shards absent from required aggregates.
+      // Pending/skipped proves no green. Required-only census falsely held eight PRs on dbca9031a
+      // (2026-10-10), whose only red was test-slow-shard (2/2).
       const notConcluded = new Set([
         ...observation.pendingChecks, ...observation.nonEvidenceChecks,
         ...everyCheck.pendingChecks, ...everyCheck.nonEvidenceChecks,
@@ -2755,11 +2693,8 @@ export function buildMainHealthRung(
         }
         let failures: CiFailure[] | undefined;
         let ciFailuresUnavailable: string | undefined;
-        // W1-T4472: `main-tripwire` is never in `required` (it is not a ci-gate-required check),
-        // so `judgedRollup(rollup, required)` alone would filter its entry out and the evidence
-        // reader below would never fetch its job log — the "named failing suites" design (ii)
-        // calls for. Widened ONLY when the tripwire is actually part of this red verdict, and
-        // ONLY when `required` is non-empty (an empty `required` already reads every check).
+        // W1-T4472 (ii): include tripwire's job log only when it contributed red and `required`
+        // is non-empty; otherwise it is filtered out, or the empty set already reads every check.
         const evidenceRequired =
           required.size > 0 && observation.failingChecks.includes(MAIN_TRIPWIRE_CHECK_NAME)
             ? new Set([...required, MAIN_TRIPWIRE_CHECK_NAME])

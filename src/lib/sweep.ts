@@ -1,4 +1,4 @@
-import type { DependencyMainIdentity } from "./dependency-main-identity.js";
+import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
@@ -212,7 +212,7 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
-import { isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
+import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
@@ -253,6 +253,7 @@ import {
   repairLadderStallFrom,
   type RepairLadderFallback,
 } from "./worker-provider.js";
+import { stalledStageEscalationIdentity, stalledStageIssueIdentity } from "./stage-stall-identity.js";
 import {
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
@@ -619,22 +620,14 @@ export function stalledStageEscalationSummary(reason: string): string {
     .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
 }
 
-/** Read a complete PR/blocker identity from a title or the unabridged reason in its body. */
-function stalledStageEscalationIdentity(text: string): string | undefined {
-  return /(PR stage stalled: #\d+ \S+ — [a-z-]+)(?=;| for \d+ minutes \(|$)/.exec(text)?.[1];
-}
-
 /** The PR's oldest open stage-stall question, whatever its head, blocker or contract, viewed at the
  *  episode's head with no contract line so the gateway's own task/PR/cause match appends to it. */
 function openStallQuestionForPr(open: OpenIssue[], pr: { prNumber: number; prUrl: string; headSha: string },
   key: { class: EscalationClass; taskId: string; cause: EscalationCause }): OpenIssue | undefined {
   const prefix = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — `;
   const probe = { ...key, summary: `PR ${pr.prUrl}`, detail: "" };
-  const asked = open.filter(issue => {
-    const identityText = issue.title?.endsWith("…") ? issue.body : issue.title;
-    return stalledStageEscalationIdentity(identityText ?? "")?.startsWith(prefix) === true &&
-      matchDuplicateEscalation(probe, [issue]) !== undefined;
-  }).sort((a, b) => a.number - b.number)[0];
+  const asked = open.filter(issue => stalledStageIssueIdentity(issue)?.startsWith(prefix) === true &&
+    matchDuplicateEscalation(probe, [issue]) !== undefined).sort((a, b) => a.number - b.number)[0];
   if (!asked) return undefined;
   const body = (asked.body ?? "").replace(/^\*\*Head:\*\*.*$/m, `**Head:** ${pr.headSha}`)
     .replace(/^\*\*Contract:\*\*.*\n/m, "");
@@ -1246,6 +1239,13 @@ export function requiredSweepRuntimeCtor<T extends SweepRuntimeCtor>(name: strin
       throw new Error(`buildSweepEffects requires ${name} from its entrypoint adapter`);
     }
   }) as unknown as T;
+}
+
+/** The first PR a free-text escalation names (`/pull/<n>`, `PR #<n>`, `PR <n>`), as escalate.ts's private
+ *  dedup reader reads it. It is kept here because W1-T11034's compression pin freezes escalate.ts's executable
+ *  tokens, so that reader cannot be exported. */
+function firstPrRefInText(text: string): string | undefined {
+  return /\/pull\/(\d+)\b/.exec(text)?.[1] ?? /\bPR\s*#(\d+)\b/i.exec(text)?.[1] ?? /\bPR\s+(\d+)\b/i.exec(text)?.[1];
 }
 
 function prNumberFromRef(ref: string): number | undefined {
@@ -3198,10 +3198,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           user?: { login?: unknown }; changed_files?: unknown;
         } | undefined;
         if (main?.sha !== proof.mainSha || live?.state !== "open" || live.merged !== false || live.draft !== false ||
-            live.head?.sha !== proof.headSha || live.head.ref !== pr.headRefName || live.base?.ref !== "main" || live.base.sha !== proof.mainSha ||
+            live.head?.sha !== proof.headSha || live.head.ref !== pr.headRefName || live.base?.ref !== "main" ||
             typeof live.user?.login !== "string" || !isDependabotAuthor({ login: live.user.login }) || live.changed_files !== proof.files.length)
           return { closed: false, reason: "fresh dependency close lifecycle/head/main evidence changed or unavailable" };
-        await close();
+        // A human's review, review comment or Conversation-tab comment is a conversation this close would end:
+        // stand down. The Conversation tab is the issue-comments endpoint; the pulls endpoints never list it.
+        const conversation = [
+          { path: `pulls/${pr.prNumber}/reviews`, label: "PR review reviews" },
+          { path: `pulls/${pr.prNumber}/comments`, label: "PR review comments" },
+          { path: `issues/${pr.prNumber}/comments`, label: "PR conversation comments" },
+        ] as const;
+        for (const { path, label } of conversation) {
+          const rows = await readJsonImpl(["api", `repos/${owner}/${repo}/${path}?per_page=100`], { fresh: true });
+          if (!Array.isArray(rows) || rows.length >= 100) return { closed: false, reason: `${label} unreadable or unbounded` };
+          if (hasNonBotAuthor(rows)) return { closed: false, reason: `${label} include a non-bot author; a human conversation is open` };
+        }
+        await close(await namePathLanding(readJsonImpl, owner, repo, proof.mainSha, proof.files[0]?.path));
         return { closed: true };
       } catch (error) {
         return { closed: false, reason: `dependency close claim or fresh read/effect refused: ${String(error)}` };
@@ -3661,9 +3673,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           const kept = openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause });
           return kept ? [kept] : open.filter(issue => {
             const head = escalationHeadSha(issue.body);
-            const identityText = issue.title?.endsWith("…") ? issue.body : issue.title;
-            return (head !== undefined && head !== pr.headSha) ||
-              stalledStageEscalationIdentity(identityText ?? "") === stallIdentity;
+            return (head !== undefined && head !== pr.headSha) || stalledStageIssueIdentity(issue) === stallIdentity;
           });
         } }
         : issues;
@@ -13872,37 +13882,67 @@ export interface FixDispatchHold {
   escalated: boolean;
 }
 
-/** The newest escalation this PR's own lanes delivered at this head, read back off its `sweep.disposed` rows. */
+/** The newest escalation any lane delivered for this PR at this head, read back off the ledger. */
 export interface OwnEscalationAtHead {
   ts: string | undefined;
   /** The sentence that escalation carried; undefined when its row holds none. */
   reason: string | undefined;
+  /** The issue it opened, when its row names one (another lane's question, read off its own row). */
+  issueUrl?: string;
 }
 
 /** PR 14326 (issue 14390): an `escalated` stage is a PR some lane ALREADY escalated — a filed blocked-ambiguous
  *  or refused-escalate disposition, a progress-judge stop, or a dispatch backstop. The stall report reads that
  *  escalation back here so it can name it instead of "unknown signature". Each latch's FIRST row is the one that
  *  escalated; its later rows only repeat "already escalated". Only rows at this exact head count, since a new
- *  head re-earns its own escalation. Undefined when no such row is in `rows`. */
+ *  head re-earns its own escalation. Another lane's escalation counts too (issue 15818): the transport's birth
+ *  row names its PR and head (a headless one counts when its run observed this head), and the fix lane's
+ *  scope-amendment row names the issue it opened. Undefined when no such row is in `rows`. */
 export function ownEscalationAtHead(
   rows: ReadonlyArray<Record<string, unknown>>, pr: Pick<OpenPrView, "prNumber" | "headSha">,
 ): OwnEscalationAtHead | undefined {
   const latched = new Set<string>();
-  let found: Record<string, unknown> | undefined;
+  const runsAtHead = new Set<unknown>();
+  let found: OwnEscalationAtHead | undefined;
+  const text = (value: unknown): string | undefined => typeof value === "string" && value.trim() !== "" ? value : undefined;
+  const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? row.ts : undefined);
   for (const row of rows) {
-    if (row.step !== "sweep.disposed" || row.pr_number !== pr.prNumber || row.head_sha !== pr.headSha) continue;
+    const atHead = row.head_sha === pr.headSha;
+    const thisPr = row.pr_number === pr.prNumber ||
+      (typeof row.pr_url === "string" && firstPrRefInText(row.pr_url) === String(pr.prNumber));
+    if (atHead && thisPr && row.run_id !== undefined) runsAtHead.add(row.run_id);
+    // Issue 15818: another lane's escalation is this head's too. Every lane's issue crosses the transport, whose
+    // birth row carries the escalation it filed; a stall report's own issue (cause stage-stall) never counts.
+    const subject = (row.triage_subject ?? undefined) as Record<string, unknown> | undefined;
+    if (ESCALATION_TRIAGE_BIRTH_STEPS.includes(String(row.step)) && subject !== undefined && subject.cause !== "stage-stall" &&
+        firstPrRefInText(`${String(subject.summary ?? "")}\n${String(subject.detail ?? "")}`) === String(pr.prNumber) &&
+        (subject.headSha === undefined ? runsAtHead.has(row.run_id) : subject.headSha === pr.headSha)) {
+      found = { ts: at(row), reason: text(subject.summary), ...(text(row.issue_url) ? { issueUrl: String(row.issue_url) } : {}) };
+      continue;
+    }
+    // The fix lane's own record of a scope it could not grant names the issue its question opened.
+    if (row.step === "fix.scope_amendment" && thisPr && atHead && typeof row.outcome === "string" &&
+        row.outcome.endsWith("-escalated")) {
+      const issueUrl = text(row.issue_url);
+      if (issueUrl !== undefined && found?.issueUrl === issueUrl) continue;
+      const paths = Array.isArray(row.paths) && row.paths.length > 0 ? `: ${row.paths.map(String).join(", ")}` : "";
+      const said = text(row.reason);
+      found = { ts: at(row), reason: said === undefined ? undefined : `${said}${paths}`, ...(issueUrl ? { issueUrl } : {}) };
+      continue;
+    }
+    if (row.step !== "sweep.disposed" || row.pr_number !== pr.prNumber || !atHead) continue;
     const filed = row.acted === true && (row.disposition === "blocked-ambiguous" || row.disposition === "refused-escalate");
     const latch = typeof row.progress_escalated_key === "string" ? `progress\u0000${row.progress_escalated_key}`
       : typeof row.fix_claim_decline_escalated === "string" ? `claim\u0000${row.fix_claim_decline_escalated}`
         : row.fix_dispatch_failed_escalated === true ? "dispatch-failed" : undefined;
     const firstOfLatch = latch !== undefined && !latched.has(latch);
     if (latch !== undefined) latched.add(latch);
-    if (filed || firstOfLatch || row.stand_down_escalation_outcome === "delivered") found = row;
+    if (filed || firstOfLatch || row.stand_down_escalation_outcome === "delivered") {
+      found = { ts: at(row), reason: [row.acted === true ? row.reason : row.stand_down_reason, row.reason].map(text)
+        .find((said): said is string => said !== undefined) };
+    }
   }
-  if (found === undefined) return undefined;
-  const said = [found.acted === true ? found.reason : found.stand_down_reason, found.reason]
-    .find((text): text is string => typeof text === "string" && text.trim() !== "");
-  return { ts: typeof found.ts === "string" ? found.ts : undefined, reason: said };
+  return found;
 }
 
 /** W1-T5919 + W1-T5932 — the backstop holds, pure. The claim-decline hold stands only while the
@@ -14105,7 +14145,7 @@ export interface SweepDeps {
   draftRefusalAmendments?: (candidates: readonly RefusalCandidate[]) => Promise<readonly RefusalAmendmentResult[]>;
   /** Close superseded/abandoned PRs with a reason; the dependency fence alone holds the existing branch mutex through fresh reads and close. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
-  withDependencyCloseFence?: (pr: OpenPrView, close: () => Promise<void>) => Promise<{ closed: boolean; reason?: string }>;
+  withDependencyCloseFence?: (pr: OpenPrView, close: (supersededBy?: string) => Promise<void>) => Promise<{ closed: boolean; reason?: string }>;
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same
    *  head — from "hold" or an incomplete/unknown result, which re-run next sweep because a red
@@ -15591,8 +15631,11 @@ function priorActionsFromLedger(
         // Only an explicit completed decision dedups. A retitle can return without deciding,
         // recorded as "unknown"; missing/unrecognized outcomes are not terminal either.
         // They, like "hold", must re-run at the SAME sha (see SweepDeps.depReview).
-        if (line.dep_review_outcome === "arm" || line.dep_review_outcome === "escalate" ||
-            line.dep_review_outcome === "refuse" || line.dep_review_outcome === "migrate") {
+        // A terminal decided by an OLDER dep-review engine does not dedup: an engine fix (W1-T2872's
+        // revision) rearms the same head once, exactly as it changes the review input digest.
+        if ((line.dep_review_outcome === "arm" || line.dep_review_outcome === "escalate" ||
+            line.dep_review_outcome === "refuse" || line.dep_review_outcome === "migrate") &&
+            depReviewRowEngineRevision(line) === DEP_REVIEW_ENGINE_REVISION) {
           depReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
         break;
@@ -17530,6 +17573,9 @@ const LIVE_REVIEW_CLOSING_STEPS: ReadonlySet<string> = new Set(["review.posted",
  *  live review is announced once, not on every pass. Bounded; a restart re-announces once, which is harmless. */
 const deferredStageKeys = new Set<string>();
 const DEFERRED_STAGE_KEYS_CAP = 1000;
+/** BACKSTOP: a stage stall already reported for this PR, head and blocker is not reported again until this much
+ *  time has passed, however often its blocker_since restarts; a stall nobody acted on for a day earns one more. */
+export const STAGE_STALL_RENOTIFY_MS = 24 * 60 * 60_000;
 
 /** PURE. How long a review may run before it counts as overdue: the longest of the observed durations
  *  (the window's upper bound), or undefined when none are observed so the caller keeps its stand-in. */
@@ -17933,6 +17979,16 @@ export async function runSweep(
     }
     const reportedStage = currentRows.find(row => row.step === "pr.stuck" && stageKey(row) === key);
     if (reportedStage) { stuckStages.set(key, reportedStage); return; }
+    // A blocker that flaps between passes at one head restarts blocker_since, so the stage key above is new on
+    // every flip: #14763 filed #14777, #14779 and #14783 in ten minutes at head 50628d6. One report per PR, head
+    // and blocker; a new head or a different blocker is a new stage, and an unacted stall re-reports after
+    // STAGE_STALL_RENOTIFY_MS.
+    const reportedAtHead = currentRows.findLast(row => row.step === "pr.stuck" && row.pr_number === pr.prNumber &&
+      row.head_sha === pr.headSha && row.blocker === fields.blocker);
+    if (reportedAtHead && now - Date.parse(String(reportedAtHead.ts)) < STAGE_STALL_RENOTIFY_MS) {
+      stuckStages.set(key, reportedAtHead);
+      return;
+    }
     const stageRows = currentRows.filter(row => belongs(row) && Date.parse(String(row.ts)) >= since);
     // W1-T9433: the backstop counts only the time the stage's owner could act, so a stand-down the fleet placed
     // on itself (a PAUSE hold, capacity, a light pass) is read back from the stage's own rows and excluded.
@@ -18089,7 +18145,8 @@ export async function runSweep(
     if (fields.blocker === "escalated") {
       const original = ownEscalationAtHead(currentRows, pr);
       const answered = pr.pendingAnswer !== undefined && pr.pendingAnswer.spent !== true;
-      const at = original?.ts === undefined ? "" : ` at ${original.ts}`;
+      const at = (original?.ts === undefined ? "" : ` at ${original.ts}`) +
+        (original?.issueUrl === undefined ? "" : ` in ${original.issueUrl}`);
       originalEscalationOpen = original?.reason !== undefined && !answered;
       diagnoses.push(original === undefined
         ? `already escalated (reason unreadable: no escalation of this PR at head ${pr.headSha.slice(0, 7)} is in the ledger)` +
@@ -18100,6 +18157,7 @@ export async function runSweep(
       escalationFields = {
         original_escalation: originalEscalationOpen ? "open" : answered && original?.reason !== undefined ? "answered" : "unreadable",
         ...(original?.ts === undefined ? {} : { original_escalation_at: original.ts }),
+        ...(original?.issueUrl === undefined ? {} : { original_escalation_issue: original.issueUrl }),
       };
     }
     const diagnosis = diagnoses.length ? diagnoses.join("; ") : "unknown signature";
@@ -19590,7 +19648,7 @@ export async function runSweep(
         // time (a re-derived PR: minus its fresh read), read at the write, never at the pass's start.
         snapshot_age_ms: snapshotAgeMs(index),
         ...(rederivedIndices.has(index) ? { rederived: true } : {}),
-        ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
+        ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome, dep_review_engine_revision: DEP_REVIEW_ENGINE_REVISION } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason && !deliveredStandDownLogged ? { stand_down_reason: standDownReason } : {}),
         ...(deliveredStandDownLogged ? { stand_down_unchanged: true } : {}),
@@ -20696,7 +20754,7 @@ export async function runSweep(
         if (alreadyDone) {
           dedupStandDownReason =
             `dependency review already reached a TERMINAL outcome at this head ` +
-            `(${pr.headSha.slice(0, 7)}) — a hold would have re-run instead of deduping`;
+            `(${pr.headSha.slice(0, 7)}) under engine ${DEP_REVIEW_ENGINE_REVISION} — a hold would have re-run instead of deduping`;
         }
         break;
       case "post-review": {
@@ -22318,7 +22376,9 @@ export async function runSweep(
                 }
               }
               if (dependencyMainSupersession) {
-                const fenced = await deps.withDependencyCloseFence?.(pr, async () => { await deps.close(pr, reason); });
+                const fenced = await deps.withDependencyCloseFence?.(pr, async (supersededBy) => {
+                  await deps.close(pr, supersededBy === undefined ? reason : `${reason}; superseded by ${supersededBy}`);
+                });
                 acted = fenced?.closed === true;
                 if (!acted) standDownReason = fenced?.reason ?? "dependency close requires a strict fresh lifecycle/main/owner fence";
                 extraDisposedFields = { ...extraDisposedFields, dependency_main_identity: dependencyIdentity };

@@ -5,11 +5,11 @@ import { join, posix } from "node:path";
 import { backlogLandingGuard } from "./backlog-gardener.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { gardenStatePath, readGardenState, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
+import { gardenLedgerBucket, gardenStatePath, readGardenState, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, reparkStaleRuling } from "./machine-filing.js";
 import { parseTasksFromYaml, type Task } from "./plan.js";
-import { planInventory, type PlanInventory } from "./plan-gardener.js";
+import { planCheapFingerprint, planInventory, type PlanInventory } from "./plan-gardener.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { INSTRUMENT_SURFACE, isDialectPrefixed } from "./review.js";
 import { lintTask } from "./task-linter.js";
@@ -388,7 +388,7 @@ export function redesignGardenSpec(
     classes: REDESIGN_CLASSES,
     review: { amend: "a task amendment is the Architect's judgement call; close this PR to decline it." },
     landingRefusal: backlogLandingGuard(deps),
-    cheapFingerprint: () => redesignCandidates(sources).map((c) => c.signature).join(",") || "none",
+    cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(sources.clock)}`,
     inventory: () => { throw new Error("the redesign Architect answers asynchronously: drive it with runGardenAsync"); },
     inventoryAsync: () => redesignInventory(sources, deps),
     fingerprint: (i) => i.actions.map((a) => a.signature).join(",") || "none",
