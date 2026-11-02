@@ -136,6 +136,21 @@ test("native-looking public issues and missing provenance never become confirmed
   await assert.rejects(readEscalationIssueSource("not an issue"), /canonical escalation/);
 });
 
+test("a native bound answer preserves archived conversation provenance after restart and ledger rotation", async t => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const identity = { taskId: "W1-T42", class: "MANUAL", cause: "stage-stall", prRef: "15520" };
+  const before = await f.read(URL); assert.equal(before.state, "served"); if (before.state !== "served") return;
+  appendThreadMessage(identity, "reply", "Please investigate first.", { threadStorePath: f.store }, { replyId: "durable-answer-01", escalation: { issueUrl: URL, revision: before.conversation.revision } });
+  appendThreadMessage(identity, "escalation", "I need no more input. The investigation is running.", { threadStorePath: f.store }, { question: false });
+  rmSync(join(f.root, "state", "ledger.ndjson"));
+  const restarted = createEscalationConversationReader({ repository: "craigoley/remudero", threadStorePath: f.store, readIssue: async () => f.issue });
+  const archived = await restarted(URL); assert.equal(archived.state, "served");
+  if (archived.state === "served") { assert.equal(archived.conversation.attention, "archived"); assert.equal(archived.conversation.messages.length, 3); }
+  const foreignUrl = URL.replace("16183", "16184");
+  const foreign = createEscalationConversationReader({ repository: "craigoley/remudero", threadStorePath: f.store, readIssue: async () => ({ ...f.issue, html_url: foreignUrl }) });
+  assert.equal((await foreign(foreignUrl)).state, "unavailable");
+});
+
 test("oversized or ambiguous saved discussions remain explicitly partial", async t => {
   const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
   const opening = JSON.parse(readFileSync(f.store, "utf8").trim());

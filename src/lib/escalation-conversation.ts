@@ -189,9 +189,6 @@ export function createEscalationConversationReader(opts: {
         });
       } catch { known = false; }
     }
-    if (!known) return { state: "unavailable", reason: "invalid_source", detail: "Remudero's own record of this escalation could not be verified. No reply destination is confirmed." };
-    if (nativeReceipts.size >= MAX_CACHED_ISSUES && !nativeReceipts.has(receiptKey)) nativeReceipts.delete(nativeReceipts.values().next().value!);
-    nativeReceipts.add(receiptKey);
     let stored: ReturnType<typeof readAllThreads> | undefined;
     try { stored = opts.threadStorePath ? readAllThreads({ threadStorePath: opts.threadStorePath }) : undefined; }
     catch { /* Malformed saved history is unavailable, never an empty conversation. */ }
@@ -208,6 +205,15 @@ export function createEscalationConversationReader(opts: {
     const threadId = deriveThreadId(identity);
     const messages = selected ? boundedMessages(selected[1]) : undefined;
     const history = stored?.status !== "ok" ? "unavailable" : candidates.length === 0 ? "absent" : !messages ? "partial" : "verified";
+    // A bound answer in this native store is a durable receipt of the route's prior
+    // origin check. Archived correspondence must remain readable after a restart and
+    // ledger rotation; an unbound legacy message or another issue's receipt proves nothing.
+    known ||= history === "verified" && selected![1].some(message => message.role === "reply"
+      && typeof message.extra?.replyId === "string" && /^[A-Za-z0-9._:-]{8,128}$/.test(message.extra.replyId)
+      && message.extra.escalation?.issueUrl === issueUrl && /^[a-f0-9]{64}$/.test(message.extra.escalation.revision));
+    if (!known) return { state: "unavailable", reason: "invalid_source", detail: "Remudero's own record of this escalation could not be verified. No reply destination is confirmed." };
+    if (nativeReceipts.size >= MAX_CACHED_ISSUES && !nativeReceipts.has(receiptKey)) nativeReceipts.delete(nativeReceipts.values().next().value!);
+    nativeReceipts.add(receiptKey);
     const ordered = history === "verified" ? [...selected![1]].sort((a, b) => a.seq - b.seq) : [];
     const last = ordered.at(-1);
     // Only an explicit agent message can end correspondence. Saving an answer or an
