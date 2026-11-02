@@ -1,0 +1,46 @@
+- id: W1-T11097
+  title: A ladder gardener escalates a remedy it cannot scope, instead of filing an outcome claim against its own classifier, a data file or the file a failed remedy already used
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the ladder's filing decision for both the fix-lane and flow gardeners, plus the fix-lane ladder's declared own modules
+  origin: operator-session#stuck-pr-15065-2026-11-02
+  plan_refs:
+    - W1-T7421
+    - W1-T10781
+    - W1-T10226
+  files:
+    - src/lib/flow-remedy-gardener.ts
+    - src/lib/fix-lane-gardener.ts
+    - test/gardeners/a-ladder-remedy-it-cannot-scope-escalates-instead-of-filing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Before a ladder writes a drafted remedy, remedyScopeRefusal returns a reason when the owner file is not a source module, is one of the ladder's own measuring modules, or is the owner file of a prior remedy whose effect did not fall; that action takes the ladder's existing escalation path and writes no shard, while an admissible owner still files exactly as before
+      proof: "unit test: test/gardeners/a-ladder-remedy-it-cannot-scope-escalates-instead-of-filing.test.ts"
+    - claim: The ladder's apply step consults the scope refusal before it writes a drafted shard
+      proof: "grep: remedyScopeRefusal( in src/lib/flow-remedy-gardener.ts"
+  rationale: |
+    OBSERVED, operator session 2026-11-02 (stuck PR #15065, W1-T10781), replayed on origin/main:
+    - draftShard (src/lib/flow-remedy-gardener.ts), shared by FIX_LANE_LADDER and FLOW_LADDER, files an outcome claim ("<cause> no longer needs an operator hand fix" / "is cleared by its owner without manual intervention") scoped to the top hit of a text search for the cause's key, plus a test-title grep proof.
+    - For a fix-lane class the key is coined by the classifier, so the search returns src/lib/fix-lane-gardener.ts itself and a worker can only relabel. #15065 did exactly that and failed semantic review twice as non-responsive; #15602 (W1-T10722) failed the same way; W1-T10226 was withdrawn 2026-10-22 as a label-only remedy.
+    - 53 shards carry the ladder titles (THE FIX-LANE GARDENER'S COSTLIEST DEFECT CLASS / THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER): 18 merged, 15 withdrawn or retired, 20 queued and unmerged.
+    - 11 of the 53 are scoped to the measuring gardener itself (7) or a data file, scripts/test-placement/test-folders.tsv (4, all queued: W1-T10632, W1-T11010, W1-T11038, W1-T11060).
+    - 7 shards record a previous remedy; all 7 say it "did not fall", and 6 of those 7 re-file against the exact same owner file despite their own line "Take a structurally different remedy".
+  design: |
+    1. A pure remedyScopeRefusal(ownerFile, kind, prior) in src/lib/flow-remedy-gardener.ts returns a reason string or undefined:
+       - not a source module: the owner file is not under src/ or scripts/ with a .ts, .mts, .js or .mjs extension;
+       - the ladder's own classifier: LadderKind gains ownModules (FIX_LANE_LADDER: src/lib/fix-lane-gardener.ts; FLOW_LADDER: src/lib/flow-remedy-gardener.ts) and the owner file is one of them;
+       - a repeated failed remedy: action.prior exists and its task's first file equals the owner file.
+    2. draftShard's owner choice is factored out so apply can read the owner file before drafting. In apply, a refusal turns the action into the existing escalation branch (BLOCKED, design-remedy / accept-cost options, kind.escalatedStep row) with the refusal as its reason; no shard is written and no task id is spent.
+    3. An admissible owner files byte-identically to today. The declared-owner path (W1-T9597) is unchanged except that it too passes the check.
+    4. Nothing else: no change to pricing, rungs, effect measurement, the claim template or the machine-filing admission.
+  falsifier: |
+    Delete the refusal call in apply: the escalation cases must fail on the shard count. Remove the prior-file arm: the repeated-remedy case must fail. A test feeding an admissible src/ owner must pass at base and at head with byte-identical shard text.
+  note: |
+    reservation hand-off: run-unfiled-1793625465889 -> run-unfiled-1793625465889
+    Reserved with rmd next-task-id from the operator checkout (W1-T11097 on run-unfiled-1793625465889). Filed for the fleet to build; not hand-built.
