@@ -150,13 +150,16 @@ test("code health exports bounded provenance without publishing security results
     writeFileSync(copiedScript, readFileSync(copiedScript, "utf8") + "\n// Changed measurement implementation.\n");
     assert.notEqual(run(raw, copiedScript).configHash, manifest.configHash, "a changed quality measurement method cannot reuse its predecessor's comparison identity");
     const original = structuredClone(raw.sarif);
-    original.runs[0]!.invocations[0]!.endTimeUtc = new Date(Date.now() - 1000).toISOString();
+    // A fixed past instant: the child stamps observedAt on the REAL clock, so an end time read from a shifted test
+    // clock could pass it, and the expiring-fixture census's clock-shift control failed this suite on main.
+    original.runs[0]!.invocations[0]!.endTimeUtc = "2026-01-01T00:00:00.000Z";
     const sarifDir = join(dir, "original"); mkdirSync(sarifDir);
     writeFileSync(join(sarifDir, "javascript.sarif"), JSON.stringify(original));
     const config = join(dir, "codeql.yml"), workflow = join(dir, "workflow.yml"), productionOutput = join(dir, "production.json");
     writeFileSync(config, '# Existing configuration\npaths-ignore:\n  - "test/**"\n');
     writeFileSync(workflow, 'queries: security-and-quality\n');
-    execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--sarif-dir", sarifDir,
+    // The CLI must share the fixture's shifted clock when judging its SARIF completion time.
+    execFileSync(process.execPath, ["--import", join(repoRoot(), "scripts/clock-shift.mjs"), join(repoRoot(), "scripts/code-health-provenance.mjs"), "--sarif-dir", sarifDir,
       "--config", config, "--workflow", workflow, "--output", productionOutput], { encoding: "utf8", env: { ...process.env,
         GITHUB_REPOSITORY: raw.repository, GITHUB_SHA: raw.analyzedSha, GITHUB_REF: raw.ref, GITHUB_RUN_ID: raw.runId,
         GITHUB_RUN_ATTEMPT: raw.runAttempt, CODE_HEALTH_LANGUAGE: raw.language, CODE_HEALTH_SARIF_ID: raw.sarifId } });
@@ -168,7 +171,7 @@ test("code health exports bounded provenance without publishing security results
     delete (withoutInvocation.runs[0] as { invocations?: unknown }).invocations;
     writeFileSync(join(sarifDir, "javascript.sarif"), JSON.stringify(withoutInvocation));
     const completedOutput = join(dir, "workflow-completion.json");
-    execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--sarif-dir", sarifDir,
+    execFileSync(process.execPath, ["--import", join(repoRoot(), "scripts/clock-shift.mjs"), join(repoRoot(), "scripts/code-health-provenance.mjs"), "--sarif-dir", sarifDir,
       "--config", config, "--workflow", workflow, "--output", completedOutput], { encoding: "utf8", env: { ...process.env,
         GITHUB_REPOSITORY: raw.repository, GITHUB_SHA: raw.analyzedSha, GITHUB_REF: raw.ref, GITHUB_RUN_ID: raw.runId,
         GITHUB_RUN_ATTEMPT: raw.runAttempt, CODE_HEALTH_LANGUAGE: raw.language, CODE_HEALTH_SARIF_ID: raw.sarifId,

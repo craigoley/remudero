@@ -98,10 +98,11 @@ raw: |-
   Updates `@openai/codex` from 0.163.0 to 0.164.0
 attachments: []
 origin: repair#dep-review
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: dep-review:own-red:craigoley/remudero:@anthropic-ai/claude-code@2.1.311,@openai/codex@0.164.0
 thread_id: null
+answered_by: null

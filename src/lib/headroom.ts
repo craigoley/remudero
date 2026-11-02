@@ -240,6 +240,11 @@ export function usageSnapshotFromSdk(reading: SdkUsageReading | undefined): Usag
   const sessionPct = sdkPercent(limits.five_hour);
   if (sessionPct === undefined) return undefined;
 
+  const weekly = sdkWeeklyWindows(limits);
+  return { billingMode: sdkBillingMode(reading), session: { percentUsed: sessionPct, resetsAt: sdkReset(limits.five_hour) }, weekly };
+}
+
+function sdkWeeklyWindows(limits: NonNullable<SdkUsageReading["rate_limits"]>): WeeklyWindow[] {
   const weekly: WeeklyWindow[] = [];
   const allModelsPct = sdkPercent(limits.seven_day);
   if (allModelsPct !== undefined) {
@@ -254,15 +259,33 @@ export function usageSnapshotFromSdk(reading: SdkUsageReading | undefined): Usag
     if (!label) continue; // an unlabelled model window cannot be attributed; omit it
     weekly.push({ label, percentUsed: pct, resetsAt: sdkReset(m) });
   }
+  return weekly;
+}
 
-  const billingMode: BillingMode =
-    typeof reading.subscription_type === "string" && reading.subscription_type.length > 0
-      ? "subscription"
-      : reading.subscription_type === null
-        ? "api"
-        : "unknown";
+function sdkBillingMode(reading: SdkUsageReading): BillingMode {
+  return typeof reading.subscription_type === "string" && reading.subscription_type.length > 0
+    ? "subscription"
+    : reading.subscription_type === null
+      ? "api"
+      : "unknown";
+}
 
-  return { billingMode, session: { percentUsed: sessionPct, resetsAt: sdkReset(limits.five_hour) }, weekly };
+export type SdkUsageEmptyCase = "no-reading" | "rate-limits-unavailable" | "no-rate-limits" | "no-usable-window";
+
+export type SdkUsageCase =
+  | { kind: "session"; snapshot: UsageSnapshot }
+  | { kind: "weekly-only"; weekly: WeeklyWindow[]; billingMode: BillingMode }
+  | { kind: SdkUsageEmptyCase };
+
+export function sdkUsageReadingCase(reading: SdkUsageReading | undefined): SdkUsageCase {
+  if (!reading) return { kind: "no-reading" };
+  if (reading.rate_limits_available === false) return { kind: "rate-limits-unavailable" };
+  const limits = reading.rate_limits;
+  if (!limits) return { kind: "no-rate-limits" };
+  const snapshot = usageSnapshotFromSdk(reading);
+  if (snapshot) return { kind: "session", snapshot };
+  const weekly = sdkWeeklyWindows(limits);
+  return weekly.length > 0 ? { kind: "weekly-only", weekly, billingMode: sdkBillingMode(reading) } : { kind: "no-usable-window" };
 }
 
 export const HEADROOM_LIMIT_PCT = 95;

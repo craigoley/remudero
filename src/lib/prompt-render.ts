@@ -41,54 +41,15 @@ export const ONE_TEST_SUITE_AT_A_TIME_LINE =
   "runs the coverage shards one after another.";
 
 /**
- * SCOPE-GUARDED BRANCH REFRESH (W1-T142, the `reset --soft` phantom-revert
- * near-miss): collapsing a stale worker branch with `git reset --soft
- * origin/main` forged a merge-base — the flattened commit's diff vs main
- * REVERTED files an unrelated merged PR had touched, and because main had not
- * re-touched them GitHub showed the PR as cleanly mergeable; the phantom
- * revert would have merged silently. Given the set of paths a refreshed
- * branch's diff touches and the task's declared `files` scope, returns the
- * OUT-OF-SCOPE paths (empty = clean, safe to push) — anything outside the
- * declared scope is either a phantom revert or scope creep.
- *
- * PURE: no git/network calls — `diffFiles` is the caller's already-computed
- * diff-file list, never read here. FAIL-CLOSED: an empty/undefined
- * `declaredFiles` scope refuses every non-empty diff (returns it verbatim)
- * rather than waving it through — a task with no declared scope can never
- * legitimize an out-of-scope push. An empty `diffFiles` is always clean
- * (nothing staged, nothing to refuse) regardless of the declared scope.
- */
-
-/**
- * W1-T2650 admitted ONE hand-enumerated path (`scripts/source-size-baseline.json`, then
- * `lib/review.ts`'s `SCOPE_EXEMPT_GENERATED_ARTIFACTS`) so that gate's own printed remedy stopped
- * being refused by this guard. W1-T2651 generalizes the SOURCE of that admission: rather than a
- * second hand-maintained list this guard alone consulted, the exempt set is now read directly off
- * {@link REGENERABLE_ARTIFACT_GENERATORS} (lib/sweep.ts) — the repo's OWN registry of paths a
- * generator reproduces from the tree, already relied on by the merge-conflict rung (W1-T2548) and
- * named in {@link "./run-task.js".renderFixPrompt}'s DECLARED SCOPE carve-out (W1-T2651) with the
- * identical set, so a worker told it MAY commit a registry path is never the one this guard then
- * refuses. A sixth (or Nth) regenerable artifact registered there inherits the carve-out with no
- * second table to keep in sync.
- */
-
-/**
- * W1-T2672 adds a SECOND, independent discount: {@link GENERATED_LEDGER_CLASSES}
- * (lib/companion-paths.ts) — the table `subsystemsOf`/`checkDocsAwareness` already read to say a
- * generated measurement file (a size ledger, a knowledge-budget derivation) is not a user-visible
- * concern. `REGENERABLE_ARTIFACT_GENERATORS` answers "can this be reproduced by a generator" and
- * happens to name `scripts/source-size-baseline.json`; it does NOT name
- * `scripts/knowledge-budget-baseline.json`, which `GENERATED_LEDGER_CLASSES` also covers — so a
- * task whose only out-of-scope path is that second ledger was still flagged before this change.
- * Consulting `isCompanionPath` against the shared table (rather than copying its regex here) means
- * a later row added to `GENERATED_LEDGER_CLASSES` is discounted here with no second edit.
- */
-
-/**
- * The exemptions are only ever consulted ALONGSIDE a task's own declared scope (the
- * `!declaredFiles || declaredFiles.length === 0` branch above already returned): an undeclared
- * task still has every non-empty diff refused, ledger or registry path or not, so this never
- * widens the fail-closed default.
+ * W1-T142: `git reset --soft origin/main` forged a merge-base and silently reverted unrelated
+ * merged work. Return out-of-scope paths to catch phantom reverts and scope creep.
+ * Pure: the caller supplies the diff. Empty diff is clean; absent/empty scope refuses every
+ * non-empty diff, including exempt paths (fail-closed).
+ * W1-T2650/W1-T2651/W1-T2548: use REGENERABLE_ARTIFACT_GENERATORS, shared with renderFixPrompt,
+ * rather than a second exemption list. New generator rows inherit admission automatically.
+ * W1-T2672: GENERATED_LEDGER_CLASSES independently admits measurement companions, including
+ * scripts/knowledge-budget-baseline.json, which the generator registry does not cover.
+ * Both exemptions require a declared scope; neither widens the fail-closed default.
  */
 export function scopeGuardOutOfScopeFiles(
   diffFiles: readonly string[],
@@ -112,19 +73,16 @@ export function scopeGuardOutOfScopeFiles(
 export type FixScopeRegime = "plan" | "files";
 
 /**
- * W1-T5118: is the PR being repaired a plan-only FILING? Read from the PR's own captured diff,
- * never from a title, branch name, task type or the task's declared files. Only a NON-EMPTY
- * baseline whose every path is plan-scoped qualifies; an absent or empty one never invents it.
+ * W1-T5118: only a non-empty captured PR diff containing exclusively plan paths proves a filing;
+ * titles, branch names, task types and declared files are not evidence.
  */
 export function isPlanFilingBaseline(baselineDiffFiles?: readonly string[]): boolean {
   return !!baselineDiffFiles && baselineDiffFiles.length > 0 && baselineDiffFiles.every(isInPlanScope);
 }
 
 /**
- * W1-T5118: the ONE regime selection the fix prompt and the pre-strike guard both read. A task
- * whose declared files are all plan-scoped stays `"plan"`. An observed plan-only filing is
- * `"plan"` too, even when its shard declares future src/test paths, so a repair keeps it a
- * filing. Everything else keeps the exact declared-file regime.
+ * W1-T5118: shared by the prompt and pre-strike guard. Plan-scoped declarations or an observed
+ * filing select `"plan"`, even if the shard declares future src/test work; otherwise use `"files"`.
  */
 export function fixScopeRegime(
   declaredFiles: readonly string[] | undefined,
@@ -135,22 +93,11 @@ export function fixScopeRegime(
 }
 
 /**
- * The scope-regime SELECTION {@link fixRungScopeStandDownReason} needs twice (once for the
- * current diff, once for the baseline it stands down against) and {@link renderFixPrompt}'s
- * INHERITED SCOPE line (W1-T2607) needs a third time, applied to that SAME baseline — factored
- * out here so every caller reads ONE implementation of "which regime, which predicate" rather
- * than a second copy that could drift (design note (i), W1-T2607). Plan-only tasks (every
- * declared file itself plan-scoped, {@link isInPlanScope}) are graded by plan-scope membership
- * ({@link outOfPlanScopeFiles}); everything else by exact declared-file membership
- * ({@link scopeGuardOutOfScopeFiles} — the SAME function the implement path's push-and-flag
- * disposition already uses, never a parallel reimplementation).
- *
- * Returns `[]` when `declaredFiles` is empty/undefined — a task with no declared scope gives
- * this predicate nothing to compare against, matching {@link fixRungScopeStandDownReason}'s own
- * silent (fail-OPEN) contract for that case. A caller that needs FAIL-CLOSED semantics on an
- * undeclared scope (the implement path) calls {@link scopeGuardOutOfScopeFiles} directly instead.
- *
- * PURE: no I/O, both inputs are the caller's own reads.
+ * W1-T2607: one pure predicate for fixRungScopeStandDownReason's current/baseline comparisons
+ * and renderFixPrompt's INHERITED SCOPE. Plan regime uses outOfPlanScopeFiles; exact-file regime
+ * uses the implement path's scopeGuardOutOfScopeFiles.
+ * Absent/empty declarations return [] (fix rung's fail-open contract). Implement callers needing
+ * fail-closed behavior must call scopeGuardOutOfScopeFiles directly. Inputs are caller-owned reads.
  */
 export function outOfDeclaredScopeFiles(
   files: readonly string[],
@@ -164,65 +111,22 @@ export function outOfDeclaredScopeFiles(
     : scopeGuardOutOfScopeFiles(files, declaredFiles, registrationChanges);
 }
 
-// ── FIX-RUNG FAILURE-MODE TAXONOMY (W1-T94, W1-T76 follow-up) ────────────────
-//
-// GROUND TRUTH this taxonomy fixes: the rung's ONE prompt shape assumed every
-// block was a reviewer-computed unmet set. Two live proofs said otherwise: (1)
-// the Architect's own #157 mis-diagnosis read source WITHOUT the verbatim
-// failure signal and produced a confidently-wrong code fix for what was really
-// a PROOF-KEYWORD COVERAGE gap (the report just never mentioned the proof) —
-// an automated fix worker with the same blindness thrashes the same way, at
-// machine speed; (2) `blocked_ci` carries NO reviewer unmet-criteria at all —
-// the failing signal IS the CI log — so the old single-shape prompt has
-// nothing to render for it. MODE is derived DETERMINISTICALLY from the block
-// evidence (policy-as-data, rule 2 — a table, mirroring sweep.ts's
-// DISPOSITION_RULES), never an LLM classification and never an if/else chain:
-// adding proof_exec-executed_fail or design-conformance later is a ROW in
-// {@link FIX_MODE_RULES}, never a change to {@link deriveFixMode}'s loop.
-// FLOOR-DEGRADED HONESTY (the #157 finding): "FLOOR DEGRADED: 0/N" on a
-// PASSING review is W1-T72 working as designed — it is never a mode input and
-// never a dispatch trigger here.
-// ────────────────────────────────────────────────────────────────────────────
-
-// `CiFailure` — one failing required CI check's name + the tail of its log,
-// the `ci-log` mode's only input — is defined in lib/sweep.ts (imported above)
-// because `OpenPrView` carries it and this module already imports OpenPrView
-// from sweep.js; the reverse import would be circular (W1-T100).
+// W1-T94/W1-T76, #157: preserve the actual failure signal; a proof-keyword gap is not broken code,
+// and blocked_ci needs CI logs, not reviewer criteria. Rule 2: derive modes via FIX_MODE_RULES.
+// W1-T72: "FLOOR DEGRADED: 0/N" on a passing review is neither a mode nor a dispatch trigger.
+// W1-T100: CiFailure lives in sweep.ts with OpenPrView to avoid a reverse circular import.
 
 /** The known fix-rung failure modes. See the taxonomy note above. */
 export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | "gate-fix" | "proof-discrimination" | "plan-gate" | (string & {});
 
 /**
- * The block evidence a fix dispatch derives its MODE from. `review` carries a
- * `blocked_review` verdict (reviewer-unmet / body-coverage); `ciFailures`
- * carries a `blocked_ci` block's failing check names + log tails (ci-log,
- * W1-T226: derived from PRESENCE of `ciFailures`, never from ABSENCE of
- * `review` — see {@link FIX_MODE_RULES} row 2); `mergeConflict` carries a
- * `conflicted` dispatch's conflicting-file evidence (W1-T106, the #170 DIRTY
- * strand) — no review or check can run at all until the conflict itself
- * resolves. `mergeConflict` still precludes the other two by construction
- * (nothing runs on an unmergeable ref). `review` and `ciFailures`, though,
- * MAY legitimately coexist — a review verdict sitting beside a red required
- * check is normal (the verdict may be stale, or simply irrelevant until the
- * check clears) — and when they do, `ciFailures`' presence wins: every
- * CURRENT caller (`runFixRung`, `buildFixRungDispatchArgs`,
- * `routeFix`/`runSweep`) still constructs them mutually exclusively as a
- * matter of caller discipline, but the mode table's own correctness no
- * longer depends on that discipline holding.
- */
-
-/**
- * W1-T2236: `actionableGateFailures` carries the SAME structured, single-form remedy
- * {@link OpenPrView.actionableGateFailures} already names on the sweep side (W1-T923) — a
- * review can FAIL with `review.unmetCriteria` empty (every named criterion passed, or none
- * was ever checkable) while the reviewer's own reasons still name ONE unambiguous gate
- * failure (a changeset contradiction, test theater, a stale-criteria block). Before this
- * field existed that remedy was computed, said out loud in the sweep's own disposed-line
- * reason, and then DISCARDED at the dispatch boundary — `deriveFixMode`'s catch-all
- * `reviewer-unmet` row matched instead, and the prompt carried nothing but an empty list
- * (63% of that mode's measured dispatches, this task's own rationale). Populated ONLY when
- * `review.unmetCriteria` is empty (design note i) — never a widening of `unmetCriteria`,
- * never checked when it is non-empty (see {@link FIX_MODE_RULES}'s `gate-fix` row).
+ * Evidence selects the mode: review for blocked_review, failing check names/log tails for
+ * blocked_ci, conflicting files for conflicted (W1-T106, #170 DIRTY).
+ * W1-T226: review and ciFailures may coexist; CI presence wins even beside a stale verdict.
+ * Correctness must not depend on callers constructing those fields mutually exclusively.
+ * W1-T2236/W1-T923: actionableGateFailures preserves sweep's structured remedy when named unmet
+ * criteria are empty; dropping it at dispatch produced empty reviewer-unmet prompts (63%).
+ * Producers populate it only for empty unmetCriteria; it does not widen that criterion set.
  */
 export type FixReviewFinding = { criterionIndex: number; path: string; line: number; mechanism: string; remedy: string | null };
 
@@ -276,100 +180,19 @@ interface FixModeRule {
 }
 
 /**
- * THE MODE TABLE (policy-as-data, rule 2). Precedence is table order (first
- * match wins). W1-T2236: the terminal row (`reviewer-unmet`) is NAMED, never a
- * `when: () => true` catch-all — a rule that matches every unclassified shape can
- * never be wrong, which is exactly why it hid this task's own defect (63% of
- * measured `reviewer-unmet` dispatches carried zero unmet criteria). `deriveFixMode`
- * below still returns SOME mode for any input (its own total-function fallback), but
- * the TABLE itself no longer claims "unconditional" as a virtue.
- */
-
-/**
- *   1. merge-conflict  — `evidence.mergeConflict` is set (W1-T106, the #170
- *                        DIRTY strand): the PR's merge state itself is dirty,
- *                        which precedes EVERYTHING else — no CI check even
- *                        runs on an unmergeable ref, so neither a review nor a
- *                        CI log can exist yet either. Checked FIRST so it is
- *                        never misclassified as ci-log (both leave `review`
- *                        undefined).
- */
-
-/**
- *   2. ci-log         — W1-T226 (corrects W1-T224/W1-T94's original row):
- *                        gated on PRESENCE of `evidence.ciFailures`, never on
- *                        ABSENCE of `evidence.review`. A required check red is
- *                        the failing signal that actually blocks a merge —
- *                        GitHub will not merge past it no matter what a review
- *                        verdict sitting BESIDE it says, and that verdict may
- *                        itself be stale (computed before the push that broke
- *                        the check, or before a slower required check
- *                        settled). This is the SAME "ci-log wins" precedence
- *                        {@link DISPOSITION_RULES} row 5 (`isBlockedCi`,
- *                        sweep.ts) already established and W1-T138 broadened
- *                        to fire "regardless of the review verdict beside it"
- *                        — this row previously did not actually implement
- *                        that precedence: gating on `review === undefined`
- *                        meant ANY posted-or-computed verdict, pass or fail,
- *                        made the row miss and fall through to a
- *                        review-shaped mode, masking the check. Every CURRENT
- */
-
-/**
- *                        caller (`runFixRung`, `buildFixRungDispatchArgs`,
- *                        `routeFix`/`runSweep`'s `dispatchFix`) already
- *                        constructs `review`/`ciFailures` mutually
- *                        exclusively, so this correction changes nothing
- *                        observable for them — it closes the table's OWN
- *                        latent gap, provable by calling {@link deriveFixMode}
- *                        directly with BOTH fields set (a review-failed AND
- *                        CI-red PR, PR 479's shape in the W1-T226 rationale)
- *                        rather than by any caller relying on that discipline
- *                        forever holding.
- */
-
-/**
- *   3. gate-fix        — W1-T2236: `evidence.actionableGateFailures` is non-empty — a
- *                        review FAILED with `unmetCriteria` empty (design note i: every
- *                        named criterion may already read MET) while the reviewer's own
- *                        structured reasons still name ONE unambiguous gate failure (a
- *                        changeset contradiction, test theater, a stale-criteria block —
- *                        see {@link actionableGateFailuresFromReasons}, lib/sweep.ts).
- *                        Reached only when merge-conflict/ci-log above also missed. By
- *                        construction (every producer of `actionableGateFailures` checks
- *                        `unmetCriteria.length === 0` first) this NEVER matches beside a
- *                        non-empty `review.unmetCriteria`, so its ordering relative to
- *                        body-coverage below is inert — placed first because it is the
- *                        more specific, structured shape.
- */
-
-/**
- *   4. body-coverage   — every unmet criterion's reason is a keyword-coverage
- *                        gap ("matched N/M proof keywords") and NONE was an
- *                        OBSERVED `executed_fail` (an actual failed run always
- *                        means real code broke — never treat that as body-only,
- *                        the #157/#143 lesson). Reached only when ci-log's row
- *                        above also missed (no `ciFailures`) — a red required
- *                        check outranks a body-coverage-shaped review too.
- */
-
-/**
- *   5. reviewer-unmet  — a real reviewer-computed unmet set (W1-T76, unchanged):
- *                        `evidence.review.unmetCriteria` is non-empty. W1-T2236: NAMED,
- *                        not unconditional — see this doc block's own header, above. An
- *                        evidence shape that reaches NONE of these five rows (no unmet
- *                        criteria, no named gate failure, no CI/merge-conflict evidence) still
- *                        DISPATCHES on its FIRST such round — `deriveFixMode`'s fallback below
- *                        names `reviewer-unmet` for it, exactly as the old unconditional
- *                        catch-all did, so the review's own `summary` (never empty for a
- *                        failing review) still gives a fix worker something to act on that one
- *                        time, honoring `test/escalation-evidence-floor.test.ts` (W1-T487,
- *                        protected, not in this task's scope — every one of its blocked_review
- *                        fixtures pins this exact shape to dispatch-then-escalate on ITS one
- *                        and only round). `runFixRung`'s own pre-strike guard (site
- *                        `rung.empty_review_evidence`) stands the SAME shape down under a
- *                        named reason, rather than defaulting again, once it has already spent
- *                        one honest strike and recurs unchanged — see that guard's own doc.
+ * Rule 2: first matching row wins. W1-T2236: reviewer-unmet is a named predicate, not an
+ * unconditional row that hides empty evidence; deriveFixMode alone supplies the total fallback.
+ * W1-T106 (#170 DIRTY): conflict comes first; checks cannot run on an unmergeable ref.
+ * W1-T226/W1-T138 (correcting W1-T224/W1-T94): CI presence outranks a review, even a stale pass,
+ * matching sweep.ts's DISPOSITION_RULES. Falsifier: deriveFixMode with BOTH review and CI red
+ * (PR 479), rather than relying on runFixRung/buildFixRungDispatchArgs/routeFix caller discipline.
+ * W1-T2236: gate-fix carries actionableGateFailuresFromReasons' structured remedy when producers
+ * report empty unmetCriteria; putting it before body-coverage does not widen the unmet set.
+ * #157/#143: body-coverage requires every unmet reason to be a keyword gap and NONE executed_fail;
+ * an observed failed proof is never a body-only repair. CI still outranks that shape.
+ * W1-T76/W1-T487: unmatched evidence retains reviewer-unmet fallback for its first dispatch;
+ * test/escalation-evidence-floor.test.ts pins dispatch-then-escalate. runFixRung's pre-strike
+ * rung.empty_review_evidence guard stands down recurring empty evidence after that honest strike.
  */
 /**
  * W1-T10574: a gate failure whose remedy is a PR SPLIT (Standing rule 15) or an unsatisfiable

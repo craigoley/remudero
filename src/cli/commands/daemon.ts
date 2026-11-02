@@ -8,7 +8,7 @@ import type { RatifyCliGateway } from "../../lib/panel-graph.js";
  * and delegates here, so HANDLERS and every caller are unchanged.
  */
 import type { tickReadProducer, TickReadFacts, TickReadRequest } from "../../lib/tick-read-worker.js";
-import { registeredGardenEnabled } from "../../lib/garden-registry.js";
+import { registeredGardenEnabled, registeredGardenTargetArgs } from "../../lib/garden-registry.js";
 import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "../../lib/read-plane.js";
 import { remeasureSettledGoals, withGoalRemeasurement } from "../../lib/goals.js";
 import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "../../lib/ci-escalation-judge.js";
@@ -237,6 +237,12 @@ export interface GardenBuildContext {
   repo: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
   raiseDuplicate: (e: Escalation) => string;
+  /** False for a per-target garden built over a non-self managed target (`owner`/`repo` name it); absent is self. */
+  isSelf?: boolean;
+  /** That target's checkout, whose origin/main the garden reads; absent, `repoRoot`. */
+  targetRoot?: string;
+  /** That target's plan file, the one its daemon reads (an explicit `--plan` included); absent, `targetRoot`'s layout. */
+  planPath?: string;
 }
 
 /** One production composition, using the boot's existing gateway and its in-flight ownership. */
@@ -918,9 +924,13 @@ export async function daemonCommand(
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
   const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
   const gardenContext: GardenBuildContext = { config, repoRoot: effectiveRepoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs, codeSha: daemonLoadedCodeSha };
+  // A per-target garden on a non-self target reads THAT repository and its checkout; every other garden reads self.
+  const gardenContextFor = (name: RegisteredGardenName): GardenBuildContext => registeredGardenTargetArgs(name, target).length === 0 ? gardenContext
+    : { ...gardenContext, owner: target.owner, repo: target.repo, isSelf: false, targetRoot: daemonTargetCheckoutRoot(target, config.root), planPath: resolve(target.planPath) };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
-    ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
-  const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
+    ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContextFor(name), signal) : undefined);
+  const boundedPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
+  const gardenPassSpawn: GardenPassSpawn = (name, args, signal) => boundedPassSpawn(name, [...args, ...registeredGardenTargetArgs(name, target)], signal);
   const gardenerRuntime = createGardenerRuntimeWriter({ stateDir: join(config.root, "state"), repository: `${target.owner}/${target.repo}`,
     daemonRunId: runId, codeSha: daemonLoadedCodeSha, log,
     gardens: REGISTERED_GARDEN_NAMES.map((name) => ({ name, enabled: registeredGardenEnabled(name, target.isSelf),
@@ -928,7 +938,7 @@ export async function daemonCommand(
       scope: name === "host-resource" ? "host" : name === "overseer" ? "fleet" : "repository" })) });
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
     registeredGardenEnabled(name, target.isSelf)
-      ? startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) })
+      ? startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContextFor(name)) }) })
       : { stop() {} };
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
@@ -1816,8 +1826,10 @@ export async function daemonCommand(
           childModeTracker.record(dispatchMode?.decision, log);
           childContract(dispatchMode?.decision);
           // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
+          let selectedRegistryIntent: import("../../lib/run-child-contract.js").RunChildSpecOptions["selectedRegistryIntent"];
           const inChild = await runInChildWhenOn({
             taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log: childLog, planSync: planSyncCoalescer.sync,
+            onSelectedRegistryIntent: (intent: typeof selectedRegistryIntent) => { selectedRegistryIntent = intent; },
             onPending: runOptions?.onChildPending, mayRunInProcess: runOptions?.mayRunInProcess,
           }, { readMode: childPolicy, evidence: childModeTracker.evidence });
           if (inChild) {
@@ -1828,9 +1840,10 @@ export async function daemonCommand(
           const admittedPlan = createAdmittedPlanSlot();
           void startRunChildProbe({
             taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log: childLog,
-            options: childOptions,
+            options: { ...childOptions, selectedRegistryIntent },
           }, dispatchMode ? { readMode: () => dispatchMode.mode } : {});
           return runTaskFn(taskId, {
+            selectedRegistryIntent,
             planPath: target.planPath,
             config,
             allowStale,
@@ -2077,7 +2090,8 @@ export async function daemonCommand(
                 }),
               ],
             }
-          : {}),
+          // Operator 2026-11-01: a managed target runs its per-target gardens (the issue-revalidation garden, shadow).
+          : { gardens: REGISTERED_GARDEN_NAMES.filter((name) => registeredGardenEnabled(name, false)).map(offLoopGarden) }),
         clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),
         plainBackfill: {
           stateDir: join(config.root, "state"),

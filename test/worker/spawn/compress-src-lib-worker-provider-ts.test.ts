@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "@babel/parser";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function snapshot(source: string) {
@@ -28,12 +29,15 @@ function snapshot(source: string) {
 test("W1-T10918: comment compression preserves executable code", () => {
   // Pre-compression source: 811d6e2d19018530bd12c885d307d08f02fb09bc.
   // Historical comparison evidence for this edit, not a new comment ceiling.
-  // W1-T10855 intentionally adds price, shape and effort rows plus the effort lookup.
-  // Refresh executable fingerprints for that behavior; retain the compression bounds below.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 44036);
-  assert.equal(actual.tokenDigest, "ca6c6a142830a81efbc569c3692b9b18ad5fe760b01c29ae2b10dd769f8b31fe");
-  assert.equal(actual.astDigest, "9f97e3043c20e31c8fe50a437016871c3d24c254ac1c7386174fb531acbf4742");
+  const before = compressionPinBase("src/lib/worker-provider.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free.
+    const base = snapshot(before);
+    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
+    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+  }
   assert.ok(actual.commentLines < 1357, "comment lines must decrease from the pre-compression source");
   assert.ok(actual.commentBytes < 104858, "comment bytes must decrease; rewrapping alone is insufficient");
 

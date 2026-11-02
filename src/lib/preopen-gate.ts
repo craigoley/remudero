@@ -434,12 +434,23 @@ export function preopenGateSandboxArgv(input: GateContainInput, parentEnv: NodeJ
   return [...base.slice(0, at), ...extra, ...proofBinds, ...masks, ...base.slice(chdir)];
 }
 
+/** PRIMARY CONTROL: retained characters in a sandbox failure line on a ledger row. */
+export const SANDBOX_FAILURE_TEXT_MAX = 160;
+
+/** Keep the failure's identifying head and diagnostic tail within the same character bound. */
+export function boundFailureLine(line: string, max = SANDBOX_FAILURE_TEXT_MAX): string {
+  if (line.length <= max) return line;
+  const head = Math.ceil((max - 1) / 2);
+  const tail = max - head - 1;
+  return `${line.slice(0, head)}…${line.slice(line.length - tail)}`;
+}
+
 /** A spawn failure's first useful line, bounded for a ledger row. */
 function sandboxFailureText(error: unknown, binary: string): string {
   const err = error as NodeJS.ErrnoException & { stderr?: unknown };
   if (err.code === "ENOENT") return `${binary} is not installed`;
   const line = String(err.stderr ?? "").split("\n").find((l) => l.trim() !== "") ?? String(err.message ?? error);
-  return line.trim().slice(0, 160);
+  return boundFailureLine(line.trim());
 }
 
 /**
@@ -459,7 +470,7 @@ export async function defaultGateContainment(
     if (within(cwd, harness) || within(harness, cwd)) return { mode: "unavailable", reason: "the worktree and the harness checkout overlap" };
     argv = preopenGateSandboxArgv(input, parentEnv);
   } catch (error) {
-    return { mode: "unavailable", reason: `the sandbox argv could not be built: ${String((error as Error)?.message ?? error).slice(0, 160)}` };
+    return { mode: "unavailable", reason: `the sandbox argv could not be built: ${boundFailureLine(String((error as Error)?.message ?? error))}` };
   }
   return execFileLoopBounded(binary, [...argv, process.execPath, "-e", ""], { cwd: input.cwd, env: input.env, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" }).then(
     (): GateContainment => ({ mode: "sandboxed", file: binary, argv }),
@@ -542,7 +553,7 @@ export function defaultRunGate(
   } catch (error) {
     // A containment or launch that threw: no child started, so the gate is unmeasured with why, never a pass.
     cleanup();
-    return Promise.resolve({ exitCode: null, error: `the gate could not start: ${String((error as Error)?.message ?? error).slice(0, 160)}` });
+    return Promise.resolve({ exitCode: null, error: `the gate could not start: ${boundFailureLine(String((error as Error)?.message ?? error))}` });
   }
   return settled.finally(cleanup);
 }

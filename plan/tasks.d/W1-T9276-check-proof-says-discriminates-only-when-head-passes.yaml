@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 9.50
   risk: low  # one concern: the closing discrimination line of check-proof --base reads the head outcome; src/lib/check-proof.ts and one new test
   band_meaning: span
   origin: "operator session 2026-10-13: #11430's guard proof read fail at head and base, check-proof --base said it discriminates, and the PR failed review"

@@ -1062,16 +1062,25 @@ watchdog_deploy_run() (
 WATCHDOG_DEPLOY_DEADLINE
 }
 
-# Core only: recreate an ABSENT remudero-serve/cloudflared (deploy/edge-heal.sh). On EXIT, so every
-# clean tick path reaches it and serve-container.sh can read the App env off a just-revived daemon.
+# Core only: recreate an ABSENT remudero-serve/cloudflared and roll a tunnel off its pin
+# (deploy/edge-heal.sh). On EXIT, so every clean tick path reaches it and serve-container.sh can
+# read the App env off a just-revived daemon. W1-T10844: edge-heal's exit 3 (and only 3) is a failed
+# or held tunnel roll and raises tunnel-roll-failed; its `tunnel on pin` line clears it.
 render_edge_heal() {
   case "${INSTANCE_NAME:-core}" in core) : ;; *) return 0 ;; esac
   cat <<'EDGE_HEAL'
 edge_heal_on_exit() {
-  local rc=$?
+  local rc=$? out hrc=0 why
   if [ "$rc" -eq 0 ] && [ -x "$CHECKOUT/deploy/edge-heal.sh" ]; then
-    RMD_STATE_DIR="$STATE_DIR" "$CHECKOUT/deploy/edge-heal.sh" ||
-      echo "rmd-relaunch: edge heal incomplete; the next tick re-asks." >&2
+    out="$(RMD_STATE_DIR="$STATE_DIR" "$CHECKOUT/deploy/edge-heal.sh")" || hrc=$?
+    [ -z "$out" ] || printf '%s\n' "$out"
+    if [ "$hrc" -eq 3 ]; then
+      why="$(printf '%s\n' "$out" | sed -n 's/^edge-heal: tunnel roll failed -- //p' | tail -n 1)"
+      host_alert_raise tunnel-roll-failed "edge-heal: ${why:-the cloudflared roll failed (exit 3)}"
+    elif [ "$(printf '%s\n' "$out" | grep -c '^edge-heal: tunnel on pin ')" -gt 0 ]; then
+      host_alert_clear tunnel-roll-failed
+    fi
+    [ "$hrc" -eq 0 ] || echo "rmd-relaunch: edge heal incomplete; the next tick re-asks." >&2
   fi
   return "$rc"
 }

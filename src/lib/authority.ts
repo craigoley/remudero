@@ -551,6 +551,35 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
       "classifier, active-head reread and SHA-preserving chunk pruner. The full-sweep cadence is " +
       "throttled by a branch-set fingerprint and six-hour bound; the light in-flight pass cannot reach it.",
   },
+  {
+    id: "archive-stale-held-branches",
+    action: "archive a stale held run branch's tip under refs/rmd-recovery/reaped/ and delete the branch, in one atomic leased push",
+    module: "src/lib/branch-reaper.ts",
+    symbol: "archiveStaleHoldsSteps",
+    boundary: "git-push",
+    gate: "policy",
+    policyField: "sweep.armStaleBranchArchive",
+    ledgerSteps: ["branch_reap.hygiene_archived"],
+    verb: "daemon full-sweep rung (prune pass) / rmd reap-branches --archive-stale",
+    note:
+      "Operator ruling 2026-11-01 (\"Build act mode, flag off\"): default off, so the lane ledgers only " +
+      "branch_reap.hygiene_shadow. Armed, at most 25 per pass; --force-with-lease on the planned sha refuses a " +
+      "moved branch, --atomic lands archive and delete together, and the archive ref restores it.",
+  },
+  // ── src/lib/gardener.ts ──────────────────────────────────────────────────────────────────
+  {
+    id: "garden-close-released-decision-pr",
+    action: "close a garden's own decision PR once the pass releases it unjudged past its backstop",
+    module: "src/lib/gardener.ts",
+    symbol: "gardenClosePr (decision-backstop release)",
+    boundary: "gh-pr-close",
+    gate: "always",
+    ledgerSteps: [],
+    verb: "rmd daemon (every registered garden, `rmd garden run <name>`)",
+    note:
+      "Fires only on the pending PR a garden itself opened and holds, only when it is still open and bot-authored, " +
+      "and never while a non-bot review or review comment exists. Closing preserves the branch, so it is reversible.",
+  },
   // ── src/lib/machine-filing-judge.ts ──────────────────────────────────────────────────────
   {
     id: "machine-judge-withdraw-stale-pr",

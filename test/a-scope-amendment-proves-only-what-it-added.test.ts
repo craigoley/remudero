@@ -65,3 +65,39 @@ test("a scope amendment's proofs match only the files entries it added, never a 
     }
   }
 });
+
+test("a second amendment of an already reparked machine task adds no verify proof that matches at base", () => {
+  // #15855 (W1-T10722 for #15602): the earlier amendment #15628 had already set verify: human, so the writer's
+  // "returns to the judge" proof `^ *verify: human` matched base and proof-discrimination refused its own PR.
+  const machine = (verify: string) => `- id: ${taskId}\n  author_class: machine\n  verify: ${verify}\n  files: [src/existing.ts]\n${rationale}`;
+  const writes = (text: string) => {
+    let written = "";
+    let body = "";
+    const deps = {
+      repoDir: "/fixture", findShard: () => ({ path: shardPath, text }),
+      worktreeAdd: () => {}, worktreeRemove: () => {},
+      writeFile: (_path: string, next: string) => { written = next; },
+      gitAdd: () => {}, gitCommit: () => "amendment-sha", gitPush: () => {},
+      probeExisting: () => undefined,
+      createPr: (opts: { body: string }) => { body = opts.body; return { prUrl: "https://github.com/acme/repo/pull/99", prNumber: 99 }; },
+      worktreePathFor: () => "/amendment", lookupIdentity: () => undefined, recordIdentity: () => {},
+      updateBranch: () => ({ ok: true }),
+    } as unknown as ProofAmendmentWritePorts;
+    const paths = ["src/lib/status.ts"];
+    const outcome = amendments.requestScopeAmendment({ taskId, prNumber: 42, prUrl: "https://github.com/acme/repo/pull/42",
+      headSha: "head-a", trailerTaskId: taskId, paths, changedPaths: paths }, deps);
+    assert.equal(outcome.kind, "created", JSON.stringify(outcome));
+    const proofs = body.split("\n").filter((line) => line.startsWith("- ") && line.includes(" | grep: "))
+      .map((line) => line.slice(line.indexOf(" | grep: ") + " | grep: ".length, line.lastIndexOf(" in ")));
+    return { written, body, proofs };
+  };
+  const first = writes(machine("auto"));
+  assert.ok(first.proofs.includes("^ *verify: human"), "positive control: the first repark proves its verify change");
+  assert.match(first.written, /verify: human/);
+  const second = writes(machine("human"));
+  assert.ok(!second.proofs.includes("^ *verify: human"), second.body);
+  assert.doesNotMatch(second.body, /Set verify: human/);
+  for (const pattern of second.proofs) {
+    assert.equal(grepHits(pattern, machine("human")), 0, `${pattern} must miss at base, or proof-discrimination refuses it`);
+  }
+});
