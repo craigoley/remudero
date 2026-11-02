@@ -589,10 +589,10 @@ function registryDeletionChildEnv(scratch: string, phase: "intact" | "deleted" |
 
 test("mutant coverage is retained per source variant and never mixed into head evidence", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}mutant-coverage-`));
-  const prior = process.env.NODE_V8_COVERAGE, parent = join(root, "parent");
-  mkdirSync(parent);
+  const prior = process.env.NODE_V8_COVERAGE, parentTmp = join(root, "parent");
+  mkdirSync(parentTmp);
   try {
-    const parentEnv = { ...process.env, NODE_V8_COVERAGE: parent };
+    const parentEnv = { ...process.env, NODE_V8_COVERAGE: parentTmp };
     const variants = new Set<string>();
     for (const phase of ["intact", "deleted", "restored"] as const) {
       const env = registryDeletionChildEnv(root, phase, parentEnv);
@@ -601,13 +601,14 @@ test("mutant coverage is retained per source variant and never mixed into head e
         { env, cwd: root, encoding: "utf8", timeout: 10000 });
       assert.equal(child.status, 0, child.stderr);
       assert.ok(env.NODE_V8_COVERAGE);
-      const reports = readdirSync(env.NODE_V8_COVERAGE).filter(name => /^coverage-.*[.]json$/.test(name));
+      const scratchCoverage = env.NODE_V8_COVERAGE;
+      const reports = readdirSync(scratchCoverage).filter(name => /^coverage-.*[.]json$/.test(name));
       assert.ok(reports.length > 0, "the real child must retain actual V8 evidence");
       assert.ok(reports.some(name => JSON.parse(readFileSync(join(env.NODE_V8_COVERAGE!, name), "utf8")).result
         .some((entry: { functions: Array<{ functionName: string; ranges: Array<{ count: number }> }> }) => entry.functions
           .some(fn => fn.functionName === "variantProbe" && fn.ranges.some(range => range.count > 0)))));
-      assert.deepEqual(readdirSync(parent), [], "mutant source must never enter the HEAD collector");
-      assert.notEqual(env.NODE_V8_COVERAGE, parent);
+      assert.deepEqual(readdirSync(parentTmp), [], "mutant source must never enter the HEAD collector");
+      assert.notEqual(env.NODE_V8_COVERAGE, parentTmp);
       assert.equal(process.env.NODE_V8_COVERAGE, prior, "a child-variant control must preserve the parent's collector");
       variants.add(env.NODE_V8_COVERAGE);
     }
