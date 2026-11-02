@@ -140,7 +140,10 @@ process.exit(98);
     RMD_SERVE_DOCKERENV_PATH: join(root, "no-dockerenv"), GH_TOKEN: "fixture-token",
   };
   const run = (script: string, args: string[] = [], extra: NodeJS.ProcessEnv = {}, shell = "bash") => {
-    const r = spawnSync(shell, [script, ...args], { env: { ...env, ...extra }, encoding: "utf8", timeout: 90_000 });
+    // The generated launcher converges an install, loads the real CLI and runs both lifecycle children.
+    // Its composed run needs a separate budget from a direct script in the cold reviewer sandbox.
+    const timeout = script === join(output, "launcher") ? 180_000 : 90_000;
+    const r = spawnSync(shell, [script, ...args], { env: { ...env, ...extra }, encoding: "utf8", timeout });
     assert.equal(r.error, undefined, `${script}: ${r.error}`);
     return r;
   };
