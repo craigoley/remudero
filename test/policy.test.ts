@@ -136,6 +136,7 @@ function goodRaw(): Record<string, unknown> {
       // literal ever gated this.
       armSessionPrs: { value: false, origin: "net-new" },
       armAdhocLaneReap: { value: false, origin: "net-new" },
+      armStaleBranchArchive: { value: false, origin: "net-new" },
       // W1-T905: recurrence threshold/window for filing a §7B feedback entry off a classified
       // surface's repeated `sweep.disposed` rows — net-new, no prior source literal.
       repairFilingThreshold: { value: 3, origin: "net-new", min: 2, max: 15 },
@@ -563,6 +564,9 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // INSIDE the rung and the call site passed nothing, so there is no prior literal to cite as a
     // source site. The row is the first place the decision has ever been expressible.
     "sweep.armAdhocLaneReap",
+    // `sweep.armStaleBranchArchive` joins them too (operator ruling 2026-11-01): the repo-hygiene
+    // lane's act mode did not exist before it, so there is no prior literal to cite as a source site.
+    "sweep.armStaleBranchArchive",
     // W1-T905: `sweep.repairFilingThreshold`/`sweep.repairFilingWindowDays` join them too — no
     // consumer of `sweep.disposed` rows existed before this task, so there is no prior literal
     // to cite as either field's source.
