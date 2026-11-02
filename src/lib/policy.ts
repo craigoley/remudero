@@ -114,6 +114,11 @@ export interface PolicyValues {
      *  the call site passed no `enabled` at all, so there was nothing an operator could decide.
      *  This row is that decision, made settable. Same shape as `armSessionPrs`. */
     armAdhocLaneReap: boolean;
+    /** ARMS the repo-hygiene branch lane's act mode (operator ruling 2026-11-01: "Build act mode, flag
+     *  off"). Off, `rmd reap-branches` only ledgers `branch_reap.hygiene_shadow`; on, the automatic
+     *  rung's prune pass (or `--archive-stale`) archives each stale held run branch's tip under
+     *  `refs/rmd-recovery/reaped/` and deletes the branch in one atomic leased push. Net-new. */
+    armStaleBranchArchive: boolean;
     /** W1-T1038: the dispatch-path `/proc/meminfo` `MemAvailable` floor (MiB); below it, new
      *  dispatch defers. Ships at 0. See {@link checkMemoryGovernor}. Why:
      *  docs/forensics/policy.md#sweepmemoryfloormib. */
@@ -299,6 +304,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.dailyCostCeilingUsd": "lifted",
   "sweep.armSessionPrs": "net-new",
   "sweep.armAdhocLaneReap": "net-new",
+  "sweep.armStaleBranchArchive": "net-new",
   "sweep.repairFilingThreshold": "net-new",
   "sweep.repairFilingWindowDays": "net-new",
   "sweep.supersessionDisposal": "net-new",
@@ -787,6 +793,7 @@ export function validatePolicy(raw: unknown): Policy {
   const dailyCostCeilingUsd = numberField("sweep.dailyCostCeilingUsd", sweepRaw.dailyCostCeilingUsd, origin, bounds);
   const armSessionPrs = booleanField("sweep.armSessionPrs", sweepRaw.armSessionPrs, origin);
   const armAdhocLaneReap = booleanField("sweep.armAdhocLaneReap", sweepRaw.armAdhocLaneReap, origin);
+  const armStaleBranchArchive = booleanField("sweep.armStaleBranchArchive", sweepRaw.armStaleBranchArchive, origin);
   const repairFilingThreshold = numberField("sweep.repairFilingThreshold", sweepRaw.repairFilingThreshold, origin);
   const repairFilingWindowDays = numberField("sweep.repairFilingWindowDays", sweepRaw.repairFilingWindowDays, origin);
   const supersessionDisposal = booleanField("sweep.supersessionDisposal", sweepRaw.supersessionDisposal, origin);
@@ -963,6 +970,7 @@ export function validatePolicy(raw: unknown): Policy {
         dailyCostCeilingUsd,
         armSessionPrs,
         armAdhocLaneReap,
+        armStaleBranchArchive,
         repairFilingThreshold,
         repairFilingWindowDays,
         supersessionDisposal,

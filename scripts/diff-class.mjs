@@ -595,8 +595,8 @@ function clonesRepoArgv(content) {
 /**
  * Whether the suite `content` (in `testDir`) clones the repository: by a clone argv of its own, or
  * by calling a name it imports from a `test/helpers/` module, with a repository-rooted argument,
- * when that helper's own clone argv clones its repository parameter. A `.js` specifier resolves
- * to its `.ts` source.
+ * when that helper's own clone argv clones its repository parameter. Relative imports and the
+ * declared `#test/*` mapping are followed; a `.js` specifier resolves to its `.ts` source.
  */
 export function clonesTheRepository(content, testDir, root) {
   const bare = withoutRelativePathLiterals(content);
@@ -605,7 +605,20 @@ export function clonesTheRepository(content, testDir, root) {
     const names = m[1].split(",").map((n) => n.trim().replace(/^type\s+/, "").split(/\s+as\s+/).pop() ?? "")
       .filter((n) => /^[A-Za-z_$][\w$]*$/.test(n));
     if (names.length === 0) continue;
-    const abs = repoImportPath(m[2], testDir, root);
+    let abs;
+    if (m[2].startsWith("#test/")) {
+      let target;
+      try {
+        target = JSON.parse(fs.readFileSync(join(root, "package.json"), "utf8"))?.imports?.["#test/*"];
+      } catch (err) {
+        if ((err && /** @type {{code?: string}} */ (err).code) === "ENOENT") continue;
+        throw err;
+      }
+      if (typeof target !== "string" || !target.startsWith("./") || !/^[^*]*\*$/.test(target)) continue;
+      const mapped = target.slice(2, -1) + m[2].slice("#test/".length);
+      if (mapped.split(/[\\/]/).some((part) => /^(?:\.{1,2}|node_modules)$/i.test(part)) || /%2[ef]|%5c/i.test(mapped)) continue;
+      abs = normalize(join(root, mapped));
+    } else abs = repoImportPath(m[2], testDir, root);
     if (abs === undefined) continue;
     // Only a SHARED TEST HELPER: an imported src or scripts module is a suite's subject, not its walker.
     if (!relative(root, abs).split(sep).join("/").startsWith("test/helpers/")) continue;
