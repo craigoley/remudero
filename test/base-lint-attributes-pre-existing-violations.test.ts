@@ -33,8 +33,8 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { lintPlanCommand } from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { lintPlanCommand } from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

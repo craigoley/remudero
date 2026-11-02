@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parse } from "yaml";
 
-import { CI_COVERAGE_SHARD_COUNT, coverageShardConcurrency } from "../src/lib/ci-parity.js";
+import { CI_COVERAGE_SHARD_COUNT, coverageShardConcurrency } from "#src/lib/ci-parity.js";
 
 test("test/the-local-coverage-shard-count-equals-cis.test.ts: local coverage matches CI's matrix and stays CPU-bounded", () => {
   const workflow = parse(readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8")) as {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { recognizeChangesetClaims, stripQuotedRegions } from "../src/lib/review.js";
+import { recognizeChangesetClaims, stripQuotedRegions } from "#src/lib/review.js";
 
 const DIFF = ["src/lib/review.ts", "test/html-comments-are-not-changeset-claims.test.ts"];
 

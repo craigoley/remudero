@@ -189,6 +189,14 @@ cheap `git ls-remote --heads origin` fingerprint; the REST/ancestry classifier
 is throttled, and the light in-flight pass never reaches the remote git write.
 An unreadable or empty listing refuses rather than becoming a healthy zero.
 
+**Stale held run branches: shadow by default, act behind a flag** (operator ruling 2026-11-01).
+Each reap pass names the run branches `planBranchReap` holds that have gone stale (7 days for a
+merge-credited task, 14 otherwise) and ledgers them as `branch_reap.hygiene_shadow`, pushing nothing.
+`sweep.armStaleBranchArchive` in `plan/policy.yaml` (default `false`) arms the act mode: the automatic
+rung's prune pass, or `rmd reap-branches --archive-stale`, archives up to 25 per pass with one atomic
+leased push each and ledgers `branch_reap.hygiene_archived`. Restore one with
+`git fetch origin refs/rmd-recovery/reaped/<name>/<sha>:refs/rmd-recovery/reaped/<name>/<sha> && git push origin refs/rmd-recovery/reaped/<name>/<sha>:refs/heads/<name>`.
+
 ### Two Mac accounts, one GitHub login: Codex reads through the broker too (W1-T10302)
 
 Your Codex sessions run under a second Mac account and open every `codex/` PR as the same GitHub user the Claude

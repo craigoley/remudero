@@ -13,7 +13,7 @@ import {
   probeContainment,
   stripDenyFloorLines,
   type ProbeExecResult,
-} from "../src/lib/containment.js";
+} from "#src/lib/containment.js";
 
 const containmentSrc = readFileSync(fileURLToPath(new URL("../src/lib/containment.ts", import.meta.url)), "utf8");
 const denyFloorSrc = readFileSync(fileURLToPath(new URL("../hooks/deny-floor.sh", import.meta.url)), "utf8");

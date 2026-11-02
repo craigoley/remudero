@@ -6,7 +6,7 @@ import { getPriority } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
 import { makeTempDir } from '#src/lib/tmp.js';
-import { gitRepo } from './helpers/git-repo.js';
+import { gitRepo } from '#test/helpers/git-repo.js';
 
 // A retro can reach these fixtures without an admitted parent lease after its
 // outer slot wait bound. Keep fixture admission in owned scratch in BOTH shapes;
@@ -31,7 +31,7 @@ const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {})
 };
 
 test('author deadline admission refuses a too-small real slot budget before starting static work', async (t) => {
-  const { makeRuntimeFixture } = await import('./helpers/native-runtime-fixture.js');
+  const { makeRuntimeFixture } = await import('#test/helpers/native-runtime-fixture.js');
   const { calibrateAuthorRuntime } = await import(pathToFileURL(join(ROOT, 'scripts/calibrate-author-runtime.mjs')).href);
   const f = makeRuntimeFixture(); t.after(() => f.cleanup());
   const observed = calibrateAuthorRuntime({ root: f.dir });

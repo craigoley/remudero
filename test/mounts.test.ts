@@ -13,8 +13,8 @@ import {
   TierInvariantError,
   validateMounts,
   frontierPeerWorkerRow,
-} from "../src/lib/mounts.js";
-import { DEFAULT_TASK_CLASS } from "../src/lib/task-class.js";
+} from "#src/lib/mounts.js";
+import { DEFAULT_TASK_CLASS } from "#src/lib/task-class.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const SHIPPED = mountsPath(REPO_ROOT);

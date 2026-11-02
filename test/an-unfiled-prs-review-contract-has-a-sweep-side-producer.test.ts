@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { hydrateReviewReuseFacts, ownDiffDigestFromCompareFiles } from "../src/lib/open-prs-rest.js";
-import { DEFAULT_RISK } from "../src/lib/plan.js";
-import * as review from "../src/lib/review.js";
-import { parseAcceptanceBlock, reviewContractDigest } from "../src/lib/review.js";
-import { usesUntaskedReviewMetadata } from "../src/lib/tick-read-worker.js";
+import { hydrateReviewReuseFacts, ownDiffDigestFromCompareFiles } from "#src/lib/open-prs-rest.js";
+import { DEFAULT_RISK } from "#src/lib/plan.js";
+import * as review from "#src/lib/review.js";
+import { parseAcceptanceBlock, reviewContractDigest } from "#src/lib/review.js";
+import { usesUntaskedReviewMetadata } from "#src/lib/tick-read-worker.js";
 
 // The sweep integration proofs live in a-run-unfiled-prs-review-verdict-is-its-own.test.ts.
 const FILES = [{ filename: "src/example.ts", status: "modified", sha: "blob1" }];

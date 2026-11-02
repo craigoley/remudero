@@ -1,10 +1,16 @@
 // 2026-10-11: scope amendment #10842 (W1-T6018 + src/lib/now-view.ts, for #10833) was pushed without
 // ever running the task linter; Rule 19 sizing blocked it and no lane could repair it.
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
+import { stringify } from "yaml";
+import { loadPlanFromYaml, parseTasksFromYaml, type MachineFilingAdmissionContext } from "../src/lib/plan.js";
+import * as amendments from "../src/lib/proof-amendment.js";
 import { newAmendedBlockers, requestScopeAmendment, type ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
-import { lintTask } from "../src/lib/task-linter.js";
+import { lintTask, taskRulingPin } from "../src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const taskId = "W1-T9001";
 const shardPath = `plan/tasks.d/${taskId}-a-fixture-shard.yaml`;
@@ -36,7 +42,8 @@ function shard(opts: { risk?: string; bandMeaning?: string; files?: string; veri
 
 interface Calls { worktrees: number; written: string; commit: string; pushes: number; prs: Array<{ title: string; body: string }> }
 
-function amend(text: string, paths: string[]): { outcome: ReturnType<typeof requestScopeAmendment>; calls: Calls } {
+function amend(text: string, paths: string[], machineFilingAdmission?: (root: string) => MachineFilingAdmissionContext | undefined):
+  { outcome: ReturnType<typeof requestScopeAmendment>; calls: Calls } {
   const calls: Calls = { worktrees: 0, written: "", commit: "", pushes: 0, prs: [] };
   const deps = {
     repoDir: "/fixture", findShard: () => ({ path: shardPath, text }),
@@ -47,7 +54,7 @@ function amend(text: string, paths: string[]): { outcome: ReturnType<typeof requ
     probeExisting: () => undefined,
     createPr: (o: { title: string; body: string }) => { calls.prs.push(o); return { prUrl: "https://github.com/acme/repo/pull/99", prNumber: 99 }; },
     worktreePathFor: () => "/amendment", lookupIdentity: () => undefined, recordIdentity: () => {},
-    updateBranch: () => ({ ok: true }),
+    updateBranch: () => ({ ok: true }), ...(machineFilingAdmission ? { machineFilingAdmission } : {}),
   } as unknown as ProofAmendmentWritePorts;
   const outcome = requestScopeAmendment({ taskId, prNumber: 42, prUrl: "https://github.com/acme/repo/pull/42",
     headSha: "head-a", trailerTaskId: taskId, paths, changedPaths: paths }, deps);
@@ -157,4 +164,74 @@ test("W1-T7959: a task that declares no risk is given one at high beside its id"
   assert.equal(task.risk, "high");
   assert.equal(task.band_meaning, "span");
   assert.equal(calls.written.match(/^ {2}risk: high {2}# Rule 19 span/m)?.length, 1);
+});
+
+// #15766 (W1-T10573 for #15532): the writer reparked a machine task to verify: human, its pre-check linted
+// without the machine-filing admission hosted lint-plan runs, and the PR opened red on exactly that admission.
+function machineShard(origin: string, extra: Record<string, unknown> = {}): string {
+  const record = {
+    id: taskId, title: "A MACHINE FIXTURE", repo: "remudero", type: "implement", verify: "auto",
+    author_class: "machine", origin, risk: "medium", depends_on: [], status: "queued", attempts: 0, priority: 3,
+    files: ["src/lib/view-shadow.ts"], acceptance: [{ claim: "the view classifies a time diff", proof: "grep: classify in src/lib/view-shadow.ts" }],
+    ...extra,
+  };
+  const pinned = parseTasksFromYaml(stringify([record]), shardPath)[0]!;
+  return stringify([{ ...record, risk_ruling: { verdict: "low", action: "proceed", confidence: 0.9,
+    reasons: ["bounded fixture"], judged_at: "2026-11-01T00:00:00.000Z", pin: taskRulingPin(pinned) } }]);
+}
+
+function admitted(text: string, releasedIds: ReadonlySet<string> = new Set()) {
+  let roots: string[] = [];
+  const port = (root: string) => { roots = [...roots, root]; return { plan: loadPlanFromYaml(text, shardPath), releasedIds, pathExists: () => true }; };
+  return { port, roots: () => roots };
+}
+
+test("#15766: a repark that hosted lint-plan's machine-filing admission refuses escalates with that reason and opens no PR", () => {
+  const text = machineShard("console-followup:fixture");
+  const admission = admitted(text);
+  const { outcome, calls } = amend(text, ["src/other/view-shadow.ts"], admission.port);
+  assert.equal(outcome.kind, "refused", JSON.stringify(outcome));
+  assert.equal((outcome as { reason: string }).reason, "amended-shard-lint");
+  assert.match((outcome as { detail: string }).detail, /^machine-filing-admission: .*verify:human — not auto-runnable/);
+  assert.deepEqual([calls.pushes, calls.prs.length, calls.written, calls.commit], [0, 0, "", ""]);
+  assert.deepEqual(admission.roots(), ["/amendment"], "admission is judged in the amendment's own main checkout");
+  // Control: the same amendment without the admission port is what main opened.
+  assert.equal(amend(text, ["src/other/view-shadow.ts"]).outcome.kind, "created");
+  // Control: an id the release ledger released is admitted at verify: human, so the amendment still opens.
+  assert.equal(amend(text, ["src/other/view-shadow.ts"], admitted(text, new Set([taskId])).port).outcome.kind, "created");
+});
+
+test("#15766: an operator-origin machine task is escalated for its operator's ruling instead of reparked", () => {
+  for (const origin of ["Operator-approved eleven-existing-file scope, 2026-10-24", "operator-session:2026-11-01"]) {
+    const { outcome, calls } = amend(machineShard(origin), ["src/other/view-shadow.ts"]);
+    assert.equal(outcome.kind, "refused", origin);
+    assert.equal((outcome as { reason: string }).reason, "operator-origin", origin);
+    assert.match((outcome as { detail: string }).detail, /operator re-rules/);
+    assert.deepEqual([calls.worktrees, calls.pushes, calls.prs.length, calls.written], [0, 0, 0, ""], origin);
+  }
+  // A dispatch hold already parks the task off the selector, so its repark is still the writer's to make.
+  const held = amend(machineShard("operator-session:2026-11-01", { dispatch_hold: true }), ["src/other/view-shadow.ts"]);
+  assert.equal(held.outcome.kind, "created", JSON.stringify(held.outcome));
+  assert.equal(parseTasksFromYaml(held.calls.written, shardPath)[0]!.verify, "human");
+  // A machine filer's family still reparks exactly as before.
+  const machine = amend(machineShard("console-followup:fixture"), ["src/other/view-shadow.ts"]);
+  assert.equal(machine.outcome.kind, "created");
+  assert.equal(parseTasksFromYaml(machine.calls.written, shardPath)[0]!.verify, "human");
+});
+
+test("#15766: checkoutAdmission reads the checkout's plan, credits dispatched dependencies, and gives no verdict without a plan", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}scope-admission-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.equal(amendments.checkoutAdmission(dir), undefined, "no plan in the checkout is no verdict");
+  mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(dir, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(dir, shardPath), shard({ risk: "medium" }));
+  mkdirSync(join(dir, "src", "lib"), { recursive: true });
+  writeFileSync(join(dir, "src", "lib", "view-shadow.ts"), "export {};\n");
+  const context = amendments.checkoutAdmission(dir)!;
+  assert.deepEqual(context.plan.tasks.map((task) => task.id), [taskId]);
+  assert.equal(context.releasedIds.size, 0);
+  assert.equal(context.isMerged!(context.plan.tasks[0]!), true);
+  assert.equal(context.pathExists!("src/lib/view-shadow.ts"), true);
+  assert.equal(context.pathExists!("src/lib/absent.ts"), false);
 });

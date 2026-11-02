@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ciFrictionLadder, gitCiFrictionOwnerSearch } from "../src/lib/ci-friction-gardener.js";
-import { locateCiFrictionOwner, type OwnerSearch } from "../src/lib/ci-friction-remedy.js";
+import { ciFrictionLadder, gitCiFrictionOwnerSearch } from "#src/lib/ci-friction-gardener.js";
+import { locateCiFrictionOwner, type OwnerSearch } from "#src/lib/ci-friction-remedy.js";
 
 const REVISION = "a".repeat(40);
 const PIN = ["rev-parse", "--verify", "origin/main^{commit}"];

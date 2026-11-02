@@ -20,16 +20,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { readLedgerLines } from "../src/lib/status.js";
-import { loadMounts, mountsPath, resolveMount } from "../src/lib/mounts.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { loadMounts, mountsPath, resolveMount } from "#src/lib/mounts.js";
 import {
   buildWorkerStateSensor,
   deriveRunawayTurnBound,
   ledgerPathFor,
   WORKER_ACTIVITY_LEDGER_STEP,
   WORKER_RUNAWAY_TURNS_LEDGER_STEP,
-} from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 

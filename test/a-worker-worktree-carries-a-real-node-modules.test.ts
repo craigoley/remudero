@@ -3,8 +3,8 @@ import { lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { worktreesDir } from "../src/lib/worker.js";
-import type { Config } from "../src/lib/config.js";
+import { worktreesDir } from "#src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
 
 type RealNodeModulesFinding = {
   worktreePath: string;

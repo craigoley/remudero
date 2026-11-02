@@ -13,17 +13,10 @@ import { buildStandingBrief, type StandingBrief } from "./standing-briefs.js";
 import { EXTERNAL_SOURCE_CLASSES, type ExternalSourceClass } from "./untrusted-envelope.js";
 
 /**
- * Promptsmith: the read side of the compounding thesis (WS-8, W1-T19, W1-T33). It injects the two
- * doctrine lines and the matched `learnings/*.yaml` facts into every rendered implement
- * prompt. Matching is deterministic by an entry's `files:` globs and optional declared
- * `symbols:`/`error_signatures:`, never embedding-based or semantic; a knowledge
- * budget caps the injected chars, so a growing corpus can never become an unbounded context tax;
- * and every injected line carries `[src: learnings#<id>]`, so the prompt still passes the
- * provenance linter (Standing rule 1). The corpus is sharded by subsystem and read through a
- * generated index, so a task parses only the shards its files could match. `LEARNINGS.md` stays
- * the human-owned narrative, read back only by `retroCommand` (src/run-task.ts), not parsed here.
- * INVARIANT: an entry whose lifecycle is not `active` is never injected. See {@link Lifecycle}.
- * INVARIANT: one entry shape and one validator serve every layer. See {@link Layer}.
+ * Promptsmith injects doctrine and budgeted, cited facts (WS-8, W1-T19, W1-T33; Standing rule 1).
+ * Matching uses file globs and declared symbols/error signatures; the index narrows shard reads.
+ * `LEARNINGS.md` is human narrative read by `retroCommand` (src/run-task.ts), never parsed here.
+ * Invariants: only active entries are injected; one shape and validator serve every {@link Layer}.
  * FALSIFIER: test/learnings-{commons,layers,promotion}.test.ts.
  */
 
@@ -41,28 +34,24 @@ const AUTONOMY_SRC = "learnings#standing-rule-8";
 
 // Why: 8148 is a measured derivation, not a picked number — docs/forensics/learnings.md#default_knowledge_budget_chars (W1-T941).
 /**
- * Default knowledge budget: the max chars of matched fact lines injected per prompt. The doctrine
- * lines above are mandatory and are not counted against it.
- * INVARIANT: this equals scripts/knowledge-budget-baseline.json's `capChars` — raise it there.
+ * Max matched-fact chars per prompt; mandatory doctrine is outside this budget.
+ * Invariant: equals scripts/knowledge-budget-baseline.json's `capChars` — raise it there.
  * FALSIFIER: test/knowledge-budget-derivation.test.ts's drift test.
  */
 export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 8148;
 
 // Why: contradiction detection narrows recency-overwrite rather than replacing it — docs/forensics/learnings.md#lifecycle (W1-T88/P14).
 /**
- * An entry's lifecycle. `active` (the default) is a candidate for injection. `superseded` means a
- * human correction replaced the fact; `quarantined` means its `assertion` now fails, so
- * `learnings-assert-check.mjs` flipped it (W1-T34); `contested` means the consolidation pass found
- * it opposing another active entry (W1-T88). Non-active entries stay in their shard for the record.
- * INVARIANT: {@link selectLearnings} filters all three out before ranking, so none reaches a prompt.
+ * `active` defaults to injectable; human corrections supersede, failing assertions quarantine
+ * (learnings-assert-check.mjs, W1-T34), and opposing facts become contested (W1-T88).
+ * Non-active entries remain recorded but {@link selectLearnings} excludes them before ranking.
  */
 export type Lifecycle = "active" | "superseded" | "quarantined" | "contested";
 
 // Why: the three-layer design and its promotion order — docs/forensics/learnings.md#layer (P32/W1-T145).
 /**
- * Which knowledge layer an entry lives at: `project` (repo-scoped, the default), `user-overall`
- * (one operator's fleet), or `global` (cross-user, opt-in, hash-pinned). Layer says where an entry
- * is read from, not whether it is injectable — that is {@link Lifecycle}'s job.
+ * Read scope: repo (`project`, default), operator fleet (`user-overall`), or cross-user
+ * (`global`, opt-in and hash-pinned). {@link Lifecycle} controls injection eligibility.
  */
 export type Layer = "project" | "user-overall" | "global";
 
@@ -70,9 +59,7 @@ export type Layer = "project" | "user-overall" | "global";
 export const LAYERS: readonly Layer[] = ["project", "user-overall", "global"];
 
 /**
- * The only valid non-absent value of an entry's `share` field (§6, W1-T425). There is no
- * `"private"` counterpart: omitting the field already means private, so a second spelling of the
- * same state would only be another way to get it wrong.
+ * Only explicit `public` is valid; omission means private (§6, W1-T425).
  */
 export type Share = "public";
 
@@ -119,48 +106,29 @@ export interface LearningEntry {
   lifecycle: Lifecycle;
   /** (superseded entries only) the id of the entry that replaced this one. */
   supersededBy?: string;
-  /** (contested only, W1-T88/P14) the id of the other entry this one opposes. Set on BOTH members
-   *  of a pair, so a reader of either finds its counterpart. */
+  /** Opposing entry's id, set on both contested members (W1-T88/P14). */
   contestedWith?: string;
   /**
-   * (W1-T3709) The EVIDENCE behind `fact` — the measurement, the run, the PR that earned it.
-   *
-   * NEVER INJECTED. `renderLearningLine` renders `fact` alone, so this costs a worker nothing and
-   * is invisible to {@link entryBudgetWeight} and the corpus ratchet. It is RETRIEVED, not
-   * injected: the citation `[src: learnings#<id>]` already tells a reader where to look, and this
-   * is what they find when they do.
-   *
-   * THIS IS THE TREATMENT CLAUDE.md ALREADY HAS. Its headline is the whole rule and `doctrine/`
-   * holds the proof; MEASURED here, the actionable rule was 7-19% of an injected line on the
-   * longest entries, so the other 80-93% was forensics every matching task paid for and no worker
-   * needed in order to act. Same model `plan-index.json` applies to MASTER-PLAN (W1-T2282's
-   * "RETRIEVED, not INJECTED").
-   *
-   * KEEP `fact` ACTIONABLE ON ITS OWN. A fact that cannot be obeyed without opening this field has
-   * been split in the wrong place.
+   * Retrievable measurement/run/PR behind an independently actionable `fact` (W1-T3709).
+   * `renderLearningLine`, {@link entryBudgetWeight} and the corpus ratchet never inject or charge
+   * evidence. The citation locates it, as CLAUDE.md's doctrine and W1-T2282's plan index do.
+   * Falsifier: test/evidence-is-retrieved-never-injected.test.ts.
    */
   evidence?: string;
-  /** (W1-T34) Optional `sh -c` command that must exit 0 for this `fact` to still be true. Run by
-   *  `scripts/learnings-assert-check.mjs`, never by this module. */
+  /** `sh -c` validity check, run only by scripts/learnings-assert-check.mjs; must exit 0 (W1-T34). */
   assertion?: string;
-  /** (quarantined only, W1-T34) the failing assertion and its exit code, so a reader sees why
-   *  `learnings-assert-check.mjs` quarantined the entry without re-running it. */
+  /** Quarantined only: failing assertion and exit code from learnings-assert-check.mjs (W1-T34). */
   quarantinedReason?: string;
-  /** (W1-T50) Marks a `failures` incident whose symptom is operator-visible; defaults to `false`.
-   *  `true` obligates a matching `docs/troubleshooting.md` entry, which
-   *  `checkTroubleshootingCoverage` (src/lib/review.ts) enforces from the diff alone. */
+  /** Operator-visible `failures` incident, default false; checkTroubleshootingCoverage in
+   * src/lib/review.ts requires a matching docs/troubleshooting.md diff entry (W1-T50). */
   operatorImpact?: boolean;
-  /** (W1-T939) Marks a `failures` incident whose guard belongs in a `scripts/recovery-drill.mjs`
-   *  fixture (`RECOVERY_PATHS`, W1-T366/W1-T938): {@link operatorImpact}'s sibling, one level
-   *  narrower. Defaults to `false`. `true` obligates a drill-table touch in the same diff, which
-   *  `checkDrillCoverage` (src/lib/review.ts) enforces from the diff alone. */
+  /** Narrower than {@link operatorImpact}, default false; checkDrillCoverage (src/lib/review.ts)
+   * obligates a scripts/recovery-drill.mjs RECOVERY_PATHS fixture touch (W1-T939, W1-T366/W1-T938). */
   drillObligating?: boolean;
-  /** (P32/W1-T145) Defaults to `"project"`, so a shard entry written before this field existed
-   *  needs no edit. Read it through {@link entryLayer}, never as this raw field. */
+  /** Defaults to project for legacy entries; read via {@link entryLayer} (P32/W1-T145). */
   layer?: Layer;
-  /** (§6, W1-T425) The transport opt-in: `share: public` makes this entry exportable via
-   *  `rmd learnings export`. Omitting it means private forever, and {@link selectExportableEntries}
-   *  never includes an entry the exporter merely guesses is safe. */
+  /** Explicit export opt-in; omission stays private. {@link selectExportableEntries} never
+   * infers safety for `rmd learnings export` (§6, W1-T425). */
   share?: Share;
   /** Repo-relative globs; an entry matches a task file when one glob hits it. */
   files: string[];
@@ -172,13 +140,11 @@ export interface LearningEntry {
   fact: string;
   /** Provenance of the fact (e.g. `PR#8`); recorded lineage, not the injected src. */
   src: string;
-  /** Optional ISO date last cited; recent entries win a budget tie. W1-T419's retro.ts miner
-   *  derives it from measured evidence: a `learnings.injected` ledger row, or a `learnings#<id>`
-   *  git-log citation. */
+  /** ISO last-cited date breaks budget ties; retro.ts mines learnings.injected ledger rows
+   * or learnings#<id> git-log citations (W1-T419). */
   cited?: string;
-  /** (W1-T419) Optional count of the evidence backing {@link cited}. Absent means nothing mined
-   *  yet, which the budget ratchet renders `never-cited`, never zero. {@link selectLearnings} does
-   *  not read it; the ratchet's compression ordering does. */
+  /** Evidence count for {@link cited}; absent renders never-cited, never zero. Used by ratchet
+   * compression ordering, not {@link selectLearnings} (W1-T419). */
   citedCount?: number;
   /** Optional, structured provenance. Local authors may use only Git or source-free origins. */
   origin?: AnyOrigin;
@@ -248,19 +214,11 @@ export interface UnreachableLearning {
 }
 
 /**
- * W1-T4240 — which active learnings name paths that do not exist. The matcher anchors each glob
- * (`^…$`) with no directory-prefix rule, so a bare `test` matches only a file literally named
- * `test`: on 2026-09-23, 17 of 160 globs were bare directories and four entries could never be
- * injected, while keeping the Beta prior that hides them from the gardener's RETIRE class. Uses
- * the SAME {@link globToRegExp} {@link selectLearnings} uses, so this census and selection cannot
- * disagree about what a glob reaches. Superseded, quarantined and contested entries are skipped:
- * they are never injected, so a dead glob on one costs nothing. An entry with NO globs is
- * reachable only through `symbols` / `error_signatures`, so one carrying neither is unreachable.
- *
- * REPAIR A DEAD GLOB TO WHAT THE FACT IS ABOUT, NOT TO ITS WIDEST READING. Ranking counts file
- * hits, so `test` -> `test/**` made four method lessons match ~80% of plan tasks and pushed 2,948
- * selected entries out of 840 tasks (replayed over plan/ at 50de4b6a). Those four now carry
- * `files: []` plus the symbols / error signatures their own text names (0.5-2% of tasks each).
+ * Find dead globs on active entries using {@link selectLearnings}' {@link globToRegExp} (W1-T4240).
+ * Globs are anchored: bare `test` cannot match children. Non-active entries are skipped; entries
+ * without globs need a symbol/error trigger or are unreachable, even with a healthy Beta prior.
+ * Repair to the fact's subject: broadening `test` to `test/**` crowded out relevant entries
+ * (replay 50de4b6a). Use `files: []` with the fact's own symbol/error triggers for method lessons.
  */
 export function unreachableLearnings(entries: LearningEntry[], trackedPaths: readonly string[]): UnreachableLearning[] {
   const out: UnreachableLearning[] = [];
@@ -501,18 +459,14 @@ export function entryLayer(entry: LearningEntry): Layer {
   return entry.layer ?? "project";
 }
 
-/** The project layer's home (P32/W1-T145): resolved through {@link resolveRepoLayout} (W1-T2922)
- *  rather than a bare `join(repoRoot, "learnings")` house literal, so a target carrying its own
- *  layout override reads ITS learnings directory, not this repo's. House defaults reproduce
- *  today's path exactly, so every existing caller is unaffected. Named so it,
- *  `userOverallLearningsHome` and `globalLearningsHome` (config.ts) read as one symmetric set. */
+/** Project home honors target layout overrides via {@link resolveRepoLayout} (P32/W1-T145,
+ * W1-T2922); complements config.ts's userOverallLearningsHome/globalLearningsHome. */
 export function projectLearningsHome(repoRoot: string): string {
   return resolveRepoLayout(repoRoot).learningsDir;
 }
 
-/** The five subsystem shards this repo's corpus is split into (W1-T33). `rmd onboard --phase
- *  synthesize` (W1-T2505) seeds an onboarded repo with the SAME split, so {@link
- *  loadLearningsCorpus} and {@link loadLearningsIndex} work there unchanged. */
+/** Shared shard split for corpus/index loaders and `rmd onboard --phase synthesize` (W1-T33,
+ * W1-T2505); onboarding must not invent a different split. */
 export const PROJECT_LEARNINGS_SHARD_NAMES = ["architecture", "ci", "failures", "platform", "testing"] as const;
 
 /** One seeded shard file's content: an empty entry list plus a header explaining WHY it is
@@ -540,10 +494,9 @@ function seedShardFileContent(name: string): string {
 
 // Why: onboarding seeds a home for facts, never a fact — docs/forensics/learnings.md#seedprojectlearningshomefiles (W1-T2505).
 /**
- * The seeded project learnings home's files (W1-T2505), keyed by filename relative to the home:
- * five empty shards ({@link PROJECT_LEARNINGS_SHARD_NAMES}) plus a matching `index.json`.
- * INVARIANT: that `index.json` is exactly what `scripts/generate-learnings-index.mjs` would produce
- * from five empty shards, reproduced here because onboarding writes through an injected fs seam.
+ * Seed five empty shards and index, keyed relative to their home (W1-T2505).
+ * Invariant: index equals scripts/generate-learnings-index.mjs output for these empty shards;
+ * reproduced here for onboarding's injected filesystem seam.
  */
 export function seedProjectLearningsHomeFiles(): Record<string, string> {
   const files: Record<string, string> = {};
@@ -889,23 +842,19 @@ export function renderFreshnessNote(entryId: string, corpusChurn: Record<string,
   return ` (${VERIFY_FIRST_NOTE} — ${churn} commit${churn === 1 ? "" : "s"} since earned, higher churn than ${outranks}/${otherChurned.length} other changed facts)`;
 }
 
-/** The reason prefix {@link loadGlobalArtifact} emits for a missing artifact (W1-T1251). Exported
- *  so a caller classifies by the SAME literal this module returns, not a second driftable regex.
- *  Matched with `startsWith`, so a short test fixture and the real path-suffixed message agree. */
+/** Shared missing-artifact prefix; callers use startsWith, avoiding regex drift and tolerating
+ * path suffixes from {@link loadGlobalArtifact} (W1-T1251). */
 export const GLOBAL_ARTIFACT_ABSENT_REASON_PREFIX = "global artifact not found";
 
 /**
- * `"absent"` is the artifact not existing yet: the one designed, non-fatal state (W1-T1251).
- * `"refused"` is every other {@link loadGlobalArtifact} failure — invalid YAML, not a mapping, a
- * missing `version` or `hash`, a malformed entry, a hash mismatch — a real problem, not an absence.
+ * Absent is the designed non-fatal state; invalid YAML/shape/version/hash/entries or tampering
+ * are refused, never treated as absence (W1-T1251, {@link loadGlobalArtifact}).
  */
 export type GlobalArtifactRefusalKind = "absent" | "refused";
 
 /**
- * Classify a `loadGlobalArtifact` refusal reason: the ONE discriminant every consumer reads.
- * INVARIANT: `"absent"` iff the reason starts with {@link GLOBAL_ARTIFACT_ABSENT_REASON_PREFIX}.
- * Every other reason, an unrecognized future one included, classifies `"refused"`, so a new failure
- * reads as a problem rather than vanishing into the deferred-transport line.
+ * Shared discriminant: absent iff reason starts with {@link GLOBAL_ARTIFACT_ABSENT_REASON_PREFIX}.
+ * Every other reason, including future failures, is refused rather than hidden as deferred transport.
  */
 export function classifyGlobalArtifactRefusal(reason: string): GlobalArtifactRefusalKind {
   return reason.startsWith(GLOBAL_ARTIFACT_ABSENT_REASON_PREFIX) ? "absent" : "refused";
@@ -955,10 +904,7 @@ export function loadGlobalArtifact(path: string): GlobalArtifactResult {
   try {
     schema = resolveLearningsSchema(r.version);
   } catch (err) {
-    // DELIBERATE: an unknown `learnings-v*` version is a REFUSAL, not a crash — the resolver's own
-    // message is carried through verbatim (with the path appended) so the caller learns which
-    // version it declared and which file said so. Nothing is erased: this converts a throw into
-    // the same `refused` channel every other validation failure above already uses.
+    // Unknown versions refuse with the resolver's message and path, preserving the failure reason.
     return refused(`${err instanceof Error ? err.message : String(err)} (${path})`);
   }
   if (typeof r.hash !== "string" || r.hash.length === 0) {
@@ -1301,14 +1247,10 @@ export interface PromotionResult {
 
 // Why: scrub runs before the judge so nothing project-identifying reaches an LLM call — docs/forensics/learnings.md#promoteentry (P32/W1-T146).
 /**
- * The promotion pipeline for ONE entry (P32/W1-T146): scrub, then judge, in that order only. It
- * mutates nothing and writes nothing to any home.
- * 1. {@link scrubEntry}. A block returns `stage: "scrub"` and the judge is never called; the
- *    scrub falsifier asserts zero judge invocations.
- * 2. An entry already at the top layer returns `stage: "top-layer"`, also without a judge call.
- * 3. Otherwise the judge runs and {@link planPromotionFromVerdict} decides; a non-promoting
- *    verdict returns `stage: "judge"` and the entry stays put, which is the judge falsifier.
- * 4. A promoting verdict returns `promotedEntry`: the entry with layer bumped, `src` redacted.
+ * Pure promotion pipeline: scrub before judge; never mutate or write a home (P32/W1-T146).
+ * Scrub blocks and top-layer entries never call the judge (scrub falsifier: zero invocations).
+ * {@link planPromotionFromVerdict} keeps non-promoting entries at stage judge (judge falsifier),
+ * or returns promotedEntry with layer bumped and src redacted.
  */
 export async function promoteEntry(entry: LearningEntry, deps: PromotionJudgeDeps): Promise<PromotionResult> {
   const log = deps.log ?? (() => {});
@@ -1525,11 +1467,7 @@ export function mineRevertedLearningSourcePrsFromGitDump(gitDump: string): Rever
   return out;
 }
 
-// ── TRANSPORT: EXPORT/IMPORT (§6, W1-T425) ──────────────────────────────────
-//
-// Two verbs riding machinery that already exists: loadGlobalArtifact's hash-pin verification and
-// scrubEntry's leak-grep analog both predate this section, which builds only the bundle between
-// them and never a second copy of either guard.
+// Export/import reuses loadGlobalArtifact's hash check and scrubEntry's leak guard (§6, W1-T425).
 
 /** Provenance stamped onto an exported bundle (§6, W1-T425): where it came from and when — informational, never hashed (only `entries` is; see {@link computeArtifactHash}). */
 export interface ExportProvenance {
@@ -1628,12 +1566,8 @@ export function renderExportBundle(bundle: ExportBundle): string {
 export type BundlePinResult = { ok: true } | { ok: false; reason: string };
 
 /**
- * Verify a bundle's own declared `hash` against an operator-supplied pin (§6, W1-T425): the check
- * `rmd learnings import` runs before writing to the global home, catching a wrong or substituted
- * file before it reaches disk.
- * INVARIANT: this never recomputes the hash from `entries`. That re-derivation is
- * {@link loadGlobalArtifact}'s job at prompt-assembly time, so import gates only whether the file
- * is written, never reimplementing the tamper check.
+ * Before import writes, compare the declared hash to the operator pin (§6, W1-T425).
+ * Never recompute entries here: {@link loadGlobalArtifact} owns that tamper check at prompt assembly.
  */
 export function verifyBundlePin(bundleText: string, pin: string): BundlePinResult {
   let raw: unknown;
@@ -2147,13 +2081,10 @@ export function renderLearningsContext(selected: LearningEntry[]): string {
 }
 
 /**
- * Progressive disclosure for a headline-and-body rule corpus (W1-T2508). CLAUDE.md's bullets are
- * already written `- **HEADLINE** body`, an agent-skill-shaped split nobody had to invent, only
- * honour. Still not wired into {@link renderLearningsContext} — that block stays the
- * doctrine+matched-learnings pair it always was. W1-T2761 DOES wire the headline HALF into
- * `run-task.ts`'s `implementPromptParts`/`renderAnchorBlock` (via `buildRuleHeadlinesPart`,
- * policy-gated on `workerRuleHeadlines.enabled`); `lookupWorkerRule` now supplies one selected
- * body or learning's evidence to the worker's rule tool; an id the index lacks resolves via `doctrine/merged-rules.json`.
+ * Split `- **HEADLINE** body` rules for progressive disclosure (W1-T2508).
+ * W1-T2761 wires headlines through run-task.ts's implementPromptParts/renderAnchorBlock and
+ * buildRuleHeadlinesPart, gated by workerRuleHeadlines.enabled; renderLearningsContext stays separate.
+ * lookupWorkerRule retrieves bodies/evidence; missing ids resolve via doctrine/merged-rules.json.
  */
 
 /** One parsed rule bullet. INVARIANT: the headline wrapped in `**` markers, followed by `body`,
@@ -2293,28 +2224,13 @@ export function lookupWorkerRule(
 }
 
 /**
- * W1-T3323: a rule body that is NOTHING BUT A POINTER to the file holding its evidence.
- *
- * CLAUDE.md is now an INDEX — 56 headlines, each followed by `→ doctrine/<section>/<rule>.md` —
- * because the headline IS the instruction and the body is the measurement that makes it
- * believable. An interactive agent cannot call {@link retrieveRuleBody}; Claude Code reads
- * CLAUDE.md natively and offers no hook. So the address has to be READABLE TEXT ON THE LINE,
- * which is the design's one load-bearing constraint: an agent that never fetches still holds
- * every instruction, and one that needs the evidence has a path it can `cat`.
- *
- * THE TRAILING GROUP IS NOT COSMETIC. {@link parseRuleHeadlines} ends a bullet at the NEXT bullet
- * or heading, so the blank line separating a section's last rule from the next `##` lands inside
- * that rule's body. Capturing it and replaying it after the resolved body is what makes
- * {@link resolveDoctrineForReader} reproduce the pre-migration file BYTE FOR BYTE (proved at
- * 43685 -> 43685 by test/the-doctrine-index-points-at-every-body.test.ts). An anchored `$` alone
- * would have silently refused every section-final pointer and left those five rules unresolved.
- *
- * EVERY SEGMENT MUST OPEN WITH AN ALPHANUMERIC, WHICH IS WHAT KEEPS A POINTER INSIDE THE STORE.
- * A first draft used the flat class `[A-Za-z0-9._/-]+` and happily accepted
- * `doctrine/../../etc/shadow.md` — and the pointer's target is READ AND RETURNED AS DOCTRINE, so a
- * pattern that admits traversal turns a rule body into an arbitrary-file read. `..` has no leading
- * alphanumeric, and neither does the empty segment in `doctrine//x.md`, so both are refused; the
- * fixture in test/the-doctrine-index-points-at-every-body.test.ts drives that arm directly.
+ * Evidence-only rule pointer (W1-T3323). Keep a readable address beside each instruction:
+ * native CLAUDE.md readers cannot call {@link retrieveRuleBody} but must be able to fetch evidence.
+ * Preserve trailing whitespace: {@link parseRuleHeadlines} includes section separators in bodies;
+ * dropping the trailer would refuse section-final pointers and break byte-for-byte reconstruction.
+ * Each segment starts alphanumerically (underscore also allowed), rejecting `..` and empty segments;
+ * a permissive `[A-Za-z0-9._/-]+` admitted doctrine/../../etc/shadow.md as an arbitrary-file read.
+ * Falsifier: test/the-doctrine-index-points-at-every-body.test.ts checks round trips and store escapes.
  */
 export const RULE_BODY_POINTER_RE =
   /^[ \t]*(?:→|->)[ \t]+(doctrine(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)+\.md)([ \t]*\n*)$/;
@@ -2337,11 +2253,8 @@ export function parseRuleBodyPointer(body: string): RuleBodyPointer | undefined 
 }
 
 /**
- * Follow one pointer to its body. FAILS LOUD IN BOTH DIRECTIONS, because design (v) of W1-T3323
- * says a doctrine that silently loses its evidence is worse than one that is merely long:
- * an unreadable target throws, and so does a target whose stored bullet does not open with THIS
- * headline — the case a careless rename or a copy-pasted pointer produces, where every byte is
- * readable and the reader is handed another rule's evidence under this rule's instruction.
+ * Follow a pointer; throw on unreadable targets or a stored bullet with the wrong headline
+ * (W1-T3323 design v). Renames/copy-pastes must not silently attach another rule's evidence.
  */
 export function resolveRuleBodyPointer(
   headline: string,
@@ -2366,22 +2279,16 @@ export function resolveRuleBodyPointer(
   return text.slice(prefix.length) + pointer.trailer;
 }
 
-/** The repo root this module was loaded from, so the default store reader resolves a
- *  repo-relative `doctrine/…` pointer with no caller passing a root. `src/lib/learnings.ts` ->
- *  two levels up. */
+/** Module's repo root, two levels above src/lib/learnings.ts, for default doctrine reads. */
 export const DOCTRINE_STORE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-/** Default store reader: a real repo-relative read. Injected in every test, so the pointer logic
- *  is provable without a fixture tree on disk. */
+/** Real repo-relative store read; tests can inject a reader without a filesystem fixture. */
 export function readDoctrineStoreFile(target: string, root: string = DOCTRINE_STORE_ROOT): string {
   return readFileSync(join(root, target), "utf8");
 }
 
-/** Resolve the complete rule corpus a doctrine reader sees. This is deliberately STRICTER than
- * {@link retrieveRuleBodyOrDegrade}: a worker prompt must degrade rather than go silent, but a
- * test asserting a doctrine fact must fail when it cannot read that fact. The parser and index are
- * the same primitives the worker path uses; `readBody` is the future body-store seam, while its
- * default reads today's inline bodies from that index. */
+/** Resolve the full corpus strictly: tests must fail on unreadable doctrine, unlike worker
+ * {@link retrieveRuleBodyOrDegrade}. Shares the worker parser/index; readBody defaults to the index. */
 export function resolveDoctrineForReader(
   readSource: () => string,
   readBody?: (headline: string) => string | undefined,
@@ -2412,10 +2319,7 @@ export function resolveDoctrineForReader(
       if (body === undefined) {
         throw new LearningsError(`resolveDoctrineForReader: body for "${rule.headline}" is absent`);
       }
-      // W1-T3323: after the migration the INDEX holds a pointer where the body used to sit, so a
-      // reader that asks for the doctrine gets the evidence followed, not the address quoted. An
-      // inline body (an un-migrated corpus, any synthetic fixture) parses to `undefined` here and
-      // passes through byte-unchanged.
+      // Follow evidence pointers; inline bodies pass through byte-unchanged (W1-T3323).
       const pointer = parseRuleBodyPointer(body);
       const resolved = pointer === undefined ? body : resolveRuleBodyPointer(rule.headline, pointer, readStoreFile);
       return `- **${rule.headline}**${resolved}`;
@@ -2423,10 +2327,8 @@ export function resolveDoctrineForReader(
     .join("\n");
 }
 
-/** Resolve one rule's body on demand through the injected `retrieve`. INVARIANT: a failed
- *  retrieval degrades to the FULL rule (`- **headline**body`), never to `""` and never a throw.
- *  W1-T2508's rationale names the hazard: a headline whose body cannot be fetched leaves the
- *  reader knowing a rule exists, unable to read it, and proceeding anyway. */
+/** Retrieve a body; undefined falls back to the full rule, never empty (W1-T2508).
+ * A headline alone would let a reader proceed without the instruction's body. */
 export function retrieveRuleBodyOrDegrade(
   rule: RuleHeadline,
   retrieve: (headline: string) => string | undefined,
@@ -2436,9 +2338,8 @@ export function retrieveRuleBodyOrDegrade(
   return `- **${rule.headline}**${rule.body}`;
 }
 
-/** The wider context-block shape this mechanism assembles into, mirroring
- *  {@link renderLearningsContext}'s stable-then-volatile ordering (W1-T35): the headline index is
- *  stable and sits first, `retrievedBodies` grows over a session and sits last. */
+/** Stable headline index first, growing retrieved bodies last; mirrors
+ * {@link renderLearningsContext}'s cache ordering (W1-T35). */
 export function renderProgressiveRuleContext(rules: RuleHeadline[], retrievedBodies: string[]): string {
   return [renderHeadlineOnlyIndex(rules), retrievedBodies.join("\n")].filter((s) => s.length > 0).join("\n\n");
 }

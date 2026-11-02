@@ -5,7 +5,7 @@ import {
   disarmAutoMerge,
   disarmOutcomeWithdrawn,
   withdrawArmIfVerdictRefuses,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 // ── W1-T1056: THE LEDGER MUST NOT RECORD A WITHDRAWAL THAT DID NOT HAPPEN ────────────────────
 //

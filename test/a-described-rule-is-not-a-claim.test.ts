@@ -7,7 +7,7 @@ import {
   bodyContradictsDiff,
   failSummary,
   recognizeChangesetClaims,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 /**
  * W1-T3061 — `recognizeChangesetClaims` read two shapes as this changeset's own assertion that are

@@ -4,17 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
-import { openUsageProbeSession } from "../src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
+import { openUsageProbeSession } from "#src/lib/worker.js";
 import {
   type ClaudeCredentialSeedEvent,
   materializeSpawnWorkerHome,
   seedClaudeFleetCredentials,
   workerCredentialFilePath,
   WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH,
-} from "../src/lib/worker-home.js";
-import { usageCredentialSink } from "../src/run-task.js";
+} from "#src/lib/worker-home.js";
+import { usageCredentialSink } from "#src/run-task.js";
 
 /**
  * W1-T6252. Core and console each forked the owner's OAuth credential into a container-local

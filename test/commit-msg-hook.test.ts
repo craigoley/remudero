@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { worktreeAdd } from "../src/lib/worker.js";
+import { worktreeAdd } from "#src/lib/worker.js";
 
 // ── W1-T137: STOP a worker committing a malformed message in its OWN worktree ──
 //

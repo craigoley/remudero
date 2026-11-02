@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 // @ts-expect-error — the executable .mjs has no declaration output.
-import * as workflowGuard from "../scripts/workflow-guard-mutation-ratchet.mjs";
+import * as workflowGuard from "#scripts/workflow-guard-mutation-ratchet.mjs";
 
 interface SkipGuard {
   key: string;

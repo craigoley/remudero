@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +10,7 @@ import {
   WorkerKeychainError,
   ensureWorkerKeychain,
   workerKeychainPaths,
-} from "../src/lib/worker-home.js";
+} from "#src/lib/worker-home.js";
 
 /**
  * W1-T2398 — the worker credential's expiry MARGIN becomes run-length-aware.

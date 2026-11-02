@@ -72,7 +72,7 @@ raw: >-
   separate W1-T11078 resolver prerequisite.
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/16047
 summary: null

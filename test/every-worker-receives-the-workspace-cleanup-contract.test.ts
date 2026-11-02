@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs, type WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { openWeightEstimatedTokens, spawnDecisionPoint } from "../src/lib/worker-provider.js";
+import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs, type WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { openWeightEstimatedTokens, spawnDecisionPoint } from "#src/lib/worker-provider.js";
 
 // Real common dispatcher, synthetic provider boundaries: no paid calls or live credentials.
 for (const provider of ["claude", "codex", "cash"] as const) {
   test(`the real ${provider} worker receives cleanup duties without changing its task or authority`, async () => {
-    const { WORKSPACE_CLEANUP_INSTRUCTIONS } = await import("../src/lib/workspace-cleanup-contract.js");
+    const { WORKSPACE_CLEANUP_INSTRUCTIONS } = await import("#src/lib/workspace-cleanup-contract.js");
     const root = mkdtempSync(join(tmpdir(), "rmd-cleanup-contract-"));
     const task = 'Return exactly {"ok":true}; do not change repository files.';
     let received = "";
@@ -51,7 +51,7 @@ for (const provider of ["claude", "codex", "cash"] as const) {
 }
 
 test("provider fallback keeps exactly one cleanup contract and preserves the original task", async () => {
-  const { withWorkspaceCleanup, WORKSPACE_CLEANUP_INSTRUCTIONS } = await import("../src/lib/workspace-cleanup-contract.js");
+  const { withWorkspaceCleanup, WORKSPACE_CLEANUP_INSTRUCTIONS } = await import("#src/lib/workspace-cleanup-contract.js");
   const prompt = "build the task";
   const first = withWorkspaceCleanup(prompt);
   assert.equal(first, `${prompt}\n\n${WORKSPACE_CLEANUP_INSTRUCTIONS}`);

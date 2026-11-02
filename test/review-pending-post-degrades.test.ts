@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runReview } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { runReview } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 /**
  * W1-T913 — THE PENDING-POST DEGRADATION ARM, driven rather than asserted from source.

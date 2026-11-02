@@ -14,7 +14,7 @@ import { test } from "node:test";
 
 // @ts-expect-error — this executable .mjs intentionally has no declaration output; the complete
 // seam consumed by this TypeScript suite is declared immediately below rather than left as any.
-import * as workflowGuard from "../scripts/workflow-guard-mutation-ratchet.mjs";
+import * as workflowGuard from "#scripts/workflow-guard-mutation-ratchet.mjs";
 
 interface SkipGuard {
   key: string;

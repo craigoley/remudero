@@ -7,15 +7,15 @@ import {
   buildMeasurementCadenceDaemonHooks,
   defaultProofDebtCadenceInput,
   type ProofDebtCadenceInputDeps,
-} from "../src/run-task.js";
-import { buildMeasurementCadenceRow, measurementCadenceMarkerPath, runMeasurementCadenceReport, mintProofDebtProposals } from "../src/lib/measurement-cadence.js";
-import { resolveNameFilteredCandidates } from "../src/lib/review.js";
-import { proofQueueAudit } from "../src/lib/proof-queue-audit.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { parseProposalRegistry } from "../src/lib/inbox.js";
-import { mechanicalAskPurpose } from "../src/lib/inbox-retirement.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/run-task.js";
+import { buildMeasurementCadenceRow, measurementCadenceMarkerPath, runMeasurementCadenceReport, mintProofDebtProposals } from "#src/lib/measurement-cadence.js";
+import { resolveNameFilteredCandidates } from "#src/lib/review.js";
+import { proofQueueAudit } from "#src/lib/proof-queue-audit.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { parseProposalRegistry } from "#src/lib/inbox.js";
+import { mechanicalAskPurpose } from "#src/lib/inbox-retirement.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
 
 // ── W1-T2641 — `MeasurementCadenceReportOpts.proofDebt` (W1-T2477) had ZERO production
 // suppliers: its one production call site (`buildMeasurementCadenceDaemonHooks`'s `run`,

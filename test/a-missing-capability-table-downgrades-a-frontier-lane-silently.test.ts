@@ -10,10 +10,10 @@ import {
   resolveCodexCapability,
   selectCodexModel,
   type CodexModelInfo,
-} from "../src/lib/worker-provider.js";
-import { spawnWorker, workerLedgerFields } from "../src/lib/worker.js";
-import { withLiveSpawnAllowed } from "../src/lib/spawn-guard.js";
-import type { CapabilityLadder } from "../src/lib/mounts.js";
+} from "#src/lib/worker-provider.js";
+import { spawnWorker, workerLedgerFields } from "#src/lib/worker.js";
+import { withLiveSpawnAllowed } from "#src/lib/spawn-guard.js";
+import type { CapabilityLadder } from "#src/lib/mounts.js";
 
 /**
  * W1-T3097 — `codexCapabilityForRequestedModel` collapses an UNREADABLE `.remudero/mounts.yaml`

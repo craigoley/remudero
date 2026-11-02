@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { reviewCommand } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { reviewCommand } from "#src/run-task.js";
 
 test("review command declines a PR closed after sweep discovery before materializing its worktree", async () => {
   let read = 0;

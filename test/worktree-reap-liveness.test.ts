@@ -29,7 +29,7 @@
  * Its own file per CLAUDE.md's coverage rule — never appended to test/run-task.test.ts.
  */
 import assert from "node:assert/strict";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import {
   chmodSync,
   existsSync,
@@ -55,9 +55,9 @@ import {
   runLockPath,
   runWorktreeReapRung,
   writeRunLock,
-} from "../src/lib/worker.js";
-import { DEFAULT_LIVENESS_BOUND_MS } from "../src/lib/status.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/lib/worker.js";
+import { DEFAULT_LIVENESS_BOUND_MS } from "#src/lib/status.js";
+import type { Config } from "#src/lib/config.js";
 
 const MIN = 60_000;
 const ago = (mins: number) => new Date(Date.now() - mins * MIN);

@@ -11,10 +11,10 @@ import {
   postReviewStatusGuarded,
   resolvePlanCriteriaAtHead,
   reviewInputDigest,
-} from "../src/lib/review.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { ciGateFromRollup, fetchCiFailures } from "../src/run-task.js";
+} from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { ciGateFromRollup, fetchCiFailures } from "#src/run-task.js";
 
 const PR_URL = "https://github.com/craigoley/remudero/pull/3840";
 const HEAD = "61f35181057c37af013b5e46c29a4cc43d388505";

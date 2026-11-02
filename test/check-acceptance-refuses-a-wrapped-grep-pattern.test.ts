@@ -1,4 +1,3 @@
-// test/check-acceptance-refuses-a-wrapped-grep-pattern.test.ts
 //
 // #11704 (2026-10-14): a hand PR's body carried `grep: "census:worktree-creation" in package.json`. `rmd
 // check-acceptance` printed OK and `rmd check-proof` passed it, but CI's acceptance-author-gate refused it as
@@ -9,7 +8,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checkAcceptanceCommand } from "../src/run-task.js";
+import { checkAcceptanceCommand } from "#src/run-task.js";
 
 function run(proof: string): { code: number; out: string } {
   const dir = mkdtempSync(join(tmpdir(), "rmd-check-acceptance-wrapped-"));

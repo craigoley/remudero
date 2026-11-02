@@ -39,7 +39,7 @@ import {
   countFixtureCopies as countFixtureCopiesFromRoot,
   fixtureCopyViolations,
   // @ts-ignore the executable .mjs module has no declaration file.
-} from "../scripts/fixture-copy-census.mjs";
+} from "#scripts/fixture-copy-census.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE_PATH = join(REPO_ROOT, "scripts", "fixture-copy-baseline.json");

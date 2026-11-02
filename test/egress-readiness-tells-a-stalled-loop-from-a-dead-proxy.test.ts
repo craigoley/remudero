@@ -8,7 +8,7 @@ import { test } from "node:test";
 import {
   spawnWorker, startWorkerEgressProxy, verifyWorkerEgressProxy, workerLedgerFields,
   WorkerEgressError, type SpawnWorkerArgs,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 async function listener(mode: "healthy" | "stall" | "silent" | "stall-then-silent" | "stall-twice") {
   const sockets = new Set<Socket>();

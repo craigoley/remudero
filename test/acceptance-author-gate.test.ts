@@ -1,4 +1,3 @@
-// test/acceptance-author-gate.test.ts
 //
 // W1-T1060 — THE AUTHOR-TIME ACCEPTANCE CHECK EXISTS AND CANNOT REACH THE PATHS THAT KEEP
 // FAILING. `acceptanceAuthorTimeCheck` (src/lib/review.ts, W1-T952) already encodes the
@@ -20,14 +19,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs");
 
 // `scripts/**` sits OUTSIDE tsconfig's `include` (see tsconfig.json), so a static
-// `import … from "../scripts/acceptance-author-gate.mjs"` is a TS7016 — the same reason
+// `import … from "#scripts/acceptance-author-gate.mjs"` is a TS7016 — the same reason
 // test/clock-sweep.test.ts/test/mutation-ratchet.test.ts reach their scripts through a runtime
 // import rather than a typed one. A dynamic specifier is not statically resolved, so this loads
 // the REAL module with no shadow copy to drift from it.

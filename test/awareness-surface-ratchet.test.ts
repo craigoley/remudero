@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkDocsAwareness } from "../src/lib/review.js";
+import { checkDocsAwareness } from "#src/lib/review.js";
 
 // ── W1-T212 (recon R-15): the review floor's docs-awareness surface used to omit every CI
 // workflow and every ratchet gate script/baseline it exists to police -- USER_VISIBLE_SURFACE_RE

@@ -4,17 +4,17 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { buildReviewPrompt } from "../src/lib/review.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { buildReviewPrompt } from "#src/lib/review.js";
 import {
   headWasCreatedAfterReflogSnapshot,
   parseHeadReflog,
   recordHeadProviderAfterPush,
   resolveReviewProviderProvenance,
   reviewProviderProvenanceLedgerFields,
-} from "../src/lib/review-provider-provenance.js";
-import { reviewCommand } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/lib/review-provider-provenance.js";
+import { reviewCommand } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/99";
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();

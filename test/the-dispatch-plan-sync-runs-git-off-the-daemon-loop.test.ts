@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 // Namespace import: this file must LOAD on a base without the awaited symbols, so each proof
 // fails there on its own assertion rather than on a missing export.
-import * as runTaskLib from "../src/run-task.js";
-import type { SyncedPlan } from "../src/run-task.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import * as runTaskLib from "#src/run-task.js";
+import type { SyncedPlan } from "#src/run-task.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const { GitFetchError, createPlanSyncCoalescer, readOriginShardsAtRef, syncPlanFromOrigin, syncPlanOrRefuse } = runTaskLib;
 const syncPlanFromOriginAsync: typeof runTaskLib.syncPlanFromOriginAsync = (...a) => runTaskLib.syncPlanFromOriginAsync(...a);

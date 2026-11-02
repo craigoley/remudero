@@ -19,7 +19,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { filingSelfCreditCheck } from "../src/lib/review.js";
+import { filingSelfCreditCheck } from "#src/lib/review.js";
 
 const FILING_BODY = ["Plan-only. Files W1-T3231.", "", "Remudero-Task: W1-T3231"].join("\n");
 

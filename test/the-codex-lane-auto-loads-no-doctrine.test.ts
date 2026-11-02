@@ -24,8 +24,8 @@ import { PassThrough } from "node:stream";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CODEX_DOCTRINE_PRELUDE, CODEX_PROJECT_DOC_MAX_BYTES, spawnCodexWorker } from "../src/lib/worker-provider.js";
-import type { ContainedSpawnOptions } from "../src/lib/worker-containment.js";
+import { CODEX_DOCTRINE_PRELUDE, CODEX_PROJECT_DOC_MAX_BYTES, spawnCodexWorker } from "#src/lib/worker-provider.js";
+import type { ContainedSpawnOptions } from "#src/lib/worker-containment.js";
 
 function deferredCodexProcess() {
   const stdin = new PassThrough();

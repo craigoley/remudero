@@ -4,11 +4,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { benchmarkRunLedgerLogger, dispatchFallbackObserver, recordBenchmarkWorkerAttempt, runTask } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { spawnWorker, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { benchmarkRunLedgerLogger, dispatchFallbackObserver, recordBenchmarkWorkerAttempt, runTask } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { spawnWorker, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 test("run task wires best effort benchmark attempt receipts for every dispatch spawn", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-attempt-"));

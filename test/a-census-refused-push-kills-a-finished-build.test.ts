@@ -11,16 +11,16 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { censusPushRefusal, runTask, type CensusPushRefusal } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { GitHub } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { censusPushRefusal, runTask, type CensusPushRefusal } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { GitHub } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TASK_ID = "T-CENSUS-PUSH";
 const CLOCK_BASELINE = "scripts/clock-signature-baseline.json";

@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { reapStaleWorktrees, runAdhocLaneReapRung, writeRunLock } from "../src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { reapStaleWorktrees, runAdhocLaneReapRung, writeRunLock } from "#src/lib/worker.js";
 
 function fixture() {
   const root = makeTempDir("async-lane-size");

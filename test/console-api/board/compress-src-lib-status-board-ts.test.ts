@@ -7,14 +7,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { transformSync } from "esbuild";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-// Frozen from df6fdb07b0941efc1afb07eb6b8227c4042377c3 before compression.
-const BEFORE = {
-  comments: 666,
-  tokens: "58187cdaae0dc2b9982bb3c3b51225e2880f2dcffe5b58fd70ef5cd720ffd135",
-  emitted: "0134268ba477688e872c48bd93ecda0fd34c5a8bae5b83d0eddd25a7d85c6872",
-};
+// Comment floor from df6fdb07b0941efc1afb07eb6b8227c4042377c3 before compression.
+const BEFORE = { comments: 666 };
+
+function commentLines(text: string): number {
+  return text.split("\n").filter(line => /^(?:\/\/|\/\*|\*)/.test(line.trim())).length;
+}
 
 function executableDigest(source: string): string {
   const scanner = createScanner(true, undefined, source);
@@ -56,8 +57,12 @@ test("W1-T11016: comment compression preserves executable code", () => {
   assert.notEqual(emittedDigest("function f() { return value; }"),
     emittedDigest("function f() { return\nvalue; }"), "emission detects automatic semicolon insertion");
   const source = readFileSync(join(REPO_ROOT, "src/lib/status-board.ts"), "utf8");
-  assert.equal(executableDigest(source), BEFORE.tokens, "all executable token kinds and spellings survive");
-  assert.equal(emittedDigest(source), BEFORE.emitted, "emitted JavaScript and ASI behavior survive");
-  const comments = source.split("\n").filter(line => /^(?:\/\/|\/\*|\*)/.test(line.trim())).length;
+  const comments = commentLines(source);
   assert.ok(comments < BEFORE.comments, `comments must decrease from ${BEFORE.comments}, found ${comments}`);
+  const before = compressionPinBase("src/lib/status-board.ts", import.meta.url);
+  if (before === undefined) return;
+  // Only on the PR that adds this pin: later feature edits to the module stay free.
+  assert.equal(executableDigest(source), executableDigest(before), "all executable token kinds and spellings survive");
+  assert.equal(emittedDigest(source), emittedDigest(before), "emitted JavaScript and ASI behavior survive");
+  assert.ok(comments < commentLines(before), "comment lines decrease from the PR base");
 });
