@@ -7,7 +7,7 @@ import {
   reviewerIdentityPosture,
   unpinnedRequiredContexts,
   type RequiredStatusChecksSnapshot,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 // ── W1-T2442 — THE REQUIRED REVIEW GATE IS ENFORCED BY CONVENTION, NOT BY MECHANISM ──────────
 //

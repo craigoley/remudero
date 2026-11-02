@@ -8,9 +8,9 @@ import { test } from 'node:test';
 import { gunzipSync, gzipSync } from 'node:zlib';
 
 // @ts-expect-error The production coverage merger is an executable .mjs module outside tsconfig.
-import { renderCoverageSummary, stageRawCoverageFile } from '../scripts/coverage-merge-ratchet.mjs';
+import { renderCoverageSummary, stageRawCoverageFile } from '#scripts/coverage-merge-ratchet.mjs';
 // @ts-expect-error The production chunk codec is an executable .mjs module outside tsconfig.
-import { decodeCoverageChunk, encodeCoverageChunk, readCoverageChunkBytes } from '../scripts/lib/coverage-chunk-codec.mjs';
+import { decodeCoverageChunk, encodeCoverageChunk, readCoverageChunkBytes } from '#scripts/lib/coverage-chunk-codec.mjs';
 
 test('lossless coverage chunk compression binds decoded Unicode bytes and does not expand small evidence', () => {
   const source = JSON.stringify({ evidence: 'répétition 中文 🧪'.repeat(1000) });

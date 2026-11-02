@@ -16,10 +16,10 @@ import {
   resolveCredentialReach,
   type CredentialReachResult,
   type CredentialReachTarget,
-} from "../src/lib/containment.js";
-import { buildWorkerEnv } from "../src/lib/env.js";
-import { validateWorkerSettingsFile } from "../src/lib/settings.js";
-import { WORKER_HOME_SYMLINKS } from "../src/lib/worker-home.js";
+} from "#src/lib/containment.js";
+import { buildWorkerEnv } from "#src/lib/env.js";
+import { validateWorkerSettingsFile } from "#src/lib/settings.js";
+import { WORKER_HOME_SYMLINKS } from "#src/lib/worker-home.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE_PATH = join(REPO_ROOT, "scripts", "credential-reach-baseline.json");

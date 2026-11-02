@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { loadPlan } from "../src/lib/plan.js";
-import { auditMergedTaskClaims } from "../src/lib/review.js";
-import type { ProofExecutor, WhitelistedProof } from "../src/lib/review.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { auditMergedTaskClaims } from "#src/lib/review.js";
+import type { ProofExecutor, WhitelistedProof } from "#src/lib/review.js";
 
 /**
  * W1-T302: a claim-level audit over MERGED tasks. Merge credit is derived per TASK,

@@ -3,8 +3,8 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { assertWorktreeBaseCurrent, worktreeAdd } from "../src/lib/worker.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { assertWorktreeBaseCurrent, worktreeAdd } from "#src/lib/worker.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T405 design note (iii): the base-currency check "must not fire on a healthy run" --
 // this repo has earned that caution four times over (ci-gate's wait cap, a deploy ceiling

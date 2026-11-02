@@ -11,7 +11,7 @@ import {
   SUBCOMMAND_RE,
   toolStepSignature,
   UNSAFE_PATH_RE,
-} from "../src/lib/tool-step-signature.js";
+} from "#src/lib/tool-step-signature.js";
 
 const WT = "/work/wt-run";
 const bash = (command: unknown): string | undefined => toolStepSignature("Bash", { command }, WT);

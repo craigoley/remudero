@@ -6,9 +6,9 @@ import { syncBuiltinESMExports } from "node:module";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { coverageGateLockDir, coverageScratchDir, testWithCoverageLeaf } from "../src/lib/ci-parity.js";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { finishJudgedRun } from "./helpers/judged-pool-run.js";
+import { coverageGateLockDir, coverageScratchDir, testWithCoverageLeaf } from "#src/lib/ci-parity.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 function fixture() {
   const root = mkdtempSync("/tmp/rmd-coverage-holder-");

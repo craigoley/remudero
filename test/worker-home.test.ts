@@ -17,8 +17,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
 
-import { workerHomeDir, type Config } from "../src/lib/config.js";
-import { spawnWorker } from "../src/lib/worker.js";
+import { workerHomeDir, type Config } from "#src/lib/config.js";
+import { spawnWorker } from "#src/lib/worker.js";
 import {
   CLAUDE_CONFIG_BACKUP_PREFIX,
   CLAUDE_CONFIG_REL,
@@ -39,7 +39,7 @@ import {
   workerCredentialFilePath,
   assertWorkerCredentialFile,
   workerKeychainPaths,
-} from "../src/lib/worker-home.js";
+} from "#src/lib/worker-home.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "rmd-workerhome-"));

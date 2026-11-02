@@ -14,15 +14,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { KNOWN_UNWIRED } from "../src/lib/producer-completeness.js";
+import { KNOWN_UNWIRED } from "#src/lib/producer-completeness.js";
 import {
   DEFAULT_SWEEP_POLICY,
   checksPendingSinceFromRollup,
   deriveDisposition,
   type RollupCheckEntry,
-} from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildOpenPrViews } from "../src/run-task.js";
+} from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildOpenPrViews } from "#src/run-task.js";
 import { activeCiRerunEvidence } from "#src/lib/open-prs-rest.js";
 
 const OWNER = "o";

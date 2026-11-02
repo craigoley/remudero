@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { renderDiagnosePrompt } from "../src/lib/prompt-render.js";
+import { renderDiagnosePrompt } from "#src/lib/prompt-render.js";
 
 const TASK = { id: "W1-T4330", title: "probe" };
 const prompt = renderDiagnosePrompt(TASK, "attempt 1 failed\nattempt 2 failed");

@@ -42,14 +42,14 @@ import {
   RUN_BRANCH_FILED_FORM,
   RUN_BRANCH_UNFILED_FORM,
   RUN_BRANCH_UNFILED_RE,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "head-identity-gate.mjs");
 
 // `scripts/**` sits OUTSIDE tsconfig's `include` (see tsconfig.json), so a static
-// `import … from "../scripts/head-identity-gate.mjs"` is a TS7016 — reached via a dynamic import
+// `import … from "#scripts/head-identity-gate.mjs"` is a TS7016 — reached via a dynamic import
 // instead, the same reason test/credit-surface-gate.test.ts reaches its own sibling script.
 const GATE_URL = pathToFileURL(SCRIPT).href;
 const mod = (await import(GATE_URL)) as {

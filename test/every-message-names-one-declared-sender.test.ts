@@ -10,8 +10,8 @@ import {
   groupBySender,
   resolveProducerIdentity,
   type ProducerIdentity,
-} from "../src/lib/producer-identity.js";
-import { appendLedger, appendProducerLedger } from "../src/lib/ledger.js";
+} from "#src/lib/producer-identity.js";
+import { appendLedger, appendProducerLedger } from "#src/lib/ledger.js";
 
 // W1-T2495: seventeen pseudo senders write to the ledger and two of them — DAEMON/daemon,
 // RETRO/retro — are the same colleague under two spellings; nothing declared any of the

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { codexCandidatesForCapability } from "../src/lib/worker-provider.js";
+import { codexCandidatesForCapability } from "#src/lib/worker-provider.js";
 
 /**
  * W1-T6359 — with no capability table (`.remudero/mounts.yaml` unreadable), the balanced Codex

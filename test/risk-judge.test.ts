@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MountsError, validateMounts, type Mount, type Mounts } from "../src/lib/mounts.js";
-import { REPORT_EXCERPT_CAP, type spawnWorker, type WorkerResult } from "../src/lib/worker.js";
+import { MountsError, validateMounts, type Mount, type Mounts } from "#src/lib/mounts.js";
+import { REPORT_EXCERPT_CAP, type spawnWorker, type WorkerResult } from "#src/lib/worker.js";
 import {
   assessRisk,
   buildRiskJudgePrompt,
@@ -20,7 +20,7 @@ import {
   type RiskJudgeInput,
   type RiskJudgeOrchestratorDeps,
   type RiskJudgeVerdict,
-} from "../src/lib/risk-judge.js";
+} from "#src/lib/risk-judge.js";
 
 function baseInput(overrides: Partial<RiskJudgeInput> = {}): RiskJudgeInput {
   return {
@@ -373,7 +373,7 @@ test("acceptance 5: resolveRiskJudgeMount is STABLE — the same table resolves 
 });
 
 test("acceptance 5: resolveRiskJudgeMount also works against the SHIPPED .remudero/mounts.yaml table", async () => {
-  const { loadMounts, mountsPath } = await import("../src/lib/mounts.js");
+  const { loadMounts, mountsPath } = await import("#src/lib/mounts.js");
   const { fileURLToPath } = await import("node:url");
   const { join } = await import("node:path");
   const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");

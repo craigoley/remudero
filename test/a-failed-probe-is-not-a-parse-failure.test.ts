@@ -28,9 +28,9 @@ import {
   isolationFailureReason,
   probeIsolation,
   type ProbeExecResult,
-} from "../src/lib/isolation.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/isolation.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 /** The exact wording the parse-failure branch owns — asserted ABSENT on a spawn failure. */
 const PARSE_FAILURE_WORDING = "counts could not be parsed";

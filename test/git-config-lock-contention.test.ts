@@ -11,14 +11,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createFixRungWorktree } from "../src/run-task.js";
+import { createFixRungWorktree } from "#src/run-task.js";
 import {
   DEFAULT_CONFIG_LOCK_GRACE_MS,
   configLockPath,
   isConfigLockStale,
   pruneStaleRuns,
   worktreeAdd,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 // W1-T1129: `git checkout -B <branch> origin/<branch>` (the fix rung, src/run-task.ts) and
 // `git worktree add -b <branch> ... origin/<base>` (the dispatch worker, src/lib/worker.ts)

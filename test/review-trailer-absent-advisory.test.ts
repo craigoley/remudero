@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { judgeReview } from "../src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { judgeReview } from "#src/lib/review.js";
 
 // W1-T458 (the #1731 near-miss) — PR #1731 implemented W1-T452 and merged with no
 // `Remudero-Task:` trailer. NEITHER credit path resolved (`findMergedByTrailer`/

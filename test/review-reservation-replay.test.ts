@@ -4,20 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import type { Config } from "#src/lib/config.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   claimReviewDecision,
   judgeReview,
   postReviewStatusGuarded,
   reviewDecisionDigest,
   reviewReservationOwnershipEvidence,
-} from "../src/lib/review.js";
-import { formatReservationAnchorMessage } from "../src/lib/task-id-reservation.js";
-import { runReview } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/review.js";
+import { formatReservationAnchorMessage } from "#src/lib/task-id-reservation.js";
+import { runReview } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const ID = "W1-T4561";
 const BRANCH = "plan/review-reservation-replay-fixture";

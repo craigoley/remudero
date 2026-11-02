@@ -18,14 +18,14 @@ import {
   validateWorkerSettings,
   validateWorkerSettingsFile,
   WorkerSettingsError,
-} from "../src/lib/settings.js";
+} from "#src/lib/settings.js";
 import {
   CLAUDE_BIN_ENV_OVERRIDE,
   createClaudeExecutableCache,
   renderWorkerSettings,
   spawnWorker,
   type SpawnWorkerArgs,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TEMPLATE = join(REPO_ROOT, "settings", "worker.json");

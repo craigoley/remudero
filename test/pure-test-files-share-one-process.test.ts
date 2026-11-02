@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { finishJudgedRun, isJudgedRun } from "./helpers/judged-pool-run.js";
+import { finishJudgedRun, isJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

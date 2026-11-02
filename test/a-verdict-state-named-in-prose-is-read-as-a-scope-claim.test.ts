@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { bodyContradictsDiff } from "../src/lib/review.js";
+import { bodyContradictsDiff } from "#src/lib/review.js";
 
 /**
  * test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts — W1-T2679.

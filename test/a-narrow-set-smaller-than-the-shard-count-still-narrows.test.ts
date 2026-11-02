@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { finishJudgedRun } from "./helpers/judged-pool-run.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 const script = fileURLToPath(new URL("../scripts/test-tier-manifest.mjs", import.meta.url));
 type Manifest = { thresholdMs: number; files: Record<string, number> };

@@ -4,7 +4,7 @@ import { test, afterEach } from "node:test";
 import { join } from "node:path";
 // A NAMESPACE import, deliberately: at the merge base `ProofCwdMissingError` does not exist, and a named import would
 // fail the whole file at load — read as "never ran", not as a red. Through the namespace each test fails at its assertion.
-import * as review from "../src/lib/review.js";
+import * as review from "#src/lib/review.js";
 const {
   defaultAsyncProofSpawner,
   defaultProofSpawner,
@@ -15,8 +15,8 @@ const {
   ProofSandboxUnavailableError,
   setProofSandboxForTests,
 } = review;
-import { discriminateReviewReuse } from "../src/lib/sweep.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { discriminateReviewReuse } from "#src/lib/sweep.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 afterEach(() => setProofSandboxForTests());
 

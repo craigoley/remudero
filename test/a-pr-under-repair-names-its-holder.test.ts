@@ -3,15 +3,15 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import {
   currentRepairLeaseHolder,
   postRepairLease,
   repairLeaseAllowsPush,
   type RepairLeaseRecord,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 /**
  * W1-T3646: two lanes independently repairing the same PR could not see each other, so both

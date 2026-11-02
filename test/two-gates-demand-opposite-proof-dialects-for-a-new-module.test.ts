@@ -28,7 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { judgeCriterion } from "../src/lib/review.js";
+import { judgeCriterion } from "#src/lib/review.js";
 
 const CONSUMER = "src/lib/worker.ts";
 const NEW_MODULE = "src/lib/install-inputs.ts";

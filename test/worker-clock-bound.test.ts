@@ -25,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runTask } from "../src/run-task.js";
+import { runTask } from "#src/run-task.js";
 import {
   CLAUDE_BIN_ENV_OVERRIDE,
   WorkerAbandonedError,
@@ -34,13 +34,13 @@ import {
   type SpawnWorkerArgs,
   type WorkerAbandonmentEvidence,
   type WorkerResult,
-} from "../src/lib/worker.js";
-import { loadDefaultPolicy } from "../src/lib/policy.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import type { Config } from "../src/lib/config.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
+} from "#src/lib/worker.js";
+import { loadDefaultPolicy } from "#src/lib/policy.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import type { Config } from "#src/lib/config.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 

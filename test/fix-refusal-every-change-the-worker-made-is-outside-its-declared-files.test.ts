@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ciLogNamedSourcePaths, runFixRung } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { ReviewVerdict } from "../src/lib/review.js";
-import type { WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { ciLogNamedSourcePaths, runFixRung } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
+import type { WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const inherited = "src/inherited.ts";
 const rogue = "src/rogue.ts";
@@ -168,7 +168,7 @@ function branchBehindMain() {
 }
 
 test("a path main changed since the merge base and this branch did not is main's red, not this PR's", async () => {
-  const runTask = await import("../src/run-task.js");
+  const runTask = await import("#src/run-task.js");
   const mainOwnedPaths = (runTask as Record<string, unknown>).mainOwnedPaths as
     ((dir: string, paths: string[]) => { outcome: string; owned: string[] }) | undefined;
   assert.equal(typeof mainOwnedPaths, "function");

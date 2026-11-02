@@ -28,8 +28,8 @@ import {
   censusSuiteMembership,
   censusSuiteMembershipFor,
   type CensusMembershipReport,
-} from "../src/lib/ci-parity.js";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
+} from "#src/lib/ci-parity.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
 
 /** A `PreflightSpawn` that answers the ONE `git grep -lE 'ls-files|readdirSync|globSync'` call
  *  `censusSuiteMembershipFor` makes with `stdout`, and fails any other invocation loudly rather

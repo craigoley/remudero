@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { loadMounts, mountsPath } from "../src/lib/mounts.js";
-import { mountRecommendationProposalCandidate, recommendMounts, type MountHeadroomCell } from "../src/lib/mount-recommender.js";
-import { runMountRecommenderRung } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
+import { mountRecommendationProposalCandidate, recommendMounts, type MountHeadroomCell } from "#src/lib/mount-recommender.js";
+import { runMountRecommenderRung } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const sweep = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "mount-headroom-sweep.mjs")).href)) as {

@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 import { parse } from "yaml";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");

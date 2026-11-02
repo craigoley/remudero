@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error untyped mjs
-import { runCiControlPlanePrecheck } from "../scripts/ci-control-plane-precheck.mjs";
+import { runCiControlPlanePrecheck } from "#scripts/ci-control-plane-precheck.mjs";
 
 const input = "src/lib/capability-snapshot.ts";
 async function run(files: string[], runner: () => unknown) {
@@ -16,7 +16,7 @@ async function run(files: string[], runner: () => unknown) {
 }
 
 test("unit test: test/the-control-plane-precheck-calls-its-capability-snapshot-runner.test.ts", async () => {
-  const { affectedCapabilitySnapshot } = await import("../scripts/ci-control-plane-precheck.mjs" as string);
+  const { affectedCapabilitySnapshot } = await import("#scripts/ci-control-plane-precheck.mjs" as string);
   const cap = "plan/policy.yaml";
   assert.ok(affectedCapabilitySnapshot([cap]));
   const ok = await run([cap], () => ({ status: 0 }));

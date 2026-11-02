@@ -36,13 +36,13 @@ import {
   classifyUnprovenState,
   probeContainment,
   type ProbeExecResult,
-} from "../src/lib/containment.js";
+} from "#src/lib/containment.js";
 import {
   DEFAULT_MAX_TASK_DISPATCHES,
   dispatchesWithoutNewOwnedPr,
   isDispatchBreakerTripped,
   readLedgerLines,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 function settingsFile(contents: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-spawn-failure-class-test-"));

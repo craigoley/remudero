@@ -26,9 +26,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parse } from "yaml";
-import { architectModel } from "../src/lib/config.js";
-import { MountsError, validateMounts } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config-schema.js";
+import { architectModel } from "#src/lib/config.js";
+import { MountsError, validateMounts } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config-schema.js";
 
 const CFG = {} as unknown as Config;
 const table = (mut: (m: any) => void = () => {}) => {
@@ -77,7 +77,7 @@ test("the deleted seat resolvers are GONE, not merely unused", async () => {
   // An unreachable resolver left in place is a promise the config cannot keep — the next reader
   // finds `judgeModel` and reasonably assumes something selects through it. Asserted on the module's
   // own exports so the deletion cannot quietly regress into a re-export.
-  const config = await import("../src/lib/config.js");
+  const config = await import("#src/lib/config.js");
   assert.equal("judgeModel" in config, false, "judgeModel had no seat to resolve and must not exist");
   assert.equal(architectModel.length, 2, "architectModel takes (config, mounts) — no squeezed option");
 });

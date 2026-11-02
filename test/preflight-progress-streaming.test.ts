@@ -5,9 +5,9 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { runCiParity } from "../src/lib/ci-parity.js";
-import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
-import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
+import { runCiParity } from "#src/lib/ci-parity.js";
+import { defaultPreflightSpawn, type PreflightSpawn } from "#src/lib/commit-message.js";
+import { coverageParitySpawnResult } from "#test/helpers/coverage-parity-spawn.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");

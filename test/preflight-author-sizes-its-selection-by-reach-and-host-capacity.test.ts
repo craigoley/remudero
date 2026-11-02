@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const author = (await import(pathToFileURL(join(ROOT, "scripts/preflight-author.mjs")).href)) as {
@@ -26,7 +26,7 @@ const diffClass = (await import(pathToFileURL(join(ROOT, "scripts/diff-class.mjs
   planOnlySuiteFiles: (root: string, changed: string[]) => string[];
   isPlanIntegritySuite: (content: string) => boolean;
 };
-const affected = await import("../src/lib/affected-suites.js");
+const affected = await import("#src/lib/affected-suites.js");
 
 const SHARD = "plan/tasks.d/W1-T7809-preflight-author-sizes-its-selection-by-reach-and-host-capacity.yaml";
 

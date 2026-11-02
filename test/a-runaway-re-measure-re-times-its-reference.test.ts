@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { FAST_GATE_CENSUS_BOUND_MS, runPreflightFast } from "../src/lib/ci-parity.js";
+import { FAST_GATE_CENSUS_BOUND_MS, runPreflightFast } from "#src/lib/ci-parity.js";
 
 const PKG = JSON.stringify({ scripts: { "census:a": "x", "census:b": "x", "census:c": "x" } });
 
