@@ -12031,6 +12031,10 @@ function depReviewProposalCapture(landingStateRoot: string | undefined): NonNull
   };
 }
 
+export function depReviewNodePinCheckout(configRoot: string, repo: string): string {
+  return join(configRoot, "repos", repo);
+}
+
 export function defaultNodePinSyncIo(
   root: string,
   options: { git?: (args: string[], cwd: string) => string } = {},
@@ -12194,7 +12198,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     const sync = syncNodePinForImageBump(
       diff,
       { sha: view.headRefOid, ref: view.headRefName },
-      deps.nodePin ?? defaultNodePinSyncIo(config.root),
+      deps.nodePin ?? defaultNodePinSyncIo(depReviewNodePinCheckout(config.root, repo)),
     );
     if (sync.kind === "synced") {
       log("dep-review.node_pin_synced", { pr_url: view.url, from: sync.from, to: sync.to, head_sha: view.headRefOid, pushed_sha: sync.pushedSha });
