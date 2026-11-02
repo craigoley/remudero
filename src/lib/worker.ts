@@ -1,6 +1,8 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
 import { BoundedOutput, readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import { workerExecutionEvidence, sdkRequestedEffort, sdkRequestedModel, type SdkRequestEvidence,
+  type WorkerExecutionEvidenceV1 } from "./worker-execution-evidence.js";
 import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, denyMcpSuccessCredit, validateWorkerMcpIsolation,
   workerMcpExposure, workerMcpIsolationEvidence, workerMcpProbeBoundary, workerPluginInventory, WORKER_MCP_STRICT,
   type WorkerPluginInventory, type WorkerMcpExposure, type WorkerMcpIsolation,
@@ -288,6 +290,8 @@ export interface WorkerResult {
   provider?: WorkerProviderId;
   sessionId: string;
   costUsd: number;
+  /** W1-T10956: finite, nonnegative Claude SDK envelope rating; distinct from inferred defaults and invoices. */
+  sdkReportedUsageRatedUsd?: number;
   /** W1-T5629: Codex NOTIONAL price (`codexNotionalCostUsd`), never billed or in costUsd; absent without a Codex price row. */
   notionalCostUsd?: number;
   /** SDK num_turns on success AND error; feeds mounts.yaml calibration (W1-T5), never zeroed for failure.
@@ -347,6 +351,10 @@ export interface WorkerResult {
    * Retain accumulated reservation, settlement and usage evidence. */
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
+  /** Cash-only accounting evidence; absent on providers that do not expose these fields. */
+  budgetHeldUsd?: number;
+  usageEstimateUsd?: number | null;
+  billedUsd?: number | null;
   budgetRefused?: boolean;
   cashAllowanceResetAt?: string;
   /** W1-T10384: which limit refused when `budgetRefused`: the shared fleet cap or the Foundry Claude sub-cap. */
@@ -364,6 +372,8 @@ export interface WorkerResult {
   modelHealthSource?: ClaudeModelHealthSource;
   /** Configured effort INPUT, like model; absent from the SDK result envelope (W1-T6). */
   effort: string;
+  /** Final Claude SDK query options, distinct from configured and provider-served labels. */
+  sdkRequest?: SdkRequestEvidence;
   /** Cash adapter request parameters; absent for providers without this observation. */
   requestEfforts?: readonly CashRequestEffortCount[];
   /** Aggregate token usage off the result envelope (zeroed if none was seen). */
@@ -403,6 +413,9 @@ export interface WorkerResult {
   /** SDK query milliseconds around {@link collectWorkerResult}'s loop, excluding local/free setup.
    * Fixtures omit it; workerLedgerFields preserves absence rather than guessing 0 (W1-T477). */
   workerDurationMs?: number;
+  /** First nonempty assistant text relative to the same loop start; null carries a named timing gap. */
+  workerFirstTextMs?: number | null;
+  workerFirstTextReason?: string;
   /** Reset-stable subscription-window percentage points consumed while this worker exclusively owned its selected provider.
    * Present only on the opt-in multi-provider path; the default Claude-only path performs no extra capacity reads and omits
    * this field byte-for-byte. */
@@ -418,6 +431,8 @@ export interface WorkerResult {
     candidates: string[];
     searchedPaths: string[];
   };
+  /** Present on returned terminal results from the native spawn wrapper; never a provider invoice. */
+  executionEvidence?: WorkerExecutionEvidenceV1;
 }
 
 /** `model`/`effort` label logged when a call rides no explicit mount override (e.g. recon, the advisory reviewer) — an honest
@@ -588,6 +603,7 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
 export function workerLedgerFields(r: WorkerResult): {
   output_retention?: WorkerResult["outputRetention"];
   continuation?: WorkerContinuationReceipt;
+  execution_evidence?: WorkerExecutionEvidenceV1;
   mcp_isolation?: WorkerMcpIsolationEvidence;
   mcp_boundary?: typeof WORKER_MCP_STRICT;
   mcp_exposure?: WorkerMcpExposure;
@@ -670,6 +686,7 @@ export function workerLedgerFields(r: WorkerResult): {
     ...(r.egressUnenforced ? { egress_unenforced: r.egressUnenforced } : {}),
     ...(r.provider ? { provider: r.provider } : {}),
     ...(r.continuation ? { continuation: r.continuation } : {}),
+    ...(r.executionEvidence ? { execution_evidence: r.executionEvidence } : {}),
     model: r.model,
     ...(r.routedModel ? { routed_model: r.routedModel } : {}),
     ...(r.modelHealthState ? { model_health_state: r.modelHealthState } : {}),
@@ -2371,6 +2388,23 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
 }
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  const attemptId = randomUUID();
+  let assignment: WorkerSelectionAssignment | undefined;
+  const onSelectionAssignment = args.onSelectionAssignment;
+  const spawnArgs = onSelectionAssignment ? {
+    ...args,
+    onSelectionAssignment: (value: WorkerSelectionAssignment) => {
+      const snapshot = structuredClone(value);
+      onSelectionAssignment(value);
+      assignment = snapshot;
+    },
+  } : args;
+  const result = await spawnWorkerImpl(spawnArgs);
+  result.executionEvidence = workerExecutionEvidence(attemptId, result, assignment);
+  return result;
+}
+
+async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   validateWorkerMcpIsolation(args);
   if (args.promptFor) {
     const promptFor = args.promptFor;
@@ -3365,6 +3399,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // W1-T9489: EVERY Claude spawn is strict with an explicit server map (knowledge-only with ruleLookup, else none), so
       // the shared config dir's claude.ai connectors can never attach to a worker running under bypassPermissions.
       const boundaryServers = applyWorkerMcpBoundary(options);
+      const sdkRequest: SdkRequestEvidence = {
+        model: sdkRequestedModel(options),
+        effort: sdkRequestedEffort(options),
+      };
       const liveQuery = runQuery({ prompt: execution.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
@@ -3383,6 +3421,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // label, never a guess.
             model: args.model ?? DEFAULT_MODEL_LABEL,
             effort: args.effort ?? DEFAULT_EFFORT_LABEL,
+            sdkRequest,
             accountLabel: accountId,
             // Mirrored verbatim from the SAME `options.maxTurns` this call was spawned with — see {@link
             // WorkerResult.maxTurns}. `undefined`, never guessed, when no cap was set.
@@ -3868,6 +3907,8 @@ export async function collectWorkerResult(
     model?: string;
     /** Configured input, logged verbatim — defaults to `DEFAULT_EFFORT_LABEL`. */
     effort?: string;
+    /** Final SDK request options captured immediately before this stream was requested. */
+    sdkRequest?: SdkRequestEvidence;
     /** W1-T268: the account this call's spend is attributed to — see {@link WorkerResult.accountLabel}. */
     accountLabel?: string;
     /** W1-T303: configured input, mirrored verbatim — see {@link WorkerResult.maxTurns}. */
@@ -3888,9 +3929,9 @@ export async function collectWorkerResult(
   },
 ): Promise<WorkerResult> {
   // Started BEFORE the first `for await` pull: this function's body IS the worker call, since everything above it in
-  // spawnWorker is local, free setup. No clock injection, because existing tests already drive this loop against near-instant
-  // synthetic streams (W1-T477).
-  const startedAtMs = Date.now();
+  // spawnWorker is local, free setup. Keep resource-duration timestamps on the shared wall-clock port; the optional
+  // injected clock below remains dedicated to stream-observer/quiet-floor behavior (W1-T477).
+  const startedAtMs = systemClock.now();
   const toolLineage = createWorkerToolLineage({ provider: "claude", root: opts.root, runId: opts.runId, taskId: opts.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const blockOutput = new BoundedOutput(WORKER_OUTPUT_BYTES, "\n");
@@ -3899,11 +3940,14 @@ export async function collectWorkerResult(
 
   let sessionId = "";
   let costUsd = 0;
+  let sdkReportedUsageRatedUsd: number | undefined;
   let numTurns = 0;
   // Independently counted, mid-flight approximation of "turns": one increment per raw assistant message, reported on EVERY
   // observer call including heartbeats, which carry the count without incrementing it. Never asserted to equal the terminal
   // envelope's `numTurns` above (W1-T2557).
   let turnsSoFar = 0;
+  let firstTextAtMs: number | undefined;
+  let firstTextClockInvalid = false;
   let text = "";
   let subtype = "";
   let isError = false;
@@ -3918,6 +3962,7 @@ export async function collectWorkerResult(
   // W1-T6027: only an SDK throw reports the process's end; a clean envelope saw none.
   let exit: WorkerExit = { kind: "unobserved" };
   let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+  let tokenUsageState: WorkerResult["tokenUsageState"];
   let modelUsage: Record<string, ModelUsageEntry> = {};
   // The LAST real (non-`<synthetic>`) `msg.message.model` seen on the live assistant stream — see {@link
   // WorkerResult.servedModel}. `undefined` until a genuine value is observed, so a stream carrying none falls through to the
@@ -3976,6 +4021,11 @@ export async function collectWorkerResult(
               const text = (block as { text: string }).text;
               blockOutput.push(text);
               opts.streamObserver?.({ kind: "working", tsMs: nowFn(), text, turnsSoFar });
+              if (text.length > 0 && firstTextAtMs === undefined && !firstTextClockInvalid) {
+                const observedAtMs = systemClock.now();
+                if (!Number.isFinite(observedAtMs) || observedAtMs < startedAtMs) firstTextClockInvalid = true;
+                else firstTextAtMs = observedAtMs;
+              }
               observedThisMessage = true;
             } else if (blockType === "tool_use") {
               const { name: toolName, id: toolUseId, input: toolInput } = block as { name?: string; id?: unknown; input?: unknown };
@@ -4042,6 +4092,8 @@ export async function collectWorkerResult(
         textOutput.push(r.result ?? "");
         sessionId = r.session_id;
         costUsd = r.total_cost_usd;
+        if (typeof r.total_cost_usd === "number" && Number.isFinite(r.total_cost_usd) && r.total_cost_usd >= 0)
+          sdkReportedUsageRatedUsd = r.total_cost_usd;
         numTurns = typeof r.num_turns === "number" ? r.num_turns : 0;
         if (typeof r.stop_reason === "string" && r.stop_reason.length > 0) envelopeStopReason = r.stop_reason;
         permissionDenials = r.permission_denials ?? [];
@@ -4051,6 +4103,12 @@ export async function collectWorkerResult(
           cacheRead: r.usage?.cache_read_input_tokens ?? 0,
           cacheCreation: r.usage?.cache_creation_input_tokens ?? 0,
         };
+        const usageCounters = [r.usage?.input_tokens, r.usage?.output_tokens,
+          r.usage?.cache_read_input_tokens, r.usage?.cache_creation_input_tokens];
+        const observedUsageCounters = usageCounters.filter((value) =>
+          typeof value === "number" && Number.isSafeInteger(value) && value >= 0).length;
+        tokenUsageState = observedUsageCounters === usageCounters.length ? "observed"
+          : observedUsageCounters > 0 ? "partial" : "unavailable";
         modelUsage = Object.fromEntries(
           Object.entries(r.modelUsage ?? {}).map(([model, u]) => [
             model,
@@ -4111,11 +4169,16 @@ export async function collectWorkerResult(
   const incomplete = !sawResult || [retainedBlocks, retainedText, retainedStderr].some((r) => r.evidence.state !== "complete");
   text = retainedText.chunks.join("");
   const finalStopReason = envelopeStopReason ?? assistantStopReason;
+  const workerDurationMs = systemClock.now() - startedAtMs;
+  const firstTextOffsetMs = firstTextAtMs === undefined ? undefined : firstTextAtMs - startedAtMs;
+  const firstTextInvalidAtEnd = firstTextOffsetMs !== undefined
+    && (!Number.isFinite(workerDurationMs) || workerDurationMs < 0 || workerDurationMs < firstTextOffsetMs);
   return {
     ...(opts.lostGrants?.length ? { lostGrants: opts.lostGrants } : {}),
     ...(opts.credentialHelperUnwired ? { credentialHelperUnwired: opts.credentialHelperUnwired } : {}),
     sessionId,
     costUsd,
+    ...(sdkReportedUsageRatedUsd === undefined ? {} : { sdkReportedUsageRatedUsd }),
     numTurns,
     maxTurns: opts.maxTurns,
     text,
@@ -4141,14 +4204,22 @@ export async function collectWorkerResult(
       ? { servedModelReason: "no assistant message in the stream reported a real model before the call ended" }
       : {}),
     effort: opts.effort ?? DEFAULT_EFFORT_LABEL,
+    ...(opts.sdkRequest ? { sdkRequest: structuredClone(opts.sdkRequest) } : {}),
     tokens,
+    tokenUsageState,
     modelUsage,
     compactionEvents,
     initSummary: initSummary ?? unavailableWorkerInitSummary(),
     compactionFailures,
     compactionConfigured: opts.compactionConfigured ?? false,
     qualitySuspect: isQualitySuspect(compactionEvents),
-    workerDurationMs: Date.now() - startedAtMs,
+    workerDurationMs,
+    workerFirstTextMs: firstTextOffsetMs === undefined || firstTextInvalidAtEnd ? null : firstTextOffsetMs,
+    ...(firstTextAtMs === undefined
+      ? { workerFirstTextReason: firstTextClockInvalid ? "first-text-clock-nonmonotonic" : "no-nonempty-assistant-text" }
+      : firstTextInvalidAtEnd
+      ? { workerFirstTextReason: "first-text-clock-nonmonotonic" }
+      : {}),
   };
 }
 
