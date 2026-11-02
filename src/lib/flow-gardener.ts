@@ -81,7 +81,7 @@ const STAGE_OWNER: Readonly<Record<FlowStage, string>> = {
 
 const READ_STEPS = [
   "pr.opened", "pr.terminal", "sweep.review_eligible", "sweep.review_admitted", "review.posted",
-  "automerge.armed", "sweep.update_branch.updated", "fix.dispatch", "fix.done", "branch.update_requested", "review.plan_only_reviewed",
+  "automerge.armed", "automerge.direct_merge_preflight_refused", "sweep.update_branch.updated", "fix.dispatch", "fix.done", "branch.update_requested", "review.plan_only_reviewed",
 ];
 export const ADMISSION_FLOW_STEP = "admission_flow.shadow";
 /** PRIMARY CONTROL: selected terminal evidence is normally limited to eight reads per off-loop pass. */
@@ -286,6 +286,39 @@ export interface FlowCiReading {
   doneMs: number;
 }
 
+/** One batched GitHub query for the complete open cohort and PR arrivals or terminal events in a recent window. */
+export function flowOpenQueueReader(
+  owner: string, repo: string, readJson: (args: string[]) => Promise<unknown> = ghJsonAsync, clock: Clock = systemClock,
+): (sinceIso: string) => Promise<FlowOpenQueueRead> {
+  return async (sinceIso) => {
+    const query = `query($q:String!){repository(owner:"${owner}",name:"${repo}"){pullRequests(states:OPEN,first:100,orderBy:{field:UPDATED_AT,direction:DESC}){totalCount pageInfo{hasNextPage} nodes{number createdAt updatedAt headRefOid headRefName reviewDecision statusCheckRollup{state}}}} search(query:$q,type:ISSUE,first:100){issueCount pageInfo{hasNextPage} nodes{... on PullRequest{number createdAt updatedAt mergedAt closedAt headRefOid headRefName reviewDecision statusCheckRollup{state}}}}}`;
+    const q = `repo:${owner}/${repo} is:pr updated:>=${sinceIso.slice(0, 10)}`;
+    const body = await readJson(["api", "graphql", "-f", `query=${query}`, "-F", `q=${q}`]) as Record<string, unknown> | null;
+    const data = object(body?.data);
+    if (Array.isArray(body?.errors) && body!.errors.length > 0) throw new Error("flow: GitHub open-queue GraphQL query failed");
+    const repository = object(data.repository), openConnection = object(repository.pullRequests), windowConnection = object(data.search);
+    const openNodes = Array.isArray(openConnection.nodes) ? openConnection.nodes : [];
+    const windowNodes = Array.isArray(windowConnection.nodes) ? windowConnection.nodes : [];
+    const parse = (value: unknown): FlowOpenQueuePr | undefined => {
+      const pr = object(value), createdAtMs = Date.parse(String(pr.createdAt ?? "")), updatedAtMs = Date.parse(String(pr.updatedAt ?? ""));
+      const number = Number(pr.number), headSha = typeof pr.headRefOid === "string" ? pr.headRefOid : "";
+      if (!Number.isSafeInteger(number) || number <= 0 || !Number.isFinite(createdAtMs) || !Number.isFinite(updatedAtMs) || !headSha) return undefined;
+      const mergedAtMs = typeof pr.mergedAt === "string" ? Date.parse(pr.mergedAt) : undefined;
+      const closedAtMs = typeof pr.closedAt === "string" ? Date.parse(pr.closedAt) : undefined;
+      const checksState = typeof object(pr.statusCheckRollup).state === "string" ? String(object(pr.statusCheckRollup).state) : "UNKNOWN";
+      return { number, createdAtMs, updatedAtMs, headSha, headRefName: String(pr.headRefName ?? "unknown"), checksState,
+        ...(mergedAtMs !== undefined && Number.isFinite(mergedAtMs) ? { mergedAtMs } : {}),
+        ...(closedAtMs !== undefined && Number.isFinite(closedAtMs) ? { closedAtMs } : {}) };
+    };
+    const open = openNodes.map(parse).filter((pr): pr is FlowOpenQueuePr => pr !== undefined);
+    const window = windowNodes.map(parse).filter((pr): pr is FlowOpenQueuePr => pr !== undefined);
+    const openComplete = Number(openConnection.totalCount) === openNodes.length && object(openConnection.pageInfo).hasNextPage === false;
+    const windowComplete = Number(windowConnection.issueCount) === windowNodes.length && object(windowConnection.pageInfo).hasNextPage === false;
+    return { ok: body !== null && typeof body === "object", complete: openComplete && windowComplete && open.length === openNodes.length && window.length === windowNodes.length,
+      observedAtMs: clock.now(), open, window, ...(!(openComplete && windowComplete) ? { reason: "census-page-cap-exceeded" } : {}) };
+  };
+}
+
 /** CI wall clock of the newest green `ci.yml` run at a head, or `undefined` when none completed green. */
 export function flowCiReader(
   owner: string, repo: string, readJson: (args: string[]) => Promise<unknown> = ghJsonAsync,
@@ -307,8 +340,17 @@ export function flowCiReader(
 
 type FlowPlanTask = { id: string; origin?: string; status?: string; retirement?: string; superseded_by?: string };
 
+export interface FlowOpenQueuePr {
+  number: number; createdAtMs: number; updatedAtMs: number; headSha: string; headRefName: string;
+  checksState: string; mergedAtMs?: number; closedAtMs?: number;
+}
+export interface FlowOpenQueueRead {
+  ok: boolean; complete: boolean; observedAtMs: number; open: FlowOpenQueuePr[]; window: FlowOpenQueuePr[]; reason?: string;
+}
 export interface FlowGardenSources {
   readLedger?: (sinceIso: string) => FlowLedgerRead;
+  /** One batched repository census; never one GitHub read per PR. */
+  readOpenQueue?: (sinceIso: string) => Promise<FlowOpenQueueRead>;
   readCi?: (headSha: string) => Promise<FlowCiReading | undefined>;
   planTasks?: () => FlowPlanTask[];
   /** Whether a superseding task has landed (W1-T9729). Absent: its `Remudero-Task:` trailer on the checkout's origin/main. */
@@ -539,11 +581,86 @@ export function renderFlowFollowUp(stat: FlowStageStat, taskId: string, populati
   });
 }
 
+const OPEN_QUEUE_MAX_AGE_MS = 6 * 60 * MIN_MS;
+const medianNumber = (values: number[]): number | null => {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+};
+
+/** Right-censored open work and one complete arrival/drain window; it can only recommend in shadow. */
+export function openQueueShadow(
+  census: FlowOpenQueueRead, rows: readonly Row[], previous: FlowState["openQueue"], nowMs: number,
+): { mode: "shadow"; permission: "not-granted"; action: "none"; status: "UNKNOWN" | "OBSERVED";
+  reason: string; window: { fromMs: number; toMs: number }; cohort: Record<string, number | null>;
+  producer?: string; recommendation?: string; nextState: NonNullable<FlowState["openQueue"]> } {
+  const fromMs = nowMs - DAY_MS;
+  const window = { fromMs, toMs: nowMs };
+  const windowDay = fixedClock(nowMs).iso().slice(0, 10);
+  const unknown = (reason: string) => ({ mode: "shadow" as const, permission: "not-granted" as const, action: "none" as const,
+    status: "UNKNOWN" as const, reason, window, cohort: { open: null, arrivals: null, merged_or_closed: null, review_waiting: null,
+      merge_preflight_refused: null, ready_to_direct_merge: null, review_wait_p50_ms: null,
+      merge_preflight_refusal_age_p50_ms: null, ready_to_direct_merge_age_p50_ms: null, open_age_p50_ms: null, arrivals_exceed_drain: null },
+    nextState: { observedAtMs: census.observedAtMs, windowDay, reviewP50: null, pressure: false, streak: 0 } });
+  if (!census.ok || !census.complete) return unknown(census.reason ?? "incomplete-census");
+  if (!Number.isFinite(census.observedAtMs) || census.observedAtMs > nowMs || nowMs - census.observedAtMs > OPEN_QUEUE_MAX_AGE_MS) return unknown("stale-census");
+  const recent = census.window.filter((pr) => pr.createdAtMs > fromMs && pr.createdAtMs <= nowMs);
+  const arrivals = recent.length;
+  const drain = census.window.filter((pr) => (pr.mergedAtMs !== undefined && pr.mergedAtMs > fromMs && pr.mergedAtMs <= nowMs) ||
+    (pr.closedAtMs !== undefined && pr.closedAtMs > fromMs && pr.closedAtMs <= nowMs)).length;
+  const details = census.open.map((pr) => {
+    const matching = rows.filter((r) => prNumberOf(r) === pr.number && r.head_sha === pr.headSha).sort((a, b) => tsOf(a) - tsOf(b));
+    const eligible = matching.filter((r) => r.step === "sweep.review_eligible").at(-1);
+    const admitted = matching.filter((r) => r.step === "sweep.review_admitted").at(-1);
+    const reviewed = matching.filter((r) => r.step === "review.posted" && r.state === "success").at(-1);
+    const refused = matching.filter((r) => r.step === "automerge.direct_merge_preflight_refused").at(-1);
+    const reviewWaiting = eligible !== undefined && (admitted === undefined || tsOf(admitted) < tsOf(eligible)) &&
+      (reviewed === undefined || tsOf(reviewed) < tsOf(eligible));
+    const preflightRefused = refused !== undefined && (reviewed === undefined || tsOf(refused) >= tsOf(reviewed));
+    const ready = reviewed !== undefined && pr.checksState === "SUCCESS" && !preflightRefused;
+    const reviewAge = reviewWaiting ? Math.max(0, nowMs - tsOf(eligible!)) : null;
+    const stage = reviewWaiting ? "review_waiting" : preflightRefused ? "merge_preflight_refused" : ready ? "ready_to_direct_merge" : "other_open";
+    const stageStart = reviewWaiting ? tsOf(eligible!) : preflightRefused ? tsOf(refused!) : ready ? tsOf(reviewed!) : NaN;
+    return { pr, stage, reviewAge, age: Number.isFinite(stageStart) ? Math.max(0, nowMs - stageStart) : null };
+  });
+  const reviewAges = details.map((d) => d.reviewAge).filter((n): n is number => n !== null);
+  const reviewP50 = medianNumber(reviewAges);
+  const producers = new Map<string, number>();
+  for (const pr of recent) {
+    const producer = pr.headRefName.startsWith("run-W1-") ? "plan-task-workers" : pr.headRefName.split("/")[0] || "unknown";
+    producers.set(producer, (producers.get(producer) ?? 0) + 1);
+  }
+  const producer = [...producers].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+  const previousWindowConsecutive = previous !== undefined && previous.windowDay !== windowDay &&
+    nowMs - previous.observedAtMs <= 2 * DAY_MS;
+  const pressure = arrivals > drain && reviewP50 !== null && previousWindowConsecutive && previous!.reviewP50 !== null &&
+    reviewP50 > previous!.reviewP50 && producer !== undefined && producer === previous!.producer;
+  const streak = pressure ? (previous!.pressure ? previous!.streak + 1 : 1) : 0;
+  const nextState = { observedAtMs: census.observedAtMs, windowDay, reviewP50, pressure, streak, ...(producer ? { producer } : {}) };
+  return { mode: "shadow", permission: "not-granted", action: "none", status: "OBSERVED", reason: pressure
+    ? `complete-window-inflow-exceeds-drain-review-p50-worsened-streak-${streak}` : "complete-window-no-confirmed-pressure",
+    window, cohort: { open: details.length, arrivals, merged_or_closed: drain,
+      review_waiting: details.filter((d) => d.stage === "review_waiting").length,
+      merge_preflight_refused: details.filter((d) => d.stage === "merge_preflight_refused").length,
+      ready_to_direct_merge: details.filter((d) => d.stage === "ready_to_direct_merge").length,
+      other_open: details.filter((d) => d.stage === "other_open").length,
+      review_wait_p50_ms: reviewP50,
+      merge_preflight_refusal_age_p50_ms: medianNumber(details.filter((d) => d.stage === "merge_preflight_refused").map((d) => d.age!).filter(Number.isFinite)),
+      ready_to_direct_merge_age_p50_ms: medianNumber(details.filter((d) => d.stage === "ready_to_direct_merge").map((d) => d.age!).filter(Number.isFinite)),
+      other_open_age_p50_ms: medianNumber(details.filter((d) => d.stage === "other_open").map((d) => Math.max(0, nowMs - d.pr.createdAtMs))),
+      producer_arrivals: producer ? producers.get(producer)! : 0,
+      open_age_p50_ms: medianNumber(details.map((d) => Math.max(0, nowMs - d.pr.createdAtMs))),
+      arrivals_exceed_drain: arrivals > drain ? 1 : 0 },
+    ...(producer ? { producer } : {}), ...(streak >= 2 && producer ? { recommendation: `consider-slowing-${producer}` } : {}), nextState };
+}
+
 interface FlowState {
   lastReportDay?: string;
   ci?: Record<string, { headSha: string; mergedMs: number; reading: FlowCiReading | null }>;
   filed?: Record<string, { taskId: string; atMs: number }>;
   filings?: Array<{ day: string; key: string }>;
+  openQueue?: { observedAtMs: number; windowDay?: string; reviewP50: number | null; pressure: boolean; streak: number; producer?: string };
 }
 
 function readState(stateDir: string): FlowState {
@@ -604,7 +721,27 @@ export async function runFlowGardener(
   const ledger = (sources.readLedger ?? ((iso) => readFlowLedger(deps.stateDir, iso)))(sinceIso);
   if (!ledger.ok) {
     unreadable("ledger", { unread: ledger.unread });
+    deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN",
+      reason: "ledger-incomplete", window: { from: fixedClock(nowMs - DAY_MS).iso(), to: fixedClock(nowMs).iso() },
+      cohort: { open: null, arrivals: null, merged_or_closed: null, review_waiting: null, merge_preflight_refused: null,
+        ready_to_direct_merge: null, review_wait_p50_ms: null, merge_preflight_refusal_age_p50_ms: null,
+        ready_to_direct_merge_age_p50_ms: null, open_age_p50_ms: null, arrivals_exceed_drain: null } });
     return { ran: false, stats: [], filed: [] };
+  }
+  if (sources.readOpenQueue === undefined) {
+    deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN", reason: "census-reader-unavailable" });
+    state.openQueue = { observedAtMs: nowMs, windowDay: day, reviewP50: null, pressure: false, streak: 0 };
+  } else {
+    try {
+      const census = await sources.readOpenQueue(fixedClock(nowMs - DAY_MS).iso());
+      const shadow = openQueueShadow(census, ledger.rows, state.openQueue, clock.now());
+      deps.log("flow.open_queue_shadow", shadow);
+      state.openQueue = shadow.nextState;
+    } catch (e) {
+      deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN",
+        reason: "census-read-failed", error: String((e as Error)?.message ?? e) });
+      state.openQueue = { observedAtMs: nowMs, windowDay: day, reviewP50: null, pressure: false, streak: 0 };
+    }
   }
   const prs = flowPrs(ledger.rows).filter((pr) => pr.mergedMs > nowMs - (FLOW_BASELINE_DAYS + 1) * DAY_MS && pr.mergedMs <= nowMs);
 
