@@ -25,14 +25,14 @@ function executableDigest(source: string): string {
 const BEFORE_COMMENTS = 2085;
 // Regenerated from the merged W1-T9114 child placement, adoption, drain and retro work plus
 // W1-T9819's ended-run evidence. The original comment-reduction threshold stays fixed.
-const EXPECTED_EXECUTABLE = "5b915668601f6edfdb7b31057849fc4a5d3aa7b0b3caff6c017487f322db5c25";
+const EXPECTED_EXECUTABLE = "fcfac222f2d4dd6b0cb762ca655cb9d7331f307a055c841424ea68d6be9d7d45";
 
 function emittedDigest(source: string): string {
   const { code } = transformSync(source, { loader: "ts", format: "esm", legalComments: "none" });
   return createHash("sha256").update(code).digest("hex");
 }
 
-const EXPECTED_EMITTED = "70c948681d4787399914a515e50a2566d3b00f18a11de3f2c9ea41ed5a831a1d";
+const EXPECTED_EMITTED = "445c3abd473037ccb4d1f82bc32ae52c752b097ecbf73e7f6c1d04dcba968f46";
 
 test("W1-T10871: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/daemon.ts"), "utf8");

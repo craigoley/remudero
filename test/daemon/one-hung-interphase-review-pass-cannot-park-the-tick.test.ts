@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { startInterphaseReviewClock, type DaemonDeps } from "#src/lib/daemon.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
@@ -31,7 +32,7 @@ async function until(predicate: () => boolean): Promise<void> {
   assert.fail("review clock did not enter its next wait");
 }
 
-test("W1-T11071: stop bounds a hung review pass and names its age", async () => {
+test("W1-T11071 criterion 1: stop bounds a hung review pass and names its age", async () => {
   const pass = deferred<void>();
   const runnerWait = deferred<void>();
   const started = deferred<void>();
@@ -54,7 +55,7 @@ test("W1-T11071: stop bounds a hung review pass and names its age", async () => 
     await stopping;
   }
   assert.equal(outcome, "stopped", "stop must return within the one-second bound");
-  assert.ok(elapsedMs < 1_500, `stop took ${elapsedMs}ms beyond its one-second bound`);
+  assertWallClockBound(elapsedMs, 1_500, "stop took beyond its one-second bound");
   const stopped = await stopping;
   assert.deepEqual(stopped, { eventWakeSeen: true, passes: 1, held: 0 });
   const abandoned = harness.events.filter((row) => row.step === "daemon.review_clock.pass_left_running");
