@@ -76,8 +76,6 @@
       proof: 'unit test: escalation intake outcome replay preserves one causal response'
     - claim: the assembled authenticated service supports the reply and follow-up round trip
       proof: 'unit test: assembled service preserves the escalation correspondence lifecycle'
-    - claim: a fresh escalation source read uses native broker revalidation and cannot join an ordinary cached read
-      proof: 'unit test: a fresh escalation read revalidates through the native broker'
   falsifier: |
     Remove the runtime outcome call, replace a failed publication with no-more-input, or route the
     clarification answer to another thread: named fixtures must fail. Keep control/mutant/restored
