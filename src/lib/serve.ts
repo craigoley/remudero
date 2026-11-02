@@ -1,3 +1,4 @@
+import { readDaemonMemoryPolicy, recordChildHeapGrowingPercent } from "./daemon-memory-policy.js";
 import { buildImprovementThreadRoutes } from "./improvement-thread.js";
 import { buildEscalationConversationRoute, createEscalationConversationReader } from "./escalation-conversation.js";
 /**
@@ -208,7 +209,7 @@ import {
   type WakeCounters,
 } from "./github-event-wake.js";
 import { createGithubKeepWarm } from "./github-refresh-pacer.js";
-import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
+import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY, policyPath } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -3323,7 +3324,10 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   });
   // W1-T9370: each worker module's first start (bundle or .ts source) is ledgered as worker.entry_resolved.
   setWorkerEntryLog(deps.log);
+  // W1-T10290: serve's read-model oracle children start under the daemon's growth percent; serve's own heap is unchanged.
+  const childHeapArgs = deps.readModel ? recordChildHeapGrowingPercent(readDaemonMemoryPolicy(policyPath(deps.questionsRoot)).policy) : [];
   const readModel = deps.readModel && withNeedsYouView(createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository,
+    childHeapArgs,
     selectedRegistryObservation: deps.selectedRegistryObservation,
     registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH },
     ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel, modelApprovalConfig }));
