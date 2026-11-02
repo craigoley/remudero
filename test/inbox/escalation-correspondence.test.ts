@@ -14,20 +14,24 @@ import { createEscalationConversationReader, readEscalationIssueSource } from "#
 import { fixedClock } from "#src/lib/clock.js";
 import { readEscalationQuestionFeedback } from "#src/lib/escalation-correspondence.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { buildEscalationReplyRoute } from "#src/lib/panel-actions.js";
+import { createService } from "#src/lib/service.js";
+import { readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
+import type { AddressInfo } from "node:net";
 
-function fixture(t: { after: (f: () => void) => void }) {
+function fixture(t: { after: (f: () => void) => void }, answered = true) {
   const root = mkdtempSync(join(tmpdir(), "rmd-escalation-correspondence-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const deps = { threadStorePath: join(root, "threads.jsonl"), repository: "craigoley/remudero", now: () => 1793621400000 };
   const identity = { taskId: "W1-T42", class: "MANUAL", cause: "stage-stall", prRef: "15520" };
   const threadId = deriveThreadId(identity), issueUrl = "https://github.com/craigoley/remudero/issues/16183";
-  appendThreadMessage(identity, "escalation", "The stage stopped. What should I investigate?", deps);
+  appendThreadMessage(identity, "escalation", "PR #15520 needs clarification\n\nPR #15520 is stalled.", deps);
   const intentId = "reply-fixture-001", text = "Investigate Linux first.";
-  appendThreadReplyOnce(identity, text, intentId, deps, { escalation: { issueUrl, revision: "a".repeat(64) } });
+  if (answered) appendThreadReplyOnce(identity, text, intentId, deps, { escalation: { issueUrl, revision: "a".repeat(64) } });
   const entry: FeedbackEntry = { id: "fb-fixture-001", ts: "2026-11-02T12:10:00Z", raw: text, attachments: [], origin: "ui", status: "new",
     proposal_pr: null, thread_id: threadId, submission_key: escalationReplySubmissionKey(threadId, intentId, issueUrl) };
   const messages = () => { const r = readThread(threadId, deps); assert.equal(r.status, "ok"); return r.status === "ok" ? r.messages : []; };
-  return { deps, identity, entry, messages };
+  return { root, deps, identity, entry, messages };
 }
 
 test("an intake response ends the ask while work remains pending", t => {
@@ -84,7 +88,7 @@ test("feedback landing preserves immutable escalation input identity through a s
   assert.equal(mergeFeedbackRecord(upstream, stringify({ ...f.entry, status: "grilling", submission_key: "another-input" })).kind, "refuse");
 });
 
-test("a fresh escalation read revalidates through the native broker", async t => {
+test("a fresh escalation read revalidates through the native broker", { timeout: 10_000 }, async t => {
   const cache = mkdtempSync("/tmp/rmd-cbf-"); t.after(() => rmSync(cache, { recursive: true, force: true }));
   const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
   mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, "heartbeat"), "60\n");
@@ -147,4 +151,32 @@ test("fresh conversation guards cannot join or be overwritten by an older servic
     release(source); await ordinary;
     const cached = await reader(issueUrl); assert.ok(cached.state === "served"); assert.equal(cached.conversation.recommendation, "New recommendation");
   } finally { clearTimeout(backstop); release(source); await ordinary; }
+});
+
+for (const failedCapture of [false, true]) test(`concurrent identical escalation replies preserve one input when capture ${failedCapture ? "fails" : "succeeds"}`, { timeout: 10_000 }, async t => {
+  const f = fixture(t, false), issueUrl = "https://github.com/craigoley/remudero/issues/16183";
+  if (failedCapture) { mkdirSync(join(f.root, "plan")); writeFileSync(join(f.root, "plan", "feedback"), "Capture is blocked in this fixture."); }
+  const reader = createEscalationConversationReader({ repository: f.deps.repository, threadStorePath: f.deps.threadStorePath,
+    knownIssue: () => true, readIssue: async () => ({ html_url: issueUrl, title: "[MANUAL] W1-T42: PR #15520 needs clarification", state: "open", updated_at: "2026-11-02T12:10:00Z",
+      body: "**Class:** MANUAL\n**Task:** W1-T42\n**Cause:** stage-stall\n\nPR #15520 is stalled.\n\n## Options\n- **Investigate** — Find the cause.\n\n## Recommendation\nInvestigate first." }) });
+  const initial = await reader(issueUrl); assert.ok(initial.state === "served"); assert.equal(initial.conversation.canReply, true);
+  let arrivals = 0, release!: () => void;
+  const both = new Promise<void>(resolve => { release = resolve; });
+  const service = createService({ tokens: { write: "fixture-write" }, routes: [buildEscalationReplyRoute({ root: f.root,
+    ledgerPath: join(f.root, "ledger.ndjson"), threadStorePath: f.deps.threadStorePath, issues: { close() { assert.fail("A reply cannot close an issue"); } },
+    readEscalationConversation: async (url, fresh) => { const result = await reader(url, fresh); if (++arrivals === 2) release(); await both; return result; } })] });
+  await new Promise<void>(resolve => service.listen(0, "127.0.0.1", resolve));
+  try {
+    const endpoint = `http://127.0.0.1:${(service.address() as AddressInfo).port}/v1/escalation/reply`;
+    const send = () => fetch(endpoint, { method: "POST", headers: { authorization: "Bearer fixture-write", "content-type": "application/json" },
+      body: JSON.stringify({ ...f.identity, issueUrl, expectedRevision: initial.conversation.revision, intentId: "concurrent-answer-01", text: "Investigate Linux first." }) });
+    const responses = await Promise.all([send(), send()]);
+    for (const response of responses) { assert.equal(response.status, 200); const receipt = await response.json() as { saved: {seq: number}; work: string }; assert.equal(receipt.saved.seq, 2); assert.equal(receipt.work, "not_observed"); }
+    assert.equal(f.messages().filter(message => message.role === "reply").length, 1);
+    if (failedCapture) {
+      assert.equal(readQueuedFeedbackRecords(f.root).size, 0); rmSync(join(f.root, "plan", "feedback"));
+      const recovered = await send(); assert.equal(recovered.status, 200); await recovered.arrayBuffer();
+    }
+    assert.equal(readQueuedFeedbackRecords(f.root).size, 1);
+  } finally { release(); service.closeAllConnections(); await new Promise<void>(resolve => service.close(() => resolve())); }
 });

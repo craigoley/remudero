@@ -47,7 +47,7 @@ import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from ".
 import { deriveLastPoll } from "./daemon-health.js";
 import { deriveThreadId, readThread, appendThreadMessage, appendThreadReplyOnce, type ThreadIdentity, type ThreadMessageExtra } from "./inbox-thread.js";
 import type { EscalationConversationReader } from "./escalation-conversation.js";
-import { captureFeedback, feedbackEntryRepoPath, setFeedbackStatus } from "./feedback.js";
+import { captureFeedback, feedbackEntryRepoPath, listFeedback, setFeedbackStatus } from "./feedback.js";
 import { escalationReplySubmissionKey, readEscalationQuestionFeedback } from "./escalation-correspondence.js";
 import { queueFeedbackRecord, readQueuedFeedbackRecords } from "./feedback-landing.js";
 import { applyOperatorMergeHold, type OperatorMergeHoldAction } from "./operator-merge-hold.js";
@@ -862,16 +862,27 @@ function validateEscalationReply(body: unknown): { error: string } | EscalationR
   };
 }
 
+const boundFeedbackId = (submissionKey: string): string => `fb-escalation-${createHash("sha256").update(submissionKey).digest("hex")}`;
+
+function feedbackQuestionHasAnotherAnswer(root: string, feedbackId: string, ownId: string): boolean {
+  const queued = readQueuedFeedbackRecords(root), parent = queued.get(feedbackEntryRepoPath(feedbackId));
+  return Boolean(parent && !["new", "grilling"].includes(parent.status) && !(parent.status === "answered" && parent.answered_by === ownId))
+    || [...listFeedback(root), ...queued.values()].some(entry => entry.reply_to === feedbackId && entry.id !== ownId);
+}
+
 async function captureBoundEscalationFeedback(root: string, threadId: string, input: EscalationReplyInput,
   question?: NonNullable<ThreadMessageExtra["escalation"]>["question"]) {
   const submissionKey = escalationReplySubmissionKey(threadId, input.intentId!, input.issueUrl!);
-  const id = `fb-escalation-${createHash("sha256").update(submissionKey).digest("hex")}`;
+  const id = boundFeedbackId(submissionKey);
   const parentInQueue = question ? readQueuedFeedbackRecords(root).get(feedbackEntryRepoPath(question.feedbackId)) : undefined;
   if (parentInQueue && !["new", "grilling"].includes(parentInQueue.status) && !(parentInQueue.status === "answered" && parentInQueue.answered_by === id))
     throw new Error("The current feedback question already has another answer.");
   const parent = question && parentInQueue?.status !== "answered"
     ? await readEscalationQuestionFeedback(/^https:\/\/github\.com\/([^/]+\/[^/]+)\//.exec(input.issueUrl!)![1]!, question.feedbackId, true) : undefined;
   if (parent && (parent.status !== "grilling" || parent.thread_id !== threadId)) throw new Error("The current feedback question is no longer awaiting this answer.");
+  // Recheck after the awaited canonical read, including partially landed answers whose
+  // parent status has not caught up. This is the existing feedback reply refusal rule.
+  if (question && feedbackQuestionHasAnotherAnswer(root, question.feedbackId, id)) throw new Error("The current feedback question already has another input.");
   const entry = captureFeedback(root, { id, raw: input.text, origin: "ui", threadId, submissionKey,
     ...(question ? { replyTo: question.feedbackId } : {}), land: { stateRoot: root } });
   if (entry.submission_key !== submissionKey || entry.thread_id !== threadId || entry.raw !== input.text.trim() || (entry.reply_to ?? undefined) !== question?.feedbackId)
@@ -961,8 +972,8 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         }
         currentQuestion = current.conversation.activeQuestion;
         if (currentQuestion) {
-          const pendingAnswer = readQueuedFeedbackRecords(deps.root).get(feedbackEntryRepoPath(currentQuestion.feedbackId));
-          if (pendingAnswer && !["new", "grilling"].includes(pendingAnswer.status)) return void sendJson(res, 409,
+          const ownId = boundFeedbackId(escalationReplySubmissionKey(threadId, input.intentId, input.issueUrl!));
+          if (feedbackQuestionHasAnotherAnswer(deps.root, currentQuestion.feedbackId, ownId)) return void sendJson(res, 409,
             { error: "source_changed", detail: "The agent's question already has an answer. Your draft was retained." });
         }
       }
