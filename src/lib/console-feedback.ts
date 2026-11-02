@@ -94,7 +94,8 @@ export function consoleCorrectionCandidates(entries: readonly ConsoleCorrectionC
     if (entry.console_correction === undefined) continue;
     const reject = () => { unverified.add(entry.id); valid.delete(entry.id); };
     const c = entry.console_correction;
-    if (!object(c) || c.version !== 1 || c.sourceKind !== "engineering_escalation" || !object(c.source) || !object(c.reportedTemplate)
+    if (typeof entry.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(entry.id)
+      || !object(c) || c.version !== 1 || c.sourceKind !== "engineering_escalation" || !object(c.source) || !object(c.reportedTemplate)
       || !object(c.facts) || c.facts.work !== "not_observed" || c.reportedTemplate.authority !== "operator_reported"
       || [c.source.repository, c.source.issueUrl, c.source.threadId, c.source.revision].some(value => typeof value !== "string")
       || entry.origin !== "ui" || entry.thread_id != null || entry.reply_to != null) { reject(); continue; }

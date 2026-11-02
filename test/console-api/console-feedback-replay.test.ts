@@ -52,3 +52,18 @@ test("console correction evaluation preserves unknown and not-run results", () =
   assert.equal(evaluateConsoleWordingReplay(spec, { ...packet(spec), candidateRevision: "" }).state, "unknown");
   assert.equal(evaluateConsoleWordingReplay(spec, { ...packet(spec), caseId: "foreign-case" }).state, "unknown");
 });
+
+
+test("wording evidence refuses feedback paths outside its captured record namespace", () => {
+  const source = { repository: "craigoley/remudero", issueUrl: "https://github.com/craigoley/remudero/issues/16183",
+    threadId: "thread:W1-T42::MANUAL::stage-stall::15520", revision: "a".repeat(64) };
+  const bound = bindConsoleCorrection({ kind: "wording_correction", intentId: "wording-paths-001", text: "State the question first.",
+    issueUrl: source.issueUrl, threadId: source.threadId, expectedRevision: source.revision, symptom: "unclear_request",
+    reportedTemplate: { id: "escalation-conversation", version: "1", renderedDigest: "b".repeat(64) } },
+    { ...source, source: { state: "current" }, history: "verified", attention: "needs_input" });
+  assert.ok(bound.state === "bound");
+  const id = "../outside";
+  const result = consoleCorrectionCandidates([{ id, origin: "ui", raw: bound.value.correction, console_correction: bound.value,
+    submission_key: consoleCorrectionSubmissionKey(bound.value) }], [{ feedbackId: id, digest: consoleCorrectionDigest(bound.value), ...source }]);
+  assert.equal(result.candidates.length, 0); assert.equal(result.unverified, 1);
+});

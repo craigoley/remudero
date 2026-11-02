@@ -6563,18 +6563,19 @@ export interface components {
         renderedDigest: string;
       };
     };
+    ConsoleWordingCorrectionSource: {
+      repository: string;
+      issueUrl: string;
+      threadId: string;
+      revision: string;
+    };
     ConsoleWordingCorrection: {
       version: 1;
       sourceKind: "engineering_escalation";
       intentId: string;
       correction: string;
       symptom: "unclear_request" | "unclear_status" | "unclear_recommendation" | "incorrect_fact";
-      source: {
-        repository: string;
-        issueUrl: string;
-        threadId: string;
-        revision: string;
-      };
+      source: ConsoleWordingCorrectionSource;
       reportedTemplate: {
         id: "escalation-conversation";
         version: string;
@@ -6594,6 +6595,8 @@ export interface components {
       state: "recorded";
       feedbackId: string;
       correctionDigest: string;
+      intentId: string;
+      source: ConsoleWordingCorrectionSource;
       duplicate: boolean;
       businessAnswer: "not_sent";
       work: "not_observed";

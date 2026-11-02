@@ -15193,6 +15193,16 @@ components:
             version: {type: string, maxLength: 80, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'}
             renderedDigest: {type: string, pattern: '^[a-f0-9]{64}$'}
 
+    ConsoleWordingCorrectionSource:
+      type: object
+      additionalProperties: false
+      required: [repository, issueUrl, threadId, revision]
+      properties:
+        repository: {type: string}
+        issueUrl: {type: string, format: uri}
+        threadId: {type: string, pattern: '^thread:', maxLength: 768}
+        revision: {type: string, pattern: '^[a-f0-9]{64}$'}
+
     ConsoleWordingCorrection:
       type: object
       additionalProperties: false
@@ -15204,14 +15214,7 @@ components:
         correction: {type: string, minLength: 1, maxLength: 4000}
         symptom: {type: string, enum: [unclear_request, unclear_status, unclear_recommendation, incorrect_fact]}
         source:
-          type: object
-          additionalProperties: false
-          required: [repository, issueUrl, threadId, revision]
-          properties:
-            repository: {type: string}
-            issueUrl: {type: string, format: uri}
-            threadId: {type: string, pattern: '^thread:', maxLength: 768}
-            revision: {type: string, pattern: '^[a-f0-9]{64}$'}
+          $ref: "#/components/schemas/ConsoleWordingCorrectionSource"
         reportedTemplate:
           type: object
           additionalProperties: false
@@ -15234,13 +15237,16 @@ components:
     ConsoleWordingCorrectionResult:
       type: object
       additionalProperties: false
-      required: [ok, kind, state, feedbackId, correctionDigest, duplicate, businessAnswer, work]
+      required: [ok, kind, state, feedbackId, correctionDigest, intentId, source, duplicate, businessAnswer, work]
       properties:
         ok: {type: boolean, enum: [true]}
         kind: {type: string, enum: [wording_correction]}
         state: {type: string, enum: [recorded]}
         feedbackId: {type: string}
         correctionDigest: {type: string, pattern: '^[a-f0-9]{64}$'}
+        intentId: {type: string, pattern: '^[A-Za-z0-9._:-]{8,128}$'}
+        source:
+          $ref: "#/components/schemas/ConsoleWordingCorrectionSource"
         duplicate: {type: boolean}
         businessAnswer: {type: string, enum: [not_sent]}
         work: {type: string, enum: [not_observed]}

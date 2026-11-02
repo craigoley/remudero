@@ -67,7 +67,9 @@ test("console correction capture refuses foreign or changed conversation context
   const f = await endpointFixture(t), before = readFileSync(f.threadStorePath, "utf8");
   const anonymous = await f.post(input(), false); assert.equal(anonymous.status, 401); await anonymous.arrayBuffer();
   const saved = await f.post(input()); assert.equal(saved.status, 200);
-  const receipt = await saved.json() as { kind: string; state: string; feedbackId: string; businessAnswer: string; work: string };
+  const receipt = await saved.json() as { kind: string; state: string; feedbackId: string; businessAnswer: string; work: string; intentId: string; source: unknown };
+  assert.equal(receipt.intentId, input().intentId);
+  assert.deepEqual(receipt.source, { repository: context.repository, issueUrl: context.issueUrl, threadId: context.threadId, revision: context.revision });
   assert.equal(receipt.kind, "wording_correction"); assert.equal(receipt.state, "recorded"); assert.equal(receipt.businessAnswer, "not_sent"); assert.equal(receipt.work, "not_observed");
   const repeat = await f.post(input()); assert.equal(repeat.status, 200); assert.equal((await repeat.json() as typeof receipt).feedbackId, receipt.feedbackId);
   const conflict = await f.post({ ...input(), text: "Different wording for the same intent." }); assert.equal(conflict.status, 409); await conflict.arrayBuffer();

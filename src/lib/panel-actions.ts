@@ -936,13 +936,15 @@ async function recordConsoleWordingCorrection(body: Record<string, unknown>, dep
     if (queued && (queued.submission_key !== key || queued.raw !== entry.raw || !isDeepStrictEqual(queued.console_correction, correction)))
       throw new Error("The queued correction identity conflicts.");
     const staged = queued ? { queued: [rel] } : queueFeedbackRecord(deps.root, rel, deps.root);
-    if (!staged.queued?.includes(rel)) throw new Error("Correction delivery is unverified.");
+    if (staged.queued === undefined) throw new Error("Correction delivery could not be verified.");
+    if (!staged.queued.includes(rel)) throw new Error("The correction queue omitted this input.");
     const inputDigest = consoleCorrectionDigest(correction);
     ledgerPanelAction(deps, "panel.console_wording_corrected", c.identity.taskId, bearerTokenId(req), {
       state: "recorded", feedback_id: entry.id, correction_digest: inputDigest, repository: correction.source.repository,
       issue_url: correction.source.issueUrl, thread_id: correction.source.threadId, conversation_revision: correction.source.revision,
       business_answer: "not_sent", work: "not_observed" });
     sendJson(res, 200, { ok: true, kind: "wording_correction", state: "recorded", feedbackId: entry.id, correctionDigest: inputDigest,
+      intentId: correction.intentId, source: correction.source,
       duplicate: Boolean(previous), businessAnswer: "not_sent", work: "not_observed" });
   } catch {
     // A failed source, capture, queue or receipt cannot claim delivery. The same input identity is retained for retry.

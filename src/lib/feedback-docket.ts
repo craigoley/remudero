@@ -299,7 +299,7 @@ export function synthesizeFeedbackDocketProposal(
       summary: `Wording correction: ${correction.evidence.length} verified report(s) about one template version and symptom.\n`
         + "Prepare a bounded fixture/template repair through normal native ownership and review. A repeated symptom does not prove one cause. "
         + "Preserve source facts, unknowns, action authority and delivery receipts. Do not alter operational policy, holds, budgets or gates. "
-        + "Replay evaluation is not_run until measured against the proposed immutable revision; automated checks do not certify human comprehension.\n"
+        + "Reproduce the reported wording from its template version and rendered digest before proposing a change; unreproduced original wording remains unknown. Replay evaluation is not_run until measured against the proposed immutable revision; automated checks do not certify human comprehension.\n"
         + envelope(JSON.stringify(packet), "feedback-entry"),
       evidenceAnchors: correction.evidence.map(evidence => ({ description: `Wording report ${evidence.feedbackId}: ${evidence.source.issueUrl}`,
         pattern: evidence.feedbackId, path: `plan/feedback/${evidence.feedbackId}.yaml` })) } };
