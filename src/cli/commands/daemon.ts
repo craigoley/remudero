@@ -1766,7 +1766,7 @@ export async function daemonCommand(
           ledgerPath,
           runId,
           judge: productionDispatchBreakJudge({ cwd: repoRoot, settingsFile: join(repoRoot, "settings", "worker.json") }),
-          mainEvidence: mainEvidenceReader(join(config.root, "repos", target.repo)),
+          mainEvidence: mainEvidenceReader(daemonTargetCheckoutRoot(target, config.root)),
         }),
         // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
         // daemon flushes one bounded batch after the pass and routes it through the existing judge;
