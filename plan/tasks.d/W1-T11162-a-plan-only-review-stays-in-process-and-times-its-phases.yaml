@@ -19,15 +19,15 @@
   files:
     - src/lib/run-child.ts
     - src/cli/commands/review.ts
-    - test/worker/a-plan-only-review-stays-in-process-and-times-its-phases.test.ts
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
+    - test/review-skips-spawn-on-plan-only.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: The detached-work host's spawnReview answers undefined for a PR whose isPlanFiling is true in every mode, starts no probe and no run child for it, and ledgers review.placement with placement in-process and reason plan-only-filing; a code review's placement is unchanged
-      proof: "unit test: test/worker/a-plan-only-review-stays-in-process-and-times-its-phases.test.ts"
+      proof: "unit test: W1-T11162 criterion 1: a plan filing's review is never a run child"
     - claim: A review whose diff is plan-only ledgers one review.plan_only_phases row after its arm, carrying the milliseconds of its worktree materialization, diff read, decision claim, lint-plan, proof judgement, status post and arm, and the review's total; a review that is not plan-only writes no such row
-      proof: "grep: W1-T11162 criterion 2 in test/worker/a-plan-only-review-stays-in-process-and-times-its-phases.test.ts"
+      proof: "grep: W1-T11162 criterion 2 in test/review-skips-spawn-on-plan-only.test.ts"
   rationale: |
     MEASURED 2026-11-02 (Mac ledger ~/Remudero/state; core host ledger live window, read-only):
     - Mac local review of plan-only #16199: start -> provider_provenance 1.7 s, -> pending_posted 2.5 s, -> reviewer.skipped
@@ -60,5 +60,5 @@
   note: |
     Reserved with rmd next-task-id --branch plan-file-1793659478136. Coordinates with W1-T11148: that task admits plan reviews
     apart from the CPU bound; this one changes what runs once a plan review is admitted. Their criterion 2 (a plan-lane child
-    does not count against the bound) still holds for an adopted child after a boot. The test path is rmd test-place's answer for a
-    suite importing run-child.ts and review.ts.
+    does not count against the bound) still holds for an adopted child after a boot. The falsifiers join the two suites that already
+    drive these paths: a new suite would add a run-task importer and a GitHub PATH shim over their recorded census baselines.
