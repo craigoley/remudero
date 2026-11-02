@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { compressionPinBase } from "#test/helpers/compression-pin.js";
 // @source-text-subject: historical serve.ts comment compression and executable-token preservation.
 // @census-reads: none — the source text is an embedded immutable historical fixture.
