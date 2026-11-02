@@ -162,7 +162,7 @@ for (const failedCapture of [false, true]) test(`concurrent identical escalation
   const initial = await reader(issueUrl); assert.ok(initial.state === "served"); assert.equal(initial.conversation.canReply, true);
   let arrivals = 0, release!: () => void;
   const both = new Promise<void>(resolve => { release = resolve; });
-  const service = createService({ tokens: { write: "fixture-write" }, routes: [buildEscalationReplyRoute({ root: f.root,
+  const service = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, routes: [buildEscalationReplyRoute({ root: f.root,
     ledgerPath: join(f.root, "ledger.ndjson"), threadStorePath: f.deps.threadStorePath, issues: { close() { assert.fail("A reply cannot close an issue"); } },
     readEscalationConversation: async (url, fresh) => { const result = await reader(url, fresh); if (++arrivals === 2) release(); await both; return result; } })] });
   await new Promise<void>(resolve => service.listen(0, "127.0.0.1", resolve));
