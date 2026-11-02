@@ -14,10 +14,12 @@
   files:
     - src/lib/escalation-conversation.ts
     - src/lib/panel-actions.ts
+    - src/lib/inbox-thread.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
-    - test/lib/escalation-conversation.test.ts
-    - test/lib/escalation-conversation-serving.test.ts
+    - packages/api-client/src/schema.d.ts
+    - test/inbox/escalation-conversation.test.ts
+    - test/inbox/escalation-conversation-serving.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -32,7 +34,9 @@
     in the real serve assembly and documented in OpenAPI. Bind the requested issue to the serving
     repository; read its current native source through the existing asynchronous GitHub transport,
     with bounded/coalesced on-demand caching and explicit observed time, revision and source state.
-    Reject malformed, foreign, non-escalation and unsupported source records. Parse only the native
+    Require a positive native escalation receipt, using the current board or a bounded ledger-union
+    positive search. Missing evidence stays unverified; an ordinary issue with copied metadata is
+    not a native escalation. Reject malformed, foreign, non-escalation and unsupported source records. Parse only the native
     anchored Task/Class/Cause/Options/Recommendation format, preserving missing/unknown information.
     Derive the SAME task/class/cause/PR thread identity as escalate.ts, read the existing store and
     return bounded messages plus source recommendation/options. Missing or unreadable history is an
