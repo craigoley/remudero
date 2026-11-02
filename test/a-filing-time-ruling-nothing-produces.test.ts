@@ -15,9 +15,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildFilingRiskJudgeInput, recordFilingRiskRuling } from "../src/lib/risk-judge.js";
-import { machineAuthorVerifyViolation, taskRulingPin } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { buildFilingRiskJudgeInput, recordFilingRiskRuling } from "#src/lib/risk-judge.js";
+import { machineAuthorVerifyViolation, taskRulingPin } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 /** A machine-authored record at verify:auto — the shape the ladder refuses until a ruling clears it. */
 function machineTask(over: Partial<Task> = {}): Task {

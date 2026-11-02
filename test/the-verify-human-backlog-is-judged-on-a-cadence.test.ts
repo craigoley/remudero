@@ -16,13 +16,13 @@ import {
   runMeasurementCadenceReport,
   verifyHumanAgeBandKey,
   verifyHumanCadence,
-} from "../src/lib/measurement-cadence.js";
+} from "#src/lib/measurement-cadence.js";
 import {
   FAIL_OPEN_VERIFY_HUMAN_VERDICT,
   observedStateKey,
   type ShardUnderJudgement,
   type VerifyHumanVerdict,
-} from "../src/lib/verify-human-judge.js";
+} from "#src/lib/verify-human-judge.js";
 
 const ASK: ShardUnderJudgement = {
   id: "W1-T9001",
@@ -248,8 +248,8 @@ test("W1-T3271: runMeasurementCadenceReport carries the verify-human cadence res
 // so without the dedupe the operator's inbox grows one duplicate per tick.
 
 test("W1-T3271: staging the same proposal twice leaves the registry untouched the second time", async () => {
-  const { stageInboxProposalOnce } = await import("../src/run-task.js");
-  const { loadProposalRegistry } = await import("../src/lib/inbox.js");
+  const { stageInboxProposalOnce } = await import("#src/run-task.js");
+  const { loadProposalRegistry } = await import("#src/lib/inbox.js");
   const root = mkdtempSync(join(tmpdir(), "rmd-t3271-stage-"));
   try {
     const registryPath = join(root, "inbox-proposals.json");

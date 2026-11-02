@@ -19,8 +19,8 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { test } from "node:test";
-import { architectModel, synthesisEffort, synthesisModel, type Config } from "../src/lib/config.js";
-import { loadMounts, mountsPath, MountsError, TierInvariantError, validateMounts, SYNTHESIS_ROLES } from "../src/lib/mounts.js";
+import { architectModel, synthesisEffort, synthesisModel, type Config } from "#src/lib/config.js";
+import { loadMounts, mountsPath, MountsError, TierInvariantError, validateMounts, SYNTHESIS_ROLES } from "#src/lib/mounts.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SHIPPED = mountsPath(REPO_ROOT);

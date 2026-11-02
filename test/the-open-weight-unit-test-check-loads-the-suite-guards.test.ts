@@ -14,8 +14,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 // A NAMESPACE import, so the file still LOADS on a tree without the shared constant and fails by
 // assertion there: a load error would read as an environment gap, not a red.
-import * as workerProvider from "../src/lib/worker-provider.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as workerProvider from "#src/lib/worker-provider.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const { OPENWEIGHT_CHECKS, spawnOpenWeightWorker } = workerProvider;
 

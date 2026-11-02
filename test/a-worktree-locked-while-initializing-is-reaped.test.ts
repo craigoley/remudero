@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { join } from "node:path";
 import test from "node:test";
 
-import { reapStaleWorktrees } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { reapStaleWorktrees } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function fixture() {
   const { dir, git } = gitRepo({ kind: "reap-initializing" });

@@ -42,13 +42,13 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS } from "../src/lib/policy.js";
+import { DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS } from "#src/lib/policy.js";
 import {
   WorkerKeychainError,
   acquireKeychainProvisionLock,
   keychainProvisionLockPath,
   resolveKeychainProvisionLockWaitMs,
-} from "../src/lib/worker-home.js";
+} from "#src/lib/worker-home.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "rmd-keychain-lock-"));

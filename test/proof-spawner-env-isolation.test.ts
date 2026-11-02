@@ -17,7 +17,7 @@
 // test/check-proof-base.test.ts) already uses.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildProofEnv, defaultProofSpawner, PROOF_ENV_ALLOWLIST } from "../src/lib/review.js";
+import { buildProofEnv, defaultProofSpawner, PROOF_ENV_ALLOWLIST } from "#src/lib/review.js";
 
 /** Run the REAL `defaultProofSpawner` with a tiny node one-liner that dumps its own
  *  `process.env` back out as JSON, and parse the result. */

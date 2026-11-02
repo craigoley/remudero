@@ -32,9 +32,9 @@ import {
   cashDivertToolsForLane,
   cashDivertSpawnFields,
   harnessOwnsGitFor,
-} from "../src/lib/worker.js";
-import { cashCanServeToolSurface } from "../src/lib/worker.js";
-import { SPECIALIST_TOOLS, isReadOnlyToolset } from "../src/lib/specialist-panel.js";
+} from "#src/lib/worker.js";
+import { cashCanServeToolSurface } from "#src/lib/worker.js";
+import { SPECIALIST_TOOLS, isReadOnlyToolset } from "#src/lib/specialist-panel.js";
 
 test("review-cash-divert: the review lane declares a cash surface, and it carries no shell", () => {
   const tools = cashDivertToolsForLane("review");

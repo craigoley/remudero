@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { renderPrerequisitePrPrompt } from "../src/lib/prompt-render.js";
+import { renderPrerequisitePrPrompt } from "#src/lib/prompt-render.js";
 
 const PROOF = "test/the-prerequisite-split-contract-has-no-optional-seam.test.ts";
 const PROMPT_ARGS = {

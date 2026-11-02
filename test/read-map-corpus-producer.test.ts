@@ -6,11 +6,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 // @ts-expect-error — native script ESM is outside this project's tsconfig source roots.
-import { assessReadMapCorpus, collectReadMapCorpus, corpusDigest, prepareReadMapCorpus, readCorpusBytes, readMapSummary, validateCorpusManifest } from "../scripts/lib/read-map-corpus.mjs";
+import { assessReadMapCorpus, collectReadMapCorpus, corpusDigest, prepareReadMapCorpus, readCorpusBytes, readMapSummary, validateCorpusManifest } from "#scripts/lib/read-map-corpus.mjs";
 // @ts-expect-error — native CLI ESM is outside this project's tsconfig source roots.
-import { main } from "../scripts/read-map-corpus.mjs";
+import { main } from "#scripts/read-map-corpus.mjs";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const TSX = import.meta.resolve("tsx");

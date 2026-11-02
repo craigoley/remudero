@@ -14,12 +14,12 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { CHILD_ENTRY_SPAWNED_STEP } from "../src/lib/child-entry-argv.js";
+import { CHILD_ENTRY_SPAWNED_STEP } from "#src/lib/child-entry-argv.js";
 import {
   armedEnforcers, classifyGateExit, DEADLINE_RUNNER, defaultRunGate, findOnPath, GATE_DEADLINE_EXIT_CODE,
   GATE_DEADLINE_MARKER, gateTimeoutBin, runPreopenGate, type GateContain, type PreopenGateResult,
-} from "../src/lib/preopen-gate.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/preopen-gate.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const DEADLINE_MS = 1_000;
 const FREEZE_MS = 4_000;

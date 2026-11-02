@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { proofQueueAuditCommand } from "../src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { proofQueueAuditCommand } from "#src/run-task.js";
 
 type Verdict = "pass" | "fail" | "unreadable";
 

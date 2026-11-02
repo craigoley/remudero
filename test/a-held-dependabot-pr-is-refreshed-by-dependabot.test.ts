@@ -26,12 +26,12 @@ import {
   type DependabotHeadRun,
   type DependabotRefreshVerdict,
   type DepReviewRequired,
-} from "../src/lib/dep-review.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Plan } from "../src/lib/plan.js";
-import { buildSweepEffects, defaultDepReviewActions, depReviewCommand, readDepReviewRequiredChecks, type DepReviewDeps } from "../src/run-task.js";
+} from "#src/lib/dep-review.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Plan } from "#src/lib/plan.js";
+import { buildSweepEffects, defaultDepReviewActions, depReviewCommand, readDepReviewRequiredChecks, type DepReviewDeps } from "#src/run-task.js";
 import {
   BASE_RED_STOOD_DOWN_STEP,
   DEFAULT_SWEEP_POLICY,
@@ -43,7 +43,7 @@ import {
   type BaseChangedFiles,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-10-14T23:45:35.000Z");
 const ASOF = new Date(NOW).toISOString();

@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources } from "../src/lib/benchmark-run.js";
-import { workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources } from "#src/lib/benchmark-run.js";
+import { workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 import {
   CASH_SERVED_MODEL_REASONS,
   CODEX_SERVED_MODEL_REASON,
@@ -16,7 +16,7 @@ import {
   cashServedModel,
   spawnCodexWorker,
   spawnOpenWeightWorker,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 
 // W1-T4650: claude attempts named their served model in 242 of 258 rows, codex in 0 of 100 and
 // cash in 0 of 260 — and none of the unnamed rows said why. Each provider now either names the

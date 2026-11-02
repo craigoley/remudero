@@ -44,7 +44,7 @@ import {
   EGRESS_TIMEOUT_SECONDS,
   PROBE_TURN_ALLOWANCE,
   type ContainmentEvidence,
-} from "../src/lib/containment.js";
+} from "#src/lib/containment.js";
 
 /** Run the REAL generated command 4 in a scratch cwd, with `curl` stubbed to the given exit code. */
 function runCommandFour(curlExit: number): { stdout: string; dir: string } {

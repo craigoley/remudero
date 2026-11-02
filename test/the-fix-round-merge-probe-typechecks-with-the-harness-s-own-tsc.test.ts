@@ -11,9 +11,9 @@ import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { after, before, test } from "node:test";
-import { defaultMergeProbeGit, mergedHeadTypechecks, type MergeProbeGit, type TypecheckSpawn } from "../src/lib/merge-probe.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { defaultMergeProbeGit, mergedHeadTypechecks, type MergeProbeGit, type TypecheckSpawn } from "#src/lib/merge-probe.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const harnessPkg = createRequire(import.meta.url).resolve("typescript/package.json");
 const HARNESS_TSC = join(realpathSync(dirname(harnessPkg)), "bin", "tsc");

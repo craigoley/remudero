@@ -4,16 +4,16 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { captureConsoleError } from "./helpers/captured-console.js";
-import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
-import type { Config } from "../src/lib/config.js";
-import type { GitHub } from "../src/lib/status.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { loadReconArtifact, main, runTask, wipeTestCommand, writeReconArtifact } from "../src/run-task.js";
-import type { RunResult } from "../src/lib/run-result.js";
+import { captureConsoleError } from "#test/helpers/captured-console.js";
+import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
+import type { Config } from "#src/lib/config.js";
+import type { GitHub } from "#src/lib/status.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import { loadReconArtifact, main, runTask, wipeTestCommand, writeReconArtifact } from "#src/run-task.js";
+import type { RunResult } from "#src/lib/run-result.js";
 import {
   aggregateWipeTestPairs,
   computeWipeTestDelta,
@@ -27,7 +27,7 @@ import {
   type WipeTestFactor,
   type WipeTestPair,
   type WipeTestRunResult,
-} from "../src/lib/wipe-test.js";
+} from "#src/lib/wipe-test.js";
 
 // W1-T2512 — "THE WIPE TEST CAN ONLY EVER ASK ABOUT LEARNINGS": the harness generalises from
 // one hard-coded factor (learnings) to a NAMED factor (`WipeTestFactor`, "learnings" | "recon"),
@@ -251,7 +251,7 @@ async function runFixture(
   process.env.PATH = `${fakeBinDir}:${savedPath}`;
   const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
 
-  const { withLiveWritesAllowed } = await import("../src/lib/live-write-guard.js");
+  const { withLiveWritesAllowed } = await import("#src/lib/live-write-guard.js");
   try {
     const res = await withLiveWritesAllowed(() =>
       runTask("T-WIPE-RECON", {
@@ -333,7 +333,7 @@ test("BEHAVIORAL: maskRecon:true never reads or writes the recon artifact store 
   const savedPath = process.env.PATH;
   process.env.PATH = `${fakeBinDir}:${savedPath}`;
   const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
-  const { withLiveWritesAllowed } = await import("../src/lib/live-write-guard.js");
+  const { withLiveWritesAllowed } = await import("#src/lib/live-write-guard.js");
   try {
     await withLiveWritesAllowed(() =>
       runTask("T-WIPE-RECON", {
@@ -373,7 +373,7 @@ test("BEHAVIORAL: maskRecon:true never reads or writes the recon artifact store 
 
 function fakeRunTaskFnCapturingOpts(
   calls: Array<{ maskLearnings?: boolean; maskRecon?: boolean }>,
-): typeof import("../src/run-task.js").runTask {
+): typeof import("#src/run-task.js").runTask {
   return (async (_taskId: string, opts: { maskLearnings?: boolean; maskRecon?: boolean } = {}) => {
     calls.push({ maskLearnings: opts.maskLearnings, maskRecon: opts.maskRecon });
     return {
@@ -383,7 +383,7 @@ function fakeRunTaskFnCapturingOpts(
       costUsd: 1,
       verdict: "merged",
     } as RunResult;
-  }) as unknown as typeof import("../src/run-task.js").runTask;
+  }) as unknown as typeof import("#src/run-task.js").runTask;
 }
 
 test("wipeTestCommand: omitting --factor (default \"learnings\") dispatches BYTE-IDENTICALLY to before W1-T2512 -- maskLearnings on arm B only, maskRecon never set", async () => {
@@ -428,7 +428,7 @@ test("wipeTestCommand: --factor recon dispatches maskRecon on arm B only, and ne
       costUsd: 1,
       verdict: "merged",
     } as RunResult;
-  }) as unknown as typeof import("../src/run-task.js").runTask;
+  }) as unknown as typeof import("#src/run-task.js").runTask;
 
   const code = await wipeTestCommand(["W1-T86", "--factor", "recon", "--repo", "remudero", "--allow-non-sandbox"], {
     config,
@@ -473,7 +473,7 @@ test("wipeTestCommand: an unrecognized --factor value fails loud (exit 2), befor
   const runTaskFn = (async () => {
     dispatched++;
     return { taskId: "W1-T86", runId: "X", merged: false, costUsd: 0, verdict: "merged" } as RunResult;
-  }) as unknown as typeof import("../src/run-task.js").runTask;
+  }) as unknown as typeof import("#src/run-task.js").runTask;
 
   const code = await wipeTestCommand(["W1-T86", "--factor", "bogus", "--repo", "remudero", "--allow-non-sandbox"], {
     config,
@@ -578,7 +578,7 @@ test("wipeTestCommand: the merged pre-flight refuses a recon-factor pair exactly
   const runTaskFn = (async () => {
     dispatched++;
     return { taskId: "W1-T86", runId: "X", merged: false, costUsd: 0, verdict: "merged" } as RunResult;
-  }) as unknown as typeof import("../src/run-task.js").runTask;
+  }) as unknown as typeof import("#src/run-task.js").runTask;
 
   // The default target is the SANDBOX, not self, so `wipeTestCommand` reaches its clone-if-absent
   // branch before the merged pre-flight — see that branch's own doc for why the pre-flight has to
@@ -609,7 +609,7 @@ test("wipeTestCommand: --factor recon on a non-sandbox --repo without --allow-no
   const runTaskFn = (async () => {
     dispatched++;
     return { taskId: "W1-T86", runId: "X", merged: false, costUsd: 0, verdict: "merged" } as RunResult;
-  }) as unknown as typeof import("../src/run-task.js").runTask;
+  }) as unknown as typeof import("#src/run-task.js").runTask;
 
   const code = await wipeTestCommand(["W1-T86", "--factor", "recon", "--repo", "remudero"], {
     config,

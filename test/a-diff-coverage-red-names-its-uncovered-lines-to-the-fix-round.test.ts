@@ -7,9 +7,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
 // @ts-expect-error The exercised gate is a plain .mjs script without a declaration file.
-import { computeBoundaryRanges } from "../scripts/diff-coverage.mjs";
+import { computeBoundaryRanges } from "#scripts/diff-coverage.mjs";
 
 const BLOCKED_LOG = [
   "diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:",
@@ -51,7 +51,7 @@ test("a harness-committed diff-coverage round is told to verify without git", ()
 test("a ci-log red that is not a diff-coverage block gets no coverage targets", async () => {
   const prompt = ciLogPrompt("not ok 3 - some unrelated assertion\n# fail 1");
   assert.doesNotMatch(prompt, /DIFF-COVERAGE TARGETS/);
-  const mod = await import("../src/lib/diff-coverage-targets.js");
+  const mod = await import("#src/lib/diff-coverage-targets.js");
   assert.equal(mod.diffCoverageTargets(["not ok 3 - x"]), undefined);
   assert.deepEqual(mod.diffCoverageTargets([BLOCKED_LOG])?.targets.map((t: { file: string }) => t.file), [
     "src/lib/daemon-memory-telemetry.ts",

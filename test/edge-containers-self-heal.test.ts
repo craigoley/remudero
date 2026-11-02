@@ -12,6 +12,9 @@ import { join } from "node:path";
 
 const HEAL = join(process.cwd(), "deploy", "edge-heal.sh");
 const FAKE_TOKEN = "fake-tunnel-token-not-real-0000";
+/** W1-T10844: the pinned image, the one FROM line of deploy/cloudflared/Dockerfile. */
+const PIN = /^FROM (\S+)\s*$/m.exec(readFileSync(join(process.cwd(), "deploy", "cloudflared", "Dockerfile"), "utf8"))?.[1] ?? "";
+const TUNNEL_INSPECT = "container inspect --format {{.Name}} {{.Config.Image}} cloudflared cloudflared-next";
 
 interface Scene {
   root: string;
@@ -27,14 +30,15 @@ function writeExecutable(path: string, body: string): void {
   chmodSync(path, 0o755);
 }
 
-/** `present` names the containers/networks docker already has; `token` writes the token file. */
+/** `present` names the containers/networks docker already has (a present cloudflared runs the pin);
+ *  `token` writes the token file. */
 function scene(opts: { present: string[]; token: boolean }): Scene {
   const root = mkdtempSync(join(tmpdir(), "rmd-edge-heal-"));
   const stub = join(root, "stubbin");
   const present = join(root, "present");
   mkdirSync(stub);
   mkdirSync(present);
-  for (const name of opts.present) writeFileSync(join(present, name), "");
+  for (const name of opts.present) writeFileSync(join(present, name), name === "cloudflared" ? PIN : "");
   const dockerLog = join(root, "docker.log");
   const serveLog = join(root, "serve.log");
   writeExecutable(
@@ -44,7 +48,13 @@ function scene(opts: { present: string[]; token: boolean }): Scene {
       `echo "$*" >> "${dockerLog}"`,
       `P="${present}"`,
       'case "$1 $2" in',
-      '  "container inspect") [ -e "$P/$3" ] ;;',
+      '  "container inspect")',
+      '    if [ "$3" = --format ]; then',
+      '      shift 4; rc=0',
+      '      for n in "$@"; do if [ -e "$P/$n" ]; then echo "/$n $(cat "$P/$n")"; else rc=1; fi; done',
+      '      exit "$rc"',
+      "    fi",
+      '    [ -e "$P/$3" ] ;;',
       '  "network inspect") [ -e "$P/net-$3" ] ;;',
       '  "network create") touch "$P/net-$3" ;;',
       '  "run -d") touch "$P/$4" ;;',
@@ -118,7 +128,7 @@ test("edge heal: an absent cloudflared is created with --token-file from a read-
     assert.equal(
       runs[0],
       `run -d --name cloudflared --restart=unless-stopped --network rmd-net -v ${s.tokenFile}:/etc/cloudflared/token:ro ` +
-        "cloudflare/cloudflared:latest tunnel --no-autoupdate run --token-file /etc/cloudflared/token",
+        `${PIN} tunnel --no-autoupdate run --token-file /etc/cloudflared/token`,
     );
     for (const text of [read(s.dockerLog), r.stdout, r.stderr]) assert.ok(!text.includes(FAKE_TOKEN), "the token value leaked");
     assert.doesNotMatch(read(s.dockerLog), /(^| )-e /m, "no env value carries the token");
@@ -142,12 +152,12 @@ test("edge heal: an absent cloudflared with no token file is refused in one line
   }
 });
 
-test("edge heal control: both containers present costs one container inspect each and nothing else", () => {
+test("edge heal control: both containers present, the tunnel on its pin, costs one container inspect each and nothing else", () => {
   const s = scene({ present: ["remudero-serve", "cloudflared"], token: true });
   try {
     const r = heal(s);
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(read(s.dockerLog), "container inspect remudero-serve\ncontainer inspect cloudflared\n");
+    assert.equal(read(s.dockerLog), `container inspect remudero-serve\n${TUNNEL_INSPECT}\n`);
     assert.equal(read(s.serveLog), "");
   } finally {
     rmSync(s.root, { recursive: true, force: true });
@@ -160,7 +170,7 @@ test("edge heal: --migrate-cloudflared replaces the live tunnel with the token-f
     const r = heal(s, ["--migrate-cloudflared"]);
     assert.equal(r.status, 0, r.stderr);
     const calls = read(s.dockerLog).split("\n").filter(Boolean);
-    assert.deepEqual(calls.map((c) => c.split(" ").slice(0, 2).join(" ")), ["pull cloudflare/cloudflared:latest", "network inspect", "rm -f", "run -d"]);
+    assert.deepEqual(calls.map((c) => c.split(" ").slice(0, 2).join(" ")), [`pull ${PIN}`, "network inspect", "rm -f", "run -d"]);
     assert.match(calls[3], /--token-file \/etc\/cloudflared\/token$/);
     assert.ok(!read(s.dockerLog).includes(FAKE_TOKEN));
   } finally {

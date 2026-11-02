@@ -3,18 +3,18 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { loadMounts, mountsPath, resolveMountForClass, validateMounts, TierInvariantError, MountsError } from "../src/lib/mounts.js";
-import { DESIGN_RECORD_GLOB_RE, deriveTaskClass, implementRouteClass } from "../src/lib/task-class.js";
-import { resolveRunMounts } from "../src/run-task.js";
-import type { ProviderCapacity } from "../src/lib/worker-provider.js";
+import { loadMounts, mountsPath, resolveMountForClass, validateMounts, TierInvariantError, MountsError } from "#src/lib/mounts.js";
+import { DESIGN_RECORD_GLOB_RE, deriveTaskClass, implementRouteClass } from "#src/lib/task-class.js";
+import { resolveRunMounts } from "#src/run-task.js";
+import type { ProviderCapacity } from "#src/lib/worker-provider.js";
 import {
   createClaudeExecutableCache,
   spawnWorker,
   SubscriptionOnlyRefusedError,
   type SpawnWorkerArgs,
   type WorkerResult,
-} from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+} from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 
 // Operator ruling 2026-09-24 (DECISIONS.md): Opus takes risk:high and design work on its FIRST
 // attempt, as a peer of the Architect and judge (G-17 amended). A later operator ruling permits

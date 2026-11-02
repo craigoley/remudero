@@ -2,10 +2,10 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
 
-import { scopeAdvisorySection, unwiredExportAdvisorySection } from "../src/lib/review.js";
-import type { UnwiredAdvisory } from "../src/lib/review.js";
+import { scopeAdvisorySection, unwiredExportAdvisorySection } from "#src/lib/review.js";
+import type { UnwiredAdvisory } from "#src/lib/review.js";
 
 const unwired = (symbols: string[]): UnwiredAdvisory => ({
   reasonCode: "unwired_export",

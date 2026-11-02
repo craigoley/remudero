@@ -25,11 +25,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { worktreeAdd } from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { OpenPrView } from "../src/lib/sweep.js";
-import * as runTask from "./helpers/run-task-test.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import { worktreeAdd } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { OpenPrView } from "#src/lib/sweep.js";
+import * as runTask from "#test/helpers/run-task-test.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 const EXTRACTED_SOURCE = fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url));
 const SOURCE = fileURLToPath(new URL("../src/run-task.ts", import.meta.url));

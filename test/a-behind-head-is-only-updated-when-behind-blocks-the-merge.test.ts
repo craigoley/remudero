@@ -8,7 +8,7 @@
 // this repo (1,191 of 1,556). An update the merge never needed is a self-inflicted share of it.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attemptArm, type FixRebaseMergeFacts } from "../src/run-task.js";
+import { attemptArm, type FixRebaseMergeFacts } from "#src/run-task.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/5779";
 const HEAD = "8c2cd65e7f1069262ad17bb8d50ccb39a8c365ba";

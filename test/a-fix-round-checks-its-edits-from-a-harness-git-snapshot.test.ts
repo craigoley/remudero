@@ -8,11 +8,11 @@ import { test, type TestContext } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
-import type { WorkerResult, SpawnWorkerArgs } from "../src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
+import type { WorkerResult, SpawnWorkerArgs } from "#src/lib/worker.js";
 // @ts-ignore executable census module has no declaration file.
-import { CENSUS_SNAPSHOT_ROOTS, main, readCensusSnapshot } from "../scripts/census-precheck.mjs";
+import { CENSUS_SNAPSHOT_ROOTS, main, readCensusSnapshot } from "#scripts/census-precheck.mjs";
 
 const ROOT = REPO_ROOT;
 const REACH = "test/the-affected-suite-reach-ratchet.test.ts";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createWorkerToolLineage, observeWorkerToolLineage, type WorkerToolReceipt } from "../src/lib/worker-tool-lineage.js";
+import { createWorkerToolLineage, observeWorkerToolLineage, type WorkerToolReceipt } from "#src/lib/worker-tool-lineage.js";
 
 test("test/worker-tool-lineage-joins.test.ts real IDs join multiple tools and shared message fragments", () => {
   const receipts: WorkerToolReceipt[] = [];

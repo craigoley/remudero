@@ -13,7 +13,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
-import * as affected from "../src/lib/affected-suites.js";
+import * as affected from "#src/lib/affected-suites.js";
 
 const TREE: Record<string, string> = {
   "src/heavy.ts": "export const heavy = 1;\n",

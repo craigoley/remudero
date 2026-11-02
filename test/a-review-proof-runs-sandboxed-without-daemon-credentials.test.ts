@@ -14,7 +14,7 @@ import { afterEach, test } from "node:test";
 // A NAMESPACE import, deliberately: at the merge base the W1-T6124 exports do not exist, and a named
 // import would fail the whole file at load — the reviewer reads that as "never ran", not as a red.
 // Read through the namespace, each test reaches its own assertion and fails there instead.
-import * as review from "../src/lib/review.js";
+import * as review from "#src/lib/review.js";
 const {
   defaultAsyncProofSpawner,
   defaultProofSpawner,
@@ -34,8 +34,8 @@ const {
   ProofSandboxUnavailableError,
   setProofSandboxForTests,
 } = review;
-import { makeTempDir } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const CREDENTIALS: Record<string, string> = {
   GH_TOKEN: "fixture-gh-token",

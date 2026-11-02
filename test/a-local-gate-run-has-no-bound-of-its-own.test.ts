@@ -12,12 +12,12 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { boundedSuiteLeaf, runBoundedSuite } from "../src/lib/ci-parity.js";
-import { defaultPreflightSpawn } from "../src/lib/commit-message.js";
-import { defaultProbe } from "../src/lib/host-memory-ledger.js";
-import { killProcessGroup } from "../src/lib/worker-containment.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { boundedSuiteLeaf, runBoundedSuite } from "#src/lib/ci-parity.js";
+import { defaultPreflightSpawn } from "#src/lib/commit-message.js";
+import { defaultProbe } from "#src/lib/host-memory-ledger.js";
+import { killProcessGroup } from "#src/lib/worker-containment.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const SPIN_MS = 20_000;
 const BOUND_MS = 700;

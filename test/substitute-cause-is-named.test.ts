@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { judgeCriterion, type ReportSubstituteCause } from "../src/lib/review.js";
+import { judgeCriterion, type ReportSubstituteCause } from "#src/lib/review.js";
 
 // A refusal named a failure that never happened (2026-08-25).
 //

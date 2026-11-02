@@ -75,3 +75,7 @@ Each section is one pass of the gate gardener (W1-T4116).
 
 - refresh scripts/learnings-budget-baseline.json#measuredChars: The recorded measuredChars is 43003; the corpus measures 43202.
 - refresh scripts/learnings-budget-baseline.json#measuredActiveEntries: The recorded measuredActiveEntries is 83; the corpus measures 84.
+
+## Pass 2026-11-02T07:38:24.151Z
+
+- demote scan-pr / osv-scan: It never refused on 75 pull requests and cost 74.6 CI minutes.

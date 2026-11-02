@@ -4,7 +4,7 @@ import {
   decideAutoMergeArmAtSha,
   resolveReviewProvenance,
   type ReviewStatusEntry,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 const TRUSTED = "remudero-reviewer[bot]";
 

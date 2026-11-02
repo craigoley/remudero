@@ -23,8 +23,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { selectAffectedSuites, shadowRecord, type AffectedSuitesInput } from "../src/lib/affected-suites.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { selectAffectedSuites, shadowRecord, type AffectedSuitesInput } from "#src/lib/affected-suites.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

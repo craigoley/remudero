@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
+import type { Config } from "#src/lib/config.js";
 import {
   buildSweepEffects,
   DEFAULT_SWEEP_POLICY,
@@ -18,7 +18,7 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 // Every age below is read against this frozen NOW, never the wall clock.
 const NOW = 1_800_000_000_000;

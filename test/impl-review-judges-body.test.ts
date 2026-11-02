@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { bodyContradictsDiff } from "../src/lib/review.js";
+import { bodyContradictsDiff } from "#src/lib/review.js";
 
 // ── recon-GK: the implementation review must judge the PR BODY, not the worker's chat text ──
 //

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createWorkerToolLineage, observeWorkerToolLineage, type WorkerToolReceipt, WORKER_TOOL_LINEAGE_MAX_CALLS } from "../src/lib/worker-tool-lineage.js";
+import { createWorkerToolLineage, observeWorkerToolLineage, type WorkerToolReceipt, WORKER_TOOL_LINEAGE_MAX_CALLS } from "#src/lib/worker-tool-lineage.js";
 
 test("test/worker-tool-lineage-redaction.test.ts identifiers are encoded and only bounded metadata reaches the sink", () => {
   const rows: WorkerToolReceipt[] = [];

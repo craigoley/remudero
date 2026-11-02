@@ -17,9 +17,9 @@ import {
   deriveAnalyticsSnapshotFromLedger,
   readAnalyticsCheckpoint,
   writeAnalyticsCheckpoint,
-} from "../src/lib/analytics-route.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/analytics-route.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   cohensKappa,
   deriveJudgeCalibration,
@@ -41,7 +41,7 @@ import {
   type JudgeLabel,
   type JudgeLabelStore,
   type JudgeVerdict,
-} from "../src/lib/judge-calibration.js";
+} from "#src/lib/judge-calibration.js";
 
 const NOW = "2026-09-27T12:00:00.000Z";
 const TASK = "W1-T9999";

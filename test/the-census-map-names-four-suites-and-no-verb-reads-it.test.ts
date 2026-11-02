@@ -23,7 +23,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { censusSuiteMembership, CENSUS_MEMBERSHIP_SUITES, KNOWN_CENSUS_SUITES } from "../src/lib/ci-parity.js";
+import { censusSuiteMembership, CENSUS_MEMBERSHIP_SUITES, KNOWN_CENSUS_SUITES } from "#src/lib/ci-parity.js";
 
 /** The suites a diff joins, as job names. */
 const suitesFor = (path: string): readonly string[] =>
@@ -129,7 +129,7 @@ test("W1-T2969 a REGISTRY-modelled suite is STILL named unadmitted — membershi
 
 // ── (v) THE DERIVATION IS REACHABLE FROM A TERMINAL, AND REPORTS RATHER THAN GATING ──────────
 
-import { censusMembershipCommand } from "../src/run-task.js";
+import { censusMembershipCommand } from "#src/run-task.js";
 
 /** Capture console output for one call. */
 function captured(fn: () => number): { code: number; out: string } {

@@ -25,13 +25,13 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 // Namespace imports, not named ones: this file must LOAD on the base tree (where these exports do
 // not exist yet) so its assertions, not a module-load error, are what fail there.
-import * as noLiveRemote from "./setup/no-live-remote.js";
-import * as tmpHygiene from "./setup/tmp-hygiene.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as noLiveRemote from "#test/setup/no-live-remote.js";
+import * as tmpHygiene from "#test/setup/tmp-hygiene.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { GH_CONFIG_DIR_PREFIX, pidIsAlive, reapDeadOwnerDirs } = noLiveRemote;

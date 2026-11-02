@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { providerEligibility, type ProviderCapacity } from "../src/lib/worker-provider.js";
+import { providerEligibility, type ProviderCapacity } from "#src/lib/worker-provider.js";
 import {
   createClaudeExecutableCache,
   spawnWorker,
@@ -11,8 +11,8 @@ import {
   type SpawnWorkerArgs,
   type WorkerResult,
   type WorkerSelectionAssignment,
-} from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+} from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 
 // Every worker.assignment row must say WHY its provider was chosen: the rule that fired, the
 // providers it weighed, and each subscription's headroom at that moment. The console explains a
