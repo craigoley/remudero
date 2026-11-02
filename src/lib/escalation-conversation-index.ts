@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { fixedClock, systemClock } from "./clock.js";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { parseAllThreads, type ThreadMessage, type ThreadStoreDeps } from "./inbox-thread.js";
 import { escalationCorrespondenceAttention, escalationIssueLocation } from "./escalation-conversation.js";
@@ -152,7 +153,7 @@ export function readEscalationConversationIndex(deps: ThreadStoreDeps & { reposi
       activeQuestion: last.role === "escalation" && last.extra?.question === true });
     rows.set(key, { sourceKind: "engineering", issueUrl, threadId, identity,
       subject: identity.prRef ? `Conversation about PR #${identity.prRef}` : "Conversation about this task",
-      preview: last.body.slice(0, 500), attention, lastActivityAt: new Date(last.ts).toISOString(),
+      preview: last.body.slice(0, 500), attention, lastActivityAt: fixedClock(last.ts).iso(),
       evidence: "saved_conversation", sourceText: flag?.sourceText.slice(0, 500) ?? "Saved native conversation" });
     if (rows.size > MAX_ITEMS) { incomplete = true; break; }
   }
@@ -179,7 +180,7 @@ export function readEscalationConversationIndex(deps: ThreadStoreDeps & { reposi
   const next = offset + items.length, hasMore = next < filtered.length;
   const byAttention: Record<EscalationMailboxAttention, number> = { needs_input: 0, waiting_for_agent: 0, archived: 0, unknown: 0 };
   for (const row of all) byAttention[row.attention]++;
-  return { state: "served", version: 1, repository: deps.repository, snapshot, generatedAt: new Date(deps.now?.() ?? Date.now()).toISOString(),
+  return { state: "served", version: 1, repository: deps.repository, snapshot, generatedAt: fixedClock(deps.now?.() ?? systemClock.now()).iso(),
     coverage: { state: incomplete ? "incomplete" : "complete", board: board.state, history: history.state, detail: incomplete
       ? "Some conversation sources could not be verified. Folder totals are unknown."
       : "The current board and saved conversation store were read." }, items,
