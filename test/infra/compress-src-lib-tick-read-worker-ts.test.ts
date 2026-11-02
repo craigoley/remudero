@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "@babel/parser";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function snapshot(source: string) {
@@ -30,9 +31,14 @@ test("W1-T10963: comment compression preserves executable code", () => {
   // Frozen before compression at f134daa07bf5ca8467f7c699968ef6e2051b6e5a.
   // Comparative evidence for this edit, not a new comment-volume ceiling.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/tick-read-worker.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 23556);
-  assert.equal(actual.tokenDigest, "af72e11268e9c2dd410d822aaa78f0da2f1c856547a9409e6168233f7842b48c");
-  assert.equal(actual.astDigest, "a46f2ba5a6ed4256ed0bdc998679606f0d812160c0fc8d5978b8048afb85444c");
+  const before = compressionPinBase("src/lib/tick-read-worker.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free.
+    const base = snapshot(before);
+    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
+    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+  }
   assert.ok(actual.commentLines < 1053, `comment lines must decrease from 1053; got ${actual.commentLines}`);
   assert.ok(actual.commentBytes < 82761, `comment bytes must decrease from 82761; got ${actual.commentBytes}`);
 
