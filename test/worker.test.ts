@@ -7,9 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { WorkerSettingsError } from "../src/lib/settings.js";
-import { WorkerKeychainError } from "../src/lib/worker-home.js";
-import { isPidAlive, killProcessGroup, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "../src/lib/worker-containment.js";
+import { WorkerSettingsError } from "#src/lib/settings.js";
+import { WorkerKeychainError } from "#src/lib/worker-home.js";
+import { isPidAlive, killProcessGroup, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "#src/lib/worker-containment.js";
 import {
   BILLING_MODE,
   CLAUDE_BIN_ENV_OVERRIDE,
@@ -33,8 +33,8 @@ import {
   workerKeychainGrantApps,
   workerLedgerFields,
   workerTranscript,
-} from "../src/lib/worker.js";
-import { ledgeredNonDispatchSpawn, runReview } from "../src/run-task.js";
+} from "#src/lib/worker.js";
+import { ledgeredNonDispatchSpawn, runReview } from "#src/run-task.js";
 import { BoundedOutput } from "#src/lib/bounded-file-tail.js";
 import { WORKER_OUTPUT_BYTES } from "#src/lib/worker.js";
 import fs from "node:fs";

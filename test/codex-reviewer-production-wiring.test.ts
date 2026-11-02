@@ -6,12 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { spawnCodexWorker } from "../src/lib/worker-provider.js";
-import { WorkerAbandonedError } from "../src/lib/worker.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
-import { loadDefaultPolicy } from "../src/lib/policy.js";
-import { runReview } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { spawnCodexWorker } from "#src/lib/worker-provider.js";
+import { WorkerAbandonedError } from "#src/lib/worker.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
+import { loadDefaultPolicy } from "#src/lib/policy.js";
+import { runReview } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 test("W1-T2946: runReview gives Codex a test-capable disposable review sandbox", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-codex-review-wiring-"));

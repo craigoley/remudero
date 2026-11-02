@@ -17,9 +17,9 @@ import { parse as parseYaml } from "yaml";
 
 // @ts-expect-error — plain .mjs, no declaration file. A namespace import, so a tree without the
 // export fails inside each test rather than at module load.
-import * as tierManifest from "../scripts/test-tier-manifest.mjs";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as tierManifest from "#scripts/test-tier-manifest.mjs";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CI_YAML = readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8");

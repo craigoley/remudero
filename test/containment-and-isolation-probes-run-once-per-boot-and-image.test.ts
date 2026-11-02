@@ -16,14 +16,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import * as runTaskModule from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { DispatchClaimReserver } from "../src/lib/dispatch-claim.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { spawnWorker } from "../src/lib/worker.js";
-import type { ProbeExecResult as ContainmentProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as runTaskModule from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { DispatchClaimReserver } from "#src/lib/dispatch-claim.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { spawnWorker } from "#src/lib/worker.js";
+import type { ProbeExecResult as ContainmentProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- read through the namespace; see header.
 const mod = runTaskModule as any;

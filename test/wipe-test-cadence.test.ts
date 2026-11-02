@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { loadPlan } from "../src/lib/plan.js";
-import type { Config } from "../src/lib/config.js";
-import type { LedgerUnionResult } from "../src/lib/ledger-grep.js";
-import type { LearningsIndex } from "../src/lib/learnings.js";
-import type { Policy } from "../src/lib/policy.js";
+import { loadPlan } from "#src/lib/plan.js";
+import type { Config } from "#src/lib/config.js";
+import type { LedgerUnionResult } from "#src/lib/ledger-grep.js";
+import type { LearningsIndex } from "#src/lib/learnings.js";
+import type { Policy } from "#src/lib/policy.js";
 import {
   readWipeTestAblationEvidence,
   recordWipeTestCadenceFire,
@@ -17,14 +17,14 @@ import {
   wipeTestCadenceMarkerPath,
   type WipeTestAblationEvidence,
   type WipeTestEvidenceCost,
-} from "../src/lib/measurement-cadence.js";
+} from "#src/lib/measurement-cadence.js";
 // A namespace import, so a test of one export fails alone where that export is missing rather than the file.
-import * as cadence from "../src/lib/measurement-cadence.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { runWipeTestPair, WIPE_TEST_PAIRING_FLOOR } from "../src/lib/wipe-test.js";
-import { buildWipeTestCadenceDaemonHooks, daemonCommand } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as cadence from "#src/lib/measurement-cadence.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import { runWipeTestPair, WIPE_TEST_PAIRING_FLOOR } from "#src/lib/wipe-test.js";
+import { buildWipeTestCadenceDaemonHooks, daemonCommand } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = new Date("2026-09-06T12:00:00Z");
 const ON = { enabled: true, minIntervalMinutes: 1440, maxPerDay: 1, baseShare: 1, settledHalfWidthTurns: 2 };

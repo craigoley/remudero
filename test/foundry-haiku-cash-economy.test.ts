@@ -3,10 +3,10 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { fixedClock } from "../src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { openWeightPriceFor, OPENWEIGHT_CONTEXT_WINDOWS, openWeightAllowancePath,
-  openWeightReservationUsd, openWeightUsageUsd, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
+  openWeightReservationUsd, openWeightUsageUsd, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 
 const MODEL = "claude-haiku-5-5";
 const env = { RMD_FOUNDRY_CLAUDE_API_KEY: "test-only-key",

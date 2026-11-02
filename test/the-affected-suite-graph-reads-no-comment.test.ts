@@ -1,7 +1,7 @@
 /**
  * W1-T5701 — the affected-suite graph reads no comment.
  *
- * `specifiers` and `namedPaths` once matched raw source, so a JSDoc `{@link import("./b.js")}` or a
+ * `specifiers` and `namedPaths` once matched raw source, so a JSDoc `{@link import("#test/b.js")}` or a
  * backticked test path became a graph edge: a change to `b` selected the suites of `a`, which only
  * CITES `b` in prose. Comments are stripped (string-aware) first, and a named path never targets a
  * `*.test.ts`.
@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { selectAffectedSuites, stripComments } from "../src/lib/affected-suites.js";
+import { selectAffectedSuites, stripComments } from "#src/lib/affected-suites.js";
 
 function select(tree: Record<string, string>, changed: string[]): string[] {
   return selectAffectedSuites(changed, { files: new Map(Object.entries(tree)), pathReaders: [] }).suites;

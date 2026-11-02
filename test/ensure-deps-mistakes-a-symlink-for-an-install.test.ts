@@ -11,9 +11,9 @@ import {
   parseWhitelistedProof,
   pinnedVitestCli,
   type ProofSpawner,
-} from "../src/lib/review.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { absentRunnerCheckout, checkoutWithPackage } from "./helpers/proof-runner-checkout.js";
+} from "#src/lib/review.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { absentRunnerCheckout, checkoutWithPackage } from "#test/helpers/proof-runner-checkout.js";
 
 // W1-T4585: a checkout-local Vitest proof now comes from a repository that runs Vitest (remudero-site);
 // core's own apps/dashboard root was retired with the dashboard.

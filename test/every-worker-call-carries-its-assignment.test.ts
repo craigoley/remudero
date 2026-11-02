@@ -1,4 +1,4 @@
-import { maskLiterals, stripComments } from "../src/lib/test-impact-map.js";
+import { maskLiterals, stripComments } from "#src/lib/test-impact-map.js";
 /**
  * W1-T4615: every worker call carries its assignment.
  *
@@ -22,16 +22,16 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import {
   spawnWorker,
   type SpawnWorkerArgs,
   type WorkerResult,
   type WorkerSelectionAssignment,
   type WorkerStreamEvent,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 import {
   archiveWorkerTranscript,
   attributeWorkerStreamEvent,
@@ -39,7 +39,7 @@ import {
   runReview,
   WORKER_ACTIVITY_LEDGER_STEP,
   type WorkerStateSensor,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 // @source-text-subject: the census half inventories spawnWorker entrypoints in source text; its
 // planted-site control proves the census names a newly unreceipted caller.

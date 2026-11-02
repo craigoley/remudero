@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { selectAffectedSuites } from "../src/lib/affected-suites.js";
+import { selectAffectedSuites } from "#src/lib/affected-suites.js";
 
 /**
  * W1-T4994 — A SWEEP-SEAM CHANGE SELECTS THE VERDICT-REUSE SUITE. The suite drives runSweep and

@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { selectAffectedSuites, shadowRecord, stripComments, type AffectedSuitesInput } from "../src/lib/affected-suites.js";
+import { selectAffectedSuites, shadowRecord, stripComments, type AffectedSuitesInput } from "#src/lib/affected-suites.js";
 import {
   buildImpactMap,
   decodeMappings,
@@ -34,13 +34,13 @@ import {
   type ImpactArmContext,
   type ImpactArmInput,
   type ImpactMap,
-} from "../src/lib/test-impact-map.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/test-impact-map.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
-import * as ratchet from "../scripts/coverage-merge-ratchet.mjs";
+import * as ratchet from "#scripts/coverage-merge-ratchet.mjs";
 // @ts-expect-error -- plain .mjs script, no type declarations
-import * as shadowScript from "../scripts/select-affected-suites.mjs";
+import * as shadowScript from "#scripts/select-affected-suites.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TSX = import.meta.resolve("tsx");

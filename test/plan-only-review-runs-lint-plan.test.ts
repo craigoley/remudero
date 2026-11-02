@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { judgeReview, type PlanLintOutcome } from "../src/lib/review.js";
-import { lintPlanForReview, planLintOutcomeFromOutput } from "../src/run-task.js";
-import { discriminateReviewReuse } from "../src/lib/sweep.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { judgeReview, type PlanLintOutcome } from "#src/lib/review.js";
+import { lintPlanForReview, planLintOutcomeFromOutput } from "#src/run-task.js";
+import { discriminateReviewReuse } from "#src/lib/sweep.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 /**
  * W1-T4423 — A CONSUMER FILING PASSED REVIEW AS "GATED BY LINT-PLAN" WHEN NO LINT-PLAN RAN.

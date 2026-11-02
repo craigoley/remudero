@@ -1,0 +1,45 @@
+- id: W1-T11105
+  title: A fleet build's pre-open gate also runs a light gate in shadow (census counts plus the cheap fast-gate checks, without census suites or rule-checks) and ledgers both verdicts and durations, so the switch to the light gate is decided on measured misses
+  repo: remudero
+  depends_on: [W1-T11098]
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the pre-open gate, the preflight step selection it launches, and the gate row it writes; shadow only, the full gate still decides
+  origin: operator-session#preflight-throughput-2026-11-02
+  plan_refs:
+    - W1-T6435
+    - W1-T9556
+    - W1-T11098
+  files:
+    - src/lib/preopen-gate.ts
+    - src/lib/ci-parity.ts
+    - src/run-task.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/ci/gates/a-light-pre-open-gate-is-measured-beside-the-full-one.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Before the full pre-open gate, a fleet build runs a light gate (census-precheck --counts-only plus every fast-gate step except census-precheck and rule-checks) under its own short bound, and the full gate then runs and decides exactly as before
+      proof: "unit test: test/ci/gates/a-light-pre-open-gate-is-measured-beside-the-full-one.test.ts"
+    - claim: The gate row records the light gate's result, its failed steps and duration beside the full gate's, plus a miss flag that is true only when the full gate failed on a census-suite or rule-check step the light gate does not run while the light gate passed
+      proof: "grep: W1-T11105 criterion 2 in test/ci/gates/a-light-pre-open-gate-is-measured-beside-the-full-one.test.ts"
+    - claim: rmd preflight takes an option naming fast-gate steps to leave out, used only by the light gate; with no such option every step runs as before
+      proof: "grep: W1-T11105 criterion 3 in test/ci/gates/a-light-pre-open-gate-is-measured-beside-the-full-one.test.ts"
+  rationale: |
+    MEASURED 2026-11-02, implement.preopen_gate rows in the core ledger union from 2026-11-01T12Z (about 26 h):
+    - 54 gates took 23 worker-hours: median 24 min, p90 38 min, max 139 min.
+    - 32 (59%) ended unmeasured: "fast gate exceeded its backstop" at about 38.6 min (measured-p95-plus-iqr), with no readable summary. 16 of them named "environment: rule-checks". 11 of those runs opened their PR anyway, and 10 handed off.
+    - 10 passed (median 10 min). 12 failed fast: 8 on project:unavailable (environment), 4 on census-precheck.
+    - Inside an author static run on 2026-11-02, census-precheck took 1,896 s and rule-checks 924 s of 3,085 s. CI runs both before merge.
+    Operator ruling 2026-11-02 (AskUserQuestion): "Shadow first, then switch". The gate runs everything for 48 h while recording what the lighter gate would have decided, then the switch happens on the operator's yes, against the hit/miss numbers.
+  design: |
+    1. ci-parity's fast-gate run accepts a skip set (job names). rmd preflight exposes it as --skip-step <job> (repeatable). Absent, nothing changes.
+    2. preopen-gate runs the light gate first: the same contained launch with --skip-step census-precheck --skip-step rule-checks, plus census-precheck --counts-only. Its bound is the light gate's own measured p95 plus IQR once 20 rows exist, 10 min before that. Then the full gate runs exactly as today.
+    3. implement.preopen_gate gains light_result, light_failed, light_duration_ms and light_miss (full failed on census-precheck or rule-checks only, and light passed). It also gains light_would_save_ms (full duration minus light duration) when the full gate passed or was unmeasured.
+    4. Promotion (a separate operator-approved change): after 48 h of rows, report light_miss count against the full gate's real catches, and the total would-save hours.
+  note: |
+    reservation hand-off: run-unfiled-1793629687846 -> run-unfiled-1793629687846
+    Reserved with rmd next-task-id from the operator checkout (W1-T11105 on run-unfiled-1793629687846). Operator ruling 2026-11-02: "Shadow first, then switch". The test path is where rmd test-place puts a suite importing src/lib/preopen-gate.ts; a builder whose final imports place it elsewhere amends this record first.

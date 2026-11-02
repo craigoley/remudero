@@ -8,7 +8,7 @@ import {
   commitWorkerEdits,
   pathIsUnderDeclaredSurface,
   workerChangedPaths,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 // W1-T3696 A1. The worker edits; the HARNESS commits. This is the one verb missing beside the
 // existing CAS-guarded push, and it is what lets an implement lane be bounded without Bash --

@@ -8,9 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
-import * as containment from "../src/lib/containment.js";
-import { GENERIC_EXIT_CODE, RmdError, exitCodeFor } from "../src/lib/errors.js";
-import { spawnWorker, workerEgressMode, workerLedgerFields, type SpawnWorkerArgs } from "../src/lib/worker.js";
+import * as containment from "#src/lib/containment.js";
+import { GENERIC_EXIT_CODE, RmdError, exitCodeFor } from "#src/lib/errors.js";
+import { spawnWorker, workerEgressMode, workerLedgerFields, type SpawnWorkerArgs } from "#src/lib/worker.js";
 
 const settings = JSON.parse(readFileSync(new URL("../settings/worker.json", import.meta.url), "utf8"));
 const domains: string[] = settings.sandbox.network.allowedDomains;

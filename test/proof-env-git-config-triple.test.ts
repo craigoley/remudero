@@ -15,7 +15,7 @@
 // this task's `note:`).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildProofEnv } from "../src/lib/review.js";
+import { buildProofEnv } from "#src/lib/review.js";
 
 /** A minimal, otherwise-empty parent env carrying only the fields under test, so every
  *  assertion below is about the git-config triple specifically — never diluted by whatever this

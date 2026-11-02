@@ -31,9 +31,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
-import { lintPlanCommand, type LintPlanStatusDeps } from "../src/run-task.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
+import { FAST_GATE_STEPS, runPreflightFast } from "#src/lib/ci-parity.js";
+import { lintPlanCommand, type LintPlanStatusDeps } from "#src/run-task.js";
 
 const REPO_ROOT = process.cwd();
 const LINT_PLAN_STEP = FAST_GATE_STEPS.find((s) => s.job === "lint-plan");

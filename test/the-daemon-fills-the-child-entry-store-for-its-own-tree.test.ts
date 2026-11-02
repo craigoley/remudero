@@ -13,10 +13,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { childEntryArgv, DAEMON_TREE_FILL_SOURCE, type ChildEntryStoreOptions } from "../src/lib/child-entry-argv.js";
+import { childEntryArgv, DAEMON_TREE_FILL_SOURCE, type ChildEntryStoreOptions } from "#src/lib/child-entry-argv.js";
 import {
   buildIntoStore, pruneChildEntryStore, STORE_IDLE_MS, type BuildIntoStoreOptions, type StoreBuildResult,
-} from "../src/lib/child-entry-store.js";
+} from "#src/lib/child-entry-store.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO, "scripts", "build-child-entries.mjs");

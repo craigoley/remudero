@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   claudeScratchRoot,
   DEFAULT_SCRATCH_SWEEP_MAX_AGE_MS,
@@ -15,7 +15,7 @@ import {
   scratchSlugForCwd,
   scratchTreeIsFresh,
   sweepStaleWorkerScratch,
-} from "../src/lib/worker-scratch.js";
+} from "#src/lib/worker-scratch.js";
 
 const UID = 4242;
 

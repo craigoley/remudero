@@ -144,7 +144,7 @@ test("W1-T5515: a merge group commit is gated on exactly ci, coverage-ratchet an
   assert.ok(mergeGroupRequired.length >= 18);
   // ...and it is a strict subset: the census found real PR-only names it leaves out.
   assert.ok(REQUIRED.length > mergeGroupRequired.length);
-  for (const name of ["prompt-surface-gate", "mutation-ratchet", "commitlint", "acceptance-author-gate", "scan-pr / osv-scan", "License Review"]) {
+  for (const name of ["prompt-surface-gate", "mutation-ratchet", "commitlint", "acceptance-author-gate", "License Review"]) {
     assert.ok(REQUIRED.includes(name) && !mergeGroupRequired.includes(name), name);
   }
 

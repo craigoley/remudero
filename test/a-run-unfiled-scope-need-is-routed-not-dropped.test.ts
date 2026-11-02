@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { runFixRung } from "./helpers/run-task-test.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 type Run = Parameters<typeof runFixRung>[0];
 type Row = { step: string } & Record<string, unknown>;

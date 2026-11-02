@@ -4,11 +4,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { checkReaderAgreement, type ReaderFigures } from "../src/lib/reader-agreement.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { runSweep, type SweepDeps } from "./helpers/sweep-test.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
+import { checkReaderAgreement, type ReaderFigures } from "#src/lib/reader-agreement.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { runSweep, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
 
 const figures: ReaderFigures = {
   dispatchStreaks: { "W1-T2982": 2 }, openPrCount: 3, queuedTaskCount: 4,
@@ -98,7 +98,7 @@ test("W1-T4841: real append default persists a disagreement", async () => {
   const { path } = corpus();
   await checkReaderAgreement({ ledgerPath: path, runId: "SWEEP-persist",
     boardReader: () => ({ ...figures, openPrCount: 5 }), independentReader: () => figures });
-  const { readLedgerLines } = await import("../src/lib/status.js");
+  const { readLedgerLines } = await import("#src/lib/status.js");
   const row = readLedgerLines(path).find(row => row.step === "reader.disagreement");
   assert.equal(row?.run_id, "SWEEP-persist");
   assert.equal(row?.board_value, 5);

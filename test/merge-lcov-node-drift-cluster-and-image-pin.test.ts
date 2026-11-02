@@ -45,8 +45,8 @@ import {
   hostCausedSuiteRedsStep,
   type CiParityStepResult,
   type HostFacts,
-} from "../src/lib/ci-parity.js";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
+} from "#src/lib/ci-parity.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");

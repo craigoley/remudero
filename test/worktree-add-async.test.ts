@@ -3,8 +3,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { WorktreeBaseStaleError, readWorktreeBase, worktreeAdd, worktreeAddAsync } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { WorktreeBaseStaleError, readWorktreeBase, worktreeAdd, worktreeAddAsync } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function seededRepo() {
   const repo = gitRepo({ kind: "worktree-add-async" });

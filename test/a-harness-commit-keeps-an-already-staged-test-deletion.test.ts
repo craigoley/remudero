@@ -11,8 +11,8 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { commitWorkerEdits } from "../src/run-task.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { commitWorkerEdits } from "#src/run-task.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 function configure(repo: GitRepo): void {
   repo.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);

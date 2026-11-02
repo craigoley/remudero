@@ -19,7 +19,13 @@
     - src/lib/model-canary-runner.ts
     - src/lib/model-canary-command.ts
     - src/lib/model-canary-ledger.ts
+    - src/lib/model-canary-suite.ts
+    - src/lib/model-canary-schedule.ts
+    - src/lib/model-canary-metrics.ts
     - test/model-canary-command.test.ts
+    - test/model-canary-suite.test.ts
+    - test/model-canary-schedule.test.ts
+    - test/model-canary-metrics.test.ts
     - test/routing/model-canary-coding-isolation.test.ts
     - test/routing/model-canary-native-session.test.ts
   status: queued
@@ -42,7 +48,11 @@
     unless the exact existing contract authorizes it. Maintain separate author/refusal/partial,
     correctness, invocation, usage/cost and served-identity evidence. Keep execution unarmed until
     an owner qualifies and explicitly releases its existing controls; no new schedule or public
-    publication is authorized."
+    publication is authorized. Make coding a first-class versioned case in the existing suite,
+    runner and schedule contracts without casts or misleading review/tool family labels. Retain
+    the native 128-slot and serial-owner bounds. Join actual coding resource observations through
+    a separately scoped versioned metrics receipt; configured caps are not measured peaks and
+    unsupported isolation or missing resource evidence remains refused or unavailable."
   note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
     this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
     grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
@@ -52,7 +62,12 @@
     Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
     coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
     requirements. Filing neither supplies a missing qualification route nor resets or transfers any
-    old head-bound allowance.
+    old head-bound allowance. The operator's 2026-11-02 implementation approval includes the
+    suite/schedule/metrics contract integration needed for honest first-class coding cases.
+    Normal trusted exact-head SOURCE CI may supply the full isolated Linux suite and owning-SF
+    coverage evidence when its real receipts are complete; this is not an additional manual
+    Azure full-suite gate. Identify a specific missing proof before adding a targeted run.
+    Keep runtime-version provenance explicit; a Node24 result is not a Node22 test result.
   acceptance:
     - claim: the existing private coding executor contains filesystem and credential effects and closes
         its real descendants

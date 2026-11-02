@@ -1,0 +1,79 @@
+- id: W1-T11096
+  title: Keep an engineering escalation readable and answerable through its exact native conversation
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20
+  risk: high
+  band_meaning: span
+  origin: human#2026-11-02-console-inbox-delivery
+  plan_refs: [W1-T2494, W1-T2496, W1-T4471, W1-T8887, CONSOLE-T128]
+  files:
+    - src/lib/escalation-conversation.ts
+    - src/lib/panel-actions.ts
+    - src/lib/inbox-thread.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/inbox/escalation-conversation.test.ts
+    - test/inbox/escalation-conversation-serving.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The operator's Now attention item opens GitHub issue 16183 instead of an internal conversation.
+    Inspected core ff61a9c has only proposal identities in GET /v1/inbox/thread. The native escalation
+    reply already accepts task/class/cause/prRef, but its console helper loses optional identity and
+    its response does not distinguish a saved answer from later work. The existing thread producer
+    stores summary/detail but omits recommendation/options. Do not fabricate a proposal identity,
+    an executable repair, or another message store. W1-T8887 remains the sole executable-choice task.
+  design: |
+    Add a bounded read-only GET /v1/escalation/thread?issueUrl=<canonical GitHub issue URL>, mounted
+    in the real serve assembly and documented in OpenAPI. Bind the requested issue to the serving
+    repository; read its current native source through the existing asynchronous GitHub transport,
+    with bounded/coalesced on-demand caching and explicit observed time, revision and source state.
+    Require a positive native escalation receipt, using the current board or a bounded ledger-union
+    positive search. Missing evidence stays unverified; an ordinary issue with copied metadata is
+    not a native escalation. Reject malformed, foreign, non-escalation and unsupported source records. Parse only the native
+    anchored Task/Class/Cause/Options/Recommendation format, preserving missing/unknown information.
+    Derive the SAME task/class/cause/PR thread identity as escalate.ts, read the existing store and
+    return bounded messages plus source recommendation/options. Missing or unreadable history is an
+    explicit state and disables ordinary reply; do not treat a source read as dispatch authority.
+    For a legacy escalation with no saved messages, advertise an explicit startConversation capability
+    only after positively reading an existing healthy native store and verifying the open native source.
+    A GET never writes. A bound first reply imports the verified original source and appends the exact
+    answer under the existing store mutation lock. Missing, corrupt or partial stores cannot start one.
+    Native recommendationReplies may advertise exact Accept and Decline prose while input is needed.
+    Bind the current recommendation, response kind and exact answer to the same immutable reply intent.
+    These controls record input only; they do not execute repair, approve a task or close an issue.
+    Extend the existing LOW escalation reply with optional bounded intentId and current source/thread
+    binding. Use native durable append identity so repeated identical intent does not append twice,
+    and conflicting text or changed source refuses. Preserve legacy callers. Return saved-answer
+    identity/sequence and separate downstream-input delivery evidence; partial capture or a lost
+    response never proves work ran. Do not silently repeat feedback side effects after an ambiguous
+    response. Readback can reconcile a saved intent. No new executor, choice route, model or budget.
+    Exercise real file stores and real assembled HTTP service in fixtures, plus unavailable source,
+    malformed/oversize bodies, wrong repository/thread, changed source, duplicate/conflicting intent,
+    partial side effects, and source-read timeout. No test may post on a real escalation.
+  acceptance:
+    - claim: the production serve assembly calls the new native conversation reader
+      proof: 'grep: buildEscalationConversationRoute( in src/lib/serve.ts'
+    - claim: native escalation detail preserves the recommendation and exact conversation identity
+      proof: 'unit test: escalation conversation preserves the native recommendation and exact identity'
+    - claim: foreign or unreadable escalation sources never enable a reply
+      proof: 'unit test: escalation conversation refuses foreign and unreadable source identity'
+    - claim: a repeated reply intent records one answer and separates input delivery from work completion
+      proof: 'unit test: escalation reply intent records once without claiming completed work'
+    - claim: the real authenticated service mounts the escalation conversation read
+      proof: 'unit test: assembled service serves an authenticated escalation conversation'
+    - claim: a positively empty native store can start the legacy escalation discussion only on a bound reply
+      proof: 'unit test: an existing native escalation without saved history starts one conversation on the first reply'
+    - claim: recommendation controls record exact native prose without approving or executing work
+      proof: 'unit test: native Accept and Decline record the exact recommendation answer without approving work'
+  falsifier: |
+    On the filing base there is no escalation conversation read, and only proposal ids resolve in the
+    inbox detail. Removing the exact cause/PR identity or treating append as completed work fails the
+    named fixtures. Delete the fix and retain failing/restored results. Closing or approving a task
+    must never satisfy these criteria. Keep missing live/owner/deployment evidence explicit.

@@ -6,15 +6,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
-import { canonicalWorkerProviderId, ConfigValidationError, enabledWorkerProviders, validateConfig, type Config } from "../src/lib/config.js";
-import { loadMounts, mountsPath, MountsError, TierInvariantError, validateMounts } from "../src/lib/mounts.js";
+import { canonicalWorkerProviderId, ConfigValidationError, enabledWorkerProviders, validateConfig, type Config } from "#src/lib/config.js";
+import { loadMounts, mountsPath, MountsError, TierInvariantError, validateMounts } from "#src/lib/mounts.js";
 import {
   ProviderRoutingPolicyError,
   writeProviderRoutingPolicyOverride,
   type ProviderRoutingPolicyOverrideInput,
-} from "../src/lib/provider-routing-policy.js";
-import { LiveSpawnBlockedError } from "../src/lib/spawn-guard.js";
-import { spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "../src/lib/worker.js";
+} from "#src/lib/provider-routing-policy.js";
+import { LiveSpawnBlockedError } from "#src/lib/spawn-guard.js";
+import { spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "#src/lib/worker.js";
 import {
   OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS,
   OPENWEIGHT_ALLOWANCE_FILENAME,
@@ -42,13 +42,13 @@ import {
   selectOpenWeightModel,
   spawnOpenWeightWorker,
   type OpenWeightAllowanceState,
-} from "../src/lib/worker-provider.js";
-import { inboxDraftPrompt, INBOX_DRAFT_DISALLOWED_TOOLS } from "../src/lib/inbox.js";
-import { buildEscalationJudgeSpawnArgs, judgeEscalation, type Escalation } from "../src/lib/escalate.js";
-import { buildVerifyHumanJudgeSpawnArgs, VERIFY_HUMAN_JUDGE_TOOLS } from "../src/lib/verify-human-judge.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { buildInboxDraftSpawnArgs, draftProposalBatch } from "../src/run-task.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/worker-provider.js";
+import { inboxDraftPrompt, INBOX_DRAFT_DISALLOWED_TOOLS } from "#src/lib/inbox.js";
+import { buildEscalationJudgeSpawnArgs, judgeEscalation, type Escalation } from "#src/lib/escalate.js";
+import { buildVerifyHumanJudgeSpawnArgs, VERIFY_HUMAN_JUDGE_TOOLS } from "#src/lib/verify-human-judge.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { buildInboxDraftSpawnArgs, draftProposalBatch } from "#src/run-task.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SETTINGS_FILE = join(REPO_ROOT, "settings", "worker.json");

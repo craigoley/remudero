@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireTestSlot } from "../src/lib/test-slot.js";
+import { acquireTestSlot } from "#src/lib/test-slot.js";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "rmd-slot-file-safety-")), logs: string[] = [];

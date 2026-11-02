@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runReview } from "../src/run-task.js";
-import { ghShim, type GhShim } from "./helpers/gh-shim.js";
-import { REVIEW_ENGINE_REVISION, reviewInputDigest } from "../src/lib/review.js";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { runReview } from "#src/run-task.js";
+import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
+import { REVIEW_ENGINE_REVISION, reviewInputDigest } from "#src/lib/review.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 /**
  * W1-T4468 — a review whose FIRST effect, the pending post, is refused because the PR already

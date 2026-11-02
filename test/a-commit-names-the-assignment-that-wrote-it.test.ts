@@ -28,10 +28,10 @@ import {
   ASSIGNMENT_ID_RE,
   ASSIGNMENT_LINE_RE,
   TRAILER_LINE_RE,
-} from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { harnessCommitForShellLessWorker, headProvenanceFields } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { harnessCommitForShellLessWorker, headProvenanceFields } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const IDENTITY: Record<string, string> = {
   GIT_AUTHOR_NAME: "t",

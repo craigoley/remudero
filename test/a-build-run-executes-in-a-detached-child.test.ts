@@ -12,23 +12,23 @@ import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { deriveLedgerActor, markRunChildProcessActor } from "../src/lib/ledger.js";
-import { isFleetAutomationActor } from "../src/lib/operator-interventions.js";
-import { TaskAdmissionError } from "../src/lib/plan.js";
-import type { LearnedReservation } from "../src/lib/host-memory-learning.js";
+import { deriveLedgerActor, markRunChildProcessActor } from "#src/lib/ledger.js";
+import { isFleetAutomationActor } from "#src/lib/operator-interventions.js";
+import { TaskAdmissionError } from "#src/lib/plan.js";
+import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import {
   RUN_CHILD_ABORT_STEP, RUN_CHILD_FALLBACK_STEP, RUN_CHILD_LOST_STEP, RUN_CHILD_SPAWNED_STEP, RUN_CHILD_STDERR_FILE,
   abortRunChild, boundStderrLog, chainAbortSignal, pruneTerminalRunDirs, readFileTail, runChildModeIsOn, spawnRunChild, writePlanSnapshot,
   type RunChildHandle, type RunChildLaunch, type SpawnRunChildPorts,
-} from "../src/lib/run-child.js";
+} from "#src/lib/run-child.js";
 import {
   RUN_CHILD_SCHEMA, classifyRunChildError, readSpec, readStatus, runDir, writeSpec, writeStatus,
   type RunChildProbe, type RunChildState, type RunChildStatus,
-} from "../src/lib/run-child-contract.js";
-import type { RunResult } from "../src/lib/run-result.js";
-import { killProcessGroup } from "../src/lib/worker-containment.js";
-import { runChildMain, type RunChildRunTask } from "../src/run-child-main.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/run-child-contract.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import { killProcessGroup } from "#src/lib/worker-containment.js";
+import { runChildMain, type RunChildRunTask } from "#src/run-child-main.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SHA = "b".repeat(40);
@@ -631,7 +631,7 @@ test("terminal run directories are pruned beyond the newest, and a live one neve
 // ── the daemon's wiring: when `runOne` starts a child and when it stays in-process ───────────────────────────
 
 test("the daemon's runOne starts a child only under mode on, and falls back with a reason otherwise", async () => {
-  const { runInChildWhenOn } = await import("../src/run-task.js");
+  const { runInChildWhenOn } = await import("#src/run-task.js");
   const root = tmp("wiring");
   mkdirSync(join(root, "state"));
   const config = { claudeBin: "/bin/true", root, installRoot: process.cwd() } as never;

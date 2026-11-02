@@ -10,10 +10,10 @@ import {
   planRiskJudgeAction,
   readRiskPolicy,
   type RiskJudgeVerdict,
-} from "../src/lib/risk-judge.js";
-import { RELEASE_LEDGER_STEP, type Plan, type Task } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { approveParkedTask, productionVerifyHumanRelease, verifyHumanReleaseProposalId } from "../src/run-task.js";
+} from "#src/lib/risk-judge.js";
+import { RELEASE_LEDGER_STEP, type Plan, type Task } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { approveParkedTask, productionVerifyHumanRelease, verifyHumanReleaseProposalId } from "#src/run-task.js";
 
 /**
  * W1-T4050 — RISK LEVELS ARE HARD-CODED, NOT CONFIGURED.

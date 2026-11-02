@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { defaultRunGate, preopenGateCommand, runPreopenGate } from "../src/lib/preopen-gate.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { FAST_GATE_STEPS, runPreflightFast } from "#src/lib/ci-parity.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
+import { defaultRunGate, preopenGateCommand, runPreopenGate } from "#src/lib/preopen-gate.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function scratch(kind: string): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t8920-${kind}-`));

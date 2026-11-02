@@ -4,9 +4,9 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { execWhitelistedProof, parseWhitelistedProof } from "../src/lib/review.js";
-import { COMMANDS } from "../src/run-task.js";
-import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
+import { execWhitelistedProof, parseWhitelistedProof } from "#src/lib/review.js";
+import { COMMANDS } from "#src/run-task.js";
+import { checkProofCommand, CHECK_PROOF_EXIT } from "#src/lib/check-proof.js";
 
 // ── W1-T387: check-proof and the reviewer's executor CANNOT be two different programs ───────────
 //

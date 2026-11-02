@@ -8,9 +8,9 @@ import { parse as parseYaml } from "yaml";
 
 // @ts-expect-error — plain .mjs, no declaration file (same convention as this repo's other
 // scripts/*.mjs-importing suites, e.g. test/an-unmeasured-test-file-is-not-free-to-the-sharder.test.ts).
-import { DEFAULT_CI_SHARD_COUNT, proposalIsMaterial } from "../scripts/test-tier-manifest.mjs";
+import { DEFAULT_CI_SHARD_COUNT, proposalIsMaterial } from "#scripts/test-tier-manifest.mjs";
 // @ts-expect-error — plain .mjs, no declaration file.
-import { assertExpectedShardCount } from "../scripts/coverage-merge-ratchet.mjs";
+import { assertExpectedShardCount } from "#scripts/coverage-merge-ratchet.mjs";
 
 // ── W1-T4436 ──────────────────────────────────────────────────────────────────────────────────
 //

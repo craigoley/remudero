@@ -27,8 +27,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { main } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { main } from "#src/run-task.js";
 
 class ProcessExitCalled extends Error {
   constructor(public code: number | undefined) {

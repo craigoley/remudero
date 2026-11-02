@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const PRECHECK = pathToFileURL(join(ROOT, "scripts/census-precheck.mjs")).href;
