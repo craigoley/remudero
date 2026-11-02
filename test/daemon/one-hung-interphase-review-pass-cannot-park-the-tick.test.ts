@@ -55,7 +55,7 @@ function fixture(t: TestContext, scope?: "pause" | "drain") {
   };
 }
 
-test("one hung interphase review pass cannot park the tick after the stop bound", async (t) => {
+test("W1-T11071 criterion 1: one hung interphase review pass cannot park the tick after the stop bound", async (t) => {
   const f = fixture(t);
   await f.startPass();
   await f.advance(7_000);
