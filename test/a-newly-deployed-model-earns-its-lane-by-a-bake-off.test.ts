@@ -39,6 +39,7 @@ test("W1-T4926: the trial covers every thinking level the model accepts", () => 
   const candidates = deploymentCandidates(deployed, incumbent);
   assert.deepEqual(candidates.map((c) => [c.model, c.effort]), [
     ["gpt-oss-120b", "medium"],
+    ["gpt-5-nano", undefined],
     ...["low", "medium", "high"].map((effort) => ["gpt-5-nano", effort]),
     ...["low", "medium", "high"].map((effort) => ["claude-sonnet-5-5", effort]),
   ]);
