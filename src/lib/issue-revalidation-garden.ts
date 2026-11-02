@@ -253,6 +253,9 @@ export interface RevalidationVerdict {
   /** A referent verdict's OPEN PR and its current head, read from the batched open-PR view the referent
    *  derivation already holds. Absent when the PR is not open or its head is unknown. */
   openPrHead?: { prNumber: number; sha: string };
+  /** A referent verdict's PR when the same batched view reads it MERGED or CLOSED: no stage of it can
+   *  still be stalled. Absent when the PR is open, unread, or not named. */
+  terminalPr?: { prNumber: number; state: "merged" | "closed" };
 }
 
 export type RevalidationAction = "close" | "refresh" | "convert" | "keep";
@@ -272,6 +275,12 @@ export interface PriorVerdict {
   acted?: boolean;
   reason?: string;
   citation?: string;
+  /** The newest earlier row whose action was a refresh that ACTED, from any row in the window, not only
+   *  the newest one: a refresh is followed by `keep` rows, and reading only the newest row let a `keep`
+   *  hide the refresh, so the pass after it refreshed again (#15114: 34 comments in 4 days). */
+  lastRefreshAt?: string;
+  /** The newest earlier row whose convert ACTED: a `keep` after it must not let the next pass convert again. */
+  lastConvertAt?: string;
 }
 
 const OPERATOR_OWNED_CLASSES = new Set(["MANUAL", "GRILL"]);
@@ -338,7 +347,7 @@ export function decideAction(input: {
   if (verdict.verdict === "resolved") {
     if (!verdict.citation) return { action: "keep", guard: "no-citation" };
     if (isAbsenceOnlyCitation(verdict.citation)) return { action: "keep", guard: "absence-only-citation" };
-    // A stall report is the fleet's own observation, not an operator capacity decision: its two deterministic
+    // A stall report is the fleet's own observation, not an operator capacity decision: its deterministic
     // resolutions may close a MANUAL issue. A GRILL, and any other MANUAL resolution, still only refreshes.
     const fleetObservation = input.stageStallResolved === true && input.escalationClass === "MANUAL";
     if (operatorOwned && !fleetObservation) return refreshUnlessRecent(input.prior, input.nowMs, "operator-owned-class");
@@ -347,14 +356,17 @@ export function decideAction(input: {
   }
   if (verdict.verdict === "convert-to-task") {
     if (operatorOwned) return refreshUnlessRecent(input.prior, input.nowMs, "operator-owned-class");
-    if (input.prior?.action === "convert" && input.prior.acted) return { action: "keep", guard: "refresh-not-due" };
+    if (input.prior?.lastConvertAt !== undefined || (input.prior?.action === "convert" && input.prior.acted)) {
+      return { action: "keep", guard: "refresh-not-due" };
+    }
     return { action: "convert" };
   }
   return refreshUnlessRecent(input.prior, input.nowMs);
 }
 
 function refreshUnlessRecent(prior: PriorVerdict | undefined, nowMs: number, guard?: RevalidationGuard): { action: RevalidationAction; guard?: RevalidationGuard } {
-  const lastRefresh = prior?.action === "refresh" && prior.acted ? Date.parse(prior.at) : NaN;
+  const lastRefreshAt = prior?.lastRefreshAt ?? (prior?.action === "refresh" && prior.acted ? prior.at : undefined);
+  const lastRefresh = lastRefreshAt === undefined ? NaN : Date.parse(lastRefreshAt);
   if (Number.isFinite(lastRefresh) && nowMs - lastRefresh < STILL_TRUE_REFRESH_MS) {
     return { action: "keep", guard: guard ?? "refresh-not-due" };
   }
@@ -366,16 +378,34 @@ function refreshUnlessRecent(prior: PriorVerdict | undefined, nowMs: number, gua
 export const STAGE_STALL_CAUSE = "stage-stall";
 const FULL_SHA = /^[0-9a-f]{40}$/;
 
-/** A stage-stall report's deterministic resolution, or `undefined` when neither rule decides it:
- *  (1) the PR's current head is not the head the stall was reported at, so the report no longer describes
+/** A MANUAL stage-stall report's PR is merged or closed, read from the referent derivation's batched view:
+ *  no stage of it can still be stalled, whatever the class. `undefined` for any other issue or PR state. */
+export function stageStallTerminalResolution(
+  issue: RevalidationIssue, terminalPr: RevalidationVerdict["terminalPr"],
+): RevalidationVerdict | undefined {
+  if (issueEscalationClass(issue) !== "MANUAL" || issueEscalationCause(issue) !== STAGE_STALL_CAUSE) return undefined;
+  const pr = prReferentFromIssueText(issue.body) ?? prReferentFromIssueText(issue.title);
+  if (pr === undefined || terminalPr === undefined || terminalPr.prNumber !== pr) return undefined;
+  return {
+    verdict: "resolved",
+    reason: `the stalled PR #${pr} is ${terminalPr.state}, so none of its stages can still be stalled`,
+    citation: `PR #${pr} is ${terminalPr.state}`,
+  };
+}
+
+/** A stage-stall report's deterministic resolution, or `undefined` when no rule decides it: (0) its PR is
+ *  merged or closed ({@link stageStallTerminalResolution}); (1) the PR's current head is not the head the stall was reported at, so the report no longer describes
  *  the PR (a stall at the new head files its own issue); or (2) a NEWER open stage-stall issue reports the
  *  same PR, head and blocker, W1-T11031's dedup key read through its own parsers. Different blockers at
  *  one head are distinct questions and both stay. Only a MANUAL stall report is decided here. */
 export function stageStallResolution(
   issue: RevalidationIssue, open: readonly RevalidationIssue[], openPrHead: RevalidationVerdict["openPrHead"],
+  terminalPr?: RevalidationVerdict["terminalPr"],
 ): RevalidationVerdict | undefined {
   // Stall reports are filed MANUAL; any other class (a GRILL above all) is never decided here.
   if (issueEscalationClass(issue) !== "MANUAL" || issueEscalationCause(issue) !== STAGE_STALL_CAUSE) return undefined;
+  const terminal = stageStallTerminalResolution(issue, terminalPr);
+  if (terminal !== undefined) return terminal;
   const head = escalationHeadSha(issue.body);
   const pr = prReferentFromIssueText(issue.body) ?? prReferentFromIssueText(issue.title);
   if (head === undefined || !FULL_SHA.test(head) || pr === undefined) return undefined;
@@ -538,8 +568,10 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     let stageStallResolved = false;
     if (issueClass === "referent") {
       verdict = referents.get(issue.number) ?? { verdict: "unknown", reason: "the referent could not be derived this pass" };
-      // A terminal referent keeps its own citation; an open or unread one may still be a stale stall report.
-      const stall = verdict.verdict === "resolved" ? undefined : stageStallResolution(issue, issues, verdict.openPrHead);
+      // A terminal referent resolves a stall report by its PR's state alone; an open or unread one may still be
+      // a stale stall report by its head or a newer twin.
+      const stall = verdict.verdict === "resolved" ? stageStallTerminalResolution(issue, verdict.terminalPr)
+        : stageStallResolution(issue, issues, verdict.openPrHead, verdict.terminalPr);
       if (stall !== undefined) {
         verdict = stall;
         stageStallResolved = true;
@@ -625,14 +657,22 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
   return { mode: policy.mode, ran: true, issuesSeen: issues.length, rows, found };
 }
 
-/** Each issue's newest {@link ISSUE_REVALIDATION_VERDICT_STEP} row, from ledger rows in any order. */
+/** Each issue's newest {@link ISSUE_REVALIDATION_VERDICT_STEP} row, from ledger rows in any order, carrying
+ *  the newest acted refresh among ALL its rows as `lastRefreshAt`. */
 export function priorVerdictsFromRows(rows: Iterable<Record<string, unknown>>): Map<number, PriorVerdict> {
   const out = new Map<number, PriorVerdict>();
+  const refreshedAt = new Map<number, string>();
+  const convertedAt = new Map<number, string>();
   for (const r of rows) {
     if (r.step !== ISSUE_REVALIDATION_VERDICT_STEP) continue;
     const n = Number(r.issue_number);
     const at = String(r.ts ?? "");
     if (!Number.isSafeInteger(n) || !Number.isFinite(Date.parse(at))) continue;
+    for (const [action, seenAt] of [["refresh", refreshedAt], ["convert", convertedAt]] as const) {
+      if (r.action !== action || r.acted !== true) continue;
+      const last = seenAt.get(n);
+      if (last === undefined || Date.parse(last) < Date.parse(at)) seenAt.set(n, at);
+    }
     const seen = out.get(n);
     if (seen !== undefined && Date.parse(seen.at) >= Date.parse(at)) continue;
     out.set(n, {
@@ -644,6 +684,8 @@ export function priorVerdictsFromRows(rows: Iterable<Record<string, unknown>>): 
       ...(typeof r.citation === "string" ? { citation: r.citation } : {}),
     });
   }
+  for (const [n, lastRefreshAt] of refreshedAt) out.set(n, { ...out.get(n)!, lastRefreshAt });
+  for (const [n, lastConvertAt] of convertedAt) out.set(n, { ...out.get(n)!, lastConvertAt });
   return out;
 }
 
