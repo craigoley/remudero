@@ -1,15 +1,8 @@
 /**
- * lib/board.ts — the read-only live board's daemon-side wiring (W3-T2, MASTER-PLAN §7 WS-5a).
- *
- * One route pair: GET /v1/status (a REST snapshot) and GET /v1/status/stream (SSE, one `status`
- * event per task whose derived StatusProjection changes), built entirely on lib/service.ts's
- * Route/SseRoute and lib/status.ts's projectPlan/deriveStatus. Zero new business logic: this
- * module only wires those two together and tails state/ledger.ndjson to know when to recompute.
- *
- * INVARIANT: the stream polls the ledger every {@link DEFAULT_POLL_MS} rather than using
- * `fs.watch` (not portable across CI runners), and only sends an event when a task's projection
- * actually changed — a state flip, not a mere touch. Proven against a real HTTP server,
- * test/board.test.ts, the way test/service.test.ts proves the generic mechanism.
+ * Read-only board wiring: service routes, status projections and ledger tailing; no new
+ * business logic (W3-T2, MASTER-PLAN §7 WS-5a). SSE polls every {@link DEFAULT_POLL_MS}, avoiding
+ * nonportable `fs.watch`, and emits only changed projections, never mere touches.
+ * Falsifiers: test/board.test.ts and test/service.test.ts use real HTTP servers.
  */
 // Why: the "Option A" narrow-scope decision — docs/forensics/board.md#file-header
 
@@ -32,8 +25,7 @@ import {
   type PrRef,
   taskIdFromRunBranch,
 } from "./status.js";
-// W1-T2895: `BoardDeps` re-exported unchanged for every existing consumer of `board.js`'s own
-// `BoardDeps` — moving the DEFINITION to `status.ts`, never the public surface.
+// W1-T2895: keep board.js's public BoardDeps export after moving its definition to status.ts.
 export type { BoardDeps };
 import type { Route, SseRoute, SseSend } from "./service.js";
 import { bearerTokenId } from "./panel-actions.js";
@@ -50,12 +42,9 @@ const OPERATOR_ACTION_STEPS = new Set(["console.kick_refused", "console.kick_dis
 export const DEFAULT_POLL_MS = 250;
 
 /**
- * One board row: a {@link StatusProjection} enriched with the plan-`Task` fields the FIND layer
- * (W1-T157) needs but {@link StatusProjection} does not carry — `title` and `risk` — plus
- * `lastActivityAt`, the ISO timestamp of the last ledger line naming this task. The join lives
- * here, not on {@link StatusProjection}, because that interface is mirrored by openapi/daemon.yaml
- * and consumed elsewhere; the SSE `status` stream keeps emitting the bare projection, and the
- * shell backfills the enrichment across deltas (src/lib/serve.ts).
+ * FIND row (W1-T157): projection plus plan title/risk and last ledger activity time.
+ * Keep enrichment here: StatusProjection mirrors openapi/daemon.yaml and SSE emits it bare.
+ * The shell backfills enrichment across deltas (src/lib/serve.ts).
  */
 export interface BoardRow extends StatusProjection {
   title: string;
@@ -70,22 +59,17 @@ export interface BoardRow extends StatusProjection {
   /** True when a run is in flight but has logged no spend/turns yet — unknown, not zero. Mutually
    *  exclusive with {@link liveSpendUsd}/{@link liveTurns} (fb-1784902052582-c124f9). */
   liveSpendPending?: boolean;
-  /** Worker liveness (W1-T944), carried through from {@link StatusProjection.workerState} — the
-   *  same scan that derives `phase`/`elapsedMs`. Present only alongside `phase`; absent there
-   *  means no `worker.state` row has arrived, rendered as "state unknown". */
+  /** Worker liveness from StatusProjection (W1-T944), only alongside `phase`.
+   *  Absent means no worker.state row yet; render "state unknown". */
   workerState?: StatusProjection["workerState"];
-  /** ISO-8601 `ts` the run entered its current `workerState`, carried through from
-   *  {@link StatusProjection.workerStateSince}. Present only while `workerState === "quiet"`; the
-   *  console ages a "quiet Nm" duration off it on the same 1s tick `elapsedMs` uses. */
+  /** ISO-8601 entry time from StatusProjection.workerStateSince, only while quiet.
+   *  The console ages "quiet Nm" on elapsedMs's 1s tick. */
   workerStateSince?: string;
-  /** Process-unevidenced (W1-T1240), carried through from
-   *  {@link StatusProjection.processUnevidenced}. Present only alongside `phase`, same sparse
-   *  convention as `workerState`. */
+  /** Process-unevidenced from StatusProjection (W1-T1240), only alongside `phase`. */
   processUnevidenced?: StatusProjection["processUnevidenced"];
-  /** The row's own `remudero-review` three-state (W1-T914), present only alongside `prUrl`. One
-   *  of `success`/`failure` (last posted verdict), `pending`, `none` (never posted — per W1-T225
-   *  the worst state, never softened), `unreadable` (the read itself failed), or `not-applicable`
-   *  (W1-T2235: PR merged/closed). Bound to {@link GitHub.reviewState}. */
+  /** GitHub.reviewState alongside prUrl (W1-T914): success/failure are posted verdicts;
+   *  pending, none (never posted; worst per W1-T225), unreadable (read failed), and
+   *  not-applicable (merged/closed, W1-T2235) remain distinct. */
   // Why: the W1-T225 absent-is-worst ruling — docs/forensics/board.md#boardrow-reviewstate
   reviewState?: "success" | "failure" | "pending" | "none" | "unreadable" | "not-applicable";
 }
@@ -117,9 +101,8 @@ export interface BoardSnapshot {
   /** GLANCE strip totals (W1-T159), from the same ledger lines this snapshot already read. */
   spend: GlanceSpend;
   tasks: BoardRow[];
-  /** A PR the sweep reconciler already disposed into a non-progressing class (W1-T1006's sixth
-   *  NEEDS-ME row source), sourced verbatim from status-board.ts's `deriveBlockedPrSections` — see
-   *  {@link deriveBoardStatusSections}. Always an array, never `undefined`. */
+  /** Non-progressing PRs from deriveBlockedPrSections (W1-T1006's sixth NEEDS-ME source).
+   *  See {@link deriveBoardStatusSections}; always an array. */
   blockedPrs: BlockedPrBlocker[];
   /** The currently-standing operator merge holds (W1-T2719), from status-board.ts's reader. */
   mergeHeld: MergeHeldRow[];
@@ -163,9 +146,8 @@ interface BoardComputeOptions {
   prQueueIndex?: PrQueueIndexRead;
   /** {@link DeriveDeps.reuseProjection}, threaded through to `projectPlan`. Absent by default. */
   reuseProjection?: DeriveDeps["reuseProjection"];
-  /** Hands back the projection map this snapshot was built from, so a caller memoizing per task
-   *  stores CLEAN projections rather than the {@link BoardRow}s below, which carry pass-scoped
-   *  joins (`lastActivityAt`, `liveSpendUsd`) that must be re-derived each pass, never carried. */
+  /** Capture clean projections for memoization; BoardRow joins (lastActivityAt, liveSpendUsd)
+   *  must be re-derived each pass, never carried. */
   captureProjections?: (byId: ReadonlyMap<string, StatusProjection>) => void;
 }
 
@@ -176,10 +158,8 @@ interface PrQueueIndexRead {
   failureReason: string;
 }
 
-/** The `ts` of the last ledger line naming each task id (the board's `lastActivityAt`, W1-T157),
- *  factored out so {@link computeBoardSnapshot} doesn't duplicate this scan inline. RECENT no
- *  longer shares this map for its own ordering; {@link computeRecentActivity} orders by ledger
- *  append order via its own {@link RecentActivityState.scannedLines} tail cursor instead. */
+/** Last ledger ts per task for computeBoardSnapshot (W1-T157).
+ *  RECENT instead uses append order via RecentActivityState.scannedLines. */
 interface LedgerActivity {
   ts?: string;
 }
@@ -395,10 +375,8 @@ function derivePrQueue(
   return { complete: true, rows };
 }
 
-/** The board snapshot, reusing {@link projectPlan} verbatim for the merge-state — no new
- *  derivation logic. Joins each projection with its plan `Task`'s `title`/`risk` and the
- *  ledger's `lastActivityAt` to produce a {@link BoardRow} (W1-T157; see that interface's note
- *  for why the join lives here). */
+/** Join projectPlan's unchanged merge-state projections with plan title/risk and ledger
+ *  lastActivityAt to produce BoardRows (W1-T157; see {@link BoardRow}). */
 export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptions = {}): BoardSnapshot {
   // Read the ledger once (W1-T184) and hand projectPlan an overriding readLedger so its own
   // internal amortization, and liveRunSpend below, see this SAME already-parsed array rather
@@ -424,9 +402,8 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   const lastActivity = lastActivityByTask(lines);
   const liveSpend = liveRunSpendByTask(lines, [...byId.values()].filter((p) => p.phase).map((p) => p.taskId));
   const tasks: BoardRow[] = [...byId.values()].map((p) => {
-    // A task-less escalation's own row (W1-T283) owns no plan Task to join title/risk from.
-    // Fall back to its own title (or the bare id) and the default risk band rather than a
-    // non-null assertion that would crash the whole snapshot.
+    // Task-less escalations have no plan Task: fall back to their title/id and default risk
+    // rather than crashing the snapshot with a non-null assertion (W1-T283).
     const task = deps.plan.byId.get(p.taskId);
     const row: BoardRow = {
       ...p,
@@ -449,9 +426,7 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
     if (reviewState) row.reviewState = reviewState;
     return row;
   });
-  // The header counts derive from these SAME tasks (never a second predicate that could
-  // disagree), and the merge tally is flagged unknown on a GitHub outage rather than reporting
-  // "0 merged" as fact (fb-1784902052582-c124f9).
+  // Count these same tasks; a GitHub outage means unknown, never "0 merged" (fb-1784902052582-c124f9).
   const github_unreachable = safeReadFailed(effectiveDeps.github);
   const now = deps.now ?? Date.now;
   const generatedAt = new Date(now()).toISOString();
@@ -479,12 +454,9 @@ export function isRunningRow(row: Pick<BoardRow, "phase">): boolean {
 }
 
 /**
- * One STOPPED predicate, shared by the header tally and the GLANCE strip's client-side recompute.
- *
- * INVARIANT: `status === "blocked"` alone undercounts stopped work, because `needsHuman` is a
- * separate field `deriveStatus` sets beside `status`, never by overwriting it — a task can be
- * `queued`/`running` and still need a human. Every `needs me` row is a `blocked` row; `blocked`
- * additionally holds plan-declared `status: "blocked"` tasks with no issue to click.
+ * Shared STOPPED predicate for header and GLANCE: blocked status or needsHuman.
+ * deriveStatus sets needsHuman independently; queued/running tasks can still need a human.
+ * Include plan-blocked tasks even without an issue to click.
  */
 // Why: the 2026-08-03 zero-blocked-with-two-stopped incident — docs/forensics/board.md#isblockedrow
 export function isBlockedRow(row: Pick<BoardRow, "status" | "needsHuman">): boolean {
@@ -507,19 +479,12 @@ export function summarizeCounts(
   };
 }
 
-// `liveRunSpend` moved to `status-stream-publisher.ts` (W1-T4455): imported above, so this
-// module and that one stay a one-way edge rather than a cycle. See that file's docstring on it.
+// liveRunSpend lives in status-stream-publisher.ts to keep imports acyclic (W1-T4455; see its docstring).
 
 /**
- * Memoized {@link computeBoardSnapshot} (W1-T184): a recompute only happens when something the
- * projection actually depends on has changed; an unchanged input returns the same cached
- * snapshot instantly. Every consumer here is synchronous, so no two recomputes can ever overlap —
- * this same memo also collapses a burst of concurrent requests into exactly one recompute.
- *
- * Deliberately not time/TTL-based: the cache key is `(ledger line count, gateway health,
- * material open-index fingerprint)`. Any of the three can change with no new ledger line — the
- * gateway can recover or fail, or a PR can open/close before sweep records it — so a TTL would
- * either recompute needlessly often or miss a GitHub-only change for a whole window.
+ * Memoized computeBoardSnapshot (W1-T184); synchronous consumers cannot overlap recomputes.
+ * Key on decision fingerprint, gateway health and material open-index fingerprint, not TTL.
+ * Gateway recovery/failure or PR opens/closes can invalidate without a ledger append.
  */
 // Why: the 2026-07-20 uncached GET /v1/status latency outage this memo fixes —
 // docs/forensics/board.md#createboardsnapshotcache--boardsnapshotcache
@@ -536,10 +501,8 @@ export interface BoardSnapshotSource {
   current(): BoardSnapshotState;
 }
 
-/** `github.readFailed?.()` guarded (W1-T184): a gateway that THROWS from `readFailed()` itself
- *  (not merely fails soft) would otherwise blow up the cache-key computation and 500 the whole
- *  /v1/status request. Fails closed — an unreadable health signal reads as an outage, never a
- *  silent "GitHub is fine". */
+/** Treat a throwing readFailed accessor as an outage, avoiding a /v1/status 500
+ *  or a false healthy signal (W1-T184). */
 function safeReadFailed(github: BoardDeps["github"]): boolean {
   try {
     return github.readFailed?.() ?? false;
@@ -549,12 +512,8 @@ function safeReadFailed(github: BoardDeps["github"]): boolean {
 }
 
 /**
- * The row's `reviewState` (W1-T914), bound to {@link GitHub.reviewState} — never a second
- * derivation. `undefined` for a row with no PR at all. Three fail-soft cases stay distinct: no
- * `reviewState` method on the gateway -> `"none"` (honestly unresolved); the method returns a
- * real value, including its own `"none"`/`"not-applicable"` -> that value verbatim; the method
- * throws or returns `undefined` -> `"unreadable"` when {@link safeReadFailed} confirms an
- * outage, `"none"` otherwise (a `prUrl` this gateway simply can't resolve).
+ * GitHub.reviewState verbatim (W1-T914). No PR means undefined; no accessor means none.
+ * Throws/undefined mean unreadable only when safeReadFailed confirms an outage; otherwise none.
  */
 export function deriveReviewState(
   prUrl: string | undefined,
@@ -572,24 +531,16 @@ export function deriveReviewState(
 }
 
 /**
- * Ledger steps that never change a board row (W1-T2919), so the cache key can ignore them.
- * `daemon.alive` and `board_gateway.fetch_bytes` append on every poll/fetch and previously
- * invalidated the cache key every time, forcing a synchronous recompute roughly once a minute
- * with nothing on the board actually changed.
- *
- * INVARIANT: defined by exclusion, not inclusion. An inclusion list defaults a step nobody has
- * added yet to "irrelevant", so a new board-affecting step would silently serve a stale board.
- * This exclusion defaults a new step to relevant instead — the cache invalidates, and the only
- * cost is a missed optimisation, never a correctness bug. A step may join this set only once
- * measured to be unread anywhere in the projection path.
+ * Ignore only steps measured unread throughout the projection path (W1-T2919).
+ * Frequent daemon.alive/board_gateway.fetch_bytes rows once forced unchanged recomputes.
+ * Exclude known noise rather than include known inputs: new steps must invalidate by default
+ * so an optimization miss cannot silently serve stale projections.
  */
 // Why: the once-a-minute cache-thrash incident this exclusion fixes —
 // docs/forensics/board.md#board_irrelevant_steps
 export const BOARD_IRRELEVANT_STEPS: ReadonlySet<string> = new Set(["daemon.alive", "daemon.pulse", "board_gateway.fetch_bytes", "board_gateway.fetch_ok", "board_snapshot.unchanged", "board_gateway.rollup"]);
 
-/** The `step` of one already-parsed ledger row, or `undefined` when it carries none (a torn
- *  write). A row whose step cannot be read is treated as decision-relevant — unknown stays
- *  visible, the same fail-open posture the rest of this module takes. */
+/** A parsed row's step, or undefined on torn/unknown data, which stays decision-relevant. */
 export function ledgerStepOf(row: Record<string, unknown>): string | undefined {
   return typeof row.step === "string" ? row.step : undefined;
 }
@@ -604,29 +555,18 @@ export function isDecisionRelevantRow(row: Record<string, unknown>): boolean {
 export interface DecisionFingerprint {
   /** How many rows have been folded in — the read cursor, not the count below. */
   readonly foldedUpTo: number;
-  /** The first row's identity as folded, so a rotation (the live file shrinking, or its head
-   *  being replaced) is detected and the fold restarted rather than continued against a stale file. */
+  /** First-row identity; shrinkage or a replaced head restarts the fold on rotation. */
   readonly head: string | undefined;
   readonly hash: number;
-  /** How many decision-relevant rows have been folded in — sufficient alone to detect an append
-   *  on this append-only log, the same signal the old raw line count gave without the noise. */
+  /** Decision-relevant row count detects appends without the old raw line count's noise. */
   readonly count: number;
 }
 
 /**
- * THE SAME FOLD, SPLIT BY TASK — the input to a per-task projection memo.
- *
- * {@link DecisionFingerprint} answers "did ANYTHING change", which is the right question for a
- * whole-snapshot memo and the wrong one for a per-task memo: on a live daemon it says yes every
- * 1.5s, so a board keyed on it re-derives all 1,792 tasks to reflect a change in one (MEASURED
- * 2026-09-15 — docs/forensics/board.md#the-board-re-derived-1792-tasks-to-reflect-a-change-in-one).
- * This fold answers "did THIS task change".
- *
- * A ROW NAMING NO TASK INVALIDATES EVERY TASK. That is the fail-safe direction and not merely
- * prudence: this module cannot know which projections an unattributable row bears on, and the
- * cost of guessing wrong is a board showing a stale answer confidently. {@link globalHash}
- * therefore rides in every per-task key, so such a row degrades this to exactly today's
- * all-or-nothing behaviour rather than to a quiet miss.
+ * Split the decision fold by task to avoid re-deriving the whole plan for one task's change.
+ * Rows naming no task invalidate every task: globalHash belongs in every key because their
+ * affected projections are unknown. Fall back to full recomputation rather than a stale answer.
+ * Measurement: docs/forensics/board.md#the-board-re-derived-1792-tasks-to-reflect-a-change-in-one.
  */
 export interface TaskFingerprints {
   /** Rows folded so far — the read cursor, same shape as {@link DecisionFingerprint}. */
@@ -692,16 +632,9 @@ export function foldTaskFingerprints(
 }
 
 /**
- * One task's memo stamp: every unattributable row, plus this task's own rows. An identical stamp
- * means the projection cannot have moved.
- *
- * NUMBERS, NOT A STRING, AND THE GATEWAY HALF DELIBERATELY ABSENT. The obvious shape is one
- * string key per task carrying the gateway fingerprint too — and it costs more than the work it
- * saves: `prQueueIndexFingerprint` serialises every open PR INCLUDING ITS BODY, so that key runs
- * to kilobytes, and building it twice per task over a 1,792-task plan spent 110ms a pass doing
- * nothing but concatenating the same prefix (MEASURED 2026-09-15). The gateway half is shared by
- * every task by construction, so it is compared ONCE per pass — see the cache's own
- * `heldGatewayKey` — and what remains per task is three integer comparisons.
+ * Stamp unattributable rows plus this task's rows with three integers. Compare the shared
+ * gateway fingerprint once per pass (heldGatewayKey); repeating its PR bodies per task cost
+ * more than the work saved. Record: docs/forensics/board.md, 2026-09-15 measurement.
  */
 export interface TaskProjectionStamp {
   readonly globalCount: number;
@@ -718,21 +651,10 @@ export function sameTaskProjectionStamp(a: TaskProjectionStamp, b: TaskProjectio
 }
 
 /**
- * THE ONE PROJECTION A STAMP CANNOT SPEAK FOR: an in-flight run, which moves with the CLOCK and
- * not with the ledger.
- *
- * A stamp says "no row about this task arrived since I was made". For a settled task that is the
- * whole story. For a running one it is not: `deriveStatus` recomputes `elapsedMs` from `now()`
- * every derivation ({@link StatusProjection.elapsedMs} — "re-derived fresh, never cached"), and
- * its liveness test —
- * `now() - Date.parse(runState.lastActivityTs) <= DEFAULT_LIVENESS_BOUND_MS` — flips a task out
- * of "running" after 30 quiet minutes WITHOUT any new ledger line to change the stamp. Reusing
- * such a projection would pin a dead run "running" forever and freeze its elapsed clock: exactly
- * the silently-stale board this memo must not create.
- *
- * So anything in flight is re-derived every pass, unconditionally. It costs almost nothing —
- * MEASURED 2026-09-15, the live ledger touched 1 distinct task in a 3s window and 17 in 20
- * minutes — and it is the difference between a memo that is fast and one that is also honest.
+ * Always re-derive in-flight projections: elapsedMs and DEFAULT_LIVENESS_BOUND_MS depend on
+ * now(), even without new rows. Reusing a stamp would freeze elapsed time and pin dead runs
+ * as running beyond 30 quiet minutes. See StatusProjection.elapsedMs and the 2026-09-15
+ * measurement in docs/forensics/board.md.
  */
 export function projectionAgesWithTheClock(projection: StatusProjection): boolean {
   return projection.phase !== undefined || projection.elapsedMs !== undefined;
@@ -780,18 +702,14 @@ export function decisionKey(fp: DecisionFingerprint): string {
 export function createBoardSnapshotCache(): BoardSnapshotCache {
   let cached: { plan: Plan; decisionKey: string; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
   let lastGoodPrQueueAt: string | undefined;
-  // Folded across requests (W1-T2919), so a cache hit costs one pass over the lines appended
-  // since the last one, never a re-walk of the whole ledger.
+  // Fold only appended rows across requests, never the whole ledger (W1-T2919).
   let fingerprint: DecisionFingerprint = EMPTY_DECISION_FINGERPRINT;
-  // The per-task half of the same fold, plus what each task's projection was when its key last
-  // held. See {@link TaskFingerprints} for why this exists and what keeps it honest.
+  // Per-task fold and held projections; see TaskFingerprints for invalidation rules.
   let taskFingerprints: TaskFingerprints = EMPTY_TASK_FINGERPRINTS;
-  // Compared ONCE per pass, not once per task: every task shares it. A change here means every
-  // projection may have moved, so the memo is dropped whole.
+  // Shared gateway key: compare once per pass; changes invalidate every projection.
   let heldGatewayKey: string | undefined;
   const projectionByTask = new Map<string, { stamp: TaskProjectionStamp; projection: StatusProjection }>();
-  // One persistent tail cursor for this route's whole lifetime, never reconstructed per request —
-  // otherwise a cache hit would still pay a full ledger re-read just to compute the line count.
+  // Keep the tail cursor across requests or even cache hits would re-read the whole ledger.
   const tail = createLedgerTailCache();
   return {
     get(deps: BoardDeps): BoardSnapshot {
@@ -799,8 +717,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
       const lines = readLedger(deps.ledgerPath);
       fingerprint = foldDecisionFingerprint(lines, fingerprint);
       const key = decisionKey(fingerprint);
-      // The queue's live identity can change before sweep appends anything. Read the batched
-      // open half once for the cache key, then hand this same capture to the recompute below.
+      // GitHub can change without a ledger append; share one open-index read with recomputation.
       const prQueueIndex = readPrQueueIndex(deps.github);
       const prQueueIndexKey = prQueueIndexFingerprint(prQueueIndex);
       const ghFailed = safeReadFailed(deps.github);
@@ -813,15 +730,11 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
         cached.ghTruncated === ghTruncated &&
         cached.prQueueIndexKey === prQueueIndexKey
       ) return withLiveGithubFacts(cached.snapshot, deps.github);
-      // ── THE INCREMENTAL PASS ─────────────────────────────────────────────────────────────
-      // Everything GitHub-visible about this pass, shared by every task's key: an index change, a
-      // gateway that started or stopped failing, or a truncated read each re-derive the whole
-      // plan, exactly as they do today.
+      // Index, health or truncation changes re-derive the whole plan.
       const gatewayKey = prQueueIndexKey + "|" + ghFailed + "|" + ghTruncated;
       taskFingerprints = foldTaskFingerprints(lines, taskFingerprints);
       if (heldGatewayKey !== gatewayKey || cached?.plan !== deps.plan) {
-        // An index change, or a gateway that started or stopped failing, can move ANY task's
-        // projection — so nothing is reused this pass. Identical to today's behaviour.
+        // A new gateway key or plan invalidates every held projection.
         projectionByTask.clear();
         heldGatewayKey = gatewayKey;
       }
@@ -838,8 +751,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
             return sameTaskProjectionStamp(held.stamp, taskProjectionStamp(fp, task.id)) ? held.projection : undefined;
           },
           captureProjections: (byId) => {
-            // Rebuilt, not merged, so a task that left the plan leaves the memo with it rather
-            // than accumulating forever.
+            // Rebuild so tasks removed from the plan cannot accumulate in the memo.
             projectionByTask.clear();
             for (const [taskId, projection] of byId) projectionByTask.set(taskId, { stamp: taskProjectionStamp(fp, taskId), projection });
           },
@@ -857,9 +769,8 @@ function sendJson(res: ServerResponse, status: number, body: unknown, headers: R
   res.end(JSON.stringify(body));
 }
 
-/** `GET /v1/status`'s body — the memoized {@link BoardSnapshot} plus, when `lastSeen` is wired
- *  (W1-T163), the caller token's own "since you last checked" recap. Both fields are absent when
- *  no `lastSeen` store is wired, so a caller that predates W1-T163 sees an unchanged shape. */
+/** GET /v1/status adds this token's recap only when lastSeen is wired (W1-T163).
+ *  Otherwise both fields are absent, preserving the earlier response shape. */
 export interface StatusResponse extends BoardSnapshot {
   /** Every recap-worthy event after this token's prior marker; `[]` on a first-ever view (no
    *  prior marker to recap from). */
@@ -868,9 +779,8 @@ export interface StatusResponse extends BoardSnapshot {
   sinceCheckpoint?: string;
 }
 
-/** The request header a caller sets to say "a human is looking at this response, mark it seen".
- *  Absent means an automatic poll, which must not advance the marker. A header, not a query
- *  param, so the request URL stays byte-identical to what every existing caller matches. */
+/** Mark human views; automatic polls omit this and must not advance the marker.
+ *  A header preserves the request URL existing callers match. */
 // Why: the query-param design this header replaced — docs/forensics/board.md#recap_ack_header
 export const RECAP_ACK_HEADER = "x-rmd-recap-ack";
 
@@ -883,12 +793,9 @@ export function requestAcknowledgesRecap(headerValue: string | string[] | undefi
 }
 
 /**
- * GET /v1/status — the board snapshot, read-scoped, memoized per {@link createBoardSnapshotCache}.
- * When `lastSeen` (W1-T163) is supplied, a view also folds the calling token's own recap in.
- *
- * INVARIANT: the marker advances only on an acknowledged view ({@link RECAP_ACK_HEADER} set),
- * never on every automatic poll — an unconditional advance once shrank a tab left open all
- * evening to an effectively permanent few-second recap window.
+ * Read-scoped, memoized status with optional per-token recap (W1-T163).
+ * Advance lastSeen only with RECAP_ACK_HEADER: automatic polls once shrank an open tab's
+ * recap window permanently to a few seconds.
  */
 // Why: the recap-window incident this ack gate fixes — docs/forensics/board.md#buildstatusroute
 export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore, source?: BoardSnapshotSource): Route {
@@ -914,9 +821,7 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore, sour
         sinceCheckpoint === undefined
           ? []
           : buildRecapEvents(deps.readLedger?.(deps.ledgerPath) ?? readLedgerLines(deps.ledgerPath), sinceCheckpoint, deps.plan);
-      // Advance AFTER computing the recap, off the SAME timestamp the snapshot itself claims to
-      // be current as of -- never `Date.now()` a second time, which could race a hair ahead of
-      // what this response actually reflects. Gated on the ack flag: see this function's doc.
+      // Advance after recap to the snapshot's timestamp; a second Date.now() could race ahead.
       if (requestAcknowledgesRecap(req.headers[RECAP_ACK_HEADER])) lastSeen.advance(tokenId, snapshot.generated_at);
       const body: StatusResponse = { ...snapshot, recap, sinceCheckpoint };
       sendJson(res, 200, body, staleSourceHeaders(snapshot));
@@ -924,33 +829,26 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore, sour
   };
 }
 
-// ── GET /v1/recent — the ledger-first activity feed (W1-T184, W1-T153's RECENT section) ───────
-//
-// An activity feed over the ledger's own event classes — merges/verdicts, fix-rung outcomes,
-// escalations, spend checkpoints — never routed through deriveStatus/projectPlan's GitHub-gated
-// rungs. GitHub only decorates a row that already carries a PR link; a failed decoration marks
-// it `githubUnavailable` and never removes it (see {@link decoratePrTitle}).
+// Ledger-first RECENT feed (W1-T184, W1-T153): bypass GitHub-gated status projections.
+// GitHub only decorates linked PRs; failures mark githubUnavailable, never remove entries
+// (see decoratePrTitle).
 
 interface RecentActivityState {
   /** Bounded candidate history includes rows whose task was not yet filed in this plan. */
   retainedCandidates?: RecentActivityEntry[];
   /** This identity must not keep an old parsed plan alive between feed reads. */
   plan?: WeakRef<Plan>;
-  /** How many ledger lines have already been scanned/classified, so a render never
-   *  re-classifies (or re-fetches GitHub for) a line it already minted an entry from. */
+  /** Classified line cursor: never reclassify or refetch GitHub for an already-minted entry. */
   scannedLines: number;
   /** Minted entries, oldest first, capped to {@link RECENT_ACTIVITY_HISTORY_CAP}. */
   entries: RecentActivityEntry[];
   /** `run_id` -> its `pr.opened` PR url — carries a run's own PR forward onto later lines (e.g.
    *  `verdict`/`fix.done`) that name no `pr_url` of their own. */
   prByRun: Map<string, string>;
-  /** The file-level tail cursor {@link readLedgerTail} reads/writes, one layer below
-   *  `scannedLines`' line-level cursor — this is what makes even a full re-scan O(new bytes),
-   *  not O(history). */
+  /** readLedgerTail's byte cursor below scannedLines: file reads cost O(new bytes), not O(history). */
   ledgerTail: LedgerTailCache;
-  /** The array the default tail reader returned last time. {@link readLedgerTail} extends one
-   *  array in place and starts a new one only when the file shrank, so a different array means a
-   *  rotation rewrote the live file, even when the rewrite left it with more lines than were scanned. */
+  /** readLedgerTail extends its array in place; a new identity signals rotation even when
+   *  the rewritten file has more lines than scannedLines. */
   lastLines?: ReadonlyArray<Record<string, unknown>>;
 }
 
@@ -964,15 +862,11 @@ export function createRecentActivityCache(): RecentActivityCache {
   return { state: { scannedLines: 0, entries: [], prByRun: new Map(), ledgerTail: createLedgerTailCache() } };
 }
 
-/** GitHub decoration, never a gate (W1-T184): resolves `prUrl`'s title via the same `prByRef`
- *  every other precedence rung calls. A missing title is silent (the row already renders fine
- *  ledger-only); a gateway reporting `readFailed()` marks the row `githubUnavailable` instead
- *  (W1-T181), so an outage reads as "GitHub unreachable" rather than a merely sparser row. */
+/** Decorate via prByRef, never gate entries (W1-T184). Missing titles stay silent;
+ *  readFailed marks githubUnavailable so outages remain visible (W1-T181). */
 function decoratePrTitle(entry: RecentActivityEntry, deps: BoardDeps): RecentActivityEntry {
   if (!entry.prUrl) return entry;
-  // Both github calls live inside this one try: this is the one place a GitHub read feeds
-  // straight into an HTTP response with no caller-side layer to absorb a surprise throw, so a
-  // throw from either call degrades this one row instead of 500ing the whole request.
+  // Guard both GitHub calls: either throw degrades this row, never 500s the HTTP request.
   try {
     const pr = deps.github.prByRef(entry.prUrl);
     if (pr?.title) return { ...entry, prTitle: pr.title };
@@ -983,15 +877,11 @@ function decoratePrTitle(entry: RecentActivityEntry, deps: BoardDeps): RecentAct
   }
 }
 
-/** The RECENT activity feed (W1-T184): classifies only the lines new since
- *  {@link RecentActivityState.scannedLines}, decorates each fresh entry with GitHub once at mint
- *  time, and returns the most recent `max`, newest first. A fully-failing `deps.github` still
- *  returns identical entries, just without `prTitle` (see {@link decoratePrTitle}). */
+/** Classify only new lines, decorate once at mint, and return newest max entries (W1-T184).
+ *  A failing gateway preserves entries without prTitle; see {@link decoratePrTitle}. */
 export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCache, max = 20): RecentActivityEntry[] {
   const state = cache.state;
-  // Two independent tail cursors: readLedgerTail (file I/O layer) reads only new bytes, and
-  // state.scannedLines (classification layer) further limits which of those lines get
-  // re-classified/re-decorated.
+  // Separate byte and line cursors bound file reads and classification/decoration respectively.
   const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, state.ledgerTail));
   const lines = readLedger(deps.ledgerPath);
   // A shorter ledger than last scanned should never happen (append-only); degrade safely by
@@ -1120,10 +1010,8 @@ export function buildRecentRoute(deps: BoardDeps): Route {
   };
 }
 
-/** GET /v1/status/stream — one `status` SSE event per task whose projection changes, fanned out
- *  by the ONE shared publisher (W1-T4455, `subscribeStatusStream` in `status-stream-publisher.ts`)
- *  rather than a per-connection tail/derive/poll: N viewers now cost ONE ledger tail and ONE
- *  derive pass, not N. Subscribing is never replayed history, exactly as before this task. */
+/** SSE status changes via one shared publisher (W1-T4455, status-stream-publisher.ts):
+ *  N viewers share one tail/derive/poll pass. Subscribing never replays history. */
 export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): SseRoute {
   return {
     path: "/v1/status/stream",
@@ -1135,13 +1023,8 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
   };
 }
 
-// ── FIND-layer sort comparators (W1-T157) ──────────────────────────────────────────────────
-//
-// Pure comparators over BoardRow, one per sortable column. serve.ts's inline console script
-// mirrors these for its own client-side sort (it's a template literal and cannot import this
-// module), so these exported, unit-tested functions are the canonical spec of the ordering. Each
-// takes an explicit direction so "a missing value always sorts last, in both directions" is
-// expressed once, here, rather than by a caller reversing the sorted array (which would flip it).
+// FIND sort specification (W1-T157), mirrored by serve.ts's non-importable inline script.
+// Explicit direction keeps missing values last both ways; reversing the array would break that.
 
 export type BoardSortKey = "id" | "status" | "recency" | "age";
 export type SortDir = "asc" | "desc";
