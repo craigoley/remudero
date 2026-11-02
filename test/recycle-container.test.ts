@@ -589,10 +589,11 @@ function registryDeletionChildEnv(scratch: string, phase: "intact" | "deleted" |
 
 test("mutant coverage is retained per source variant and never mixed into head evidence", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}mutant-coverage-`));
-  const prior = process.env.NODE_V8_COVERAGE, parentTmp = join(root, "parent");
-  mkdirSync(parentTmp);
+  const prior = process.env.NODE_V8_COVERAGE;
+  const parent = join(root, "parent");
+  mkdirSync(parent);
   try {
-    const parentEnv = { ...process.env, NODE_V8_COVERAGE: parentTmp };
+    const parentEnv = { ...process.env, NODE_V8_COVERAGE: parent };
     const variants = new Set<string>();
     for (const phase of ["intact", "deleted", "restored"] as const) {
       const env = registryDeletionChildEnv(root, phase, parentEnv);
@@ -600,15 +601,16 @@ test("mutant coverage is retained per source variant and never mixed into head e
         `function variantProbe() { return ${JSON.stringify(phase)}; } variantProbe();`],
         { env, cwd: root, encoding: "utf8", timeout: 10000 });
       assert.equal(child.status, 0, child.stderr);
-      assert.ok(env.NODE_V8_COVERAGE);
-      const scratchCoverage = env.NODE_V8_COVERAGE;
-      const reports = readdirSync(scratchCoverage).filter(name => /^coverage-.*[.]json$/.test(name));
+      const coverage = join(root, `coverage-${phase}`);
+      assert.equal(env.NODE_V8_COVERAGE, coverage,
+        "the child's collector is the exact owned fixture variant before reading any report");
+      const reports = readdirSync(coverage).filter(name => /^coverage-.*[.]json$/.test(name));
       assert.ok(reports.length > 0, "the real child must retain actual V8 evidence");
-      assert.ok(reports.some(name => JSON.parse(readFileSync(join(env.NODE_V8_COVERAGE!, name), "utf8")).result
+      assert.ok(reports.some(name => JSON.parse(readFileSync(join(coverage, name), "utf8")).result
         .some((entry: { functions: Array<{ functionName: string; ranges: Array<{ count: number }> }> }) => entry.functions
           .some(fn => fn.functionName === "variantProbe" && fn.ranges.some(range => range.count > 0)))));
-      assert.deepEqual(readdirSync(parentTmp), [], "mutant source must never enter the HEAD collector");
-      assert.notEqual(env.NODE_V8_COVERAGE, parentTmp);
+      assert.deepEqual(readdirSync(parent), [], "mutant source must never enter the HEAD collector");
+      assert.notEqual(env.NODE_V8_COVERAGE, parent);
       assert.equal(process.env.NODE_V8_COVERAGE, prior, "a child-variant control must preserve the parent's collector");
       variants.add(env.NODE_V8_COVERAGE);
     }
@@ -1842,22 +1844,35 @@ test("W1-T9071: a failing recycle action never stops the recycle, and no session
   assert.match(run.stderr, /not-a-reviewed-action FAILED \(no reviewed script/);
 });
 
-function modeRecycleRoot(t: TestContext): string {
-  const root = mkdtempSync(join(tmpdir(), "rmd-mode-recycle-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  return root;
-}
-
 function modeRecycle(t: TestContext, fields: string[], opts: RunOpts = {}): Run {
-  return runInstance(fields, "good", { instanceRoot: modeRecycleRoot(t), shellPath: "/bin/bash", ...opts });
+  // Reuse a caller-owned root. Allocate and retire a fixture only when this invocation owns it.
+  const root = opts.instanceRoot ?? mkdtempSync(join(tmpdir(), "rmd-mode-recycle-"));
+  if (opts.instanceRoot === undefined) t.after(() => rmSync(root, { recursive: true, force: true }));
+  return runInstance(fields, "good", { shellPath: "/bin/bash", ...opts, instanceRoot: root });
 }
 
 function stableModeCalls(run: Run): Call[] {
   return run.calls.map(c => ({ bin: c.bin, argv: c.argv.map(a => a.replaceAll(run.fixtureRecordingDir, "<recording>").replaceAll(run.fixtureStubDir, "<stub>")) }));
 }
 
+test("recycler fixture reuses its caller-owned root without allocating a second cleanup root", t => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-mode-recycle-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let registrations = 0;
+  const context = { after: (...args: Parameters<TestContext["after"]>) => {
+    registrations++;
+    return t.after(...args);
+  } } as TestContext;
+  const run = modeRecycle(context, ["mode: shadow"], { instanceRoot: root });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(registrations, 0, "a caller-owned root must not allocate another root to retire");
+  assert.ok(existsSync(join(root, "state", "state", "ledger.ndjson")));
+});
+
 test("recycler accepts existing shadow and live mode without activating it", t => {
-  const root = modeRecycleRoot(t), opts = { instanceRoot: root, shellPath: "/bin/bash" };
+  const root = mkdtempSync(join(tmpdir(), "rmd-mode-recycle-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const opts = { instanceRoot: root, shellPath: "/bin/bash" };
   const legacy = runInstance([], "good", opts);
   assert.equal(legacy.status, 0, legacy.stderr);
   for (const mode of ["shadow", "live", '"shadow"', '"live"', "shadow   # comment", "live   "]) {
@@ -1877,7 +1892,9 @@ test("recycler refuses invalid or duplicate mode before effects", t => {
   for (const fields of [["mode: LIVE"], ["mode:"], ["mode: unknown"], ['mode: "shadow'], ['mode: live"'],
     ['mode: "live"suffix"'], ["mode: 'shadow'"], ["mode: shadow extra"], ["mode: shadow", "mode: live"],
     ["mode: shadow", "mode: shadow"], ["mode:", "mode: live"]]) {
-    const root = modeRecycleRoot(t), run = modeRecycle(t, fields, { instanceRoot: root });
+    const root = mkdtempSync(join(tmpdir(), "rmd-mode-recycle-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const run = modeRecycle(t, fields, { instanceRoot: root });
     assert.equal(run.status, 2, `${fields.join(" / ")}: ${run.stderr}`);
     assert.match(run.stderr, /mode/);
     assert.deepEqual(run.calls, [], "not even the first Docker/Azure read or mutation is allowed");
@@ -1891,7 +1908,9 @@ test("recycler refuses invalid or duplicate mode before effects", t => {
 });
 
 test("recycler mode compatibility preserves legacy effects and owner holds", t => {
-  const root = modeRecycleRoot(t), state = join(root, "state", "state");
+  const root = mkdtempSync(join(tmpdir(), "rmd-mode-recycle-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const state = join(root, "state", "state");
   mkdirSync(state, { recursive: true });
   const pause = JSON.stringify({ reason: "owner hold", requestedAt: new Date().toISOString(), pid: 4242, host: "owner" });
   writeFileSync(join(state, "PAUSE"), pause);
@@ -1913,7 +1932,9 @@ test("recycler mode compatibility preserves legacy effects and owner holds", t =
 });
 
 test("lifecycle mode grammar falsifiers exercise the real script arms: recycler", t => {
-  const root = modeRecycleRoot(t), deploy = join(root, "deploy");
+  const root = mkdtempSync(join(tmpdir(), "rmd-mode-recycle-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const deploy = join(root, "deploy");
   cpSync(join(REPO_ROOT, "deploy"), deploy, { recursive: true });
   const script = join(deploy, "recycle-container.sh"), source = readFileSync(SCRIPT, "utf8");
   assert.equal(modeRecycle(t, ["mode: shadow"], { scriptPath: script }).status, 0, "the unmodified copied default must run first");

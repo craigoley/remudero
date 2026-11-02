@@ -1,4 +1,4 @@
-import type { DependencyMainIdentity } from "./dependency-main-identity.js";
+import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
@@ -212,7 +212,7 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
-import { isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
+import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
@@ -253,6 +253,7 @@ import {
   repairLadderStallFrom,
   type RepairLadderFallback,
 } from "./worker-provider.js";
+import { stalledStageEscalationIdentity, stalledStageIssueIdentity } from "./stage-stall-identity.js";
 import {
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
@@ -617,11 +618,6 @@ export function stalledStageEscalationSummary(reason: string): string {
   return reason
     .replace(/^(PR stage stalled: .+?) for \d+ minutes \((?:BACKSTOP \d+|owner: none)\); since [^;]*;/, "$1;")
     .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
-}
-
-/** Read a complete PR/blocker identity from a title or the unabridged reason in its body. */
-function stalledStageEscalationIdentity(text: string): string | undefined {
-  return /(PR stage stalled: #\d+ \S+ — [a-z-]+)(?=;| for \d+ minutes \(|$)/.exec(text)?.[1];
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
@@ -3188,10 +3184,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           user?: { login?: unknown }; changed_files?: unknown;
         } | undefined;
         if (main?.sha !== proof.mainSha || live?.state !== "open" || live.merged !== false || live.draft !== false ||
-            live.head?.sha !== proof.headSha || live.head.ref !== pr.headRefName || live.base?.ref !== "main" || live.base.sha !== proof.mainSha ||
+            live.head?.sha !== proof.headSha || live.head.ref !== pr.headRefName || live.base?.ref !== "main" ||
             typeof live.user?.login !== "string" || !isDependabotAuthor({ login: live.user.login }) || live.changed_files !== proof.files.length)
           return { closed: false, reason: "fresh dependency close lifecycle/head/main evidence changed or unavailable" };
-        await close();
+        // A human's review, review comment or Conversation-tab comment is a conversation this close would end:
+        // stand down. The Conversation tab is the issue-comments endpoint; the pulls endpoints never list it.
+        const conversation = [
+          { path: `pulls/${pr.prNumber}/reviews`, label: "PR review reviews" },
+          { path: `pulls/${pr.prNumber}/comments`, label: "PR review comments" },
+          { path: `issues/${pr.prNumber}/comments`, label: "PR conversation comments" },
+        ] as const;
+        for (const { path, label } of conversation) {
+          const rows = await readJsonImpl(["api", `repos/${owner}/${repo}/${path}?per_page=100`], { fresh: true });
+          if (!Array.isArray(rows) || rows.length >= 100) return { closed: false, reason: `${label} unreadable or unbounded` };
+          if (hasNonBotAuthor(rows)) return { closed: false, reason: `${label} include a non-bot author; a human conversation is open` };
+        }
+        await close(await namePathLanding(readJsonImpl, owner, repo, proof.mainSha, proof.files[0]?.path));
         return { closed: true };
       } catch (error) {
         return { closed: false, reason: `dependency close claim or fresh read/effect refused: ${String(error)}` };
@@ -3646,9 +3654,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const escalationIssues: AsyncIssueGateway = stallIdentity !== undefined && issues.listOpen
         ? { ...issues, listOpen: async (label) => (await issues.listOpen!(label)).filter(issue => {
           const head = escalationHeadSha(issue.body);
-          const identityText = issue.title?.endsWith("…") ? issue.body : issue.title;
-          return (head !== undefined && head !== pr.headSha) ||
-            stalledStageEscalationIdentity(identityText ?? "") === stallIdentity;
+          return (head !== undefined && head !== pr.headSha) || stalledStageIssueIdentity(issue) === stallIdentity;
         }) }
         : issues;
       const file = async (context: string): Promise<void> => { await escalateAsync(
@@ -14119,7 +14125,7 @@ export interface SweepDeps {
   draftRefusalAmendments?: (candidates: readonly RefusalCandidate[]) => Promise<readonly RefusalAmendmentResult[]>;
   /** Close superseded/abandoned PRs with a reason; the dependency fence alone holds the existing branch mutex through fresh reads and close. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
-  withDependencyCloseFence?: (pr: OpenPrView, close: () => Promise<void>) => Promise<{ closed: boolean; reason?: string }>;
+  withDependencyCloseFence?: (pr: OpenPrView, close: (supersededBy?: string) => Promise<void>) => Promise<{ closed: boolean; reason?: string }>;
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same
    *  head — from "hold" or an incomplete/unknown result, which re-run next sweep because a red
@@ -15605,8 +15611,11 @@ function priorActionsFromLedger(
         // Only an explicit completed decision dedups. A retitle can return without deciding,
         // recorded as "unknown"; missing/unrecognized outcomes are not terminal either.
         // They, like "hold", must re-run at the SAME sha (see SweepDeps.depReview).
-        if (line.dep_review_outcome === "arm" || line.dep_review_outcome === "escalate" ||
-            line.dep_review_outcome === "refuse" || line.dep_review_outcome === "migrate") {
+        // A terminal decided by an OLDER dep-review engine does not dedup: an engine fix (W1-T2872's
+        // revision) rearms the same head once, exactly as it changes the review input digest.
+        if ((line.dep_review_outcome === "arm" || line.dep_review_outcome === "escalate" ||
+            line.dep_review_outcome === "refuse" || line.dep_review_outcome === "migrate") &&
+            depReviewRowEngineRevision(line) === DEP_REVIEW_ENGINE_REVISION) {
           depReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
         break;
@@ -19619,7 +19628,7 @@ export async function runSweep(
         // time (a re-derived PR: minus its fresh read), read at the write, never at the pass's start.
         snapshot_age_ms: snapshotAgeMs(index),
         ...(rederivedIndices.has(index) ? { rederived: true } : {}),
-        ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
+        ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome, dep_review_engine_revision: DEP_REVIEW_ENGINE_REVISION } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason && !deliveredStandDownLogged ? { stand_down_reason: standDownReason } : {}),
         ...(deliveredStandDownLogged ? { stand_down_unchanged: true } : {}),
@@ -20725,7 +20734,7 @@ export async function runSweep(
         if (alreadyDone) {
           dedupStandDownReason =
             `dependency review already reached a TERMINAL outcome at this head ` +
-            `(${pr.headSha.slice(0, 7)}) — a hold would have re-run instead of deduping`;
+            `(${pr.headSha.slice(0, 7)}) under engine ${DEP_REVIEW_ENGINE_REVISION} — a hold would have re-run instead of deduping`;
         }
         break;
       case "post-review": {
@@ -22347,7 +22356,9 @@ export async function runSweep(
                 }
               }
               if (dependencyMainSupersession) {
-                const fenced = await deps.withDependencyCloseFence?.(pr, async () => { await deps.close(pr, reason); });
+                const fenced = await deps.withDependencyCloseFence?.(pr, async (supersededBy) => {
+                  await deps.close(pr, supersededBy === undefined ? reason : `${reason}; superseded by ${supersededBy}`);
+                });
                 acted = fenced?.closed === true;
                 if (!acted) standDownReason = fenced?.reason ?? "dependency close requires a strict fresh lifecycle/main/owner fence";
                 extraDisposedFields = { ...extraDisposedFields, dependency_main_identity: dependencyIdentity };
