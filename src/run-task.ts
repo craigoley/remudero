@@ -2903,7 +2903,6 @@ import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
-import { runChildCredentialSocket } from "./lib/secret-boundary.js";
 import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, planStaleHoldArchive, readDispatchClaimTaskIdsSteps, remoteBranchHeadsSteps, archiveStaleHoldsSteps, staleHoldRestoreCommand, STALE_HOLD_ARCHIVE_CAP, pruneDeletableBranchesSteps, readNamedInSourceSteps, readRemoteBranchTipsSteps, readTipInMainMembershipSteps, remoteBranchNamesSteps, tipInMainFor, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
 // initialiser (`resolveRepoRoot`) its own declaration (`repoRoot`) depends on — a move, never
