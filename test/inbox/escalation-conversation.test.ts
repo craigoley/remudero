@@ -7,8 +7,8 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { fixedClock } from "#src/lib/clock.js";
-import { createEscalationConversationReader, buildEscalationConversationRoute, type EscalationIssueSource } from "#src/lib/escalation-conversation.js";
-import { escalate } from "#src/lib/escalate.js";
+import { createEscalationConversationReader, buildEscalationConversationRoute, readEscalationIssueSource, type EscalationIssueSource } from "#src/lib/escalation-conversation.js";
+import { escalate, type Escalation } from "#src/lib/escalate.js";
 import { readThread } from "#src/lib/inbox-thread.js";
 import { buildEscalationReplyRoute } from "#src/lib/panel-actions.js";
 import { createService } from "#src/lib/service.js";
@@ -17,7 +17,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 const URL = "https://github.com/craigoley/remudero/issues/16183";
 const AT = "2026-11-02T12:00:00.000Z";
 
-function fixture() {
+function fixture(overrides: Partial<Pick<Escalation, "summary" | "detail" | "decisionSummary">> = {}) {
   const root = mkdtempSync(join(tmpdir(), "escalation-conversation-"));
   mkdirSync(join(root, "state"));
   const store = join(root, "state", "inbox-threads.jsonl");
@@ -25,7 +25,7 @@ function fixture() {
   escalate({ taskId: "W1-T42", class: "MANUAL", cause: "stage-stall", summary: "PR #15520 needs clarification",
     detail: "PR stage stalled: #15520 — own-red. The diagnosis is unknown.",
     recommendation: "Investigate the failed stage and repair the problem.",
-    options: [{ label: "Investigate and repair", detail: "Find the cause before changing the pull request." }] }, {
+    options: [{ label: "Investigate and repair", detail: "Find the cause before changing the pull request." }], ...overrides }, {
     ledgerPath: join(root, "state", "ledger.ndjson"), runId: "fixture", threadStorePath: store,
     issues: { create(title, body) { issue.title = title; issue.body = body; return URL; } },
   });
@@ -81,6 +81,50 @@ test("escalation conversation coalesces reads and preserves a stale source witho
   assert.equal(stale.conversation.source.observedAt, AT);
   assert.equal(stale.conversation.canReply, false);
   assert.equal((await read(URL, true)).state, "unavailable");
+});
+
+test("native truncated summaries and generated context cannot redirect an escalation thread", async t => {
+  const summary = `PR #15520 needs clarification ${"about the failing stage ".repeat(20)}`;
+  const long = fixture({ summary }); t.after(() => rmSync(long.root, { recursive: true, force: true }));
+  assert.match(long.issue.body, /Full summary \(JSON\)/);
+  const readLong = await long.read(URL); assert.equal(readLong.state, "served"); if (readLong.state !== "served") return;
+  assert.equal(readLong.conversation.headline, summary);
+  assert.equal(readLong.conversation.canReply, true);
+  const context = fixture({ summary: "A pull request needs clarification", decisionSummary: {
+    headline: "PR #999 is related context", what_happened: "Another pull request is related.", decision: "Investigate the current failure.",
+    options: [{ label: "Investigate", consequence: "The cause becomes known." }, { label: "Wait", consequence: "The PR remains stalled." }],
+  } }); t.after(() => rmSync(context.root, { recursive: true, force: true }));
+  assert.match(context.issue.body, /## Decision Summary/);
+  const actual = await context.read(URL); assert.equal(actual.state, "served"); if (actual.state !== "served") return;
+  assert.equal(actual.conversation.identity.prRef, "15520");
+  assert.equal(actual.conversation.canReply, true);
+  for (const malformed of ["invalid JSON", '"' + "x".repeat(16_385) + '"', "42"]) {
+    long.issue.body = long.issue.body.replace(/^\*\*Full summary \(JSON\):\*\*.*$/m, `**Full summary (JSON):** ${malformed}`);
+    assert.equal((await long.read(URL, true)).state, "unavailable");
+  }
+});
+
+test("native-looking public issues and missing provenance never become confirmed conversations", async t => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  rmSync(join(f.root, "state", "ledger.ndjson"));
+  assert.equal((await f.read(URL)).state, "unavailable");
+  const unknown = createEscalationConversationReader({ repository: "craigoley/remudero", threadStorePath: f.store,
+    knownIssue() { throw new Error("snapshot unavailable"); }, readIssue: async () => f.issue });
+  assert.equal((await unknown(URL)).state, "unavailable");
+  const absent = createEscalationConversationReader({ repository: "craigoley/remudero", readIssue: async () => { throw new Error("read timeout"); } });
+  assert.equal((await absent(URL)).state, "unavailable");
+  await assert.rejects(readEscalationIssueSource("not an issue"), /canonical escalation/);
+});
+
+test("oversized or ambiguous saved discussions remain explicitly partial", async t => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const opening = JSON.parse(readFileSync(f.store, "utf8").trim());
+  writeFileSync(f.store, Array.from({ length: 101 }, (_, i) => JSON.stringify({ ...opening, seq: i + 1 })).join("\n") + "\n");
+  const partial = await f.read(URL); assert.equal(partial.state, "served"); if (partial.state !== "served") return;
+  assert.equal(partial.conversation.history, "partial"); assert.equal(partial.conversation.canReply, false);
+  writeFileSync(f.store, JSON.stringify(opening) + "\n" + JSON.stringify({ ...opening, threadId: opening.threadId.replace("15520", "999") }) + "\n");
+  const ambiguous = await f.read(URL); assert.equal(ambiguous.state, "served"); if (ambiguous.state !== "served") return;
+  assert.equal(ambiguous.conversation.history, "partial"); assert.equal(ambiguous.conversation.canReply, false);
 });
 
 test("escalation conversation bounds malformed sources and distinguishes absent and closed history", async t => {
@@ -161,11 +205,12 @@ test("escalation source default really shells out through the bounded transport"
   const gh = join(bin, "gh"), marker = join(f.root, "called");
   writeFileSync(gh, `#!/bin/sh\nprintf used > "$FIXTURE_MARKER"\nprintf '%s' '${shellLiteral}'\n`); chmodSync(gh, 0o700);
   const module = pathToFileURL(join(REPO_ROOT, "src/lib/escalation-conversation.ts")).href;
-  const stdout = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+  const stdout = execFileSync(process.execPath, ["--enable-source-maps", "--import", "tsx", "--input-type=module", "-e",
     `import {readEscalationIssueSource} from ${JSON.stringify(module)}; console.log(JSON.stringify(await readEscalationIssueSource(${JSON.stringify(URL)})))`], {
     cwd: REPO_ROOT, timeout: 20_000, encoding: "utf8",
     // Only a fixture binary and dummy identity; no host credential or broker can reach this child.
-    env: { PATH: bin, HOME: f.root, GH_TOKEN: "offline-fixture-only", FIXTURE_MARKER: marker },
+    env: { PATH: bin, HOME: f.root, GH_TOKEN: "offline-fixture-only", FIXTURE_MARKER: marker,
+      ...(process.env.NODE_V8_COVERAGE ? { NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE } : {}) },
   });
   assert.equal(JSON.parse(stdout).html_url, URL);
   assert.equal(readFileSync(marker, "utf8"), "used");
