@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createCapabilityGrant, InMemoryCapabilityGrantStore, verifyCapabilityGrant } from "../src/lib/capability-grant.js";
-import { inspectCapabilityDecision } from "../src/lib/capability-inspection.js";
+import { createCapabilityGrant, InMemoryCapabilityGrantStore, verifyCapabilityGrant } from "#src/lib/capability-grant.js";
+import { inspectCapabilityDecision } from "#src/lib/capability-inspection.js";
 
 test("test/capability-inspection-outcomes.test.ts: allow and every refusal agree with the explicit verifier clock", () => {
   const request = { grantId: "g", operation: "read", target: "t", audience: "a", nonce: "n" };

@@ -3,9 +3,9 @@ import { spawnSync } from "node:child_process";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { withTempDir } from "../src/lib/tmp.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { withTempDir } from "#src/lib/tmp.js";
 import {
   assessPendingReviewOwner,
   lastPendingReviewStatusFromLedger,
@@ -13,9 +13,9 @@ import {
   reviewInputDigest,
   type PendingReviewOwnerAssessment,
   type PostReviewPendingOpts,
-} from "../src/lib/review.js";
-import { buildOpenPrViews } from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type SweepDeps } from "./helpers/sweep-test.js";
+} from "#src/lib/review.js";
+import { buildOpenPrViews } from "#src/run-task.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type SweepDeps } from "#test/helpers/sweep-test.js";
 
 function fixture(dir: string) {
   const now = Date.now();

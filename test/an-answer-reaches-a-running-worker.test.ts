@@ -20,7 +20,7 @@ import {
   deliverOperatorAnswerToRunningWorker,
   spawnWorker,
   type SpawnWorkerArgs,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 /** Bounds a promise so a defect that would otherwise wait FOREVER (a callback deep inside `spawnWorker`'s own
  * control flow — `started()` — never firing because some earlier step threw or a different code path was taken)

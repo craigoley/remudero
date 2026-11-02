@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runPairedReviewEvaluation, type PairedReviewCase } from "../src/lib/paired-review-eval.js";
-import { replayPairedReviews } from "../src/lib/replay-harness.js";
-import type { GoldenCorpusItem } from "../src/lib/golden-corpus.js";
+import { runPairedReviewEvaluation, type PairedReviewCase } from "#src/lib/paired-review-eval.js";
+import { replayPairedReviews } from "#src/lib/replay-harness.js";
+import type { GoldenCorpusItem } from "#src/lib/golden-corpus.js";
 
 const sha = (char: string) => char.repeat(40);
 const at = "2026-09-29T00:00:00Z";

@@ -13,8 +13,8 @@ import {
   reapWorkerHome,
   sweepStaleWorkerHomes,
   workerHomePlan,
-} from "../src/lib/worker-home.js";
-import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
+} from "#src/lib/worker-home.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker } from "#src/lib/worker.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "rmd-workerhome-perrun-"));

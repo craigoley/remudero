@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { detectInstrumentEntanglement, ENTANGLEMENT_EXEMPT_INSTRUMENTS } from "../src/lib/review.js";
+import { detectInstrumentEntanglement, ENTANGLEMENT_EXEMPT_INSTRUMENTS } from "#src/lib/review.js";
 
 const CI = ".github/workflows/ci.yml";
 const GATE = ".github/workflows/ci-gate.yml";

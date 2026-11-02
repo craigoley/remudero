@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { resolveDaemonTarget, resolveReviewTarget } from "../src/run-task.js";
+import { resolveDaemonTarget, resolveReviewTarget } from "#src/run-task.js";
 
 /**
  * W1-T1062 ACCEPTANCE 1: "a bare repo flag keeps resolving to this checkout's own owner, so

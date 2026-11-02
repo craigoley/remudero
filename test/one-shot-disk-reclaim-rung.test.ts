@@ -32,14 +32,14 @@ import { join } from "node:path";
 import { describe, it, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { logCloneReapSurveyAsync, logDiskReclaimRung } from "../src/run-task.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import { sweepStaleTempDirs } from "../src/lib/tmp.js";
-import { sweepStaleWorkerHomes } from "../src/lib/worker-home.js";
-import type { Config } from "../src/lib/config.js";
-import type { CloneReapSummary } from "../src/lib/clone-reaper.js";
-import type { TempSweepSummary } from "../src/lib/tmp.js";
-import type { WorkerHomeSweepSummary } from "../src/lib/worker-home.js";
+import { logCloneReapSurveyAsync, logDiskReclaimRung } from "#src/run-task.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import { sweepStaleTempDirs } from "#src/lib/tmp.js";
+import { sweepStaleWorkerHomes } from "#src/lib/worker-home.js";
+import type { Config } from "#src/lib/config.js";
+import type { CloneReapSummary } from "#src/lib/clone-reaper.js";
+import type { TempSweepSummary } from "#src/lib/tmp.js";
+import type { WorkerHomeSweepSummary } from "#src/lib/worker-home.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 const CONFIG = { root: "/nonexistent-repo-root-for-disk-reclaim-test" } as unknown as Config;

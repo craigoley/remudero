@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { judgeReview, type ProofExecutor } from "../src/lib/review.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import { judgeReview, type ProofExecutor } from "#src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 
 // ── W1-T273 ──────────────────────────────────────────────────────────────────
 //

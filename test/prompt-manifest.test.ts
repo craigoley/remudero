@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { buildPromptManifest, type PromptManifestInput } from "../src/lib/prompt-manifest.js";
-import { implementPromptParts, renderImplementPrompt, renderImplementPromptWithParts } from "../src/run-task.js";
-import type { Task } from "../src/lib/plan.js";
+import { buildPromptManifest, type PromptManifestInput } from "#src/lib/prompt-manifest.js";
+import { implementPromptParts, renderImplementPrompt, renderImplementPromptWithParts } from "#src/run-task.js";
+import type { Task } from "#src/lib/plan.js";
 
 function task(over: Partial<Task> = {}): Task {
   return {

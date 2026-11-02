@@ -11,8 +11,8 @@ import {
   type ProofExecutor,
   type ReviewEvidence,
   type WhitelistedProof,
-} from "../src/lib/review.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+} from "#src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 
 /**
  * test/a-review-runs-each-unique-proof-once.test.ts — W1-T2743.

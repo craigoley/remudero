@@ -3,8 +3,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { WorkerKeychainError } from "../src/lib/worker-home.js";
-import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
+import { WorkerKeychainError } from "#src/lib/worker-home.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker } from "#src/lib/worker.js";
 
 /**
  * W1-T2518 — `expectedRunMs` (W1-T2398, worker-home.ts) gets its FIRST caller.
@@ -227,7 +227,7 @@ test("claim: observedHeadroomMs is logged on every darwin provisioning call, exp
 // ── the SAME logHomeReap discipline this task's log fields function follows ─────
 
 test("grep-anchor: workerKeychainHeadroomLogFields projects step/observed_headroom_ms/expected_run_ms/provision_reason", async () => {
-  const { workerKeychainHeadroomLogFields } = await import("../src/lib/worker.js");
+  const { workerKeychainHeadroomLogFields } = await import("#src/lib/worker.js");
   const fields = workerKeychainHeadroomLogFields(
     { keychainPath: "/cfg/state/remudero-worker.keychain-db", provisioned: true, unlocked: true, reason: "absent", observedHeadroomMs: 12345 },
     60000,

@@ -6,14 +6,14 @@ import {
   type GatePostureDecision,
   type GatePostureFinding,
   type GatePostureOutcome,
-} from "../src/lib/gate-posture.js";
+} from "#src/lib/gate-posture.js";
 import {
   buildRiskJudgePrompt,
   parseRiskJudgeResponse,
   parseRiskJudgeVerdict,
   type RiskJudgeResult,
   type RiskJudgeVerdict,
-} from "../src/lib/risk-judge.js";
+} from "#src/lib/risk-judge.js";
 
 const FINDING: GatePostureFinding = {
   gate: "test-tier-manifest",

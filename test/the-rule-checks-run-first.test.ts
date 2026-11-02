@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
-import { FAST_GATE_STEPS, listRuleSuites, MIN_RULE_SUITE_COUNT, runPreflightFast } from "../src/lib/ci-parity.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { FAST_GATE_STEPS, listRuleSuites, MIN_RULE_SUITE_COUNT, runPreflightFast } from "#src/lib/ci-parity.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import {
   main,
   runRuleSuites,
   // @ts-ignore the executable .mjs module is exercised directly and has no declaration file.
-} from "../scripts/list-rule-suites.mjs";
+} from "#scripts/list-rule-suites.mjs";
 
 const REPO_ROOT = process.cwd();
 

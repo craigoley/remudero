@@ -3,9 +3,9 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { parseCodexJsonl, spawnCodexWorker } from "../src/lib/worker-provider.js";
-import { workerLedgerFields } from "../src/lib/worker.js";
-import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources } from "../src/lib/benchmark-run.js";
+import { parseCodexJsonl, spawnCodexWorker } from "#src/lib/worker-provider.js";
+import { workerLedgerFields } from "#src/lib/worker.js";
+import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources } from "#src/lib/benchmark-run.js";
 
 const completed = (usage?: Record<string, unknown>) => ({ type: "turn.completed", ...(usage ? { usage } : {}) });
 const zero = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 };

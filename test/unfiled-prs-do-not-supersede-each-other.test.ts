@@ -22,7 +22,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildOpenPrViews } from "../src/run-task.js";
+import { buildOpenPrViews } from "#src/run-task.js";
 
 function ledgerPath(): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-unfiled-supersession-"));

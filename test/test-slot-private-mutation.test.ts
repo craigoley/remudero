@@ -4,8 +4,8 @@ import { chmodSync, closeSync, existsSync, linkSync, lstatSync, mkdirSync, mkdte
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity, SlotCapacityCleanupError } from "../src/lib/test-slot-capacity.js";
-import { acquireSlotMutation, slotMutationPending } from "../src/lib/test-slot-mutation.js";
+import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity, SlotCapacityCleanupError } from "#src/lib/test-slot-capacity.js";
+import { acquireSlotMutation, slotMutationPending } from "#src/lib/test-slot-mutation.js";
 
 const MUTATION_URL = new URL("../src/lib/test-slot-mutation.ts", import.meta.url).href;
 const CAPACITY_URL = new URL("../src/lib/test-slot-capacity.ts", import.meta.url).href;

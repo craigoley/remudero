@@ -22,8 +22,8 @@ import {
   taskIdFromSlugBranch,
   type BranchFacts,
   type BranchReapPlan,
-} from "../src/lib/status.js";
-import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "../src/run-task.js";
+} from "#src/lib/status.js";
+import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "#src/run-task.js";
 
 const f = (name: string, over: Partial<BranchFacts> = {}): BranchFacts => ({
   name,

@@ -18,8 +18,8 @@ import {
   type ReviewCapacityObservation,
   type ReviewCapacityPolicy,
   type ReviewCapacityState,
-} from "../src/lib/review-capacity.js";
-import { writeProviderRoutingStatus, type ProviderRoutingStatus } from "../src/lib/provider-routing-status.js";
+} from "#src/lib/review-capacity.js";
+import { writeProviderRoutingStatus, type ProviderRoutingStatus } from "#src/lib/provider-routing-status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweep,
@@ -27,9 +27,9 @@ import {
   validateReviewCapacityPolicy,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { activeWorkerCount, withWorkerOccupancy } from "../src/lib/worker.js";
-import { buildSweepEffects } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { activeWorkerCount, withWorkerOccupancy } from "#src/lib/worker.js";
+import { buildSweepEffects } from "#src/run-task.js";
 
 const POLICY: ReviewCapacityPolicy = {
   hostWorkerBudget: 4,

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
 import {
   BARE_EXIT_CODE_ANNOTATION,
   ciFailurePromptEvidence,
   extractCiFailureRegion,
   fetchCiFailures,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const TAP_FAILURE = [
   "not ok 7 - W1-T4461 fixture fails with a useful assertion",

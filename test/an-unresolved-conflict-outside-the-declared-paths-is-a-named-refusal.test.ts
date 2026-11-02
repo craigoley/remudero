@@ -11,10 +11,10 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import {
   commitWorkerEdits, harnessCommitForShellLessWorker, UNRESOLVED_CONFLICT_REFUSAL_PREFIX,
-} from "./helpers/run-task-commit-seam.js";
+} from "#test/helpers/run-task-commit-seam.js";
 
 const DECLARED = "declared.txt";
 const OUTSIDE = "outside.txt";

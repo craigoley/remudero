@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { checkCommitMessage } from "../src/lib/commit-message.js";
-import { applyPlanProposalCommit, planCommitMessage } from "../src/lib/plan-architect.js";
-import { loadMounts, mountsPath } from "../src/lib/mounts.js";
-import { planCommand } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { checkCommitMessage } from "#src/lib/commit-message.js";
+import { applyPlanProposalCommit, planCommitMessage } from "#src/lib/plan-architect.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
+import { planCommand } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const gitEnv = {

@@ -11,7 +11,7 @@ import {
   readerJoins,
   sourceTextReaderOf,
   type SourceTextReader,
-} from "../src/lib/source-text-readers.js";
+} from "#src/lib/source-text-readers.js";
 
 /**
  * A census that reads source text joins every diff that edits that text, whatever its enumeration

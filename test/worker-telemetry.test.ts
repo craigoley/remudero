@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { enrichWorkerStreamEvent } from "../src/lib/worker-telemetry.js";
-import type { WorkerSelectionAssignment, WorkerStreamEvent } from "../src/lib/worker.js";
+import { enrichWorkerStreamEvent } from "#src/lib/worker-telemetry.js";
+import type { WorkerSelectionAssignment, WorkerStreamEvent } from "#src/lib/worker.js";
 
 const baseEvent: WorkerStreamEvent = { kind: "message", tsMs: 1_000, turnsSoFar: 3 };
 

@@ -12,8 +12,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { prerequisitePrAdmissionRefusal } from "../src/run-task.js";
-import { acceptanceAuthorTimeCheck } from "../src/lib/review.js";
+import { prerequisitePrAdmissionRefusal } from "#src/run-task.js";
+import { acceptanceAuthorTimeCheck } from "#src/lib/review.js";
 
 const PREREQ_URL = "https://github.com/acme/remudero/pull/9206";
 const MINTED = "run-unfiled-1791164997643";

@@ -5,11 +5,11 @@ import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 // @ts-expect-error -- executable .mjs script has no declaration file.
-import { gitOrThrow } from "../scripts/lib/git.mjs";
+import { gitOrThrow } from "#scripts/lib/git.mjs";
 // @ts-expect-error -- executable .mjs script has no declaration file.
-import { main as checkBranchShape } from "../scripts/worker-branch-shape.mjs";
+import { main as checkBranchShape } from "#scripts/worker-branch-shape.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 let sequence = 0;

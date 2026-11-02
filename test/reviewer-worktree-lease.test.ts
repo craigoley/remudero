@@ -5,16 +5,16 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { reviewAdvanceIsMaterial } from "../src/lib/self-sync.js";
-import { reapStaleWorktrees } from "../src/lib/worker.js";
-import { buildFreshTreeReviewRunner } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { reviewAdvanceIsMaterial } from "#src/lib/self-sync.js";
+import { reapStaleWorktrees } from "#src/lib/worker.js";
+import { buildFreshTreeReviewRunner } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // check-proof transplants the test into main. An absent new production module is an explicit
 // failing feature assertion; a real import/toolchain error on a present module still propagates.
 const leaseSource = fileURLToPath(new URL("../src/lib/reviewer-worktree-lease.ts", import.meta.url));
-const leaseModule = existsSync(leaseSource) ? await import("../src/lib/reviewer-worktree-lease.js") : undefined;
+const leaseModule = existsSync(leaseSource) ? await import("#src/lib/reviewer-worktree-lease.js") : undefined;
 
 async function withReviewerWorktreeLease<T>(path: string, action: () => Promise<T>): Promise<T> {
   assert.ok(leaseModule, "the production reviewer ownership module must exist");

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { reportWorkerSourceSizeFollowup } from "../src/run-task.js";
+import { reportWorkerSourceSizeFollowup } from "#src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

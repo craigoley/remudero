@@ -18,11 +18,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { MODEL_HOST_DEFAULT, boundaryLedgerRow, declaredHostsFromWorkerSettings, forwardedTarget, mintSentinel, repoFromCredentialRequest, secretBoundaryEnv, startBoundaryProxy, startCredentialHelperSocket, type BoundaryDestination, type BoundaryLedgerRow, type ScopedTokenMint } from "../src/lib/secret-boundary.js";
-import { buildWorkerEnv } from "../src/lib/env.js";
-import { mintScopedToken } from "../src/lib/github-app.js";
-import { ALLOWED_NETWORK_DOMAINS } from "../src/lib/settings.js";
-import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, wireCredentialHelperSocket } from "../src/lib/worker.js";
+import { MODEL_HOST_DEFAULT, boundaryLedgerRow, declaredHostsFromWorkerSettings, forwardedTarget, mintSentinel, repoFromCredentialRequest, secretBoundaryEnv, startBoundaryProxy, startCredentialHelperSocket, type BoundaryDestination, type BoundaryLedgerRow, type ScopedTokenMint } from "#src/lib/secret-boundary.js";
+import { buildWorkerEnv } from "#src/lib/env.js";
+import { mintScopedToken } from "#src/lib/github-app.js";
+import { ALLOWED_NETWORK_DOMAINS } from "#src/lib/settings.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, wireCredentialHelperSocket } from "#src/lib/worker.js";
 
 function keyPair() {
   return generateKeyPairSync("rsa", {

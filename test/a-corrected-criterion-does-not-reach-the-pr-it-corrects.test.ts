@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config-schema.js";
-import type { ReviewRunResult } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { Config } from "#src/lib/config-schema.js";
+import type { ReviewRunResult } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -44,7 +44,7 @@ function gitPlanRepo(): { dir: string; run: (args: string[]) => string; commit: 
   return { dir, run, commit };
 }
 
-let reviewCommand: typeof import("../src/run-task.js").reviewCommand | undefined;
+let reviewCommand: typeof import("#src/run-task.js").reviewCommand | undefined;
 
 async function reviewLogs(repoDir: string, headRefOid: string, state: "success" | "failure"): Promise<string[]> {
   const stateRoot = mkdtempSync(join(tmpdir(), "rmd-stale-plan-tree-state-"));
@@ -53,7 +53,7 @@ async function reviewLogs(repoDir: string, headRefOid: string, state: "success" 
       const argv = process.argv;
       process.argv = [...argv, "--repo-root", repoDir];
       try {
-        ({ reviewCommand } = await import("../src/run-task.js"));
+        ({ reviewCommand } = await import("#src/run-task.js"));
       } finally {
         process.argv = argv;
       }
@@ -118,7 +118,7 @@ test("a corrected criterion does not reach the PR it corrects", async () => {
 test("the stale-plan-tree advisory degrades when origin main is unreadable", async () => {
   const { dir } = gitRepo({ branch: "main", seedCommit: false, kind: "unreadable-origin-main" });
   try {
-    const { planTreeIsBehindMain } = await import("../src/run-task.js");
+    const { planTreeIsBehindMain } = await import("#src/run-task.js");
     assert.equal(planTreeIsBehindMain("plan/tasks.d/@0123456789ab", dir), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });

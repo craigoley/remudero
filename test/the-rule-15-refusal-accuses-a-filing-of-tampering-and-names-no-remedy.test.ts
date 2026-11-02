@@ -23,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { checkSatisfiedByGuard, failSummary } from "../src/lib/review.js";
+import { checkSatisfiedByGuard, failSummary } from "#src/lib/review.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

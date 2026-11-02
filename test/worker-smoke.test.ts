@@ -5,16 +5,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { Config } from "../src/lib/config.js";
+import type { Config } from "#src/lib/config.js";
 import {
   WORKER_SMOKE_MAX_TURNS,
   assessWorkerSmoke,
   runWorkerSmoke,
   workerSmokeMain,
   workerSmokePrompt,
-} from "../src/lib/containment.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/containment.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");

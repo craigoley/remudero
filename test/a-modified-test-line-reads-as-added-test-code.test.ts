@@ -9,14 +9,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { detectTestTheater } from "../src/lib/review.js";
+import { detectTestTheater } from "#src/lib/review.js";
 // The planted tautologies live under `test/fixtures/` — which `isFixtureDataPath` excludes from
 // the scan — because a suite holding them INLINE self-matches the very arm it is testing. See
 // that fixture's own header for the measurement that earned this split.
 import {
   ALL_PLANTED_TAUTOLOGIES,
   PLANTED_BARE_ASSERT_TRUE,
-} from "./fixtures/test-theater-planted/planted.js";
+} from "#test/fixtures/test-theater-planted/planted.js";
 
 /** A unified-diff hunk for one test file. `lines` carry their own `+`/`-`/` ` prefix. */
 function diffFor(path: string, lines: string[]): string {

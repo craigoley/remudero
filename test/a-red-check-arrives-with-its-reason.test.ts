@@ -6,7 +6,7 @@ import {
   fetchCiFailures,
   type CiAnnotationFetch,
   type CiJobLogFetch,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 function failing(name: string, jobId: string, startedAt = "2026-09-10T00:00:00Z") {
   return {

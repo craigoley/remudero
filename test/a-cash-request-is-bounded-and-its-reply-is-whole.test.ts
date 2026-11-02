@@ -6,7 +6,7 @@ import {
   OpenWeightRequestTimeoutError,
   OpenWeightTruncatedReplyError,
   openWeightReplyIsTruncated,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 
 // Two transport gaps measured against synthwatch's production Azure adapter, which has run this
 // shape for months: remudero's `fetch` carried NO `signal`, and `finish_reason` was never read.
@@ -58,8 +58,8 @@ test("the deadline is generous, because a reasoning model on a large prompt is l
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
-import type { Config } from "../src/lib/config-schema.js";
+import { spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import type { Config } from "#src/lib/config-schema.js";
 
 const fixedClock = (ms: number) => ({ now: () => ms, iso: () => new Date(ms).toISOString() });
 

@@ -14,11 +14,11 @@ import {
   type RiskJudgeInput,
   type RiskJudgeOrchestratorDeps,
   type RiskJudgeVerdict,
-} from "../src/lib/risk-judge.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import * as runTaskModule from "../src/run-task.js";
-import { changeView, changeViewAsync } from "../src/run-task.js";
+} from "#src/lib/risk-judge.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import * as runTaskModule from "#src/run-task.js";
+import { changeView, changeViewAsync } from "#src/run-task.js";
 
 // W1-T7724 — PR #10339 (W1-T7092) had a review PASS and green checks, and the handed-off-head judge
 // still opened issue #10670 at low risk / confidence 0.60 "on the change's description/files alone, no

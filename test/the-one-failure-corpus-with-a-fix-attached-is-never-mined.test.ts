@@ -16,8 +16,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { collectCiFailureCorpus, type CorpusPr } from "../src/lib/ci-failure-corpus.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { collectCiFailureCorpus, type CorpusPr } from "#src/lib/ci-failure-corpus.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /** A check-run rollup entry, as `rollupFromRest` maps one. */
 const run = (name: string, conclusion: string, startedAt = "2026-09-06T10:00:00Z") => ({ name, status: "COMPLETED", conclusion, startedAt });
@@ -238,8 +238,8 @@ test("W1-T3449 restores the shared checkout after its isolated assertion", () =>
 // (`ghJson`) are the one line each that a unit test cannot reach; the dispatch case names that
 // boundary explicitly.
 
-import { ciFailuresCommand, commitChangedFiles, loadCiFailureWindow } from "../src/run-task.js";
-import { rollupAtSha } from "../src/lib/ci-failure-corpus.js";
+import { ciFailuresCommand, commitChangedFiles, loadCiFailureWindow } from "#src/run-task.js";
+import { rollupAtSha } from "#src/lib/ci-failure-corpus.js";
 
 /** Capture console.log/error for one call. */
 function captured(fn: () => number): { code: number; out: string } {

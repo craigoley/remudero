@@ -4,8 +4,8 @@ import {
   buildTypedJudgmentPrompt,
   parseTypedJudgmentResponse,
   runTypedJudgment,
-} from "../src/lib/typed-judgment.js";
-import type { spawnWorker } from "../src/lib/worker.js";
+} from "#src/lib/typed-judgment.js";
+import type { spawnWorker } from "#src/lib/worker.js";
 
 test("typed judgment prompt example round-trips through the real parser", () => {
   for (const options of [

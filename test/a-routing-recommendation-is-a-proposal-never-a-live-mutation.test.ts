@@ -1,4 +1,3 @@
-// test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts
 //
 // W1-T2575 — NOTHING TURNS THE ROUTING EVIDENCE INTO A DECISION. scripts/mount-headroom-sweep.mjs
 // (W1-T2560, extended W1-T2574) already MEASURES: it groups retained ledger runs into (type,
@@ -35,10 +34,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { validateMounts, type Mounts } from "../src/lib/mounts.js";
-import { updateProposalRegistry } from "../src/lib/inbox.js";
-import { harnessRunnerOver } from "../src/lib/replay-harness.js";
-import type { GoldenTask } from "../src/lib/replay.js";
+import { validateMounts, type Mounts } from "#src/lib/mounts.js";
+import { updateProposalRegistry } from "#src/lib/inbox.js";
+import { harnessRunnerOver } from "#src/lib/replay-harness.js";
+import type { GoldenTask } from "#src/lib/replay.js";
 import {
   DEFAULT_MIN_SAMPLE_N,
   mountRecommendationProposalCandidate,
@@ -51,7 +50,7 @@ import {
   type MountHeadroomComparison,
   type MountRecommendation,
   type MountRefusal,
-} from "../src/lib/mount-recommender.js";
+} from "#src/lib/mount-recommender.js";
 
 // ── A minimal, VALID mounts table (mirrors test/mounts.test.ts's own `goodRaw`) — real
 // validation, not a hand-typed stub, so a drift in mounts.ts's shape breaks THIS suite too. ──────
