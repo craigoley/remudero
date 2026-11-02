@@ -501,6 +501,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       const nativeBoundary = spawn === spawnSync;
       const sourceBefore = nativeBoundary ? observeAuthorContext({ root, git, dependency: () => dependencyBefore }).source : undefined;
       let boundContext;
+      // The acquired test slot; assigned at admission, read when the native context is observed.
+      let slot;
       const observeContext = () => observeAuthorContext({ root, git, slot,
         allocations: { diagnostics: diagnosticsRoot, scratch: tmpdir(), workspace: root } });
       /** The exact head/tree, dependencies, slot owner and allocation filesystems the phase is bound to. */
@@ -575,7 +577,6 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         // line while the static stage runs on its own memory admission; suites are admitted after it.
         const queue = enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: AUTHOR_SLOT_CEILING });
         receipt.suiteQueue = { ticketed: queue.ticketed, positionAtEnqueue: queue.position ?? null, note: queue.note };
-        let slot;
         let staticEndedAt;
         const admitSuites = () => {
           const waitStartedAt = Date.now();
