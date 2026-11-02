@@ -175,3 +175,16 @@ test("PR 13223: an instrument hold releases on a new head, another PR or an unde
     assert.ok(!disposed.some((r) => String(r.stand_down_reason).includes("instrument scope decision")), JSON.stringify(row));
   }
 });
+
+// #15917 (PR #15368) read "Cause: ci" with an empty failing-check signature: a review drove that round, and the
+// scope escalation hardcoded its cause while every sibling escalation in the rung classifies its own.
+test("a scope need from a review-driven round escalates with the review cause, not ci", async () => {
+  const f = rung([docs, instrument], [instrument]);
+  delete (f.run as { ciFailures?: unknown }).ciFailures;
+  await runFixRung(f.run);
+  assert.equal(f.issues.length, 1, "positive control: the instrument need still escalates");
+  assert.match(f.issues[0].body, /\*\*Cause:\*\* review/);
+  const ci = rung([docs, instrument], [instrument]);
+  await runFixRung(ci.run);
+  assert.match(ci.issues[0].body, /\*\*Cause:\*\* ci/, "a round CI drove still names ci");
+});
