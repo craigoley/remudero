@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: high # two files, one concern: the author static stage skips a census the same run already answered; the fleet pre-open gate keeps its own census step
+  risk: high # three files, one concern: the author static stage skips a census the same run already answered; the fleet pre-open gate keeps its own census step
   origin: operator-session#preflight-throughput-2026-11-02
   plan_refs:
     - W1-T6435
@@ -15,6 +15,7 @@
   files:
     - scripts/preflight-author.mjs
     - src/lib/ci-parity.ts
+    - src/lib/config-schema.ts
     - test/ci/parity/the-author-static-step-reuses-its-own-precheck-answer.test.ts
   status: queued
   attempts: 0
@@ -30,7 +31,7 @@
     - census-precheck joined the fast-gate steps (W1-T6435) so a hand-built PR that never ran hooks/pre-push still got a census check. The author preflight now runs it as its own step, and from W1-T11098 its counts first.
     - A measurement replaced the original W1-T11101 (seed a new worktree's tsc buildinfo). seedFromCanonical already seeds, a cold typecheck is 28-50 s, and a seed only helps when the TS inputs are identical, which a hand-build never has.
   design: |
-    preflight-author passes RMD_AUTHOR_CENSUS_ANSWERED=<headSha>:<outcome> in the static stage's childEnvironment after its census-precheck step returns. Outcome is ok, refused or time-bound; a run whose census refused never reaches static anyway. ci-parity's census-precheck step, and only that step, reads it. When the sha equals the tree's HEAD, it returns ok with detail "answered by the author preflight's census-precheck step at <sha> (<outcome>)" and no spawn. Otherwise it runs as now. The fleet pre-open gate and rmd preflight never set the variable.
+    preflight-author passes RMD_AUTHOR_CENSUS_ANSWERED=<headSha>:<outcome> in the static stage's childEnvironment after its census-precheck step returns. Outcome is ok, refused or time-bound; a run whose census refused never reaches static anyway. ci-parity's census-precheck step, and only that step, reads it. When the sha equals the tree's HEAD, it returns ok with detail "answered by the author preflight's census-precheck step at <sha> (<outcome>)" and no spawn. Otherwise it runs as now. The fleet pre-open gate and rmd preflight never set the variable. The variable is registered in ENV_REGISTRY (src/lib/config-schema.ts), and HEAD is read through hostWorktreeGit.
   note: |
     reservation hand-off: run-unfiled-1793629687846 -> run-unfiled-1793629687846
     Reserved with rmd next-task-id from the operator checkout (W1-T11098..W1-T11102 on run-unfiled-1793629687846). Operator ruling 2026-11-02: "go with all of your recommendations". Re-scoped before filing on a measured finding.
