@@ -34,8 +34,57 @@ function socketError(code: string): Error & { code: string } {
   error.code = code;
   return error;
 }
+function interruptedResponse(code: string): Response {
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`{"token":"${TOKEN}",`));
+      controller.error(new TypeError("terminated", { cause: socketError(code) }));
+    },
+  }), { status: 201 });
+}
 
 for (const code of ["EPIPE", "ECONNRESET", "UND_ERR_SOCKET", "ETIMEDOUT"]) {
+  test(`a token response body interrupted by ${code} retries before publishing the token`, async () => {
+    let calls = 0;
+    const rows: LogRow[] = [];
+    const signals: (AbortSignal | null | undefined)[] = [];
+    const opts = options(async (_url, init) => {
+      calls++;
+      assert.equal(new Headers(init?.headers).get("connection"), "close");
+      signals.push(init?.signal);
+      assert.equal(opts.env.GH_TOKEN, "old-test-token");
+      return calls === 1 ? interruptedResponse(code) : tokenResponse();
+    }, rows);
+    const result = await refreshInstallationToken(opts);
+    assert.equal(result.ok, true);
+    assert.equal(calls, 2);
+    assert.notEqual(signals[0], signals[1], "each attempt has an independent abort controller");
+    assert.equal(opts.env.GH_TOKEN, TOKEN);
+    assert.deepEqual(rows.filter(row => row.step === TOKEN_REFRESH_FAILED_STEP), [{
+      step: TOKEN_REFRESH_FAILED_STEP,
+      extra: { reason: `exchange request failed: ${code}`, retry_attempt: 2, max_attempts: MAX_TOKEN_EXCHANGE_ATTEMPTS },
+    }]);
+    assert.equal(JSON.stringify(rows).includes(TOKEN), false);
+  });
+
+  test(`token response body retries for ${code} stop at the attempt bound`, async () => {
+    let calls = 0;
+    const rows: LogRow[] = [];
+    const opts = options(async (_url, init) => {
+      calls++;
+      assert.equal(new Headers(init?.headers).get("connection"), "close");
+      return interruptedResponse(code);
+    }, rows);
+    assert.deepEqual(await refreshInstallationToken(opts), { ok: false, reason: `exchange request failed: ${code}` });
+    assert.equal(calls, MAX_TOKEN_EXCHANGE_ATTEMPTS);
+    assert.equal(opts.env.GH_TOKEN, "old-test-token");
+    const failures = rows.filter(row => row.step === TOKEN_REFRESH_FAILED_STEP);
+    assert.equal(failures.length, MAX_TOKEN_EXCHANGE_ATTEMPTS);
+    assert.deepEqual(failures.map(row => row.extra.retry_attempt), [2, 3, undefined]);
+    assert.ok(failures.every(row => row.extra.reason === `exchange request failed: ${code}`));
+    assert.equal(JSON.stringify(rows).includes(TOKEN), false);
+  });
+
   test(`a GitHub App token exchange retries ${code} on a close-after-request connection`, async () => {
     let calls = 0;
     const rows: LogRow[] = [];
@@ -103,13 +152,38 @@ test("non-socket errors and rejected exchanges are not retried", async () => {
   assert.equal(result.reason, "private key unreadable");
 });
 
-test("a real socket reset is retried on a distinct connection and closed after the request", { timeout: 15000 }, async t => {
+test("malformed JSON and rejected exchanges with interrupted bodies are not retried", async () => {
+  for (const status of [201, 401, 403]) {
+    let calls = 0;
+    const rows: LogRow[] = [];
+    const opts = options(async () => {
+      calls++;
+      return status === 201
+        ? new Response(`{"token":"${TOKEN}","error":"UND_ERR_SOCKET"`, { status })
+        : new Response(new ReadableStream({ start(controller) { controller.error(socketError("UND_ERR_SOCKET")); } }), { status });
+    }, rows);
+    const reason = status === 201 ? "exchange response unparsable" : `exchange rejected: ${status}`;
+    assert.deepEqual(await refreshInstallationToken(opts), { ok: false, reason });
+    assert.equal(calls, 1);
+    assert.equal(opts.env.GH_TOKEN, "old-test-token");
+    assert.deepEqual(rows, [{ step: TOKEN_REFRESH_FAILED_STEP, extra: { reason } }]);
+    assert.equal(JSON.stringify(rows).includes(TOKEN), false);
+  }
+});
+
+for (const duringBody of [false, true]) {
+test(`a real socket reset ${duringBody ? "during the body" : "before headers"} retries on a distinct closed connection`, { timeout: 15000 }, async t => {
   const sockets: object[] = [];
   const server = createServer((req, res) => {
     sockets.push(req.socket);
     assert.equal(req.headers.connection, "close");
     if (sockets.length === 1) {
-      req.socket.destroy();
+      if (duringBody) {
+        res.writeHead(201, { "content-type": "application/json" });
+        res.write(`{"token":"${TOKEN}",`);
+      } else {
+        req.socket.destroy();
+      }
       return;
     }
     res.writeHead(201, { "content-type": "application/json" });
@@ -124,13 +198,22 @@ test("a real socket reset is retried on a distinct connection and closed after t
   assert.ok(address && typeof address !== "string");
   const rows: LogRow[] = [];
   let calls = 0;
-  const result = await refreshInstallationToken(options(async (_url, init) => {
+  const opts = options(async (_url, init) => {
     calls++;
-    return fetch(`http://127.0.0.1:${address.port}/token`, init);
-  }, rows));
-  assert.equal(result.ok, true);
+    const response = await fetch(`http://127.0.0.1:${address.port}/token`, init);
+    if (duringBody && calls === 1) server.closeAllConnections();
+    return response;
+  }, rows);
+  const result = await refreshInstallationToken(opts);
+  assert.equal(result.ok, true, JSON.stringify({ result, rows }));
+  assert.equal(opts.env.GH_TOKEN, TOKEN);
   assert.equal(calls, 2);
   assert.equal(sockets.length, 2);
   assert.notEqual(sockets[0], sockets[1], "the retry uses a newly accepted TCP connection");
+  const failures = rows.filter(row => row.step === TOKEN_REFRESH_FAILED_STEP);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]?.extra.reason, "exchange request failed: UND_ERR_SOCKET");
+  assert.equal(failures[0]?.extra.retry_attempt, 2);
   assert.equal(JSON.stringify(rows).includes(TOKEN), false);
 });
+}
