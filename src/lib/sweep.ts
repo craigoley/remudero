@@ -1,4 +1,5 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
+import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
@@ -19484,6 +19485,11 @@ export async function runSweep(
     return decided.mode;
   };
   const quietContradictoryRows = new Set<number>();
+  const loopDecisions = new Map<number, unknown>();
+  for (const row of ledgerLines) {
+    if (row.step === "sweep.disposed" && typeof row.pr_number === "number" && row.loop_decision !== undefined)
+      loopDecisions.set(row.pr_number, row.loop_decision);
+  }
   // W1-T7734: entries acting on a view read DURING this pass, and when each read happened.
   const rederivedIndices = new Set<number>();
   const freshReadAtMs = new Map<number, number>();
@@ -19652,6 +19658,7 @@ export async function runSweep(
         step: "sweep.disposed",
         pr_number: pr.prNumber,
         pr_url: pr.prUrl,
+        ...(loopDecisions.has(pr.prNumber) ? { loop_decision: loopDecisions.get(pr.prNumber) } : {}),
         disposition,
         ...blockerRow,
         acted,
@@ -19743,6 +19750,22 @@ export async function runSweep(
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
     let { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
     noteHeadObservation(pr.prNumber, pr.headSha, passClockMs());
+    const loopDecision = loopDecisions.has(pr.prNumber) ? undefined : decideLoopOutcome({
+      taskId: pr.taskId, prNumber: pr.prNumber, prUrl: pr.prUrl, headSha: pr.headSha,
+      reviewInputDigest: pr.reviewInputDigest,
+      reviewState: pr.reviewState, checksGreen: pr.checksState === "green", mergeClean: pr.mergeState === "clean",
+      changedFiles: pr.changedFiles,
+      pushThroughFollowUp: /(?:^|\n)\s*push-through-follow-up:\s*\S+/i.test(pr.body ?? ""),
+      ledger: ledgerLines,
+    });
+    if (loopDecision && !deps.dryRun) {
+      const receipt = { ts: clockFromMillisFn(() => now).iso(), step: "loop.decision", run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+        pr_number: pr.prNumber, head_sha: pr.headSha, shadow: true, ...loopDecision };
+      appendLine(deps.ledgerPath, receipt);
+      // sweep.disposed is retained by rotation; carry the shadow receipt without a new retention rule.
+      loopDecisions.set(pr.prNumber, receipt);
+      if (!ledgerLines.includes(receipt)) ledgerLines.push(receipt);
+    }
     const priorGardenClose = ledgerLines.findLast(row => row.step === "sweep.disposed" &&
       row.pr_number === pr.prNumber && row.disposition === "stale" && row.acted === true &&
       typeof row.garden_record_refusal === "string");
