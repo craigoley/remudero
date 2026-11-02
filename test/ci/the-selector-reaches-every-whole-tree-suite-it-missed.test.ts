@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -67,6 +68,65 @@ test("W1-T4787: a suite that enumerates the tree through a helper is a census su
       `execFileSync("git", ["clone", "-q", originGit, repoDir]);\n`);
     const selected = censusSuiteFiles(["src/lib/anything.ts"], root);
     assert.deepEqual(selected, ["test/own-clone.test.ts", "test/through-the-helper.test.ts"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T10970: repository clone helper aliases enter the census", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}census-alias-`));
+  try {
+    const testDir = join(root, "test", "ci");
+    mkdirSync(testDir, { recursive: true });
+    mkdirSync(join(root, "test", "helpers"));
+    writeFileSync(join(root, "test", "helpers", "checkout.ts"), CLONING_HELPER);
+    writeFileSync(join(root, "test", "helpers", "fixture-clone.ts"), FIXTURE_HELPER);
+    const suite = (name: string, spec: string, call = 'copy(REPO_ROOT, "/x")', imported = "checkoutOf") => {
+      writeFileSync(join(testDir, `${name}.test.ts`), `import { ${imported} as copy } from "${spec}";\n${call};\n`);
+    };
+    suite("alias", "#test/helpers/checkout.js");
+    suite("alias-ts", "#test/helpers/checkout.ts");
+    suite("relative", "../helpers/checkout.js");
+    suite("fixture-source", "#test/helpers/checkout.js", 'copy(bare, "/x")');
+    suite("fixture-destination", "#test/helpers/fixture-clone.js", 'copy(REPO_ROOT, "/x")', "seedFrom");
+    suite("missing-helper", "#test/helpers/missing.js");
+    suite("traversal", "#test/helpers/../helpers/checkout.js");
+    suite("encoded-traversal", "#test/helpers/%2e%2e/helpers/checkout.js");
+    suite("other-package", "#other/helpers/checkout.js");
+    const pkg = join(root, "package.json");
+    const mapping = (target: unknown) => writeFileSync(pkg, JSON.stringify({ imports: { "#test/*": target } }));
+    const selected = () => censusSuiteFiles(["src/lib/anything.ts"], root);
+    const relativeOnly = ["test/ci/relative.test.ts"];
+    mapping("./test/*");
+    assert.deepEqual(selected(), ["test/ci/alias-ts.test.ts", "test/ci/alias.test.ts", ...relativeOnly]);
+
+    for (const target of [null, ["./test/*"], { default: "./test/*" }, "test/*", "./test/../test/*", "./test/**", "./src/*"]) {
+      mapping(target);
+      assert.deepEqual(selected(), relativeOnly, `unsupported mapping: ${JSON.stringify(target)}`);
+    }
+    mapping("./test/helpers/*");
+    suite("remapped", "#test/checkout.js");
+    assert.deepEqual(selected(), [...relativeOnly, "test/ci/remapped.test.ts"]);
+    writeFileSync(pkg, "{}");
+    assert.deepEqual(selected(), relativeOnly, "an undeclared alias is not assumed");
+    rmSync(pkg);
+    assert.deepEqual(selected(), relativeOnly, "a missing manifest preserves relative imports");
+    writeFileSync(pkg, "{");
+    assert.throws(selected, SyntaxError, "a malformed manifest cannot silently shrink the census");
+    mapping("./test/*");
+    const read = fs.readFileSync;
+    const denied = Object.assign(new Error("fixture read denied"), { code: "EACCES" });
+    for (const blocked of [pkg, join(root, "test", "helpers", "checkout.ts")]) {
+      const mock = t.mock.method(fs, "readFileSync", (...args: Parameters<typeof read>) => {
+        if (String(args[0]) === blocked) throw denied;
+        return Reflect.apply(read, fs, args);
+      });
+      try {
+        assert.throws(selected, (err) => err === denied, "an unreadable manifest or helper fails closed");
+      } finally {
+        mock.mock.restore();
+      }
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
