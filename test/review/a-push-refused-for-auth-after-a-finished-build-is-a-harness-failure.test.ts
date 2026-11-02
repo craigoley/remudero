@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -131,7 +130,7 @@ test("W1-T10749: an auth-refused build resumes straight to push", async () => {
     const pending = pendingWorkerBoundaryHandoffs(ledger).get("W1-T10749");
     assert.deepEqual(pending, { branch: built, headSha, resumePhase: "preopen" }, "the next dispatch resumes past implement, at pre-open and push");
 
-    const resume = clone.addWorktree(`${clone.dir}-resume`, "run-W1-T10749-1793037999999", "origin/main");
+    const resume = clone.addWorktree(join(clone.dir, "resume-wt"),"run-W1-T10749-1793037999999", "origin/main");
     const steps: string[] = [];
     const result = await restoreBoundaryCheckpoint(pending!, "W1-T10749", async (args) => resume.git(...args), (step) => void steps.push(step));
     assert.equal(result.headSha, headSha, "the unpushed head is restored from its kept ref with no fetch from origin");
@@ -139,7 +138,6 @@ test("W1-T10749: an auth-refused build resumes straight to push", async () => {
     assert.ok(!steps.includes("implement.checkpoint_dropped"));
     assert.equal(resume.git("rev-parse", "HEAD"), headSha);
   } finally {
-    rmSync(`${clone.dir}-resume`, { recursive: true, force: true });
     for (const repo of [clone, seed, origin]) repo.cleanup();
   }
 });
