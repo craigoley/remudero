@@ -25,7 +25,7 @@
     - claim: A settled escalate ruling is asked again once main changes an implicated path, the judge is told which paths changed, an unchanged main never re-asks, and a continue ruling resets the breaker
       proof: "unit test: test/daemon/a-breaker-is-re-judged-when-main-changes-what-its-failures-named.test.ts"
     - claim: The daemon command wires the real main-evidence reader into the breaker hook for its target repo checkout
-      proof: "grep: mainEvidence: mainEvidenceReader(join(config\\.root, \"repos\", target\\.repo)) in src/cli/commands/daemon.ts"
+      proof: "grep: mainEvidence: mainEvidenceReader(daemonTargetCheckoutRoot(target, config\\.root)) in src/cli/commands/daemon.ts"
   rationale: |
     OBSERVED, operator recon 2026-11-02:
     - The site daemon started no worker for five days. Its only remaining frontier task, PORTAL-T45, tripped its dispatch breaker at 2026-10-27T19:41Z after five refusals that collected zero tests: the site's vitest include read tests/unit/**/*.test.ts and the task's test was .tsx.
