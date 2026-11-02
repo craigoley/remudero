@@ -3184,11 +3184,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             live.head?.sha !== proof.headSha || live.head.ref !== pr.headRefName || live.base?.ref !== "main" ||
             typeof live.user?.login !== "string" || !isDependabotAuthor({ login: live.user.login }) || live.changed_files !== proof.files.length)
           return { closed: false, reason: "fresh dependency close lifecycle/head/main evidence changed or unavailable" };
-        // A human's review or review comment is a conversation this close would end: stand down.
-        for (const kind of ["reviews", "comments"] as const) {
-          const rows = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}/${kind}?per_page=100`], { fresh: true });
-          if (!Array.isArray(rows) || rows.length >= 100) return { closed: false, reason: `PR review ${kind} unreadable or unbounded` };
-          if (hasNonBotAuthor(rows)) return { closed: false, reason: `PR review ${kind} include a non-bot author; a human conversation is open` };
+        // A human's review, review comment or Conversation-tab comment is a conversation this close would end:
+        // stand down. The Conversation tab is the issue-comments endpoint; the pulls endpoints never list it.
+        const conversation = [
+          { path: `pulls/${pr.prNumber}/reviews`, label: "PR review reviews" },
+          { path: `pulls/${pr.prNumber}/comments`, label: "PR review comments" },
+          { path: `issues/${pr.prNumber}/comments`, label: "PR conversation comments" },
+        ] as const;
+        for (const { path, label } of conversation) {
+          const rows = await readJsonImpl(["api", `repos/${owner}/${repo}/${path}?per_page=100`], { fresh: true });
+          if (!Array.isArray(rows) || rows.length >= 100) return { closed: false, reason: `${label} unreadable or unbounded` };
+          if (hasNonBotAuthor(rows)) return { closed: false, reason: `${label} include a non-bot author; a human conversation is open` };
         }
         await close(await namePathLanding(readJsonImpl, owner, repo, proof.mainSha, proof.files[0]?.path));
         return { closed: true };

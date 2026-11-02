@@ -24,6 +24,7 @@ function fixture() {
     [`repos/o/r/git/trees/${HEAD_TREE}`, tree(HEAD_TREE)], [`repos/o/r/git/trees/${MAIN_TREE}`, tree(MAIN_TREE)],
     ["repos/o/r/pulls/13446/reviews?per_page=100", [{ user: { login: "remudero-fleet[bot]", type: "Bot" }, state: "COMMENTED" }]],
     ["repos/o/r/pulls/13446/comments?per_page=100", []],
+    ["repos/o/r/issues/13446/comments?per_page=100", [{ user: { login: "dependabot[bot]", type: "Bot" }, body: "rebase" }]],
     [`repos/o/r/commits?sha=${MAIN}&path=package.json&per_page=1`, [{ sha: LANDED, commit: { message: "chore(deps): bump the npm group (#15744)\n\nbody" } }]],
   ]);
   const calls: string[] = [];
@@ -178,7 +179,8 @@ test("default dependency close holds the canonical branch mutex through fresh re
       assert.throws(() => acquireInflightLock(f.claims, f.key, { run_id: "competing-native-fix", reclaim: false }), { code: "EEXIST" });
       assert.equal(JSON.parse(readFileSync(inflightLockPath(f.claims, f.key), "utf8")).run_id, "dependency-close-test");
     });
-    assert.deepEqual(await f.run(), { closed: true }); assert.equal(protectedReads, 5);
+    // main, the PR, reviews, review comments and Conversation-tab comments, plus the landing name: all under the claim.
+    assert.deepEqual(await f.run(), { closed: true }); assert.equal(protectedReads, 6);
     assert.equal(f.posts.length, 1); assert.deepEqual(f.posts[0].slice(0, 3), ["pr", "close", f.pr.prUrl]);
     assert.ok(!f.posts[0].includes("--delete-branch")); assert.equal(existsSync(inflightLockPath(f.claims, f.key)), false);
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
@@ -373,6 +375,22 @@ for (const fault of ["human-review", "human-review-comment", "untyped-review-aut
     } finally { rmSync(f.dir, { recursive: true, force: true }); }
   });
 }
+
+test("supersession close never ends a human comment on the PR's Conversation tab", async () => {
+  for (const [name, rows] of [
+    ["human conversation comment", [{ user: { login: "dependabot[bot]", type: "Bot" }, body: "rebase" }, { user: { login: "craigoley", type: "User" }, body: "keep this one" }]],
+    ["conversation unreadable", { message: "rate limited" }],
+  ] as const) {
+    const f = effectFixture();
+    try {
+      f.f.responses.set("repos/o/r/issues/13446/comments?per_page=100", rows);
+      const result = await f.run();
+      assert.equal(result.closed, false, name); assert.match(result.reason ?? "", /PR conversation comments/, name);
+      assert.equal(f.posts.length, 0, name);
+      assert.equal(existsSync(inflightLockPath(f.claims, f.key)), false, name);
+    } finally { rmSync(f.dir, { recursive: true, force: true }); }
+  }
+});
 
 test("supersession: the sweep's close comment carries the superseding PR the fence names", async () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}dependency-named-close-`));
