@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 6.00
+  budget_usd: 9.50
   risk: high  # Rule 19: one concern, one folder's pure-rename move; it renames up to 111 files
   band_meaning: blast-radius
   origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter H (wave 5 of 21: fix-lane)'

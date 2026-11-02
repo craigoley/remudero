@@ -27,3 +27,11 @@
     - PR #9222: 6.67 PR-hours — required checks red — ci-log fix, strike 1/2 — mergeability unread this pass; inherited last known "dirty" observed 2026-10-05T10:22:20.986Z for this exact head 8b30cfc (W1-T4470)
     - PR #9206: 6.03 PR-hours — required checks red — ci-log fix, strike 1/2 — mergeability unread this pass; inherited last known "dirty" observed 2026-10-05T10:22:20.994Z for this exact head f3e3e4f (W1-T4470)
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The rationale aggregates five PRs with differing blocker histories but supplies no common root-cause diagnosis or bounded remedy; the claimed fix-lane finding cannot be verified from the supplied record.; on the change's description/files alone, no diff was read — Three cited PRs explicitly await human decisions. The acceptance requires clearing without a person but does not explain how those pending decisions remain respected.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for test declaration text, which does not establish that the described blocker clears or that escalation safeguards remain effective."
+    judged_at: "2026-10-30T18:42:27.907Z"
+    pin: "78c0bf73466bd3b8d3d76deabb23662a8d1094fa5e85870ab1a34c9b8b956af0"

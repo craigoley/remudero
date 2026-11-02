@@ -1,3 +1,4 @@
+import { recordCashAccounting, validCashIdentity, cashIdentityMatches, cashEndpointIdentity, type CashRequestIdentity, type CashReservation, type CashAccountingEvidence } from "./cash-accounting.js";
 import { setTimeout as abortableDelay } from "node:timers/promises";
 import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-request-effort.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
@@ -38,7 +39,7 @@ import { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
-import type { UsageSnapshot } from "./headroom.js";
+import type { SdkUsageCase, UsageSnapshot, WeeklyWindow } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
@@ -61,7 +62,10 @@ import {
   workerMarkerEnv,
   type ContainedProcess,
   type ContainedSpawnOptions,
+  type StderrFailure,
+  type StderrSink,
 } from "./worker-containment.js";
+import { readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import {
   CASH_WEB_SEARCH_KEY_ENV,
   CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
@@ -102,7 +106,7 @@ interface CodexSpawnArgs {
   containment?: {
     spawn?: (
       opts: ContainedSpawnOptions,
-      onStderr?: (chunk: string) => void,
+      onStderr?: StderrSink,
       onSpawnError?: (error: NodeJS.ErrnoException) => void,
     ) => ContainedProcess;
     teardown?: (pgid: number) => void;
@@ -139,6 +143,14 @@ interface CodexWorkerResult {
   outputTruncation?: CodexOutputTruncation;
   /** W1-T8203: set when stderr passed its retention bound and only its head and tail were kept. */
   stderrTruncation?: CodexStderrTruncation;
+  outputRetention?: {
+    text: Omit<FileTail, "text">;
+    blocks: Omit<FileTail, "text">;
+    stdout?: Omit<FileTail, "text">;
+    stderr: Omit<FileTail, "text">;
+    completion?: CodexCompletionEvidence;
+    originalSubtype: string;
+  };
   subtype: string;
   isError: boolean;
   /** W1-T6027: the child's own `exit(code, signal)`, never derived from `subtype`. */
@@ -709,16 +721,33 @@ export function queuedUpgradeAllocation(
   return allocateUpgrades(candidates, liveWindow);
 }
 
+function claudeWeeklyWindows(weekly: readonly WeeklyWindow[]): ProviderCapacityWindow[] {
+  return weekly.map((window) => ({ name: `weekly (${window.label})`, usedPercent: window.percentUsed, resetsAt: window.resetsAt }));
+}
+
+export function claudeCapacityFromUsageCase(reading: SdkUsageCase, accountLabel?: string): ProviderCapacity {
+  if (reading.kind === "session") return claudeCapacityFromUsage(reading.snapshot, accountLabel);
+  if (reading.kind !== "weekly-only") {
+    return { provider: "claude", readable: false, windows: [], detail: `capacity unreadable: ${reading.kind}` };
+  }
+  const windows = claudeWeeklyWindows(reading.weekly);
+  const valid = windows.filter(validCapacityWindow);
+  return {
+    provider: "claude",
+    readable: true,
+    ...(accountLabel ? { accountLabel } : {}),
+    windows,
+    ...(valid.length > 0 ? { allocationWindows: valid } : {}),
+    detail: "no five-hour window in the reading: weekly windows only",
+  };
+}
+
 export function claudeCapacityFromUsage(
   snapshot: UsageSnapshot | undefined,
   accountLabel?: string,
 ): ProviderCapacity {
   if (!snapshot) return { provider: "claude", readable: false, windows: [], detail: "capacity unreadable" };
-  const weeklyWindows: ProviderCapacityWindow[] = snapshot.weekly.map((window) => ({
-    name: `weekly (${window.label})`,
-    usedPercent: window.percentUsed,
-    resetsAt: window.resetsAt,
-  }));
+  const weeklyWindows = claudeWeeklyWindows(snapshot.weekly);
   const validWeeklyWindows = weeklyWindows.filter(validCapacityWindow);
   return {
     provider: "claude",
@@ -935,6 +964,12 @@ export interface OpenWeightContextWindow {
 }
 
 export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightContextWindow>> = {
+  // Microsoft Learn: models sold directly by Azure, read 2026-10-27.
+  "DeepSeek-V4-Flash": { totalTokens: 1_000_000, readAt: "2026-10-27" },
+  // Third-party figure; the V4.1 window is unconfirmed on Azure.
+  "DeepSeek-V4.1-Flash": { totalTokens: 1_000_000, readAt: "2026-10-27" },
+  // Microsoft Learn: Kimi-K2.6 context window, read 2026-10-27.
+  "Kimi-K2.6": { totalTokens: 262_144, readAt: "2026-10-27" },
   "claude-haiku-5-5": { totalTokens: 1_000_000, readAt: "2026-10-07" },
   "gpt-oss-120b": { totalTokens: 131_072, readAt: "2026-09-15" },
   "gpt-5-nano": { totalTokens: 272_000, readAt: "2026-09-15" },
@@ -2240,6 +2275,11 @@ interface CodexJsonEvent {
   };
 }
 
+export interface CodexCompletionEvidence {
+  state: "complete" | "absent" | "incomplete";
+  reason?: string;
+}
+
 export interface ParsedCodexEvents {
   sessionId: string;
   text: string;
@@ -2252,6 +2292,7 @@ export interface ParsedCodexEvents {
   errors: string[];
   usageRefusal?: UsageLimitRefusal;
   outputTruncation?: CodexOutputTruncation;
+  completion: CodexCompletionEvidence;
 }
 
 export interface CodexOutputTruncation {
@@ -2267,7 +2308,7 @@ export const CODEX_WORKER_STDOUT_MAX_BYTES = 1 * 1024 * 1024;
 export const CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES = 64 * 1024 * 1024;
 /** PRIMARY CONTROL (W1-T8203): a MEMORY bound on what is RETAINED of stderr, a share of the stdout retention bound. stderr is
  * diagnostic evidence (failure tail, retro evidence), never protocol input: passing this keeps the head and the
- * tail and records the drop. It never tears the worker down and never decides a verdict. */
+ * tail and records the drop. It never tears the worker down; lost evidence denies complete success. */
 export const CODEX_WORKER_STDERR_MAX_BYTES = CODEX_WORKER_STDOUT_MAX_BYTES / 4;
 
 export interface CodexStderrTruncation {
@@ -2317,15 +2358,29 @@ export class CodexStderrRetainer {
 
   truncation(): CodexStderrTruncation | undefined {
     if (this.totalBytes <= this.limitBytes) return undefined;
-    const retainedBytes = this.headBytes + this.tailBuffer().length;
+    const ends = this.retainedEnds();
+    const retainedBytes = Buffer.byteLength(ends.head) + Buffer.byteLength(ends.tail);
     return { limitBytes: this.limitBytes, retainedBytes, droppedBytes: this.totalBytes - retainedBytes };
+  }
+
+  private retainedEnds(): { head: string; tail: string } {
+    const head = new StringDecoder("utf8").write(Buffer.concat(this.head));
+    const tail = this.tailBuffer();
+    let start = 0;
+    while (start < Math.min(3, tail.length) && (tail[start]! & 0xc0) === 0x80) start++;
+    return { head, tail: tail.subarray(start).toString("utf8") };
+  }
+
+  evidence(): Omit<FileTail, "text"> {
+    return { state: this.totalBytes > this.limitBytes ? "truncated" : "complete",
+      bytesRead: Math.min(this.totalBytes, this.limitBytes), fileBytes: this.totalBytes };
   }
 
   text(): string {
     const truncation = this.truncation();
-    const head = Buffer.concat(this.head).toString("utf8");
-    if (!truncation) return head + Buffer.concat(this.tail).toString("utf8");
-    return `${head}\n[... ${truncation.droppedBytes} bytes of stderr dropped ...]\n${this.tailBuffer().toString("utf8")}`;
+    if (!truncation) return Buffer.concat([...this.head, ...this.tail]).toString("utf8");
+    const { head, tail } = this.retainedEnds();
+    return `${head}\n[... ${truncation.droppedBytes} bytes of stderr dropped ...]\n${tail}`;
   }
 }
 
@@ -2421,6 +2476,9 @@ class CodexJsonlAccumulator {
   private droppedBytes = 0;
   private spilledBytes = 0;
   private spilling = false;
+  private spillHead = "";
+  private spillHeadFull = false;
+  private spillEvidence?: Omit<FileTail, "text">;
   private failed = false;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
@@ -2429,6 +2487,21 @@ class CodexJsonlAccumulator {
   constructor(private nowMs: number, private readonly pendingFile?: string, private readonly observeToolLineage?: (raw: unknown) => void,
     private readonly observeMessage?: (text: string, tsMs: number) => void,
     private readonly observeToolCall?: (toolName: "Bash" | "Edit" | "Write", toolInput: Record<string, string>, tsMs: number) => void) {}
+
+  private appendSpillHead(part: string): void {
+    if (this.spillHeadFull) return;
+    const room = 64 * 1024 - Buffer.byteLength(this.spillHead);
+    if (room <= 0) { this.spillHeadFull = true; return; }
+    const bytes = Buffer.from(part);
+    const prefix = bytes.subarray(0, room);
+    if (bytes.length >= room) this.spillHeadFull = true;
+    for (let end = prefix.length; end > 0; end--) {
+      try {
+        this.spillHead += new TextDecoder("utf-8", { fatal: true }).decode(prefix.subarray(0, end));
+        return;
+      } catch { /* A byte cut may end inside one multibyte character. */ }
+    }
+  }
 
   push(chunk: string, nowMs = this.nowMs): void {
     this.nowMs = nowMs;
@@ -2439,10 +2512,12 @@ class CodexJsonlAccumulator {
       if (this.pendingFile && !this.spilling && this.retainedBytes() + Buffer.byteLength(part) > CODEX_WORKER_STDOUT_MAX_BYTES) {
         writeFileSync(this.pendingFile, this.pending, { mode: 0o600 });
         this.spilledBytes += this.pendingLineBytes();
+        this.appendSpillHead(this.pending);
         this.pending = "";
         this.spilling = true;
       }
       if (this.spilling) {
+        this.appendSpillHead(part);
         appendFileSync(this.pendingFile!, part);
         this.spilledBytes += Buffer.byteLength(part);
       } else {
@@ -2455,10 +2530,38 @@ class CodexJsonlAccumulator {
   }
 
   private consumePending(): void {
-    const line = this.spilling ? readFileSync(this.pendingFile!, "utf8") : this.pending;
+    let line = this.pending;
+    let sourceBytes: number | undefined;
+    if (this.spilling) {
+      const tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
+      const { text, ...evidence } = tail;
+      sourceBytes = tail.fileBytes === undefined ? undefined : tail.fileBytes + 1;
+      if (tail.state === "truncated") {
+        // Reconstruct only when the omitted bytes lie inside a JSON string. Parsing still
+        // validates the envelope; a partial line can never certify a complete report.
+        const omitted = tail.fileBytes! - Buffer.byteLength(this.spillHead) - Buffer.byteLength(text);
+        line = this.spillHead + JSON.stringify(this.truncationMarker(Math.max(0, omitted))).slice(1, -1) + text;
+        this.droppedBytes += Math.max(0, omitted);
+      } else {
+        line = text;
+      }
+      if (tail.state !== "complete") this.spillEvidence = evidence;
+      if (tail.state === "malformed" || tail.state === "unreadable" || tail.state === "absent") {
+        this.failed = true;
+        this.errors.push(`Codex stdout spill ${tail.state}: ${tail.reason ?? "report unavailable"}`);
+        this.pending = "";
+        this.spilling = false;
+        this.spillHead = "";
+        this.spillHeadFull = false;
+        this.boundRetained();
+        return;
+      }
+    }
     this.pending = "";
     this.spilling = false;
-    this.consumeLine(line);
+    this.spillHead = "";
+    this.spillHeadFull = false;
+    this.consumeLine(line, sourceBytes);
     if (this.pendingFile) this.boundRetained();
   }
 
@@ -2479,6 +2582,11 @@ class CodexJsonlAccumulator {
       isError: this.failed,
       subtype: this.failed ? "error_codex" : "success",
       errors: this.errors,
+      completion: Object.values(this.eventBytes).every(bytes => bytes === 0)
+        ? { state: "absent", reason: "Codex stdout report is absent" }
+        : this.completedTurns === 0 || this.turnInProgress || this.numTurns > this.completedTurns
+          ? { state: "incomplete", reason: "Codex report lacks turn.completed for the final turn" }
+          : { state: "complete" },
       ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
       ...(this.droppedBytes > 0 || this.spilledBytes > 0 ? { outputTruncation: {
         limitBytes: CODEX_WORKER_STDOUT_MAX_BYTES,
@@ -2491,6 +2599,10 @@ class CodexJsonlAccumulator {
 
   eventBytesByKind(): Readonly<Record<string, number>> {
     return { ...this.eventBytes };
+  }
+
+  stdoutEvidence(): Omit<FileTail, "text"> | undefined {
+    return this.spillEvidence;
   }
 
   pendingLineBytes(): number {
@@ -2537,14 +2649,14 @@ class CodexJsonlAccumulator {
     this.keptBytes = bytes(this.blocks) + bytes(this.errors);
   }
 
-  private consumeLine(line: string): void {
+  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1): void {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
       event = JSON.parse(line) as CodexJsonEvent;
     } catch {
       this.observeToolLineage?.(null);
-      this.eventBytes.malformed += Buffer.byteLength(line, "utf8") + 1;
+      this.eventBytes.malformed += sourceBytes;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
       this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
       this.failed = true;
@@ -2557,7 +2669,7 @@ class CodexJsonlAccumulator {
     const kind: CodexEventByteKind = CODEX_EVENT_BYTE_KIND_KEYS.includes(combined as CodexEventByteKind)
       ? (combined as CodexEventByteKind)
       : "other";
-    this.eventBytes[kind] += Buffer.byteLength(line, "utf8") + 1;
+    this.eventBytes[kind] += sourceBytes;
     if (event.type === "thread.started" && typeof event.thread_id === "string") this.sessionId = event.thread_id;
     if (event.type === "turn.started") {
       this.numTurns += 1;
@@ -2689,7 +2801,7 @@ function codexSpawnEnv(config: Config, args: CodexSpawnEnvArgs, nativeCacheRoot?
   for (const key of allowed) if (process.env[key] !== undefined) env[key] = process.env[key];
   env.CODEX_HOME = codexHome(config);
   for (const [key, value] of Object.entries(args.env ?? {})) {
-    if (!/^ANTHROPIC_|^OPENAI_API_KEY$/.test(key)) env[key] = value;
+    if (!/^ANTHROPIC_|^OPENAI_API_KEY$|^RMD_INSTANCE_REGISTRY$/.test(key)) env[key] = value;
   }
   // W1-T2800 — ASSIGNED AFTER `args.env` IS COPIED, AND FROM THE THREADED HOME ONLY.
   //
@@ -3214,6 +3326,24 @@ export const FOUNDRY_HAIKU_PRICE: OpenWeightPrice = {
 };
 
 export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
+  // Azure Retail Prices API: Azure Deepseek Models / V4 Flash Inp/Outp/cached glbl Tokens,
+  // effective 2026-08-01. Reserve cached input at full input price pending W1-T10858.
+  "DeepSeek-V4-Flash": {
+    inputUsdPerMillion: 0.19, outputUsdPerMillion: 0.51, cachedInputUsdPerMillion: 0.028,
+    reservationInputUsdPerMillion: 0.19, readAt: "2026-10-27",
+  },
+  // Azure Retail Prices API: Azure Deepseek Models / V4.1 Flash Input/Output/cached Glbl 1M
+  // Tokens, effective 2026-10-01; the same conservative cache reservation applies.
+  "DeepSeek-V4.1-Flash": {
+    inputUsdPerMillion: 0.30, outputUsdPerMillion: 1.20, cachedInputUsdPerMillion: 0.006,
+    reservationInputUsdPerMillion: 0.30, readAt: "2026-10-27",
+  },
+  // Azure Retail Prices API: Azure Kimi / K2.6 Thinking Inp/Outp glbl Tokens, effective
+  // 2026-05-01; K2.6 cached glbl Tokens effective 2026-07-01. Reserve full input rate.
+  "Kimi-K2.6": {
+    inputUsdPerMillion: 0.95, outputUsdPerMillion: 4, cachedInputUsdPerMillion: 0.16,
+    reservationInputUsdPerMillion: 0.95, readAt: "2026-10-27",
+  },
   "claude-haiku-5-5": FOUNDRY_HAIKU_PRICE,
   // Azure serverless published rate. These are the two numbers this adapter has always used;
   // they are unchanged, and are now this deployment's ROW rather than the provider's default.
@@ -3335,9 +3465,20 @@ export const FOUNDRY_CLAUDE_DAILY_CAP_USD = { normal: 5, squeezed: 10 } as const
  * gpt-oss-120b already demonstrated.
  */
 export const OPENWEIGHT_RESPONSE_FORMATS: Readonly<Record<string, readonly string[]>> = {
+  // Clean json_object measured on the adapter's Azure route; Kimi remains undeclared.
+  "DeepSeek-V4-Flash": ["json_object"],
+  "DeepSeek-V4.1-Flash": ["json_object"],
   "gpt-6.1-sol": ["json_object"],
   "gpt-5.6-luna": ["json_object"],
   "gpt-5.6-terra": ["json_object"],
+};
+
+/** Exact deployment ids only. Azure DeepSeek thinking is off when effort is omitted;
+ *  admitted efforts enable it. Measured 2026-10-27; Kimi admits no effort parameter. */
+export const OPENWEIGHT_REASONING_EFFORTS: Readonly<Record<string, readonly string[]>> = {
+  "DeepSeek-V4-Flash": ["low", "medium", "high"],
+  "DeepSeek-V4.1-Flash": ["low", "medium", "high"],
+  "Kimi-K2.6": [],
 };
 
 /** Raised INSTEAD of sending a structured-output request a deployment cannot honour. Thrown before
@@ -3374,6 +3515,10 @@ export function openWeightResponseFormatField(
 }
 
 export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
+  // All three accepted temperature: 0 on the adapter's route, measured 2026-10-27.
+  "DeepSeek-V4-Flash": 0,
+  "DeepSeek-V4.1-Flash": 0,
+  "Kimi-K2.6": 0,
   "claude-haiku-5-5": null,
   "gpt-oss-120b": 0,
   "gpt-5-nano": null,
@@ -3560,7 +3705,7 @@ async function cashHttpFailure(response: Response, source: string, signal: Abort
 }
 
 /** A provider that ignores cancellation must still not hold its caller or wake up to spend later. */
-function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>): Promise<T> {
+function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>, onLate?: (value: T) => void | Promise<void>): Promise<T> {
   signal.throwIfAborted();
   return new Promise<T>((resolve, reject) => {
     const finish = (done: () => void): void => {
@@ -3570,7 +3715,13 @@ function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>): Promise<T
     const aborted = (): void => finish(() => reject(signal.reason));
     signal.addEventListener("abort", aborted, { once: true });
     Promise.resolve().then(() => { signal.throwIfAborted(); return run(); }).then(
-      value => finish(() => resolve(value)), error => finish(() => reject(error)),
+      value => {
+        if (signal.aborted) {
+          void Promise.resolve().then(() => onLate?.(value)).catch(error => {
+            console.error(JSON.stringify({ event: "cash.late_receipt_failed", reason: error instanceof Error ? error.name : "unknown" }));
+          });
+        } else finish(() => resolve(value));
+      }, error => finish(() => reject(error)),
     );
   });
 }
@@ -3580,6 +3731,8 @@ async function cashRequestJson<T>(input: {
   args: OpenWeightSpawnArgs; deployment: string; source: string; endpoint: string;
   body: string; headers: Record<string, string>; next: (checkActive: () => void) => T;
   canContinue: () => boolean; chargeFailure: (error: Error) => void;
+  /** Usage belongs to this paid attempt even when fetch or body completion misses the deadline. */
+  onEnvelope?: (envelope: unknown, attempt: T) => void;
   /** W1-T10856: sees every response's headers (success or failure) before its status is handled. */
   observeHeaders?: (headers: Headers) => void;
 }): Promise<{ envelope: unknown; attempt: T }> {
@@ -3608,6 +3761,8 @@ async function cashRequestJson<T>(input: {
           return (args.fetchImpl ?? fetch)(input.endpoint, {
             method: "POST", headers: input.headers, body: input.body, signal: controller.signal,
           });
+        }, async late => {
+          if (late.ok) input.onEnvelope?.(await late.json(), attempt);
         });
         try { input.observeHeaders?.(response.headers); }
         catch (error) {
@@ -3634,7 +3789,9 @@ async function cashRequestJson<T>(input: {
             }
           }
         }
-        const envelope = await cashAbortable(controller.signal, () => response.json());
+        const envelope = await cashAbortable(controller.signal, () => response.json(),
+          late => input.onEnvelope?.(late, attempt));
+        input.onEnvelope?.(envelope, attempt);
         checkActive();
         args.streamObserver?.({ kind: "working", tsMs: (args.clock ?? systemClock).now() });
         return { envelope, attempt };
@@ -3774,22 +3931,14 @@ export function openWeightUtcDay(atIso: string): string {
   return day;
 }
 
-/**
- * One day's committed allowance. `reservations` is keyed by request identity so a settlement can
- * find the row it is settling; a row whose `settledUsd` is still null counts at its CONSERVATIVE
- * `reservedUsd`, which is what keeps a crashed request (one that never reached ANY settlement call
- * -- the process died before its `catch` could run) charged.
- *
- * `settledReason` is present ONLY when a failure, not a usage receipt, is what settled the row --
- * see {@link settleOpenWeightBudget}. Its presence is itself the ledger entry W1-T3666 asks for:
- * an ordinary settle-from-receipt leaves it absent, so a reader can tell "this figure came from
- * the provider's own bill" from "this figure was corrected after the request failed" without
- * parsing anything else.
+/** One day's committed allowance. Unknown requests count at their full reservation.
+ * Identity binds new receipts to their request, attempt, provider endpoint and deployment.
+ * Rated usage and known unbilled refusals remain separate from invoice cash (W1-T10954).
  */
 export interface OpenWeightAllowanceState {
   utcDay: string;
   fleetCapUsd?: number;
-  reservations: Record<string, { reservedUsd: number; settledUsd: number | null; settledReason?: string; deployment?: string }>;
+  reservations: Record<string, CashReservation>;
 }
 
 /** Committed spend = the settled figure where one was read back, the conservative reservation
@@ -3867,7 +4016,7 @@ function openWeightAllowanceReset(day: string): string {
   return fixedClock(Date.parse(`${day}T00:00:00.000Z`) + 24 * 60 * 60 * 1000).iso();
 }
 
-function parseOpenWeightAllowance(snapshot: string | undefined, path: string, utcDay: string, requireFleetCap: boolean): OpenWeightAllowanceState {
+function parseOpenWeightAllowance(snapshot: string | undefined, path: string, utcDay: string, requireFleetCap: boolean, preserveDay = false): OpenWeightAllowanceState {
   if (snapshot === undefined) {
     if (requireFleetCap) throw new Error(`shared cash allowance is missing at ${path}; refusing to reset unknown fleet spend`);
     return { utcDay, reservations: {} };
@@ -3886,13 +4035,16 @@ function parseOpenWeightAllowance(snapshot: string | undefined, path: string, ut
   for (const [id, row] of Object.entries(parsed.reservations)) {
     if (!id || row === null || typeof row !== "object" || !Number.isFinite(row.reservedUsd) || row.reservedUsd < 0 ||
         (row.settledUsd !== null && (!Number.isFinite(row.settledUsd) || row.settledUsd < 0 || row.settledUsd > row.reservedUsd)) ||
-        (row.deployment !== undefined && typeof row.deployment !== "string")) {
+        (row.deployment !== undefined && typeof row.deployment !== "string") ||
+        (row.identity !== undefined && (!validCashIdentity(row.identity) || row.identity.requestId !== id || row.identity.deployment !== row.deployment)) ||
+        (row.accountingState !== undefined && row.identity === undefined)) {
       throw new Error(`openweight allowance file at ${path} has an unreadable reservation ${id}; refusing to spend against an unknown committed total`);
     }
   }
-  if (requireFleetCap && parsed.utcDay > utcDay)
+  if (requireFleetCap && parsed.utcDay > utcDay && !preserveDay)
     throw new Error(`shared cash allowance is already on ${parsed.utcDay}; refusing an older ${utcDay} request`);
-  return { utcDay, fleetCapUsd: parsed.fleetCapUsd, reservations: parsed.utcDay === utcDay ? parsed.reservations : {} };
+  return { utcDay: preserveDay ? parsed.utcDay : utcDay, fleetCapUsd: parsed.fleetCapUsd,
+    reservations: preserveDay || parsed.utcDay === utcDay ? parsed.reservations : {} };
 }
 
 function configuredCashCap(config: Config, squeezed?: boolean): number {
@@ -3951,13 +4103,14 @@ function mutateOpenWeightAllowance<T>(
   beforeCommit?: () => void,
   shared = false,
   requireFleetCap = false,
+  preserveDay = false,
 ): T {
   if (shared) {
-    return withFleetCashAllowanceLock(path, () => mutateOpenWeightAllowance(path, utcDay, mutate, beforeCommit, false, true));
+    return withFleetCashAllowanceLock(path, () => mutateOpenWeightAllowance(path, utcDay, mutate, beforeCommit, false, true, preserveDay));
   }
   for (let attempt = 1; ; attempt++) {
     const snapshot = readFileIfExists(path);
-    const state = parseOpenWeightAllowance(snapshot, path, utcDay, requireFleetCap);
+    const state = parseOpenWeightAllowance(snapshot, path, utcDay, requireFleetCap, preserveDay);
 
     const { next, result } = mutate(state);
     // TEST-ONLY seam, in the shape {@link import("./fs-race-safe.js").reclaimStaleLock}'s own
@@ -4025,6 +4178,8 @@ export function reserveOpenWeightBudget(
   config: Config,
   input: {
     requestId: string;
+    /** Without identity, legacy callers can reserve but cannot release uncertain cash. */
+    identity?: CashRequestIdentity;
     deployment: string;
     requestBodyBytes: number;
     atIso: string;
@@ -4037,6 +4192,9 @@ export function reserveOpenWeightBudget(
     extraInputTokens?: number;
   },
 ): { reservedUsd: number; committedUsd: number; capUsd: number } {
+  if (input.identity && (!validCashIdentity(input.identity) || input.identity.requestId !== input.requestId || input.identity.deployment !== input.deployment)) {
+    throw new Error("cash reservation identity does not match its request/deployment");
+  }
   const configuredCapUsd = configuredCashCap(config, input.squeezed);
   const utcDay = openWeightUtcDay(input.atIso);
   const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes, input.extraInputTokens ?? 0);
@@ -4051,49 +4209,35 @@ export function reserveOpenWeightBudget(
         throw new OpenWeightAllowanceExhaustedError({ ...limit, wantUsd, utcDay, squeezed: input.squeezed === true });
     }
     return {
-      next: { ...state, reservations: { ...state.reservations, [input.requestId]: { reservedUsd: wantUsd, settledUsd: null, deployment: input.deployment } } },
+      next: { ...state, reservations: { ...state.reservations, [input.requestId]: { reservedUsd: wantUsd, settledUsd: null, deployment: input.deployment,
+        ...(input.identity ? { identity: input.identity, accountingState: "held-unknown" as const,
+          usageEstimateUsd: null, billedUsd: null, heldUsd: wantUsd } : {}) } } },
       result: { reservedUsd: wantUsd, committedUsd: committedUsd + wantUsd, capUsd },
     };
   }, input.beforeCommit, sharedCashAllowancePath(config) !== undefined);
 }
 
-/**
- * Settle a committed reservation DOWN, either to the provider's own reported usage, or — W1-T3666
- * — to the input-only portion of the same conservative estimate when the request FAILED before any
- * usage could be read.
- *
- * `reason`, present only on the failure path, is what makes settlement recorded rather than
- * inferred: an ordinary settle-from-receipt passes nothing, so the ledger row itself distinguishes
- * a bill it actually read from a figure it corrected after a failure (see
- * {@link OpenWeightAllowanceState}). Settlement never raises a reservation above what was
- * reserved; the reservation is a ceiling either way.
- */
+/** A receipt settles once. Without usage, retain the entire reservation and its identity. */
 export function settleOpenWeightBudget(
   config: Config,
-  input: { requestId: string; actualUsd: number; atIso: string; reason?: string },
-): void {
+  input: CashAccountingEvidence & { requestId: string; atIso: string },
+): CashReservation | undefined {
   const utcDay = openWeightUtcDay(input.atIso);
-  mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
+  return mutateOpenWeightAllowance<CashReservation | undefined>(openWeightAllowancePath(config), utcDay, (state) => {
     const row = state.reservations[input.requestId];
-    // A reservation that is no longer present (a UTC-day rollover between reserve and settle)
-    // must not be re-created here: doing so would charge today's cap for yesterday's request.
-    if (row === undefined) return { next: state, result: undefined };
-    return {
-      next: {
-        ...state,
-        reservations: {
-          ...state.reservations,
-          [input.requestId]: {
-            ...row,
-            settledUsd: Math.min(input.actualUsd, row.reservedUsd),
-            ...(input.reason !== undefined ? { settledReason: input.reason } : {}),
-          },
-        },
-      },
-      result: undefined,
-    };
-  }, undefined, sharedCashAllowancePath(config) !== undefined);
+    if (state.utcDay !== utcDay || row === undefined || !row.identity || !cashIdentityMatches(row.identity, input.identity))
+      return { next: state, result: undefined };
+    const recorded = recordCashAccounting(row, input);
+    return { next: { ...state, reservations: { ...state.reservations, [input.requestId]: recorded } }, result: recorded };
+  }, undefined, sharedCashAllowancePath(config) !== undefined, false, true);
 }
+
+type CashBudgetAttempt = {
+  requestId: string; identity: CashRequestIdentity; atIso: string;
+  reservation: ReturnType<typeof reserveOpenWeightBudget>;
+  receipt?: CashReservation;
+  tokens?: { input: number; output: number; cacheRead: number; cacheCreation: number };
+};
 
 export interface OpenWeightSpawnArgs {
   /** set ONLY by W1-T3692's blocked-auction fallback. Selects `dailyCapUsd.squeezed`
@@ -4213,6 +4357,10 @@ export interface OpenWeightWorkerResult {
   /** Attributable cash fields for the ledger. Money, not prompts: no request body, no response
    *  text and no credential is carried here. `budgetRefused` is true only when the daily allowance
    *  refused this run BEFORE any paid request was made. */
+  budgetHeldUsd: number;
+  usageEstimateUsd: number | null;
+  billedUsd: number | null;
+  tokenUsageState: "observed" | "partial" | "unavailable";
   budgetReservedUsd: number;
   budgetSettledUsd: number;
   budgetRefused: boolean;
@@ -4958,15 +5106,9 @@ export function assertOpenWeightToolBoundary(
  * with no second endpoint shape required, and the branch W1-T3598 deferred is not needed for it
  * at all.
  *
- * IT IS STILL NOT WIRED INTO {@link OPENWEIGHT_PRICES}, deliberately. No published rate for
- * DeepSeek-V4-Flash could be confirmed (absent from the pricing page, the retail prices API and
- * the catalog's `cost` field), and its billing is publicly disputed -- Microsoft Q&A threads
- * report ~357x the published rate on cached tokens and 4.5x on V4 Pro. `OPENWEIGHT_PRICES`'s own
- * contract is that a deployment with no row is refused rather than priced by a neighbour (see
- * {@link openWeightPriceFor}), so naming this deployment in the cash ladder before a bill
- * confirms its real rate would convert a disputed page number into an under-reservation. The
- * route is proven here; the price is not, and only an OBSERVED bill (not this recon) closes that
- * gap (W1-T3695).
+ * W1-T10855 adds the now-published Azure Retail Prices API rows (read 2026-10-27).
+ * The cached-token billing dispute remains: reservations use full input rates until
+ * W1-T10858 reconciles an observed invoice. Readiness alone does not add a cash ladder entry.
  */
 function openWeightEndpoint(config: Config, model: string): string {
   // W1-T10837: resolves THIS deployment's own endpoint when `workerProviders.cashDeploymentEndpoints`
@@ -5032,6 +5174,7 @@ function openWeightResult(input: {
   cacheCreationTokens?: number;
   error?: unknown;
   budgetReservedUsd?: number;
+  budgetHeldUsd?: number;
   budgetSettledUsd?: number;
   budgetRefused?: boolean;
   /** W1-T4079: the deployment this attempt found absent (HTTP 404). */
@@ -5046,14 +5189,9 @@ function openWeightResult(input: {
   return {
     provider: "cash",
     sessionId: input.sessionId ?? "",
-    // ZERO USAGE COSTS ZERO AT ANY RATE, so it needs no price row. That is not a convenience: this
-    // result is also built on the ERROR path, and one way to get here is the refusal raised when a
-    // deployment has NO row. Pricing unconditionally would throw a second time out of the catch
-    // that is meant to turn a failure into a reportable result, so the refusal would escape
-    // `spawnOpenWeightWorker` instead of being returned — collapsing the very contract the catch
-    // exists to hold. A run that never reached the transport has no tokens, hence no cost, and
-    // saying so requires no rate.
-    costUsd: input.actualCostUsd ?? (
+    // Keep the numeric budget surface conservative. Usage projections read tokenUsageState;
+    // held money and usage estimates are exposed separately and neither is an invoice.
+    costUsd: input.budgetSettledUsd ?? input.actualCostUsd ?? (
       (input.promptTokens === 0 && input.completionTokens === 0
         ? 0
         : openWeightUsageUsd(input.model, input.promptTokens, input.completionTokens)) +
@@ -5082,6 +5220,12 @@ function openWeightResult(input: {
     compactionConfigured: false,
     qualitySuspect: false,
     workerDurationMs: input.clock.now() - input.startedAt,
+    budgetHeldUsd: input.budgetHeldUsd ?? 0,
+    usageEstimateUsd: (input.budgetHeldUsd ?? 0) > 0 ? null : input.actualCostUsd ??
+      (input.budgetSettledUsd ?? 0),
+    billedUsd: null,
+    tokenUsageState: (input.budgetHeldUsd ?? 0) > 0
+      ? (input.promptTokens + input.completionTokens > 0 ? "partial" : "unavailable") : "observed",
     budgetReservedUsd: input.budgetReservedUsd ?? 0,
     budgetSettledUsd: input.budgetSettledUsd ?? 0,
     budgetRefused: input.budgetRefused ?? false,
@@ -5132,6 +5276,41 @@ function validFoundryTokenCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+type OpenWeightReceiptUsage = {
+  prompt_tokens?: unknown; completion_tokens?: unknown; cached_tokens?: unknown; cache_creation_tokens?: unknown;
+};
+
+function openWeightEnvelopeUsage(envelope: unknown, usesResponses: boolean): OpenWeightReceiptUsage | undefined {
+  const usage = (envelope as { usage?: OpenWeightReceiptUsage & {
+    input_tokens?: unknown; output_tokens?: unknown;
+    input_tokens_details?: { cached_tokens?: unknown; cache_write_tokens?: unknown };
+  } } | null)?.usage;
+  return usesResponses ? { prompt_tokens: usage?.input_tokens, completion_tokens: usage?.output_tokens,
+    cached_tokens: usage?.input_tokens_details?.cached_tokens,
+    cache_creation_tokens: usage?.input_tokens_details?.cache_write_tokens } : usage;
+}
+
+function foundryClaudeReceiptUsage(envelope: unknown) {
+  const usage = (envelope as { usage?: { input_tokens?: unknown; output_tokens?: unknown;
+    cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown } } | null)?.usage;
+  if (!usage || !validFoundryTokenCount(usage.input_tokens) || !validFoundryTokenCount(usage.output_tokens) ||
+      (usage.cache_read_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_read_input_tokens)) ||
+      (usage.cache_creation_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_creation_input_tokens))) return undefined;
+  return { input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
+    cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+    cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0 };
+}
+
+function openWeightReceiptUsd(usage: OpenWeightReceiptUsage | undefined, deployment: string, usesResponses: boolean): number | undefined {
+  if (!usage || !validFoundryTokenCount(usage.prompt_tokens) || !validFoundryTokenCount(usage.completion_tokens) ||
+      (usage.cached_tokens !== undefined && !validFoundryTokenCount(usage.cached_tokens)) ||
+      (usesResponses ? !validFoundryTokenCount(usage.cache_creation_tokens)
+        : usage.cache_creation_tokens !== undefined && !validFoundryTokenCount(usage.cache_creation_tokens)) ||
+      ((usage.cached_tokens as number | undefined) ?? 0) + ((usage.cache_creation_tokens as number | undefined) ?? 0) > usage.prompt_tokens) return undefined;
+  return openWeightUsageUsd(deployment, usage.prompt_tokens, usage.completion_tokens,
+    (usage.cached_tokens as number | undefined) ?? 0, (usage.cache_creation_tokens as number | undefined) ?? 0);
+}
+
 export async function spawnFoundryClaudeWorker(
   args: OpenWeightSpawnArgs,
   config: Config,
@@ -5150,11 +5329,12 @@ export async function spawnFoundryClaudeWorker(
   let spentUsd = 0;
   let budgetReservedUsd = 0;
   let budgetSettledUsd = 0;
+  let budgetHeldUsd = 0;
   let text = "";
   let sessionId = "";
   const servedModels: Array<string | undefined> = [];
   const requestEfforts: CashRequestEffortCount[] = [];
-  let pending: { requestId: string; reservedUsd: number } | undefined;
+  let pending: CashBudgetAttempt | undefined;
   const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-claude"}-${startedAt}-${randomUUID()}`;
   try {
     if (!isFoundryClaudeDeployment(selection.model) || (selection.model !== "claude-haiku-5-5" && args.cashSqueezed !== true)) {
@@ -5187,13 +5367,27 @@ export async function spawnFoundryClaudeWorker(
         output_config: { effort: selection.effort === "default" ? "medium" : selection.effort },
         ...(tools.length ? { tools } : {}),
       });
-      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson({
+      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<CashBudgetAttempt>({
         args, deployment: selection.model, source: `cash ${label}`, endpoint, body,
         headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+        onEnvelope: (envelope, attempt) => {
+          const usage = foundryClaudeReceiptUsage(envelope);
+          if (!usage) return;
+          attempt.tokens = { input: usage.input_tokens, output: usage.output_tokens,
+            cacheRead: usage.cache_read_input_tokens, cacheCreation: usage.cache_creation_input_tokens };
+          const actualUsd = foundryClaudeUsageUsd(selection.model, usage);
+          if (actualUsd <= attempt.reservation.reservedUsd) attempt.receipt = settleOpenWeightBudget(config, {
+            requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: attempt.atIso,
+          });
+        },
         canContinue: () => turns < maxTurns,
         chargeFailure: () => {
-          spentUsd += pending!.reservedUsd;
-          budgetSettledUsd += pending!.reservedUsd;
+          const recorded = settleOpenWeightBudget(config, { requestId: pending!.requestId, identity: pending!.identity,
+            atIso: pending!.atIso, reason: "rate-limited without usage" });
+          const chargedUsd = recorded?.settledUsd ?? pending!.reservation.reservedUsd;
+          spentUsd += chargedUsd;
+          if (recorded?.settledUsd == null) budgetHeldUsd += pending!.reservation.reservedUsd;
+          budgetSettledUsd += chargedUsd;
           pending = undefined;
         },
         next: (checkActive) => {
@@ -5204,43 +5398,39 @@ export async function spawnFoundryClaudeWorker(
           }
           checkActive();
           const requestId = `${requestPrefix}-${++turns}`;
-          const reservation = reserveOpenWeightBudget(config, { requestId, deployment: selection.model,
-            requestBodyBytes: Buffer.byteLength(body, "utf8"), atIso: clock.iso(), squeezed: args.cashSqueezed === true });
+          const identity: CashRequestIdentity = { requestId, attemptId: requestPrefix, provider: "cash", deployment: selection.model, endpoint: cashEndpointIdentity(endpoint) };
+          const atIso = clock.iso();
+          const reservation = reserveOpenWeightBudget(config, { requestId, identity, deployment: selection.model,
+            requestBodyBytes: Buffer.byteLength(body, "utf8"), atIso, squeezed: args.cashSqueezed === true });
           budgetReservedUsd += reservation.reservedUsd;
-          pending = { requestId, reservedUsd: reservation.reservedUsd };
+          pending = { requestId, identity, atIso, reservation };
           recordCashRequestEffort(requestEfforts, body, "foundry-messages");
-          return { requestId, reservation };
+          return pending;
         },
       });
       const payload = envelope as {
         id?: unknown; model?: unknown; stop_reason?: unknown; stop_details?: { category?: unknown } | null;
         content?: Array<Record<string, unknown>>;
-        usage?: { input_tokens?: unknown; output_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown };
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
       servedModels.push(cashResponseModel(payload.model));
-      const usage = payload.usage;
-      if (!usage || !validFoundryTokenCount(usage.input_tokens) || !validFoundryTokenCount(usage.output_tokens) ||
-          (usage.cache_read_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_read_input_tokens)) ||
-          (usage.cache_creation_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_creation_input_tokens))) {
-        // The provider may have billed this request. Keep the conservative reservation.
+      const measured = foundryClaudeReceiptUsage(envelope);
+      if (!measured) {
+        settleOpenWeightBudget(config, { requestId, identity: pending!.identity, atIso: pending!.atIso, reason: "usage unavailable" });
+        budgetHeldUsd += reservation.reservedUsd;
         spentUsd += reservation.reservedUsd;
         budgetSettledUsd += reservation.reservedUsd;
       } else {
-        const measured = {
-          input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
-          cache_read_input_tokens: typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : 0,
-          cache_creation_input_tokens: typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : 0,
-        };
         const actualUsd = foundryClaudeUsageUsd(selection.model, measured);
         if (actualUsd > reservation.reservedUsd) throw new Error(`cash ${label} usage exceeded its conservative reservation`);
-        settleOpenWeightBudget(config, { requestId, actualUsd, atIso: clock.iso() });
         promptTokens += measured.input_tokens;
         completionTokens += measured.output_tokens;
         cacheReadTokens += measured.cache_read_input_tokens;
         cacheCreationTokens += measured.cache_creation_input_tokens;
-        spentUsd += actualUsd;
-        budgetSettledUsd += actualUsd;
+        const chargedUsd = pending!.receipt?.settledUsd ?? reservation.reservedUsd;
+        if (pending!.receipt?.settledUsd == null) budgetHeldUsd += reservation.reservedUsd;
+        spentUsd += chargedUsd;
+        budgetSettledUsd += chargedUsd;
       }
       pending = undefined;
       if (!Array.isArray(payload.content)) throw new Error(`cash ${label} response has no content blocks`);
@@ -5261,7 +5451,7 @@ export async function spawnFoundryClaudeWorker(
         return reconcileBoundedProviderAttempt(openWeightResult({
           model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns,
           promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
-          actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
+          actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd, budgetHeldUsd,
         }), args.externalEffect);
       }
       if (payload.stop_reason !== "tool_use") throw new Error(`cash ${label} returned a tool call with stop_reason=${String(payload.stop_reason)}`);
@@ -5291,15 +5481,23 @@ export async function spawnFoundryClaudeWorker(
   } catch (error) {
     // An unknown transport outcome remains charged. Only a definite 404 is known to cost zero.
     if (pending) {
-      const billed = error instanceof OpenWeightDeploymentNotFoundError ? 0 : pending.reservedUsd;
-      if (billed === 0) settleOpenWeightBudget(config, { requestId: pending.requestId, actualUsd: 0, atIso: clock.iso(), reason: "deployment not found" });
-      spentUsd += billed;
-      budgetSettledUsd += billed;
+      const unbilled = error instanceof OpenWeightDeploymentNotFoundError;
+      const recorded = pending.receipt ?? settleOpenWeightBudget(config, { requestId: pending.requestId, identity: pending.identity,
+        ...(unbilled ? { actualUsd: 0, unbilled: true } : {}), atIso: pending.atIso,
+        reason: error instanceof Error ? error.message : String(error) });
+      const chargedUsd = recorded?.settledUsd ?? pending.reservation.reservedUsd;
+      if (recorded?.settledUsd == null) budgetHeldUsd += pending.reservation.reservedUsd;
+      spentUsd += chargedUsd;
+      budgetSettledUsd += chargedUsd;
+      promptTokens += pending.tokens?.input ?? 0;
+      completionTokens += pending.tokens?.output ?? 0;
+      cacheReadTokens += pending.tokens?.cacheRead ?? 0;
+      cacheCreationTokens += pending.tokens?.cacheCreation ?? 0;
     }
     return reconcileBoundedProviderAttempt(openWeightResult({
       model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns,
       promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
-      actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
+      actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd, budgetHeldUsd,
       budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
       ...(error instanceof OpenWeightDeploymentNotFoundError ? { deploymentAbsent: selection.model } : {}),
       error,
@@ -5348,12 +5546,8 @@ export async function spawnOpenWeightWorker(
   const requestEfforts: CashRequestEffortCount[] = [];
   let budgetReservedUsd = 0;
   let budgetSettledUsd = 0;
-  // W1-T3666: the reservation the CURRENT turn is still carrying, cleared the instant its own
-  // settlement question (settle down from a receipt, or leave the conservative figure standing --
-  // see the usage block below) is decided. If the turn throws before that point, this is what the
-  // outer `catch` settles down instead of stranding: everything before it in a PRIOR turn already
-  // reached its own decision and is no longer "pending".
-  let pendingReservation: { requestId: string; deployment: string; requestBodyBytes: number } | undefined;
+  let budgetHeldUsd = 0;
+  let pendingReservation: CashBudgetAttempt | undefined;
   let azureOpenAi429Unbilled = false;
   // Metered SEPARATELY from conversation turns (W1-T3558). They share the day cap — one cap is the
   // only way it bounds total Azure spend — but are counted apart so an operator can read what web
@@ -5423,14 +5617,27 @@ export async function spawnOpenWeightWorker(
         ...temperatureField,
         ...responseFormatField,
         // GPT-6 Chat Completions accepts function tools only at reasoning_effort=none.
-        ...(selection.model === "gpt-6-luna" && declaredNames.size > 0 ? { reasoning_effort: "none" } : {}),
+        ...(selection.model === "gpt-6-luna" && declaredNames.size > 0 ? { reasoning_effort: "none" }
+          : (OPENWEIGHT_REASONING_EFFORTS[selection.model] ?? []).includes(selection.effort)
+            ? { reasoning_effort: selection.effort } : {}),
         max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
         ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
       });
       const requestBodyBytes = Buffer.byteLength(body, "utf8");
-      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson({
+      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<CashBudgetAttempt>({
         args, deployment: selection.model, source: "openweight", endpoint, body,
         headers: { "content-type": "application/json", "api-key": key },
+        onEnvelope: (envelope, attempt) => {
+          const usage = openWeightEnvelopeUsage(envelope, usesResponses);
+          attempt.tokens = { input: validFoundryTokenCount(usage?.prompt_tokens) ? usage.prompt_tokens : 0,
+            output: validFoundryTokenCount(usage?.completion_tokens) ? usage.completion_tokens : 0,
+            cacheRead: validFoundryTokenCount(usage?.cached_tokens) ? usage.cached_tokens : 0,
+            cacheCreation: validFoundryTokenCount(usage?.cache_creation_tokens) ? usage.cache_creation_tokens : 0 };
+          const actualUsd = openWeightReceiptUsd(usage, selection.model, usesResponses);
+          if (actualUsd !== undefined) attempt.receipt = settleOpenWeightBudget(config, {
+            requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: attempt.atIso,
+          });
+        },
         observeHeaders: (headers) => {
           try { recordCashCapacity(config, selection.model, headers, { clock, runId: args.runId, taskId: args.taskId, endpoint: capacityEndpoint }); }
           catch (error) {
@@ -5441,12 +5648,12 @@ export async function spawnOpenWeightWorker(
         },
         canContinue: () => turns < maxTurns,
         chargeFailure: (error) => {
-          const inputOnlyUsd = unbilledCashRefusal(error, azureOpenAi429Unbilled) ? 0
-            : usesResponses ? openWeightReservationUsd(selection.model, requestBodyBytes)
-            : openWeightUsageUsd(selection.model, requestBodyBytes, 0);
-          settleOpenWeightBudget(config, { requestId: pendingReservation!.requestId, actualUsd: inputOnlyUsd,
-            atIso: clock.iso(), reason: error.message });
-          budgetSettledUsd += inputOnlyUsd;
+          const unbilled = unbilledCashRefusal(error, azureOpenAi429Unbilled);
+          const recorded = settleOpenWeightBudget(config, { requestId: pendingReservation!.requestId, identity: pendingReservation!.identity,
+            ...(unbilled ? { actualUsd: 0, unbilled: true } : {}), atIso: pendingReservation!.atIso, reason: error.message });
+          const chargedUsd = recorded?.settledUsd ?? pendingReservation!.reservation.reservedUsd;
+          budgetSettledUsd += chargedUsd;
+          if (recorded?.settledUsd == null) budgetHeldUsd += pendingReservation!.reservation.reservedUsd;
           pendingReservation = undefined;
         },
         next: (checkActive) => {
@@ -5457,47 +5664,42 @@ export async function spawnOpenWeightWorker(
           }
           checkActive();
           const requestId = `${runRequestPrefix}-${++turns}`;
-          const reservation = reserveOpenWeightBudget(config, { requestId, deployment: selection.model,
-            requestBodyBytes, atIso: clock.iso(), squeezed: args.cashSqueezed === true });
+          const identity: CashRequestIdentity = { requestId, attemptId: runRequestPrefix, provider: "cash", deployment: selection.model, endpoint: cashEndpointIdentity(endpoint) };
+          const atIso = clock.iso();
+          const reservation = reserveOpenWeightBudget(config, { requestId, identity, deployment: selection.model,
+            requestBodyBytes, atIso, squeezed: args.cashSqueezed === true });
           budgetReservedUsd += reservation.reservedUsd;
-          pendingReservation = { requestId, deployment: selection.model, requestBodyBytes };
+          pendingReservation = { requestId, identity, atIso, reservation };
           recordCashRequestEffort(requestEfforts, body, usesResponses ? "responses" : "chat-completions");
-          return { requestId, reservation };
+          return pendingReservation;
         },
       });
-      const payload = (responses ? responses.read(envelope as Parameters<CashResponsesConversation["read"]>[0]) : envelope) as {
-        id?: unknown;
-        model?: unknown;
-        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; cached_tokens?: unknown; cache_creation_tokens?: unknown };
-        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
-      };
-      sessionId = typeof payload.id === "string" ? payload.id : sessionId;
-      servedModels.push(cashResponseModel(payload.model));
-      const turnPromptTokens = typeof payload.usage?.prompt_tokens === "number" ? payload.usage.prompt_tokens : 0;
-      const turnCompletionTokens = typeof payload.usage?.completion_tokens === "number" ? payload.usage.completion_tokens : 0;
-      const turnCached = typeof payload.usage?.cached_tokens === "number" ? payload.usage.cached_tokens : 0;
-      const turnWritten = typeof payload.usage?.cache_creation_tokens === "number" ? payload.usage.cache_creation_tokens : 0;
+      const usage = openWeightEnvelopeUsage(envelope, usesResponses);
+      const actualUsd = openWeightReceiptUsd(usage, selection.model, usesResponses);
+      // Valid counters remain observable even when an incomplete receipt cannot price the request.
+      const turnPromptTokens = validFoundryTokenCount(usage?.prompt_tokens) ? usage.prompt_tokens : 0;
+      const turnCompletionTokens = validFoundryTokenCount(usage?.completion_tokens) ? usage.completion_tokens : 0;
+      const turnCached = validFoundryTokenCount(usage?.cached_tokens) ? usage.cached_tokens : 0;
+      const turnWritten = validFoundryTokenCount(usage?.cache_creation_tokens) ? usage.cache_creation_tokens : 0;
       cacheReadTokens += turnCached;
       cacheCreationTokens += turnWritten;
       promptTokens += turnPromptTokens;
       completionTokens += turnCompletionTokens;
-      // SETTLE DOWN ONLY FROM A RECEIPT WE COULD ACTUALLY READ. A response carrying no usage block
-      // settles at 0 tokens, which would silently hand the allowance back for a request that really
-      // was billed — so an absent receipt leaves the conservative reservation standing instead.
-      if (usesResponses
-        ? typeof payload.usage?.prompt_tokens === "number" && typeof payload.usage?.completion_tokens === "number" &&
-          typeof payload.usage?.cache_creation_tokens === "number"
-        : typeof payload.usage?.prompt_tokens === "number" || typeof payload.usage?.completion_tokens === "number") {
-        const actualUsd = openWeightUsageUsd(selection.model, turnPromptTokens, turnCompletionTokens, turnCached, turnWritten);
-        settleOpenWeightBudget(config, { requestId, actualUsd, atIso: clock.iso() });
-        budgetSettledUsd += actualUsd;
+      if (actualUsd !== undefined) {
+        budgetSettledUsd += pendingReservation!.receipt?.settledUsd ?? reservation.reservedUsd;
+        if (pendingReservation!.receipt?.settledUsd == null) budgetHeldUsd += reservation.reservedUsd;
       } else {
+        settleOpenWeightBudget(config, { requestId, identity: pendingReservation!.identity, atIso: pendingReservation!.atIso, reason: "usage unavailable" });
+        budgetHeldUsd += reservation.reservedUsd;
         budgetSettledUsd += reservation.reservedUsd;
       }
-      // THIS TURN'S SETTLEMENT QUESTION IS NOW DECIDED, one way or the other, so it is no longer
-      // "pending" for the failure-settlement catch below -- a later throw in this same turn (an
-      // undeclared tool, `maxTurns` exceeded) must not re-settle a row already resolved above.
       pendingReservation = undefined;
+      const payload = (responses ? responses.read(envelope as Parameters<CashResponsesConversation["read"]>[0]) : envelope) as {
+        id?: unknown; model?: unknown;
+        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
+      };
+      sessionId = typeof payload.id === "string" ? payload.id : sessionId;
+      servedModels.push(cashResponseModel(payload.model));
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
       // A TRUNCATED REPLY IS A NAMED FAILURE, NOT A SHORT ANSWER. Checked AFTER settlement above so
@@ -5518,7 +5720,7 @@ export async function spawnOpenWeightWorker(
       if (calls.length === 0) {
         lineageEnd = "stream-ended";
         return reconcileBoundedProviderAttempt(
-          openWeightResult({ model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens, ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}), budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
+          openWeightResult({ model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens, ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}), budgetReservedUsd, budgetSettledUsd, budgetHeldUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
           args.externalEffect,
         );
       }
@@ -5547,6 +5749,7 @@ export async function spawnOpenWeightWorker(
                   model: selection.model,
                   clock,
                   requestId: `${runRequestPrefix}-${turns}-search-${webSearchAttempted + 1}`,
+                  attemptId: runRequestPrefix,
                   fetchImpl: args.fetchImpl,
                   onMetered: (metered) => {
                     webSearchAttempted += 1;
@@ -5556,6 +5759,7 @@ export async function spawnOpenWeightWorker(
                     // `budget*Usd` must not see an understated bill.
                     budgetReservedUsd += metered.reservedUsd;
                     budgetSettledUsd += metered.settledUsd;
+                    budgetHeldUsd += metered.heldUsd;
                     webSearchUsd += metered.settledUsd;
                   },
                 }),
@@ -5581,33 +5785,22 @@ export async function spawnOpenWeightWorker(
       }
     }
   } catch (error) {
-    // W1-T3666: A RESERVATION STILL PENDING WHEN THE TURN FAILS IS SETTLED DOWN HERE, NOT
-    // STRANDED. `pendingReservation` is set only between a reservation's commit and its own
-    // settlement decision (above), so reaching this with it defined means a 429, a transport
-    // fault or an unparseable body cut the turn short before any usage receipt could be read --
-    // exactly the gap `settleOpenWeightBudget`'s own doc names. A definite unbilled refusal settles
-    // to zero; every other outcome keeps the INPUT-ONLY portion of the same byte-bound estimate
-    // the reservation used (zero completion tokens): a failed
-    // request produced no completion, so it must not be charged for the
-    // `OPENWEIGHT_MAX_COMPLETION_TOKENS` ceiling the reservation assumed it might. `reason` is the
-    // failure's own message, so the ledger row itself says which failure settled it.
     if (error instanceof CashCapacityShortfallFailure) recordCashCapacityShortfall(config, {
       reason: "capacity_shortfall", deployment: selection.model,
       estimatedTokens: error.estimatedTokens, limitTokens: error.limitTokens!,
     }, args);
     if (pendingReservation !== undefined) {
-      // Only a definite unbilled refusal releases this request's reservation. Unknown outcomes stay charged.
-      const inputOnlyUsd = unbilledCashRefusal(error, azureOpenAi429Unbilled)
-        ? 0
-        : usesResponses ? openWeightReservationUsd(pendingReservation.deployment, pendingReservation.requestBodyBytes)
-        : openWeightUsageUsd(pendingReservation.deployment, pendingReservation.requestBodyBytes, 0);
-      settleOpenWeightBudget(config, {
-        requestId: pendingReservation.requestId,
-        actualUsd: inputOnlyUsd,
-        atIso: clock.iso(),
-        reason: error instanceof Error ? error.message : String(error),
-      });
-      budgetSettledUsd += inputOnlyUsd;
+      const unbilled = unbilledCashRefusal(error, azureOpenAi429Unbilled);
+      const recorded = pendingReservation.receipt ?? settleOpenWeightBudget(config, { requestId: pendingReservation.requestId, identity: pendingReservation.identity,
+        ...(unbilled ? { actualUsd: 0, unbilled: true } : {}), atIso: pendingReservation.atIso,
+        reason: error instanceof Error ? error.message : String(error) });
+      const chargedUsd = recorded?.settledUsd ?? pendingReservation.reservation.reservedUsd;
+      budgetSettledUsd += chargedUsd;
+      if (recorded?.settledUsd == null) budgetHeldUsd += pendingReservation.reservation.reservedUsd;
+      promptTokens += pendingReservation.tokens?.input ?? 0;
+      completionTokens += pendingReservation.tokens?.output ?? 0;
+      cacheReadTokens += pendingReservation.tokens?.cacheRead ?? 0;
+      cacheCreationTokens += pendingReservation.tokens?.cacheCreation ?? 0;
     }
     // Preserve the transport/tool failure in the result's stderr + error flags; a failure must not
     // collapse into an ordinary empty worker response for callers or the catch-erasure census.
@@ -5629,6 +5822,7 @@ export async function spawnOpenWeightWorker(
         error,
         budgetReservedUsd,
         budgetSettledUsd,
+        budgetHeldUsd,
         // A refusal is a distinct outcome from a transport failure: no paid request was made, so the
         // operator reading the ledger can tell "we declined to spend" from "we spent and it failed".
         budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
@@ -5661,8 +5855,9 @@ async function brokerCashWebSearch(input: {
   model: string;
   clock: Pick<Clock, "now" | "iso">;
   requestId: string;
+  attemptId: string;
   fetchImpl?: typeof fetch;
-  onMetered: (metered: { accepted: boolean; reservedUsd: number; settledUsd: number }) => void;
+  onMetered: (metered: { accepted: boolean; reservedUsd: number; settledUsd: number; heldUsd: number }) => void;
 }): Promise<unknown> {
   const query = input.args.query;
   if (typeof query !== "string" || query.trim() === "") throw new Error("web_search query must be a non-empty string");
@@ -5675,14 +5870,16 @@ async function brokerCashWebSearch(input: {
   const rawEndpoint = cashDeploymentEndpoint(input.config, input.model);
   const endpoint = cashWebSearchEndpoint(typeof rawEndpoint === "string" ? rawEndpoint : "", input.model);
   const body = JSON.stringify({ model: input.model, input: query, tools: [{ type: "web_search" }] });
+  const identity: CashRequestIdentity = { requestId: input.requestId, attemptId: input.attemptId, provider: "cash", deployment: input.model, endpoint: cashEndpointIdentity(endpoint) };
+  const atIso = input.clock.iso();
   let reservation: { reservedUsd: number; committedUsd: number; capUsd: number };
   try {
     reservation = reserveOpenWeightBudget(input.config, {
-      requestId: input.requestId,
+      requestId: input.requestId, identity,
       deployment: input.model,
       requestBodyBytes: Buffer.byteLength(body, "utf8"),
       extraInputTokens: CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
-      atIso: input.clock.iso(),
+      atIso,
     });
   } catch (error) {
     // AN EXHAUSTED ALLOWANCE REFUSES THE SEARCH, NOT THE RUN, and it is metered as a refusal at
@@ -5690,7 +5887,7 @@ async function brokerCashWebSearch(input: {
     // escape would abort a worker that could still finish without the search, and leaving it
     // uncounted would hide "we ran out of money" among the searches that merely failed.
     if (!(error instanceof OpenWeightAllowanceExhaustedError)) throw error;
-    input.onMetered({ accepted: false, reservedUsd: 0, settledUsd: 0 });
+    input.onMetered({ accepted: false, reservedUsd: 0, settledUsd: 0, heldUsd: 0 });
     return { error: `web_search refused (allowance): ${error.message}`, sources: [] };
   }
   const result = await performCashWebSearch({
@@ -5700,15 +5897,14 @@ async function brokerCashWebSearch(input: {
     model: input.model,
     fetchImpl: input.fetchImpl,
   });
-  let settledUsd = reservation.reservedUsd;
-  if (result.usageRead) {
-    settledUsd = Math.min(
+  const recorded = settleOpenWeightBudget(input.config, { requestId: input.requestId, identity, atIso,
+    ...(result.usageRead ? { actualUsd: Math.min(
       openWeightUsageUsd(input.model, result.usage.promptTokens, result.usage.completionTokens),
       reservation.reservedUsd,
-    );
-    settleOpenWeightBudget(input.config, { requestId: input.requestId, actualUsd: settledUsd, atIso: input.clock.iso() });
-  }
-  input.onMetered({ accepted: result.outcome === "accepted", reservedUsd: reservation.reservedUsd, settledUsd });
+    ) } : { reason: "search usage unavailable" }) });
+  const settledUsd = recorded?.settledUsd ?? reservation.reservedUsd;
+  input.onMetered({ accepted: result.outcome === "accepted", reservedUsd: reservation.reservedUsd, settledUsd,
+    heldUsd: recorded?.settledUsd == null ? reservation.reservedUsd : 0 });
   if (result.outcome === "refused") {
     return { error: `web_search refused (${result.reason}): ${result.detail}`, sources: [] };
   }
@@ -5739,8 +5935,11 @@ async function spawnCodexWorkerInPrivateTemp(
     (toolName, toolInput, tsMs) =>
       args.streamObserver?.({ kind: "tool-executing", tsMs, text: `[tool_use: ${toolName}]`, toolName, toolInput, cwd: args.cwd }));
   const stdoutDecoder = new StringDecoder("utf8");
+  const stdoutValidator = new TextDecoder("utf-8", { fatal: true });
+  let stdoutFailure: Omit<FileTail, "text"> | undefined;
   let stdoutBytes = 0;
   const stderrRetainer = new CodexStderrRetainer();
+  let stderrFailure: StderrFailure | undefined;
   let outputLimit: CodexWorkerOutputLimitError | undefined;
   const pidRef: { pid?: number } = {};
   const spawn = args.containment?.spawn ?? spawnDetachedGroup;
@@ -5766,9 +5965,10 @@ async function spawnCodexWorkerInPrivateTemp(
   const childEnv = { ...codexSpawnEnv(config, args, nativeCacheRoot), TMPDIR: privateTmpDir };
   const contained = spawn(
     { command: bin, args: codexExecArgs(args, config, selection, nativeCacheRoot), cwd: args.cwd, env: childEnv },
-    (chunk) => {
+    (chunk, failure) => {
       if (outputLimit || timedOut) return;
-      // W1-T8203: stderr past its bound is truncated (head + tail), never a teardown and never a verdict.
+      if (failure) stderrFailure = failure;
+      // Retain diagnostics without interrupting the child; completeness is judged after its actual exit.
       stderrRetainer.push(chunk);
     },
     args.onSpawnError,
@@ -5795,6 +5995,13 @@ async function spawnCodexWorkerInPrivateTemp(
   };
   process.stdout.on("data", (chunk: Buffer) => {
     if (outputLimit || timedOut) return;
+    if (!stdoutFailure) {
+      try { stdoutValidator.decode(chunk, { stream: true }); }
+      catch (error) {
+        stdoutFailure = { state: "malformed", bytesRead: stdoutBytes + chunk.length,
+          reason: `Codex stdout is not valid UTF-8: ${String((error as Error).message ?? error)}` };
+      }
+    }
     const text = stdoutDecoder.write(chunk);
     stdoutBytes += chunk.length;
     if (stdoutBytes > CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES) {
@@ -5819,11 +6026,19 @@ async function spawnCodexWorkerInPrivateTemp(
   else signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const exit = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
+    await contained.outputClosed;
     if (outputLimit) throw outputLimit;
     if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
+    if (!stdoutFailure) {
+      try { stdoutValidator.decode(); }
+      catch (error) {
+        stdoutFailure = { state: "malformed", bytesRead: stdoutBytes,
+          reason: `Codex stdout is not valid UTF-8 at EOF: ${String((error as Error).message ?? error)}` };
+      }
+    }
+    if (stdoutFailure) stdoutFailure = { ...stdoutFailure, bytesRead: stdoutBytes, fileBytes: stdoutBytes };
     stdout.push(stdoutDecoder.end());
     const parsed = stdout.finish();
-    lineageEnd = exit.kind === "exit" && exit.code === 0 && !parsed.isError ? "stream-ended" : "interrupted";
     if (parsed.outputTruncation && args.runId) appendLedger(ledgerPathFor(config), {
       run_id: args.runId,
       task_id: args.taskId ?? "unattributed",
@@ -5832,9 +6047,22 @@ async function spawnCodexWorkerInPrivateTemp(
     });
     const stderr = stderrRetainer.text();
     const stderrTruncation = stderrRetainer.truncation();
+    const droppedOutput = (parsed.outputTruncation?.droppedBytes ?? 0) > 0;
+    const textBytes = Buffer.byteLength(parsed.text);
+    const blockBytes = parsed.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    const outputRetention: NonNullable<CodexWorkerResult["outputRetention"]> = {
+      text: { state: droppedOutput ? "truncated" : "complete", bytesRead: textBytes },
+      blocks: { state: droppedOutput ? "truncated" : "complete", bytesRead: blockBytes },
+      stdout: stdoutFailure ?? stdout.stdoutEvidence() ?? { state: "complete", bytesRead: stdoutBytes, fileBytes: stdoutBytes },
+      stderr: { ...stderrRetainer.evidence(), ...stderrFailure },
+      completion: parsed.completion,
+      originalSubtype: parsed.subtype,
+    };
+    const incomplete = Object.values(outputRetention).some(value => typeof value === "object" && value.state !== "complete");
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
-    const isError = parsed.isError || exitCode !== 0;
+    const isError = parsed.isError || exitCode !== 0 || incomplete;
+    lineageEnd = isError ? "interrupted" : "stream-ended";
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
     const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
@@ -5859,7 +6087,9 @@ async function spawnCodexWorkerInPrivateTemp(
       ...(parsed.outputTruncation ? { outputTruncation: parsed.outputTruncation } : {}),
       ...(stderrTruncation ? { stderrTruncation } : {}),
       stderr,
-      subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
+      outputRetention,
+      subtype: parsed.isError ? parsed.subtype : exitCode !== 0 ? `error_exit_${exitCode}`
+        : incomplete ? "error_incomplete_output" : "success",
       isError,
       exit,
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),

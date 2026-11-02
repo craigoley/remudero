@@ -16,8 +16,7 @@ import {
   type OperatorMessageCheckResult,
 } from "./operator-message.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
-// W1-T5283: the escalation and issue-gateway bodies are written ONCE as steps (W1-T5284's driver
-// pair): runStepsSync for the CLI callers, runStepsAsync for the main-health rung on the daemon loop.
+// W1-T5283/W1-T5284: shared steps run synchronously for CLI callers, asynchronously on the daemon.
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
 import type { Mount, Mounts } from "./mounts.js";
@@ -39,28 +38,20 @@ import { escalationClassSignal } from "./escalation-precision.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 
 /**
- * Escalations as GitHub issues (W1-T8, MASTER-PLAN §4 "Escalation taxonomy").
- *
- * The loop never waits on a human except for four classes: BLOCKED, a post-diagnose PR whose two
- * strikes are spent; MANUAL, an act only a hand can do — secrets, repo creation, deploys, eyeball
- * gates; HARD_STOP, the deterministic hard-stop list; and GRILL, an ambiguous feedback item intake
- * triage cannot decide alone (§7B, W1-T42), reusing this machinery rather than a second copy.
- *
- * INVARIANT: each opens a `needs-human` issue carrying the OPTIONS and the machine's RECOMMENDATION,
- * so the issue is actionable rather than a bare alert. TRAP: DECISION and DIRECTION are absorbed
- * elsewhere and ASYNC-QUESTION never escalates, so a fifth class here would widen what stops the
- * loop. Why: docs/forensics/escalate.md.
+ * Human stops (W1-T8, MASTER-PLAN §4): exhausted post-diagnose strikes (BLOCKED), human-only acts
+ * (MANUAL), deterministic HARD_STOPs, and ambiguous intake (GRILL, §7B/W1-T42).
+ * INVARIANT: each `needs-human` issue carries options and a recommendation.
+ * TRAP: DECISION/DIRECTION are absorbed elsewhere; ASYNC-QUESTION never stops the loop.
+ * History: docs/forensics/escalate.md; pre-compression source at commit 2b52efd75 (W1-T11034).
  */
 export type EscalationClass = "BLOCKED" | "MANUAL" | "HARD_STOP" | "GRILL";
 
 export type EscalationHeadDedup = "dependent" | "independent";
 
 /**
- * The closed set of routes an EXECUTABLE option may name, each at the same {@link WriteTier}
- * serve.ts's route table already declares for it. INVARIANT: the map is CLOSED, so "no merge route,
- * no PR-close route, no reject route" holds by construction — {@link validateEscalationOptionKind}
- * refuses a path outside it. TRAP: re-deriving a tier here instead of copying serve.ts's is the
- * two-enumerator defect that lets this vocabulary drift. FALSIFIER:
+ * CLOSED executable routes: no merge, PR-close or reject route. {@link validateEscalationOptionKind}
+ * refuses outsiders. TRAP: copy serve.ts's {@link WriteTier}; re-deriving it lets the tables drift.
+ * FALSIFIER:
  * test/escalation-options-are-executable.test.ts. Why: docs/forensics/escalate.md.
  */
 export const ESCALATION_OPTION_ROUTES = {
@@ -81,28 +72,21 @@ export const ESCALATION_OPTION_ROUTES = {
 /** One path from the closed {@link ESCALATION_OPTION_ROUTES} set. */
 export type EscalationOptionRoute = keyof typeof ESCALATION_OPTION_ROUTES;
 
-/** An option's machine-readable KIND (W1-T2273) — closed, like {@link EscalationClass}. An option
- *  either CAN be executed by the console, naming its route, payload and already-gated tier, or it
- *  CANNOT, because the act is the operator's alone, and says so as `operator-only`. */
+/** W1-T2273: a console-executable route/payload/tier, or an explicitly operator-only act. */
 export type EscalationOptionKind =
   | {
       readonly type: "executable";
       /** One of {@link ESCALATION_OPTION_ROUTES}'s own keys — never a route this task invents. */
       readonly route: EscalationOptionRoute;
-      /** MUST equal `ESCALATION_OPTION_ROUTES[route]`, carried explicitly rather than looked up at
-       *  render time, so {@link validateEscalationOptionKind} catches a caller whose claimed tier
-       *  disagrees with the route's real one. Typed {@link WriteTier}: a fourth tier is not
-       *  expressible. */
+      /** MUST equal `ESCALATION_OPTION_ROUTES[route]`; validation catches a caller's tier mismatch. */
       readonly tier: WriteTier;
       /** The JSON body the console would POST to `route`. Omitted when the route needs none. */
       readonly payload?: Readonly<Record<string, unknown>>;
     }
   | { readonly type: "operator-only" };
 
-/** One choice a human can make to resolve the escalation. `kind` is OPTIONAL (W1-T2273) so every
- *  existing producer renders byte-identical; an option with no `kind` renders exactly like
- *  `operator-only` — prose, no button. The kind is a machine-readable SIBLING of `label`/`detail`,
- *  never a replacement for the sentence. Why: docs/forensics/escalate.md. */
+/** Human choice (W1-T2273): absent `kind` renders prose like `operator-only`, preserving legacy output.
+ *  Machine metadata supplements label/detail. Why: docs/forensics/escalate.md. */
 export interface EscalationOption {
   label: string;
   detail: string;
@@ -110,11 +94,8 @@ export interface EscalationOption {
   kind?: EscalationOptionKind;
 }
 
-/** Refuse an option whose `kind` is unrecognised, whose `route` is outside {@link
- *  ESCALATION_OPTION_ROUTES}, or whose `tier` disagrees with that route's real tier (W1-T2273).
- *  `undefined` and `operator-only` pass untouched. Called from {@link escalate}/{@link
- *  escalateWithJudge}, so no caller reaches {@link createEscalationIssue} with an option the
- *  console has no honest way to render. */
+/** W1-T2273: before issue creation, refuse unknown kinds/routes and mismatched tiers.
+ *  `undefined` and `operator-only` pass untouched. */
 export function validateEscalationOptionKind(option: EscalationOption): void {
   const kind = option.kind;
   if (kind === undefined || kind.type === "operator-only") return;
@@ -156,42 +137,24 @@ export interface Escalation {
   options: EscalationOption[];
   /** Which option the machine recommends (auto-choose doctrine, §4) — must be one of options[].label. */
   recommendation: string;
-  /** The PR's head commit sha, OPTIONAL (W1-T195) — the dedup key's 2nd dimension. An omitting
-   *  caller keeps today's (taskId, PR) behaviour, because {@link escalate}'s dup search requires
-   *  equality here only when BOTH sides carry a value. Why: docs/forensics/escalate.md. */
+  /** W1-T195: dedup head dimension; vetoes a match only when BOTH sides carry disagreeing values. */
   headSha?: string;
-  /** OPTIONAL (W1-T3179) — defaults to `dependent`, preserving W1-T195's per-sha dedup. Producers
-   *  whose question cannot be changed by a push set `independent`: the observed sha still renders
-   *  as evidence, but it no longer vetoes an open duplicate match. */
+  /** W1-T3179: default `dependent`; `independent` renders the head as evidence without a dedup veto. */
   headDedup?: EscalationHeadDedup;
-  /** The blocked PR's underlying cause, OPTIONAL (W1-T195) — the key's 3rd dimension. A failing
-   *  review, red checks and a conflict are different operator asks on the same head sha, so those
-   *  must still open separately. See {@link escalationCause}; permissive when absent, like
-   *  {@link Escalation.headSha}. */
+  /** W1-T195: separate asks for review, CI and conflict on one head; permissive when absent. */
   cause?: EscalationCause;
-  /** OPTIONAL (W1-T3579) — a deterministic revision of the CURRENT authoritative task contract
-   *  (see {@link "../run-task.js".taskContractRevision}) — the key's 4th dimension. `headSha`
-   *  alone cannot tell "a human was already asked about this exact repair" from "a plan-only
-   *  scope/acceptance amendment newly authorized a repair the open issue predates": both render
-   *  the identical head. Permissive when absent on either side, exactly like {@link
-   *  Escalation.headSha}/{@link Escalation.cause} — an un-migrated caller or a legacy issue keeps
-   *  today's dedup unchanged. */
+  /** W1-T3579: current authoritative taskContractRevision distinguishes newly authorized repairs
+   *  on an unchanged head. Like head/cause, absent on either side preserves legacy dedup. */
   contractRevision?: string;
-  /** A plain-language decision card, generated ONCE at creation time by {@link summarizeEscalation};
-   *  {@link renderIssueBody} renders it above the raw `detail`. Named `decisionSummary` because
-   *  {@link Escalation.summary} is the issue title. Absent degrades to the raw-only body (W1-T313). */
+  /** W1-T313: summarizeEscalation's birth-time card above raw detail; absent renders raw-only. */
   decisionSummary?: DecisionSummary | null;
-  /** OPTIONAL (W1-T2498) — what follows from doing nothing: the fourth part of {@link
-   *  checkOperatorMessage}'s presence check. Unset reads as an omitted part, which is reported
-   *  non-conforming, annotated and delivered anyway. `null` is an EXPLICIT "nothing follows from
-   *  inaction" (docs/operator-message-standard.md) and counts as present. */
+  /** W1-T2498: inaction consequence; missing is annotated, never held. Explicit `null` counts as
+   *  present (docs/operator-message-standard.md); see withExplicitConsequence for normalization. */
   consequence?: string | null;
 }
 
-/** Project an {@link Escalation} onto the four presence slots {@link checkOperatorMessage} reads
- *  (W1-T2498). Every field is read from something the escalation ALREADY carries, so no producer
- *  changes. `consequenceOfInaction` is the part most producers omit, and making that gap visible is
- *  the point. Why: docs/forensics/escalate.md. */
+/** W1-T2498: project existing fields onto checkOperatorMessage's four presence slots.
+ *  Missing consequences stay visible. Why: docs/forensics/escalate.md. */
 export function toOperatorMessage(e: Escalation): OperatorMessage {
   return {
     speaker: e.class,
@@ -212,28 +175,18 @@ function checkOperatorMessageSafe(e: Escalation): OperatorMessageCheckResult | u
   }
 }
 
-/** Normalize an OMITTED `consequence` to explicit `null` before {@link toOperatorMessage} ever
- *  sees it (W1-T3391). Every escalation producer traced today reached `escalate`/
- *  `escalateWithJudge` without setting the property at all — never `undefined` on purpose — so an
- *  omitted key and a deliberately-empty "nothing follows from inaction" answer were
- *  indistinguishable to {@link checkOperatorMessage}, and every one of them ledgered
- *  `operator_message_missing`. An EXPLICIT `consequence` (including the literal `undefined` the
- *  non-conforming fixtures use on purpose) is left untouched, so that annotation path is unchanged. */
+/** W1-T3391: normalize only an OMITTED consequence to `null` before projection.
+ *  Explicit values, including `undefined` in non-conforming fixtures, keep their annotation path. */
 function withExplicitConsequence(e: Escalation): Escalation {
   return Object.prototype.hasOwnProperty.call(e, "consequence") ? e : { ...e, consequence: null };
 }
 
-/** The cause split {@link Escalation.cause} keys on (W1-T195's design). "stage-stall" (W1-T8167) is the
- *  stalled-stage escalation's OWN cause: a fix strike's probe always carries "review", "ci" or "conflict",
- *  so the cause dimension keeps an open stall issue from standing a fix round down. It is never returned
- *  by {@link escalationCause}. */
+/** W1-T195/W1-T8167: stage-stall is separate from fix-probe causes, so a stall issue cannot stand
+ *  a fix round down. {@link escalationCause} never returns it. */
 export type EscalationCause = "review" | "ci" | "conflict" | "stage-stall";
 
-/** Classify a blocked PR's cause from the SAME two booleans each rung already computes for dispatch
- *  (W1-T195) — never a second classification, never string-parsing a free-text reason. INVARIANT:
- *  `conflicted` wins over `ciFailing`, because a dirty merge state means GitHub never ran checks at
- *  all, so checks read "none"/stale rather than genuinely failing (see {@link isBlockedCi} in
- *  sweep.ts). Why: docs/forensics/escalate.md. */
+/** W1-T195: use dispatch's booleans, never parse prose. INVARIANT: conflict wins over CI because
+ *  dirty heads have absent/stale checks (sweep.ts isBlockedCi). Why: docs/forensics/escalate.md. */
 export function escalationCause(conflicted: boolean, ciFailing: boolean): Exclude<EscalationCause, "stage-stall"> {
   if (conflicted) return "conflict";
   if (ciFailing) return "ci";
@@ -1309,29 +1262,19 @@ export function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[
     const body = normalizeCandidateBody(issue.body ?? "");
     if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) return false;
     if (prRef) {
-      // W1-T195: the composite key. taskId + PR are REQUIRED matches. headSha/cause veto only when
-      // both sides carry a value and disagree, so a caller setting neither keeps today's dedup while
-      // the two rungs that set both get their own issue on a new push or a different cause.
+      // W1-T195: taskId + PR must match; head/cause veto only when both values exist and disagree.
       if (candidatePrRef(issue.title, body) !== prRef) return false;
       const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
       if (matchesHeadDimension(e, candidateHead, issue.title, body) === false) return false;
       if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
-      // W1-T3579: the 4th dimension — permissive exactly like cause/head above, so an
-      // un-migrated producer or a legacy issue (neither side carrying a recorded contract) keeps
-      // today's dedup unchanged. A genuine disagreement (the task contract has since been
-      // amended) is what lets a recurring escalation open its own revision-distinct issue instead
-      // of silently appending to one filed against a since-superseded contract. Named rather than
-      // inlined, unlike its two siblings above, so negating the match call never folds "no
-      // Contract line" and "a real disagreement" into one textual `!chain?.` shape.
+      // W1-T3579: contract disagreements permit a new issue; missing revisions preserve legacy dedup.
+      // Keep the named predicate: absence and disagreement must not collapse into `!chain?.`.
       const candidateContract = CONTRACT_REVISION_LINE_RE.exec(body)?.[1];
       if (!matchesOptionalDimension(e.contractRevision, candidateContract)) return false;
       return true;
     }
-    // W1-T345: no PR resolves — dedup on (taskId, class, cause) instead of skipping the search.
-    // class is REQUIRED equal; cause is permissive, so distinct causes still open separately. With
-    // no cause on either side, compare the rendered title: its summary segment is a fixed,
-    // per-producer phrase, so two producers sharing one (taskId, class) never collide, while the
-    // same producer's repeated firing does dedup.
+    // W1-T345: without a PR, match taskId/class and permissive cause. With no causes, the rendered
+    // title distinguishes producers while deduping a producer's repeated firing.
     if (CLASS_LINE_RE.exec(body)?.[1] !== e.class) return false;
     const candidateCause = CAUSE_LINE_RE.exec(body)?.[1];
     if (e.cause !== undefined || candidateCause !== undefined) {
@@ -1341,15 +1284,9 @@ export function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[
   });
 }
 
-/** Search OPEN `needs-human` issues for a duplicate of `e` — extracted from {@link escalate} so
- *  {@link escalateWithJudge} runs the IDENTICAL search once, up front, and never judges a duplicate.
- *  Returns `undefined` for no `listOpen`, a failed read, or no match — DELIBERATELY UNCHANGED by
- *  W1-T2912: this is also the pre-strike false-block probe's own predicate (run-task.ts, design
- *  comment at the `openEscalation` stand-down gate), which relies on a throwing `listOpen` staying
- *  fail-open so an unreadable surface never itself manufactures a stand-down. {@link escalate} and
- *  {@link escalateWithJudge} do NOT call this any more — see {@link lookupDuplicateEscalation}, which
- *  tells "unreadable" apart from "no match" for the one caller (issue creation) where collapsing the
- *  two is the bug W1-T2912 exists to fix. */
+/** Pre-strike duplicate probe: absent, failed or unmatched reads return `undefined` (W1-T2912).
+ *  INVARIANT: unreadability must never manufacture a fix stand-down. Issue creation instead uses
+ *  {@link lookupDuplicateEscalation}, which distinguishes unreadability from no match. */
 export function findDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): OpenIssue | undefined {
   if (!deps.issues.listOpen) return undefined;
   let open: OpenIssue[];
@@ -1361,24 +1298,16 @@ export function findDuplicateEscalation(e: EscalationDedupKey, deps: Pick<Escala
   return matchDuplicateEscalation(e, open);
 }
 
-/** The three-way outcome {@link escalate}/{@link escalateWithJudge} need but {@link
- *  findDuplicateEscalation} cannot give them (W1-T2912): a `listOpen` that THROWS — a REST outage
- *  while GraphQL `create` still works, say — is not "no match". Collapsing the two into `undefined`
- *  is exactly the bug: every tick during the outage reads "no duplicate found" and files a fresh
- *  `needs-human` issue, flooding the operator's inbox with one copy per tick for the length of the
- *  outage. `unreadable` lets the caller refuse to create instead, and retry the read next tick —
- *  the condition being escalated is durable and will still be there. */
+/** W1-T2912: unreadable is distinct from no match. Otherwise a REST-read outage with working
+ *  issue creation floods one duplicate per tick. Refuse creation and retry the durable ask later. */
 export type DedupLookup =
   // W1-T4659: "none" carries the OPEN list already read, so a new-issue caller can rescan it.
   | { kind: "none"; open: OpenIssue[] }
   | { kind: "found"; issue: OpenIssue }
   | { kind: "unreadable"; error: unknown };
 
-/** {@link findDuplicateEscalation}'s outcome-preserving twin — same search, same predicate, but a
- *  throwing `listOpen` reports `{ kind: "unreadable" }` instead of silently degrading to "no match".
- *  Used ONLY by {@link escalate}/{@link escalateWithJudge}, the one caller that turns "no match" into
- *  CREATING a new issue; every other reader of the dedup search (the pre-strike probe) keeps calling
- *  {@link findDuplicateEscalation} itself, unchanged. */
+/** Creation-only twin of findDuplicateEscalation: same predicate, but throwing reads are unreadable.
+ *  The pre-strike probe keeps its fail-open predicate. */
 function* lookupDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps<AsyncIssueGateway>, "issues">): Steps<DedupLookup> {
   if (!deps.issues.listOpen) return { kind: "none", open: [] };
   let open: OpenIssue[];
@@ -1391,11 +1320,8 @@ function* lookupDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDe
   return match ? { kind: "found", issue: match } : { kind: "none", open };
 }
 
-/** Ledger the `escalation.dedup_unreadable` step and return WITHOUT creating an issue (W1-T2912): a
- *  failed dedup read must refuse to create, not report no match. Returns `""` (never a real issue
- *  URL — none was opened) so {@link escalate}/{@link escalateWithJudge} keep their `string` return
- *  type; every caller only logs/interpolates it, and the ledger row (not the return value) is the
- *  durable record a human or the next tick reads. */
+/** W1-T2912: ledger `escalation.dedup_unreadable`, refuse creation, return `""` (no issue URL).
+ *  The ledger row is the durable failure record. */
 function recordUnreadableDedup(e: Escalation, error: unknown, deps: Pick<EscalateDeps, "ledgerPath" | "runId">): string {
   appendLedger(deps.ledgerPath, {
     run_id: deps.runId,
@@ -1439,18 +1365,10 @@ function issueRefFromUrl(url: string): string {
   return n ? `#${n}` : url;
 }
 
-/**
- * W1-T4659 — retires the issue(s) a brand-new head just made stale (#7561/W1-T3721 carried five
- * open issues across two hours of re-pushes, one per head). Fires only from the "opened a
- * brand-new issue" branch of {@link escalate}/{@link escalateWithJudge} — a dedup-hit touched no
- * new issue — and only when `e` carries a `headSha`. Scans the SAME `open` list {@link
- * lookupDuplicateEscalation} already fetched for every OTHER open issue naming the SAME (task, PR)
- * whose own `**Head:**` line DISAGREES with `e.headSha` (necessarily older — an agreeing head
- * would already have taken the dedup-hit branch). Never a different task/PR, or no Head line at
- * all (design clause iii). CANNOT-OBSERVE MEANS WAIT (W1-T130), like {@link
- * "./escalation-catalogue.js".escalateStarvationCleared}: a close failure leaves that one issue
- * open and costs a ledger row, never a throw into the caller.
- */
+/** W1-T4659 (#7561/W1-T3721): only a newly opened issue with headSha retires older-head issues.
+ *  Reuse the fetched OPEN list; require the same task/PR and an explicit, disagreeing Head line.
+ *  Never retire on a dedup hit, missing Head or another task/PR (design iii).
+ *  CANNOT-OBSERVE MEANS WAIT (W1-T130): failed closes stay open and ledger failure, never throw. */
 function* closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIssue[], newIssueUrl: string, deps: EscalateDeps<AsyncIssueGateway>): Steps<void> {
   if (!e.headSha) return;
   const newIssueRef = issueRefFromUrl(newIssueUrl);
@@ -1593,21 +1511,11 @@ function recordThreadMessage(e: Escalation, deps: Pick<EscalateDeps, "threadStor
   }
 }
 
-/**
- * Open a labeled GitHub issue for one escalation and ledger it; returns the issue URL. Zero options
- * is refused — a bare alert with no actionable choice is what §4 exists to avoid.
- *
- * DEDUP LIVES HERE, IN THE TRANSPORT (W1-T104), so every caller inherits it instead of deduping only
- * against its own prior actions. Two modes, chosen by whether a PR reference resolves out of this
- * escalation's own text: PR-KEYED (taskId, PR, plus headSha/cause when set, matched permissively) and
- * REFERENT-LESS (taskId, class, cause, with the rendered title as fallback discriminator — W1-T345).
- * Both search OPEN issues only, because a closed one recorded a human's resolution and must not
- * silence a recurrence; a duplicate takes the second observer's context as a comment. An absent
- * `listOpen` falls through to create (no surface to search), but a `listOpen` that THROWS refuses to
- * create instead (W1-T2912): an unreadable surface is not a "no match", and treating it as one during
- * a REST outage (while GraphQL `create` still works) files one duplicate issue per tick for the
- * length of the outage. Why: docs/forensics/escalate.md.
- */
+/** Open and ledger an actionable issue; zero options are refused (§4).
+ *  DEDUP LIVES HERE, IN THE TRANSPORT (W1-T104): PR-keyed or referent-less (W1-T345), as above.
+ *  Search OPEN issues only: human-resolved issues must not silence recurrence. Duplicates append
+ *  observer context. Missing listOpen permits creation; throwing listOpen refuses it (W1-T2912).
+ *  Why: docs/forensics/escalate.md. */
 export function escalate(e: Escalation, deps: EscalateDeps): string {
   return runStepsSync(escalateSteps(e, deps));
 }
@@ -1802,17 +1710,10 @@ export async function escalateWithJudge(
   }, true));
 }
 
-/** NON-THROWING escalation, for callers inside a SUPERVISED LOOP. Returns the issue URL, or `null`
- *  when it could not be delivered; a failure is recorded on its own `escalation.failed` ledger step,
- *  so an undelivered escalation is degraded and legible rather than silent. TRAP: `escalate()` throws
- *  on any nonzero `gh` exit, right for a one-shot command and wrong inside `rmd daemon`'s `for(;;)` —
- *  an uncaught escalation ends the PROCESS, launchd reads the exit as a crash, and the fresh process
- *  re-selects the same circuit-broken task and throws again. This also catches the zero-options
- *  programming error deliberately. Also normalizes `escalate()`'s `""` (W1-T2912: an unreadable dedup
- *  read refuses to create WITHOUT throwing, so its own `escalation.dedup_unreadable` ledger row is
- *  the only record) to `null` — every caller keying `delivered`/`issue_url` off this function's
- *  return via `!== null` (e.g. escalation-catalogue.ts) must read "refused to create" identically to
- *  "create() itself failed", not as a phantom successful delivery. */
+/** NON-THROWING escalation for supervised loops: URL on delivery, `null` otherwise.
+ *  Failures (including zero options) ledger `escalation.failed`. TRAP: uncaught gh failures can
+ *  crash-loop the daemon on the same task. Normalize unreadable-dedup `""` to `null` too
+ *  (W1-T2912), so `!== null` delivery callers cannot report phantom success. */
 // Why: the 2026-07-21 daemon boot loop this wrapper ended (W1-T197's sibling) — docs/forensics/escalate.md.
 export function tryEscalate(e: Escalation, deps: EscalateDeps): string | null {
   return runStepsSync(tryEscalateSteps(e, deps));
@@ -1970,13 +1871,8 @@ function issueGatewaySteps(
 
 // ── W1-T2696: signed, single-use answer links ────────────────────────────────
 //
-// The loop is half built. `rmd escalate` opens a needs-human issue with typed options
-// (W1-T2273); the console executes them through a closed route map; notify() pages the operator
-// with prose. The operator reads the ping on a phone and must open the console to act.
-//
-// A link, not a bot: a Telegram or Slack bot is a new channel with its own identity problem
-// (channel spoofing). A signed link inherits the console's token model and W1-T2211's boundary —
-// the secret is minted by the daemon under the state root, which a worker tree cannot read.
+// Signed option links let a notification execute a console choice (W1-T2273) without a new bot
+// identity. W1-T2211 boundary: the daemon mints the secret under the worker-inaccessible state root.
 //
 // INVARIANT: a link authorises exactly one option on exactly one escalation, once, before its
 // expiry. Signature, expiry and single-use are checked independently, and a refusal names which.

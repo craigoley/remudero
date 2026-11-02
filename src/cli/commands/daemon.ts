@@ -8,7 +8,7 @@ import type { RatifyCliGateway } from "../../lib/panel-graph.js";
  * and delegates here, so HANDLERS and every caller are unchanged.
  */
 import type { tickReadProducer, TickReadFacts, TickReadRequest } from "../../lib/tick-read-worker.js";
-import { registeredGardenEnabled } from "../../lib/garden-registry.js";
+import { registeredGardenEnabled, registeredGardenTargetArgs } from "../../lib/garden-registry.js";
 import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "../../lib/read-plane.js";
 import { remeasureSettledGoals, withGoalRemeasurement } from "../../lib/goals.js";
 import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "../../lib/ci-escalation-judge.js";
@@ -237,6 +237,12 @@ export interface GardenBuildContext {
   repo: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
   raiseDuplicate: (e: Escalation) => string;
+  /** False for a per-target garden built over a non-self managed target (`owner`/`repo` name it); absent is self. */
+  isSelf?: boolean;
+  /** That target's checkout, whose origin/main the garden reads; absent, `repoRoot`. */
+  targetRoot?: string;
+  /** That target's plan file, the one its daemon reads (an explicit `--plan` included); absent, `targetRoot`'s layout. */
+  planPath?: string;
 }
 
 /** One production composition, using the boot's existing gateway and its in-flight ownership. */
@@ -598,6 +604,10 @@ export async function daemonCommand(
      * the watcher closes before the daemon re-raises SIGINT/SIGTERM without signalling the test
      * runner itself. */
     wireSweepWake?: typeof wireSweepWakeToDaemon;
+    startGitCredentialSocket?: typeof startDaemonGitCredentialSocket;
+    startReadPlane?: typeof startReadPlane;
+    startLoopTelemetry?: typeof startReadPlaneTelemetry;
+    startMemoryCensus?: typeof startDaemonMemoryCensus;
     processKill?: (pid: number, signal: NodeJS.Signals) => boolean;
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
@@ -914,9 +924,13 @@ export async function daemonCommand(
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
   const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
   const gardenContext: GardenBuildContext = { config, repoRoot: effectiveRepoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs, codeSha: daemonLoadedCodeSha };
+  // A per-target garden on a non-self target reads THAT repository and its checkout; every other garden reads self.
+  const gardenContextFor = (name: RegisteredGardenName): GardenBuildContext => registeredGardenTargetArgs(name, target).length === 0 ? gardenContext
+    : { ...gardenContext, owner: target.owner, repo: target.repo, isSelf: false, targetRoot: daemonTargetCheckoutRoot(target, config.root), planPath: resolve(target.planPath) };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
-    ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
-  const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
+    ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContextFor(name), signal) : undefined);
+  const boundedPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
+  const gardenPassSpawn: GardenPassSpawn = (name, args, signal) => boundedPassSpawn(name, [...args, ...registeredGardenTargetArgs(name, target)], signal);
   const gardenerRuntime = createGardenerRuntimeWriter({ stateDir: join(config.root, "state"), repository: `${target.owner}/${target.repo}`,
     daemonRunId: runId, codeSha: daemonLoadedCodeSha, log,
     gardens: REGISTERED_GARDEN_NAMES.map((name) => ({ name, enabled: registeredGardenEnabled(name, target.isSelf),
@@ -924,7 +938,7 @@ export async function daemonCommand(
       scope: name === "host-resource" ? "host" : name === "overseer" ? "fleet" : "repository" })) });
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
     registeredGardenEnabled(name, target.isSelf)
-      ? startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) })
+      ? startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContextFor(name)) }) })
       : { stop() {} };
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
@@ -1180,6 +1194,12 @@ export async function daemonCommand(
     }
     throw e;
   }
+  // Register each release only after acquisition; boot and the loop share this finally.
+  const cleanup: Array<{ resource: string; close: () => void | Promise<void> }> = [
+    { resource: "drain_lock", close: () => drainLock.release() },
+    { resource: "stop_marker", close: () => { consumeStop(config.root); } },
+  ];
+  try {
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
   const landedClaimRerunReported = new Set<string>();
   try {
@@ -1255,6 +1275,7 @@ export async function daemonCommand(
     // older full sweep is still executing and the resulting wake is refused by its liveness gate.
     onCheckBurstSettled: () => void mainHealthRung(),
   });
+  cleanup.push({ resource: "github_event_wake", close: () => githubEventWake.close() });
   const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const onSignal = (sig: NodeJS.Signals) => {
     archivedLifetime.history?.close?.();
@@ -1264,7 +1285,9 @@ export async function daemonCommand(
     processKill(process.pid, sig); // re-raise with the default handler now cleared
   };
   process.once("SIGINT", onSignal);
+  cleanup.push({ resource: "sigint_listener", close: () => { process.removeListener("SIGINT", onSignal); } });
   process.once("SIGTERM", onSignal);
+  cleanup.push({ resource: "sigterm_listener", close: () => { process.removeListener("SIGTERM", onSignal); } });
 
   log("daemon.start", {
     max: opts.max ?? null,
@@ -1382,7 +1405,10 @@ export async function daemonCommand(
   // `runDaemon` is a test-only loop seam. Its fixtures must not inherit the live shared hold a
   // production daemon is deliberately required to honour; injected `checkPause` still takes precedence.
   const checkPause = deps.checkPause ?? (deps.runDaemon ? () => pauseDetail(config.root) : () => checkSharedPause(config.root, realDeps().sharedPauseGit));
-  if (!deps.checkPause && !deps.runDaemon && !checkStop()) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
+  if (!deps.checkPause && !deps.runDaemon) {
+    cleanup.push({ resource: "shared_pause_refresh", close: () => disposeSharedPauseRefresh(realDeps().sharedPauseGit) });
+    if (!checkStop()) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
+  }
   if (target.isSelf && !deps.runDaemon) unwireOwnCheckoutCredentialHelper(repoRoot, log);
   const invokeDaemonBoot: typeof daemonBoot = (...args) => daemonBoot(...args);
   const bootHold = resolveFleetControlHold({ checkStop, checkPause });
@@ -1592,21 +1618,24 @@ export async function daemonCommand(
   // W1-T5115: the daemon's ONE git credential socket, started only on an App-configured host and
   // only once the first App mint above has settled. Its path reaches every task worker (`runOne`)
   // and every sweep fix worker (`sweep:`) below; `undefined` leaves both on the ambient helper.
-  const gitCredentialSocket = await startDaemonGitCredentialSocket({
+  const gitCredentialSocket = await (deps.startGitCredentialSocket ?? startDaemonGitCredentialSocket)({
     ready: githubAppRefresh.ready,
     stateDir: join(config.root, "state"),
     log,
     mint: deps.gitCredentialMint,
   });
+  if (gitCredentialSocket) cleanup.push({ resource: "git_credential_socket", close: () => gitCredentialSocket.close() });
   const readOptions: TickReadOptions = { owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot };
   let inlineProducer: ReturnType<typeof tickReadProducer> | undefined;
-  const readPlane = deps.githubFactory ? undefined : startReadPlane({
+  const readPlane = deps.githubFactory ? undefined : (deps.startReadPlane ?? startReadPlane)({
     // W1-T9722: the worker starts from the narrow tick-read entry (a current bundle when one is vouched for).
     workerUrl: tickReadWorkerUrl(), workerInput: readOptions, log, spawn: () => startTickReadWorker(readOptions),
     inline: (input: TickReadRequest) => (inlineProducer ??= planReaders.inlineTickRead(readOptions, { log }))(input),
   });
+  if (readPlane) cleanup.push({ resource: "read_plane", close: () => readPlane.stop() });
   const readTick = readPlane && planReaders.tickRead(readPlane.read);
-  const loopTelemetry = startReadPlaneTelemetry();
+  const loopTelemetry = (deps.startLoopTelemetry ?? startReadPlaneTelemetry)();
+  cleanup.push({ resource: "loop_telemetry", close: () => loopTelemetry.stop() });
   // The daemon's rolling rss+swap samples, kept across rotations and restarts for the memory budget's daemon split.
   const daemonFootprint = createDaemonFootprint(daemonFootprintPath(join(config.root, "state")));
   installDaemonFootprint(daemonFootprint);
@@ -1623,7 +1652,7 @@ export async function daemonCommand(
   installDaemonSlackReclaimer(slackReclaimer);
   // W1-T9647: what holds the heap, on its own unref'd timer; `unattributed_live_bytes` is read against the reclaimer's
   // last measured live set above. Cheap counters and sliced walks only: no snapshot, no forced collection.
-  const stopMemoryCensus = startDaemonMemoryCensus({
+  const stopMemoryCensus = (deps.startMemoryCensus ?? startDaemonMemoryCensus)({
     holders: daemonHolderSource({
       planCopies: daemonPlanCopies,
       sizedMemos: { terminalUnionScans: terminalUnionScans.size, mergeLogEvidenceByRoot: mergeLogEvidenceByRoot.size,
@@ -1635,8 +1664,8 @@ export async function daemonCommand(
     }),
     log, liveSet: daemonLiveSet.read, bootHeadSha: daemonLoadedCodeSha,
   });
+  cleanup.push({ resource: "memory_census", close: stopMemoryCensus });
   log("daemon.heap_ceiling_shadow", { basis: "boot", ...slackReclaimer.derivedCeiling() });
-  try {
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     // W1-T7744: the filing read is awaited here, before the loop, and behind each selection after — never on the loop.
     await dispatchFilingPrefetch.refresh(target.planPath);
@@ -1797,8 +1826,10 @@ export async function daemonCommand(
           childModeTracker.record(dispatchMode?.decision, log);
           childContract(dispatchMode?.decision);
           // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
+          let selectedRegistryIntent: import("../../lib/run-child-contract.js").RunChildSpecOptions["selectedRegistryIntent"];
           const inChild = await runInChildWhenOn({
             taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log: childLog, planSync: planSyncCoalescer.sync,
+            onSelectedRegistryIntent: (intent: typeof selectedRegistryIntent) => { selectedRegistryIntent = intent; },
             onPending: runOptions?.onChildPending, mayRunInProcess: runOptions?.mayRunInProcess,
           }, { readMode: childPolicy, evidence: childModeTracker.evidence });
           if (inChild) {
@@ -1809,9 +1840,10 @@ export async function daemonCommand(
           const admittedPlan = createAdmittedPlanSlot();
           void startRunChildProbe({
             taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log: childLog,
-            options: childOptions,
+            options: { ...childOptions, selectedRegistryIntent },
           }, dispatchMode ? { readMode: () => dispatchMode.mode } : {});
           return runTaskFn(taskId, {
+            selectedRegistryIntent,
             planPath: target.planPath,
             config,
             allowStale,
@@ -2058,7 +2090,8 @@ export async function daemonCommand(
                 }),
               ],
             }
-          : {}),
+          // Operator 2026-11-01: a managed target runs its per-target gardens (the issue-revalidation garden, shadow).
+          : { gardens: REGISTERED_GARDEN_NAMES.filter((name) => registeredGardenEnabled(name, false)).map(offLoopGarden) }),
         clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),
         plainBackfill: {
           stateDir: join(config.root, "state"),
@@ -2357,19 +2390,21 @@ export async function daemonCommand(
     // reason still resolves through `daemonExitCode` itself, unchanged.
     return daemonExitCodeForSummary(summary);
   } finally {
-    await readPlane?.stop();
-    if (!deps.checkPause && !deps.runDaemon) disposeSharedPauseRefresh(realDeps().sharedPauseGit);
-    loopTelemetry.stop();
-    stopMemoryCensus();
-    process.removeListener("SIGINT", onSignal);
-    process.removeListener("SIGTERM", onSignal);
-    githubEventWake.close(); // W1-T2568: never outlives the daemon's own normal-stop path either
-    // W1-T5115: closed and its path removed on normal stop; a failed close is ledgered, never thrown.
-    await gitCredentialSocket?.close().catch((e: unknown) => log(LEDGER_REQUEST_STEP, {
-      host: "github.com", decision: "refuse", status: "error", reason: `git credential socket did not close: ${String(e)}`,
-    }));
-    consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
-    drainLock.release();
+    for (const { resource, close } of cleanup.reverse()) {
+      try {
+        await close();
+      } catch (error) {
+        try {
+          log("daemon.cleanup_failed", { resource, error: String(error) });
+          if (resource === "git_credential_socket") log(LEDGER_REQUEST_STEP, {
+            host: "github.com", decision: "refuse", status: "error", reason: `git credential socket did not close: ${String(error)}`,
+          });
+        } catch (logError) {
+          // A failed ledger cannot replace the boot/loop error or skip sibling releases.
+          console.error("daemon cleanup reporting failed", { resource, error: String(error), reason: String(logError) });
+        }
+      }
+    }
   }
   } finally {
     archivedLifetime.history?.close?.();

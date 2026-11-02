@@ -1221,11 +1221,7 @@ test("openweight daily reservation remains charged across restart and cannot be 
     const atMs = Date.parse(atIso);
     const config = allowanceConfig(root, 5);
 
-    // A FAILED response still leaves SOMETHING charged -- the request was sent and Azure may well
-    // have billed the input tokens -- but W1-T3666 settles it down rather than stranding the whole
-    // conservative reservation the way this test used to assert: see
-    // "a failed openweight request settles rather than stranding its reservation" for the
-    // dedicated coverage of that correction.
+    // W1-T10954: an unobserved failure retains the full ceiling across process restarts.
     const failed = await spawnOpenWeightWorker(
       {
         cwd: root,
@@ -1244,9 +1240,11 @@ test("openweight daily reservation remains charged across restart and cannot be 
     const chargedAfterFailure = openWeightCommittedUsd(afterFailure);
     assert.ok(chargedAfterFailure > 0, "a failed response still commits SOME reservation");
     assert.equal(
-      Object.values(afterFailure.reservations).every((row) => row.settledUsd !== null),
+      Object.values(afterFailure.reservations).every((row) => row.settledUsd === null &&
+        row.accountingState === "held-unknown" && row.heldUsd === row.reservedUsd &&
+        row.usageEstimateUsd === null && row.billedUsd === null),
       true,
-      "W1-T3666: a failed request is settled down rather than stranded at its conservative figure",
+      "a failed request without usage retains its full reservation as held unknown",
     );
 
     // RESTART: a brand-new process reads the SAME committed file. This is real cross-process

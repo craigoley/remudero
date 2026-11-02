@@ -1,0 +1,32 @@
+id: incident-9af2f8b2decd6bc2
+ts: 2026-10-31T08:19:50.153Z
+raw: >-
+  Incident 9af2f8b2decd: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  Operator approval of the <n>-second exit bound, <n> repeats, and <n>-second
+  subprocess timeout is required to complete acceptance.
+
+  First seen: 2026-10-31T08:17:45.109Z
+
+  Last seen: 2026-10-31T08:17:45.109Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15851 escalated: already escalated (reason unreadable: no escalation of this PR at head ae282b7 is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793426514270:1:1793433743319) — Operator approval of the 60-second exit bound, 50 repeats, and 120-second subprocess timeout is required to complete acceptance.
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#9af2f8b2decd6bc261378ad27af85bc2c2effa2b8c192492e7a5ec5070d37b9f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

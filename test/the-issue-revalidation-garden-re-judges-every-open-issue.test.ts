@@ -490,6 +490,34 @@ test("classification, the operator check and the action table", () => {
   assert.deepEqual(decideAction({ verdict: still, escalationClass: "MANUAL", operatorSpokeLast: false, prior: refreshed, nowMs: NOW }), { action: "keep", guard: "refresh-not-due" });
 });
 
+test("a still-true issue gets one refresh per STILL_TRUE_REFRESH_MS across passes, not one every other pass", async () => {
+  // #15114: the pass after a refresh recorded keep, and the pass after THAT read only the keep row and
+  // refreshed again, so 34 comments landed in 4 days. The ledger here is the garden's own verdict rows.
+  const ledger: Array<Record<string, unknown>> = [];
+  const still = issue(1, escalation("MANUAL", "PR-100"));
+  const comments: string[] = [];
+  const pass = async (hours: number) => {
+    const c = fixedClock(NOW + hours * HOUR);
+    const { ports: p } = ports({
+      mode: "act", clock: c, listOpenIssues: async () => [still],
+      referentVerdicts: async () => new Map([[1, { verdict: "still-true", reason: "PR-100 is still open" }]]),
+      priorVerdicts: () => priorVerdictsFromRows(ledger),
+      comment: async (url) => void comments.push(url),
+      log: (step, extra = {}) => void ledger.push({ ...extra, step, ts: c.iso() }),
+    });
+    await runIssueRevalidationGarden(p);
+  };
+  for (const hours of [0, 3, 6, 9, 20]) await pass(hours);
+  assert.equal(comments.length, 1, "five passes within a day post exactly one refresh");
+  const actions = ledger.filter((r) => r.step === ISSUE_REVALIDATION_VERDICT_STEP).map((r) => `${r.action}:${r.guard ?? ""}`);
+  assert.deepEqual(actions, ["refresh:", "keep:refresh-not-due", "keep:refresh-not-due", "keep:refresh-not-due", "keep:refresh-not-due"]);
+  assert.equal(priorVerdictsFromRows(ledger).get(1)?.lastRefreshAt, at(0));
+  await pass(STILL_TRUE_REFRESH_MS / HOUR - 1);
+  assert.equal(comments.length, 1, "an hour short of the interval is still not due");
+  await pass(STILL_TRUE_REFRESH_MS / HOUR);
+  assert.equal(comments.length, 2, "a pass STILL_TRUE_REFRESH_MS after the refresh posts the second");
+});
+
 test("the policy block is strict, and the shipped one acts on operator 2026-10-14", () => {
   assert.deepEqual(loadIssueRevalidationPolicy(join(process.cwd(), "plan", "policy.yaml")), { mode: "act", maxClosesPerPass: 5 });
   const row = (value: unknown) => ({ value, origin: "net-new", min: 1, max: 20 });
@@ -548,7 +576,15 @@ test("the judge's verdict parse fails toward unknown, and prior verdicts are the
     { step: "other", issue_number: 5, ts: at(-1) },
     { step, issue_number: "x", ts: at(-1) },
   ]);
-  assert.deepEqual([...prior], [[4, { verdict: "still-true", at: at(-1), issueUpdatedAt: "u", action: "refresh", acted: true, reason: "r", citation: "c" }]]);
+  assert.deepEqual([...prior], [[4, { verdict: "still-true", at: at(-1), issueUpdatedAt: "u", action: "refresh", acted: true, reason: "r", citation: "c", lastRefreshAt: at(-1) }]]);
+  const kept = priorVerdictsFromRows([
+    { step, issue_number: 9, ts: at(-30), verdict: "still-true", action: "refresh", acted: true },
+    { step, issue_number: 9, ts: at(-20), verdict: "still-true", action: "refresh", acted: false },
+    { step, issue_number: 9, ts: at(-2), verdict: "still-true", action: "keep", acted: false },
+    { step, issue_number: 9, ts: at(-40), verdict: "still-true", action: "refresh", acted: true },
+  ]).get(9);
+  assert.equal(kept?.action, "keep", "the prior verdict is still the newest row");
+  assert.equal(kept?.lastRefreshAt, at(-30), "the newest ACTED refresh, never a shadow one, survives a newer keep row");
   assert.deepEqual(evidenceNames({ title: "t", body: "`a.b` and src/lib/x.ts and stale.widget plus notes.md" }), ["a.b", "src/lib/x.ts", "stale.widget"]);
 });
 
@@ -687,4 +723,18 @@ test("the run-task ports derive referents through the reconciler, load the plan 
   assert.equal(await p.judgeText("the prompt", 7), "REVALIDATION_VERDICT: unknown");
   assert.deepEqual(spawned[0]!.tools, []);
   assert.equal(spawned[0]!.prompt, "the prompt");
+});
+
+test("a converted issue is never converted again, even after a keep row follows the conversion", () => {
+  const step = "issue_revalidation.verdict";
+  const rows = [
+    { step, issue_number: 9, ts: "2026-11-01T01:00:00.000Z", verdict: "convert-to-task", action: "convert", acted: true },
+    { step, issue_number: 9, ts: "2026-11-01T02:00:00.000Z", verdict: "convert-to-task", action: "keep", acted: false },
+  ];
+  const prior = priorVerdictsFromRows(rows).get(9);
+  assert.equal(prior?.action, "keep", "positive control: the newest row is the keep that hid the conversion");
+  assert.equal(prior?.lastConvertAt, "2026-11-01T01:00:00.000Z");
+  const decided = decideAction({ verdict: { verdict: "convert-to-task", reason: "names work" }, escalationClass: "BLOCKED",
+    operatorSpokeLast: false, prior, nowMs: Date.parse("2026-11-01T03:00:00.000Z") });
+  assert.deepEqual(decided, { action: "keep", guard: "refresh-not-due" });
 });

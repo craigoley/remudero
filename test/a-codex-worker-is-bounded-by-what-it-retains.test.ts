@@ -27,16 +27,15 @@ function fakeCodex(streamObserver?: Parameters<typeof spawnCodexWorker>[0]["stre
   const home = mkdtempSync(join(tmpdir(), "rmd-w1t4595-home-"));
   let teardowns = 0;
   let exited = false;
-  // This call omits `tools`, which `codexReadOnly` treats as a writer, so `spawnCodexWorker` now
-  // awaits the async Git-worktree probe BEFORE calling `containment.spawn`. An `exit` emitted
-  // before that callback runs has no listener yet and is lost, hanging `await run` forever —
-  // `spawned` lets every call site wait for the real attach point first.
+  // The read-only fixture still waits for containment.spawn before emitting exit: an exit
+  // emitted before the listener attaches is lost and hangs `await run` forever.
   let markSpawned!: () => void;
   const spawned = new Promise<void>((resolve) => { markSpawned = resolve; });
   const run = spawnCodexWorker(
     {
       workerHome: home,
       streamObserver,
+      tools: [],
       cwd: process.cwd(),
       prompt: "retention budget",
       settingsFile: join(process.cwd(), "settings", "worker.json"),
@@ -151,11 +150,13 @@ test("completed Codex messages reach the retained native fix tail without raw co
   const f = await started;
   try {
     await f.spawned;
+    f.stdout.write('{"type":"turn.started"}\n');
     f.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "command_execution", aggregated_output: "DO_NOT_RETAIN_RAW_COMMAND_OUTPUT" } }) + "\n");
     const wire = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "SWC validation remains unmeasured" } }) + "\n";
     f.stdout.write(wire.slice(0, 19));
     f.stdout.write(wire.slice(19));
     f.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Final diagnosis requires retained evidence" } }) + "\n");
+    f.stdout.write('{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}\n');
     f.stdout.end(); f.proc.emit("exit", 0);
     const result = await pending;
     const path = join(root, "state", "runs", "fixture-worker.tail");
