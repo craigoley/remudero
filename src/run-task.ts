@@ -289,7 +289,7 @@ export {
 };
 // W1-T4678: the cheap-lane read BEFORE `escalateCircuitBreak` above — see stall-verifier.ts's
 // own doc for why this reads the evidence rather than paging straight from a tripped breaker.
-import { judgeDispatchBreak, stallShardFingerprint, verifyStalledTask, type DispatchBreakJudge } from "./lib/stall-verifier.js";
+import { judgeDispatchBreak, stallShardFingerprint, verifyStalledTask, type DispatchBreakJudge, type MainEvidenceReader } from "./lib/stall-verifier.js";
 // Compatibility re-export target: lib/arm-auto-merge" (W1-T2887) — the auto-merge arm cluster
 // (armAutoMerge/armAutoMergeDetailed/attemptArm/armAutoMergeAtOpen/disarmAutoMerge/
 // armIfVerdictPermits/realArmDeps and their classifiers) moved to src/lib/arm-auto-merge.ts;
@@ -24618,7 +24618,7 @@ export function breakerDetailDep(
 export function onCircuitBreakWithVerifier(
   gate: Pick<ReturnType<typeof breakerGateFor>, "detailFor">,
   projFor: (taskId: string) => { prState?: string; merged?: boolean } | undefined,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; judge?: DispatchBreakJudge },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; judge?: DispatchBreakJudge; mainEvidence?: MainEvidenceReader },
 ): (task: Task) => Promise<void> | void {
   return (task) => {
     const detail = gate.detailFor(task.id);
@@ -24643,7 +24643,7 @@ export function onCircuitBreakWithVerifier(
     const page = () => escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, issues: ctx.issues });
     if (!ctx.judge) return page();
     // Settles off the selection pass; a throw anywhere still pages (the judge route never throws on its own).
-    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge: ctx.judge })
+    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge: ctx.judge, mainEvidence: ctx.mainEvidence })
       .then((decision) => { if (decision === "escalate") page(); }, page);
   };
 }

@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { RUNNER_CONFIG_PATHS } from "./dispatch-repair.js";
 import type { FixProgressVerdict } from "./fix-progress-judge.js";
 import { appendLedger, matchesRepoScopedTask } from "./ledger.js";
 import type { Task } from "./plan.js";
 import { DISPATCH_BREAKER_JUDGED_STEP, isDispatchStreakReset, readLedgerLines, streakRefusal } from "./status.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /**
  * W1-T4678: A CIRCUIT-BROKEN TASK PAGES THE OPERATOR WITH NO DIAGNOSIS.
@@ -208,7 +210,7 @@ export function verifyStalledTask(
 }
 
 /** One attributable attempt the dispatch-break judge reads: a run's terminal verdict that no exclusion names. */
-export interface DispatchBreakAttempt { runId: string; verdict: string; reason?: string; costUsd?: number }
+export interface DispatchBreakAttempt { runId: string; verdict: string; reason?: string; costUsd?: number; atMs?: number }
 
 /** The dispatch-break judge's whole input — the attempts since the streak last reset, and its own earlier rulings. */
 export interface DispatchBreakInput {
@@ -219,6 +221,7 @@ export interface DispatchBreakInput {
   attempts: DispatchBreakAttempt[];
   priorRulings: Array<{ decision: string; reason: string }>;
   stall: StallVerdict;
+  mainChangedSinceLastAttempt?: string[];
 }
 export type DispatchBreakJudge = (input: DispatchBreakInput) => Promise<FixProgressVerdict | undefined>;
 
@@ -234,9 +237,35 @@ export function dispatchBreakAttempts(rows: ReadonlyArray<Record<string, unknown
     if (row.step !== "verdict" || typeof row.run_id !== "string" || streakRefusal(row) !== undefined) continue;
     attempts.push({ runId: row.run_id, verdict: String(row.verdict),
       ...(typeof row.reason === "string" ? { reason: row.reason.slice(0, 300) } : {}),
-      ...(typeof row.cost_usd === "number" ? { costUsd: row.cost_usd } : {}) });
+      ...(typeof row.cost_usd === "number" ? { costUsd: row.cost_usd } : {}),
+      ...(Number.isFinite(Date.parse(String(row.ts))) ? { atMs: Date.parse(String(row.ts)) } : {}) });
   }
   return attempts;
+}
+
+export type MainEvidence = { digest: string; changedPaths: string[] } | { unreadable: string };
+export type MainEvidenceReader = (paths: readonly string[], sinceMs: number | undefined) => Promise<MainEvidence>;
+
+const NAMED_REPO_PATH = /(?:[\w.-]+\/)+[\w.-]+\.(?:[cm]?[jt]sx?|json|ya?ml)\b/g;
+
+export function implicatedMainPaths(task: Pick<Task, "files">, attempts: readonly DispatchBreakAttempt[]): string[] {
+  const named = attempts.flatMap((attempt) => attempt.reason?.match(NAMED_REPO_PATH) ?? []);
+  const declared = (task.files ?? []).filter((path) => !/[*?[]/.test(path));
+  return [...new Set([...RUNNER_CONFIG_PATHS, ...declared, ...named])].sort();
+}
+
+export function mainEvidenceReader(repoDir: string, git: typeof hostWorktreeGitAsync = hostWorktreeGitAsync): MainEvidenceReader {
+  return async (paths, sinceMs) => {
+    try {
+      const listing = await git(repoDir, ["ls-tree", "origin/main", "--", ...paths]);
+      const changed = sinceMs === undefined ? "" : await git(repoDir,
+        ["log", `--since=${new Date(sinceMs).toISOString()}`, "--format=", "--name-only", "origin/main", "--", ...paths]);
+      return { digest: createHash("sha256").update(listing).digest("hex").slice(0, 16),
+        changedPaths: [...new Set(changed.split("\n").map((line) => line.trim()).filter(Boolean))].sort() };
+    } catch (error) {
+      return { unreadable: String((error as Error)?.message ?? error).slice(0, 200) };
+    }
+  };
 }
 
 /**
@@ -248,14 +277,17 @@ export function dispatchBreakAttempts(rows: ReadonlyArray<Record<string, unknown
  * cached, so the next process asks again; a ruling is asked once per observed state.
  */
 export async function judgeDispatchBreak(
-  task: Pick<Task, "id" | "title">,
+  task: Pick<Task, "id" | "title"> & Partial<Pick<Task, "files">>,
   evidence: Pick<StallEvidence, "freshCount" | "excludedByReason">,
   stall: StallVerdict,
-  ctx: { repo: string; ledgerPath: string; runId: string; judge?: DispatchBreakJudge },
+  ctx: { repo: string; ledgerPath: string; runId: string; judge?: DispatchBreakJudge; mainEvidence?: MainEvidenceReader },
 ): Promise<"continue" | "escalate"> {
   const rows = readLedgerLines(ctx.ledgerPath);
   const attempts = dispatchBreakAttempts(rows, task.id);
-  const observed = `${task.id}:fresh=${evidence.freshCount}:last=${attempts.at(-1)?.runId ?? "none"}`;
+  const main = ctx.mainEvidence ? await ctx.mainEvidence(implicatedMainPaths(task, attempts), attempts.at(-1)?.atMs) : undefined;
+  const mainKey = main && "digest" in main ? `:main=${main.digest}` : "";
+  const mainChanged = main && "digest" in main && main.changedPaths.length > 0 ? main.changedPaths : undefined;
+  const observed = `${task.id}:fresh=${evidence.freshCount}:last=${attempts.at(-1)?.runId ?? "none"}${mainKey}`;
   const own = rows.filter((row) => row.step === DISPATCH_BREAKER_JUDGED_STEP && matchesRepoScopedTask(row, ctx.repo, task.id));
   const settled = own.findLast((row) => row.observed_state === observed && (row.decision === "continue" || row.decision === "escalate"));
   if (settled) return settled.decision as "continue" | "escalate";
@@ -264,7 +296,8 @@ export async function judgeDispatchBreak(
   try {
     verdict = await ctx.judge?.({ taskId: task.id, title: task.title, freshCount: evidence.freshCount,
       excludedByReason: evidence.excludedByReason, attempts, stall,
-      priorRulings: own.map((row) => ({ decision: String(row.decision), reason: String(row.reason ?? "") })) });
+      priorRulings: own.map((row) => ({ decision: String(row.decision), reason: String(row.reason ?? "") })),
+      ...(mainChanged ? { mainChangedSinceLastAttempt: mainChanged } : {}) });
     if (ctx.judge && !verdict) failure = "absent or unparseable dispatch-break verdict";
   } catch (error) {
     failure = `dispatch-break judgment failed: ${String((error as Error)?.message ?? error)}`;
@@ -272,6 +305,8 @@ export async function judgeDispatchBreak(
   const decision = verdict === undefined ? "unavailable" : verdict.verdict === "escalate" ? "escalate" : "continue";
   appendLedger(ctx.ledgerPath, { run_id: ctx.runId, task_id: task.id, repo: ctx.repo, step: DISPATCH_BREAKER_JUDGED_STEP,
     observed_state: observed, decision, fresh_count: evidence.freshCount, reason: verdict?.reason ?? failure,
+    ...(main && "digest" in main ? { main_digest: main.digest, main_changed: main.changedPaths } : {}),
+    ...(main && "unreadable" in main ? { main_unreadable: main.unreadable } : {}),
     ...(verdict?.verdict === "change-approach" ? { approach: verdict.approach } : {}) });
   return decision === "continue" ? "continue" : "escalate";
 }

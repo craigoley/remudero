@@ -94,6 +94,7 @@ import { type DispatchGovernorDeps } from "../../lib/dispatch-governor.js";
 import { focusGateFor } from "../../lib/focus-gardener.js";
 import { captureHeavyNewBuildStartupGate } from "../../lib/heavy-ready-startup.js";
 import { hostWorktreeGitAsync } from "../../lib/worktree-git.js";
+import { mainEvidenceReader } from "../../lib/stall-verifier.js";
 import { step } from "../../lib/git-push.js";
 import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "../../lib/worker-home.js";
 import { acquireDrainLock, DrainLockError } from "../../lib/drain-lock.js";
@@ -1765,6 +1766,7 @@ export async function daemonCommand(
           ledgerPath,
           runId,
           judge: productionDispatchBreakJudge({ cwd: repoRoot, settingsFile: join(repoRoot, "settings", "worker.json") }),
+          mainEvidence: mainEvidenceReader(join(config.root, "repos", target.repo)),
         }),
         // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
         // daemon flushes one bounded batch after the pass and routes it through the existing judge;
