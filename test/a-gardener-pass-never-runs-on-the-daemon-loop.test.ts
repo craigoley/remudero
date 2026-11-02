@@ -1,31 +1,45 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
+import { setImmediate as flush } from "node:timers/promises";
 import { test } from "node:test";
 import type { components } from "../packages/api-client/src/schema.js";
-import { clockFromMillisFn } from "#src/lib/clock.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
 import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
 import type { GardenerRuntimeEvent } from "#src/lib/gardener-runtime.js";
 import {
   boundedGardenPassSpawn,
   childGardenPassSpawn,
+  gardenChildNodeArgv,
+  gardenPacingPath,
   GARDEN_HOURLY_FLAG,
+  GARDEN_PLAN_FLAG,
+  GARDEN_REPO_FLAG,
   GARDEN_PASS_STEP,
   gardenSchedule,
   isRegisteredGardenName,
+  issueRevalidationGardenPass,
   REGISTERED_GARDEN_NAMES,
   startGardenOffLoop,
   type GardenPassSpawn,
+  type RegisteredGardenName,
 } from "#src/lib/garden-registry.js";
+import { productionIssueRevalidationPorts } from "#src/lib/issue-revalidation-garden.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "#src/lib/host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "#src/lib/gardener-overseer.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { buildRegisteredGarden, daemonCommand, gardenCommand as runGardenCommand, runRegisteredGardenPass, type GardenBuildContext } from "#src/run-task.js";
+import {
+  buildRegisteredGarden, daemonCommand, gardenCommand as runGardenCommand, gardenTargetContext, issueRevalidationRunTaskPorts, parseGardenRunArgs,
+  registeredGardenDueProbe, runRegisteredGardenPass, type GardenBuildContext,
+} from "#src/run-task.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { declaredBody, SPEC, violations } from "#test/helpers/openapi-strict.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // MEASURED 2026-10-01: eleven daemon ticks spent 4,344 s reaching admission; ~1,620 s of the silent-loop gaps ended
 // in a gardener's scorecard, because every garden starter ran its synchronous pass on the daemon's event loop.
@@ -632,4 +646,116 @@ test("W1-T5114: rmd garden run runs one pass of a registered garden and refuses 
   assert.equal(await gardenCommand(["run", "evidence-coverage"]), 0);
   const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
   assert.match(ledger, /"run_id":"GARDEN-evidence-coverage-\d+","task_id":"DAEMON"/);
+});
+
+// Moved from test/a-managed-repo-runs-the-issue-garden-in-shadow.test.ts (it no longer imports run-task.ts, held at the
+// affected-suite reach ceiling): the per-target issue-revalidation garden's daemon and child wiring.
+const managedGardenClock = fixedClock(Date.parse("2026-11-01T12:00:00.000Z"));
+
+test("a managed repo runs the issue garden in shadow: the garden child's --repo builds over that target and its checkout", () => {
+  const self = { owner: "craigoley", repo: "remudero" };
+  assert.deepEqual(gardenTargetContext("issue-revalidation", "acme/consumer", self, "/cfg"),
+    { owner: "acme", repo: "consumer", isSelf: false, targetRoot: join("/cfg", "repos", "consumer") });
+  assert.deepEqual(gardenTargetContext("issue-revalidation", undefined, self, "/cfg"), {});
+  assert.deepEqual(gardenTargetContext("issue-revalidation", "CraigOley/Remudero", self, "/cfg"), {}, "naming self is self");
+  assert.deepEqual(gardenTargetContext("plan", "acme/consumer", self, "/cfg"), {}, "a self-only garden never reads a target");
+});
+
+test("a managed repo runs the issue garden in shadow: the daemon on a non-self target spawns only that pass, with --repo", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}managed-garden-home-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const originalHomedir = os.homedir;
+  t.mock.method(os, "homedir", () => home);
+  syncBuiltinESMExports();
+  t.after(() => { os.homedir = originalHomedir; syncBuiltinESMExports(); rmSync(home, { recursive: true, force: true }); });
+  const spawned: Array<{ name: RegisteredGardenName; args: readonly string[] }> = [];
+  const code = await daemonCommand(["--repo", "acme/consumer", "--plan", planPath, "--max", "0"], {
+    gardenPassSpawn: async (name, args) => { spawned.push({ name, args }); return 0; },
+    runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+      const started = (deps.gardens ?? []).map((start) => start(60_000));
+      await flush(); await flush();
+      for (const garden of started) garden.stop();
+      return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+    },
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(spawned, [{ name: "issue-revalidation", args: [GARDEN_REPO_FLAG, "acme/consumer", GARDEN_PLAN_FLAG, planPath] }]);
+  const inventory = JSON.parse(readFileSync(join(root, "state", "gardener-runtime.json"), "utf8")) as { gardens: Array<{ name: string; enabled: boolean }> };
+  assert.deepEqual(inventory.gardens.filter((g) => g.enabled).map((g) => g.name), ["issue-revalidation"]);
+});
+
+// The reviewer's counterexample (#16084): `rmd daemon --repo acme/consumer --plan <file>` reads <file> and never clones,
+// but its garden child got only `--repo`, so it read `<root>/repos/consumer/plan/tasks.yaml` (absent: ENOENT on the
+// first issue). The daemon's real spawn argv, through the real child node argv and the child's own parse, must name
+// the target and resolve the --plan file, whose task is then the issue's referent.
+test("a managed repo runs the issue garden in shadow: the daemon's garden child argv carries its --plan and the child reads it", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}managed-garden-plan-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  const planPath = join(home, "consumer-tasks.yaml");
+  writeFileSync(planPath, "- id: W9-T1\n  title: one\n  repo: consumer\n  type: implement\n  status: queued\n  attempts: 0\n");
+  const originalHomedir = os.homedir;
+  t.mock.method(os, "homedir", () => home);
+  syncBuiltinESMExports();
+  t.after(() => { os.homedir = originalHomedir; syncBuiltinESMExports(); rmSync(home, { recursive: true, force: true }); });
+  const spawned: Array<{ name: RegisteredGardenName; args: readonly string[] }> = [];
+  const code = await daemonCommand(["--repo", "acme/consumer", "--plan", planPath, "--max", "0"], {
+    gardenPassSpawn: async (name, args) => { spawned.push({ name, args }); return 0; },
+    runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+      const started = (deps.gardens ?? []).map((start) => start(60_000));
+      await flush(); await flush();
+      for (const garden of started) garden.stop();
+      return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(spawned.length, 1);
+  const { name, args } = spawned[0]!;
+  const entry = "/opt/rmd/run-task.js";
+  const argv = gardenChildNodeArgv(name, args, 512, { execArgv: [], entry }, false, () => {});
+  const childRest = argv.slice(argv.indexOf(entry) + 2);
+  assert.deepEqual(argv.slice(argv.indexOf(entry) + 1, argv.indexOf(entry) + 4), ["garden", "run", "issue-revalidation"]);
+  const parsed = parseGardenRunArgs(childRest);
+  assert.ok(!("error" in parsed), JSON.stringify(parsed));
+  const target = gardenTargetContext(parsed.name, parsed.repoFlag, { owner: "craigoley", repo: "remudero" }, root, parsed.planFlag);
+  assert.deepEqual(target, { owner: "acme", repo: "consumer", isSelf: false, targetRoot: join(root, "repos", "consumer"), planPath });
+  assert.equal(existsSync(target.targetRoot!), false, "a --plan daemon never clones: the checkout's plan is not the target's");
+  const ports = issueRevalidationRunTaskPorts({ owner: target.owner!, repo: target.repo!, repoRoot: REPO_ROOT, stateDir: join(root, "state"),
+    log: () => {}, planRoot: target.targetRoot, planPath: target.planPath });
+  const issue = { number: 1, url: "https://github.com/acme/consumer/issues/1", title: "t", body: "**Task:** W9-T1\n", labels: [] };
+  assert.equal(ports.hasReferent(issue as never), true, "the --plan file's task is the issue's referent");
+  assert.equal(ports.hasReferent({ ...issue, body: "**Task:** W9-T2\n" } as never), false);
+  assert.deepEqual(parseGardenRunArgs(["run", "issue-revalidation", GARDEN_PLAN_FLAG, planPath]),
+    { error: `rmd garden: ${GARDEN_PLAN_FLAG} names a managed target's plan and needs ${GARDEN_REPO_FLAG}` });
+});
+
+test("a managed repo runs the issue garden in shadow: two targets never share one pacing record", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}managed-garden-pacing-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const consumerPath = gardenPacingPath(stateDir, "issue-revalidation", "acme/consumer");
+  const selfPath = gardenPacingPath(stateDir, "issue-revalidation");
+  assert.notEqual(consumerPath, selfPath);
+  assert.notEqual(consumerPath, gardenPacingPath(stateDir, "issue-revalidation", "acme/other"));
+  const quiet = { policy: () => ({ mode: "off" as const, maxClosesPerPass: 5 }) };
+  const ports = { ...productionIssueRevalidationPorts({ owner: "acme", repo: "consumer", stateDir, repoRoot: REPO_ROOT, log: () => {},
+    hasReferent: () => false, referentVerdicts: async () => new Map(), judgeText: async () => "" }), ...quiet };
+  await issueRevalidationGardenPass(stateDir, ports, managedGardenClock, "acme/consumer")();
+  assert.ok(existsSync(consumerPath), "the target's pass records its own pacing");
+  assert.equal(existsSync(selfPath), false, "and never the self repo's");
+  // The garden the daemon builds over a managed target reads THAT record: quiet for days, it is not due; self has none.
+  writeFileSync(consumerPath, JSON.stringify({ lastPassAt: new Date().toISOString(), lastNewAt: "2026-01-01T00:00:00.000Z" }) + "\n");
+  const ctx: GardenBuildContext = { config: { root } as Config, repoRoot: REPO_ROOT, owner: "craigoley", repo: "remudero",
+    log: () => {}, raiseDuplicate: () => "" };
+  const managed = registeredGardenDueProbe("issue-revalidation", { ...ctx, owner: "acme", repo: "consumer", isSelf: false, targetRoot: root });
+  const self = registeredGardenDueProbe("issue-revalidation", ctx);
+  await flush();
+  assert.equal(await managed(), false);
+  assert.equal(await self(), true);
 });
