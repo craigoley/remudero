@@ -84,10 +84,11 @@ test("W1-T11094 criterion 4: the timer observer survives a failed ledger write a
     try {
       const deadline = Date.now() + 20_000;
       // The first pass's log write throws (rejection arm); a fresh observer below proves the resolve arm.
-      while (errors.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-      assert.equal(errors.length, 1, "the failed write is reported, not thrown");
-      assert.equal(errors[0]![0], "hold readiness observer failed");
-      assert.match(String(errors[0]![1]), /ledger write failed/);
+      // The absent checkout also makes the git pin write its own refusal row to console.error; only the observer's report counts.
+      const reported = () => errors.filter((args) => args[0] === "hold readiness observer failed");
+      while (reported().length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(reported().length, 1, "the failed write is reported once, not thrown");
+      assert.match(String(reported()[0]![1]), /ledger write failed/);
     } finally {
       observer.close();
     }
