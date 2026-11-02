@@ -11,6 +11,7 @@ import { createEscalationConversationReader, buildEscalationConversationRoute, r
 import { escalate, type Escalation } from "#src/lib/escalate.js";
 import { readThread, appendThreadMessage } from "#src/lib/inbox-thread.js";
 import { buildEscalationReplyRoute } from "#src/lib/panel-actions.js";
+import type { InterpretReplyDeps } from "#src/lib/reply-interpreter.js";
 import { createService } from "#src/lib/service.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -181,15 +182,30 @@ test("escalation conversation bounds malformed sources and distinguishes absent 
   assert.match(closed.conversation.replyUnavailableReason!, /closed/);
 });
 
-async function withReplyService(f: ReturnType<typeof fixture>, run: (base: string) => Promise<void>, captureRoot = f.root) {
+async function withReplyService(f: ReturnType<typeof fixture>, run: (base: string) => Promise<void>, captureRoot = f.root, interpretReplyDeps?: InterpretReplyDeps) {
   const server = createService({ routes: [buildEscalationConversationRoute(f.read), buildEscalationReplyRoute({
     root: captureRoot, ledgerPath: join(f.root, "state", "ledger.ndjson"), issues: { close() { assert.fail("A reply must not close an issue"); } },
-    threadStorePath: f.store, readEscalationConversation: f.read,
+    threadStorePath: f.store, readEscalationConversation: f.read, interpretReplyDeps,
   })], tokens: { read: "fixture-read", write: "fixture-write" } });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   try { await run(`http://127.0.0.1:${(server.address() as AddressInfo).port}`); }
   finally { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
 }
+
+test("an agent clarification after a saved reply stays on the same conversation and needs input", async t => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const detail = await f.read(URL); assert.equal(detail.state, "served"); if (detail.state !== "served") return;
+  await withReplyService(f, async base => {
+    const reply = await fetch(`${base}/v1/escalation/reply`, { method: "POST", headers: { authorization: "Bearer fixture-write", "content-type": "application/json" },
+      body: JSON.stringify({ ...detail.conversation.identity, text: "Investigate the check.", issueUrl: URL, expectedRevision: detail.conversation.revision, intentId: "clarification-fixture-01" }) });
+    assert.equal(reply.status, 200);
+    const result = await f.read(URL); assert.equal(result.state, "served"); if (result.state !== "served") return;
+    assert.equal(result.conversation.threadId, detail.conversation.threadId);
+    assert.equal(result.conversation.attention, "needs_input");
+    assert.equal(result.conversation.messages.at(-2)?.text, "Investigate the check.");
+    assert.match(result.conversation.messages.at(-1)?.text ?? "", /Which platform/);
+  }, f.root, { rules: [{ id: "platform", research: () => ({ settled: false, established: "The check fails on Linux." }), question: () => "Which platform should I compare?" }] });
+});
 
 test("escalation reply intent records once without claiming completed work", async t => {
   const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
