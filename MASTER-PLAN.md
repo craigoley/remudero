@@ -77,37 +77,6 @@ regression views. Grouping reduces duplicate cards but never deletes ledger evid
 tied to a shipped artifact, regression requires newer evidence, and snooze ends on a named
 condition or new activity. W1-T3853 and W1-T3854 make these rules durable and source-labeled.
 
-## Omnigent research: observed runtime and learning identity (2026-11-02)
-
-Omnigent is an Apache-2.0 portable agent meta-harness, with a separate Databricks managed Beta.
-Its useful transferable mechanism is explicit separation of configured capabilities from observed
-runtime conformance. It is not evidence of an autonomous learning optimizer or a measured Remudero
-benefit. Sources: [Databricks overview](https://docs.databricks.com/aws/en/omnigent/) and
-[pinned upstream harness bench](https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/tests/harness_bench/README.md).
-Offline/fixture success does not prove a live DENY path; unattempted probes remain NOT_RUN/SKIPPED.
-
-Four bounded tasks extend existing mechanisms instead of creating a second optimizer:
-
-- **W1-T11115**, exact learning-content outcome attribution, is the first cheap independent slice.
-  Selected and dropped interventions retain source revision identities; edits cannot inherit prior
-  effectiveness. Existing randomization, propensity trimming, arm floors and observational authority stay.
-- **W1-T11114**, redacted within-round tool-error episode census, is the other cheap independent slice.
-  It reuses unique joined lineage, distinguishes missing evidence, and measures the population before
-  any stop/retry policy is proposed. Healthy repeated successful checks remain ordinary activity.
-- **W1-T11112**, observed harness contract, records declared, adapter-tested and installed-runtime
-  evidence separately. Reuse W1-T10635 governed worker context; do not duplicate its skill scan or
-  widen tools, sandbox, network or approval authority. Live qualification remains NOT_RUN until admitted.
-- **W1-T11113**, runtime cohort eligibility for existing paired trials, consumes the contract evidence
-  from W1-T11112; until that evidence exists it must report unknown/unmeasurable. Preserve the five
-  existing revision pins and preregistered treatment axes while excluding unplanned runtime/policy drift.
-
-The expensive runtime/cohort path waits for authoritative executable/context evidence and ordinary
-capacity; it does not block the two cheap independent slices. Task records are canonical in
-`plan/tasks.d/`; these are source-qualified planning records, not implementation or runtime adoption.
-Future effect checks report eligible denominators, exclusions, exact revisions and observation windows.
-No installed Omnigent dependency, new schedule, paid experiment, automatic promotion, guard retirement,
-spending increase, release or operational hold change follows from this plan update.
-
 ## Release bake rule status (W1-T9662)
 
 As researched on 2026-10-21, the operator's **30‑minute bake** has a historical ruling,
