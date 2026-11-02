@@ -1,0 +1,62 @@
+- id: W1-T11162
+  title: A plan-only filing's review is never started as a review run child, and every plan-only review ledgers how long each of its own phases took, so the 82 s a host plan review takes against about 23 s on the Mac is attributed instead of guessed
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, the work inside a plan-only review; it spans the detached-work host that places a review and the review that runs it
+  band_meaning: span
+  origin: "operator instruction 2026-11-02 (in chat): plan only PRs get a super fast lane that doesn't require all this overhead"
+  plan_refs:
+    - W1-T2472
+    - W1-T4423
+    - W1-T9114
+    - W1-T11148
+    - W1-T11152
+  files:
+    - src/lib/run-child.ts
+    - src/cli/commands/review.ts
+    - test/worker/a-plan-only-review-stays-in-process-and-times-its-phases.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The detached-work host's spawnReview answers undefined for a PR whose isPlanFiling is true in every mode, starts no probe and no run child for it, and ledgers review.placement with placement in-process and reason plan-only-filing; a code review's placement is unchanged
+      proof: "unit test: test/worker/a-plan-only-review-stays-in-process-and-times-its-phases.test.ts"
+    - claim: A review whose diff is plan-only ledgers one review.plan_only_phases row after its arm, carrying the milliseconds of its worktree materialization, diff read, decision claim, lint-plan, proof judgement, status post and arm, and the review's total; a review that is not plan-only writes no such row
+      proof: "grep: W1-T11162 criterion 2 in test/worker/a-plan-only-review-stays-in-process-and-times-its-phases.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 (Mac ledger ~/Remudero/state; core host ledger live window, read-only):
+    - Mac local review of plan-only #16199: start -> provider_provenance 1.7 s, -> pending_posted 2.5 s, -> reviewer.skipped
+      9.5 s, the lint-plan child (cold tsx, child_entry.spawned kind tsx reason no-manifest) 8.6 s, -> arm 1.1 s; 23.6 s total.
+    - Host plan reviews (n=82 in the live window): reviewer.skipped -> arm median 99 s, p90 308 s. #16233: admitted -> provenance
+      82 s, pending -> skipped 99 s, skipped -> arm 50 s. #16278: pending -> skipped 15 s, skipped -> arm 59 s. #16246:
+      pending -> skipped 134 s, skipped -> arm 70 s. No row lies inside pending -> skipped, so those 15-134 s are not attributable.
+    - A `git worktree add` of this repo (11,588 files) took 1.3 s on the Mac and an incremental checkout 0.24 s. So the operator's
+      "no worktree materialization" lever is about 1.3 s of 23.6 s locally; on the host it is unmeasured, which is criterion 2's job.
+    READ at origin/main 1368db581:
+    - run-child.ts spawnReview places every full review by detachedWorkPlacement, plan filings included (the spec already
+      carries planOnlyFiling). A plan-only review is lint plus grep proofs; W1-T2472 already skips its reviewer spawn, and a run
+      child adds a cold process start (W1-T11152 measures 25.0 h a week of admission -> start for code reviews).
+    - reviewCommand materializes a full head worktree and a base proof tree before runReview reads the diff; runReview runs
+      lintPlanForReview as a `tsx src/run-task.ts lint-plan` child.
+    WHAT THIS TASK DOES NOT DO, AND WHY: admission (the CPU bound and the restart latch) is W1-T11148's, hand-built by another
+    session. It latches a plan review on its own measured length rather than not at all. Replacing the lint child or the worktree is
+    not done blind: criterion 2 measures them on the host first. Starting children from the bundle is W1-T11152.
+  design: |
+    1. createDetachedWorkHost's spawnReview returns undefined before the shadow probe and before placement when pr.isPlanFiling is
+       true, logging review.placement { pr_number, head_sha, placement: "in-process", reason: "plan-only-filing" }. The sweep's
+       postReview then takes its existing in-process reviewRunner path, which already passes planOnlyFiling.
+    2. reviewCommand times materialize plus buildBaseProof and hands the figure to runReview. runReview times fetchPrDiff, the
+       decision preparation and claim, lintPlanForReview, preparedDecision.judge, the status post and the arm with systemClock.
+       When planOnlySkip is true it logs review.plan_only_phases with those milliseconds and total_ms from its own start.
+  falsifier: |
+    At origin/main a detached-work host in mode on, given a plan filing, starts a review run child for it; and a plan-only review
+    leaves no row between review.pending_posted and review.reviewer.skipped that says where its time went.
+  note: |
+    Reserved with rmd next-task-id --branch plan-file-1793659478136. Coordinates with W1-T11148: that task admits plan reviews
+    apart from the CPU bound; this one changes what runs once a plan review is admitted. Their criterion 2 (a plan-lane child
+    does not count against the bound) still holds for an adopted child after a boot. The test path is rmd test-place's answer for a
+    suite importing run-child.ts and review.ts.
