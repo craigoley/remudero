@@ -27431,8 +27431,19 @@ export function issueRevalidationRunTaskPorts(
     },
     referentVerdicts: async (issues) => {
       const served = issues.map((i) => ({ number: i.number, url: i.url, title: i.title, body: i.body }));
+      // Held here so the open PR's current head is read from the SAME batched view the derivation filled:
+      // an in-memory lookup, never a per-issue API call.
+      const github = seams.reconcile?.github ?? buildBatchedGithub(owner, repo, { log });
+      const byNumber = new Map(issues.map((i) => [i.number, i]));
+      const openPrHead = (n: number | undefined): RevalidationVerdict["openPrHead"] => {
+        const issue = n === undefined ? undefined : byNumber.get(n);
+        const pr = issue === undefined ? undefined : prReferentFromIssueText(issue.body) ?? prReferentFromIssueText(issue.title);
+        const ref = pr === undefined ? undefined : github.prByRef(pr);
+        return ref?.state?.toUpperCase() === "OPEN" && ref.headRefOid ? { prNumber: ref.number, sha: ref.headRefOid } : undefined;
+      };
       const candidates = buildEscalationReconcileCandidates(owner, repo, planNow(), join(stateDir, LEDGER_FILENAME), log, {
         ...seams.reconcile,
+        github,
         issues: { create: () => { throw new Error("issue-revalidation never opens issues"); }, listOpen: () => served },
       });
       return new Map(candidates.filter((c) => c.issueNumber !== undefined).map((c): [number, RevalidationVerdict] => {
@@ -27440,7 +27451,8 @@ export function issueRevalidationRunTaskPorts(
         if (c.derived.indeterminate) return [c.issueNumber!, { verdict: "unknown", reason: `the referent of ${c.taskId} could not be derived` }];
         if (c.derived.merged) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId} is merged`, citation: `${pr} merged${c.derived.prUrl ? ` (${c.derived.prUrl})` : ""}` }];
         if (c.derived.closed) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId}'s PR closed without merging`, citation: `${pr} closed without merging` }];
-        return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open` }];
+        const head = openPrHead(c.issueNumber);
+        return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open`, ...(head ? { openPrHead: head } : {}) }];
       }));
     },
     judgeText: (prompt, issueNumber, observe) => {
