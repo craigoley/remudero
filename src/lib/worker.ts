@@ -61,7 +61,7 @@ import {
 } from "./config.js";
 import { assertModelAllowed } from "./model-gate.js";
 import { chooseDraftDeployment, readDraftStats, recordDraftRouting, type DraftStats, type DraftChoice } from "./draft-routing.js";
-import { usageSnapshotFromSdk } from "./headroom.js";
+import { sdkUsageReadingCase } from "./headroom.js";
 import {
   detectCompactionEvents,
   detectCompactionFailures,
@@ -160,6 +160,7 @@ import {
   abandonProviderWindowMeasurement,
   beginProviderWindowMeasurement,
   claudeCapacityFromUsage,
+  claudeCapacityFromUsageCase,
   finishProviderWindowMeasurement,
   providerEligibility,
   readCodexCapacity,
@@ -1960,8 +1961,8 @@ export async function readClaudeProviderCapacity(
       return value;
     }
     try {
-      const value = claudeCapacityFromUsage(
-        usageSnapshotFromSdk(await method.call(session) as never),
+      const value = claudeCapacityFromUsageCase(
+        sdkUsageReadingCase(await method.call(session) as never),
         (deps.accountLabel ?? readClaudeAccountLabel)(),
       );
       claudeCapacityCache = { at: now(), value };
@@ -3166,6 +3167,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // configured. Otherwise ANTHROPIC_* is stripped as before (W1-T258).
       allowApiKey: config.overflow === "api_key" && frontierClaudeSpawn === false,
     });
+    delete childEnv.RMD_INSTANCE_REGISTRY;
     // W1-T2699: every spawn's env routes through secretBoundaryEnv, a no-op absent a model boundary (see its doc).
     // MUTATING `childEnv` in place, never rebinding it: W1-T2800's structural falsifier (test/codex-worker-home-
     // redirection.test.ts) greps this file for the literal `const childEnv = buildWorkerEnv(...)` above, so the

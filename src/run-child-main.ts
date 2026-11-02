@@ -15,6 +15,11 @@ import { collectAtAgentWait, type AgentWaitHeap } from "./lib/agent-wait-heap.js
 import { runsBundled } from "./lib/child-entry-argv.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { markRunChildProcessActor } from "./lib/ledger.js";
+import { appendLedger } from "./lib/ledger.js";
+import { loadConfig } from "./lib/config.js";
+import { ledgerPathFor } from "./lib/ledger-path.js";
+import { observeSelectedRegistry, selectedRegistryObserverFromIntent, withSelectedRegistryContext,
+  type RegistryObservationSink } from "./lib/selected-registry-consumers.js";
 import type { Plan, Task } from "./lib/plan.js";
 import { DETACHED_WORK_CAPABILITY, HOSTED_DETACHED_WORK_KINDS, readWorkSpec, type DetachedWorkKind, type DetachedWorkSpec } from "./lib/run-child.js";
 import { withRunChildReservation } from "./lib/run-child-reservation.js";
@@ -24,7 +29,7 @@ import {
 } from "./lib/secret-boundary.js";
 import {
   RUN_CHILD_SCHEMA, childIdentity, contractMismatchFailure, readSpec, realRunChildProbe, toRunChildFailure, writeStatus,
-  type RunChildFailure, type RunChildProbe, type RunChildStatus,
+  type RunChildFailure, type RunChildProbe, type RunChildStatus, type RunChildSpec,
 } from "./lib/run-child-contract.js";
 
 /** What a probe's status carries beyond the contract's fields. The contract reader ignores them (a newer minor's fields
@@ -75,6 +80,7 @@ export interface RunChildMainPorts {
   startCredentialSocket?: typeof startRunChildGitCredentialSocket;
   /** The collection at the start of each agent wait; the default is src/lib/agent-wait-heap.ts's. */
   atAgentWait?: () => Promise<AgentWaitHeap>;
+  selectedRegistryRecord?: RegistryObservationSink;
 }
 
 const defaultLoadRunPath = (): Promise<unknown> => import("./run-task.js");
@@ -177,10 +183,14 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
     writeStatus(dir, (probeMode ? { ...next, probe: true, ...extras } : next) as RunChildStatus);
   };
   /** The run verb: load the run path, run the task under the spec's reservation, await its background work, write the terminal status. */
-  const runTaskInChild = async (): Promise<number> => {
-    const spec = readSpec(dir);
-    if (!spec.ok) throw new Error(`spec unreadable after it was read: ${spec.detail}`);
+  const runTaskInChild = async (value: RunChildSpec): Promise<number> => {
+    const spec = { value };
     const options = spec.value.options;
+    const observer = selectedRegistryObserverFromIntent(options.selectedRegistryIntent, (step, fields) => {
+      const receipt = { ...fields, engine_sha: value.engine.sha, engine_source_hash: value.engine.sourceHash };
+      return deps.selectedRegistryRecord ? deps.selectedRegistryRecord(step, receipt)
+        : appendLedger(ledgerPathFor(loadConfig()), { run_id: value.runId, task_id: value.taskId, step, ...receipt });
+    });
     // W1-T9114: a spec carrying `work` is detached work (a review), never a build run: it is hosted by `runDetachedWork`, reads no plan.
     const work = readWorkSpec(dir);
     if (work === "malformed") {
@@ -218,16 +228,24 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
         // Detached work has no safe point to stop at: a SIGTERM ends it as `aborted` at once, and the process exit takes the work with it.
         const stopped = new Promise<{ error: unknown }>((resolve) => { abort.signal.addEventListener("abort", () => resolve(aborted()), { once: true }); });
         outcome = await Promise.race([
-          withRunChildReservation(spec.value, () => detachedWork(work, { runId, taskId: spec.value.taskId, onPhase: (next) => {
-            phase = `${work.kind}:${next}`;
-            status("running", phase, {});
-          } })).then(
+          withSelectedRegistryContext(observer, async () => {
+            try {
+              return await observeSelectedRegistry(observer, "run-child", {}, () =>
+                withRunChildReservation(spec.value, () => detachedWork(work, { runId, taskId: spec.value.taskId, onPhase: (next) => {
+                  phase = `${work.kind}:${next}`;
+                  status("running", phase, {});
+                } })));
+            } finally { await observer?.settled(); }
+          }, { qualifiedRun: true }).then(
             (result): { result: RunResult } => ({ result }), (error: unknown): { error: unknown } => ({ error })),
           stopped,
         ]);
       } else outcome = abort.signal.aborted || runTask === undefined
         ? { error: Object.assign(new Error("aborted before the run started"), { name: "AbortError" }) }
-        : { result: await withRunChildReservation(spec.value, () => runTask(spec.value.taskId, {
+        : { result: await withSelectedRegistryContext(observer, async () => {
+          try {
+            return await observeSelectedRegistry(observer, "run-child", {}, () => withRunChildReservation(spec.value, () => runTask(spec.value.taskId, {
+          selectedRegistryIntent: options.selectedRegistryIntent,
           ...(options.planPath !== undefined ? { planPath: options.planPath } : {}),
           ...(options.owner !== undefined ? { owner: options.owner } : {}),
           ...(options.allowStale !== undefined ? { allowStale: options.allowStale } : {}),
@@ -238,7 +256,12 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
           atAgentWait: deps.atAgentWait ?? (() => collectAtAgentWait()),
           abortSignal: abort.signal,
           onBackgroundWork: (pending: Promise<unknown>) => { background.push(pending); },
-        })) };
+            })));
+          } finally {
+            if (!abort.signal.aborted) await Promise.allSettled(background);
+            await observer?.settled();
+          }
+        }, { qualifiedRun: true }) };
     } catch (error) {
       outcome = { error }; // Carried, not erased: it is rethrown as the run's failure, or recorded as the abort that caused it, below.
     } finally {
@@ -289,7 +312,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
       status("failed", "credentials", {}, { class: "spawn_infra_blocked", reasonClass: "spawn_infra_blocked", message: `credential startup failed: ${String(error)}` });
       return 1;
     }
-    if (!probeMode) return await runTaskInChild();
+    if (!probeMode) return await runTaskInChild(spec.value);
     status("starting", "load", {});
     const loadStart = clock();
     const loaded = await (deps.loadRunPath ?? defaultLoadRunPath)() as { runDetachedWork?: RunChildDetachedWork } | undefined;

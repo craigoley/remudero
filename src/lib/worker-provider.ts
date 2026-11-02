@@ -39,7 +39,7 @@ import { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
-import type { UsageSnapshot } from "./headroom.js";
+import type { SdkUsageCase, UsageSnapshot, WeeklyWindow } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
@@ -721,16 +721,33 @@ export function queuedUpgradeAllocation(
   return allocateUpgrades(candidates, liveWindow);
 }
 
+function claudeWeeklyWindows(weekly: readonly WeeklyWindow[]): ProviderCapacityWindow[] {
+  return weekly.map((window) => ({ name: `weekly (${window.label})`, usedPercent: window.percentUsed, resetsAt: window.resetsAt }));
+}
+
+export function claudeCapacityFromUsageCase(reading: SdkUsageCase, accountLabel?: string): ProviderCapacity {
+  if (reading.kind === "session") return claudeCapacityFromUsage(reading.snapshot, accountLabel);
+  if (reading.kind !== "weekly-only") {
+    return { provider: "claude", readable: false, windows: [], detail: `capacity unreadable: ${reading.kind}` };
+  }
+  const windows = claudeWeeklyWindows(reading.weekly);
+  const valid = windows.filter(validCapacityWindow);
+  return {
+    provider: "claude",
+    readable: true,
+    ...(accountLabel ? { accountLabel } : {}),
+    windows,
+    ...(valid.length > 0 ? { allocationWindows: valid } : {}),
+    detail: "no five-hour window in the reading: weekly windows only",
+  };
+}
+
 export function claudeCapacityFromUsage(
   snapshot: UsageSnapshot | undefined,
   accountLabel?: string,
 ): ProviderCapacity {
   if (!snapshot) return { provider: "claude", readable: false, windows: [], detail: "capacity unreadable" };
-  const weeklyWindows: ProviderCapacityWindow[] = snapshot.weekly.map((window) => ({
-    name: `weekly (${window.label})`,
-    usedPercent: window.percentUsed,
-    resetsAt: window.resetsAt,
-  }));
+  const weeklyWindows = claudeWeeklyWindows(snapshot.weekly);
   const validWeeklyWindows = weeklyWindows.filter(validCapacityWindow);
   return {
     provider: "claude",
@@ -2784,7 +2801,7 @@ function codexSpawnEnv(config: Config, args: CodexSpawnEnvArgs, nativeCacheRoot?
   for (const key of allowed) if (process.env[key] !== undefined) env[key] = process.env[key];
   env.CODEX_HOME = codexHome(config);
   for (const [key, value] of Object.entries(args.env ?? {})) {
-    if (!/^ANTHROPIC_|^OPENAI_API_KEY$/.test(key)) env[key] = value;
+    if (!/^ANTHROPIC_|^OPENAI_API_KEY$|^RMD_INSTANCE_REGISTRY$/.test(key)) env[key] = value;
   }
   // W1-T2800 — ASSIGNED AFTER `args.env` IS COPIED, AND FROM THE THREADED HOME ONLY.
   //

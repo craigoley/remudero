@@ -71,3 +71,37 @@ test("W1-T4787: a suite that enumerates the tree through a helper is a census su
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// #15046 moved the test tree onto package.json's `#src/*`, `#scripts/*` and `#test/*` aliases. Spliced in, as above.
+const ALIAS_WALKER = "#scripts/walker.mjs", ALIAS_SRC_WALKER = "#src/lib/walker.js";
+const ALIAS_CHECKOUT = "#test/helpers/checkout.js", REL = "../scripts/walker.mjs";
+
+test("#15046: a census importing its walker or cloning helper through a repository alias is selected", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}census-alias-`));
+  try {
+    for (const dir of ["scripts", "src/lib", "test/helpers", "test/nested"]) mkdirSync(join(root, dir), { recursive: true });
+    const walker = 'import { readdirSync } from "node:fs";\nexport function walk(root) {\n  return readdirSync(join(root, "src"));\n}\n';
+    writeFileSync(join(root, "scripts", "walker.mjs"), walker);
+    writeFileSync(join(root, "src", "lib", "walker.ts"), walker);
+    writeFileSync(join(root, "test", "helpers", "checkout.ts"), CLONING_HELPER);
+    const suite = (name: string, body: string) => writeFileSync(join(root, "test", `${name}.test.ts`), body);
+    suite("alias-walker", `import { walk } from "${ALIAS_WALKER}";\nwalk(process.cwd());\n`);
+    // An alias resolves from the ROOT: one directory deeper, the same specifier names the same walker.
+    suite("nested/alias-walker", `import { walk } from "${ALIAS_WALKER}";\nwalk(process.cwd());\n`);
+    suite("alias-clone", `import { checkoutOf } from "${ALIAS_CHECKOUT}";\nconst co = checkoutOf(REPO_ROOT, "/x");\n`);
+    suite("relative-walker", `import { walk } from "${REL}";\nwalk(process.cwd());\n`);
+    // Control: a `.js` subject import keeps its written extension, alias or not, so it is no walker.
+    suite("alias-src-subject", `import { walk } from "${ALIAS_SRC_WALKER}";\nwalk(process.cwd());\n`);
+    assert.deepEqual(censusSuiteFiles(["src/lib/anything.ts"], root), [
+      "test/alias-clone.test.ts", "test/alias-walker.test.ts", "test/nested/alias-walker.test.ts", "test/relative-walker.test.ts",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#15046: the real tree's alias-importing census suites are selected for a src change", () => {
+  const selected = censusSuiteFiles(["src/lib/sre-lane.ts"], REPO_ROOT);
+  // It reaches its population walker only through `#scripts/census-precheck.mjs`, never a relative specifier.
+  assert.ok(selected.includes("test/ci/an-instruction-file-holds-no-hidden-text.test.ts"));
+});
