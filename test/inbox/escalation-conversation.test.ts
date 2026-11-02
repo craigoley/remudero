@@ -131,6 +131,20 @@ test("oversized or ambiguous saved discussions remain explicitly partial", async
   assert.equal(ambiguous.conversation.history, "partial"); assert.equal(ambiguous.conversation.canReply, false);
 });
 
+test("pending escalation reads are bounded without issuing more source requests", async () => {
+  let release!: (value: unknown) => void;
+  const pending = new Promise<unknown>(resolve => { release = resolve; });
+  let calls = 0;
+  const read = createEscalationConversationReader({ repository: "craigoley/remudero", readIssue: async () => { calls++; return pending; } });
+  const requests = Array.from({ length: 32 }, (_, i) => read(URL.replace("16183", String(i + 1))));
+  const extra = await read(URL);
+  assert.equal(extra.state, "unavailable");
+  if (extra.state === "unavailable") assert.equal(extra.reason, "source_unavailable");
+  assert.equal(calls, 32);
+  release(null);
+  await Promise.all(requests);
+});
+
 test("escalation conversation bounds malformed sources and distinguishes absent and closed history", async t => {
   const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
   const original = { ...f.issue };
@@ -169,6 +183,7 @@ test("escalation reply intent records once without claiming completed work", asy
     const body = { ...detail.conversation.identity, text: "Please explain the failing check before changing it.", issueUrl: URL,
       expectedRevision: detail.conversation.revision, intentId: "reply-fixture-01" };
     const post = (value = body) => fetch(`${base}/v1/escalation/reply`, { method: "POST", headers: { authorization: "Bearer fixture-write", "content-type": "application/json" }, body: JSON.stringify(value) });
+    assert.equal((await post({ ...body, intentId: "bad" })).status, 400);
     const first = await post(); assert.equal(first.status, 200);
     const receipt = await first.json() as Record<string, unknown>;
     assert.deepEqual(receipt.saved, { intentId: "reply-fixture-01", seq: 2 });
@@ -176,6 +191,7 @@ test("escalation reply intent records once without claiming completed work", asy
     const repeat = await post(); assert.equal(repeat.status, 200);
     assert.equal((await repeat.json() as { duplicate: boolean }).duplicate, true);
     assert.equal((await post({ ...body, text: "Different direction" })).status, 409);
+    assert.equal((await post({ ...body, issueUrl: URL.replace("16183", "16184") })).status, 409);
     const stored = readThread(detail.conversation.threadId, { threadStorePath: f.store });
     assert.equal(stored.status, "ok"); if (stored.status === "ok") assert.equal(stored.messages.filter(m => m.role === "reply").length, 1);
     const after = await f.read(URL, true); assert.equal(after.state, "served");
