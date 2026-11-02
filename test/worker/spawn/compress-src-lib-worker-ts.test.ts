@@ -1,11 +1,11 @@
 // @source-text-subject: worker.ts comment compression must preserve its pre-compression code.
 // @census-reads: src/lib/worker.ts
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // scripts/ is outside tsconfig's include; load the real counter with its explicit runtime contract.
@@ -16,14 +16,6 @@ const { countCommentLines } = await import(COMMENT_LOAD_SCRIPT) as {
 
 // Comment baseline at 3b28ef9e3, before compression: 2,018 lines (the filing measured 2,008).
 // Fingerprint token kinds, raw literal contents and preceding line breaks (ASI), including types.
-// W1-T9855's reviewed root-provisioning and refusal edits changed the executable fingerprint.
-// W1-T11072 swaps the capacity call to claudeCapacityFromUsageCase over sdkUsageReadingCase.
-// W1-T10962's reviewed bounded output and incomplete-evidence handling changed it again.
-// Its final stderr drain, error-result subtypes and terminal completion evidence are included here.
-// Include the subsequent pipe-closure wait and stderr failure evidence before judging completeness.
-// W1-T9796 excludes RMD_INSTANCE_REGISTRY from the Claude worker env.
-// Intentional future code edits must review this hash before updating it.
-const REVIEWED_TOKENS_SHA256 = "9e145b5e634cb45e91920d6340eed8c3b498727d2e8acc33f042d133d9937b52";
 const BEFORE_COMMENT_LINES = 2018;
 
 function executableTokens(source: string): Array<[SyntaxKind, string, boolean]> {
@@ -51,10 +43,23 @@ function executableTokens(source: string): Array<[SyntaxKind, string, boolean]> 
 
 test("W1-T10879: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/worker.ts"), "utf8");
-  const tokens = executableTokens(source);
-  assert.equal(createHash("sha256").update(JSON.stringify(tokens)).digest("hex"), REVIEWED_TOKENS_SHA256,
-    "reviewed executable tokens, literals and line-break boundaries must remain unchanged");
   const { comments } = countCommentLines(source, "src/lib/worker.ts");
   assert.ok(comments < BEFORE_COMMENT_LINES,
     `expected a real reduction from ${BEFORE_COMMENT_LINES} comment lines, observed ${comments}`);
+  const before = compressionPinBase("src/lib/worker.ts", import.meta.url);
+  if (before === undefined) return;
+  // Only on the PR that adds this pin: later feature edits to the module stay free.
+  assert.deepEqual(executableTokens(source), executableTokens(before),
+    "all PR-base executable tokens, literals and line-break boundaries must remain unchanged");
+  assert.ok(comments < countCommentLines(before, "src/lib/worker.ts").comments,
+    "comment lines decrease from the PR base");
+});
+
+test("worker compression fingerprint ignores comments and catches executable edits", () => {
+  const control = 'const re = /https?:\\/\\//; const s = `// ${name} /* text */`;';
+  assert.deepEqual(executableTokens(control), executableTokens(`/* explanation */ ${control}`));
+  for (const [before, after] of [["name", "other"], ["text", "changed"], ["https?", "http"]]) {
+    assert.notDeepEqual(executableTokens(control), executableTokens(control.replace(before, after)));
+  }
+  assert.notDeepEqual(executableTokens("return value"), executableTokens("return\nvalue"));
 });

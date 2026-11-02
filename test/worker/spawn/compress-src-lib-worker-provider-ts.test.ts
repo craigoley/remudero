@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "@babel/parser";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function snapshot(source: string) {
@@ -28,17 +29,15 @@ function snapshot(source: string) {
 test("W1-T10918: comment compression preserves executable code", () => {
   // Pre-compression source: 811d6e2d19018530bd12c885d307d08f02fb09bc.
   // Historical comparison evidence for this edit, not a new comment ceiling.
-  // W1-T10855 intentionally adds price, shape and effort rows plus the effort lookup.
-  // W1-T10954 adds exact settlement, preserves partial counters and reconciles late raw receipts.
-  // W1-T11072 adds claudeCapacityFromUsageCase and shares the weekly-window mapping.
-  // W1-T10962 carries bounded output, stderr failures and terminal completion evidence into the result.
-  // Include its subsequent pipe-closure wait and streaming UTF-8 validation through EOF.
-  // W1-T9796 excludes RMD_INSTANCE_REGISTRY from the Codex worker env.
-  // Refresh executable fingerprints for those behaviors; retain the compression bounds below.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 46703);
-  assert.equal(actual.tokenDigest, "deb6df656923feaa428ce0c02560bd95754cd86fd9afb266a50917741adeeac5");
-  assert.equal(actual.astDigest, "5f564a461a6e9be210575a09a8fee4be3896ca69d2a36b03520c29262fa5cd5c");
+  const before = compressionPinBase("src/lib/worker-provider.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free.
+    const base = snapshot(before);
+    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
+    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+  }
   assert.ok(actual.commentLines < 1357, "comment lines must decrease from the pre-compression source");
   assert.ok(actual.commentBytes < 104858, "comment bytes must decrease; rewrapping alone is insufficient");
 
