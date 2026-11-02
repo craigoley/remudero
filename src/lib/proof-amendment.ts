@@ -32,7 +32,8 @@ import { hostWorktreeGit } from "./worktree-git.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, matchedLinesAreAllComments, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
-import { parseTasksFromYaml, type Task } from "./plan.js";
+import { loadPlanForLayout, parseTasksFromYaml, type MachineFilingAdmissionContext, type Task } from "./plan.js";
+import { machineFamily } from "./machine-filing-judge.js";
 import { lintTask, type LintViolation } from "./task-linter.js";
 import { taskIdFromRunBranch } from "./status.js";
 import { isTaskShardName } from "./task-shard-name.js";
@@ -364,6 +365,24 @@ export interface ProofAmendmentWritePorts {
   /** The existing expected-head guarded update-branch operation (run-task.ts's `ghUpdateBranch`,
    *  never re-implemented here) — the ONLY touch this module makes on the implementation PR itself. */
   readonly updateBranch: (prUrl: string, expectedHeadSha: string) => { ok: boolean; error?: string };
+  /** #15766: the machine-filing admission context hosted lint-plan judges a changed machine task under, read
+   *  from the amendment's own main checkout (production: {@link checkoutAdmission}). Absent ⇒ not judged. */
+  readonly machineFilingAdmission?: (checkoutRoot: string) => MachineFilingAdmissionContext | undefined;
+}
+
+/** #15766: lint-plan --base's machine-filing admission facts for a checkout of main, as the amendment PR's
+ *  hosted run will see them: that checkout's plan and paths, and no release the writer cannot show (the
+ *  empty set machine filers already pass, machineShardFilingRefusal). A dependency is credited because the
+ *  task under amendment was dispatched, which assertRunnable refuses while one is unmerged; the yaml
+ *  `status:` default would refuse on a stale decorative field. A plan that does not load gives no verdict. */
+export function checkoutAdmission(checkoutRoot: string): MachineFilingAdmissionContext | undefined {
+  let plan;
+  try {
+    plan = loadPlanForLayout(resolveRepoLayout(checkoutRoot));
+  } catch {
+    return undefined; // no baseline to judge against: hosted lint-plan fails this checkout on its own load
+  }
+  return { plan, releasedIds: new Set(), isMerged: () => true, pathExists: (path) => existsSync(join(checkoutRoot, path)) };
 }
 
 export interface ProofAmendmentRequest {
@@ -517,8 +536,8 @@ export function addedFilesEntryPattern(path: string, flow: boolean, singleLineFl
  *  message). `undefined` means no verdict: the base shard does not load as a plan, so there is no
  *  baseline to attribute a violation against and the lint stays silent, as it does everywhere a fact
  *  is absent. */
-export function newAmendedBlockers(baseText: string, amendedText: string, label: string, taskId: string):
-  { blockers: LintViolation[]; task: Task | undefined } | undefined {
+export function newAmendedBlockers(baseText: string, amendedText: string, label: string, taskId: string,
+  admission?: MachineFilingAdmissionContext): { blockers: LintViolation[]; task: Task | undefined } | undefined {
   const load = (text: string): { task?: Task; error?: string } => {
     try { return { task: parseTasksFromYaml(text, label).find((t) => t.id === taskId) }; }
     catch (e) { return { error: (e as Error).message }; }
@@ -531,7 +550,8 @@ export function newAmendedBlockers(baseText: string, amendedText: string, label:
       message: `the amended shard no longer loads as a plan task${error ? `: ${error}` : ""}` }] };
   }
   const had = new Set(lintTask(baseTask).violations.filter((v) => v.severity === "block").map((v) => `${v.check}\0${v.message}`));
-  const blockers = lintTask(task, { riskTransition: { baseTask } }).violations
+  // #15766: the admission is never subtracted against base — hosted lint-plan fails a changed task on it either way.
+  const blockers = lintTask(task, { riskTransition: { baseTask }, ...(admission ? { machineFilingAdmission: admission } : {}) }).violations
     .filter((v) => v.severity === "block" && !had.has(`${v.check}\0${v.message}`));
   return { task, blockers };
 }
@@ -668,6 +688,15 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   }
   const additions = paths.filter((path) => !files.toJSON().includes(path));
   if (additions.length === 0) return refuse("already-declared", "all requested paths are already in files");
+  // #15766: an operator-origin record is the operator's, not a machine filer's (machineFamily, the judge's own
+  // reading of origin). Reparking it to verify: human drops the operator's ruling and fails lint-plan's machine-filing
+  // admission; widening it at verify: auto stales that ruling's pin. Either way only the operator re-rules it, so
+  // it escalates, unless a dispatch hold already parks it off the selector.
+  if (isMap(task) && String(task.get("author_class")) === "machine" && String(task.get("dispatch_hold")) !== "true" &&
+      /^operator/i.test(machineFamily({ origin: String(task.get("origin") ?? "") }))) {
+    return refuse("operator-origin", `${request.taskId}'s origin is an operator session; the operator re-rules ` +
+      `its widened files (${additions.join(", ")}) rather than this writer reparking it`);
+  }
   const [start, end] = files.range;
   const last = files.items.at(-1);
   const scoutTest = isMap(task) && String(task.get("origin")).startsWith("scout:") && isScalar(last) &&
@@ -727,6 +756,12 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     const currentShard = deps.findShard(wp, request.taskId);
     if (currentShard?.path !== shard.path || currentShard.text !== shard.text) {
       return refuse("shard-drifted", "the amendment base differs from the observed task shard");
+    }
+    // #15766: judged here, in the main checkout the amendment PR's hosted lint-plan reads, never the implementation's.
+    const admission = deps.machineFilingAdmission?.(wp);
+    const admitted = admission ? newAmendedBlockers(shard.text, text, shard.path, request.taskId, admission) : undefined;
+    if (admitted && admitted.blockers.length > 0) {
+      return refuse("amended-shard-lint", admitted.blockers.map((v) => `${v.check}: ${v.message}`).join("; "));
     }
     deps.writeFile(join(wp, shard.path), text);
     deps.gitAdd(wp, shard.path);
