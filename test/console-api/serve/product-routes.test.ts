@@ -1023,13 +1023,16 @@ setTimeout(() => {
 });
 
 async function ownedServedPlan(t: TestContext) {
-  const scratch = ownedFixtureDir(t, "served-owned-plan").dir;
+  const closures: Array<() => void | Promise<void>> = [];
+  const scope = { after: (close: () => void | Promise<void>) => { closures.unshift(close); } };
+  t.after(async () => { for (const close of closures) await close(); });
+  const scratch = ownedFixtureDir(scope, "served-owned-plan").dir;
   const root = join(scratch, "control");
   const ledgerPath = join(root, "state", "ledger.ndjson"), release = join(scratch, "release");
   const receiptPath = join(scratch, "child.json"), countPath = join(scratch, "starts");
   mkdirSync(join(root, "state"), { recursive: true });
-  const origin = gitRepo({ scope: t, bare: true });
-  const seed = gitRepo({ scope: t });
+  const origin = gitRepo({ scope, bare: true });
+  const seed = gitRepo({ scope });
   mkdirSync(join(seed.dir, "bin"));
   mkdirSync(join(seed.dir, "plan"));
   mkdirSync(join(seed.dir, ".remudero"));
@@ -1062,7 +1065,7 @@ setTimeout(() => process.exit(2), 30000).unref();
   const localOrigin = join(scratch, "craigoley", "remudero.git");
   mkdirSync(join(scratch, "craigoley"));
   renameSync(origin.dir, localOrigin);
-  const generation = gitRepo({ scope: t, cloneFrom: localOrigin, kind: "immutable-generation" });
+  const generation = gitRepo({ scope, cloneFrom: localOrigin, kind: "immutable-generation" });
   const source = generation.dir;
   generation.git("checkout", "--quiet", "--detach");
   seed.git("remote", "set-url", "origin", localOrigin);
@@ -1071,7 +1074,7 @@ setTimeout(() => process.exit(2), 30000).unref();
   seed.git("push", "-q", "origin", "main");
   const sourceHead = seed.git("rev-parse", "HEAD");
   mkdirSync(join(source, "node_modules"));
-  const target = gitRepo({ scope: t });
+  const target = gitRepo({ scope });
   const checkout = join(root, "repos", "wreckterra");
   mkdirSync(join(root, "repos"));
   renameSync(target.dir, checkout);
@@ -1085,7 +1088,7 @@ setTimeout(() => process.exit(2), 30000).unref();
       owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
     { when: "api ", stdout: "[]" },
   ]);
-  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
+  scope.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const jwk = { ...publicKey.export({ format: "jwk" }), kid: "served-plan", kty: "RSA" };
   const issuer = "https://served-plan.example", allowedOrigin = "https://console.example";
@@ -1113,7 +1116,7 @@ setTimeout(() => process.exit(2), 30000).unref();
         operatorIdentity: { issuer, jwksUrl: `${issuer}/keys`, allowedOrigins: [allowedOrigin], operatorUserIds: ["alice"] } },
     }));
     const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
-      process.argv.push("--repo-root", ${JSON.stringify(source)});
+      process.argv = [process.execPath, "fixture-serve", "--repo-root", ${JSON.stringify(source)}];
       globalThis.fetch = async url => {
         if (String(url) !== ${JSON.stringify(`${issuer}/keys`)}) throw new Error("unexpected fixture network access: " + url);
         return new Response(JSON.stringify({ keys: [${JSON.stringify(jwk)}] }), { status: 200 });
@@ -1134,13 +1137,16 @@ setTimeout(() => process.exit(2), 30000).unref();
     const stop = async () => {
       if (stopped) return;
       stopped = true;
-      writeFileSync(release, "release\n");
-      if (existsSync(receiptPath)) await wait(() => rows().some(row => row.step === "ratify.cli_exited"));
-      child.kill("SIGTERM");
-      const [code, signal] = await exited;
-      assert.deepEqual([code, signal], [0, null], output);
+      try {
+        writeFileSync(release, "release\n");
+        if (existsSync(receiptPath)) await wait(() => rows().some(row => row.step === "ratify.cli_exited"));
+      } finally {
+        child.kill("SIGTERM");
+        const [code, signal] = await exited;
+        assert.deepEqual([code, signal], [0, null], output);
+      }
     };
-    t.after(stop);
+    scope.after(stop);
     await wait(() => output.includes("listening on") || child.exitCode !== null);
     assert.ok(output.includes("listening on"), output);
     return { base: `http://127.0.0.1:${port}`, stop };
