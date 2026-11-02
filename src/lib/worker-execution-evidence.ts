@@ -26,7 +26,7 @@ export interface SdkRequestEvidence {
 /** The result fields consumed by this normalizer. Kept structural to avoid a worker/helper import cycle. */
 export interface WorkerExecutionInput {
   readonly provider?: WorkerProviderId;
-  readonly childEnvKeys: readonly string[];
+  readonly childEnvKeys?: readonly string[];
   readonly model?: string;
   readonly routedModel?: string;
   readonly servedModel?: string | null;
@@ -134,7 +134,9 @@ export function workerExecutionEvidence<Assignment = unknown>(
     ? { state: "observed" as const, value: "api" as const }
     : result.provider === undefined
       ? unavailable<BillingMode>("billing-mode-not-recorded")
-      : { state: "observed" as const, value: billingMode(result.childEnvKeys) };
+      : !Array.isArray(result.childEnvKeys) || !result.childEnvKeys.every(key => typeof key === "string")
+        ? unavailable<BillingMode>("billing-environment-not-recorded")
+        : { state: "observed" as const, value: billingMode(result.childEnvKeys) };
   const tokenUsage: WorkerTokenUsageEvidence = result.tokenUsageState === "observed" || result.tokenUsageState === "partial"
     ? { state: result.tokenUsageState, value: structuredClone(result.tokens) }
     : result.tokenUsageState === "unavailable"

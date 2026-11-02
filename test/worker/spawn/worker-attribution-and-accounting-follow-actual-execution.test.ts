@@ -122,6 +122,13 @@ test("W1-T10956: unavailable usage, cost, and resource values remain explicit", 
     { state: "unavailable", reason: "usage-rating-not-reported" });
   assert.deepEqual(heldCash.accounting.cashBudget.reservedUsd,
     { state: "unavailable", reason: "cash-reservation-not-recorded" });
+  const legacy = workerExecutionEvidence("legacy-environment-missing", result({
+    provider: "codex", childEnvKeys: undefined,
+  }));
+  assert.deepEqual(legacy.accounting.billingMode,
+    { state: "unavailable", reason: "billing-environment-not-recorded" });
+  assert.deepEqual(legacy.accounting.subscriptionNotionalUsd,
+    { state: "unavailable", reason: "billing-environment-not-recorded" });
 });
 
 test("W1-T10956: partial usage stays partial and an admission-abandoned worker is not marked invoked or successful", () => {
