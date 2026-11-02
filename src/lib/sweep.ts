@@ -2226,6 +2226,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "reviewerCodeStaleThisPass",
   // W1-T4415: every open draft is marked ready for review (operator ruling 2026-09-24: no drafts).
   "readyDraft",
+  "readPrHeadDiff",
   // An armed PR's body edited after the arm is re-checked for closing references every pass.
   "guardArmedBody",
   // W1-T4838: a worker's categorized refusal is held and drafted as a plan amendment, not retried.
