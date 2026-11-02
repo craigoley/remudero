@@ -1,0 +1,35 @@
+- id: W1-T11094
+  title: A held task whose cited prerequisites have all merged is named for release in shadow, so a satisfied hold no longer waits for an operator recon to be noticed
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two concerns: a new shadow observer module and its wiring in the daemon command; it writes ledger rows only
+  origin: operator-session#satellite-idle-2026-11-02
+  plan_refs:
+    - W1-T11093
+  files:
+    - src/lib/hold-readiness.ts
+    - src/cli/commands/daemon.ts
+    - test/infra/a-held-task-whose-prerequisites-merged-is-named-for-release.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A held queued shard reads prerequisites-merged only when every task id it cites has merged credit on origin/main; one pass names each held shard once, an unchanged picture writes no new row, every row is shadow, and an unreadable checkout is reported as unreadable
+      proof: "unit test: test/infra/a-held-task-whose-prerequisites-merged-is-named-for-release.test.ts"
+    - claim: The daemon command starts the observer on its own target checkout with the engine checkout as a credit source
+      proof: "grep: startHoldReadinessObserver({ planCheckout: daemonTargetCheckoutRoot(target, config\\.root), creditCheckouts: \\[repoRoot\\], log }) in src/cli/commands/daemon.ts"
+  rationale: |
+    OBSERVED, operator recon 2026-11-02:
+    - The console daemon had no runnable task: 202 merged, 9 verify human, 7 blocked. Six of the seven carry dispatch_hold true with a prose release condition.
+    - CONSOLE-T143 waited on core W1-T10558 and W1-T10559, merged 2026-10-27 (#14176). CONSOLE-T144 waited on W1-T10560..10562, merged by 2026-10-28. CONSOLE-T135 waited on W1-T8950, merged 2026-10-15 (#11918). Nothing read those conditions again; the recon found them by hand.
+    - Replay over origin/main: of 41 held shards (34 core, 7 console), 26 cite only ids with merged credit. Some still wait on prose conditions such as a 7-day serve gate (W1-T5060) or a read-model switch (CONSOLE-T143), so merged credit is a release candidate, never a release.
+    - Hold release stays the operator's (verify-human-release.ts: an explicit dispatch hold is only the operator's to resolve).
+  design: |
+    One hourly pass per daemon on an unref'd timer, the first 10 minutes after boot, all async git and off the dispatch loop: git grep the plan checkout's origin/main tasks.d for held shards, git show them, and read merged credit (Remudero-Task trailers and "(<id>) (#n)" squash subjects) from origin/main of the plan checkout and the engine checkout, so a console hold citing a core task resolves. Each held queued unretired shard gets a dispatch_hold.readiness row (state prerequisites-merged, waiting or cites-nothing; cited, unmerged, the hold's own condition text) when its picture changes, plus one dispatch_hold.readiness_pass summary row. Shadow only: it never edits a shard or releases a hold. Promotion criteria, after 7 days of rows: each prerequisites-merged row the operator released within 7 days is a hit, each the operator declined is a miss; act mode (a plan-only readiness amendment PR for the operator) needs the operator's yes on that evidence.
+  note: |
+    reservation hand-off: run-unfiled-1793619620927 -> run-unfiled-1793619620927
+    Reserved with rmd next-task-id from the operator checkout (W1-T11093..W1-T11094 on run-unfiled-1793619620927). The operator session hand-builds it on run-W1-T11094-<epochMs>.

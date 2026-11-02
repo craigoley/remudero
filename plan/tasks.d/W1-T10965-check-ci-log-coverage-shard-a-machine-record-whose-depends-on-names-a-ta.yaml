@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.33
+  # refusal-amendment (W1-T10965, run W1-T10965-1793594207400, 2026-11-02T07:41:34.225Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The cited behaviors execute in `src/lib/machine-filing-judge.ts`; the declared source scope permits only `src/lib/benchmark-run.ts`, and no causal repair there was established.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

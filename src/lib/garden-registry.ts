@@ -13,11 +13,13 @@
  * refresh) stays in the parent, because a child starts fresh every pass.
  */
 import { spawn } from "node:child_process";
+import { BoundedOutput } from "./bounded-file-tail.js";
+import { RmdError } from "./errors.js";
 import { inboxGardenerMode } from "./inbox-retirement.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { readFileSync } from "node:fs";
 import { homedir, setPriority as osSetPriority } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CHILD_ENTRY_SPAWNED_STEP, childEntryArgv, childEntrySpawnedRow } from "./child-entry-argv.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -27,7 +29,9 @@ import { runFlakeIncidentGardener } from "./flake-incident-gardener.js";
 import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener, type AdmissionFlowInput } from "./flow-gardener.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "./gardener-overseer.js";
-import { ISSUE_REVALIDATION_FAILED_STEP, ISSUE_REVALIDATION_MIN_INTERVAL_MS, runIssueRevalidationGarden, type IssueRevalidationPorts } from "./issue-revalidation-garden.js";
+import {
+  ISSUE_REVALIDATION_FAILED_STEP, ISSUE_REVALIDATION_MIN_INTERVAL_MS, runIssueRevalidationGarden, type IssueRevalidationPolicy, type IssueRevalidationPorts,
+} from "./issue-revalidation-garden.js";
 import { SCOUT_MIN_INTERVAL_MS } from "./scout-gardener.js";
 import {
   readCoverageShardLogsAsync, readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener,
@@ -78,9 +82,34 @@ export const REGISTERED_GARDEN_NAMES = [
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];
+
+/** Operator 2026-11-01 ("something that manages this running as a part of rmd on any repo its managing"): the
+ *  gardens that also run on a non-self managed target, over THAT repository. Every other garden stays self-only. */
+export const PER_TARGET_GARDEN_NAMES: readonly RegisteredGardenName[] = ["issue-revalidation"];
+
 /** Disabled Inbox mode is represented consistently in starters, due probes and runtime health. */
 export function registeredGardenEnabled(name: RegisteredGardenName, isSelf: boolean, env: NodeJS.ProcessEnv = process.env): boolean {
-  return isSelf && (name !== "inbox" || inboxGardenerMode(env) !== "off");
+  return (isSelf || PER_TARGET_GARDEN_NAMES.includes(name)) && (name !== "inbox" || inboxGardenerMode(env) !== "off");
+}
+
+/** The child's flag naming the managed repository a per-target garden's pass reads (`owner/repo`). */
+export const GARDEN_REPO_FLAG = "--repo";
+
+/** The child's flag naming the plan file a per-target garden's pass reads: the daemon's own (`--plan` or derived). */
+export const GARDEN_PLAN_FLAG = "--plan";
+
+/** The extra child args a garden's pass carries on this target: the repository and the plan the daemon reads (absolute,
+ *  so an explicit relative `--plan` survives the child's cwd), only for a per-target garden on a non-self target, so a
+ *  self pass's argv is exactly what it always was. */
+export function registeredGardenTargetArgs(name: RegisteredGardenName, target: { owner: string; repo: string; isSelf: boolean; planPath?: string }): string[] {
+  if (target.isSelf || !PER_TARGET_GARDEN_NAMES.includes(name)) return [];
+  return [GARDEN_REPO_FLAG, `${target.owner}/${target.repo}`, ...(target.planPath === undefined ? [] : [GARDEN_PLAN_FLAG, resolve(target.planPath)])];
+}
+
+/** The issue-revalidation policy on a target. No per-target block exists in plan/policy.yaml, so a non-self
+ *  target is never above SHADOW: its verdicts are ledgered and nothing is written to its GitHub. "off" stays off. */
+export function issueRevalidationPolicyForTarget(policy: IssueRevalidationPolicy, isSelf: boolean): IssueRevalidationPolicy {
+  return isSelf || policy.mode !== "act" ? policy : { ...policy, mode: "shadow" };
 }
 
 export function isRegisteredGardenName(name: string): name is RegisteredGardenName {
@@ -216,14 +245,17 @@ export interface GardenPacing {
   inputs?: string;
 }
 
-export function gardenPacingPath(stateDir: string, name: RegisteredGardenName): string {
-  return join(stateDir, `${name}-garden-pacing.json`);
+/** A pacing record's file. `repository` (`owner/repo`) keys a per-target garden's record on a non-self target, so
+ *  two targets never share one; the self repo's record keeps its unkeyed name. */
+export function gardenPacingPath(stateDir: string, name: RegisteredGardenName, repository?: string): string {
+  const key = repository === undefined ? "" : `-${repository.toLowerCase().replace(/[^a-z0-9._-]+/g, "__")}`;
+  return join(stateDir, `${name}${key}-garden-pacing.json`);
 }
 
 /** The recorded pacing; an absent or damaged record is none, so the next poll runs a pass. */
-export function readGardenPacing(stateDir: string, name: RegisteredGardenName): GardenPacing | undefined {
+export function readGardenPacing(stateDir: string, name: RegisteredGardenName, repository?: string): GardenPacing | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(gardenPacingPath(stateDir, name), "utf8")) as Partial<GardenPacing>;
+    const parsed = JSON.parse(readFileSync(gardenPacingPath(stateDir, name, repository), "utf8")) as Partial<GardenPacing>;
     if (!Number.isFinite(Date.parse(String(parsed.lastPassAt))) || !Number.isFinite(Date.parse(String(parsed.lastNewAt)))) return undefined;
     if (parsed.inputs !== undefined && typeof parsed.inputs !== "string") return undefined;
     return parsed as GardenPacing;
@@ -240,8 +272,8 @@ function gardenQuietSpanDue(pacing: GardenPacing, clock: Clock): boolean {
   return clock.now() - last >= quiet / GARDEN_QUIET_BACKOFF_DIVISOR;
 }
 
-export function gardenPacingDue(stateDir: string, name: RegisteredGardenName, opts: { clock?: Clock; inputs?: () => string } = {}): boolean {
-  const pacing = readGardenPacing(stateDir, name);
+export function gardenPacingDue(stateDir: string, name: RegisteredGardenName, opts: { clock?: Clock; inputs?: () => string; repository?: string } = {}): boolean {
+  const pacing = readGardenPacing(stateDir, name, opts.repository);
   if (pacing === undefined) return true;
   if (name === "host-resource" || name === "flow-remedy") {
     const elapsed = (opts.clock ?? systemClock).now() - Date.parse(pacing.lastPassAt);
@@ -267,12 +299,12 @@ export async function gardenPacingDueAsync(stateDir: string, name: RegisteredGar
 }
 
 /** Record one finished pass of a paced garden: `found` is whether it found anything new. */
-export function recordGardenPacing(stateDir: string, name: RegisteredGardenName, found: boolean, opts: { clock?: Clock; inputs?: string } = {}): void {
+export function recordGardenPacing(stateDir: string, name: RegisteredGardenName, found: boolean, opts: { clock?: Clock; inputs?: string; repository?: string } = {}): void {
   const at = (opts.clock ?? systemClock).iso();
-  const prior = readGardenPacing(stateDir, name);
+  const prior = readGardenPacing(stateDir, name, opts.repository);
   const pacing: GardenPacing = { lastPassAt: at, lastNewAt: found || prior === undefined ? at : prior.lastNewAt,
     ...(opts.inputs === undefined ? {} : { inputs: opts.inputs }) };
-  writeAtomic(gardenPacingPath(stateDir, name), JSON.stringify(pacing) + "\n");
+  writeAtomic(gardenPacingPath(stateDir, name, opts.repository), JSON.stringify(pacing) + "\n");
 }
 
 /** Persistent low-yield pacing at the same production pass/probe boundary. Capture inputs BEFORE
@@ -367,12 +399,12 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
         observe(event("running", { passId, nextDueAt: null, queueMs: Math.max(0, admittedMs - startedMs) }));
       },
     };
-    const settle = (outcome: GardenPassOutcome, error?: string): void => {
+    const settle = (outcome: GardenPassOutcome, error?: string, report?: GardenReportError): void => {
       settled = true;
       const deferred = typeof outcome === "object" && outcome !== null;
-      const exit = deferred ? null : outcome;
+      const exit = report ? report.childExit : deferred ? null : outcome;
       running = false;
-      if (hourly && exit === 0) reportedBucket = bucket;
+      if (hourly && exit === 0 && error === undefined) reportedBucket = bucket;
       // One completion timestamp for both destinations: the logger's own latency
       // is not child execution, and the persisted card can correlate this row.
       const finishedMs = clock.now();
@@ -388,11 +420,13 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
       const queueMs = admittedMs === undefined ? null : Math.max(0, admittedMs - startedMs);
       const executionMs = deferred || admittedMs === undefined ? null : Math.max(0, finishedMs - admittedMs);
       wiring.log(GARDEN_PASS_STEP, { name, passId, ms: finishedMs - startedMs, queueMs, executionMs, exit,
-        ...(deferred ? { reason: outcome.reason } : {}), ...(error === undefined ? {} : { error }) });
+        ...(deferred ? { reason: outcome.reason } : {}), ...(error === undefined ? {} : { error }),
+        ...(report ? { signal: report.signal, output_retention: report.retained.evidence,
+          stderr: report.retained.chunks.join("") } : {}) });
       const phase = deferred ? "idle" : error !== undefined || (exit !== null && exit !== 0) ? "failed" : exit === 0 ? "completed" : "cancelled";
       observe(event(phase, { passId, exit,
         queueMs, executionMs, ...(dueIntervalMs === undefined ? {} : { dueIntervalMs }),
-        reason: deferred ? outcome.reason : error !== undefined ? "spawn-failed" : exit === 0 ? "process-completed" : exit === null ? "signal-or-cancelled" : "process-failed" }));
+        reason: deferred ? outcome.reason : report ? "process-failed" : error !== undefined ? "spawn-failed" : exit === 0 ? "process-completed" : exit === null ? "signal-or-cancelled" : "process-failed" }));
     };
     let pass: Promise<GardenPassOutcome>;
     try {
@@ -404,7 +438,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     }
     pass.then(
       (exit) => settle(exit),
-      (e: unknown) => settle(null, String((e as Error)?.message ?? e)),
+      (e: unknown) => settle(null, String((e as Error)?.message ?? e), e instanceof GardenReportError ? e : undefined),
     );
   };
   const tick = (): void => {
@@ -483,7 +517,16 @@ export const GARDEN_PRIORITY_DEGRADED_STEP = "garden.priority_degraded";
 export const GARDEN_HEAP_EXHAUSTED = "heap_exhausted";
 
 const HEAP_EXHAUSTED_STDERR = /heap out of memory/;
-const STDERR_TAIL_CHARS = 8 * 1024;
+/** PRIMARY CONTROL: match worker report retention; valid telemetry alone exceeds the old 8 KiB excerpt. */
+export const GARDEN_OUTPUT_BYTES = 256 * 1024;
+
+/** A failed report keeps the child's observed exit separate from the evidence failure. */
+class GardenReportError extends RmdError {
+  constructor(message: string, readonly childExit: number | null, readonly signal: NodeJS.Signals | null,
+    readonly retained: ReturnType<BoundedOutput["finish"]>) {
+    super("gardener", 1, message);
+  }
+}
 
 /** The harness tree this module runs from: where the precompiled run-task entry for a garden child lives. */
 const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -608,14 +651,27 @@ export function childGardenPassSpawn(
         stdio: ["ignore", "ignore", "pipe"],
       });
       child.once("spawn", () => signal.admitted?.());
-      let stderr = "";
+      const stderr = new BoundedOutput(GARDEN_OUTPUT_BYTES);
+      const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+      let stderrFailure: { state: "unreadable" | "malformed"; reason: string } | undefined;
+      let stderrBytes = 0;
+      let heapSuffix = "";
       let heapExhaustedSeen = false;
-      child.stderr?.on("data", (chunk: Buffer | string) => {
-        const captured = `${stderr}${String(chunk)}`;
-        // Classify the stream before bounding its diagnostic tail: a long native backtrace
-        // can displace the fatal signature, including when a single chunk exceeds the cap.
+      child.stderr?.on("data", (chunk: Buffer) => {
+        stderrBytes += chunk.length;
+        // The fatal signature is ASCII; decoding failures must not erase a heap verdict.
+        const captured = heapSuffix + chunk.toString("latin1");
         heapExhaustedSeen ||= HEAP_EXHAUSTED_STDERR.test(captured);
-        stderr = captured.slice(-STDERR_TAIL_CHARS);
+        heapSuffix = captured.slice(-32);
+        if (stderrFailure) return;
+        try {
+          stderr.push(decoder.decode(chunk, { stream: true }));
+        } catch (error) {
+          stderrFailure = { state: "malformed", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+        }
+      });
+      child.stderr?.once("error", (error) => {
+        stderrFailure = { state: "unreadable", reason: error.message.slice(0, 240) };
       });
       let lowered: Promise<void> = Promise.resolve();
       const pid = child.pid;
@@ -642,9 +698,19 @@ export function childGardenPassSpawn(
       });
       child.once("close", (code, signal) => {
         release();
+        if (!stderrFailure) {
+          try { stderr.push(decoder.decode()); }
+          catch (error) {
+            stderrFailure = { state: "malformed", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+          }
+        }
+        const retained = stderr.finish();
+        if (stderrFailure) retained.evidence = { ...retained.evidence, ...stderrFailure, fileBytes: stderrBytes };
         void lowered.then(() => {
           if (signal !== null && heapExhaustedSeen) {
-            reject(new Error(`${GARDEN_HEAP_EXHAUSTED}: garden ${name} exceeded its ${heapLimitMb} MB heap cap (${signal})`));
+            reject(new GardenReportError(`${GARDEN_HEAP_EXHAUSTED}: garden ${name} exceeded its ${heapLimitMb} MB heap cap (${signal})`, code, signal, retained));
+          } else if (retained.evidence.state !== "complete") {
+            reject(new GardenReportError(`garden ${name}: incomplete stderr output (${retained.evidence.state})`, code, signal, retained));
           } else {
             resolve(code);
           }
@@ -775,9 +841,10 @@ export function flowGardenPass(
 
 /** W1-T8864: one issue-revalidation pass as the daemon builds it. Paced: a pass whose verdicts all match
  *  the previous ones widens the wait (never under the garden's hourly floor), and a changed verdict snaps
- *  it back. A pass never throws: a failure is ledgered as `issue_revalidation.failed`. */
+ *  it back. A pass never throws: a failure is ledgered as `issue_revalidation.failed`. `repository` keys the pacing
+ *  record of a non-self managed target ({@link gardenPacingPath}); absent, it is the self repo's. */
 export function issueRevalidationGardenPass(
-  stateDir: string, ports: IssueRevalidationPorts, clock?: Clock,
+  stateDir: string, ports: IssueRevalidationPorts, clock?: Clock, repository?: string,
 ): (() => Promise<void>) & { due: () => boolean | Promise<boolean> } {
   const pass = async (): Promise<void> => {
     let found = false;
@@ -787,10 +854,10 @@ export function issueRevalidationGardenPass(
       ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "pass", error: String((e as Error)?.message ?? e) });
     }
     try {
-      recordGardenPacing(stateDir, "issue-revalidation", found, { clock });
+      recordGardenPacing(stateDir, "issue-revalidation", found, { clock, repository });
     } catch (e) {
       ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "pacing", error: String((e as Error)?.message ?? e) });
     }
   };
-  return Object.assign(pass, { due: () => gardenPacingDue(stateDir, "issue-revalidation", { clock }) });
+  return Object.assign(pass, { due: () => gardenPacingDue(stateDir, "issue-revalidation", { clock, repository }) });
 }

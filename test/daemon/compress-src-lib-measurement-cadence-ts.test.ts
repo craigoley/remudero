@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { parse } from "@babel/parser";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function snapshot(source: string) {
@@ -27,12 +28,16 @@ function snapshot(source: string) {
 
 test("W1-T11007: comment compression preserves executable code", () => {
   // Frozen before compression at 6f907f51a9e0158b48f68838ebd5590621c386f7.
-  // Refreshed for W1-T10041's intentional tree-free machine-filing admission check.
   // Comparative evidence for this edit, not a new hard comment ceiling.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/measurement-cadence.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 23604);
-  assert.equal(actual.tokenDigest, "c5f6e995838eb080f5c4d462dbd876566e7f7e223a4975bc9422bb15d37d726f");
-  assert.equal(actual.astDigest, "d5a69bce1de424708922358485743cfa7ada085c5280b2d3ae864d467ef2f534");
+  const before = compressionPinBase("src/lib/measurement-cadence.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free.
+    const base = snapshot(before);
+    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
+    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+  }
   assert.ok(actual.commentLines < 756, `comment lines must decrease from 756; got ${actual.commentLines}`);
   assert.ok(actual.commentBytes < 62677, `comment bytes must decrease from 62677; got ${actual.commentBytes}`);
 

@@ -76,12 +76,29 @@ export function remoteBranchNames(exec: (cmd: string, args: string[]) => string)
   return runStepsSync(remoteBranchNamesSteps(exec));
 }
 
+/** The reaper's one `git ls-remote` site: `ls-remote <before…> origin <after…>`, read in the managed checkout. */
+function* lsRemoteOriginSteps(exec: BranchReapExec, before: readonly string[], after: readonly string[] = []): Steps<string> {
+  return yield* step(() => exec("git", ["ls-remote", ...before, "origin", ...after]));
+}
+
+/** The reaper's one `git push` site: `push <before…> origin <after…>`, run in the managed checkout. The prune's
+ *  chunked `--delete` and the stale-hold archive's atomic leased push both go through it. */
+function* pushOriginSteps(exec: BranchReapExec, before: readonly string[], after: readonly string[]): Steps<string> {
+  return yield* step(() => exec("git", ["push", ...before, "origin", ...after]));
+}
+
 export function* remoteBranchNamesSteps(exec: BranchReapExec): Steps<string[]> {
-  return (yield* step(() => exec("git", ["ls-remote", "--heads", "origin"])))
-    .split("\n")
-    .map((l) => l.split("refs/heads/")[1])
-    .filter((n): n is string => Boolean(n && n.trim()))
-    .map((n) => n.trim());
+  return [...(yield* remoteBranchHeadsSteps(exec)).keys()];
+}
+
+/** Every remote branch's LIVE tip sha, from the same one `git ls-remote --heads origin` read, in listing order. */
+export function* remoteBranchHeadsSteps(exec: BranchReapExec): Steps<Map<string, string>> {
+  const heads = new Map<string, string>();
+  for (const line of (yield* lsRemoteOriginSteps(exec, ["--heads"])).split("\n")) {
+    const name = line.split("refs/heads/")[1]?.trim();
+    if (name) heads.set(name, line.split(/\s/)[0] ?? "");
+  }
+  return heads;
 }
 
 /**
@@ -694,7 +711,7 @@ export function* pruneDeletableBranchesSteps(
   for (let i = 0; i < deletable.length; i += chunkSize) {
     const chunk = deletable.slice(i, i + chunkSize);
     try {
-      yield* step(() => exec("git", ["push", "origin", "--delete", ...chunk.map((e) => e.name)]));
+      yield* pushOriginSteps(exec, [], ["--delete", ...chunk.map((e) => e.name)]);
       for (const e of chunk) deleted.push(e.name);
     } catch (err) {
       // The whole chunk survives: git applies a rejected push atomically per invocation, so naming
@@ -781,4 +798,183 @@ export function withholdActiveBranches(
   }
 
   return { proceed, withheld };
+}
+
+// ── REPO HYGIENE: STALE HELD RUN BRANCHES (operator ruling 2026-11-01) ──────────────────────
+//
+// planBranchReap holds a no-PR run branch whose task shipped by another attempt as
+// `named_task_credited`, and one whose task has not shipped as `named_task_open`, until someone
+// adjudicates it. Nothing does: on 2026-11-01 remudero carried 506 branches, 311 of them no-PR run
+// branches of shipped tasks (296 older than 7 days) and 83 unshipped ones older than 14 days. This
+// planner names the stale ones. It does NOT change planBranchReap's verdict: the caller archives
+// each tip under STALE_HOLD_ARCHIVE_PREFIX before any delete, so no commit is lost, and the lane
+// starts in shadow mode, which only ledgers what it would reap.
+
+/** BACKSTOP: a held run branch of a SHIPPED task is stale after this long without a new commit. */
+export const STALE_CREDITED_HOLD_MS = 7 * 24 * 3_600_000;
+/** BACKSTOP: a held run branch of an UNSHIPPED task is stale after this long without a new commit. */
+export const STALE_UNSHIPPED_HOLD_MS = 14 * 24 * 3_600_000;
+/** Where a stale branch's tip is archived before its branch is deleted: `<prefix><branch>/<sha>`. */
+export const STALE_HOLD_ARCHIVE_PREFIX = "refs/rmd-recovery/reaped/";
+
+export type StaleHoldReason = "credited_sibling_stale" | "orphan_unshipped_stale";
+
+/** The facts this planner reads, a structural subset of status.ts's BranchFacts (no import: status.ts imports
+ *  this module, and dependency-cruiser counts even a type-only edge as a cycle). */
+export interface StaleHoldFacts {
+  name: string;
+  prState: "merged" | "closed" | "open" | "none" | "unknown";
+  tipInMain: boolean | "unknown";
+  namedInSource: boolean;
+  namedTaskId?: string;
+}
+
+export interface StaleHoldCandidate {
+  name: string;
+  sha: string;
+  reason: StaleHoldReason;
+  ageMs: number;
+  taskId: string;
+}
+
+/**
+ * The held run branches stale enough to archive and reap. PURE. A branch qualifies only when every
+ * fact was READ: a confirmed no-PR state, a tip confirmed not in main and equal to the live remote sha, a
+ * readable commit age past its threshold, a resolved task id, and a claim list that was read without a
+ * live claim for that task.
+ * An unreadable claim list (`undefined`) yields no candidates at all.
+ */
+export function planStaleHoldArchive(input: {
+  facts: readonly StaleHoldFacts[];
+  reasons: Readonly<Record<string, string>>;
+  tips: ReadonlyMap<string, RemoteBranchTip>;
+  /** The live `ls-remote --heads` sha per branch. A local remote-tracking tip that differs (or is absent here) is stale: it names nothing. */
+  liveShaByName: ReadonlyMap<string, string>;
+  nowMs: number;
+  claimedTaskIds: ReadonlySet<string> | undefined;
+  /** A `run-<taskId>-<epochMs>` branch's plan task, which the slug matcher never reads (it lands `no_pr_ever`). */
+  runTaskByBranch?: ReadonlyMap<string, string>;
+  /** The merge-credited task ids, or `undefined` when unread: a `no_pr_ever` run branch then names nothing. */
+  creditedTaskIds?: ReadonlySet<string>;
+  creditedAfterMs?: number;
+  unshippedAfterMs?: number;
+}): StaleHoldCandidate[] {
+  if (input.claimedTaskIds === undefined) return [];
+  const out: StaleHoldCandidate[] = [];
+  for (const f of input.facts) {
+    const reason = input.reasons[f.name];
+    if (reason !== "named_task_credited" && reason !== "named_task_open" && reason !== "no_pr_ever") continue;
+    if (f.prState !== "none" || f.tipInMain !== false || f.namedInSource || !/^run-.+-[0-9]+$/.test(f.name)) continue;
+    const taskId = f.namedTaskId ?? input.runTaskByBranch?.get(f.name);
+    if (taskId === undefined || input.claimedTaskIds.has(taskId)) continue;
+    if (reason === "no_pr_ever" && input.creditedTaskIds === undefined) continue;
+    const credited = reason === "named_task_credited" || (reason === "no_pr_ever" && input.creditedTaskIds!.has(taskId));
+    const tip = input.tips.get(f.name);
+    if (tip === undefined || tip.committedAtMs === undefined) continue;
+    if (input.liveShaByName.get(f.name) !== tip.sha) continue;
+    const ageMs = input.nowMs - tip.committedAtMs;
+    const bound = credited ? (input.creditedAfterMs ?? STALE_CREDITED_HOLD_MS) : (input.unshippedAfterMs ?? STALE_UNSHIPPED_HOLD_MS);
+    if (ageMs < bound) continue;
+    out.push({ name: f.name, sha: tip.sha, reason: credited ? "credited_sibling_stale" : "orphan_unshipped_stale", ageMs, taskId });
+  }
+  return out;
+}
+
+/** The task ids holding a live dispatch claim, or the read's error: an unread listing is never an empty one. */
+export function* readDispatchClaimTaskIdsSteps(exec: BranchReapExec): Steps<{ ids: Set<string> } | { error: string }> {
+  try {
+    return { ids: parseDispatchClaimTaskIds(yield* lsRemoteOriginSteps(exec, [], ["refs/rmd-dispatch/*"])) };
+  } catch (err) {
+    return { error: String((err as Error)?.message ?? err) };
+  }
+}
+
+/** The task ids holding a live `refs/rmd-dispatch/<id>` claim, from `git ls-remote origin 'refs/rmd-dispatch/*'`. */
+export function parseDispatchClaimTaskIds(raw: string): Set<string> {
+  const ids = new Set<string>();
+  for (const line of raw.split("\n")) {
+    const ref = line.split("\t")[1]?.trim();
+    if (ref?.startsWith("refs/rmd-dispatch/")) ids.add(ref.slice("refs/rmd-dispatch/".length));
+  }
+  return ids;
+}
+
+// ── REPO HYGIENE, ACT MODE (operator ruling 2026-11-01: "Build act mode, flag off") ──────────────
+//
+// Armed only by `sweep.armStaleBranchArchive` in plan/policy.yaml (default false), and only on the
+// automatic rung's prune pass or an explicit `rmd reap-branches --archive-stale`. Unarmed, the lane
+// stays the shadow above: it ledgers `branch_reap.hygiene_shadow` and pushes nothing.
+
+/** BACKSTOP: at most this many stale holds are archived per pass. The 2026-11-01 backlog was 379
+ *  (296 shipped-task branches past 7 days, 83 unshipped ones past 14); 25 matches the prune's own
+ *  chunk size, so a first armed pass removes a reviewable handful rather than the whole backlog, and
+ *  the rest drain over later passes. The ledger row's `capped` names what this pass left. */
+export const STALE_HOLD_ARCHIVE_CAP = 25;
+
+export interface StaleHoldArchived {
+  name: string;
+  sha: string;
+  reason: StaleHoldReason;
+  archive_ref: string;
+}
+
+export interface StaleHoldArchiveOutcome {
+  archived: StaleHoldArchived[];
+  /** A push git refused: the lease failed (the branch moved) or the remote rejected it. The branch is unchanged. */
+  failed: { name: string; error: string }[];
+  /** Candidates past the cap, left for a later pass. */
+  capped: number;
+}
+
+/** `refs/rmd-recovery/reaped/<branch>/<sha>`: where a stale hold's tip is kept once its branch is deleted. */
+export function staleHoldArchiveRef(name: string, sha: string): string {
+  return `${STALE_HOLD_ARCHIVE_PREFIX}${name}/${sha}`;
+}
+
+/**
+ * The documented one-line restore for an archived branch:
+ * `git fetch origin <archive_ref>:<archive_ref> && git push origin <archive_ref>:refs/heads/<name>`.
+ * The fetch is not optional: a push's source is resolved LOCALLY, and the archive ref exists only on
+ * origin, so the bare push fails with "src refspec … does not match any" in any clone that has not
+ * fetched it (measured against a real remote in this lane's test).
+ */
+export function staleHoldRestoreCommand(name: string, sha: string): string {
+  const ref = staleHoldArchiveRef(name, sha);
+  return `git fetch origin ${ref}:${ref} && git push origin ${ref}:refs/heads/${name}`;
+}
+
+/**
+ * Archive each stale hold's tip and delete its branch, ONE ATOMIC PUSH PER BRANCH:
+ *
+ *   git push --atomic --force-with-lease=refs/heads/<name>:<sha> origin \
+ *     <sha>:refs/rmd-recovery/reaped/<name>/<sha> :refs/heads/<name>
+ *
+ * `--atomic` makes the archive ref and the delete land together or not at all, and the lease makes
+ * the whole push refuse when the branch no longer points at the sha the planner read — so a branch
+ * that gained a commit is left alone, never deleted. A refused push is reported in `failed` and its
+ * branch stays. One push per branch, not a chunk, so one moved branch cannot block the others.
+ *
+ * RESTORE is one line ({@link staleHoldRestoreCommand}):
+ *   git fetch origin refs/rmd-recovery/reaped/<name>/<sha>:refs/rmd-recovery/reaped/<name>/<sha> \\
+ *     && git push origin refs/rmd-recovery/reaped/<name>/<sha>:refs/heads/<name>
+ */
+export function* archiveStaleHoldsSteps(
+  candidates: readonly StaleHoldCandidate[],
+  exec: BranchReapExec,
+  opts: { readonly cap?: number } = {},
+): Steps<StaleHoldArchiveOutcome> {
+  const cap = Math.max(0, opts.cap ?? STALE_HOLD_ARCHIVE_CAP);
+  const archived: StaleHoldArchived[] = [];
+  const failed: { name: string; error: string }[] = [];
+  for (const c of candidates.slice(0, cap)) {
+    const archiveRef = staleHoldArchiveRef(c.name, c.sha);
+    try {
+      yield* pushOriginSteps(exec, ["--atomic", `--force-with-lease=refs/heads/${c.name}:${c.sha}`],
+        [`${c.sha}:${archiveRef}`, `:refs/heads/${c.name}`]);
+      archived.push({ name: c.name, sha: c.sha, reason: c.reason, archive_ref: archiveRef });
+    } catch (err) {
+      failed.push({ name: c.name, error: String((err as Error)?.message ?? err) });
+    }
+  }
+  return { archived, failed, capped: Math.max(0, candidates.length - cap) };
 }

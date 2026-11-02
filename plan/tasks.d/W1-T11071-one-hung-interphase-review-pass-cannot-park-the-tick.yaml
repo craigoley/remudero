@@ -1,0 +1,26 @@
+- id: W1-T11071
+  title: One hung interphase review pass can no longer park the daemon's tick for hours; stopping the review clock waits a bounded time and names what it left running
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the review clock's stop; review admission and the passes themselves are unchanged
+  origin: operator-session#fleet-health-2026-11-01
+  plan_refs:
+    - W1-T5803
+    - W1-T11069
+  files:
+    - src/lib/daemon.ts
+    - test/daemon/one-hung-interphase-review-pass-cannot-park-the-tick.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the interphase review clock is stopped while one of its passes never settles, stop() returns after a bounded wait, ledgers the passes it left running with how long each had run, and the tick continues; a pass that settles within the bound is awaited as today"
+      proof: "unit test: test/daemon/one-hung-interphase-review-pass-cannot-park-the-tick.test.ts"
+  rationale: |
+    OBSERVED, operator recon 2026-11-01: the daemon (DAEMON-1793529044317) wrote one daemon.tick at 10:32:16 and none after; its dispatch phase settled at 12:10:32, and no light pass finished after 11:33:39. The stop() of startInterphaseReviewClock (src/lib/daemon.ts) ends with `if (activePasses.size > 0) await Promise.all(activePasses)`, unbounded, so one light pass whose open-PR read hung (its GitHub token had expired; W1-T11070) parked the whole tick. The earlier stall had the same shape: a light pass whose open_pr_views took 10,896,359 ms finished at 10:10:49, and the next daemon.tick followed 37 s later.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (run-unfiled-1793538128289).

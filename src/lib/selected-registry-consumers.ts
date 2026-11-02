@@ -5,6 +5,7 @@ import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO,
 
 export type RegistryConsumerAction = "serve-registry" | "serve-readiness" | "serve-go-live" | "serve-shadow-evidence" | "serve-topology"
   | "serve-liveness" | "repositories-view" | "repo-dashboard" | "benchmark-discovery" | "inbox-discovery"
+  | "run-child" | "run-child-dispatch" | "run-task-resume"
   | "deploy-restart" | "deploy-recycle" | "deploy-rollback" | "serve-policy-replace" | "pause-target" | "pause" | "resume" | "sre-target";
 export interface RegistryConsumerTarget {
   repository?: string;
@@ -41,7 +42,7 @@ const unknown = (reason: string, digest?: string): Evidence => ({ selected_state
 const LIMIT = 32;
 const isLifecycleAction = (action: RegistryConsumerAction): boolean => action.startsWith("deploy-")
   || ["serve-policy-replace", "pause-target", "pause", "resume", "sre-target"].includes(action);
-interface ConsumerScope { observer: SelectedRegistryObserver | undefined; active: boolean }
+interface ConsumerScope { observer: SelectedRegistryObserver | undefined; active: boolean; qualifiedRun?: boolean }
 const consumerScope = new AsyncLocalStorage<ConsumerScope>();
 
 /** Invocation-owned diagnostics only. An absent nested invocation masks, rather than inherits, opt-in. */
@@ -50,9 +51,15 @@ export function selectedRegistryObserverInContext(): SelectedRegistryObserver | 
   return scope?.active ? scope.observer : undefined;
 }
 
+/** Only a run entry that pinned its transport before admission can reuse the inherited observer. */
+export function hasQualifiedSelectedRegistryRunContext(): boolean {
+  const scope = consumerScope.getStore();
+  return scope?.active === true && scope.qualifiedRun === true;
+}
+
 export async function withSelectedRegistryContext<T>(observer: SelectedRegistryObserver | undefined,
-  operation: () => Promise<T>): Promise<T> {
-  const scope: ConsumerScope = { observer, active: true };
+  operation: () => Promise<T>, qualification?: { qualifiedRun: true }): Promise<T> {
+  const scope: ConsumerScope = { observer, active: true, qualifiedRun: qualification?.qualifiedRun };
   try { return await consumerScope.run(scope, operation); }
   finally { scope.active = false; observer?.close(); }
 }
@@ -121,6 +128,17 @@ export function captureSelectedRegistryIntent(options: SelectedRegistryConsumerO
   if (captured.kind !== "selected" || !captured.transferable) return unavailableIntent();
   const { signal: _signal, ...input } = captured.input;
   return copySelectedRegistryIntent({ kind: "shadow", version: 1, input, instanceName: captured.name });
+}
+
+/** Pin trusted transport before admission can yield; a failed initial read cannot acquire a later identity. */
+export async function qualifySelectedRegistryIntent(value: unknown): Promise<SelectedRegistryIntent | undefined> {
+  const intent = copySelectedRegistryIntent(value);
+  if (intent === undefined || intent.kind === "unknown") return intent;
+  const read = await readSelectedInstanceRegistry(intent.input);
+  if (read.kind !== "ready" || !read.binding.capabilities.includes("identity")) return unavailableIntent();
+  return copySelectedRegistryIntent({ ...intent, input: { ...intent.input,
+    expectedDigest: read.binding.digest, contractVersion: read.binding.contractVersion,
+    requiredCapabilities: read.binding.capabilities } });
 }
 
 export function selectedRegistryObserverFromIntent(intent: unknown, record: RegistryObservationSink): SelectedRegistryObserver | undefined {

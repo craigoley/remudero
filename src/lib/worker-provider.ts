@@ -39,7 +39,7 @@ import { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
-import type { UsageSnapshot } from "./headroom.js";
+import type { SdkUsageCase, UsageSnapshot, WeeklyWindow } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
@@ -62,7 +62,10 @@ import {
   workerMarkerEnv,
   type ContainedProcess,
   type ContainedSpawnOptions,
+  type StderrFailure,
+  type StderrSink,
 } from "./worker-containment.js";
+import { readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import {
   CASH_WEB_SEARCH_KEY_ENV,
   CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
@@ -103,7 +106,7 @@ interface CodexSpawnArgs {
   containment?: {
     spawn?: (
       opts: ContainedSpawnOptions,
-      onStderr?: (chunk: string) => void,
+      onStderr?: StderrSink,
       onSpawnError?: (error: NodeJS.ErrnoException) => void,
     ) => ContainedProcess;
     teardown?: (pgid: number) => void;
@@ -140,6 +143,14 @@ interface CodexWorkerResult {
   outputTruncation?: CodexOutputTruncation;
   /** W1-T8203: set when stderr passed its retention bound and only its head and tail were kept. */
   stderrTruncation?: CodexStderrTruncation;
+  outputRetention?: {
+    text: Omit<FileTail, "text">;
+    blocks: Omit<FileTail, "text">;
+    stdout?: Omit<FileTail, "text">;
+    stderr: Omit<FileTail, "text">;
+    completion?: CodexCompletionEvidence;
+    originalSubtype: string;
+  };
   subtype: string;
   isError: boolean;
   /** W1-T6027: the child's own `exit(code, signal)`, never derived from `subtype`. */
@@ -710,16 +721,33 @@ export function queuedUpgradeAllocation(
   return allocateUpgrades(candidates, liveWindow);
 }
 
+function claudeWeeklyWindows(weekly: readonly WeeklyWindow[]): ProviderCapacityWindow[] {
+  return weekly.map((window) => ({ name: `weekly (${window.label})`, usedPercent: window.percentUsed, resetsAt: window.resetsAt }));
+}
+
+export function claudeCapacityFromUsageCase(reading: SdkUsageCase, accountLabel?: string): ProviderCapacity {
+  if (reading.kind === "session") return claudeCapacityFromUsage(reading.snapshot, accountLabel);
+  if (reading.kind !== "weekly-only") {
+    return { provider: "claude", readable: false, windows: [], detail: `capacity unreadable: ${reading.kind}` };
+  }
+  const windows = claudeWeeklyWindows(reading.weekly);
+  const valid = windows.filter(validCapacityWindow);
+  return {
+    provider: "claude",
+    readable: true,
+    ...(accountLabel ? { accountLabel } : {}),
+    windows,
+    ...(valid.length > 0 ? { allocationWindows: valid } : {}),
+    detail: "no five-hour window in the reading: weekly windows only",
+  };
+}
+
 export function claudeCapacityFromUsage(
   snapshot: UsageSnapshot | undefined,
   accountLabel?: string,
 ): ProviderCapacity {
   if (!snapshot) return { provider: "claude", readable: false, windows: [], detail: "capacity unreadable" };
-  const weeklyWindows: ProviderCapacityWindow[] = snapshot.weekly.map((window) => ({
-    name: `weekly (${window.label})`,
-    usedPercent: window.percentUsed,
-    resetsAt: window.resetsAt,
-  }));
+  const weeklyWindows = claudeWeeklyWindows(snapshot.weekly);
   const validWeeklyWindows = weeklyWindows.filter(validCapacityWindow);
   return {
     provider: "claude",
@@ -2247,6 +2275,11 @@ interface CodexJsonEvent {
   };
 }
 
+export interface CodexCompletionEvidence {
+  state: "complete" | "absent" | "incomplete";
+  reason?: string;
+}
+
 export interface ParsedCodexEvents {
   sessionId: string;
   text: string;
@@ -2259,6 +2292,7 @@ export interface ParsedCodexEvents {
   errors: string[];
   usageRefusal?: UsageLimitRefusal;
   outputTruncation?: CodexOutputTruncation;
+  completion: CodexCompletionEvidence;
 }
 
 export interface CodexOutputTruncation {
@@ -2274,7 +2308,7 @@ export const CODEX_WORKER_STDOUT_MAX_BYTES = 1 * 1024 * 1024;
 export const CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES = 64 * 1024 * 1024;
 /** PRIMARY CONTROL (W1-T8203): a MEMORY bound on what is RETAINED of stderr, a share of the stdout retention bound. stderr is
  * diagnostic evidence (failure tail, retro evidence), never protocol input: passing this keeps the head and the
- * tail and records the drop. It never tears the worker down and never decides a verdict. */
+ * tail and records the drop. It never tears the worker down; lost evidence denies complete success. */
 export const CODEX_WORKER_STDERR_MAX_BYTES = CODEX_WORKER_STDOUT_MAX_BYTES / 4;
 
 export interface CodexStderrTruncation {
@@ -2324,15 +2358,29 @@ export class CodexStderrRetainer {
 
   truncation(): CodexStderrTruncation | undefined {
     if (this.totalBytes <= this.limitBytes) return undefined;
-    const retainedBytes = this.headBytes + this.tailBuffer().length;
+    const ends = this.retainedEnds();
+    const retainedBytes = Buffer.byteLength(ends.head) + Buffer.byteLength(ends.tail);
     return { limitBytes: this.limitBytes, retainedBytes, droppedBytes: this.totalBytes - retainedBytes };
+  }
+
+  private retainedEnds(): { head: string; tail: string } {
+    const head = new StringDecoder("utf8").write(Buffer.concat(this.head));
+    const tail = this.tailBuffer();
+    let start = 0;
+    while (start < Math.min(3, tail.length) && (tail[start]! & 0xc0) === 0x80) start++;
+    return { head, tail: tail.subarray(start).toString("utf8") };
+  }
+
+  evidence(): Omit<FileTail, "text"> {
+    return { state: this.totalBytes > this.limitBytes ? "truncated" : "complete",
+      bytesRead: Math.min(this.totalBytes, this.limitBytes), fileBytes: this.totalBytes };
   }
 
   text(): string {
     const truncation = this.truncation();
-    const head = Buffer.concat(this.head).toString("utf8");
-    if (!truncation) return head + Buffer.concat(this.tail).toString("utf8");
-    return `${head}\n[... ${truncation.droppedBytes} bytes of stderr dropped ...]\n${this.tailBuffer().toString("utf8")}`;
+    if (!truncation) return Buffer.concat([...this.head, ...this.tail]).toString("utf8");
+    const { head, tail } = this.retainedEnds();
+    return `${head}\n[... ${truncation.droppedBytes} bytes of stderr dropped ...]\n${tail}`;
   }
 }
 
@@ -2428,6 +2476,9 @@ class CodexJsonlAccumulator {
   private droppedBytes = 0;
   private spilledBytes = 0;
   private spilling = false;
+  private spillHead = "";
+  private spillHeadFull = false;
+  private spillEvidence?: Omit<FileTail, "text">;
   private failed = false;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
@@ -2436,6 +2487,21 @@ class CodexJsonlAccumulator {
   constructor(private nowMs: number, private readonly pendingFile?: string, private readonly observeToolLineage?: (raw: unknown) => void,
     private readonly observeMessage?: (text: string, tsMs: number) => void,
     private readonly observeToolCall?: (toolName: "Bash" | "Edit" | "Write", toolInput: Record<string, string>, tsMs: number) => void) {}
+
+  private appendSpillHead(part: string): void {
+    if (this.spillHeadFull) return;
+    const room = 64 * 1024 - Buffer.byteLength(this.spillHead);
+    if (room <= 0) { this.spillHeadFull = true; return; }
+    const bytes = Buffer.from(part);
+    const prefix = bytes.subarray(0, room);
+    if (bytes.length >= room) this.spillHeadFull = true;
+    for (let end = prefix.length; end > 0; end--) {
+      try {
+        this.spillHead += new TextDecoder("utf-8", { fatal: true }).decode(prefix.subarray(0, end));
+        return;
+      } catch { /* A byte cut may end inside one multibyte character. */ }
+    }
+  }
 
   push(chunk: string, nowMs = this.nowMs): void {
     this.nowMs = nowMs;
@@ -2446,10 +2512,12 @@ class CodexJsonlAccumulator {
       if (this.pendingFile && !this.spilling && this.retainedBytes() + Buffer.byteLength(part) > CODEX_WORKER_STDOUT_MAX_BYTES) {
         writeFileSync(this.pendingFile, this.pending, { mode: 0o600 });
         this.spilledBytes += this.pendingLineBytes();
+        this.appendSpillHead(this.pending);
         this.pending = "";
         this.spilling = true;
       }
       if (this.spilling) {
+        this.appendSpillHead(part);
         appendFileSync(this.pendingFile!, part);
         this.spilledBytes += Buffer.byteLength(part);
       } else {
@@ -2462,10 +2530,38 @@ class CodexJsonlAccumulator {
   }
 
   private consumePending(): void {
-    const line = this.spilling ? readFileSync(this.pendingFile!, "utf8") : this.pending;
+    let line = this.pending;
+    let sourceBytes: number | undefined;
+    if (this.spilling) {
+      const tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
+      const { text, ...evidence } = tail;
+      sourceBytes = tail.fileBytes === undefined ? undefined : tail.fileBytes + 1;
+      if (tail.state === "truncated") {
+        // Reconstruct only when the omitted bytes lie inside a JSON string. Parsing still
+        // validates the envelope; a partial line can never certify a complete report.
+        const omitted = tail.fileBytes! - Buffer.byteLength(this.spillHead) - Buffer.byteLength(text);
+        line = this.spillHead + JSON.stringify(this.truncationMarker(Math.max(0, omitted))).slice(1, -1) + text;
+        this.droppedBytes += Math.max(0, omitted);
+      } else {
+        line = text;
+      }
+      if (tail.state !== "complete") this.spillEvidence = evidence;
+      if (tail.state === "malformed" || tail.state === "unreadable" || tail.state === "absent") {
+        this.failed = true;
+        this.errors.push(`Codex stdout spill ${tail.state}: ${tail.reason ?? "report unavailable"}`);
+        this.pending = "";
+        this.spilling = false;
+        this.spillHead = "";
+        this.spillHeadFull = false;
+        this.boundRetained();
+        return;
+      }
+    }
     this.pending = "";
     this.spilling = false;
-    this.consumeLine(line);
+    this.spillHead = "";
+    this.spillHeadFull = false;
+    this.consumeLine(line, sourceBytes);
     if (this.pendingFile) this.boundRetained();
   }
 
@@ -2486,6 +2582,11 @@ class CodexJsonlAccumulator {
       isError: this.failed,
       subtype: this.failed ? "error_codex" : "success",
       errors: this.errors,
+      completion: Object.values(this.eventBytes).every(bytes => bytes === 0)
+        ? { state: "absent", reason: "Codex stdout report is absent" }
+        : this.completedTurns === 0 || this.turnInProgress || this.numTurns > this.completedTurns
+          ? { state: "incomplete", reason: "Codex report lacks turn.completed for the final turn" }
+          : { state: "complete" },
       ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
       ...(this.droppedBytes > 0 || this.spilledBytes > 0 ? { outputTruncation: {
         limitBytes: CODEX_WORKER_STDOUT_MAX_BYTES,
@@ -2498,6 +2599,10 @@ class CodexJsonlAccumulator {
 
   eventBytesByKind(): Readonly<Record<string, number>> {
     return { ...this.eventBytes };
+  }
+
+  stdoutEvidence(): Omit<FileTail, "text"> | undefined {
+    return this.spillEvidence;
   }
 
   pendingLineBytes(): number {
@@ -2544,14 +2649,14 @@ class CodexJsonlAccumulator {
     this.keptBytes = bytes(this.blocks) + bytes(this.errors);
   }
 
-  private consumeLine(line: string): void {
+  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1): void {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
       event = JSON.parse(line) as CodexJsonEvent;
     } catch {
       this.observeToolLineage?.(null);
-      this.eventBytes.malformed += Buffer.byteLength(line, "utf8") + 1;
+      this.eventBytes.malformed += sourceBytes;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
       this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
       this.failed = true;
@@ -2564,7 +2669,7 @@ class CodexJsonlAccumulator {
     const kind: CodexEventByteKind = CODEX_EVENT_BYTE_KIND_KEYS.includes(combined as CodexEventByteKind)
       ? (combined as CodexEventByteKind)
       : "other";
-    this.eventBytes[kind] += Buffer.byteLength(line, "utf8") + 1;
+    this.eventBytes[kind] += sourceBytes;
     if (event.type === "thread.started" && typeof event.thread_id === "string") this.sessionId = event.thread_id;
     if (event.type === "turn.started") {
       this.numTurns += 1;
@@ -2696,7 +2801,7 @@ function codexSpawnEnv(config: Config, args: CodexSpawnEnvArgs, nativeCacheRoot?
   for (const key of allowed) if (process.env[key] !== undefined) env[key] = process.env[key];
   env.CODEX_HOME = codexHome(config);
   for (const [key, value] of Object.entries(args.env ?? {})) {
-    if (!/^ANTHROPIC_|^OPENAI_API_KEY$/.test(key)) env[key] = value;
+    if (!/^ANTHROPIC_|^OPENAI_API_KEY$|^RMD_INSTANCE_REGISTRY$/.test(key)) env[key] = value;
   }
   // W1-T2800 — ASSIGNED AFTER `args.env` IS COPIED, AND FROM THE THREADED HOME ONLY.
   //
@@ -5830,8 +5935,11 @@ async function spawnCodexWorkerInPrivateTemp(
     (toolName, toolInput, tsMs) =>
       args.streamObserver?.({ kind: "tool-executing", tsMs, text: `[tool_use: ${toolName}]`, toolName, toolInput, cwd: args.cwd }));
   const stdoutDecoder = new StringDecoder("utf8");
+  const stdoutValidator = new TextDecoder("utf-8", { fatal: true });
+  let stdoutFailure: Omit<FileTail, "text"> | undefined;
   let stdoutBytes = 0;
   const stderrRetainer = new CodexStderrRetainer();
+  let stderrFailure: StderrFailure | undefined;
   let outputLimit: CodexWorkerOutputLimitError | undefined;
   const pidRef: { pid?: number } = {};
   const spawn = args.containment?.spawn ?? spawnDetachedGroup;
@@ -5857,9 +5965,10 @@ async function spawnCodexWorkerInPrivateTemp(
   const childEnv = { ...codexSpawnEnv(config, args, nativeCacheRoot), TMPDIR: privateTmpDir };
   const contained = spawn(
     { command: bin, args: codexExecArgs(args, config, selection, nativeCacheRoot), cwd: args.cwd, env: childEnv },
-    (chunk) => {
+    (chunk, failure) => {
       if (outputLimit || timedOut) return;
-      // W1-T8203: stderr past its bound is truncated (head + tail), never a teardown and never a verdict.
+      if (failure) stderrFailure = failure;
+      // Retain diagnostics without interrupting the child; completeness is judged after its actual exit.
       stderrRetainer.push(chunk);
     },
     args.onSpawnError,
@@ -5886,6 +5995,13 @@ async function spawnCodexWorkerInPrivateTemp(
   };
   process.stdout.on("data", (chunk: Buffer) => {
     if (outputLimit || timedOut) return;
+    if (!stdoutFailure) {
+      try { stdoutValidator.decode(chunk, { stream: true }); }
+      catch (error) {
+        stdoutFailure = { state: "malformed", bytesRead: stdoutBytes + chunk.length,
+          reason: `Codex stdout is not valid UTF-8: ${String((error as Error).message ?? error)}` };
+      }
+    }
     const text = stdoutDecoder.write(chunk);
     stdoutBytes += chunk.length;
     if (stdoutBytes > CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES) {
@@ -5910,11 +6026,19 @@ async function spawnCodexWorkerInPrivateTemp(
   else signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const exit = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
+    await contained.outputClosed;
     if (outputLimit) throw outputLimit;
     if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
+    if (!stdoutFailure) {
+      try { stdoutValidator.decode(); }
+      catch (error) {
+        stdoutFailure = { state: "malformed", bytesRead: stdoutBytes,
+          reason: `Codex stdout is not valid UTF-8 at EOF: ${String((error as Error).message ?? error)}` };
+      }
+    }
+    if (stdoutFailure) stdoutFailure = { ...stdoutFailure, bytesRead: stdoutBytes, fileBytes: stdoutBytes };
     stdout.push(stdoutDecoder.end());
     const parsed = stdout.finish();
-    lineageEnd = exit.kind === "exit" && exit.code === 0 && !parsed.isError ? "stream-ended" : "interrupted";
     if (parsed.outputTruncation && args.runId) appendLedger(ledgerPathFor(config), {
       run_id: args.runId,
       task_id: args.taskId ?? "unattributed",
@@ -5923,9 +6047,22 @@ async function spawnCodexWorkerInPrivateTemp(
     });
     const stderr = stderrRetainer.text();
     const stderrTruncation = stderrRetainer.truncation();
+    const droppedOutput = (parsed.outputTruncation?.droppedBytes ?? 0) > 0;
+    const textBytes = Buffer.byteLength(parsed.text);
+    const blockBytes = parsed.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    const outputRetention: NonNullable<CodexWorkerResult["outputRetention"]> = {
+      text: { state: droppedOutput ? "truncated" : "complete", bytesRead: textBytes },
+      blocks: { state: droppedOutput ? "truncated" : "complete", bytesRead: blockBytes },
+      stdout: stdoutFailure ?? stdout.stdoutEvidence() ?? { state: "complete", bytesRead: stdoutBytes, fileBytes: stdoutBytes },
+      stderr: { ...stderrRetainer.evidence(), ...stderrFailure },
+      completion: parsed.completion,
+      originalSubtype: parsed.subtype,
+    };
+    const incomplete = Object.values(outputRetention).some(value => typeof value === "object" && value.state !== "complete");
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
-    const isError = parsed.isError || exitCode !== 0;
+    const isError = parsed.isError || exitCode !== 0 || incomplete;
+    lineageEnd = isError ? "interrupted" : "stream-ended";
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
     const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
@@ -5950,7 +6087,9 @@ async function spawnCodexWorkerInPrivateTemp(
       ...(parsed.outputTruncation ? { outputTruncation: parsed.outputTruncation } : {}),
       ...(stderrTruncation ? { stderrTruncation } : {}),
       stderr,
-      subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
+      outputRetention,
+      subtype: parsed.isError ? parsed.subtype : exitCode !== 0 ? `error_exit_${exitCode}`
+        : incomplete ? "error_incomplete_output" : "success",
       isError,
       exit,
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),

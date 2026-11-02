@@ -1,0 +1,30 @@
+- id: W1-T11069
+  title: The redesign garden's due check reads no ledger on the daemon loop, so it can no longer starve the loop and its token refresh
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one gardener's due-check key; the pass and its candidate walk are unchanged
+  origin: operator-session#fleet-health-2026-11-01
+  plan_refs:
+    - W1-T5114
+  files:
+    - src/lib/redesign-gardener.ts
+    - test/gardeners/the-redesign-due-check-reads-no-ledger.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The redesign garden's cheapFingerprint reads no ledger rows; it keys on the plan's modification times and the hourly ledger bucket, so it is stable within an hour and moves with a new bucket
+      proof: "unit test: test/gardeners/the-redesign-due-check-reads-no-ledger.test.ts"
+    - claim: The due check uses the hourly ledger bucket
+      proof: "grep: gardenLedgerBucket(sources\\.clock) in src/lib/redesign-gardener.ts"
+  rationale: |
+    OBSERVED, operator recon 2026-11-01:
+    - The daemon stalled for hours twice: no sweep.pass from 05:41 to 10:11 and from 11:38 to the operator-approved restart at 12:56. In each stall the daemon's GitHub App token expired, every refresh failed with "exchange request failed: EPIPE" or "ECONNRESET", and every GitHub read answered 401 Bad credentials. Gardener children in the same container refreshed 192 times with no failure.
+    - daemon.loop_lag shows 60-180 s blocks, and daemon.loop_stall_profile names scanLedgerBuffer, parseObject, gardenPassDue and redesignCandidates.
+    - redesignGardenSpec's cheapFingerprint called redesignCandidates, which reads seven days of sweep.disposed rows from the ledger union with readLedgerUnionRecordsSync, on every due check on the daemon loop. The redesign garden merged 2026-10-30T14:45Z (#15621); the token-failure episodes began 2026-10-31 about 13:49Z. Every sweep gap of 45 min or more since then resumed within minutes of a daemon token refresh succeeding.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (W1-T11069..W1-T11077 on run-unfiled-1793538128289). The operator session hand-builds it on run-W1-T11069-<epochMs>.

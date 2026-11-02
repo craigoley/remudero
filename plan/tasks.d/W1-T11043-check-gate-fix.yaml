@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.09
+  # refusal-amendment (W1-T11043, run W1-T11043-1793529273447, 2026-11-01T11:28:27.556Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: Preventing the recorded round requires changing the dispatch or prepublication gate path outside `src/lib/prompt-render.ts` and `test/worker/check-gate-fix.test.ts`.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
