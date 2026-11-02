@@ -79,7 +79,9 @@ test("test/sweep/a-looping-pr-is-routed-push-through-rebuild-or-split-in-shadow.
       "src/lib/merge-queue.ts", "src/lib/risk-judge.ts", "src/lib/ci-gate.ts", "src/lib/ledger.ts",
       "src/lib/ledger-steps.ts", "src/lib/loop-decision.ts", "src/lib/sweep.ts", ".env", "secrets/key.pem",
       "src/lib/credentials.ts", "src/lib/review-findings.ts", "../escape.ts", "deploy\\Dockerfile",
-      "src/run-task.ts", "scripts/source-size-ratchet.mjs", "schemas/ledger.json", "src/lib/classify.ts"]) {
+      "src/run-task.ts", "scripts/source-size-ratchet.mjs", "schemas/ledger.json", "src/lib/classify.ts",
+      ".codex/auth.json", "src/lib/github-app.ts", "src/lib/provider-auth-sessions.ts", "src/lib/authority.ts",
+      "src/lib/managed-garden-token.ts", ".claude/credentials.json", ".npmrc", "keys/id_rsa"]) {
       assert.equal(decideLoopOutcome({ ...input(), changedFiles: [path] })?.route, "close-and-rebuild", path);
     }
   });

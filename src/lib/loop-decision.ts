@@ -35,10 +35,11 @@ function criteriaOf(value: unknown): Criterion[] | undefined {
 
 function protectedPath(path: string): boolean {
   if (!path || path.startsWith("/") || path.includes("\\") || path.split("/").some(p => p === "." || p === "..")) return true;
-  return /^(?:deploy|\.github|hooks|scripts|\.git|\.ssh|secrets|credentials)(?:\/|$)/i.test(path) ||
+  return /^(?:deploy|\.github|hooks|scripts|\.git|\.ssh|\.codex|\.claude|\.aws|\.gnupg|\.config|secrets|credentials)(?:\/|$)/i.test(path) ||
     path === "src/run-task.ts" ||
-    /(?:^|\/)(?:\.env(?:\..*)?|[^/]*\.(?:pem|key|p12))$/i.test(path) ||
-    /(?:^|\/)[^/]*(?:credential|secret|review|merge|risk|gate|ledger|loop-decision|sweep|policy|classify|pr-blocker)[^/]*\.(?:[cm]?[jt]sx?|json|ya?ml)$/i.test(path);
+    /(?:^|\/)(?:\.env(?:\..*)?|\.npmrc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|[^/]*\.(?:pem|key|p12|pfx|keystore))$/i.test(path) ||
+    // Credential stores and their owning modules (auth.json, github-app.ts, provider-auth-sessions.ts, tokens).
+    /(?:^|\/)[^/]*(?:credential|secret|auth|github-app|token|keychain|review|merge|risk|gate|ledger|loop-decision|sweep|policy|classify|pr-blocker)[^/]*\.(?:[cm]?[jt]sx?|json|ya?ml)$/i.test(path);
 }
 
 /** Shadow only (W1-T11076): replay existing receipts; the caller records the result without acting on it. */
