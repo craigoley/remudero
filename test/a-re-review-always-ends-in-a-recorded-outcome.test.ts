@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
-import type { Config } from "../src/lib/config.js";
-import { postReviewStatusGuarded } from "../src/lib/review.js";
-import { reviewAttemptsForInput, reviewCommand, type ReviewRunResult } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { postReviewStatusGuarded } from "#src/lib/review.js";
+import { reviewAttemptsForInput, reviewCommand, type ReviewRunResult } from "#src/run-task.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const CONTROLLER_HEAD = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();

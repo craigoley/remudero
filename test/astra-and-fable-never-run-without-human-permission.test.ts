@@ -3,22 +3,22 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { loadMounts, mountsPath, type CapabilityLadder } from "../src/lib/mounts.js";
+import { loadMounts, mountsPath, type CapabilityLadder } from "#src/lib/mounts.js";
 import {
   assertModelAllowed,
   HumanGatedModelError,
   humanGatedFamily,
   modelAllowed,
-} from "../src/lib/model-gate.js";
-import { withLiveSpawnAllowed } from "../src/lib/spawn-guard.js";
+} from "#src/lib/model-gate.js";
+import { withLiveSpawnAllowed } from "#src/lib/spawn-guard.js";
 import {
   selectCodexModel,
   selectOpenWeightModel,
   spawnCodexWorker,
   type CodexModelInfo,
-} from "../src/lib/worker-provider.js";
-import { createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+} from "#src/lib/worker-provider.js";
+import { createClaudeExecutableCache, spawnWorker } from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 
 // Operator ruling, 2026-09-22: "We should never use Astra or Fable without getting human
 // permission first." Astra is the Codex account's DEFAULT model, and the Claude CLI's own default

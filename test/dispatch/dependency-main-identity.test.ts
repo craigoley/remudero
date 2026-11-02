@@ -9,8 +9,9 @@ import { buildSweepEffects, fixBranchClaimKey } from "#src/run-task.js";
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { acquireInflightLock, inflightLockPath } from "#src/lib/inflight-lock.js";
 import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
-const HEAD = "c".repeat(40), MAIN = "a".repeat(40), HEAD_TREE = "d".repeat(40), MAIN_TREE = "e".repeat(40), BLOB = "f".repeat(40);
+const HEAD = "c".repeat(40), MAIN = "a".repeat(40), HEAD_TREE = "d".repeat(40), MAIN_TREE = "e".repeat(40), BLOB = "f".repeat(40), LANDED = "9".repeat(40);
 function fixture() {
   const candidate: OpenPrRest = { number: 13446, url: "https://github.com/o/r/pull/13446", headRefName: "dependabot/npm/sdk", headRefOid: HEAD,
     updatedAt: new Date().toISOString(), body: "", autoMergeRequest: null, contributionOrigin: { actor: { login: "dependabot[bot]" } } };
@@ -21,6 +22,10 @@ function fixture() {
     ["repos/o/r/commits/main", { sha: MAIN }], ["repos/o/r/pulls/13446", metadata], ["repos/o/r/pulls/13446/files?per_page=100", files],
     [`repos/o/r/git/commits/${HEAD}`, { sha: HEAD, tree: { sha: HEAD_TREE } }], [`repos/o/r/git/commits/${MAIN}`, { sha: MAIN, tree: { sha: MAIN_TREE } }],
     [`repos/o/r/git/trees/${HEAD_TREE}`, tree(HEAD_TREE)], [`repos/o/r/git/trees/${MAIN_TREE}`, tree(MAIN_TREE)],
+    ["repos/o/r/pulls/13446/reviews?per_page=100", [{ user: { login: "remudero-fleet[bot]", type: "Bot" }, state: "COMMENTED" }]],
+    ["repos/o/r/pulls/13446/comments?per_page=100", []],
+    ["repos/o/r/issues/13446/comments?per_page=100", [{ user: { login: "dependabot[bot]", type: "Bot" }, body: "rebase" }]],
+    [`repos/o/r/commits?sha=${MAIN}&path=package.json&per_page=1`, [{ sha: LANDED, commit: { message: "chore(deps): bump the npm group (#15744)\n\nbody" } }]],
   ]);
   const calls: string[] = [];
   const fetch = (args: string[]) => { const path = args[1]; calls.push(path); if (!responses.has(path)) throw new Error(`unexpected ${path}`); return responses.get(path); };
@@ -40,7 +45,7 @@ test("Dependabot whole-path immutable content and regular modes prove already-la
   const reads = f.calls.length; assert.deepEqual(f.observe(), proof); assert.equal(f.calls.length, reads + 1, "immutable cache still pins fresh main");
 });
 
-for (const fault of ["bytes", "mode", "symlink", "submodule", "missing", "truncated", "tree-sha", "duplicate", "count", "renamed", "deleted", "blob-binding", "head", "base", "base-sha", "closed", "author", "unreadable"] as const) {
+for (const fault of ["bytes", "mode", "symlink", "submodule", "missing", "truncated", "tree-sha", "duplicate", "count", "renamed", "deleted", "blob-binding", "head", "base", "closed", "author", "unreadable"] as const) {
   test(`dependency identity refuses ${fault} evidence`, () => {
     const f = fixture();
     const main = f.responses.get(`repos/o/r/git/trees/${MAIN_TREE}`) as { sha: string; truncated: boolean; tree: Array<{ path: string; mode: string; type: string; sha: string }> };
@@ -58,7 +63,6 @@ for (const fault of ["bytes", "mode", "symlink", "submodule", "missing", "trunca
     if (fault === "blob-binding") f.files[0].sha = "1".repeat(40);
     if (fault === "head") f.metadata.head.sha = "1".repeat(40);
     if (fault === "base") f.metadata.base.ref = "other";
-    if (fault === "base-sha") f.metadata.base.sha = "1".repeat(40);
     if (fault === "closed") f.metadata.state = "closed";
     if (fault === "author") f.metadata.user.login = "cao825";
     if (fault === "unreadable") f.responses.delete("repos/o/r/pulls/13446");
@@ -102,7 +106,7 @@ test("non-bot, incomplete, duplicate, mixed-scope and unsupported nested manifes
     if (fault === "author") f.candidate.contributionOrigin = { actor: { login: "cao825" } };
     if (fault === "incomplete") f.observations.set(13446, { state: "unreadable", reason: "per-pass-cap" });
     if (fault === "duplicate") f.observations.set(13446, { state: "complete", cache: "miss", paths: ["package.json", "package.json"] });
-    if (fault === "scope") f.observations.set(13446, { state: "complete", cache: "miss", paths: ["package.json", "src/other.ts"] });
+    if (fault === "scope") f.observations.set(13446, { state: "complete", cache: "miss", paths: ["src/other.ts", "README.md"] });
     if (fault === "nested") f.observations.set(13446, { state: "complete", cache: "miss", paths: ["fixture/package.json"] });
     assert.equal(f.observe(), undefined); assert.equal(f.calls.length, 0);
   }
@@ -162,7 +166,7 @@ function effectFixture() {
     readJsonImpl: async args => { onRead?.(); return f.fetch(args); },
     ghRunImpl: (_file, args) => { posts.push([...args]); return ""; },
   });
-  const run = async () => effects.withDependencyCloseFence!(pr, async () => { await effects.close(pr, "immutable dependency identity"); });
+  const run = async () => effects.withDependencyCloseFence!(pr, async (by) => { await effects.close(pr, by === undefined ? "immutable dependency identity" : `immutable dependency identity; superseded by ${by}`); });
   return { dir, f, pr, claims, key, posts, effects, run, onRead: (fn: () => void) => { onRead = fn; } };
 }
 
@@ -175,7 +179,8 @@ test("default dependency close holds the canonical branch mutex through fresh re
       assert.throws(() => acquireInflightLock(f.claims, f.key, { run_id: "competing-native-fix", reclaim: false }), { code: "EEXIST" });
       assert.equal(JSON.parse(readFileSync(inflightLockPath(f.claims, f.key), "utf8")).run_id, "dependency-close-test");
     });
-    assert.deepEqual(await f.run(), { closed: true }); assert.equal(protectedReads, 2);
+    // main, the PR, reviews, review comments and Conversation-tab comments, plus the landing name: all under the claim.
+    assert.deepEqual(await f.run(), { closed: true }); assert.equal(protectedReads, 6);
     assert.equal(f.posts.length, 1); assert.deepEqual(f.posts[0].slice(0, 3), ["pr", "close", f.pr.prUrl]);
     assert.ok(!f.posts[0].includes("--delete-branch")); assert.equal(existsSync(inflightLockPath(f.claims, f.key)), false);
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
@@ -308,4 +313,95 @@ test("ordinary mergeable disposition retains its normal arm path despite unrelat
     const rows = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map(row => JSON.parse(row));
     assert.equal(rows.find(row => row.step === "sweep.disposed")?.disposition, "mergeable");
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test("supersession: an idle Dependabot PR whose base trails main is still proven superseded by main's current blobs", () => {
+  const f = fixture();
+  f.metadata.base.sha = "1".repeat(40);
+  const proof = f.observe();
+  assert.equal(proof?.state, "identical", JSON.stringify(proof));
+  if (proof?.state === "identical") assert.equal(proof.mainSha, MAIN, "identity pins main's CURRENT sha, not the PR's stale base");
+});
+
+test("supersession: a Dependabot head carrying a non-manifest repair file is proven superseded when every path matches main", () => {
+  const f = fixture();
+  f.files[1].filename = "settings.ts";
+  for (const side of [HEAD_TREE, MAIN_TREE]) (f.responses.get(`repos/o/r/git/trees/${side}`) as { tree: Array<{ path: string }> }).tree[1].path = "settings.ts";
+  f.observations.set(13446, { state: "complete", cache: "miss", paths: ["package.json", "settings.ts"] });
+  assert.equal(f.observe()?.state, "identical");
+  (f.responses.get(`repos/o/r/git/trees/${MAIN_TREE}`) as { tree: Array<{ sha: string }> }).tree[1].sha = "1".repeat(40);
+  assert.equal(runGhReadSteps(hydrateDependencyMainIdentitiesSteps("o", "r", [f.candidate], f.observations, f.fetch, {})).get(13446)?.state,
+    "different", "a repair file main does not carry keeps the PR open");
+});
+
+test("supersession close names the superseding PR and still closes an idle PR whose base trails main", async () => {
+  const f = effectFixture();
+  try {
+    f.f.metadata.base.sha = "1".repeat(40);
+    assert.deepEqual(await f.run(), { closed: true });
+    assert.equal(f.posts.length, 1);
+    assert.match(f.posts[0][4], /superseded by #15744 \(main commit 999999999999\)/);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test("supersession close without a nameable landing commit still closes, saying why it names none", async () => {
+  for (const landing of [undefined, [], [{ sha: "bad", commit: { message: "x" } }], [{ sha: LANDED, commit: { message: "direct push" } }]]) {
+    const f = effectFixture();
+    try {
+      const key = `repos/o/r/commits?sha=${MAIN}&path=package.json&per_page=1`;
+      if (landing === undefined) f.f.responses.delete(key); else f.f.responses.set(key, landing);
+      assert.deepEqual(await f.run(), { closed: true });
+      const direct = Array.isArray(landing) && landing.length === 1 && landing[0].sha === LANDED;
+      if (direct) assert.match(f.posts[0][4], /superseded by main commit 999999999999$/);
+      else if (landing === undefined) assert.match(f.posts[0][4], /superseded by main a{12} \(landing commit unreadable: Error: unexpected /);
+      else assert.doesNotMatch(f.posts[0][4], /superseded by/);
+    } finally { rmSync(f.dir, { recursive: true, force: true }); }
+  }
+});
+
+for (const fault of ["human-review", "human-review-comment", "untyped-review-author", "reviews-unreadable", "comments-unbounded"] as const) {
+  test(`supersession close never ends an open human review conversation: ${fault}`, async () => {
+    const f = effectFixture();
+    try {
+      const reviews = "repos/o/r/pulls/13446/reviews?per_page=100", comments = "repos/o/r/pulls/13446/comments?per_page=100";
+      if (fault === "human-review") f.f.responses.set(reviews, [{ user: { login: "craigoley", type: "User" }, state: "CHANGES_REQUESTED" }]);
+      if (fault === "human-review-comment") f.f.responses.set(comments, [{ user: { login: "craigoley", type: "User" }, body: "wait" }]);
+      if (fault === "untyped-review-author") f.f.responses.set(reviews, [{ state: "COMMENTED" }]);
+      if (fault === "reviews-unreadable") f.f.responses.set(reviews, { message: "rate limited" });
+      if (fault === "comments-unbounded") f.f.responses.set(comments, Array.from({ length: 100 }, () => ({ user: { login: "x[bot]", type: "Bot" } })));
+      const result = await f.run();
+      assert.equal(result.closed, false); assert.match(result.reason ?? "", /review/); assert.equal(f.posts.length, 0);
+      assert.equal(existsSync(inflightLockPath(f.claims, f.key)), false);
+    } finally { rmSync(f.dir, { recursive: true, force: true }); }
+  });
+}
+
+test("supersession close never ends a human comment on the PR's Conversation tab", async () => {
+  for (const [name, rows] of [
+    ["human conversation comment", [{ user: { login: "dependabot[bot]", type: "Bot" }, body: "rebase" }, { user: { login: "craigoley", type: "User" }, body: "keep this one" }]],
+    ["conversation unreadable", { message: "rate limited" }],
+  ] as const) {
+    const f = effectFixture();
+    try {
+      f.f.responses.set("repos/o/r/issues/13446/comments?per_page=100", rows);
+      const result = await f.run();
+      assert.equal(result.closed, false, name); assert.match(result.reason ?? "", /PR conversation comments/, name);
+      assert.equal(f.posts.length, 0, name);
+      assert.equal(existsSync(inflightLockPath(f.claims, f.key)), false, name);
+    } finally { rmSync(f.dir, { recursive: true, force: true }); }
+  }
+});
+
+test("supersession: the sweep's close comment carries the superseding PR the fence names", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}dependency-named-close-`));
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson"); writeFileSync(ledgerPath, "");
+    const reasons: string[] = [];
+    const deps: SweepDeps = { ledgerPath, runId: "named-close", arm: () => {}, dispatchFix: () => {}, escalate: () => {},
+      close: (_pr, reason) => { reasons.push(reason); }, depReview: () => "hold",
+      withDependencyCloseFence: async (_pr, close) => { await close("#15744 (main commit 999999999999)"); return { closed: true }; } };
+    await runSweep([view()], deps, DEFAULT_SWEEP_POLICY);
+    assert.equal(reasons.length, 1);
+    assert.match(reasons[0], /already match main a{40} at head c{40}; superseded by #15744 \(main commit 999999999999\)$/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { spawnCodexWorker } from "../src/lib/worker-provider.js";
-import type { ContainedSpawnOptions } from "../src/lib/worker-containment.js";
+import { spawnCodexWorker } from "#src/lib/worker-provider.js";
+import type { ContainedSpawnOptions } from "#src/lib/worker-containment.js";
 
 function deferredCodexProcess() {
   const stdin = new PassThrough();

@@ -3,11 +3,11 @@ import { test } from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runReview } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { runReview } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 // ── W1-T166 (end-to-end): runReview's POSTING PATH filters holdout criteria out of the
 // ledger's `unmet_criteria`/PR-comment display and writes the `reward_hacking_gap` field,

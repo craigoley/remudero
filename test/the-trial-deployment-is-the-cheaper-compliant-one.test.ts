@@ -26,15 +26,15 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
-import { fixedClock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
 import {
   openWeightCandidatesForCapability,
   openWeightPriceFor,
   openWeightReservationUsd,
   openWeightUsageUsd,
   spawnOpenWeightWorker,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MOUNTS = join(REPO_ROOT, ".remudero", "mounts.yaml");

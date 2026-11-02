@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { loadPlanFromYaml } from "../src/lib/plan.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
 // A NAMESPACE import: at the merge base `independentQueueGateway` does not exist, and a named import would fail the
 // whole file at load, which the reviewer reads as "never ran" rather than as a red.
-import * as agreement from "../src/lib/reader-agreement.js";
-import type { GitHub } from "../src/lib/status.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import * as agreement from "#src/lib/reader-agreement.js";
+import type { GitHub } from "#src/lib/status.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 /**
  * W1-T6246 — THE READER-AGREEMENT CHECK PROJECTS THE PLAN OFF THE DAEMON LOOP. Its independent queue figure built a

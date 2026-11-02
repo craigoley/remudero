@@ -2,10 +2,20 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import type { CashReservation } from "#src/lib/cash-accounting.js";
 import type { Config } from "#src/lib/config.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { OPENWEIGHT_ALLOWANCE_FILENAME, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+
+function assertHeld(row: CashReservation) {
+  assert.ok(row.reservedUsd > 0);
+  assert.equal(row.settledUsd, null, "no usage receipt can release the output ceiling");
+  assert.equal(row.accountingState, "held-unknown");
+  assert.equal(row.heldUsd, row.reservedUsd);
+  assert.equal(row.usageEstimateUsd, null);
+  assert.equal(row.billedUsd, null);
+}
 
 const hidden = "private-fixture-body-key-prompt-and-reasoning";
 const models = ["gpt-6-luna", "gpt-6.1-sol", "claude-haiku-5-5"];
@@ -27,10 +37,11 @@ async function refuse(t: TestContext, response: Response, model = models[0]!, si
   assert.equal(result.stderr.includes(hidden), false);
   assert.equal(result.text.includes(hidden), false);
   assert.equal(allowance.includes(hidden), false);
-  const reservations = Object.values(JSON.parse(allowance).reservations) as Array<{ settledUsd: number | null }>;
+  const reservations = Object.values(JSON.parse(allowance).reservations) as CashReservation[];
   assert.equal(reservations.length, 1);
-  if (model.startsWith("claude-")) assert.equal(reservations[0]!.settledUsd, null);
-  else assert.ok(reservations[0]!.settledUsd! > 0);
+  assertHeld(reservations[0]!);
+  assert.equal(result.budgetHeldUsd, reservations[0]!.reservedUsd);
+  assert.equal(result.usageEstimateUsd, null);
   return result;
 }
 

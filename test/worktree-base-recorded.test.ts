@@ -22,7 +22,7 @@ import {
   worktreeBasePath,
   worktreeRemove,
   writeRunLock,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 // W1-T405 acceptance (4): the base commit is recorded when the worktree is created, so a
 // later refusal can be attributed without re-deriving it. `worktreeAdd` never asserted or

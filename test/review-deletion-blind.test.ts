@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { judgeReview } from "../src/lib/review.js";
+import { judgeReview } from "#src/lib/review.js";
 
 // W1-T389 — `walkDiff` set the current file from the diff's `+++` line, and a DELETED
 // file's is `+++ /dev/null`, so every removed line was tagged `/dev/null`. `changedFiles`

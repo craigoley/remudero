@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runTask, taskRecordContextLine, workerVisibleRecordPath } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { GitHub } from "../src/lib/status.js";
-import { cashDivertToolsForLane } from "../src/lib/worker.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
+import { runTask, taskRecordContextLine, workerVisibleRecordPath } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { GitHub } from "#src/lib/status.js";
+import { cashDivertToolsForLane } from "#src/lib/worker.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
 
 // ── W1-T299: a recon worker that runs out of turns must not kill the whole dispatch — a
 // read-only preamble failing must never cost the task its ability to ever run again. These
@@ -176,7 +176,7 @@ async function runFixture(
   process.env.PATH = `${fakeBinDir}:${savedPath}`;
   const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
 
-  const { withLiveWritesAllowed } = await import("../src/lib/live-write-guard.js");
+  const { withLiveWritesAllowed } = await import("#src/lib/live-write-guard.js");
   try {
     const res = await withLiveWritesAllowed(() =>
       runTask("T-RECON-DEGRADE", {

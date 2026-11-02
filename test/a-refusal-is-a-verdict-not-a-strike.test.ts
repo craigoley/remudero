@@ -3,13 +3,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildOpenPrViews, IMPLEMENT_REFUSAL_REPORT_CONTRACT, routeFix, type FixDeps } from "../src/run-task.js";
+import { buildOpenPrViews, IMPLEMENT_REFUSAL_REPORT_CONTRACT, routeFix, type FixDeps } from "#src/run-task.js";
 import {
   decideAutoMergeArm,
   judgeReview,
   reviewLedgerReasons,
   type CriterionVerdict,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
@@ -17,7 +17,7 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 /** W1-T3837 — DERIVED FROM THE CLOCK, NEVER A CONSTANT, because one caller in this file does not
  *  take an injected one. `deriveDisposition` is handed `NOW` explicitly at every call site below,

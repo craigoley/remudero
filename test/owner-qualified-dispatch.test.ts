@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { resolveDaemonTarget, resolveReviewTarget } from "../src/run-task.js";
+import { resolveDaemonTarget, resolveReviewTarget } from "#src/run-task.js";
 
 /**
  * W1-T1062 ACCEPTANCE 2: "an owner-qualified target resolves to that owner rather than to this

@@ -1,0 +1,34 @@
+id: incident-942291754286c3ad
+ts: 2026-11-01T23:12:26.338Z
+raw: >-
+  Incident 942291754286: flow pr-stage-stall:plan-proof-unrunnable:plan-only PR
+  is red on ci-shard (<n>/<n>), lint-plan — the code-fix lane cannot stage
+  outside a plan filing, so no fix is dispatched; the plan violation needs a
+  plan repair — its log names: W1-T10573 [machine-filing-admission] task
+  W1-T10573 is not selectable by runnableCandidates under the current
+  releasedIds: task W1-T10573 is verify:human — not auto-runnable by the
+  proto-runner
+
+  First seen: 2026-11-01T10:20:25.432Z
+
+  Last seen: 2026-11-01T10:20:25.432Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15766 plan-proof-unrunnable: repeat: "plan-only PR is red on ci-shard (<n>/<n>), lint-plan — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair — its log names: W1-T10573 [machine-filing-admission] task W1-T10573 is not selectable by runnableCandidates under the current releasedIds: task W1-T10573 is verify:human — not auto-runnable by the proto-runner" x2
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#942291754286c3ad4a733352e04e7629dfde39514e8f2814d94d9ce361544329
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

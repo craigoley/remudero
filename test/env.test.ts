@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildWorkerEnv, isBillingClean, billingMode, assertCleanBoot } from "../src/lib/env.js";
-import { LIVE_LEDGER_DENY_ROOT_ENV } from "../src/lib/live-write-guard.js";
-import { GARDENER_ORIGIN_ENV, GARDENER_ORIGIN_MAX_BYTES, gardenerOriginEnv, readGardenerOrigin } from "../src/lib/worker-containment.js";
+import { buildWorkerEnv, isBillingClean, billingMode, assertCleanBoot } from "#src/lib/env.js";
+import { LIVE_LEDGER_DENY_ROOT_ENV } from "#src/lib/live-write-guard.js";
+import { GARDENER_ORIGIN_ENV, GARDENER_ORIGIN_MAX_BYTES, gardenerOriginEnv, readGardenerOrigin } from "#src/lib/worker-containment.js";
 
 test("SDK gardener origin validation and parent precedence", () => {
   const passA = "a5142db1-3dab-4f50-8f8f-a25cfb8e8db1";

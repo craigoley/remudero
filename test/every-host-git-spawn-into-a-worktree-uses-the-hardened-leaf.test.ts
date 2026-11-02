@@ -24,9 +24,9 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { maskLiterals, stripComments } from "../src/lib/test-impact-map.js";
+import { maskLiterals, stripComments } from "#src/lib/test-impact-map.js";
 // @ts-ignore the executable .mjs module has no declaration file.
-import { CWD_OPTION_GIT_SPAWN as SHARED_CWD_OPTION_GIT_SPAWN, NOT_A_SPAWN, POSITIONAL_C } from "../scripts/lib/git-spawn-shapes.mjs";
+import { CWD_OPTION_GIT_SPAWN as SHARED_CWD_OPTION_GIT_SPAWN, NOT_A_SPAWN, POSITIONAL_C } from "#scripts/lib/git-spawn-shapes.mjs";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 

@@ -4,9 +4,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readWorktreeBase, WorktreeBaseStaleError, worktreeAddAsync } from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { readWorktreeBase, WorktreeBaseStaleError, worktreeAddAsync } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // MEASURED 2026-09-28..10-01: 10 build runs ended worktree.stale_base before any work ran — main advanced between the fetch and
 // the ls-remote while a slow `worktree add` checked out (W1-T4939: fetched b1329af, main 2994dd9, behind 2). The worktree is

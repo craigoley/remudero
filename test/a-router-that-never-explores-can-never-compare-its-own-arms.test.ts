@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Config, WorkerProviderId } from "../src/lib/config.js";
+import type { Config, WorkerProviderId } from "#src/lib/config.js";
 import {
   configForMountExploration,
   exploreMount,
@@ -8,9 +8,9 @@ import {
   mountExplorationLedgerFields,
   resolveMountExplorationDispatch,
   type MountExplorationDispatch,
-} from "../src/lib/mount-exploration.js";
-import type { Mount, Mounts } from "../src/lib/mounts.js";
-import type { MountHeadroomCell } from "../src/lib/mount-recommender.js";
+} from "#src/lib/mount-exploration.js";
+import type { Mount, Mounts } from "#src/lib/mounts.js";
+import type { MountHeadroomCell } from "#src/lib/mount-recommender.js";
 
 function mounts(): Mounts {
   const sonnetHigh = { model: "sonnet", effort: "high", maxTurns: 400, contextBudget: 160000 };

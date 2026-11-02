@@ -23,9 +23,9 @@ import {
   runContextLine,
   buildPreflightSummary,
   type RunContext,
-} from "../src/lib/ci-parity.js";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { preflightCommand } from "../src/run-task.js";
+} from "#src/lib/ci-parity.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
+import { preflightCommand } from "#src/run-task.js";
 import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 /** A spawn recorder: returns a canned result per argv, and records what was asked for. */

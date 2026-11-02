@@ -5,8 +5,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { collectWorkerFailureCorpus } from "../src/lib/ci-failure-corpus.js";
-import type { LedgerLine } from "../src/lib/ledger.js";
+import { collectWorkerFailureCorpus } from "#src/lib/ci-failure-corpus.js";
+import type { LedgerLine } from "#src/lib/ledger.js";
 
 const review = (over: Record<string, unknown>): LedgerLine =>
   ({ step: "review.posted", run_id: "R", task_id: "W1-T1", pr_url: "https://github.com/o/r/pull/1", ...over }) as unknown as LedgerLine;

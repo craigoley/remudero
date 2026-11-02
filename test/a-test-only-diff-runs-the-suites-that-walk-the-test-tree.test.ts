@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 // @ts-expect-error diff-class is an executable .mjs module outside tsconfig.
-import { censusSuiteFiles, enumeratesPopulation, testOnlyRun } from "../scripts/diff-class.mjs";
+import { censusSuiteFiles, enumeratesPopulation, testOnlyRun } from "#scripts/diff-class.mjs";
 
 const CENSUS = "test/a-wall-clock-bound-declares-itself.test.ts";
 const MEMBER = "test/a-review-proof-run-keeps-the-daemon-loop-responsive.test.ts";

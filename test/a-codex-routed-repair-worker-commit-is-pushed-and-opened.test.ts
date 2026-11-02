@@ -13,19 +13,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
-import type { Config } from "../src/lib/config.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { MainRepairFixRequest } from "../src/lib/main-health-rung.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { alertOriginId, alertTaskId } from "../src/lib/ops.js";
-import { inertAcceptanceProofs } from "../src/lib/proof-grammar.js";
-import { parseAcceptanceBlock } from "../src/lib/review.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { commitCodexWriterEdits, type CodexHarnessCommit } from "../src/lib/worker-provider.js";
-import { worktreeAddAsync, type SpawnWorkerArgs, type WorkerResult } from "../src/lib/worker.js";
+import type { AlertLaneAlert } from "#src/lib/alert-lane.js";
+import type { Config } from "#src/lib/config.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { MainRepairFixRequest } from "#src/lib/main-health-rung.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { alertOriginId, alertTaskId } from "#src/lib/ops.js";
+import { inertAcceptanceProofs } from "#src/lib/proof-grammar.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { commitCodexWriterEdits, type CodexHarnessCommit } from "#src/lib/worker-provider.js";
+import { worktreeAddAsync, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import {
   type AlertFixDispatchDeps,
   alertFixPrompt,
@@ -35,8 +35,8 @@ import {
   MAIN_REPAIR_PROSE_PLACEHOLDER,
   mainRepairFixPrompt,
   mainRepairTaskId,
-} from "../src/run-task.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+} from "#src/run-task.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 
 const OWNER = "craigoley";
 const RED_MERGE = "037a58d8f".padEnd(40, "0"); // the 2026-10-15 red merge

@@ -6,8 +6,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 // @ts-expect-error The production coverage merger is an executable .mjs module outside tsconfig.
-import { mergeShardLineHits } from "../scripts/coverage-merge-ratchet.mjs";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { mergeShardLineHits } from "#scripts/coverage-merge-ratchet.mjs";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 /**
  * `SF:src/lib/<define:import.meta>` IS A COMMONJS COMPILE OF THE REAL src GRAPH, AND ITS REFUSAL SAYS SO.

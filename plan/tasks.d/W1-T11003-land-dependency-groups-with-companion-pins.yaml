@@ -25,7 +25,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=65294f7f6d5c3135
-  # backlog gardener: placed=2026-10-30T04:04:41.730Z
+  # backlog gardener: placed=2026-11-01T13:30:31.115Z
   attempts: 0
   rationale: |
     The checkout still pins image CLI versions 2.1.303 and 0.163.0, SDK

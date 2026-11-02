@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { RECON_MAX_TURNS, resolveRunMounts } from "../src/run-task.js";
+import { RECON_MAX_TURNS, resolveRunMounts } from "#src/run-task.js";
 
 // ── THE DEFECT ────────────────────────────────────────────────────────────────────────
 // The RECON spawn passed neither `model` nor `effort`. Both are optional on SpawnWorkerArgs

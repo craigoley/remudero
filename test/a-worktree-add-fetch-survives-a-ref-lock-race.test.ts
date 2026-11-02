@@ -4,9 +4,9 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { worktreeAdd } from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { worktreeAdd } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // MEASURED 2026-10-01: an operator `rmd plan` run died in worktreeAdd's `git fetch origin` with "cannot lock ref
 // 'refs/remotes/origin/main': is at … but expected …" because the daemon fetched the same managed checkout at the

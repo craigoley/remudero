@@ -55,6 +55,16 @@ const JWT_TTL_SEC = 9 * 60;
 // Why: docs/forensics/github-app.md#exchange_timeout_ms
 export const EXCHANGE_TIMEOUT_MS = 20 * 1000;
 
+/** PRIMARY CONTROL: caps one token refresh at three total attempts, including the initial exchange. */
+export const MAX_TOKEN_EXCHANGE_ATTEMPTS = 3;
+const RETRYABLE_EXCHANGE_SOCKET_CODES = new Set(["EPIPE", "ECONNRESET", "UND_ERR_SOCKET", "ETIMEDOUT"]);
+
+function retryableExchangeCode(reason: string): string | undefined {
+  const prefix = "exchange request failed: ";
+  const code = reason.startsWith(prefix) ? reason.slice(prefix.length) : "";
+  return RETRYABLE_EXCHANGE_SOCKET_CODES.has(code) ? code : undefined;
+}
+
 /** The two ledger step names this module writes, owned here so each has exactly one spelling —
  *  imported by readers like `deriveNeedsMe` (`src/lib/status-board.ts`) rather than retyped. */
 // Why: docs/forensics/github-app.md#token_refreshed_step
@@ -152,6 +162,9 @@ function fetchFailureIdentifier(err: unknown): string | undefined {
     if (cause && typeof cause === "object" && "code" in cause && typeof (cause as { code: unknown }).code === "string") {
       return (cause as { code: string }).code;
     }
+    if ("code" in err && typeof (err as Error & { code?: unknown }).code === "string") {
+      return (err as Error & { code: string }).code;
+    }
     if (err.name && err.name !== "Error") {
       return err.name;
     }
@@ -229,46 +242,50 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
     return { ok: false, reason: "jwt signing failed" };
   }
 
-  // The exchange is abandoned, never awaited forever — see EXCHANGE_TIMEOUT_MS's doc. The timer
-  // is armed before the fetch is issued; only how the catch below names a failure changed here.
-  let res: Response;
-  const timeoutController = new AbortController();
-  const cancelDeadline = exchangeDeadline(timeoutController, clockFromMillisFn(now), "token exchange timed out");
-  try {
-    res = await fetchFn(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${jwt}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-      signal: timeoutController.signal,
-    });
-  } catch (err) {
-    // Decide from the caught error first, the abort only when the error says nothing — never
-    // from `signal.aborted` alone, which is true for the whole 20s and says nothing about
-    // whether the network was ever touched.
-    const reason = describeExchangeCatch(err, timeoutController);
-    log(TOKEN_REFRESH_FAILED_STEP, { reason });
-    return { ok: false, reason };
-  } finally {
-    cancelDeadline();
+  // Each attempt keeps its deadline through the body read and asks the peer to close the connection.
+  // A failed socket is retried only when its transport error names one of the observed reset codes.
+  let body: { token?: string; expires_at?: string } | undefined;
+  for (let attempt = 1; attempt <= MAX_TOKEN_EXCHANGE_ATTEMPTS; attempt++) {
+    const timeoutController = new AbortController();
+    const cancelDeadline = exchangeDeadline(timeoutController, clockFromMillisFn(now), "token exchange timed out");
+    let readingBody = false;
+    try {
+      const res = await fetchFn(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          Connection: "close",
+        },
+        signal: timeoutController.signal,
+      });
+      if (!res.ok) {
+        // Preserve the exchange status even if its error body cannot be read.
+        log(TOKEN_REFRESH_FAILED_STEP, { reason: `exchange rejected: ${res.status}` });
+        return { ok: false, reason: `exchange rejected: ${res.status}` };
+      }
+      readingBody = true;
+      body = (await res.json()) as { token?: string; expires_at?: string };
+      break;
+    } catch (err) {
+      // Decide from the caught error first. Our own abort and non-socket failures retain the
+      // existing single-attempt path; only the named transport resets get a fresh retry.
+      const exchangeReason = describeExchangeCatch(err, timeoutController);
+      const code = retryableExchangeCode(exchangeReason);
+      const reason = readingBody && code === undefined && !timeoutController.signal.aborted
+        ? "exchange response unparsable" : exchangeReason;
+      const retrying = code !== undefined && !timeoutController.signal.aborted && attempt < MAX_TOKEN_EXCHANGE_ATTEMPTS;
+      log(TOKEN_REFRESH_FAILED_STEP, {
+        reason,
+        ...(retrying ? { retry_attempt: attempt + 1, max_attempts: MAX_TOKEN_EXCHANGE_ATTEMPTS } : {}),
+      });
+      if (!retrying) return { ok: false, reason };
+    } finally {
+      cancelDeadline();
+    }
   }
-
-  if (!res.ok) {
-    // Naming the status keeps a missing-scope 403 from being confused with the rate limit this
-    // module exists to route around — see the forensics page for the incident.
-    log(TOKEN_REFRESH_FAILED_STEP, { reason: `exchange rejected: ${res.status}` });
-    return { ok: false, reason: `exchange rejected: ${res.status}` };
-  }
-
-  let body: { token?: string; expires_at?: string };
-  try {
-    body = (await res.json()) as { token?: string; expires_at?: string };
-  } catch {
-    log(TOKEN_REFRESH_FAILED_STEP, { reason: "exchange response unparsable" });
-    return { ok: false, reason: "exchange response unparsable" };
-  }
+  if (body === undefined) return { ok: false, reason: "exchange request failed: unknown" };
 
   if (!body.token || !body.expires_at) {
     log(TOKEN_REFRESH_FAILED_STEP, { reason: "exchange response missing token" });

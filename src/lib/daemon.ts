@@ -89,6 +89,7 @@ import {
   settledSetPayload,
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
+import { OVERLAP_SHADOW_STEP, observedOverlapShadow, overlapShadowPayload, type ObservedOpenPrScope } from "./observed-overlap.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
 import { evaluatePauseTier, isRecyclePauseDetail, type PauseTier, type PauseTierInput } from "./fleet-control.js";
 import { createFleetAccountEpisode, redactedAccountLabel, type FleetAccountDivergence, type FleetAccountPair } from "./account-usage.js";
@@ -142,7 +143,7 @@ import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
 import type { OrphanSweepReport } from "./worker-containment.js";
 // Type-only — shapes the feedback-landing injection points below (W1-T530).
-import type { FeedbackRefusal, LandFeedbackResult } from "./feedback-landing.js";
+import type { FeedbackRefusal, LandFeedbackResult, LandingGitMeter } from "./feedback-landing.js";
 // Type-only — github-posture.ts owns this shape; the real read lives in run-task.ts (W1-T1040).
 import type { GithubPostureFinding } from "./github-posture.js";
 // The Clock port (W1-T2897): declared in "../lib/clock" so every reachable-through-lib import
@@ -1342,6 +1343,11 @@ export interface DaemonDeps {
    *  pack step and the partition call below so the two never disagree about a candidate's effective
    *  scope. Optional — omitted, both fall back to the empty union (W1-T2286). */
   observedByTask?: ObservedScopeByTask;
+  /** This pass's open-PR observed scope (lib/observed-overlap.ts), read once per tick selection. Absent or
+   *  `undefined` (board unreadable) writes no `dispatch.overlap_shadow` row and changes nothing. */
+  observedOpenPrScope?: () => ObservedOpenPrScope | undefined;
+  /** `sweep.observedOverlap.mode`: `enforce` holds what the shadow names. Absent or throwing reads `shadow`. */
+  observedOverlapMode?: () => "shadow" | "enforce";
   /** What the breaker saw for a task, from the same memoised evaluation the predicates answered
    *  from, never a second call. Spread onto the refusal rows so they record the count, the bound and
    *  which outcome was reached. Optional: a caller that omits it logs the bare rows. */
@@ -1712,6 +1718,7 @@ export interface DaemonDeps {
     CiLearningCadenceRunResult & {
       filedCount: number; skippedCount: number; refusedCount: number;
       carryRefusedCount?: number; carryRefused?: FeedbackRefusal[];
+      git?: LandingGitMeter;
     }
   >;
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
@@ -4359,6 +4366,8 @@ export async function runDaemon(
   // open by then. Written at the first lane start, or at the first selection that admits nothing.
   const bootAtIso = daemonClock.iso();
   let bootFirstSelectionAtMs: number | undefined;
+  // The last `dispatch.overlap_shadow` hold set, so an unchanged hold is ledgered once, not once per tick.
+  let lastOverlapShadowSignature = "[]";
   let bootFirstDispatchWritten = false;
   const noteBootFirstDispatch = (outcome: { startedAtMs: number; admitted: number } | { heldReason: string }): void => {
     if (bootFirstDispatchWritten) return;
@@ -5303,6 +5312,10 @@ export async function runDaemon(
                       refused: result.refusedCount,
                       carry_refused: result.carryRefusedCount ?? 0,
                       carry_refusals: result.carryRefused ?? [],
+                      git_driver: result.git?.driver ?? "none",
+                      git_calls: result.git?.calls ?? 0,
+                      git_wall_ms: Math.round(result.git?.wallMs ?? 0),
+                      git_loop_ms: Math.round(result.git?.loopMs ?? 0),
                       lesson_recurrences: result.lessonRecurrences,
                     });
                   })
@@ -6892,6 +6905,18 @@ export async function runDaemon(
       deferredPairings = partition.serialized.length;
       laneBudget = budget;
       dispatchSet = partition.dispatch.filter((task) => !hasChildTask(task.id));
+      const openPrScope = candidates.length > 0 ? deps.observedOpenPrScope?.() : undefined;
+      if (openPrScope) {
+        const shadow = observedOverlapShadow(candidates, occupiedTasks, openPrScope, partition);
+        let mode: "shadow" | "enforce" = "shadow";
+        try { mode = deps.observedOverlapMode?.() ?? "shadow"; } catch { /* an unreadable policy stays shadow */ }
+        const signature = JSON.stringify(shadow.holds);
+        if (shadow.holds.length > 0 && signature !== lastOverlapShadowSignature) {
+          log(OVERLAP_SHADOW_STEP, overlapShadowPayload(shadow, openPrScope, mode));
+        }
+        lastOverlapShadowSignature = signature;
+        if (mode === "enforce") dispatchSet = shadow.dispatch.filter((task) => !hasChildTask(task.id));
+      }
     }
     logTickPhases();
 

@@ -1,0 +1,92 @@
+- id: W1-T11090
+  title: Serve forgets cached Inbox pages retired by a committed replacement population
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30
+  risk: high
+  band_meaning: blast-radius
+  origin: operator-session#wreckterra-serve-cache-recovery-2026-11-01
+  plan_refs: [W1-T11078, W1-T11085]
+  files:
+    - src/lib/read-model-worker.ts
+    - test/read-model-worker.test.ts
+    - test/serve-generation.test.ts
+    - test/serve-standby.test.ts
+  status: queued
+  dispatch_hold: false
+  attempts: 0
+  rationale: >-
+    OBSERVED: the ordinary serving handoff to gateway prerequisite source 78edca82 aborted
+    at ready_bound with read_model_warm bodies215 against wanted373. At22:26Z the active9ddc4d59
+    still reported373 bodies; a read-only three-store census found214 committed bodies.
+    Complete845-file ledger evidence and three serve.memory samples localize the159 excess as
+    158 Inbox entries at older generation2899502 plus one needs-you entry. The current168 Inbox
+    entries coexist with those older158 in the active process. Relevant worker, generation and
+    supervisor source is identical at active9dd, candidate78ed and later Main43b51dd.
+    INFERRED: a producer restart or a commit-to-IPC interruption can leave already-retired pages
+    in the main-thread cache; the new producer sees its own latest keys and the committed store,
+    but not every key retained by the old main-thread cache. Reproduce this path before fixing it.
+    The needs-you difference is separate: do not delete a valid transient body to meet a count.
+    Human call_0da1652d0e4044338b79054c3e1ecf91 approved these four implementation files and
+    one USD30 native task through normal filing, ownership, tests, review, CI and protected merge.
+    No higher global limit, retry allowance, service action or readiness exception was approved.
+  design: |
+    Converge cached Inbox page membership at a trustworthy completed replacement-population
+    boundary, including when a publisher/worker restarts after committing replacement data but
+    before every retire message is observed. Preserve the entire current qualified population.
+    Keep pending, partial, malformed and foreign-scope evidence unavailable; such evidence must
+    never authorize deletion or readiness. Remove stale per-key bookkeeping consistently so
+    reloading or producer replacement cannot resurrect a retired cached page.
+
+    Prefer the existing pending/body/drop/current protocol and existing population identity.
+    Do not add a second cache owner, an unbounded rescan, a host-specific path or an invented
+    success receipt. This task concerns materialized cached pages; it does not dismiss Inbox
+    asks, close issues, mutate live stores, erase evidence or change any human decision.
+
+    Exercise a shrinking population with real SQLite and an actual worker/publisher recovery
+    path, plus deterministic incomplete/foreign/malformed controls. Observe current page keys
+    and exact counts, not only a source grep or a fake body count. Add the regression before
+    the fix, save the actual failed assertions, restore the fix and retain real test summaries.
+    New imports use package aliases and the shared repository-root helper. Keep new cases in
+    the four existing approved files; request scope normally if a required companion is absent.
+
+    Preserve the unchanged readModelWarmProbe and supervisor warm-body floor. Starting from an
+    active generation containing this fix, prove a legitimate shrink converges its cache so a
+    standby with the same committed current population meets that original floor. Still refuse
+    a genuinely thinner standby. Diagnose the single needs-you difference independently and
+    preserve valid transient behavior; do not synthesize pages or count filler entries.
+
+    SOURCE AND LIVE ADOPTION ARE DIFFERENT: the already-frozen9dd active process will not gain
+    new cache code merely because this task merges. This task authorizes no live cache purge,
+    forced promotion, cold restart, second signal or threshold reduction. Qualify the actual
+    supported runtime adoption separately; if the old active process still blocks it, report
+    NOT_ADOPTED and retain the readiness evidence for a concrete bounded operator decision.
+
+    Keep dispatch_hold until filing review, required checks, protected merge and the already
+    approved operator release are recorded. Preserve owners and actual claims, and stop to
+    reconcile another writer or changed head. This is one native source task under USD30,
+    not a model retry or allowance reset. The existing W1-T11085 gateway worker remains owned
+    and independent. The first Wreckterra gameplay worker still requires signed-in Console C4.
+  acceptance:
+    - claim: A completed replacement population retires obsolete main-thread Inbox page keys after producer replacement without losing any current qualified page
+      proof: "unit test: cached inbox pages converge after a committed population replaces the producer"
+    - claim: Pending, partial, malformed or foreign-scope population evidence preserves cached data and withholds qualification rather than authorizing retirement
+      proof: "unit test: inbox population recovery preserves current pages and refuses incomplete retirement"
+    - claim: Actual SQLite and worker recovery reproduces the committed-store versus main-cache gap and converges membership without a live database mutation or fake production publisher
+      proof: "unit test: a restarted publisher converges cached pages with the committed inbox population"
+    - claim: An active generation with this fix converges after a legitimate shrink so a standby passes the unchanged warm-body floor, while a genuinely thinner standby still refuses
+      proof: "unit test: a converged population meets the original standby warm-body floor"
+  falsifier: |
+    Remove only the recovery fix from a disposable committed tree. The named population-recovery
+    regression must fail on the obsolete retained key/count, not on setup, an import, timeout or
+    missing test. Restore the exact fix and require that named case to pass. Keep current-page,
+    incomplete/foreign-scope and genuinely-thinner-standby controls passing. Normal committed
+    author, stored-body proofs, native review, hosted coverage instrumentation and protected
+    merge remain required. No source test or model report proves runtime or iPhone adoption.
+  note: >-
+    Four-file USD30 human-approved follow-up; implementation held pending normal filing gates.
+    Exact read-only source/count/owner evidence is retained with the Wreckterra delivery receipts.

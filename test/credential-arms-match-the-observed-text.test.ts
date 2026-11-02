@@ -23,7 +23,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ContainmentError, probeContainment } from "../src/lib/containment.js";
+import { ContainmentError, probeContainment } from "#src/lib/containment.js";
 
 function settingsFile(contents: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-credential-arms-test-"));

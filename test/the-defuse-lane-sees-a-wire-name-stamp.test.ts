@@ -189,7 +189,8 @@ test("W1-T6036: a stamp the suite does not depend on is ledgered unconfirmed and
 test("W1-T6036: a suite already red at the control is ledgered control_failed and the shifted run is skipped", async () => {
   const g = garden();
   const run = scripted(() => false);
-  assert.deepEqual(await defuses(g, { runSuite: run.runSuite }), []);
+  // Operator ruling 2026-11-01: a control red is filed for repair (the next test), no longer dropped.
+  assert.deepEqual((await defuses(g, { runSuite: run.runSuite })).map((a) => a.target), [`expiring-fixture:${FILE}`]);
   assert.deepEqual(run.calls, [[FILE, 0.001]]);
   assert.deepEqual(g.unconfirmed(), [{ file: FILE, line: 2, crossingDate: "2026-10-06T12:00:00.000Z", outcome: "control_failed" }]);
 });
@@ -308,4 +309,20 @@ test("W1-T7812: the default shifted runner rejects incomplete TAP and mismatched
   } finally {
     g.repo.cleanup();
   }
+});
+
+// 2026-11-01: main went red at 05:11Z when the CI census proved test/ci/coverage/code-health-opportunities.test.ts
+// control_failed at its 24 h tier. This lane had already met that verdict days ahead, ledgered it and filed nothing,
+// so the one repair that would have kept main green was never asked for. A control red is the census's own block.
+test("a suite red at the clock-shift control is filed for repair before the census can block main on it", async () => {
+  const g = garden();
+  const run = scripted(() => false);
+  const actions = await defuses(g, { runSuite: run.runSuite });
+  assert.deepEqual(actions.map((a) => a.target), [`expiring-fixture:${FILE}`]);
+  assert.deepEqual(run.calls, [[FILE, 0.001]], "the shifted run is still skipped: the control already answered");
+  const edit = actions[0]!.edit as { kind: string; controlFailed?: boolean };
+  assert.equal(edit.controlFailed, true);
+  const { text } = gardener.renderDefuseShard(actions[0]!, "W1-T99997");
+  assert.match(text, /fails at the census's \+0\.001-day clock-shift control/);
+  assert.match(text, /blocks main on control_failed/);
 });

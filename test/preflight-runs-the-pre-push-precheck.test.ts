@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
+import { FAST_GATE_STEPS, runPreflightFast } from "#src/lib/ci-parity.js";
 
 // ── W1-T6435: the fast gate runs the census precheck the pre-push hook runs ─────────────────
 //

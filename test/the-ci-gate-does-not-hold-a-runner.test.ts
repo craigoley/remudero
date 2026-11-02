@@ -21,9 +21,9 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { staleCiGateTransition } from "../src/lib/sweep.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { staleCiGateTransition } from "#src/lib/sweep.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER = join(REPO_ROOT, "scripts", "ci-gate-from-contract.mjs");

@@ -1,0 +1,35 @@
+- id: W1-T11066
+  title: "Compress the 360 comment lines in src/lib/main-health-rung.ts without changing executable code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "comment-compression:src/lib/main-health-rung.ts"
+  files:
+    - src/lib/main-health-rung.ts
+    - test/fix-lane/compress-src-lib-main-health-rung-ts.test.ts
+  acceptance:
+    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+      proof: "unit test: W1-T11066: comment compression preserves executable code"
+  rationale: |
+    Observed 360 comment lines in src/lib/main-health-rung.ts. This is maintenance debt, never a merge ceiling.
+    Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
+    Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.
+    Add the named regression in test/fix-lane/compress-src-lib-main-health-rung-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
+    Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
+    Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.96
+    reasons:
+      - "The filed plan limits work to comment compression in one source file and a regression test requiring preserved executable tokens, existing behavioral assertions, and measurable comment reduction."
+      - "The rationale explicitly preserves owners, stops and deployment holds, prohibits a new hard comment ceiling, and grants no restart, release or publication override."
+      - "The supplied family record reports 17 merged tasks and no declined tasks; the filing-time gates report no concerning condition. Implementation verification remains pending because no diff exists yet."
+    judged_at: "2026-11-01T04:49:14.534Z"
+    pin: "68028e7a9035c869a5fc4721d5d304677e6b2c86746e1ac53f886f6545a1565c"

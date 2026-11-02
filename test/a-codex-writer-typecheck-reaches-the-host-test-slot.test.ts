@@ -12,10 +12,10 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 
-import { spawnCodexWorker } from "../src/lib/worker-provider.js";
-import type { ContainedSpawnOptions } from "../src/lib/worker-containment.js";
-import type { SpawnWorkerArgs } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { spawnCodexWorker } from "#src/lib/worker-provider.js";
+import type { ContainedSpawnOptions } from "#src/lib/worker-containment.js";
+import type { SpawnWorkerArgs } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const SLOT_DIR = "/home/node/rmd-scratch/test-slots";
 

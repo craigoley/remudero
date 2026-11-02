@@ -4,8 +4,8 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { ensureWorktreeConfigEnabledAsync, type WorktreeConfigGit } from "../src/lib/worktree-config.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { ensureWorktreeConfigEnabledAsync, type WorktreeConfigGit } from "#src/lib/worktree-config.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const exec = promisify(execFile);
 const missing = Object.assign(new Error("no matching key"), { code: 1 });

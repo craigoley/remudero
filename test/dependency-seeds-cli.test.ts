@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 // @ts-expect-error -- standalone .mjs tool is outside tsconfig and has no declarations.
-import { attestedOpen, ownerOnlyHome, seedIsOpen } from "../scripts/dependency-seeds.mjs";
+import { attestedOpen, ownerOnlyHome, seedIsOpen } from "#scripts/dependency-seeds.mjs";
 
 test("dependency seed CLI requires administrator scans and distinguishes no-open-files from unknown", () => {
   assert.throws(() => seedIsOpen("/seed", 501), /administrator/);

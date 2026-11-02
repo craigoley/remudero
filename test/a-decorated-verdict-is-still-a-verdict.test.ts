@@ -26,7 +26,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseVerifyHumanVerdict } from "../src/lib/verify-human-judge.js";
+import { parseVerifyHumanVerdict } from "#src/lib/verify-human-judge.js";
 
 const R = "VERIFY_HUMAN_REASON: a concrete reason";
 

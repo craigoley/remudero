@@ -12,6 +12,8 @@ const record = (value: unknown): Record<string, unknown> | undefined => value !=
 function* read(fetch: GhApiFetcher, endpoint: string): GhReadSteps<unknown> { return yield () => fetch(["api", endpoint]); }
 
 /** Existing complete-file admission bounds this reader too. No observed bot candidate means no reads.
+ * A candidate touches at least one manifest path; EVERY changed path, manifest or not, must then be
+ * blob- and mode-identical to main's current tree, so a repair commit riding a bump is covered too.
  * Only immutable identity results are retained; failed or partial reads are retried normally. */
 export function* hydrateDependencyMainIdentitiesSteps(
   owner: string, repo: string, candidates: readonly OpenPrRest[],
@@ -22,7 +24,7 @@ export function* hydrateDependencyMainIdentitiesSteps(
     const paths = observations.get(pr.number);
     return pr.isDraft !== true && pr.contributionOrigin?.actor?.login !== undefined && isDependabotAuthor({ login: pr.contributionOrigin.actor.login }) &&
       sha(pr.headRefOid) && paths?.state === "complete" && paths.paths.length > 0 &&
-      new Set(paths.paths).size === paths.paths.length && paths.paths.every(path => isManifestPath(path));
+      new Set(paths.paths).size === paths.paths.length && paths.paths.some(path => isManifestPath(path));
   });
   if (eligible.length === 0) return out;
   const cache = caches.get(cacheOwner) ?? new Map<string, DependencyMainIdentity>();
@@ -51,7 +53,9 @@ export function* hydrateDependencyMainIdentitiesSteps(
       const bound = (raw: unknown): boolean => {
         const row = record(raw);
         const head = record(row?.head), base = record(row?.base), user = record(row?.user);
-        return row?.state === "open" && row.merged === false && head?.sha === pr.headRefOid && base?.ref === "main" && base.sha === mainSha &&
+        // Not `base.sha === mainSha`: an idle PR's base trails main forever, and whole-file blob
+        // identity against main's CURRENT tree proves supersession whatever the PR was cut from.
+        return row?.state === "open" && row.merged === false && head?.sha === pr.headRefOid && base?.ref === "main" &&
           typeof user?.login === "string" && isDependabotAuthor({ login: user.login }) && row.changed_files === paths.length;
       };
       if (!bound(yield* read(fetch, `${prefix}/pulls/${pr.number}`))) throw new Error("PR identity or file count unbound");
@@ -119,4 +123,33 @@ export function* hydrateDependencyMainIdentitiesSteps(
     out.set(pr.number, result);
   }
   return out;
+}
+
+/** A GitHub App or Actions identity; anything else, or an unreadable user, counts as a human. */
+export function isBotUser(user: unknown): boolean {
+  const row = record(user);
+  return row !== undefined && (row.type === "Bot" || (typeof row.login === "string" && row.login.endsWith("[bot]")));
+}
+
+/** True when any review or review-comment row was written by a non-bot (or unreadable) author. */
+export function hasNonBotAuthor(rows: readonly unknown[]): boolean {
+  return rows.some(row => isBotUser(record(row)?.user) === false);
+}
+
+/** Names the main commit (and its squash-merge PR) that last wrote `path`, so a supersession close
+ * says what superseded it. An empty or malformed history names nothing (the caller's reason already
+ * carries main's SHA); a FAILED read says so in the name, so the comment never hides it. */
+export async function namePathLanding(
+  readJson: (args: string[], opts?: { fresh?: true }) => Promise<unknown>,
+  owner: string, repo: string, mainSha: string, path: string | undefined,
+): Promise<string | undefined> {
+  if (path === undefined) return undefined;
+  try {
+    const rows = await readJson(["api", `repos/${owner}/${repo}/commits?sha=${mainSha}&path=${encodeURIComponent(path)}&per_page=1`], { fresh: true });
+    const row = Array.isArray(rows) ? record(rows[0]) : undefined;
+    const message = record(row?.commit)?.message;
+    if (row === undefined || !sha(row.sha) || typeof message !== "string") return undefined;
+    const pr = /\(#(\d+)\)\s*$/.exec(message.split("\n")[0])?.[1];
+    return pr === undefined ? `main commit ${row.sha.slice(0, 12)}` : `#${pr} (main commit ${row.sha.slice(0, 12)})`;
+  } catch (error) { return `main ${mainSha.slice(0, 12)} (landing commit unreadable: ${String(error)})`; }
 }

@@ -10,7 +10,7 @@ import {
   linkWorkspaceNodeModules,
   workspaceNodeModulesIncomplete,
   worktreeAdd,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 // W1-T4003: `package.json#workspaces` is untrusted content read off disk, not a value this
 // process authored. `isSafeWorkspaceGlob` is the boundary the design calls out by name: only a

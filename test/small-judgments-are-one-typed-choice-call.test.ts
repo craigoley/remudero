@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Mount } from "../src/lib/mounts.js";
-import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { spawnWorker, WorkerResult } from "#src/lib/worker.js";
 import {
   argmaxTypedJudgmentOption,
   buildTypedJudgmentPrompt,
@@ -10,7 +10,7 @@ import {
   runTypedJudgment,
   TYPED_JUDGMENT_MAX_TURNS,
   TYPED_JUDGMENT_TOOLS,
-} from "../src/lib/typed-judgment.js";
+} from "#src/lib/typed-judgment.js";
 import {
   planRiskJudgeAction,
   RISK_JUDGE_TYPED_OPTIONS,
@@ -19,7 +19,7 @@ import {
   type RiskJudgeInput,
   type RiskJudgeOrchestratorDeps,
   type RiskJudgeVerdict,
-} from "../src/lib/risk-judge.js";
+} from "#src/lib/risk-judge.js";
 
 // ── shared fixtures (mirrors test/risk-judge.test.ts's own shapes) ────────────────────
 

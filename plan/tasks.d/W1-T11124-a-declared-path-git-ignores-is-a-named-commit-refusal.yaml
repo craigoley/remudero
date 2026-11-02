@@ -1,0 +1,34 @@
+- id: W1-T11124
+  title: A fix or implement worker's write to a declared path that .gitignore hides is a named commit refusal, not "the worker changed nothing", so the round escalates once instead of looping
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one function, one concern: what commitWorkerEdits reports when the only edits are git-ignored declared paths
+  origin: operator-session#stuck-pr-15434-2026-11-02
+  plan_refs:
+    - W1-T10186
+  files:
+    - src/run-task.ts
+    - test/worker/run-task/a-declared-path-git-ignores-is-a-named-commit-refusal.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the only files a worker wrote are declared paths that .gitignore hides, commitWorkerEdits refuses with a reason naming each ignored declared path and the ignore rule that hides it, never "the worker changed nothing"
+      proof: "unit test: test/worker/run-task/a-declared-path-git-ignores-is-a-named-commit-refusal.test.ts"
+    - claim: An undeclared ignored file, and a round that truly wrote nothing, keep today's outcomes
+      proof: "grep: W1-T11124 criterion 2 in test/worker/run-task/a-declared-path-git-ignores-is-a-named-commit-refusal.test.ts"
+  rationale: |
+    OBSERVED 2026-11-02 on PR #15434 (W1-T10186), from the core ledger union and state/transcripts/W1-T10186/:
+    - The fix lane spent about 19 rounds on 2026-10-29/30 against one acceptance-author-gate refusal, credited-test-path: the declared test/ci/coverage/ci-friction-remedy-8f6dbf092ca44510.test.ts was absent from the PR head.
+    - 17-18 rounds ended fix.commit_refused / implement.harness_commit_refused "the worker changed nothing". Several workers reported FIXED: they wrote the suite (5/5 passing; replacing the fix gave 2 RangeError failures) and named the cause, ".gitignore ignores directories named coverage/".
+    - commitWorkerEdits (src/run-task.ts) reads git status --porcelain --untracked-files=all, which omits ignored files. A declared, ignored write is therefore invisible: the round is charged as a no-op, and the progress judge ruled change-approach 21 times.
+    - #16036 (2026-11-02) anchored that one rule at /coverage/. The class remains: unanchored local/, dist/ and state/ still hide any directory of those names, and nothing tells a round its declared write was ignored.
+  design: |
+    When the porcelain status is empty, run git status --porcelain -z --ignored=matching (or git check-ignore -v -z) over the task's declared paths. If any declared path exists in the worktree but is ignored, return committed false with reason "declared path ignored by .gitignore: <path> (rule <source>:<line>:<pattern>)" and a distinct ignored_declared field, and never force-add it. Undeclared ignored files and a genuinely empty write keep today's reasons. The fix lane logs the new reason on fix.commit_refused like any other.
+  note: |
+    reservation hand-off: run-unfiled-1793648007851 -> run-unfiled-1793648007851
+    Reserved with rmd next-task-id from a worktree on origin/main (the operator checkout was on another session's detached HEAD). Filed with the withdrawal of W1-T10186 (operator 2026-11-02, "Work on 15434 and 15520 in parallel next").

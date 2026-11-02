@@ -466,7 +466,7 @@ test("W1-T4948: real shifted sweep cannot reap a sibling sentinel", () => withCl
     const victim = join(privateRoot, "rmd-private-victim");
     mkdirSync(victim);
     utimesSync(victim, aged, aged);
-    const code = `import { sweepStaleTempDirs } from ${JSON.stringify(tmpModule)}; sweepStaleTempDirs();`;
+    const code = `import { sweepStaleTempDirs } from ${JSON.stringify(tmpModule)}; sweepStaleTempDirs({ root: process.env.TMPDIR });`;
     execFileSync(file, ["--import", "tsx", "--import", shiftModule, "--input-type=module", "-e", code], {
       cwd: opts.cwd, env: opts.env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
     });

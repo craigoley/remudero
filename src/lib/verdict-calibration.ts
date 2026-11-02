@@ -1,86 +1,68 @@
 // lib/verdict-calibration.ts — THE CORRECTNESS JOIN (W1-T424).
 //
-// THE GAP THIS CLOSES. Every armed merge carries a review verdict in the ledger
-// (`automerge.armed` naming the task/head it armed, `review.posted` naming whether that verdict
-// was a clean full PASS, fell back to the keyword floor on some criteria, or was CAPPED and only
-// armed via an override) — and its post-merge reality is ordinary git history (reverts, and
-// fix-typed merges that land nearby). But nothing JOINS the two, so no one can say whether a
-// full-PASS verdict predicts stability better than a degraded one, or whether the review floor's
-// month of hardening (W1-T273, T362, T387, T400, T401) moved outcomes at all. This module builds
+// THE GAP THIS CLOSES. Every armed merge carries a review verdict in the ledger (`automerge.armed`
+// names the task/head; `review.posted` says whether the verdict was a clean full PASS, fell back
+// to the keyword floor, or was CAPPED and armed only via an override); its post-merge reality is
+// ordinary git history (reverts, nearby fix-typed merges). Nothing JOINED the two, so no one could
+// say whether a full-PASS verdict predicts stability better than a degraded one. This module is
 // that join. Completes the measurement triad: W1-T418 measures whether RULES prevent; W1-T423
 // locks what JUDGMENT concludes; this measures whether judgment PREDICTS.
 //
-// A HOST-SIDE VERB, LIKE W1-T418 AND FOR THE SAME REASON: the ledger lives on the daemon host;
-// the git side is local history; neither needs the network beyond an ordinary fetch.
+// A HOST-SIDE VERB, LIKE W1-T418: the ledger lives on the daemon host and git history is local.
 //
-// THE TWO CORPORA. {@link verdictCalibrationReport} — the entry export, the name is
-// load-bearing — is PURE over its two supplied corpora:
-//   (a) VERDICT ROWS ({@link VerdictRow}), mined by {@link mineVerdictRows} from the ledger
-//       UNION (lib/ledger-grep.ts's `resolveLedgerUnion` — never the live file alone, which is
-//       ~0.3% of history, the same undercount lib/rule-efficacy.ts's own module doc measured).
-//       Each row joins an `automerge.armed` line (the arm event: task id, head sha, arm
-//       timestamp) to the `review.posted` line for the SAME task+head (the verdict that
-//       permitted the arm), classifying it {@link VerdictClass}: `full-pass` (clean, no keyword
-//       floor anywhere), `keyword-floor` (`floor_degraded` — some criteria fell back while the
-//       verdict was NOT capped) or `degraded-arm` (`capped` — zero proofs executed, armed only
-//       via a plan-only carve-out or an explicit operator override). A row with no matching
-//       `review.posted` line, OR whose `automerge.armed` line itself carried no `head_sha` at all
-//       (W1-T2258 — only the review lane's own arm helper put one on the row before this task;
-//       every other lane's arm silently could not join), carries `verdictClass: null` and is
-//       reported UNMEASURABLE, honestly, with the two shapes told apart by `unjoinableCause` —
-//       never silently dropped or guessed, and never merged into one undifferentiated count.
-//   (b) a GIT EVENT dump ({@link parseGitEventDump}), the failing-split classifier's
-//       `%s%x00%b%x01` shape (run-task.ts's `classifyFailingMergeEvidence`) extended with a
-//       leading `\x02` record separator plus the commit sha and committer-date-ISO (needed to
-//       locate a SPECIFIC merge commit and date reverts/fixes against it) and `--name-only`'s
-//       per-commit file list (needed for the follow-up-fix overlap rule) — see
-//       `defaultVerdictCalibrationGitLog` (run-task.ts) for the exact `git log` invocation.
+// THE TWO CORPORA. {@link verdictCalibrationReport} — the entry export, the name is load-bearing —
+// is PURE over:
+//   (a) VERDICT ROWS ({@link VerdictRow}), mined by {@link mineVerdictRows} from the ledger UNION
+//       (lib/ledger-grep.ts's `resolveLedgerUnion` — never the live file alone, ~0.3% of history,
+//       the undercount lib/rule-efficacy.ts measured). Each row joins an `automerge.armed` line to
+//       the `review.posted` line for the SAME task+head, classified {@link VerdictClass}:
+//       `full-pass` (clean), `keyword-floor` (`floor_degraded`, NOT capped) or `degraded-arm`
+//       (`capped` — zero proofs executed, armed via plan-only carve-out or operator override). A
+//       row with no matching `review.posted`, OR whose armed line carried no `head_sha` at all
+//       (W1-T2258), carries `verdictClass: null` and is reported UNMEASURABLE, the two shapes told
+//       apart by `unjoinableCause` — never silently dropped, guessed, or merged into one count.
+//   (b) a GIT EVENT dump ({@link parseGitEventDump}): the failing-split classifier's
+//       `%s%x00%b%x01` shape (run-task.ts's `classifyFailingMergeEvidence`) plus a leading `\x02`
+//       record separator, commit sha, committer-date-ISO, and `--name-only`'s file list (for the
+//       follow-up-fix overlap rule) — see `defaultVerdictCalibrationGitLog` (run-task.ts).
 //
-// THE JOIN, PER ROW. The row's merge commit is the EARLIEST commit citing its task id (the same
-// delimiter-bounded citation idiom `classifyFailingMergeEvidence` uses, widened with the `#<n>`
-// form for the synthetic `PR-<n>` ids task-less `rmd review` PRs carry) at or after the arm
-// timestamp — "earliest after the arm" is what separates the merge itself from a LATER commit
-// that also happens to cite the same task id (a genuine follow-up fix). No such commit means the
-// merge sha cannot be recovered, so the row is UNMEASURABLE — the P48 no-naked-zero clause; a
-// rate over a silently shrunken denominator is the exact lie this verb exists to end.
+// THE JOIN, PER ROW. The merge commit is the EARLIEST commit citing the task id (the delimiter-
+// bounded idiom `classifyFailingMergeEvidence` uses, widened with `#<n>` for the synthetic `PR-<n>`
+// ids of task-less `rmd review` PRs) at or after the arm timestamp — that separates the merge from
+// a LATER commit citing the same id (a genuine follow-up fix). No such commit means the merge sha
+// is unrecoverable and the row is UNMEASURABLE (P48 no-naked-zero: a rate over a silently shrunken
+// denominator is the lie this verb exists to end).
 //
 // FOLLOW-UP FIX ATTRIBUTION IS THE JUDGMENT CALL, SO IT IS DATA ({@link ATTRIBUTION_POLICY}):
-// the window (`windowDays`) and the overlap rule live in one exported policy object this
-// module's report cites in its own output — moving the boundary is a reviewed diff, not a
-// hidden constant. A fix-typed commit (subject matching `/^fix(\(|:)/i`) attributes to a
-// verdict's merge when, within the window, EITHER its changed files intersect the merge's
-// changed files OR it cites the verdict's task id — citing NEITHER attributes to NOTHING, the
-// over-attribution guard (a busy repo fixes things near everything, so file proximity alone
-// would over-credit blame onto every verdict class equally and erase the signal this verb
-// exists to surface). Reverts use the SAME window: a revert-typed commit (`This reverts commit
-// <sha>` naming the merge, or a `Revert` subject citing the same task id) inside the window is a
-// miss; the same revert dated outside the window is not.
+// the window (`windowDays`) and overlap rule live in one exported policy the report cites — moving
+// the boundary is a reviewed diff. A fix-typed commit (subject `/^fix(\(|:)/i`) attributes to a
+// merge when, within the window, EITHER its files intersect the merge's files OR it cites the
+// task id; citing NEITHER attributes to NOTHING (the over-attribution guard — file proximity alone
+// would credit blame to every class equally and erase the signal). Reverts use the SAME window: a
+// `This reverts commit <sha>` naming the merge, or a `Revert` subject citing the task id, inside
+// the window is a miss; the same revert outside it is not.
 //
-// A MINIMUM-POPULATION FLOOR ({@link MIN_POPULATION_FLOOR}): below that many rows in a verdict
-// class, the report prints the count and REFUSES the rate — a percentage over a handful of
-// merges is an anecdote wearing a metric.
+// A MINIMUM-POPULATION FLOOR ({@link MIN_POPULATION_FLOOR}): below that many rows in a class, the
+// report prints the count and REFUSES the rate — a percentage over a handful of merges is an
+// anecdote wearing a metric.
 //
-// W1-T3082 — DRIFT NOW REACHES THE INBOX. MASTER-PLAN's own "Verdict calibration" section says a
-// periodic job "FILES TUNING TASKS when calibration drifts"; this report was computed four times
-// a day (lib/measurement-cadence.ts) and read by no one. {@link DriftBands} ({@link
-// DEFAULT_DRIFT_BANDS}, mirrored as data in plan/policy.yaml's `verdictCalibration.driftBands`)
-// gives each class a revert-rate and follow-up-fix-rate ceiling; {@link classifyVerdictDrift}
-// judges each of this report's classes against its band — a class below {@link
-// MIN_POPULATION_FLOOR} is NEVER drifted (P48: an anecdote is not a rate), so the floor refusal
-// wins before a ceiling is even consulted. {@link escalateVerdictCalibrationDrift} raises ONE
-// inbox proposal per drifted class through `updateProposalRegistry` (src/lib/inbox.ts, the
-// W1-T240 single-writer helper — the same transport W1-T418's `escalateRepeatingRules`,
-// rule-efficacy.ts, already uses for a repeating rule), keyed on (class, window) so a rerun over
-// the same window never duplicates it. {@link verdictCalibrationDriftLedgerLines} builds the
-// `verdict_calibration.drift` / `verdict_calibration.within_bands` ledger rows (one per class,
-// per fire) so a retro can show the rung fired even on a clean pass — see that function's own
-// doc. THE DIAL STAYS THE OPERATOR'S: this proposes; W1-T437's autonomy ratchet is never moved
-// by this module (design (iv), the task's own record).
+// W1-T3082 — DRIFT NOW REACHES THE INBOX. MASTER-PLAN's "Verdict calibration" section says a
+// periodic job "FILES TUNING TASKS when calibration drifts"; the report was computed four times a
+// day (lib/measurement-cadence.ts) and read by no one. {@link DriftBands} ({@link
+// DEFAULT_DRIFT_BANDS}, mirrored in plan/policy.yaml's `verdictCalibration.driftBands`) gives each
+// class revert-rate and follow-up-fix-rate ceilings; {@link classifyVerdictDrift} judges each class
+// against its band — a class below {@link MIN_POPULATION_FLOOR} is NEVER drifted (P48), the floor
+// refusal winning before any ceiling is consulted. {@link escalateVerdictCalibrationDrift} raises
+// ONE inbox proposal per drifted class through `updateProposalRegistry` (src/lib/inbox.ts, the
+// W1-T240 single-writer helper, as W1-T418's `escalateRepeatingRules` does), keyed on (class,
+// window) so a rerun never duplicates it. {@link verdictCalibrationDriftLedgerLines} builds one
+// `verdict_calibration.drift` / `verdict_calibration.within_bands` row per class per fire, so a
+// retro shows the rung fired even on a clean pass. THE DIAL STAYS THE OPERATOR'S: this proposes;
+// W1-T437's autonomy ratchet is never moved here (design (iv)).
 //
-// STILL NOT IN SCOPE: changing any verdict; confidence scores the verdicts do not yet log (their
-// own small task once this join proves the read side). {@link verdictCalibrationReport} itself
-// stays PURE and read-only — every write above is a SEPARATE, explicitly-invoked step a caller
-// (lib/measurement-cadence.ts) opts into, never a side effect of computing the report.
+// STILL NOT IN SCOPE: changing any verdict; confidence scores the verdicts do not yet log.
+// {@link verdictCalibrationReport} stays PURE and read-only — every write above is a SEPARATE,
+// explicitly-invoked step a caller (lib/measurement-cadence.ts) opts into.
 
 import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionResult } from "./ledger-grep.js";
 import { updateProposalRegistry, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
@@ -91,13 +73,10 @@ export type VerdictClass = "full-pass" | "keyword-floor" | "degraded-arm";
 
 /** Why a {@link VerdictRow} could not be joined to a merge/rate — see {@link
  *  VerdictCalibrationReport.unmeasurableByCause}. `no-head-sha` and `no-review-posted` are set by
- *  {@link mineVerdictRows} (the MINING side: two different reasons the verdict is unrecoverable —
- *  the arm row itself never carried a head, vs one that did but found no matching verdict);
- *  `merge-sha-unrecoverable` and `git-history-unavailable` are set by {@link
- *  verdictCalibrationReport} (the JOIN side, against git history). Kept as ONE enum, not two
- *  parallel ones, so a consumer breaking the count down by cause never has to know which stage
- *  produced it — W1-T2258's whole point is that these must never be merged into a single silent
- *  drop again. */
+ *  {@link mineVerdictRows} (the arm row never carried a head, vs one that did but found no
+ *  verdict); `merge-sha-unrecoverable` and `git-history-unavailable` by {@link
+ *  verdictCalibrationReport} (the join, against git). ONE enum so a consumer never needs to know
+ *  which stage produced a cause — W1-T2258: these must never merge into one silent drop again. */
 export type UnmeasurableCause = "no-head-sha" | "no-review-posted" | "merge-sha-unrecoverable" | "git-history-unavailable";
 
 /** One armed merge's verdict, joined from an `automerge.armed` line to its `review.posted`
@@ -114,15 +93,11 @@ export interface VerdictRow {
    *  (the earliest task-id-citing commit AT OR AFTER this instant). */
   armedTs: string;
   /** The `automerge.armed` line's own `lane` field (W1-T449: `"review"` | `"operator"` |
-   *  `"sweep"`, or the ambient lane a caller's own ledger-append closure defaulted to when the
-   *  row was written outside `logArmAttribution`, e.g. `"run-task"`), when present. ABSENT for
-   *  every row mined before W1-T449 added the field. Read-only passthrough — this module never
-   *  classifies differently by lane; {@link verdictCalibrationReport} uses it only to LABEL which
-   *  population a published rate was computed over, never to re-derive a verdict (design note
-   *  (v): "the review lane is the only one that posts a review.posted row at all" — reviewCommand's
-   *  own ledger-append closure hardcodes `lane: "review"` on every `review.posted` line it writes,
-   *  whichever higher-level command called it, so a class populated from more than one ARM lane is
-   *  blending judgments of different rigor under one rate). */
+   *  `"sweep"`, or the ambient lane of the caller's ledger-append closure, e.g. `"run-task"`).
+   *  ABSENT for rows mined before W1-T449. Read-only passthrough: never classifies by lane; the
+   *  report uses it only to LABEL which population a rate covers (design note (v): only the review
+   *  lane posts `review.posted`, and a class drawn from more than one ARM lane blends judgments
+   *  of different rigor under one rate). */
   lane?: string;
   verdictClass: VerdictClass | null;
   /** Present only when `verdictClass === null`. */
@@ -189,16 +164,11 @@ export function mineVerdictRows(stateDir: string, fsDeps?: LedgerGrepFsDeps): Ve
     // No task id or no arm timestamp: genuinely no identity to key or date a row by — this
     // `continue` stays silent, matching resolveLedgerUnion's own line-shape discipline.
     if (!taskId || !armedTs) continue;
-    // W1-T2258 — THE DEFECT THIS CLOSES. This used to share ONE guard with the branch above
-    // (`!taskId || !headSha || !armedTs`), so a row with a real task id and timestamp but no
-    // `head_sha` was dropped exactly as silently as a structurally malformed line — no
-    // `classifyWhy`, no entry in the unmeasurable list — even though `:139-149` two lines below
-    // already had the vocabulary for "counted, and here is why it could not be classified".
-    // Measured: only the review lane's own arm helper (`armIfVerdictPermits`) put `head_sha` on
-    // its row; every other lane's arm (run-task's deferred at-verdict arm, and every
-    // `armAndLogOutcome` caller: dep-review, retro, triage, plan, approve, sweep) systematically
-    // did not — a LANE SPLIT, not a sample, so a caveat alone would still misrepresent the
-    // resulting rate as fleet-wide (see verdictCalibrationReport's own doc).
+    // W1-T2258 — THE DEFECT THIS CLOSES. This shared ONE guard with the branch above, so a row
+    // with a task id and timestamp but no `head_sha` was dropped as silently as a malformed line.
+    // Measured: only the review lane's arm helper (`armIfVerdictPermits`) put `head_sha` on its
+    // row; every other lane's arm systematically did not — a LANE SPLIT, not a sample, so a
+    // caveat alone would misrepresent the rate as fleet-wide (see verdictCalibrationReport).
     if (!headSha) {
       rows.push({
         taskId,
@@ -477,13 +447,11 @@ export interface ClassOutcome {
   revertRate: number | null;
   /** `null` under the same refusal. */
   followupFixRate: number | null;
-  /** The lane(s) `total` was actually drawn from — an armed row's own `lane` field, deduped,
-   *  sorted, comma-joined; `"none"` at `total: 0`. Absent-lane rows read as `"review"` (the only
-   *  lane capable of producing a classified row before W1-T2258 fixed the other write paths —
-   *  see the module doc's "review lane is the only one that posts a review.posted row" finding).
-   *  NEVER blended into a fleet-wide claim without saying so: design note (v)'s reporting
-   *  decision — a caveat is not enough when the exclusion (by lane) tracks the very axis (verdict
-   *  class) this report measures, so this field is the label a consumer reads instead. */
+  /** The lane(s) `total` was drawn from — an armed row's own `lane`, deduped, sorted,
+   *  comma-joined; `"none"` at `total: 0`. Absent-lane rows read as `"review"` (the only lane that
+   *  could produce a classified row before W1-T2258). NEVER blended into a fleet-wide claim
+   *  without saying so (design note (v)): the lane exclusion tracks the very axis this report
+   *  measures, so a consumer reads this label instead of a caveat. */
   lanes: string;
   /** Set exactly when a rate is `null` — WHY it was refused, so "too few rows" (a population
    *  floor refusal) is never confused with "spans more than one arm lane" (a lane-purity refusal
@@ -524,12 +492,10 @@ export interface VerdictCalibrationReport {
   /** Rows whose merge sha (or verdict class) could not be recovered — P48's no-naked-zero
    *  clause: every one of these is named, never folded into a denominator as if measured. */
   unmeasurable: UnmeasurableRow[];
-  /** `verdictRows.length` — every arm row this report was actually handed, so a consumer can
-   *  always see the denominator behind `classes`/`unmeasurable` (W1-T2258 acceptance: "the report
-   *  states how many arms it saw"). Always equals `armsClassified + unmeasurable.length` — every
-   *  row this report iterates lands in exactly one of the two. Rows `mineVerdictRows` itself
-   *  never turned into a `VerdictRow` at all (no task id, or no arm timestamp — the one silent
-   *  drop this task leaves silent, see that function's own doc) are outside this count. */
+  /** `verdictRows.length` — every arm row handed in, so a consumer sees the denominator behind
+   *  `classes`/`unmeasurable` (W1-T2258: "the report states how many arms it saw"). Always equals
+   *  `armsClassified + unmeasurable.length`. Rows `mineVerdictRows` never turned into a
+   *  `VerdictRow` (no task id or arm timestamp — the one silent drop left silent) are outside it. */
   armsSeen: number;
   /** `classes[].total` summed — the arms that reached a verdict class AND a locatable merge
    *  commit. */

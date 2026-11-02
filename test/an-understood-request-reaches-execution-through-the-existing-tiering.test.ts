@@ -9,15 +9,15 @@ import {
   classifyProposal,
   type ReadinessContext,
   type UnderstoodRequest,
-} from "../src/lib/inbox.js";
-import type { InterpretReplyResult } from "../src/lib/reply-interpreter.js";
+} from "#src/lib/inbox.js";
+import type { InterpretReplyResult } from "#src/lib/reply-interpreter.js";
 import {
   routeRequestFanout,
   routeSpecialists,
   type RequestFanoutInput,
   type SpecialistPanelInput,
-} from "../src/lib/specialist-panel.js";
-import type { Plan } from "../src/lib/plan.js";
+} from "#src/lib/specialist-panel.js";
+import type { Plan } from "#src/lib/plan.js";
 
 // ── W1-T2500: W1-T2499 leaves a thread "understood" (an empty unanswered set) and stops there
 // by design -- it asks, it never acts. Nothing carried that state anywhere: the interpreter's
