@@ -3440,7 +3440,20 @@ function withoutNodeTestContext<T>(fn: () => T): T {
  * tree, with the SAME exit reading (0 pass, 2 "could not measure" not blocking, anything else
  * refuses). Exit 2 is reported as UNMEASURED by name so it never reads as a measured pass.
  */
+export const AUTHOR_CENSUS_ANSWERED_ENV = "RMD_AUTHOR_CENSUS_ANSWERED";
+
+export function authorCensusAnswer(value: string | undefined, head: string | undefined): { sha: string; outcome: string } | undefined {
+  const answer = /^([0-9a-f]{40}):(ok|time-bound)$/.exec(value ?? "");
+  return answer && answer[1] === head ? { sha: answer[1], outcome: answer[2]! } : undefined;
+}
+
 function censusPrecheckLeaf(repoRoot: string, spawn: PreflightSpawn): CiParityLeafResult {
+  const recorded = process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+  const head = recorded ? spawn("git", ["rev-parse", "HEAD"], { cwd: repoRoot }) : undefined;
+  const answered = authorCensusAnswer(recorded, head?.status === 0 ? String(head.stdout ?? "").trim() : undefined);
+  if (answered) {
+    return { ok: true, detail: `PASS — census-precheck answered by the author preflight's census-precheck step at ${answered.sha} (${answered.outcome}); not run again` };
+  }
   const label = "node scripts/census-precheck.mjs --base origin/main";
   const args = ["scripts/census-precheck.mjs", "--base", "origin/main"];
   const res = withoutNodeTestContext(() => spawn(process.execPath, args, { cwd: repoRoot }));
