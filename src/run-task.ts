@@ -18579,7 +18579,11 @@ function spawnReviewPlanLint(argv: string[], options: { cwd: string; signal?: Ab
 export function planLintOutcomeFromOutput(code: number, lines: string[], mergeBase: string, hasShardDir: boolean): PlanLintOutcome {
   const summary = lines.map((l) => /rmd lint-plan: (\d+) task\(s\) checked/.exec(l)).find((m) => m !== null);
   if (code === 2 || !summary) {
-    const said = lines.find((l) => l.startsWith("### rmd lint-plan:")) ?? `lint-plan exited ${code} with no summary`;
+    // Name a crash the summary never reached: its error line, else the child's last line (wreckterra#6, 2026-11-03).
+    const output = lines.map((l) => l.trim()).filter(Boolean);
+    const cause = output.find((l) => /^[A-Za-z]*Error\b/.test(l)) ?? output.at(-1);
+    const said = lines.find((l) => l.startsWith("### rmd lint-plan:"))
+      ?? `lint-plan exited ${code} with no summary${cause ? `: ${cause.slice(0, 160)}` : ""}`;
     return { ran: false, reason: said.replace(/^### rmd lint-plan: /, "") };
   }
   const violations: string[] = [];
