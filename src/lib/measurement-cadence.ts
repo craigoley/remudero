@@ -1550,7 +1550,7 @@ export interface PlanReconcileCadenceInputOptions {
   creditedMergedIds: () => ReadonlySet<string>;
   land: (inputs: readonly { relPath: string; content: string }[]) => void;
   threshold?: number;
-  hold?: PlanReconcileHold;
+  lint?: PlanReconcileLint;
 }
 
 type PlanReconcileWrite = { taskId: string; text: string };
@@ -1601,7 +1601,7 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
     isCreditedMerged: (taskId) => credited.has(taskId),
     threshold: deps.threshold ?? 10,
     land: (writes) => {
-      const { landable, held } = deps.hold ? deps.hold(deps.checkoutRoot, records, writes) : { landable: [...writes], held: [] };
+      const { landable, held } = planReconcileLintHold(deps.lint)(deps.checkoutRoot, records, writes);
       const inputs = landable.map((write) => {
         const path = byId.get(write.taskId);
         if (path === undefined) throw new Error(`plan reconciliation could not resolve shard ${write.taskId}`);

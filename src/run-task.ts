@@ -1351,7 +1351,7 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningLookbackDays, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, planReconcileLintHold, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningLookbackDays, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -18254,7 +18254,6 @@ export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionI
       readShards: deps.readShards,
       creditedMergedIds: deps.creditedMergedIds,
       land: landing.land,
-      hold: deps.hold ?? planReconcileLintHold(),
     });
     return { ...cadence, settled: landing.settled };
   } catch {

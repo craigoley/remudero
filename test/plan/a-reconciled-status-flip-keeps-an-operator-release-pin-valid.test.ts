@@ -5,11 +5,11 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { operatorReleaseContractChanged, operatorReleasePin, RELEASE_LIFECYCLE_STATUSES } from "#src/lib/operator-release.js";
-import { buildMeasurementCadenceRow, planReconcileCadence, planReconcileLintHold, type PlanReconcileLint } from "#src/lib/measurement-cadence.js";
+import { buildMeasurementCadenceRow, buildPlanReconcileCadenceInput, planReconcileCadence, planReconcileLintHold, type PlanReconcileLint } from "#src/lib/measurement-cadence.js";
+import { planReconcileLanding } from "#src/lib/feedback-landing.js";
 import { loadPlan, mergePlanBlobs, TASK_STATUSES, type Task } from "#src/lib/plan.js";
 import { reconcilePlan } from "#src/lib/plan-reconcile.js";
 import { lintPlan } from "#src/lib/task-linter.js";
-import { buildPlanReconcileProductionInput } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const PLAN_DIR = join(REPO_ROOT, "plan");
@@ -118,17 +118,15 @@ test("W1-T11175 criterion 3: the production landing lands every lint-clean flip,
     }
     return results;
   };
-  const build = (lint: PlanReconcileLint, landed: string[][], refusal?: string) =>
-    buildPlanReconcileProductionInput({
-      checkoutRoot: REPO_ROOT,
-      readShards: () => shards,
-      creditedMergedIds: () => new Set(flipSet),
-      hold: planReconcileLintHold(lint),
-      land: (_root, inputs) => {
-        landed.push(inputs.map((i) => i.relPath));
-        return refusal ? { landed: false, files: [], error: refusal } : { landed: true, files: inputs.map((i) => i.relPath) };
-      },
-    })!;
+  // buildPlanReconcileProductionInput's own composition, built here because one more importer of the CLI
+  // entry grows the affected-suite reach ratchet; only its land bridge and the lint are injected.
+  const build = (lint: PlanReconcileLint, landed: string[][], refusal?: string) => {
+    const landing = planReconcileLanding(REPO_ROOT, () => ({}), (_root, inputs) => {
+      landed.push(inputs.map((i) => i.relPath));
+      return refusal ? { landed: false, files: [], error: refusal } : { landed: true, files: inputs.map((i) => i.relPath) };
+    });
+    return buildPlanReconcileCadenceInput({ checkoutRoot: REPO_ROOT, readShards: () => shards, creditedMergedIds: () => new Set(flipSet), land: landing.land, lint });
+  };
 
   const landed: string[][] = [];
   const report = planReconcileCadence(build(victimBreaksOnMerge, landed));
