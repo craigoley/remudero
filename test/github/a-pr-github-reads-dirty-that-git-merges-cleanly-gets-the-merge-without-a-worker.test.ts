@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as sweep from "#src/lib/sweep.js";
@@ -83,8 +84,17 @@ async function fixture(t: TestContext, kind: "rename" | "both" = "rename") {
 test("W1-T11167 criterion 1: a PR GitHub reads dirty that git merges cleanly across a rename main made gets git's merge pushed, with no worker", async (t) => {
   const f = await fixture(t);
   assert.equal(f.probe.verdict, "clean", "git's ort merge follows the rename");
-  const blind = await f.git(["merge-tree", "--write-tree", "--name-only", "--no-messages", "-X", "no-renames", f.headSha, f.mainSha]);
-  assert.equal(blind.status, 1, "positive control: a rename-blind merge conflicts, as GitHub's did on #15602");
+  // `merge-tree -X` needs git >= 2.40, so the rename-blind control is a real merge in a scratch worktree.
+  const scratch = `${f.repo.dir}-blind`;
+  f.repo.git("worktree", "add", "-q", "--detach", scratch, f.headSha);
+  t.after(() => { rmSync(scratch, { recursive: true, force: true }); });
+  const blind = spawnSync("git", ["-C", scratch, "merge", "-s", "ort", "-X", "no-renames", "--no-commit", "--no-ff", f.mainSha],
+    { encoding: "utf8" });
+  assert.equal(blind.status, 1, `positive control: a rename-blind merge conflicts, as GitHub's did on #15602: ${blind.stderr}`);
+  assert.ok(spawnSync("git", ["-C", scratch, "ls-files", "-u"], { encoding: "utf8" }).stdout.includes("a.ts"),
+    "the rename-blind conflict is on a.ts");
+  spawnSync("git", ["-C", scratch, "merge", "--abort"]);
+  f.repo.git("worktree", "remove", "--force", scratch);
   f.deps.claimFixAdmission = () => assert.fail("the clean-merge route takes no fix capacity");
   await f.run();
   const head = f.remoteHead();
