@@ -17,6 +17,8 @@
     - W1-T10875
     - W1-T4574
   files:
+    - src/lib/config-schema.ts
+    - test/host-capability-fixtures.test.ts
     - src/lib/model-canary-coding.ts
     - src/lib/model-canary-runner.ts
     - src/lib/model-canary-command.ts
@@ -117,6 +119,10 @@
     synthetic-source reporting separation, worker attribution fixture and computed census test
     path. This preserves prior source and zero-provider controls without granting activation,
     a new full Linux run, extra allowance or changes to shared ownership.
+    Census reconciliation registers the existing child-profile protocol variables and declares
+    private mode-stat fixtures using the established host-capability fixture metadata. It
+    does not change census enforcement, thresholds or runtime permissions. Changed profile-source
+    bindings require one targeted zero-provider host probe; ordinary SOURCE CI owns the full suite.
   acceptance:
     - claim: the existing private coding executor contains filesystem and credential effects and closes
         its real descendants
