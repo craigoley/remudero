@@ -34,6 +34,9 @@
     - The vendored 628 KB Ubuntu bash-3.2 .deb fixtures, which the risk judge escalated, are removed. The historical-interpreter leg uses (a) the host's native /bin/bash when it reports 3.2 (macOS), (b) an absolute RMD_TEST_BASH32 executable provided outside the repository (a pinned CI install), or (c) a named UNMEASURED diagnostic, while the leg runs under the current bash so no assertion is skipped and nothing claims it was 3.2.
     - An official bash:3.2 container was ruled out: the scripts under test call the host's node, and the recording transports are node scripts writing host paths, which a musl container without node cannot run.
     - files: is re-derived from the files the PR actually touches. The six previously declared but untouched tests and docs index are dropped; the old-script fixtures, the shell fixture helper and two adjusted tests are added.
+    AMENDED AGAIN 2026-11-03 after #15638's review at b370b7c8d (criterion 4 semantic: "qualification must execute a real 3.2 interpreter"):
+    - The UNMEASURED fallback ran a 3.2 leg under bash 5.2 inside a passing proof, so criterion 4 claimed a 3.2 qualification it never ran. Real 3.2 in CI is W1-T11263's own task (verify: human, edits .github/workflows/ci.yml, builds GNU bash-3.2 pinned by sha256).
+    - Bringing that build into W1-T9795 would add ci.yml, verify: human and a third concern, the CI toolchain, to a 22-file span, and two tasks would edit one workflow. So criterion 4 now proves the current bash, and the 3.2 legs are skipped by name until W1-T11263 supplies the interpreter. W1-T11263's own criterion 2 makes CI fail when the leg is unmeasured.
     FOLLOW-UP, not in this task (it is live behaviour): the installer-generated launcher forwards its baked RMD_INSTANCE_REGISTRY to the watchdog's recycle but adds --instance only when the install named one. So a default (no --instance) install made with the variable set yields a watchdog recycle that #15532 refuses with instance_missing.
   design: |
     1. Re-census the real shell readers and trusted generated launcher/child
@@ -72,9 +75,12 @@
        mount, credential read or container operation is run against live data.
        The capability probe recognizes a maintained child wherever its argv case
        sits, reading the whole trusted file under a size backstop.
-    5. The historical Bash 3.2 leg is never vendored: native /bin/bash 3.2, else an
-       absolute RMD_TEST_BASH32 executable whose BASH_VERSION is verified, else a
-       named UNMEASURED diagnostic with the leg run under the current bash.
+    5. The historical Bash 3.2 leg is never vendored and never substituted. It runs
+       only on a verified real 3.2 (native /bin/bash 3.2, else an absolute
+       RMD_TEST_BASH32 whose BASH_VERSION is 3.2); otherwise each 3.2 leg is a
+       node:test skip naming W1-T11263, counted as skipped, never as a pass.
+       Mixed-version 3.2 coverage is its own test, outside criterion 4's title,
+       so criterion 4 proves the runner's current bash honestly.
     6. Cover every new catch/default, immutable mutation during waits and all
        independent children; delete real forwarding/binding/recheck arms and
        observe failures, then exact restoration. Retain every native failure and
@@ -92,7 +98,7 @@
       proof: 'unit test: selected shell shadow reaches real lifecycle and heartbeat consumers'
     - claim: Later child and measurement observations detect changed or unsupported selection
       proof: 'unit test: selected shell revisions invalidate generated child and heartbeat observations'
-    - claim: Supported old and new scripts preserve no-option output and legacy effects
+    - claim: Supported old and new scripts preserve no-option output and legacy effects under the runner's current bash; bash 3.2 compatibility is W1-T11263's qualification
       proof: 'unit test: selected shell qualification preserves mixed version legacy effects'
     - claim: Private selection never reaches public heartbeat fields or untrusted worker transports
       proof: 'unit test: selected shell qualification does not disclose private inputs'
@@ -102,7 +108,7 @@
       proof: 'unit test: selected shell shadow coexists with the active selection'
     - claim: The capability probe recognizes a maintained child whose argv case sits past any fixed header, and an older child without the grammar keeps its original arguments
       proof: 'unit test: selected shell capability probe reads the whole trusted child script'
-    - claim: The historical Bash 3.2 leg is never vendored and resolves through native 3.2 or RMD_TEST_BASH32, else names itself UNMEASURED
+    - claim: A bash 3.2 leg runs only on a verified real 3.2 (native /bin/bash 3.2 or RMD_TEST_BASH32) and otherwise is skipped by name, never run under a current bash or counted as a 3.2 pass
       proof: 'grep: RMD_TEST_BASH32 in test/selected-registry-shell-consumers.test.ts'
   falsifier: |
     Existing scripts select paths independently and have no shared bounded
