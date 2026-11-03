@@ -1,0 +1,32 @@
+id: incident-a88b38246b484aae
+ts: 2026-11-03T02:55:54.433Z
+raw: >-
+  Incident a88b38246b48: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  Recorded clean-draft turn counts are required to select and substantiate the
+  production cap.
+
+  First seen: 2026-11-02T20:04:22.540Z
+
+  Last seen: 2026-11-02T20:04:22.540Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16185 escalated: already escalated (reason unreadable: no escalation of this PR at head c58f698 is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793643571744:1:1793649464779) — Recorded clean-draft turn counts are required to select and substantiate the production cap.
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#a88b38246b484aae0b10d2b79e6f6257183f746e06abd485031964c9c829d471
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

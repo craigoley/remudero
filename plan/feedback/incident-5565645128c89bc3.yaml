@@ -1,0 +1,30 @@
+id: incident-5565645128c89bc3
+ts: 2026-11-03T02:58:54.443Z
+raw: >-
+  Incident 5565645128c8: intervention
+  escalated:none:fix-stood-down-at-rung-instrument-scope
+
+  First seen: 2026-11-03T02:56:51.667Z
+
+  Last seen: 2026-11-03T02:58:52.845Z
+
+  Count: 4, burn: 4.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#14326@b04ded07d actor=claude cause=escalated:none:fix-stood-down-at-rung-instrument-scope — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#14326@55c2167c8 actor=claude cause=escalated:none:fix-stood-down-at-rung-instrument-scope — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#5565645128c89bc3cf629129d4c2dcd7fa5c0687652fb9c387ab0ad99729f3fc
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

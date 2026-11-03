@@ -12,7 +12,7 @@ import {
 } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotOptions } from "./test-slot.js";
 import { pinWorktreeGit } from "./worktree-git.js";
-import { hasCapturedMergeConflictEvidence, type OpenPrView } from "./sweep.js";
+import { hasCapturedMergeConflictEvidence, lastKnownMergeStateFromLedger, mergeInheritanceRefused, type OpenPrView } from "./sweep.js";
 import type { MergeConflictEvidence } from "./merge-state.js";
 
 export const MERGE_PROBE_STEP = "sweep.merge_probe";
@@ -68,9 +68,12 @@ export async function probeMerge(input: { headSha: string; mainSha: string; git:
   }
 }
 
+const unreadMergeability = (pr: OpenPrView): boolean => pr.mergeState === undefined && pr.mergeableState === undefined;
 const needsConflictEvidence = (pr: OpenPrView): boolean =>
-  pr.mergeState === "dirty" || pr.mergeableState === "dirty" || pr.mergeableState === "unknown";
-const dirtyFirst = (pr: OpenPrView): number => (needsConflictEvidence(pr) ? 0 : 1);
+  pr.mergeState === "dirty" || pr.mergeableState === "dirty" || pr.mergeableState === "unknown" || unreadMergeability(pr);
+const dirtyFirst = (pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>, mainSha: string): number =>
+  (pr.mergeState === "dirty" || pr.mergeableState === "dirty" || pr.mergeableState === "unknown" ||
+    (unreadMergeability(pr) && mergeInheritanceRefused(lastKnownMergeStateFromLedger(lines, pr.prNumber, pr.headSha), mainSha)) ? 0 : 1);
 
 export function stackedOnNumbers(body: string | undefined): number[] {
   const line = (body ?? "").split(/\r?\n/).find((candidate) => /^\s*(?:[-*]\s+)?(?:\*\*)?Stacked on\b/i.test(candidate));
@@ -177,8 +180,8 @@ export async function probeOpenPrMerges(
     }
     const targets = eligible
       .filter((pr) => !seen.has(`${pr.headSha}:${mainSha}`))
-      // Dirty and unknown heads take slots before PRs that merely changed since the last main.
-      .sort((a, b) => dirtyFirst(a) - dirtyFirst(b) || a.lastActivityAt.localeCompare(b.lastActivityAt) || a.prNumber - b.prNumber)
+      // Dirty, unknown and moved-main clean heads (W1-T11166) take slots before PRs that merely changed since the last main.
+      .sort((a, b) => dirtyFirst(a, lines, mainSha) - dirtyFirst(b, lines, mainSha) || a.lastActivityAt.localeCompare(b.lastActivityAt) || a.prNumber - b.prNumber)
       .slice(0, opts.limit ?? MERGE_PROBE_LIMIT);
     for (const pr of eligible) {
       const waitingOnFiles = (pr.mergeState === "dirty" || pr.mergeableState === "dirty") && !hasCapturedMergeConflictEvidence(pr.mergeConflict);

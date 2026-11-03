@@ -670,7 +670,7 @@ test("W1-T9114: the production host starts a review as a child only where the le
     const host = (mode: "off" | "shadow" | "on", ledger: Array<Record<string, unknown>> = waited) => createDetachedWorkHost({
       stateRoot: f.stateRoot, repoDir: f.root, root: f.root, repo: "fixture", log: f.log, readLedger: () => ledger, readMode: () => mode, spawn, probe,
     });
-    const ask = (h: ReturnType<typeof host>) => h.spawnReview({ pr: { prNumber: 7, headSha: "h".repeat(40), taskId: "A", isPlanFiling: true },
+    const ask = (h: ReturnType<typeof host>) => h.spawnReview({ pr: { prNumber: 7, headSha: "h".repeat(40), taskId: "A", isPlanFiling: false },
       reviewKey: "review-key-7", reviewAttemptId: "review-PR7-attempt" });
 
     assert.deepEqual([...HOSTED_DETACHED_WORK_KINDS], ["review", "fix-dispatch", "retro"], "reviews, fix dispatches and retro settles have an entry");
@@ -681,7 +681,7 @@ test("W1-T9114: the production host starts a review as a child only where the le
     assert.equal(spawned.length, 1);
     assert.equal(spawned[0]!.lane, "review", "the child reserves on the review class");
     assert.deepEqual(spawned[0]!.work, { kind: "review", prNumber: 7, headSha: "h".repeat(40), reviewKey: "review-key-7",
-      inputs: { repo: "fixture", reviewAttemptId: "review-PR7-attempt", planOnlyFiling: true } });
+      inputs: { repo: "fixture", reviewAttemptId: "review-PR7-attempt", planOnlyFiling: false } });
 
     assert.equal(await ask(host("on", [])), undefined, "a review that never held a drain stays in process");
     assert.equal(await ask(host("off")), undefined);
@@ -1653,4 +1653,40 @@ test("W1-T9114: the fix run path reads real fleet holds and ledgers each refusal
     process.argv.splice(0, process.argv.length, ...argv);
     f.cleanup();
   }
+});
+
+// W1-T11162 — a plan-only filing is lint plus grep proofs, so its review never pays for a run child's start.
+test("W1-T11162 criterion 1: a plan filing's review is never a run child, in mode on or shadow, and says where it ran", async () => {
+  const f = fixture();
+  try {
+    const launched: string[] = [];
+    const probed: string[] = [];
+    const waited = [{ step: "daemon.freshness_drain.completed", duration_ms: 1_000, waited_on: [{ what: "review", kind: "review", settled_after_ms: 1_000 }] }];
+    const host = (mode: "on" | "shadow") => createDetachedWorkHost({
+      stateRoot: f.stateRoot, repoDir: f.root, root: f.root, repo: "fixture", log: f.log, readLedger: () => waited, readMode: () => mode,
+      spawn: (async (input: { taskId: string }) => {
+        launched.push(input.taskId);
+        return { started: true, runId: `child-${input.taskId}`, dir: f.root, pid: 1, settled: Promise.resolve(result("A")), abort: async () => ({}) };
+      }) as unknown as typeof spawnRunChild,
+      probe: (async (input: { taskId: string }) => {
+        probed.push(input.taskId);
+        return { started: false, reason: "fixture probe" };
+      }) as unknown as typeof startRunChildProbe,
+    });
+    const head = "4316e6a54481f8eeceff78da0cace36f0e07f7c9";
+    const on = host("on");
+    assert.equal(await on.spawnReview({ pr: { prNumber: 16297, headSha: head, isPlanFiling: true }, reviewKey: "plan-key", reviewAttemptId: undefined }),
+      undefined, "undefined is the sweep's in-process review path");
+    assert.deepEqual(launched, [], "no run child starts for a plan filing");
+    assert.deepEqual(f.rows.filter((row) => row.step === "review.placement"),
+      [{ step: "review.placement", pr_number: 16297, head_sha: head, placement: "in-process", reason: "plan-only-filing" }]);
+    const code = await on.spawnReview({ pr: { prNumber: 16276, headSha: "b".repeat(40), isPlanFiling: false }, reviewKey: "code-key", reviewAttemptId: undefined });
+    assert.equal(code?.runId, "child-PR-16276", "a code review is still placed as a run child");
+
+    const shadow = host("shadow");
+    await shadow.spawnReview({ pr: { prNumber: 16297, headSha: head, isPlanFiling: true }, reviewKey: "plan-key", reviewAttemptId: undefined });
+    assert.deepEqual(probed, [], "a plan filing does not start the shadow probe either");
+    await shadow.spawnReview({ pr: { prNumber: 16276, headSha: "b".repeat(40) }, reviewKey: "code-key", reviewAttemptId: undefined });
+    assert.deepEqual(probed, ["review-PR16276"], "a code review still probes in shadow");
+  } finally { f.cleanup(); }
 });

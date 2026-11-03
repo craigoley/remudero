@@ -1,0 +1,34 @@
+- id: W1-T11137
+  title: "The crash throttle is tiered by the instance's own recent crashes, not a fixed 120 s — every non-zero daemon exit sleeps RMD_RESTART_THROTTLE_S=120 (install-host-units.sh:1608, entrypoint.sh:858-859) before docker restarts it, so a lone OOM after hours of health pays the same two dark minutes as a crash loop, across 39 OOM kills and 9 error stops on core in one week"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: the entrypoint's sleep before a non-zero exit
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs: []
+  files:
+    - deploy/entrypoint.sh
+    - test/deploy/the-crash-throttle-is-tiered-by-recent-crashes.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A non-zero exit after a lifetime longer than the instance's own measured recent lifetimes restarts without the sleep; each further crash inside a run of short lifetimes doubles the sleep, with RMD_RESTART_THROTTLE_S as the top tier rather than the only value
+      proof: "unit test: test/deploy/the-crash-throttle-is-tiered-by-recent-crashes.test.ts"
+    - claim: The exit line and one ledger row name the tier, the recent crash count and the sleep chosen; exit 0 is never throttled, a malformed or unset RMD_RESTART_THROTTLE_S keeps today's behaviour, and an unreadable crash history uses the top tier
+      proof: "grep: W1-T11137 criterion 2 in test/deploy/the-crash-throttle-is-tiered-by-recent-crashes.test.ts"
+  rationale: |
+    MEASURED, restart census 2026-10-20 → 10-27 (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - Core booted 111 times: 39 cgroup OOM kills then a docker restart, 9 `stopReason=error`, 8 abrupt deaths, 6 OOM runs that exhausted on-failure:5.
+    - Every crash restart sleeps the fixed RMD_RESTART_THROTTLE_S=120 first.
+    - Process start → daemon.boot then takes 62 s p50 / 108 s p90, and boot → first run 262 s / 441 s. The fixed sleep adds two minutes to every one of those outages whether the crash was isolated or the fifth in a row.
+    - Total: about 981 dark minutes and about 2,940 lane-minutes (upper bound) in the week.
+    READ at origin/main d04469fa2: deploy/install-host-units.sh:1608 passes `-e RMD_RESTART_THROTTLE_S=120`. deploy/entrypoint.sh reads it (:525) and, for any non-zero exit the in-container restarts did not absorb, logs and `sleep "$RESTART_THROTTLE_S"` (:858-859) before exiting.
+    WHY A THROTTLE AT ALL: `--restart=on-failure:5` is a count, not a rate (install-host-units.sh:22-25). A crash loop with no sleep spends the five restarts in seconds and then waits for the watchdog, so the top tier must stay.
+  design: |
+    Before the sleep, read the instance's recent daemon.boot rows from its own state ledger (bounded tail, as idle-starved-probe.sh does). Take the lifetimes between consecutive boots. If this lifetime is longer than the median of the recent ones (the instance's own normal), the crash is isolated: tier 0, no sleep. Otherwise count the consecutive short lifetimes and sleep RMD_RESTART_THROTTLE_S / 2^(top − n), so a loop climbs back to the full value within a few crashes, and a healthy run resets it. No new constant: the top is the configured value and the doubling is the only step. Unreadable history means the top tier, today's behaviour. Write one `daemon.crash_throttle` row (tier, recent_crashes, sleep_s) to the state ledger, and say the same in the log line.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 6 (p2). The watchdog's slow revival once on-failure:5 is spent is filed separately (item 7), since a shorter throttle reaches that limit sooner.

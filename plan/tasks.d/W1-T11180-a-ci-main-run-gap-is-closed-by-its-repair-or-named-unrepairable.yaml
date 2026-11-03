@@ -1,0 +1,34 @@
+- id: W1-T11180
+  title: "A CI.YML MAIN-RUN GAP IS CLOSED BY ITS REPAIR OR NAMED UNREPAIRABLE — the reconciler's ci row reports 'ci.yml run covering main commit <sha>: gap persists after its repair attempt' (incident 951bdf04873c), the same defect W1-T10887 covers for codeql.yml, W1-T10895 for main-plan-guard.yml and W1-T10901 for main-tripwire.yml, so the commit pages a human"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 9.50
+  risk: high
+  band_meaning: span
+  origin: feedback#incident-951bdf04873c3e9d
+  files:
+    - src/lib/state-reconciler.ts
+    - src/lib/main-run-gaps.ts
+    - test/a-ci-main-run-gap-is-closed-by-its-repair-or-named-unrepairable.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Risk:high/span rationale (#588 merits test): one test asserts a single invariant, the reconciler ci row and main-run-gaps
+    judging must agree, which is unsatisfiable piecewise across the two files.
+    Incident 951bdf04873c (invariant reconcile.ci, count 1): 'ci.yml run covering main commit 7527e5c0:
+    gap persists after its repair attempt'. Same bare reason as incident 49262e9d0a63 (ci.yml, still grilling) and the
+    per-workflow fixes W1-T10887, W1-T10895, W1-T10901. ci.yml is not covered by any; share their fix so every
+    main-guard workflow is judged by one rule, do not duplicate it.
+  design: |
+    Reproduce with a reader where ci.yml has no run for an older commit and the repair dispatch yields a run only for the
+    current head. Then either treat an in-flight run for the repaired head as not-a-gap, close the gap as superseded when
+    a newer verdict run exists, or escalate once naming the repaired head and run state. Keep the one-repair-per-gap bound.
+  acceptance:
+    - claim: "a ci.yml gap whose repair yields only a head-sha run is closed as superseded or in flight, or escalates once naming the repaired head, never the bare 'gap persists after its repair attempt'"
+      proof: "unit test: test/a-ci-main-run-gap-is-closed-by-its-repair-or-named-unrepairable.test.ts"
+  falsifier: |
+    At origin/main the new test fails: such a reader escalates with the bare reason 'gap persists after its repair attempt'.

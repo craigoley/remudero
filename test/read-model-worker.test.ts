@@ -4,11 +4,12 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync
 import { syncBuiltinESMExports } from "node:module";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { test, mock } from "node:test";
+import { test, mock, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { pathToFileURL } from "node:url";
-import type { Clock } from "#src/lib/clock.js";
+import { systemClock, type Clock } from "#src/lib/clock.js";
+import { INBOX_STALE_AFTER_MS } from "#src/lib/inbox-freshness.js";
 import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
 import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "#src/lib/ledger-projector.js";
 import type { IssueGateway } from "#src/lib/escalate.js";
@@ -24,7 +25,8 @@ import { acquireLease, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } 
 import { coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 import { analyticsSourceBodies } from "#src/lib/analytics-view.js";
 import { AGENT_QUALIFICATION_GENERATION, agentViewKey, type AgentProposalsBody, type AgentViewData } from "#src/lib/agent-view.js";
-import { buildReadModelViewRoutes, shownReadiness, viewMode, type ViewBody } from "#src/lib/views.js";
+import { buildReadModelViewRoutes, shownReadiness, viewKey, viewMode, type ViewBody } from "#src/lib/views.js";
+import { snapshotCursor } from "#src/lib/read-page.js";
 import { shadowReadiness, viewShadowPath, type ViewShadowState } from "#src/lib/view-shadow.js";
 import { readShadowCounters } from "#src/lib/view-shadow-store.js";
 import { createService } from "#src/lib/service.js";
@@ -41,30 +43,47 @@ import {
   readReadModelSwitches,
   runReadModelWorker,
   readModelStatusView,
+  type ReadModelBodyEntry,
   type ReadModelView,
   type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
 import { buildServeServer, readModelInstances, resolveConsoleSha, stopServeReadModel, type ServeDeps } from "#src/lib/serve.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { INBOX_VIEW_NAME, INBOX_VIEW_SECTIONS, INBOX_VIEW_VERSION, INBOX_QUALIFICATION_POPULATION_META, inboxShadowPopulation, refreshInboxClassification } from "#src/lib/inbox-view.js";
+import type { PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
 
 test("the live Inbox consumer holds mismatched population messages and recovers only on matching evidence", async t => {
-  const stateDir = makeTempDir("inbox-population-messages"), repository = "craigoley/remudero", snapshotKey = "b".repeat(64), generation = `inbox-current-pages-v1:${"a".repeat(64)}`;
+  const stateDir = makeTempDir("inbox-population-messages"), repository = "craigoley/remudero", snapshotKey = "b".repeat(64);
+  const population = inboxPopulation(snapshotKey, 1, "population-sibling"), generation = population.population.generation;
   let worker: ReturnType<typeof createReadModelWorker> | undefined;
   t.after(() => { worker?.stop(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
   mkdirSync(join(stateDir, "read-model")); writeFileSync(join(stateDir, LIVE), "");
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: "auto" } }));
   const file = join(stateDir, "population-worker.mjs"), scope = { instance: "core", repository };
-  const body = { view: "inbox", key: "section=needsYou", version: 1, generation: 1, etag: 'W/"population-body"', qualificationGeneration: generation,
-    body: { view: "inbox", version: 1, generatedAt: new Date().toISOString(), asOf: null, stale: false, sources: [], data: { snapshotKey, section: "needsYou", page: { index: 0, of: 1, total: 0 }, items: [] } } };
+  const body = population.find(entry => entry.key === "section=needsYou")!;
+  const siblings = population.filter(entry => entry !== body);
+  const db = openProjectorReadModel(stateDir, "core");
+  db.exec("CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL, generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view,key)) WITHOUT ROWID");
+  for (const entry of population) {
+    db.prepare("INSERT INTO view_body(view,key,version,generation,etag,body) VALUES(?,?,?,?,?,?)")
+      .run(entry.view, entry.key, entry.version, entry.generation, entry.etag, JSON.stringify(entry.body));
+    db.prepare("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)").run(`view_qualification:${JSON.stringify([entry.view, entry.key])}`,
+      JSON.stringify({ etag: entry.etag, qualificationGeneration: entry.qualificationGeneration }));
+  }
+  db.prepare("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)").run(INBOX_QUALIFICATION_POPULATION_META, JSON.stringify(population.population));
+  db.close();
   const status = { view: "read-model", key: "", version: 1, generation: 1, etag: 'W/"population-status"',
     body: { view: "read-model", version: 1, generatedAt: new Date().toISOString(), asOf: null, stale: false, sources: [], data: { shadow: [{ view: "inbox", ready: true, reason: "controlled qualified consumer input", samples: 3000, lastRealMs: null, qualificationGeneration: generation }] } } };
   writeFileSync(file, `import { parentPort } from "node:worker_threads";
 const scope=${JSON.stringify(scope)},generation=${JSON.stringify(generation)},snapshotKey=${JSON.stringify(snapshotKey)};
 parentPort.postMessage({type:"body",entry:${JSON.stringify(body)}});
+for (const entry of ${JSON.stringify(siblings)}) parentPort.postMessage({type:"body",entry});
 parentPort.postMessage({type:"body",entry:${JSON.stringify(status)}});
 parentPort.postMessage({type:"qualification",view:"inbox",generation,snapshotKey,scope});
 let phase=0;const timer=setInterval(()=>{},1000);
@@ -1142,3 +1161,366 @@ test("a slice that cannot start is a tick failure of its instance and nothing is
   assert.equal(checkWindows(f.stateDir).length, 0, "no slice ran");
   assert.equal(lastState(f.c.messages).instances[0]?.checking, undefined, "and none is left marked as running");
 });
+
+/** Complete deterministic page data, qualified by the production population validator. */
+function inboxPopulation(snapshotKey: string, needsYouPages: number, tag: string, filters: Record<string, string> = {}) {
+  const generatedAt = new Date().toISOString();
+  const entries = INBOX_VIEW_SECTIONS.flatMap(section => {
+    const of = section === "needsYou" ? needsYouPages : 1;
+    return Array.from({ length: of }, (_, index) => {
+      const cursor = (offset: number) => snapshotCursor({ snapshotKey, section, offset });
+      const key = viewKey(new URLSearchParams({ ...filters, section, ...(index > 0 ? { cursor: cursor(index) } : {}) }));
+      return { view: INBOX_VIEW_NAME, key, version: 1, generation: 1, etag: `W/"${tag}-${section}-${index}"`,
+        body: { view: INBOX_VIEW_NAME, version: 1, generatedAt, asOf: generatedAt, stale: false,
+          sources: [{ name: "inbox-store:core", asOf: generatedAt, state: "fresh" as const }],
+          data: { snapshotKey, section, items: [{ id: `${tag}-${section}-${index}` }], counts: {},
+            page: { index, of, total: of, ...(index + 1 < of ? { next: cursor(index + 1) } : {}) } } } };
+    });
+  });
+  return qualifyInboxEntries(entries);
+}
+
+function qualifyInboxEntries<T extends ReadModelBodyEntry>(entries: T[]) {
+  const population = inboxShadowPopulation(entries.map(entry => ({ key: entry.key, data: entry.body.data, sources: entry.body.sources })),
+    { instance: "core", repository: "craigoley/remudero" }, Date.now());
+  return Object.assign(entries.map(entry => ({ ...entry, qualificationGeneration: population.generation })), { population });
+}
+
+/** A worker module that replays `script[spawn][step]`: the first step on boot, each next one per `shadow` request; `"exit"` ends that thread. */
+function scriptedInboxWorker(t: TestContext, script: unknown[][][], populations: Array<ReadModelBodyEntry[] & { population: ReturnType<typeof inboxPopulation>["population"] }>) {
+  const stateDir = makeTempDir("inbox-convergence"), scope = { instance: "core", repository: "craigoley/remudero" };
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let worker: ReturnType<typeof createReadModelWorker> | undefined;
+  t.after(() => { worker?.stop(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  mkdirSync(join(stateDir, "read-model")); writeFileSync(join(stateDir, LIVE), "");
+  const scriptPath = join(stateDir, "script.json"), counter = join(stateDir, "spawns"), file = join(stateDir, "scripted-inbox-worker.mjs");
+  writeFileSync(scriptPath, JSON.stringify(script));
+  writeFileSync(file, `import { parentPort } from "node:worker_threads";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const script = JSON.parse(readFileSync(${JSON.stringify(scriptPath)}, "utf8"));
+const spawn = existsSync(${JSON.stringify(counter)}) ? Number(readFileSync(${JSON.stringify(counter)}, "utf8")) + 1 : 1;
+writeFileSync(${JSON.stringify(counter)}, String(spawn));
+const steps = script[spawn - 1] ?? [[]];
+let step = 0;
+const run = () => { for (const message of steps[step] ?? []) { if (message === "exit") process.exit(1); parentPort.postMessage(message); } parentPort.postMessage({ type: "log", step: "fixture.step", extra: { spawn, step } }); };
+run();
+const timer = setInterval(() => {}, 1000);
+parentPort.on("message", message => { if (message.type === "stop") { clearInterval(timer); parentPort.close(); return; } if (message.type === "shadow") { step++; run(); } });
+`);
+  worker = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: scope.repository }], workerUrl: pathToFileURL(file), tickMs: 5, stopWaitMs: 50,
+    every: () => () => {}, log: (step, extra) => { logs.push({ step, extra }); } });
+  const commitStep = (messages: unknown[], override?: ReturnType<typeof inboxPopulation>) => {
+    const population = override ?? populations.find(entries => messages.some(message => {
+      const candidate = message as { type?: string; generation?: string };
+      return candidate.type === "qualification" && candidate.generation === entries.population.generation;
+    }));
+    if (!population) return;
+    const db = openProjectorReadModel(stateDir, scope.instance);
+    try {
+      db.exec("CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL, generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view,key)) WITHOUT ROWID");
+      db.exec("BEGIN IMMEDIATE");
+      db.prepare("DELETE FROM view_body WHERE view = ?").run(INBOX_VIEW_NAME);
+      for (const entry of population) {
+        db.prepare("INSERT INTO view_body(view,key,version,generation,etag,body) VALUES(?,?,?,?,?,?)")
+          .run(entry.view, entry.key, entry.version, entry.generation, entry.etag, JSON.stringify(entry.body));
+        db.prepare("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)").run(`view_qualification:${JSON.stringify([entry.view, entry.key])}`,
+          JSON.stringify({ etag: entry.etag, qualificationGeneration: entry.qualificationGeneration }));
+      }
+      db.prepare("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)").run(INBOX_QUALIFICATION_POPULATION_META, JSON.stringify(population.population));
+      db.exec("COMMIT");
+    } finally { db.close(); }
+  };
+  commitStep(script[0]![0]!);
+  let currentSpawn = 1, currentStep = 0;
+  const reached = async (spawn: number, step: number) => {
+    const deadline = Date.now() + 15000, seen = () => logs.some(log => log.step === "fixture.step" && log.extra?.spawn === spawn && log.extra?.step === step);
+    while (!seen() && Date.now() < deadline) await sleep(10);
+    assert.ok(seen(), `the scripted worker reached spawn ${spawn} step ${step}`);
+    currentSpawn = spawn; currentStep = step;
+  };
+  const inboxKeys = () => [...worker!.bodies.values()].filter(entry => entry.view === INBOX_VIEW_NAME).map(entry => entry.key).sort();
+  return { worker, scope, logs, reached, inboxKeys, advance: (population?: ReturnType<typeof inboxPopulation>) => {
+    const next = script[currentSpawn - 1]?.[currentStep + 1] ?? [];
+    commitStep(next.includes("exit") ? script[currentSpawn]?.[0] ?? [] : next, population);
+    worker!.shadow({ view: INBOX_VIEW_NAME, key: "section=needsYou", requests: 0 });
+  } };
+}
+
+const INBOX_S1 = "a".repeat(64), INBOX_S2 = "b".repeat(64);
+const qualified = (generation: string, snapshotKey: string, scope: { instance: string; repository: string }) => ({ type: "qualification", view: INBOX_VIEW_NAME, generation, snapshotKey, scope });
+
+test("cached inbox pages converge after a committed population replaces the producer", async t => {
+  const first = inboxPopulation(INBOX_S1, 3, "first"), replacement = inboxPopulation(INBOX_S2, 1, "replacement");
+  const INBOX_G1 = first.population.generation, INBOX_G2 = replacement.population.generation;
+  const status = { view: "read-model", key: "", version: 1, generation: 1, etag: 'W/"status"', body: { view: "read-model", version: 1, generatedAt: new Date().toISOString(), asOf: null, stale: false, sources: [], data: {} } };
+  const scope = { instance: "core", repository: "craigoley/remudero" }, pending = { type: "qualification", view: INBOX_VIEW_NAME, generation: "inbox-current-pages-v1:pending", scope };
+  // The first producer publishes its whole population and dies; the replacement committed its shrink, so it has no drop to send.
+  const f = scriptedInboxWorker(t, [
+    [[pending, ...first.map(entry => ({ type: "body", entry })), { type: "body", entry: status }, qualified(INBOX_G1, INBOX_S1, scope)], ["exit"]],
+    [[pending, ...replacement.map(entry => ({ type: "body", entry })), qualified(INBOX_G2, INBOX_S2, scope)]],
+  ], [first, replacement]);
+  f.worker.start();
+  await f.reached(1, 0);
+  assert.equal(f.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G1);
+  assert.deepEqual(f.inboxKeys(), first.map(entry => entry.key).sort(), "positive control: the first producer's continuation pages are cached");
+  f.advance();
+  await f.reached(2, 0);
+  assert.ok(f.logs.some(log => log.step === "read_model.worker_exited"), "the producer really was replaced by a respawned thread");
+  assert.equal(f.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G2);
+  assert.deepEqual(f.inboxKeys(), replacement.map(entry => entry.key).sort(), "the replaced producer's retired continuation pages are forgotten");
+  assert.equal(f.worker.bodies.size, replacement.length + 1, "exactly the current population and the unrelated status body remain");
+  for (const entry of replacement) assert.equal(f.worker.body(INBOX_VIEW_NAME, entry.key)?.etag, entry.etag, `current page ${entry.key} is kept as published`);
+  assert.equal(f.worker.body("read-model")?.etag, status.etag, "a body of another view is never retired by an Inbox population");
+  await t.test("source-only refresh retires pages with unchanged etags and aged cached sources", t => restartedInboxPublisher(t, true));
+});
+
+test("inbox population recovery preserves current pages and refuses incomplete retirement", async t => {
+  const first = inboxPopulation(INBOX_S1, 3, "first"), replacement = inboxPopulation(INBOX_S2, 1, "replacement");
+  const INBOX_G1 = first.population.generation, INBOX_G2 = replacement.population.generation;
+  const scope = { instance: "core", repository: "craigoley/remudero" }, pending = { type: "qualification", view: INBOX_VIEW_NAME, generation: "inbox-current-pages-v1:pending", scope };
+  const missing = replacement.find(entry => entry.key === "section=kept")!, partial = replacement.filter(entry => entry !== missing);
+  const malformed = { ...missing, etag: 'W/"malformed"', body: { ...missing.body, data: { ...missing.body.data, page: { index: 1, of: 1, total: 0 } } } };
+  const f = scriptedInboxWorker(t, [[
+    [pending, ...first.map(entry => ({ type: "body", entry })), qualified(INBOX_G1, INBOX_S1, scope)],
+    [pending],
+    [...partial.map(entry => ({ type: "body", entry })), qualified(INBOX_G2, INBOX_S2, scope)],
+    [{ type: "body", entry: malformed }, qualified(INBOX_G2, INBOX_S2, scope)],
+    [{ type: "body", entry: missing }, qualified(INBOX_G2, INBOX_S2, { ...scope, repository: "craigoley/remudero-site" })],
+    [qualified("inbox-current-pages-v1:not-a-population", INBOX_S2, scope), qualified(INBOX_G2, "not-a-snapshot", scope)],
+    [qualified(INBOX_G2, INBOX_S2, scope)],
+  ]], [first, replacement]);
+  const union = [...new Set([...first, ...replacement].map(entry => entry.key))].sort();
+  f.worker.start();
+  await f.reached(1, 0);
+  assert.equal(f.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G1, "positive control: a complete population qualifies");
+  for (const [step, evidence] of [[1, "pending"], [2, "partial"], [3, "malformed"], [4, "foreign-scope"], [5, "malformed identity"]] as const) {
+    f.advance();
+    await f.reached(1, step);
+    const cached = f.inboxKeys();
+    for (const entry of first.filter(entry => entry.key.includes("cursor="))) assert.ok(cached.includes(entry.key), `${evidence} evidence keeps cached page ${entry.key}`);
+    assert.equal(f.worker.qualificationGeneration?.(INBOX_VIEW_NAME), "inbox-current-pages-v1:pending", `${evidence} evidence withholds qualification`);
+    assert.equal(f.worker.shadowIdentity?.(INBOX_VIEW_NAME, "section=needsYou")?.key, undefined, `${evidence} evidence names no sample identity`);
+  }
+  assert.ok(f.logs.some(log => log.step === "read_model.qualification_unknown" && /complete page batch/.test(String(log.extra?.reason))), "an incomplete batch says why it withheld qualification");
+  assert.deepEqual(f.inboxKeys(), union, "no incomplete, foreign or malformed message retired a page");
+  f.advance();
+  await f.reached(1, 6);
+  assert.equal(f.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G2, "the completed matching batch qualifies");
+  assert.deepEqual(f.inboxKeys(), replacement.map(entry => entry.key).sort(), "only the completed current population remains");
+  for (const entry of replacement) assert.equal(f.worker.body(INBOX_VIEW_NAME, entry.key)?.etag, entry.etag, `current page ${entry.key} is preserved`);
+
+  const withParams = (entry: typeof replacement[number], edit: (params: URLSearchParams) => void) => {
+    const params = new URLSearchParams(entry.key);
+    edit(params);
+    return { ...entry, key: viewKey(params) };
+  };
+  const scoped = replacement.map(entry => withParams(entry, params => {
+    params.set("repo", scope.repository); params.set("repository", scope.repository); params.set("instance", scope.instance);
+  }));
+  const scopedFirst = first.map(entry => withParams(entry, params => {
+    params.set("repo", scope.repository); params.set("repository", scope.repository); params.set("instance", scope.instance);
+  }));
+  const wholeFirst = qualifyInboxEntries([...first, ...scopedFirst]);
+  const wholeReplacement = qualifyInboxEntries([...replacement, ...scoped]);
+  assert.equal(wholeFirst.length, 22, "positive control: both original filter groups include continuation pages");
+  assert.equal(wholeReplacement.length, 18, "the committed replacement contains every section of both filter groups");
+  const invalidBatches = [
+    { label: "null items", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, items: null } } })) },
+    { label: "negative page total", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, page: { ...entry.body.data.page, total: -1 } } } })) },
+    { label: "whole filter group omitted", entries: replacement },
+    { label: "null counts", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, counts: null } } })) },
+    { label: "total disagrees with items", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, page: { ...entry.body.data.page, total: 2 } } } })) },
+    { label: "unexpected continuation", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, page: { ...entry.body.data.page, next: "unexpected" } } } })) },
+    { label: "missing source", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, sources: [] } })) },
+    { label: "stale source", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, sources: entry.body.sources.map(source => ({ ...source, state: "stale" as const })) } })) },
+    { label: "mismatched source census", entries: wholeReplacement.map((entry, index) => ({ ...entry, body: { ...entry.body, sources: entry.body.sources.map(source => ({ ...source, asOf: index === 0 ? new Date(Date.parse(source.asOf!) - 1).toISOString() : source.asOf })) } })) },
+    { label: "mismatched attention census", entries: wholeReplacement.map((entry, index) => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, counts: { needsYou: index } } } })) },
+    { label: "oversized page", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, items: [{ id: "x".repeat(61 * 1024) }] } } })) },
+    ...["repo", "repository", "instance"].flatMap(filter => {
+      const foreign = filter === "instance" ? "other" : "other/repository";
+      return [
+        { label: `foreign ${filter} filters`, entries: replacement.map(entry => withParams(entry, params => params.set(filter, foreign))) },
+        { label: `duplicate ${filter} hides foreign scope`, entries: scoped.map(entry => withParams(entry, params => params.append(filter, foreign))) },
+      ];
+    }),
+    { label: "mixed valid and foreign filter groups", entries: [...replacement, ...replacement.map(entry => withParams(entry, params => params.set("repo", "other/repository")))] },
+    { label: "section route disagrees with body", entries: replacement.map((entry, index) => withParams(entry, params => params.set("section", INBOX_VIEW_SECTIONS[(index + 1) % INBOX_VIEW_SECTIONS.length]!))) },
+    { label: "missing section route", entries: replacement.map(entry => withParams(entry, params => params.delete("section"))) },
+    { label: "duplicate section route", entries: replacement.map(entry => withParams(entry, params => params.append("section", entry.body.data.section))) },
+    { label: "malformed cursor", entries: replacement.map(entry => withParams(entry, params => params.set("cursor", "not-a-cursor"))) },
+    { label: "foreign snapshot cursor", entries: replacement.map(entry => withParams(entry, params => params.set("cursor", snapshotCursor({ snapshotKey: INBOX_S1, section: entry.body.data.section, offset: 1 })))) },
+    { label: "continuation cursor on first page", entries: replacement.map(entry => withParams(entry, params => params.set("cursor", snapshotCursor({ snapshotKey: INBOX_S2, section: entry.body.data.section, offset: 1 })))) },
+  ];
+  for (const { label, entries: invalid } of invalidBatches) await t.test(label, async sub => {
+    const entries = invalid.map(entry => ({ ...entry, qualificationGeneration: wholeReplacement.population.generation }));
+    // Sources are now qualified from SQLite; corrupt those too while keeping the committed payload whole.
+    const committed = Object.assign(wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body,
+      sources: entries.find(candidate => candidate.key === entry.key)?.body.sources ?? entry.body.sources } })), { population: wholeReplacement.population });
+    const control = scriptedInboxWorker(sub, [[
+      [pending, ...wholeFirst.map(entry => ({ type: "body", entry })), qualified(wholeFirst.population.generation, INBOX_S1, scope)],
+      [pending, ...entries.map(entry => ({ type: "body", entry })), qualified(wholeReplacement.population.generation, INBOX_S2, scope)],
+      [...entries.map(entry => ({ type: "drop", view: INBOX_VIEW_NAME, key: entry.key })),
+        ...wholeReplacement.map(entry => ({ type: "body", entry })), qualified(wholeReplacement.population.generation, INBOX_S2, scope)],
+    ]], [wholeFirst, committed]);
+    control.worker.start();
+    await control.reached(1, 0);
+    assert.deepEqual(control.inboxKeys(), wholeFirst.map(entry => entry.key).sort(), "positive control: initial pages in both filter groups are cached");
+    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), wholeFirst.population.generation);
+    control.advance();
+    await control.reached(1, 1);
+    const expected = [...new Set([...wholeFirst, ...entries].map(entry => entry.key))].sort();
+    assert.deepEqual(control.inboxKeys(), expected, `${label} with a matching envelope preserves every cached page`);
+    assert.equal(control.worker.bodies.size, expected.length, "the exact cache count includes all retained pages");
+    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), "inbox-current-pages-v1:pending", "invalid pages cannot qualify a matching envelope");
+    for (const entry of entries) assert.equal(control.worker.shadowIdentity?.(INBOX_VIEW_NAME, entry.key)?.key, undefined, "invalid evidence provides no qualified sample identity");
+    control.advance(wholeReplacement);
+    await control.reached(1, 2);
+    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), wholeReplacement.population.generation, "a complete in-scope replacement still qualifies");
+    assert.deepEqual(control.inboxKeys(), wholeReplacement.map(entry => entry.key).sort(), "all current qualified filter groups survive convergence");
+    assert.equal(control.worker.bodies.size, wholeReplacement.length);
+    for (const entry of wholeReplacement) assert.equal(control.worker.body(INBOX_VIEW_NAME, entry.key)?.etag, entry.etag);
+  });
+
+  const badCommits = [
+    { label: "another committed etag", entries: replacement.map(entry => ({ ...entry, etag: 'W/"another"' })) },
+    { label: "another committed body generation", entries: replacement.map(entry => ({ ...entry, qualificationGeneration: INBOX_G1 })) },
+    { label: "another committed payload", entries: replacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, items: [{ id: "another" }] } } })) },
+    { label: "stale committed timestamps", entries: replacement.map(entry => ({ ...entry, body: { ...entry.body,
+      sources: entry.body.sources.map(source => ({ ...source, asOf: new Date(Date.parse(source.asOf!) - INBOX_STALE_AFTER_MS - 1).toISOString() })) } })) },
+    { label: "missing committed sources", entries: replacement.map(entry => ({ ...entry, body: { ...entry.body, sources: [] } })) },
+  ];
+  for (const { label, entries } of badCommits) await t.test(label, async sub => {
+    const committed = Object.assign(entries, { population: replacement.population });
+    const control = scriptedInboxWorker(sub, [[
+      [pending, ...first.map(entry => ({ type: "body", entry })), qualified(INBOX_G1, INBOX_S1, scope)],
+      [pending, ...replacement.map(entry => ({ type: "body", entry })), qualified(INBOX_G2, INBOX_S2, scope)],
+      [qualified(INBOX_G2, INBOX_S2, scope)],
+    ]], [first, committed]);
+    control.worker.start(); await control.reached(1, 0);
+    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G1);
+    control.advance(); await control.reached(1, 1);
+    assert.deepEqual(control.inboxKeys(), union, `${label} cannot retire cached pages even with fresh body messages`);
+    assert.equal(control.worker.bodies.size, union.length);
+    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), "inbox-current-pages-v1:pending");
+    control.advance(replacement); await control.reached(1, 2);
+    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G2);
+    assert.deepEqual(control.inboxKeys(), replacement.map(entry => entry.key).sort());
+    assert.equal(control.worker.bodies.size, replacement.length);
+  });
+});
+
+/** A real classified Inbox: `count` proposals page `needsYou`, and two of them fit one page. */
+async function classifiedInbox(root: string, count: number) {
+  mkdirSync(join(root, "plan"), { recursive: true });
+  const planPath = join(root, "plan", "tasks.yaml"), ledgerPath = join(root, "state", LIVE), registry = join(root, "state", "inbox-proposals.json");
+  writeFileSync(planPath, "[]\n");
+  const proposals = Array.from({ length: count }, (_, i) => ({ id: `ruling:converge-${i}`, summary: `${i} ${"operator context ".repeat(70)}`, evidenceAnchors: [] }));
+  const deps: PanelGraphDeps = { root, inboxRoot: root, planPath, ledgerPath, inboxFromSlowLane: true,
+    github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: { approve: () => undefined, reframe: () => undefined },
+    inboxMainSha: () => "a".repeat(40), inboxGrepAnchor: () => true };
+  writeFileSync(registry, JSON.stringify({ proposals }));
+  const first = await refreshInboxClassification(deps, {}, systemClock);
+  writeFileSync(registry, JSON.stringify({ proposals: proposals.slice(0, 2) }));
+  const replacement = await refreshInboxClassification(deps, {}, systemClock);
+  return { first: first.bodies, replacement: replacement.bodies };
+}
+
+test("a restarted publisher converges cached pages with the committed inbox population", t => restartedInboxPublisher(t));
+
+async function restartedInboxPublisher(t: TestContext, sourceOnly = false) {
+  const root = makeTempDir("inbox-restarted-publisher"), stateDir = join(root, "state"), repository = "craigoley/remudero";
+  let worker: ReturnType<typeof createReadModelWorker> | undefined;
+  t.after(() => { worker?.stop(); rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  mkdirSync(join(stateDir, "read-model"), { recursive: true }); writeFileSync(join(stateDir, LIVE), "");
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: "auto" } }));
+  const inbox = await classifiedInbox(root, 180);
+  const initialTime = Date.now(), { clock, advance } = steppedClock(initialTime);
+  assert.ok(inbox.first.length > inbox.replacement.length, "positive control: the real classification shrinks its page population");
+  const fixture = join(stateDir, "inbox-populations.json"), counter = join(stateDir, "spawns"), file = join(stateDir, "restarted-publisher.mjs");
+  writeFileSync(fixture, JSON.stringify({ version: INBOX_VIEW_VERSION, first: inbox.first, replacement: inbox.replacement, sourceOnly, initialTime, refreshAfter: INBOX_STALE_AFTER_MS + 1 }));
+  // The real ticker in a real worker thread, over the real SQLite store. The first thread commits the shrink and dies before
+  // posting any of it (a commit-to-IPC interruption); the respawned one finds nothing left to retire in the store.
+  writeFileSync(file, `import { parentPort, workerData } from "node:worker_threads";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+// This thread drives the real ticker itself, so the imported module's own worker entry stays dormant.
+const { stateDir, instances } = workerData;
+workerData.kind = "restarted-publisher-fixture";
+const { createReadModelTicker, readModelStatusView } = await import(${JSON.stringify(pathToFileURL(join(REPO_ROOT, "src", "lib", "read-model-worker.ts")).href)});
+const fixture = JSON.parse(readFileSync(${JSON.stringify(fixture)}, "utf8"));
+const spawn = existsSync(${JSON.stringify(counter)}) ? Number(readFileSync(${JSON.stringify(counter)}, "utf8")) + 1 : 1;
+writeFileSync(${JSON.stringify(counter)}, String(spawn));
+let pendings = 0, inboxPosts = 0, refreshed = false, now = fixture.initialTime;
+const clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
+const stamped = bodies => bodies.map(body => ({ ...body, sources: body.sources.map(source => ({ ...source, asOf: clock.iso() })) }));
+const post = message => {
+  if (message.type === "qualification" && message.generation.endsWith(":pending")) pendings++;
+  else if (spawn === 1 && pendings === 2 && (message.type === "body" || message.type === "drop" || message.type === "qualification")) process.exit(1);
+  if (message.type === "body" && message.entry.view === "inbox") inboxPosts++;
+  if (fixture.sourceOnly && spawn === 2 && !refreshed && message.type === "qualification" && !message.generation.endsWith(":pending")) return;
+  parentPort.postMessage(message);
+};
+const ticker = createReadModelTicker({ stateDir, instances, clock, holder: "restarted-publisher", oracle: "off", views: [readModelStatusView], post });
+ticker.start(); ticker.tick();
+ticker.accept({ view: "inbox", version: fixture.version, bodies: stamped(spawn === 1 ? fixture.first : fixture.replacement) });
+parentPort.postMessage({ type: "log", step: "fixture.published", extra: { spawn } });
+const timer = setInterval(() => {}, 1000);
+parentPort.on("message", message => {
+  if (message.type === "stop") { clearInterval(timer); ticker.release(); parentPort.close(); return; }
+  if (message.type === "shadow" && spawn === 1) {
+    writeFileSync(${JSON.stringify(join(stateDir, "interrupted"))}, "commit then exit\\n");
+    ticker.accept({ view: "inbox", version: fixture.version, bodies: stamped(fixture.replacement) });
+  } else if (message.type === "shadow" && spawn === 2 && fixture.sourceOnly) {
+    now += fixture.refreshAfter; refreshed = true;
+    ticker.tick();
+    const before = inboxPosts;
+    ticker.accept({ view: "inbox", version: fixture.version, bodies: stamped(fixture.replacement) });
+    parentPort.postMessage({ type: "log", step: "fixture.refreshed", extra: { bodyPosts: inboxPosts - before } });
+  }
+});
+`);
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  worker = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }], clock, workerUrl: pathToFileURL(file), tickMs: 5, stopWaitMs: 200,
+    every: () => () => {}, log: (step, extra) => { logs.push({ step, extra }); } });
+  const until = async (what: string, done: () => boolean) => { const deadline = Date.now() + 30000; while (!done() && Date.now() < deadline) await sleep(20); assert.ok(done(), what); };
+  const committed = () => loadCommittedViewBodies(stateDir, "core").bodies.filter(entry => entry.view === INBOX_VIEW_NAME).map(entry => entry.key).sort();
+  const cached = () => [...worker!.bodies.values()].filter(entry => entry.view === INBOX_VIEW_NAME).map(entry => entry.key).sort();
+  const firstKeys = inbox.first.map(body => body.key).sort(), currentKeys = inbox.replacement.map(body => body.key).sort();
+  worker.start();
+  await until("the first publisher posted its population", () => logs.some(log => log.step === "fixture.published" && log.extra?.spawn === 1));
+  assert.deepEqual(cached(), firstKeys, "positive control: serve caches every page of the first committed population");
+  worker.shadow({ view: INBOX_VIEW_NAME, key: "section=needsYou", requests: 0 });
+  await until("the publisher was replaced and re-published", () => logs.some(log => log.step === "fixture.published" && log.extra?.spawn === 2));
+  if (sourceOnly) {
+    const before = currentKeys.map(key => worker!.body(INBOX_VIEW_NAME, key)!);
+    const generation = loadCommittedViewBodies(stateDir, "core", clock.now()).inboxPopulation!.generation;
+    assert.deepEqual(cached(), [...new Set([...firstKeys, ...currentKeys])].sort(), "unobserved completion retains obsolete pages until the refresh");
+    advance(INBOX_STALE_AFTER_MS + 1);
+    assert.ok(before.every(entry => clock.now() - Date.parse(entry.body.sources[0]!.asOf!) > INBOX_STALE_AFTER_MS), "every cached current source is beyond the freshness budget");
+    worker.shadow({ view: INBOX_VIEW_NAME, key: "section=needsYou", requests: 0 });
+    await until("the producer committed a source-only refresh", () => logs.some(log => log.step === "fixture.refreshed"));
+    assert.equal(logs.find(log => log.step === "fixture.refreshed")!.extra?.bodyPosts, 0, "the actual publisher suppresses every unchanged Inbox body");
+    const committed = loadCommittedViewBodies(stateDir, "core", clock.now());
+    assert.equal(committed.inboxPopulation?.generation, generation, "source-only refresh preserves the existing population identity");
+    for (const entry of before) {
+      const stored = committed.bodies.find(body => body.view === INBOX_VIEW_NAME && body.key === entry.key)!;
+      assert.equal(stored.etag, entry.etag, "refresh preserves the cached ETag");
+      assert.equal(stored.body.sources[0]!.asOf, clock.iso(), "SQLite holds fresh committed provenance for the same body");
+      assert.equal(worker.body(INBOX_VIEW_NAME, entry.key), entry, "the cached body was not republished");
+    }
+    assert.deepEqual(cached(), currentKeys, "source-only completion retires obsolete pages without losing a qualified page");
+    assert.equal(worker.bodies.size, currentKeys.length + 1, "only the qualified pages and real status body remain before reload");
+    t.diagnostic(JSON.stringify({ sourceOnlyRecovery: { before: firstKeys.length, after: cached().length, committed: currentKeys.length,
+      refreshedBodyPosts: logs.find(log => log.step === "fixture.refreshed")!.extra?.bodyPosts } }));
+  }
+  await until("the replacement population qualified", () => worker!.qualificationGeneration?.(INBOX_VIEW_NAME) === loadCommittedViewBodies(stateDir, "core", clock.now()).inboxPopulation?.generation);
+  assert.equal(readFileSync(join(stateDir, "interrupted"), "utf8"), "commit then exit\n", "the first publisher was interrupted after its commit");
+  assert.ok(logs.some(log => log.step === "read_model.worker_exited"), "the first publisher's thread really exited");
+  assert.deepEqual(committed(), currentKeys, "the committed store already holds only the replacement population");
+  assert.deepEqual(cached(), currentKeys, "serve's cache converges on exactly the committed current population");
+  const retired = firstKeys.filter(key => !currentKeys.includes(key));
+  assert.ok(retired.length > 0, "positive control: the shrink retired real continuation pages");
+  for (const key of retired) assert.equal(worker.body(INBOX_VIEW_NAME, key), undefined, `retired page ${key} is forgotten`);
+  worker.reload();
+  assert.deepEqual(cached(), currentKeys, "a reload resurrects no retired page");
+  assert.equal(worker.bodies.size, loadCommittedViewBodies(stateDir, "core").bodies.length, "the cache holds exactly as many bodies as the committed store");
+}
