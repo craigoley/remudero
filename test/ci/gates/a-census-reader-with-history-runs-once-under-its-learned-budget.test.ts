@@ -36,7 +36,9 @@ function seed(path: string, runs: number[]) {
 }
 
 /** One reader run over injected seams, capturing the budgets handed to each child and every line printed. */
-function drive(t: TestContext, root: string, times: number[], history: Record<string, unknown>, outcome = () => ({ status: 0, stdout: PASS })) {
+type ChildResult = { status: number | null; stdout: string; error?: Error };
+function drive(t: TestContext, root: string, times: number[], history: Record<string, unknown>,
+  outcome: () => ChildResult = () => ({ status: 0, stdout: PASS })) {
   const bounds: number[] = [];
   const lines: string[] = [];
   t.mock.method(console, "log", (line: string) => { lines.push(String(line)); });
