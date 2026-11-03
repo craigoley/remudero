@@ -218,14 +218,29 @@ function failuresOfDispatch(row: Record<string, unknown>): ReviewerProofFailure[
   });
 }
 
-function failuresOfReview(row: Record<string, unknown>): ReviewerProofFailure[] {
+/**
+ * W1-T11133: the host pressure a review's proofs ran under, from the newest `review.capacity` reading the sweep wrote at
+ * or before the review posted. A criterion's own recorded load (W1-T11132) wins; with no reading, none is claimed.
+ */
+export function reviewLoadFromCapacity(capacity: Record<string, unknown> | undefined, postedAt: unknown): string | undefined {
+  if (!capacity || typeof capacity.ts !== "string" || typeof postedAt !== "string") return undefined;
+  const ageMs = Date.parse(postedAt) - Date.parse(capacity.ts);
+  if (!Number.isFinite(ageMs) || ageMs < 0) return undefined;
+  const pct = (key: string) => typeof capacity[key] === "number" ? `${capacity[key]}%` : "unread";
+  const mib = typeof capacity.mem_available_mib === "number" ? `${Math.round(capacity.mem_available_mib)} MiB` : "unread";
+  return `cpu PSI full ${pct("cpu_psi_full_avg10_pct")}, some ${pct("cpu_psi_some_avg10_pct")} (avg10); memory PSI some ` +
+    `${pct("memory_psi_some_avg10_pct")}; ${mib} available; review.capacity at ${capacity.ts}, ${Math.round(ageMs / 1000)} s before the review posted`;
+}
+
+function failuresOfReview(row: Record<string, unknown>, capacityLoad?: string): ReviewerProofFailure[] {
   const criteria = (row.decision_verdict as { criteria?: unknown } | null | undefined)?.criteria;
   if (!Array.isArray(criteria)) return [];
   return criteria.flatMap((c: unknown) => {
     const v = c && typeof c === "object" ? c as Record<string, unknown> : {};
+    const reviewLoad = typeof v.reviewLoad === "string" ? v.reviewLoad : capacityLoad;
     return typeof v.claim === "string" && v.proof_exec === "executed_fail" && typeof v.proofFailureOutput === "string"
       ? [{ claim: v.claim, digest: reviewerFailureDigest(v.proofFailureOutput), excerpt: v.proofFailureOutput,
-        ...(typeof v.reviewLoad === "string" ? { reviewLoad: v.reviewLoad } : {}),
+        ...(reviewLoad !== undefined ? { reviewLoad } : {}),
         ...(typeof v.proof === "string" ? { proof: v.proof } : {}) }] : [];
   });
 }
@@ -392,7 +407,9 @@ export function buildFixProgressInput(facts: {
   for (const row of facts.ledger) {
     if (row.step === PR_TERMINAL_STEP && typeof row.state === "string") terminal.set(Number(row.pr_number), row.state);
   }
+  let capacity: Record<string, unknown> | undefined;
   for (const [index, row] of facts.ledger.entries()) {
+    if (row.step === "review.capacity") capacity = row;
     const rowPr = rowPrNumber(row);
     if (facts.taskId !== undefined ? row.task_id !== facts.taskId : rowPr !== facts.prNumber) continue;
     if (rowPr !== undefined && facts.prNumber !== undefined && rowPr !== facts.prNumber) continue;
@@ -417,7 +434,7 @@ export function buildFixProgressInput(facts: {
       else if (number !== undefined && ["created", "resumed", "branch_update_requested", "scope_amendment"].includes(String(row.outcome ?? row.kind)))
         round.scopeAmendment = { number, state: "pending" };
     } else if (row.step === "review.posted") {
-      const failures = failuresOfReview(row);
+      const failures = failuresOfReview(row, reviewLoadFromCapacity(capacity, row.ts));
       for (const round of rounds) if (round.completed && round.reviewAfter === undefined) round.reviewAfter = failures;
     } else if (row.step === "fix.done" || row.step === "fix.commit_refused") {
       const round = id ? byId.get(id) : rounds.findLast(r => !r.completed &&

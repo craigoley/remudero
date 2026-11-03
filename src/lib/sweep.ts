@@ -16082,19 +16082,54 @@ export async function readHostedFixProofResults(
     const jobPath = `repos/${target.owner}/${target.repo}/actions/jobs/${jobId}`;
     const job = await io.json(["api", jobPath]) as { head_sha?: string; conclusion?: string; name?: string };
     if (job.head_sha !== target.headSha || job.conclusion !== conclusion || job.name !== check.name) continue;
-    const lines = (await io.text(["api", `${jobPath}/logs`], { maxBuffer: 1 << 22 }))
+    // A coverage shard's log runs past 5 MB; the bound is a backstop on a runaway log, not a size the evidence fits.
+    const lines = (await io.text(["api", `${jobPath}/logs`], { maxBuffer: 1 << 26 }))
       .split("\n").map(line => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s*/, "").trim());
+    const evidence = hostedTestFileEvidence(lines);
     for (const testFile of files) {
-      // A command echo, selection list, skipped suite or green aggregate is not an execution receipt.
-      const passing = lines.find(line => /^ok \d+ - /.test(line) && line.replace(/^ok \d+ - /, "") === testFile);
-      const failing = lines.find(line => /^not ok \d+ - /.test(line) && line.replace(/^not ok \d+ - /, "") === testFile);
+      // node:test TAP names tests by title, never by file, so the file comes from the run's own receipts.
+      const failing = evidence.failing.get(testFile);
+      const completed = evidence.completed.get(testFile);
       if (failing)
         results.push({ headSha: target.headSha, testFile, check: check.name!, result: "fail", output: failing });
-      else if (passing && conclusion === "success")
-        results.push({ headSha: target.headSha, testFile, check: check.name!, result: "pass", output: passing });
+      else if (completed && conclusion === "success")
+        results.push({ headSha: target.headSha, testFile, check: check.name!, result: "pass", output: completed });
     }
   }
   return results;
+}
+
+const HOSTED_TEST_FILE_RE = /(test\/[\w./-]+\.test\.[mc]?[jt]s):\d+:\d+/;
+
+/**
+ * W1-T11133: the physical test files a CI job's log proves ran, and the ones it proves failed. A file completed only
+ * through scripts/pool-run-tally.mjs's own `completed` receipt; it failed when a failing test's location names it
+ * (the spec reporter's `test at <file>:L:C`, or TAP's `location: '…/<file>:L:C'`) or its load failed as `not ok N -
+ * <file>`. A selection list, command echo or TAP title line is never a receipt, so a pass needs a completion inside a
+ * job that concluded success.
+ */
+export function hostedTestFileEvidence(lines: readonly string[]): { completed: Map<string, string>; failing: Map<string, string> } {
+  const completed = new Map<string, string>();
+  const failing = new Map<string, string>();
+  let inFailures = false;
+  for (const line of lines) {
+    const receipt = /^RMD-TEST-FILE-DIAGNOSTIC (\{.*\})$/.exec(line);
+    if (receipt) {
+      try {
+        const event = JSON.parse(receipt[1]!) as { phase?: unknown; file?: unknown };
+        if (event.phase === "completed" && typeof event.file === "string") completed.set(event.file, line);
+      } catch (error) {
+        failing.set(`(unreadable receipt) ${String(error).slice(0, 80)}`, line);
+      }
+      continue;
+    }
+    if (/^✖ failing tests:$/.test(line)) inFailures = true;
+    const located = /^(?:test at |location: ')/.test(line) ? HOSTED_TEST_FILE_RE.exec(line) : null;
+    if (located && (inFailures || line.startsWith("location: "))) failing.set(located[1]!, line);
+    const loadFailure = /^not ok \d+ - (test\/[\w./-]+\.test\.[mc]?[jt]s)$/.exec(line);
+    if (loadFailure) failing.set(loadFailure[1]!, line);
+  }
+  return { completed, failing };
 }
 
 export type HostedFixProofReader = (headSha: string, proofs: readonly string[]) => Promise<FixProgressHostedProofResult[]>;

@@ -1,23 +1,57 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+// @ts-ignore the executable .mjs module has no declaration file.
+import { prepareJudgedRun } from "#scripts/pure-test-pool.mjs";
 import { runWorkerAcceptanceProofs, workerAcceptanceProofSpawner } from "#src/cli/commands/fix.js";
 import { type CriterionVerdict } from "#src/lib/review.js";
 import { runFixRung, routeFix, type ReviewRunResult } from "#test/helpers/run-task-test.js";
 import { readHostedFixProofResults, buildFixProgressInputWithHostedProofs, runSweep,
   type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { buildFixProgressInput, judgeFixProgress, parseFixProgressVerdict, resolveFixProgress,
-  reviewerProofFailures, type FixProgressHostedProofResult } from "#src/lib/fix-progress-judge.js";
+  reviewerProofFailures, reviewLoadFromCapacity, type FixProgressHostedProofResult } from "#src/lib/fix-progress-judge.js";
 
 const CLAIM = "the real owner cli completes";
 const FILE = "test/fix-lane/real-owner.test.ts";
 const PROOF = `unit test: ${FILE}`;
 const OUTPUT = "not ok 1 - real owner cli\nError: timed out after 92000ms";
 const HEAD = "current-head";
-const criterion: CriterionVerdict & { reviewLoad: string } = { claim: CLAIM, proof: PROOF, met: false, reason: "review sandbox timeout",
-  proof_exec: "executed_fail", proofFailureOutput: OUTPUT, reviewLoad: "load1=18, cores=4" };
+// No production producer writes a per-criterion load (W1-T11132 will); the sweep's review.capacity reading is the one.
+const criterion: CriterionVerdict = { claim: CLAIM, proof: PROOF, met: false, reason: "review sandbox timeout",
+  proof_exec: "executed_fail", proofFailureOutput: OUTPUT };
+const POSTED_AT = "2026-11-03T01:00:30.000Z";
+const CAPACITY = { ts: "2026-11-03T01:00:10.000Z", step: "review.capacity", task_id: "DAEMON", reason: "backlog-not-sustained",
+  effective_width: 1, mem_available_mib: 16602.6, cpu_psi_some_avg10_pct: 61.2, memory_psi_some_avg10_pct: 0, cpu_psi_full_avg10_pct: 38.05 };
+const LOAD = reviewLoadFromCapacity(CAPACITY, POSTED_AT)!;
+
+/**
+ * The log a real CI test job leaves for one proof file: node:test's TAP and spec reporters plus the receipts
+ * scripts/pool-run-tally.mjs writes when scripts/pure-test-pool.mjs's prepareJudgedRun opts a run in, as CI does.
+ */
+const realLogs = new Map<boolean, string>();
+function realHostedLog(fails: boolean): string {
+  const cached = realLogs.get(fails);
+  if (cached !== undefined) return cached;
+  const root = mkdtempSync(join(tmpdir(), "rmd-hosted-log-"));
+  try {
+    mkdirSync(join(root, "test/fix-lane"), { recursive: true });
+    writeFileSync(join(root, FILE), `import { test } from 'node:test';\nimport assert from 'node:assert/strict';\n` +
+      `test('real owner cli', () => assert.equal(${fails}, false));\n`);
+    const judged = prepareJudgedRun({ files: [FILE], root });
+    try {
+      const env: NodeJS.ProcessEnv = { ...process.env, ...judged.env };
+      delete env.NODE_TEST_CONTEXT;
+      const run = spawnSync(process.execPath, ["--test", ...judged.args, "--test-reporter=tap", "--test-reporter-destination=stdout",
+        "--test-reporter=spec", "--test-reporter-destination=stdout", FILE], { cwd: root, env, encoding: "utf8" });
+      const log = `${run.stdout}\n${run.stderr}`;
+      realLogs.set(fails, log);
+      return log;
+    } finally { judged.cleanup(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
 const worker = { proof: PROOF, headSha: HEAD, result: "pass" as const, output: "# tests 1\n# pass 1\n# fail 0" };
 const ci: FixProgressHostedProofResult = { headSha: HEAD, testFile: FILE, check: "test-fast-shard (2/8)",
   result: "pass", output: "real owner cli: passed" };
@@ -37,7 +71,7 @@ function hostedFixture(over: { sha?: string; conclusion?: string; log?: string; 
     },
     text: async (args: string[]) => {
       calls.push(args[1]!);
-      return over.log ?? `2026-11-03T01:00:00Z ok 1 - ${FILE}\n2026-11-03T01:00:00Z # tests 1\n# fail 0`;
+      return over.log ?? realHostedLog(false);
     },
   }, run };
 }
@@ -68,7 +102,8 @@ function facts() {
       head_sha: "old-head", unmet_claims: [CLAIM], reviewer_proof_failures: reviewerProofFailures([criterion]) },
     { step: "fix.done", task_id: "W1-T11133", pr_number: 15532, round_id: "r1",
       fix_outcome: "FIXED", pushed_head_sha: HEAD, worker_proof_results: [worker] },
-    { step: "review.posted", task_id: "W1-T11133", pr_number: 15532, head_sha: HEAD,
+    CAPACITY,
+    { step: "review.posted", ts: POSTED_AT, task_id: "W1-T11133", pr_number: 15532, head_sha: HEAD,
       decision_verdict: { criteria: [criterion] } },
   ];
   return { taskId: "W1-T11133", prNumber: 15532, headSha: HEAD, currentRed: [`review:${CLAIM}`],
@@ -107,21 +142,51 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
     } finally { f.cleanup(); }
   });
 
+  test("W1-T11133 a real node:test log names tests by title, so the file's pass comes from its completion receipt", async () => {
+    const log = realHostedLog(false);
+    assert.match(log, /^ok 1 - real owner cli$/m, "positive control: the real TAP line carries the test's title");
+    assert.doesNotMatch(log, new RegExp(`^ok \\d+ - ${FILE.replace(/[./]/g, "\\$&")}$`, "m"),
+      "and never the file path, so a matcher on `ok N - <file>` can never see a real pass");
+    const target = { owner: "o", repo: "r", headSha: HEAD, proofs: [PROOF] };
+    const [passed] = await readHostedFixProofResults(target, hostedFixture({ log }).io);
+    assert.equal(passed?.result, "pass");
+    const [failed] = await readHostedFixProofResults(target,
+      hostedFixture({ conclusion: "failure", runs: [{ ...hostedFixture().run, conclusion: "failure" }], log: realHostedLog(true) }).io);
+    assert.equal(failed?.result, "fail", "a real failing run names its file through the failing test's location");
+  });
+
+  test("W1-T11133 the escalation's review load is the sweep's measured review.capacity reading, not an injected field", () => {
+    assert.match(LOAD, /^cpu PSI full 38\.05%, some 61\.2% \(avg10\); memory PSI some 0%; 16603 MiB available; review\.capacity at 2026-11-03T01:00:10\.000Z, 20 s before the review posted$/);
+    const input = buildFixProgressInput(facts());
+    assert.equal(input.offHostPassEvidence?.[0]?.reviewLoad, LOAD, "the production row the sweep writes reaches the evidence");
+    const noReading = facts();
+    noReading.ledger = noReading.ledger.filter((row) => row.step !== "review.capacity");
+    assert.equal(buildFixProgressInput(noReading).offHostPassEvidence?.[0]?.reviewLoad, undefined, "with no reading, no load is claimed");
+    const later = facts();
+    later.ledger = later.ledger.map((row) => row.step === "review.capacity" ? { ...row, ts: "2026-11-03T01:05:00.000Z" } : row);
+    assert.equal(reviewLoadFromCapacity(later.ledger.find((r) => r.step === "review.capacity"), POSTED_AT), undefined,
+      "a reading taken after the review posted is not the load it ran under");
+  });
+
   test("hosted evidence is read from the named file's passing job at the exact head", async () => {
     const target = { owner: "o", repo: "r", headSha: HEAD, proofs: [PROOF] };
     const f = hostedFixture();
     const results = await readHostedFixProofResults(target, f.io);
-    assert.deepEqual(results, [{ ...ci, output: `ok 1 - ${FILE}` }]);
+    assert.equal(results.length, 1);
+    assert.deepEqual({ ...results[0], output: undefined }, { ...ci, output: undefined });
+    assert.match(results[0]!.output, /^RMD-TEST-FILE-DIAGNOSTIC .*"phase":"completed".*"file":"test\/fix-lane\/real-owner\.test\.ts"/,
+      "the pass rests on the run's own completion receipt for the physical file");
     assert.ok(f.calls.includes(`repos/o/r/commits/${HEAD}/check-runs?per_page=100`));
     assert.ok(f.calls.includes("repos/o/r/actions/jobs/7"));
     assert.ok(f.calls.includes("repos/o/r/actions/jobs/7/logs"));
-    for (const over of [{ sha: "old" }, { conclusion: "failure" }, { log: `ok 1 - ${FILE} # SKIP` },
+    for (const over of [{ sha: "old" }, { conclusion: "failure" }, { log: `ok 1 - ${FILE} # SKIP` }, { log: `ok 1 - ${FILE}` },
+      { log: realHostedLog(false).split("\n").filter((line) => !line.includes('"phase":"completed"')).join("\n") },
       { log: `node --test ${FILE}\n# tests 0\n# fail 0` }, { log: "ok 1 - test/other.test.ts" },
       { runs: [f.run, { ...f.run, id: 13, conclusion: "failure" }] }]) {
       assert.deepEqual(await readHostedFixProofResults(target, hostedFixture(over).io), [], JSON.stringify(over));
     }
     for (const conclusion of ["success", "failure"]) {
-      const red = hostedFixture({ conclusion, runs: [{ ...f.run, conclusion }], log: `not ok 1 - ${FILE}\nok 2 - ${FILE}` });
+      const red = hostedFixture({ conclusion, runs: [{ ...f.run, conclusion }], log: realHostedLog(true) });
       const results = await readHostedFixProofResults(target, red.io);
       assert.equal(results[0]?.result, "fail", "a reproduced proof failure is carried, including a contradictory passing line");
       const input = await buildFixProgressInputWithHostedProofs({ ...facts(), hostedProofResults: undefined }, async () => results);
@@ -150,7 +215,7 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
         assert.equal(outcome.outcome, "escalated");
       } else await runSweep([view], deps);
       assert.equal(escalated.length, 1, lane);
-      for (const part of [PROOF, OUTPUT, worker.output, ci.check, criterion.reviewLoad])
+      for (const part of [PROOF, OUTPUT, worker.output, ci.check, LOAD])
         assert.ok(escalated[0]!.includes(part), `${lane} lost ${part}`);
       assert.ok(hosted.calls.some(call => call.endsWith("/logs")), `${lane} never read hosted evidence`);
     }
@@ -158,7 +223,8 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
 
   test("a real fix round persists its acceptance receipt in fix.done and escalates before a second worker", async () => {
     const f = workerFixture(), hosted = hostedFixture();
-    const rows: Record<string, unknown>[] = [], issues: string[] = [];
+    // The daemon ledger the fix rung reads carries the sweep's review.capacity readings beside its own rows.
+    const rows: Record<string, unknown>[] = [{ ...CAPACITY }], issues: string[] = [];
     const mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 } as const;
     const review = (headSha: string): ReviewRunResult => ({ state: "failure", headSha, criteria: [criterion],
       summary: "review sandbox timeout", testTheater: false, floorDegraded: false, capped: false,
@@ -191,7 +257,7 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
         push: () => ({ fixRoundPushedHead: HEAD }), readRemoteBranchHead: async () => HEAD,
         waitForCiGreen: async () => "green",
         runReview: async input => {
-          input.log("review.posted", { head_sha: HEAD, decision_verdict: { criteria: [criterion] } });
+          input.log("review.posted", { ts: POSTED_AT, head_sha: HEAD, decision_verdict: { criteria: [criterion] } });
           return review(HEAD);
         },
         fetchPrBody: async () => "Remudero-Task: W1-T11133", fetchPrDiffFiles: async () => [FILE],
@@ -213,7 +279,7 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
       assert.equal(workers, 1);
       assert.equal(f.spawns(), 1);
       assert.equal(issues.length, 1);
-      for (const part of [PROOF, ci.check, criterion.reviewLoad, "# tests 1"]) assert.ok(issues[0]!.includes(part), part);
+      for (const part of [PROOF, ci.check, LOAD, "# tests 1"]) assert.ok(issues[0]!.includes(part), part);
     } finally { f.cleanup(); }
   });
 
@@ -223,18 +289,17 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
     assert.equal(input.signals.offHostPass, true);
     assert.deepEqual(input.rounds[0]!.workerProofResults, [worker]);
     assert.deepEqual(input.offHostPassEvidence, [{ claim: CLAIM, proof: PROOF,
-      reviewerOutput: OUTPUT, reviewLoad: criterion.reviewLoad, worker, ci: [ci] }]);
+      reviewerOutput: OUTPUT, reviewLoad: LOAD, worker, ci: [ci] }]);
     assert.match(input.harnessGuidance!, /harness/);
     const standIn = await judgeFixProgress(input);
     assert.equal(standIn.verdict, "escalate");
     if (standIn.verdict !== "escalate") assert.fail("a harness decision must stop dispatch");
     assert.equal(standIn.loop, "harness");
-    for (const evidence of [PROOF, OUTPUT, worker.output, ci.check, ci.output, criterion.reviewLoad]) {
+    for (const evidence of [PROOF, OUTPUT, worker.output, ci.check, ci.output, LOAD]) {
       assert.ok(standIn.reason.includes(evidence), `missing escalation evidence: ${evidence}`);
     }
-    const { reviewLoad: _load, ...liveCriterion } = criterion;
-    const persistedLoad = buildFixProgressInput({ ...facts(), reviewFailures: [liveCriterion] });
-    assert.equal(persistedLoad.offHostPassEvidence?.[0]?.reviewLoad, criterion.reviewLoad,
+    const persistedLoad = buildFixProgressInput({ ...facts(), reviewFailures: [criterion] });
+    assert.equal(persistedLoad.offHostPassEvidence?.[0]?.reviewLoad, LOAD,
       "the live unmet producer may omit load, so retain the review's original ledger record");
   });
 
@@ -291,7 +356,7 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
       f => { f.ledger[1]!.fix_outcome = "NO_CHANGE"; },
       f => { f.ledger[1]!.subtype = "push_failed"; },
       f => { f.ledger[1]!.pr_number = 999; },
-      f => { f.ledger[2]!.pr_number = 999; },
+      f => { f.ledger.find((row) => row.step === "review.posted")!.pr_number = 999; },
       f => { f.reviewFailures = [{ ...criterion, proofFailureOutput: "different assertion" }]; },
       f => { f.reviewFailures = [{ ...criterion, proof_exec: "executed_pass" }]; },
       f => { f.currentRed.push("test-fast-shard (2/8)"); },
@@ -302,7 +367,7 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
       f => { f.hostedProofResults = [{ ...ci, check: "" }]; },
       f => { f.ledger[0]!.reviewer_proof_failures = [{ claim: CLAIM, digest: "wrong-output" }]; },
       f => { f.ledger[0]!.reviewer_proof_failures = reviewerProofFailures([{ ...criterion, proof: "unit test: old proof" }]); },
-      f => { f.ledger[2]!.decision_verdict = { criteria: [{ ...criterion, proof: "unit test: old proof" }] }; },
+      f => { f.ledger.find((row) => row.step === "review.posted")!.decision_verdict = { criteria: [{ ...criterion, proof: "unit test: old proof" }] }; },
     ];
     for (const change of changes) {
       const f = facts();
@@ -313,6 +378,8 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
 
   test("pending checks and later rounds cannot borrow an earlier pass", () => {
     const f = facts();
+    // This case indexes rounds by position; the capacity reading is not what it judges.
+    f.ledger = f.ledger.filter((row) => row.step !== "review.capacity");
     assert.equal(buildFixProgressInput({ ...f, pendingChecks: [ci.check] }).signals.offHostPass, undefined);
     f.ledger.push(
       { ...f.ledger[0], round_id: "r2", head_sha: HEAD },
