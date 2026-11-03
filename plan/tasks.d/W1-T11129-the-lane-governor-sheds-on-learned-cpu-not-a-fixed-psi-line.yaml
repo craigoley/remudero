@@ -1,0 +1,43 @@
+- id: W1-T11129
+  title: "The lane governor gains a CPU arm learned from cgroup cpu.stat, and review sheds on it instead of a fixed PSI line — review runs at width 1 of 4 with 10 PRs queued because core's CPU PSI full (36–44) crosses a fixed cpuPsiHighPct of 20, a reading inflated by core's cpu.weight of 59 against serve's 303, while the governor's only CPU input is a cap at the CPU count"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, CPU capacity is learned rather than fixed; it spans the governor that learns it and the review shed that reads it
+  band_meaning: span
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs:
+    - W1-T9097
+    - W1-T2985
+    - W1-T3025
+    - W1-T2989
+  files:
+    - src/lib/lane-governor.ts
+    - src/lib/review-capacity.ts
+    - plan/policy.yaml
+    - test/review/the-lane-governor-sheds-on-learned-cpu-not-a-fixed-psi-line.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: laneTarget's CPU bound is the host's CPU less its measured non-lane baseline, divided by the CPU-seconds per lane that each lane class has been measured to use (cgroup cpu.stat usage_usec deltas); an unread or unlearned input keeps today's cap at the CPU count
+      proof: "unit test: test/review/the-lane-governor-sheds-on-learned-cpu-not-a-fixed-psi-line.test.ts"
+    - claim: Review capacity's CPU shed reads the governor's CPU verdict and its PSI full relative to the container's own cpu.weight share, tiered (hold, shrink one, halve) and growing back on its own when pressure eases; with no fixed cpuPsiHighPct, a PSI full that is only the low weight's own contention does not shed
+      proof: "grep: W1-T11129 criterion 2 in test/review/the-lane-governor-sheds-on-learned-cpu-not-a-fixed-psi-line.test.ts"
+  rationale: |
+    MEASURED 2026-10-27 02:31–02:46Z on the Azure host, 8 vCPU (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - The box is CPU-bound: load 24–30, sar idle 2.9%, CPU PSI some 65–83 against memory 0.3–0.8 and io about 1–2. Core used 423% CPU and serve 222%.
+    - `review.capacity` shed on `cpu-pressure` to an effective width of 1 of 4, with 10 queued. The trigger was core's cgroup CPU PSI full of 36–44 against the fixed `cpuPsiHighPct` of 20.
+    - cpu.weight is 303 for serve and 59 for each daemon, so a daemon's PSI full rises with serve's share and does not measure the daemon's own overload.
+    - By 11-02 (Azure handoff), load was 34–47 with CPU PSI 50–79% and review width was still 1, holding 10 PRs.
+    READ at origin/main d04469fa2: review-capacity.ts:281 sheds when cpuPsiFullAvg10Pct >= policy.cpuPsiHighPct (plan/policy.yaml:665, value 20). lane-governor.ts (W1-T9097) is memory-only and in shadow mode; its only CPU input is `bounds.push([Math.floor(inputs.cpuCount), "cpu"])` (:119). Memory admission does not bind.
+    NOT COVERED: W1-T9097 (merged) built the memory arm. W1-T2985 moved the shed from PSI some to full; W1-T3025 and W1-T2989 (blocked) are about the widener and the host worker budget.
+  design: |
+    1. The governor reads each lane class's CPU use from cgroup cpu.stat usage_usec deltas over the lanes it ran (the run-child rows already name the class), keeps a running median per class, and learns the non-lane baseline from the same counter while no lane runs. CPU bound = (host CPUs − baseline) / per-lane median. No constant: an unlearned class or unread counter falls back to today's CPU-count cap.
+    2. Review capacity replaces the fixed `cpuPsiHighPct` comparison with the governor's CPU verdict. PSI full is judged against the container's own weight share (weight / sum of running containers' weights), so contention the weight itself predicts is not overload. Shedding is tiered: hold, then shrink one review, then halve, and it widens back one step per calm window measured by the same reading.
+    3. Remove `cpuPsiHighPct` from plan/policy.yaml once nothing reads it. The governor's own lane count keeps its current mode (shadow until enforced); the review shed reads the learned verdict in either mode, since it replaces a live fixed line.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 2 (p1, CPU). The operator's standing rules apply: no hard thresholds, and tiered, self-healing responses.

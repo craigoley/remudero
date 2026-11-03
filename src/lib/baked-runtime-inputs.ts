@@ -27,6 +27,7 @@ export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
   "src/lib/plan-scope.ts",
   "src/lib/producer-identity.ts",
   "src/lib/repo-layout.ts",
+  "src/lib/selected-registry-consumers.ts",
   "src/lib/self-sync.ts",
   "src/lib/serve-generation.ts",
   "src/lib/serve-slots.ts",

@@ -1,0 +1,85 @@
+- id: W1-T11118
+  title: Controlled canaries separate representative private corpus inputs from trusted trace grading
+  repo: remudero
+  depends_on: [W1-T11117]
+  plan_refs: [W1-T11117, W1-T10957, W1-T100001]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: operator-approved-router-evaluation-plan:2026-11-02
+  files:
+    - src/lib/model-canary-private-corpus.ts
+    - src/lib/model-canary-trace-grader.ts
+    - src/lib/model-canary-command.ts
+    - src/lib/model-canary-runner.ts
+    - src/lib/model-canary-schedule.ts
+    - src/lib/model-canary-owner.ts
+    - test/model-canary-runner.test.ts
+    - test/model-canary-schedule.test.ts
+    - test/model-canary-owner.test.ts
+    - test/routing/model-canary-private-corpus.test.ts
+    - test/routing/model-canary-trace-grader.test.ts
+  rationale: >-
+    The approved evaluation plan adds representative controlled tasks beside observational field
+    trials. Existing short exact-scored anchors do not establish broad operational competence,
+    and a correct final answer can conceal an unauthorized action or fabricated evidence.
+  design: >-
+    Add bounded, versioned pure corpus/request and trace-grading contracts. Reuse existing anchors
+    and provide development cases for absent/conflicting evidence, exact-head attribution,
+    real/benign review, tool arguments and ownership/approval abstention. Keep source family,
+    incident-root provenance, time/split identity, role and scorer hashes explicit. Public test
+    fixtures and committed development cases are never described as secret holdouts. Accept
+    separately supplied private sealed holdout material without emitting expectations, scorer
+    rules or source identifiers into model requests; split whole source families together and
+    reject cross-split leakage. Grade final behavior and harness-produced traces separately.
+    Missing traces, malformed scorer inputs and scorer errors remain unavailable; unauthorized
+    actions cannot pass on a correct final answer. Do not implement coding subprocess execution,
+    a judge-model call, a data collector or a scheduler. Coding isolation remains W1-T10957.
+    Extend the existing command with bounded offline corpus preparation and trace grading that
+    call these helpers directly and emit private artifacts. Follow W1-T11117 to serialize the
+    shared command edits; preparation cannot acquire execution authority. Instrument the existing
+    runner at its app-owned tool invocation and outcome seam; bind the trusted trace to the
+    actual case, run, slot and scorer revision before grading or persistence. Carry the binding
+    through the existing serial schedule and persist a bounded receipt under the existing
+    private owner. Preserve legacy case behavior. Imported or model-authored JSON, including a
+    trusted flag or self-reported origin, cannot establish authority. Offline regrading requires
+    verified custody from the native private owner or an explicitly verified private trust
+    anchor; absence or failed verification remains unavailable. Do not add a second collector,
+    lease, provider execution route or owner store.
+  note: >-
+    Adopted by the operator's 2026-11-02 approval of the researched implementation plan. No live
+    field-trial content may be exported by default. This record supplies no additional paid
+    allowance, provider call, activation, automatic case promotion or routing change. Native
+    ownership, computed test placement and exact-head qualification remain required.
+    The operator-approved implementation requires these existing runner, schedule and owner
+    paths because the current runner holds the real trace only in memory and the owner does
+    not persist it. This source-scope correction grants no release of existing execution
+    controls and adds no duplicate manual qualification requirement.
+  acceptance:
+    - claim: Request construction withholds scorer expectations and distinguishes genuine private holdouts from development fixtures
+      proof: 'unit test: private corpus keeps expected outputs outside requests and seals holdouts'
+    - claim: Source families and temporal split provenance are preserved without leaking raw source material
+      proof: 'unit test: private corpus preserves family provenance without exposing source material'
+    - claim: A correct final answer cannot hide unauthorized behavior
+      proof: 'unit test: trace grader rejects unauthorized actions despite a correct final answer'
+    - claim: Incomplete scoring evidence never becomes a pass or a model failure
+      proof: 'unit test: missing traces and scorer errors remain unavailable'
+    - claim: Native corpus preparation uses the corpus validator rather than an unused export
+      proof: 'grep: validatePrivateCorpus( in src/lib/model-canary-command.ts'
+    - claim: Native offline trace grading uses the trusted trace grader
+      proof: 'grep: gradePrivateTrace( in src/lib/model-canary-command.ts'
+    - claim: Runtime grading consumes app-owned outcomes and cannot trust imported trace claims
+      proof: 'unit test: runner grades app-owned traces and rejects imported trust claims'
+    - claim: The native runner calls the trusted grader before owner persistence
+      proof: 'grep: gradePrivateTrace( in src/lib/model-canary-runner.ts'
+  falsifier: >-
+    Pair known-good and known-bad outputs/traces. Remove request redaction, cross-split family
+    exclusion and the authority guard separately and require the appropriate named assertion
+    to fail. Remove the native trace binding and require the imported-claim negative control
+    to fail. Restore exact bytes and require complete verified-file TAP; retain failed evidence.

@@ -42,7 +42,7 @@ import type { RunResult } from "../../lib/run-result.js";
 import { dropTierRowsBeforePush, prePushGateRefusal } from "../../lib/pre-push-refusal.js";
 import type { Tier } from "../../lib/tier.js";
 import { routeSpecialists, taskMetadataFromPrinciples } from "../../lib/specialist-panel.js";
-import { type DaemonFreshness, type WorkerBoundaryCheckpoint, pendingWorkerBoundaryHandoffs } from "../../lib/daemon.js";
+import { type DaemonFreshness, type WorkerBoundaryCheckpoint, keptRunHeadRef, pendingWorkerBoundaryHandoffs, unpushedRunHeadKeptRow } from "../../lib/daemon.js";
 import { defaultListCandidates, defaultReadMarkers, killProcessGroup } from "../../lib/worker-containment.js";
 import { sweepStaleTempDirsAsync, type TempSweepOpts, type TempSweepSummary } from "../../lib/tmp.js";
 import { IMAGE_BUILD_SHA_PATH } from "../../lib/deployer.js";
@@ -1147,6 +1147,7 @@ export interface SourceSizeGatePostureResult {
 
 export type RunErrorCause =
   | "census-refused-push"
+  | "push-auth-refused"
   | "git-push-failed"
   | "git-commit-failed"
   | "pr-create-failed"
@@ -1926,7 +1927,7 @@ function unresolvedMainConflicts(worktreePath: string, paths: readonly string[])
   });
 }
 
-async function restoreBoundaryCheckpoint(
+export async function restoreBoundaryCheckpoint(
   checkpoint: { branch: string; headSha: string },
   taskId: string,
   git: (args: string[]) => Promise<string>,
@@ -1936,7 +1937,11 @@ async function restoreBoundaryCheckpoint(
   if (remoteHead && remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
   const absence = remoteHead ? {} : { sourceBranchAbsent: true as const };
   const mainSha = (await git(["rev-parse", "HEAD"])).trim();
-  if (!remoteHead) {
+  const keptLocally = !remoteHead &&
+    (await git(["for-each-ref", "--format=%(objectname)", keptRunHeadRef(checkpoint.branch)])).trim() === checkpoint.headSha;
+  if (keptLocally) {
+    log("implement.checkpoint_restored_local", { task_id: taskId, source_branch: checkpoint.branch, head_sha: checkpoint.headSha });
+  } else if (!remoteHead) {
     try {
       await git(["merge-base", "--is-ancestor", checkpoint.headSha, mainSha]);
       return { base: "main", headSha: mainSha, ...absence };
@@ -1960,7 +1965,7 @@ async function restoreBoundaryCheckpoint(
   } else {
     await git(["fetch", "origin", checkpoint.branch]);
   }
-  const fetchedHead = (await git(["rev-parse", "FETCH_HEAD"])).trim();
+  const fetchedHead = keptLocally ? checkpoint.headSha : (await git(["rev-parse", "FETCH_HEAD"])).trim();
   if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
   const base = (await git(["merge-base", checkpoint.headSha, mainSha])).trim();
   if (base === checkpoint.headSha) return { base: "main", headSha: mainSha, ...absence }; // main already carries it
@@ -5633,6 +5638,15 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     return /^[0-9a-f]{40}$/.test(pushed) && pushed !== restoredCheckpoint.headSha
       ? { ...restoredCheckpoint, branch, headSha: pushed } : restoredCheckpoint;
   };
+  const keepUnpushedRunHead = (stage: string): void => {
+    try {
+      const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
+      hostWorktreeGit(worktreePath, ["update-ref", keptRunHeadRef(branch), headSha]);
+      log("implement.checkpoint_kept", unpushedRunHeadKeptRow(taskId, branch, headSha, stage));
+    } catch (error) {
+      log("implement.checkpoint_keep_unproven", { task_id: taskId, failed_stage: stage, error: String((error as Error)?.message ?? error) });
+    }
+  };
   const keepFailedRunHead = (kept: WorkerBoundaryCheckpoint | undefined, stage: string): void => {
     if (kept) log("implement.checkpoint_kept", { task_id: taskId, source_branch: kept.branch, head_sha: kept.headSha, failed_stage: stage,
       ...(kept.resumePhase ? { resume_phase: kept.resumePhase } : {}) });
@@ -8491,7 +8505,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     const failedThroughThrow = !verdictWritten;
     // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause.
     endThrownRun(log, verdictWritten, "run.error", err, costUsd);
-    if (failedThroughThrow) keepCheckpointOnFailedExit("run.error", { failed_cause: runErrorCause(err) });
+    if (failedThroughThrow && runErrorCause(err) === "push-auth-refused" && !prOpened) keepUnpushedRunHead("run.error");
+    else if (failedThroughThrow) keepCheckpointOnFailedExit("run.error", { failed_cause: runErrorCause(err) });
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,
     // but clean up eagerly here too). Best-effort; the ledger already has the

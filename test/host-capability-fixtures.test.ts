@@ -155,6 +155,33 @@ const CHMOD_REMEDY =
  */
 const DECLARED: readonly Declared[] = [
   {
+    kind: "chmod", file: "dependency-seeds-cli.test.ts", key: "0o644", count: 1,
+    reason:
+      "The owner-cleanup reader rejects a receipt with group/world mode bits by explicit stat-mode " +
+      "policy before parsing. This tests receipt privacy, not an OS read denial, so uid 0 also refuses it.",
+  },
+  {
+    kind: "chmod", file: "dependency-seeds.test.ts", key: "0o644", count: 3,
+    reason:
+      "One site makes the sealed payload writable to exercise the explicit immutable-mode guard; " +
+      "two enable owned manifest corruption and restoration. Refusal checks stat bits and content, " +
+      "not whether the OS denies a write, so it holds for every uid.",
+  },
+  {
+    kind: "chmod", file: "dependency-seeds.test.ts", key: "0o444", count: 4,
+    reason:
+      "These sites restore sealed payload and manifest modes and seal an external symlink target. " +
+      "The later controls exercise link containment and input integrity after the mode guard passes; " +
+      "no assertion expects an OS permission denial or skips root.",
+  },
+  {
+    kind: "chmod", file: "dependency-seeds.test.ts", key: "0o555", count: 3,
+    reason:
+      "Reseals the owned dependency directory after each symlink mutation so link-containment and " +
+      "metadata-target refusals reach their own guards. The validator checks stat mode explicitly; " +
+      "directory write denial is never the asserted condition, including under uid 0.",
+  },
+  {
     kind: "chmod", file: "worker/spawn/codex-native-cache.test.ts", key: "0o500", count: 1,
     reason: "The native-cache policy explicitly requires the owner's read, write and execute mode bits before granting a directory. The fixture asserts that stat-mode refusal and unchanged permissions, not an OS write denial, so it holds for uid 0 too.",
   },

@@ -1,0 +1,34 @@
+- id: W1-T11095
+  title: Core's console telemetry route keeps the beacon's servedFrom durable marker, so a durable console serve is counted on its console.latency row instead of silently dropped
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two concerns: the telemetry validator and the published daemon OpenAPI schema; the route, pacing and row shape are otherwise unchanged
+  origin: operator-session#console-holds-2026-11-02
+  plan_refs:
+    - CONSOLE-T105
+    - CONSOLE-T106
+  files:
+    - src/lib/console-telemetry.ts
+    - openapi/daemon.yaml
+    - test/console-api/a-durable-console-serve-is-counted-in-core-telemetry.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A telemetry record carrying servedFrom durable is ledgered on its console.latency row with servedFrom durable, a record without it is ledgered without the field, and any other servedFrom value refuses the batch by name
+      proof: "unit test: test/console-api/a-durable-console-serve-is-counted-in-core-telemetry.test.ts"
+    - claim: The published telemetry record schema declares servedFrom
+      proof: "grep: servedFrom: {type: string in openapi/daemon.yaml"
+  rationale: |
+    OBSERVED, operator recon 2026-11-02:
+    - The console's latency beacon (remudero-console lib/latency-beacon.ts latencyRecord) sends servedFrom "durable" when a view was served from its durable last-good store (CONSOLE-T105, #1888). Core's validateTelemetryBatch builds each record from an allowlist that has no servedFrom, so the marker is dropped: of 9,320 console.latency rows in the core ledger union, none carries a serve tier.
+    - CONSOLE-T106 (delete the Tier 2 cache) was held on "14 days of counted serves" that could never be counted; the operator ruled 2026-11-02 to delete Tier 2 now. Recording the marker keeps the console's durable serves measurable for later rulings.
+    - The apparent beacon silence after 2026-10-29 is console usage, not a fault: console.latency rows per day were 1,252 on 10-27, 938 on 10-28, 5 on 10-29, none to 11-01 and 4 on 11-02, with an earlier gap from 10-21 to 10-26. The beacon fires only while a console tab applies live view updates, and neither repo changed the beacon or the route since 10-03.
+  design: |
+    Accept servedFrom only as the literal "durable" and copy it onto the record; any other present value refuses the batch with a named reason, the validator's existing discipline. Declare it in openapi/daemon.yaml's telemetry record schema. No new ledger step.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (W1-T11095 on run-unfiled-1793622419885).

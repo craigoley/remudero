@@ -1,0 +1,32 @@
+id: incident-772e28b0ca464af9
+ts: 2026-11-03T02:59:58.782Z
+raw: >-
+  Incident 772e28b0ca46: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  criterion <n> requires actual served-model evidence that Codex exec JSONL does
+  not expose; an evidence-source or transport decision is required
+
+  First seen: 2026-11-02T22:35:51.609Z
+
+  Last seen: 2026-11-02T22:35:51.609Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15520 escalated: already escalated (reason unreadable: no escalation of this PR at head e87ce4c is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793643571744:1:1793658285856) — criterion 5 requires actual served-model evidence that Codex exec JSONL does not expose; an evidence-source or transport decision is required
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#772e28b0ca464af9951cd913ea6e5d2b3d4654955fdc9140870ba8dee62bc84a
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

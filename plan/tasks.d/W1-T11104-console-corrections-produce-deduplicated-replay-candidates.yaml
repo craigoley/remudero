@@ -1,0 +1,104 @@
+- id: W1-T11104
+  title: Explicit console wording corrections become deduplicated replay candidates through existing feedback intake
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20
+  origin: human#2026-11-02-console-self-improvement
+  plan_refs: [W1-T11096, W1-T11103, CONSOLE-T164]
+  files:
+    - src/lib/console-feedback.ts
+    - src/lib/escalation-conversation.ts
+    - src/lib/panel-actions.ts
+    - src/lib/feedback.ts
+    - src/lib/feedback-docket.ts
+    - src/lib/triage.ts
+    - src/run-task.ts
+    - src/lib/feedback-record-merge.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/console-api/console-feedback-replay.test.ts
+    - test/console-api/console-feedback-intake.test.ts
+    - test/fixtures/console-feedback-replays.json
+    - test/feedback-docket.test.ts
+    - test/triage.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The operator asked to automate console improvement, preserve plain language and learn from real
+    corrections. The existing feedback intake and proposal docket already supply durable custody
+    and normal review. A new service, synthetic accept-rate target or autonomous live decision loop
+    would duplicate that machinery and optimize the wrong outcome. W1-T11096 provides exact native
+    conversation/revision evidence; W1-T11103 owns subsequent correspondence and must stay distinct.
+    The maintained run-task docket rung currently projects rejected feedback to id/ts/raw, and
+    triage feedbackEntryBlock carries raw/contribution only. Those real consumers need explicit
+    correction metadata; a pure helper plus fixtures would not complete this runtime path.
+    The native test-place selector assigns the console correction module to console-api (primary
+    console-read-model, with inbox-operator as runner-up), so new tests use that computed folder.
+    Existing runtime integration suites already import run-task and prove weekly publication;
+    extend those suites without adding a new direct run-task test importer.
+  design: |
+    Add a closed, explicitly chosen wording-correction kind to the existing conversation feedback
+    path, advertised only when this native contract is served. Verify repository, native issue,
+    thread, current revision and reply intent server-side before attaching source context. Record
+    the rendered template/version or digest and the operator's correction; do not collect keystrokes,
+    unsent drafts, full private threads or acceptance rates as analytics. Legacy prose replies remain
+    ordinary replies; do not guess corrective intent from arbitrary message text.
+    A wording correction is a separate typed feedback receipt, not an operator business answer.
+    It must not append a reply that clears Action required, archive the discussion, stage a grill
+    answer or invoke the business reply interpreter. Advertise and validate the explicit kind on
+    the existing mounted reply route; preserve legacy answer validation and receipt semantics.
+    Treat the rendered version/digest as operator-reported context, not a server attestation of
+    what the browser displayed. Retain only bounded source facts and curated replay case ids.
+    Use existing feedback records, immutable merge rules and intake/docket ownership. Deduplicate by
+    verified symptom/source kind and implementation version while retaining distinct source evidence
+    and conflicting corrections. A repeated symptom is an observation, not a shared root-cause claim.
+    Wire the real docket/intake path to produce one bounded candidate with source links, sanitized
+    replay input, independent expected facts/unknowns, allowed and forbidden actions, before/after
+    wording and the proposed fixture/template change. Carry the explicit correction metadata
+    through the real run-task feedback-docket rung and triage feedback envelope; neither may
+    discard it by projecting only raw text. Keep the existing untrusted-input envelope and normal
+    weekly docket/proposal limits. Do not add a run-task test importer or another intake pipeline.
+    Preserve autonomous triage selection, ratification and spend bounds. Require matching native
+    capture receipts before synthesizing a correction proposal; report missing evidence as
+    unverified, never as a verified empty source. Deduplication cannot grant execution authority.
+    A correction may propose a fixture/template repair, not automatic changes to CLAUDE.md or
+    unrelated operational policy. Preserve legacy feedback behavior when this kind is absent.
+    The normal pipeline prepares and reviews any
+    resulting patch; feedback cannot approve a live recommendation, release a hold or alter gates.
+    Add deterministic evaluation for evidence preservation and action/receipt semantics. Replay
+    stale and unauthorized reads, missing diagnosis, exact units/time zones/denominators, changed
+    recommendation, failed/duplicate/lost-response replies, agent acknowledgement versus completed
+    work, no-more-input archive and reopened question. Reuse versioned fixture packets in ordinary
+    tests/CI rather than add an evaluation service. Unsupported facts or authority always fail even
+    if the wording is shorter. Emit pass/fail/not-run evidence per case and candidate revision.
+    Default to existing dependencies/infrastructure and zero new paid model evaluation calls.
+    Existing native intake authority and review still govern proposals. Lint is not ISO/STE
+    certification and synthetic readers are not human comprehension evidence. Preserve uncertain
+    findings and the operator's observed paraphrases separately. Never grade by accept rate, empty
+    queues or merge count. Keep runtime correction capture opt-in through its explicit control.
+  acceptance:
+    - claim: the existing docket calls the correction candidate projection rather than leaving a helper unused
+      proof: 'grep: consoleCorrectionCandidates( in src/lib/feedback-docket.ts'
+    - claim: repeated explicit corrections preserve one candidate with all verified evidence
+      proof: 'unit test: console correction intake deduplicates candidates without dropping evidence'
+    - claim: replay rejects changed facts and invented action authority
+      proof: 'unit test: console wording replay rejects unsupported facts and action effects'
+    - claim: unknown and not-run evaluation evidence cannot be reported as passed
+      proof: 'unit test: console correction evaluation preserves unknown and not-run results'
+    - claim: correction capture is opt-in and bound to the exact native source
+      proof: 'unit test: console correction capture refuses foreign or changed conversation context'
+  falsifier: |
+    Delete the production docket call, drop a source qualifier, treat capture as completed work,
+    accept an unbound source or collapse an unknown into pass: the named checks must fail. Retain
+    control/mutant/restored receipts. Pure formatting scores cannot satisfy semantic criteria.
+  note: |
+    Held until W1-T11096 and W1-T11103 are merged/served with current owners reconciled. A separate
+    console consumer must be scoped against the served correction capability before exposing the
+    control. This task grants no new model budget, merge permission, schedule or deployment authority.

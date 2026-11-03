@@ -1,0 +1,53 @@
+- id: W1-T11112
+  title: A worker harness contract distinguishes declared capabilities from observed enforcement
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  priority: 2
+  budget_usd: 25
+  risk: high
+  band_meaning: span
+  author_class: machine
+  origin: research:omnigent-2026-11-02
+  plan_refs:
+    - §Self-improvement
+    - §5B
+    - W1-T4650
+    - W1-T10763
+    - W1-T10635
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - test/worker-provider.test.ts
+    - test/worker.test.ts
+  status: queued
+  attempts: 0
+  rationale: "OBSERVED: worker-provider.ts explicitly returns unknown served model and unsupported compaction for Codex, while settings/tool translation and worker adapter behavior span provider and worker modules. Existing model capability ladders classify model tiers, not runtime enforcement. Omnigent separates declared capability from observed conformance; its offline harness bench can exit zero with live probes not run, and policy DENY requires a real attempted tool call. Sources: https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/omnigent/harness_capabilities.py ; https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/tests/harness_bench/README.md ; https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/tests/harness_bench/probes/policy_deny.py . This adapts the distinction without adopting their runtime. W1-T10635 already owns skill conformance using actual governed worker capability context; reuse that context rather than widening or re-declaring its tool surface. This task observes runtime enforcement evidence, which that skill scan does not attest."
+  design: |-
+    Extend the existing worker adapter boundary with a small versioned, redacted harness-contract receipt. Capability fields cover pre-tool interception, resume, configured compaction, served-model identity, tool-result lineage, billing provenance and filesystem/network isolation. Each has supported/unsupported/unknown plus evidence class declared, deterministic-adapter-test or observed-installed-runtime; a declaration or fixture pass cannot become live enforcement. Bind installed observations to exact adapter revision, actual executable immutable identity when available, policy/settings digest and environment class; missing/unreadable identity is unknown. Reuse existing init/assignment metadata and observed facts; do not spawn version probes in the daemon hot path. Any future explicit live probe requires its own existing native admission and authority. An omitted/unattempted case is NOT_RUN or SKIPPED, never pass.
+    Exercise existing Claude/Codex adapters through deterministic transcript/spawn seams, including supported and refused tool paths. Preserve Codex unknown served identity and false compactionConfigured. A policy claim needs evidence at the actual tool interception seam; final model prose is insufficient. A receipt is observational and cannot widen tools, egress, resume rights, sandbox authority, routing or spending. Record bounded evidence identifiers, no executable paths containing usernames, policy contents, prompts, arguments, credentials or raw output. Keep fixtures under existing physical suites and use package aliases/shared repo-root helper for new tests. Report per-capability declared/tested/live-observed/unknown coverage; no live-rate or benefit claim follows from fixture tests.
+  acceptance:
+    - claim: adapter contracts preserve unsupported and unknown capabilities instead of inheriting another harness defaults
+      proof: "unit test: harness contract keeps unsupported Codex identity and compaction distinct from unknown"
+    - claim: fixture and declared claims remain distinct from installed-runtime enforcement with exact context binding
+      proof: "unit test: harness contract cannot promote declared fixture skipped or stale evidence to observed enforcement"
+    - claim: real denied tool attempts prove adapter interception while an unattempted case remains not run
+      proof: "unit test: harness contract denial evidence requires the tool interception path"
+    - claim: contract receipts remain bounded redacted and observational
+      proof: "unit test: harness contract metadata cannot widen worker authority or disclose runtime contents"
+  falsifier: Remove only the evidence-class/context check and show stale fixture evidence becomes falsely observed and the corresponding test fails. Independently make unknown adapters inherit Claude flags and bypass the real denied-tool seam. Each planted fault must fail; restore exact source and run physical suites. Live qualification stays NOT_RUN until an explicit admitted run exists.
+  note: Operator requested research, plan updates and task filing, not immediate product execution or paid experiments. Normal risk judgment, native capacity, source ownership, proof, review and merge gates remain. No installed Omnigent dependency, new scheduler, automatic guard change, model promotion or live capability proof is authorized by this record. This record is planning custody, not evidence of implementation or benefit.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description and declared files (worker-provider.ts, worker.ts, and their two test files) show a bounded, observational change: a redacted receipt that separates declared capability from observed enforcement. It touches no secrets, credentials, auth or merge/deploy policy."
+      - "The filed record states that the receipt cannot widen tools, egress, resume rights, sandbox authority, routing or spending. It also rules out new schedulers, live probes, paid experiments and automatic guard changes."
+      - "All four declared files exist at the base, and acceptance is verified by unit tests (verify: auto). The work reuses existing boundaries (W1-T10635 context) rather than adding new ones, so it is verifiable from what is shown."
+      - "The research family has no track record (0 merged, Beta mean 0.50), which is neutral rather than concerning. The normal CI and review gates still apply. No operator-only decision is requested, since the record is operator-authorized plan filing."
+    judged_at: "2026-11-02T18:19:09.747Z"
+    pin: "6fbd15f7009eeb1a1063f6969c06c72a11c89a02f219b3b05f9802e4b88a580d"

@@ -121,8 +121,11 @@ for (const [repoLength, prNumber, clippedSuffix] of [
   });
 }
 
+// Operator ruling 2026-11-01 (one open stall issue per PR) supersedes W1-T11031's new issue for a moved head or blocker.
 for (const change of ["head", "blocker", "closed"] as const) {
-  test(`a clipped legacy title still opens a new question when ${change} differs`, async t => {
+  const title = change === "closed" ? "a clipped legacy title still opens a new question when closed differs"
+    : `a clipped legacy title absorbs the episode when ${change} differs`;
+  test(title, async t => {
     const f = fixture(t);
     f.pr.prUrl = `https://github.com/craigoley/${"remudero".padEnd(38, "-")}/pull/${f.pr.prNumber}`;
     const legacy = f.legacyIssue("unknown signature", "awaiting-review");
@@ -130,10 +133,17 @@ for (const change of ["head", "blocker", "closed"] as const) {
     if (change === "closed") legacy.open = false;
     await f.escalate("repeat: launch refused", change === "blocker" ? "own-red" : "awaiting-review",
       change === "head" ? { ...f.pr, headSha: "new-head" } : f.pr);
-    assert.equal(f.created.length, 2);
-    assert.equal(f.comments.length, 0);
-    assert.equal(f.created[1].open, true);
-    assert.equal(f.rows().filter(row => row.step === "escalation.deduped").length, 0);
+    if (change === "closed") {
+      assert.equal(f.created.length, 2);
+      assert.equal(f.comments.length, 0);
+      assert.equal(f.created[1].open, true);
+      assert.equal(f.rows().filter(row => row.step === "escalation.deduped").length, 0);
+    } else {
+      assert.equal(f.created.length, 1);
+      assert.equal(f.comments.length, 1);
+      assert.equal(f.comments[0].url, legacy.url);
+      assert.deepEqual(f.rows().filter(row => row.step === "escalation.deduped").map(row => row.issue_url), [legacy.url]);
+    }
   });
 }
 
@@ -154,7 +164,8 @@ for (const repoLength of [43, 100] as const) {
           : change === "pr" ? { ...f.pr, prNumber: 15521, prUrl: f.pr.prUrl.replace("/15520", "/15521") }
           : f.pr;
         await f.escalate(diagnosis, change === "blocker" ? "own-red" : "awaiting-review", view);
-        const sameIdentity = change === "diagnosis";
+        // Operator ruling 2026-11-01: a new head or blocker is the same PR's question, not a new one.
+        const sameIdentity = change === "diagnosis" || change === "head" || change === "blocker";
         assert.equal(f.created.length, sameIdentity ? 1 : 2);
         assert.equal(f.comments.length, sameIdentity ? 1 : 0);
         assert.deepEqual(f.rows().filter(row => row.step === "escalation.deduped").map(row => row.issue_url),
@@ -171,23 +182,24 @@ for (const repoLength of [43, 100] as const) {
   }
 }
 
-test("a moved head opens a new stalled question even when its diagnosis is unchanged", async t => {
+test("a moved head appends to the open stalled question even when its diagnosis is unchanged", async t => {
   const f = fixture(t);
   await f.escalate("unknown signature");
   await f.escalate("unknown signature", "own-red", { ...f.pr, headSha: "new-head" });
-  assert.equal(f.created.length, 2);
-  assert.match(f.created[1].body!, /\*\*Head:\*\* new-head/);
-  assert.equal(f.comments.length, 0);
+  assert.equal(f.created.length, 1);
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.comments[0].url, f.created[0].url);
+  assert.match(f.comments[0].body, /\*\*Head:\*\* new-head/);
 });
 
-test("different blockers at one head keep separate stalled questions despite their common stage-stall cause", async t => {
+test("different blockers at one head share one stalled question through their common stage-stall cause", async t => {
   const f = fixture(t);
   await f.escalate("unknown signature");
   await f.escalate("unknown signature", "awaiting-review");
   await f.escalate("repeat: worker refused");
-  assert.equal(f.created.length, 2);
-  assert.equal(f.comments.length, 1);
-  assert.equal(f.comments[0].url, f.created[0].url);
+  assert.equal(f.created.length, 1);
+  assert.equal(f.comments.length, 2);
+  assert.ok(f.comments.every(comment => comment.url === f.created[0].url));
 });
 
 test("a closed stalled question is replaced with a new open question", async t => {
@@ -219,12 +231,15 @@ test("a different needs-human question cannot absorb a stalled-stage diagnosis",
   assert.equal(f.comments.length, 0);
 });
 
-test("a moved head still retires earlier questions across blockers", async t => {
+// Operator ruling 2026-11-01: nothing is retired because nothing new opens; the one question carries the moved head.
+test("a moved head carries the one stalled question forward across blockers instead of retiring it", async t => {
   const f = fixture(t);
   await f.escalate("unknown signature");
   await f.escalate("unknown signature", "awaiting-review");
   await f.escalate("repeat: launch refused", "own-red", { ...f.pr, headSha: "new-head" });
-  assert.equal(f.created.length, 3);
-  assert.deepEqual(f.created.map(issue => issue.open), [false, false, true]);
-  assert.equal(f.comments.length, 0);
+  assert.equal(f.created.length, 1);
+  assert.deepEqual(f.created.map(issue => issue.open), [true]);
+  assert.equal(f.comments.length, 2);
+  assert.match(f.comments[1].body, /\*\*Head:\*\* new-head/);
+  assert.match(f.comments[1].body, /DIAGNOSIS: repeat: launch refused/);
 });

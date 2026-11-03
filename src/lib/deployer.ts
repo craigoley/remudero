@@ -40,6 +40,8 @@ import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
 import { InstanceRegistryRuntimeError, runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryText,
   runtimeInstanceRegistryInstanceName, assertInstanceRegistryRuntimeCurrent, trustedInstanceRegistryLaunchPacket } from "./instance-registry-selection.js";
+import { createSelectedRegistryObserver, observeSelectedRegistry, selectedRegistryObserverInContext,
+  type SelectedRegistryConsumerOptions } from "./selected-registry-consumers.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
@@ -2491,6 +2493,7 @@ export function requestDeploy(stateRoot: string, reason: string | undefined): vo
 // ── Real, injected side effects ─────────────────────────────────────────────────
 
 export interface RealDeployOpts {
+  selectedRegistryObservation?: SelectedRegistryConsumerOptions;
   /** The daemon's git checkout to fast-forward (its install path / repoRoot). */
   installPath: string;
   /** `<config.root>` (holds state/). */
@@ -2685,8 +2688,8 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
   [K in DeploySensorName]?: (...args: Parameters<NonNullable<DeployDeps[K]>>) =>
     ReturnType<NonNullable<DeployDeps[K]>> | Promise<ReturnType<NonNullable<DeployDeps[K]>>>;
 } {
+  o = { ...o };
   const selectedFile = runtimeInstanceRegistryPrivateFile();
-  if (selectedFile !== undefined) o = { ...o };
   const selectedText = runtimeInstanceRegistryText();
   const selectedInstance = selectedText === undefined ? undefined
     : runtimeInstanceRegistryInstanceName() ?? instanceForStateRoot(selectedText, o.stateRoot);
@@ -2733,6 +2736,8 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
     };
   }
   const ledgerPath = deployLedgerPath(o.stateRoot);
+  const selectedObserver = o.selectedRegistryObservation === undefined ? selectedRegistryObserverInContext()
+    : createSelectedRegistryObserver(o.selectedRegistryObservation);
   const clock = (): number => Date.now();
   const exec = o.execFile ?? ((cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }) =>
     execFileSync(cmd, args, { encoding: "utf8", ...options }).toString());
@@ -2780,7 +2785,8 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
     typeof err === "object" && err !== null && (err as { code?: unknown }).code === "ENOENT";
   const kickstartDaemon = () => {
     if (selectedPacket !== undefined) throw new InstanceRegistryRuntimeError("launcher_unsupported");
-    exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.daemonLabel}`]);
+    observeSelectedRegistry(selectedObserver, "deploy-restart", lifecycleTarget,
+      () => exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.daemonLabel}`]), true);
   };
   const launchctlBackend: RestartBackend = {
     name: "launchctl",
@@ -2833,6 +2839,8 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
       }
     })();
   const inflightDir = join(o.stateRoot, "state", "inflight");
+  const lifecycleTarget = Object.freeze({ instanceName: recycleInstance, stateRoot: o.stateRoot,
+    containerName: imageShaContainer, namespace: "host" as const });
   const readLedgerText = (): string => readFileSync(ledgerPath, "utf8");
   /** W1-T8138: derive the drain wait from the ledger and the in-flight locks, and ledger what it read. */
   const deriveWaitFromState = (): DerivedDrainWait | undefined => {
@@ -2888,7 +2896,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
     describe: () =>
       `${recycleContainerScript}${recycleInstance ? ` --instance ${recycleInstance}` : ""} ` +
       `(pause, drain, pull and replace the ${o.daemonLabel} container)`,
-    restart: () => {
+    restart: () => observeSelectedRegistry(selectedObserver, "deploy-recycle", lifecycleTarget, () => {
       if (selectedPacket !== undefined && trustedInstanceRegistryLaunchPacket(selectedInstance) !== selectedPacket) {
         throw new InstanceRegistryRuntimeError("revision_changed");
       }
@@ -2921,7 +2929,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
         return;
       }
       runScript(script);
-    },
+    }, true),
   };
 
   return {
@@ -3182,7 +3190,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
       git(["merge", "--ff-only", "origin/main"]);
     },
     resetHard: (ref) => {
-      git(["reset", "--hard", ref]);
+      observeSelectedRegistry(selectedObserver, "deploy-rollback", lifecycleTarget, () => git(["reset", "--hard", ref]), true);
     },
     probeIdle: () => {
       // ALL THREE READS DISCRIMINATE a true zero from a read that did not happen; see
@@ -3236,7 +3244,8 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
       if (selectedPacket !== undefined) throw new InstanceRegistryRuntimeError("launcher_unsupported");
       // The SAME mechanism as the daemon kickstart below — one way to restart a service,
       // only the label differs. Both labels live in the same gui/<uid> domain.
-      exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.serveLabel}`]);
+      observeSelectedRegistry(selectedObserver, "deploy-restart", lifecycleTarget,
+        () => exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.serveLabel}`]), true);
     },
     // Mirrors `consolePid` below — same launchctl query, same domain, only the label differs. A
     // job that is loaded but not running reports no PID, which is precisely the corpse state.

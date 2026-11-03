@@ -335,9 +335,9 @@ export function dispatchRunHistory(rawLines: readonly string[], runs?: MeasuredR
   return { totalMs, samples };
 }
 
-/** W1-T8172: the median review run length, `sweep.review_started` to the next `review.posted` for the same PR, or
- *  undefined with no pair. Torn rows and unpaired or reversed ends contribute nothing. */
-export function medianReviewRunMs(rawLines: readonly string[]): number | undefined {
+/** W1-T8172: the median review run length, `sweep.review_started` to the next `review.posted` for the same PR (W1-T11148: whose
+ *  `plan_only` matches `planOnly` when given), or undefined with no pair. Torn rows and unpaired or reversed ends contribute nothing. */
+export function medianReviewRunMs(rawLines: readonly string[], planOnly?: boolean): number | undefined {
   const started = new Map<number, number>();
   const lengths: number[] = [];
   for (const raw of rawLines) {
@@ -351,7 +351,7 @@ export function medianReviewRunMs(rawLines: readonly string[]): number | undefin
     const startedAt = started.get(pr);
     if (startedAt === undefined) continue;
     started.delete(pr);
-    if (at > startedAt) lengths.push(at - startedAt);
+    if (at > startedAt && (planOnly === undefined || (row.plan_only === true) === planOnly)) lengths.push(at - startedAt);
   }
   return medianOf(lengths);
 }
@@ -466,6 +466,13 @@ export interface WorkerBoundaryCheckpoint {
   branch: string;
   headSha: string;
   resumePhase?: "preopen";
+}
+
+export const keptRunHeadRef = (branch: string): string => `refs/rmd-kept/${branch}`;
+
+export function unpushedRunHeadKeptRow(taskId: string, branch: string, headSha: string, stage: string): Record<string, unknown> {
+  return { task_id: taskId, source_branch: branch, head_sha: headSha, failed_stage: stage, failed_cause: "push-auth-refused",
+    resume_at: "push", resume_phase: "preopen", pushed: false, kept_ref: keptRunHeadRef(branch) };
 }
 
 const checkpointPhase = (row: Record<string, unknown>): { resumePhase?: "preopen" } =>
@@ -1249,7 +1256,7 @@ export function decideAlertPoll(i: AlertPollInputs): AlertPollDecision {
   return { fire: true, reason: `last poll ${sinceMin.toFixed(1)}m ago — interval elapsed` };
 }
 
-export type ReviewAdmissionGate = (() => boolean) & {
+export type ReviewAdmissionGate = ((reviewClass?: "review" | "plan-review") => boolean) & {
   workerAdmissionHold?: (kind?: "review") => string | undefined;
 };
 
@@ -2101,8 +2108,8 @@ function ghLaneReadFailure(err: unknown): { detail: string } | undefined {
   return { detail };
 }
 
-/** BACKSTOP — the maximum time the inter-phase review clock's stop may wait for an idle wait to notice its phase
- * ended. The wait seam is deliberately promise-only with no cancellation handle, so waiting out the whole poll
+/** BACKSTOP — the maximum time the inter-phase review clock's stop may wait for its runner and active passes.
+ * The wait seam is deliberately promise-only with no cancellation handle, so waiting out the whole poll
  * interval would add up to 60 seconds to every phase transition. The clock therefore subdivides only its in-process
  * wait into one-second quanta, while the poll interval stays the cadence that may start a light pass. No read or
  * reconciliation runs on the quantum itself (W1-T2852). */
@@ -2121,7 +2128,7 @@ export interface LightPassScope {
 
 /** W1-T9808: a latched restart's admission predicate. A call without `surface` is a probe: no hold row, no count. */
 export type RestartAdmission = (
-  kind: "review" | "fix-dispatch" | "dispatch-refill", surface?: "light" | "light-refill" | "full-sweep", lengthMs?: number,
+  kind: "review" | "plan-review" | "fix-dispatch" | "dispatch-refill", surface?: "light" | "light-refill" | "full-sweep", lengthMs?: number,
 ) => boolean;
 
 /** W1-T9808: may this light pass open its fix lanes? Never on a review-only pass, nor when the latch refuses a fix. */
@@ -2130,7 +2137,7 @@ export function lightPassFixAdmitted(scope?: LightPassScope): boolean {
 }
 
 interface InterphaseReviewClock {
-  /** Stops new admission, lets an already-started pass settle, and reports whether this clock
+  /** Stops new admission, waits up to the stop bound for started passes, and reports whether this clock
    * consumed an event edge that the ordinary full-sweep gate still needs to reconcile, and how
    * many passes it admitted. */
   stop(): Promise<{ eventWakeSeen: boolean; passes: number; held: number }>;
@@ -2280,7 +2287,9 @@ export function startInterphaseReviewClock(
   let elapsedMs = 0;
   let passes = 0;
   let held = 0;
-  const activePasses = new Set<Promise<void>>();
+  const activePasses = new Map<Promise<void>, {
+    pass: number; trigger: string; review_only: boolean; started_at_ms: number;
+  }>();
   const phase = scope === "drain" ? "freshness_drain" : scope === "pause" ? "pause" : "interphase";
   const scopeTag: Record<string, boolean> =
     scope === "drain" ? { during_drain: true } : scope === "pause" ? { during_pause: true } : {};
@@ -2336,11 +2345,12 @@ export function startInterphaseReviewClock(
             log("daemon.review_clock.held", { trigger, ...scopeTag, detail: paused, reason: "recycle_pause" });
             continue;
           }
-          if (admit && !admit("review")) {
+          if (admit && !admit("review") && !admit("plan-review")) {
             held += 1;
             continue;
           }
           passes += 1;
+          const startedAtMs = interphaseClock.now();
           const pass = (async () => {
             try {
               const named = { reviewOnly: true, scope: scope ?? "interphase-review" } as const;
@@ -2351,7 +2361,7 @@ export function startInterphaseReviewClock(
               log("daemon.sweep_light.failed", { phase, ...scopeTag, error: String((e as Error)?.message ?? e) });
             }
           })();
-          activePasses.add(pass);
+          activePasses.set(pass, { pass: passes, trigger, review_only: reviewOnly, started_at_ms: startedAtMs });
           void pass.finally(() => activePasses.delete(pass));
         }
       })()
@@ -2360,8 +2370,30 @@ export function startInterphaseReviewClock(
   return {
     stop: async () => {
       active = false;
-      if (runner) await runner;
-      if (activePasses.size > 0) await Promise.all(activePasses);
+      // Preserve the old zero-work fast path: Promise.race adds an event-loop turn even when
+      // there is no runner or admitted pass to wait for, which can release unrelated work.
+      if (!runner && activePasses.size === 0) return { eventWakeSeen, passes, held };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          (async () => {
+            if (runner) await runner;
+            if (activePasses.size > 0) await Promise.all(activePasses.keys());
+          })(),
+          new Promise<void>((resolve) => { timer = setTimeout(resolve, INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS); }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (activePasses.size > 0) {
+        const stoppedAtMs = interphaseClock.now();
+        log("daemon.review_clock.stop_bound_exceeded", {
+          phase, ...scopeTag, bound_ms: INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS,
+          active_passes: [...activePasses.values()].map((pass) => ({
+            ...pass, elapsed_ms: Math.max(0, stoppedAtMs - pass.started_at_ms),
+          })),
+        });
+      }
       return { eventWakeSeen, passes, held };
     },
     handWake: () => {
@@ -2952,8 +2984,8 @@ async function runGatedSweep(
     if (sweepBound.seededFrom) log("daemon.sweep.seeded", { samples: bound.samples, source: sweepBound.seededFrom });
     sweepBound.seededFrom = undefined;
     log("daemon.sweep.started", { bound_ms: bound.boundMs, bound_basis: bound.basis, samples: bound.samples });
-    const continueReviewAdmissions = (() => deps.checkStop?.() === undefined && deps.checkPause?.() === undefined &&
-      latchedAdmission?.()?.("review", "full-sweep") !== false) as ReviewAdmissionGate;
+    const continueReviewAdmissions = ((reviewClass: "review" | "plan-review" = "review") => deps.checkStop?.() === undefined &&
+      deps.checkPause?.() === undefined && latchedAdmission?.()?.(reviewClass, "full-sweep") !== false) as ReviewAdmissionGate;
     const workerAdmissionHold = (kind?: "review"): string | undefined => {
       const hold = deps.workerAdmissionHold?.() ?? (recyclePause ? resolveFleetControlHold(deps) : undefined);
       if (!hold) return kind === undefined && latchedAdmission?.()?.("fix-dispatch", "full-sweep") === false
@@ -4583,7 +4615,7 @@ export async function runDaemon(
   // W1-T9808 — A LATCHED RESTART ADMITS NO WORK ITS DRAIN WOULD ABANDON. 2026-10-15 fixes for W1-T9113 and W1-T7699
   // started at 19:02 inside the 18:59:45 drain and were abandoned at its bound. From the latch to the exit, every
   // surface that admits a review or a fix asks this, per admission: does the kind's measured length fit the time left?
-  type RestartWindow = { deadlineMs: number; lengths: { review?: number; "fix-dispatch"?: number }; held: number };
+  type RestartWindow = { deadlineMs: number; lengths: { review?: number; "plan-review"?: number; "fix-dispatch"?: number }; held: number };
   let restartWindow: RestartWindow | undefined;
   const restartAdmission: RestartAdmission = (kind, surface, candidateMs) => {
     const lengthMs = kind === "dispatch-refill" ? candidateMs : restartWindow?.lengths[kind];
@@ -4599,7 +4631,8 @@ export async function runDaemon(
   const beginLatchDrain = (latchAtMs: number): void => {
     if (latchDrain?.latchAtMs === latchAtMs) return;
     const lengths = measuredReviewLength();
-    restartWindow = { deadlineMs: latchAtMs + sweepWallClockBoundMs, lengths: { review: lengths.ms, "fix-dispatch": lengths.fixMs }, held: 0 };
+    restartWindow = { deadlineMs: latchAtMs + sweepWallClockBoundMs, held: 0,
+      lengths: { review: lengths.codeMs ?? lengths.ms, "plan-review": lengths.planMs ?? lengths.ms, "fix-dispatch": lengths.fixMs } };
     const reviews = new Set(inFlightReviewRunsNow());
     const detached = detachedSweepActionCount();
     const observation = observeDrain(latchAtMs, latchAtMs);
@@ -4610,12 +4643,13 @@ export async function runDaemon(
       detached_sweep_actions: detached, in_flight_reviews: reviews.size, waited_on: observation.snapshot() });
   };
   // W1-T8172 design 2: the drain's clock admits a pass only while the time left exceeds the measured review length.
-  const measuredReviewLength = (): { ms?: number; fixMs?: number; source: "measured" | "measured_memo" | "no_history" | "unreadable" } => {
+  const measuredReviewLength = (): { ms?: number; codeMs?: number; planMs?: number; fixMs?: number;
+    source: "measured" | "measured_memo" | "no_history" | "unreadable"; } => {
     try {
       const lines = deps.readLedgerLines?.() ?? [];
       const ms = medianReviewRunMs(lines);
       const fixMs = medianFixRoundMs(lines);
-      if (ms !== undefined) return { ms, fixMs, source: "measured" };
+      if (ms !== undefined) return { ms, codeMs: medianReviewRunMs(lines, false), planMs: medianReviewRunMs(lines, true), fixMs, source: "measured" };
       const memoMs = deps.readReviewMedianMs?.();
       return typeof memoMs === "number" && Number.isFinite(memoMs) && memoMs > 0
         ? { ms: memoMs, fixMs, source: "measured_memo" } : { fixMs, source: "no_history" };
@@ -4676,7 +4710,8 @@ export async function runDaemon(
       // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
       // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
       // Only a detached action earns that clock: a drain for reviews alone admits nothing new.
-      if (reviewLength) restartWindow = { deadlineMs, lengths: { review: reviewLength.ms, "fix-dispatch": reviewLength.fixMs }, held: restartWindow?.held ?? 0 };
+      if (reviewLength) restartWindow = { deadlineMs, held: restartWindow?.held ?? 0, lengths: { review: reviewLength.codeMs ?? reviewLength.ms,
+        "plan-review": reviewLength.planMs ?? reviewLength.ms, "fix-dispatch": reviewLength.fixMs } };
       const drainReviewClock =
         detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain", latchedAdmission()) : undefined;
       let abandoned: Awaited<ReturnType<typeof drainDetachedSweepActions>>;

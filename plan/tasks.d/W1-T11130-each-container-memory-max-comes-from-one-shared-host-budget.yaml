@@ -1,0 +1,38 @@
+- id: W1-T11130
+  title: "Each fleet container's memory.max comes from one shared host budget, host minus reserve minus the other containers' learned peaks (operator ruling R1, 2026-10-27) — today every build daemon inherits the same total − 5120 − 2048 ceiling (24.3 GiB each for core, console and site on the 32 GiB host) and serve keeps a fixed 7,680 MiB, so together they can overcommit the host"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every container's hard memory limit moves; one concern, the memory.max arithmetic in resource-policy.sh
+  band_meaning: blast-radius
+  origin: "operator ruling R1, 2026-10-27: memory.max is derived from the host as ONE SHARED BUDGET (supersedes 10-10's never-raise)"
+  plan_refs:
+    - W1-T8889
+    - W1-T4102
+    - W1-T4267
+  files:
+    - deploy/resource-policy.sh
+    - test/deploy/each-container-memory-max-comes-from-one-shared-host-budget.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: For each fleet container, memory.max is the host's MemTotal less the host reserve less the sum of the OTHER containers' learned peaks, so the four limits cannot together exceed the host; serve is sized the same way
+      proof: "unit test: test/deploy/each-container-memory-max-comes-from-one-shared-host-budget.test.ts"
+    - claim: A container with no learned peak yet counts its policy floor as its peak, a learned peak is re-read at every recycle so the budget follows measured use, an unreadable host total keeps today's arithmetic (never fatal), and an explicit RMD_SERVE_MEMORY_LIMIT_MIB remains an operator override that is named in the policy note
+      proof: "grep: W1-T11130 criterion 2 in test/deploy/each-container-memory-max-comes-from-one-shared-host-budget.test.ts"
+  rationale: |
+    OPERATOR RULING R1 (2026-10-27): memory.max is derived from the host as ONE SHARED BUDGET, superseding 10-10's "never raise core memory.max". Each container's limit is host − reserve − the other containers' learned peaks, so they cannot jointly overcommit. Reducing usage is still required.
+    MEASURED (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - Core OOM and abrupt deaths per day, 10-20..10-26: 0, 2, 5, 2, 12, 19, 13. Since the resize to 32 GB they are 0 (as of 10-27).
+    - The resize raised core memory.max from 8,820 MiB to 24.3 GiB through `total − 5120 − 2048`. Console and site inherited 24.3 GiB as well.
+    - 10-27 02:31Z: core 12.0 / 21.2 GB now/peak (learned memory.high 20.9 GiB); serve 6.9 / 7.66 GB under a fixed 7.5 GiB max (20,129 memory.high events, refaulting about 14.5 MB/s); console 1.8 / 4.66 GB. Host MemAvailable since the resize: min 10.7 GB, p50 17.4 GB.
+    READ at origin/main d04469fa2: deploy/resource-policy.sh sizes every build daemon at `total − RMD_SERVE_MEMORY_RESERVE_MIB − RMD_HOST_OVERHEAD_MIB` (:263) and serve at the fixed `RMD_SERVE_MEMORY_LIMIT_MIB=7680` (:27, :231-232). memory.high is already budgeted by weight (#10371) and self-tuned per container (deploy/memory-high-tuner.sh, <state>/memory-high-tuned-<container>.json), but memory.max is not.
+    NOT COVERED: W1-T8889 (queued) sizes the satellites from their own peaks within fixed bounds; R2 re-scopes it to sit inside this budget, so it now depends on this task.
+  design: |
+    Add one function in resource-policy.sh that returns a container's memory.max from: the host's MemTotal (resource_policy_mem_total_mib), RMD_HOST_RESERVE_MIB, and each OTHER fleet container's learned peak. A learned peak is the larger of its recorded cgroup memory.peak (written beside memory-high-tuned-<container>.json by the tuner each healthy tick) and its learned memory.high; with neither, its RMD_MEMORY_HIGH_FLOORS entry. The build ceiling and serve's memory.max both call it. The value is recomputed at every recycle and by the W1-T4267 drift check, so as peaks are learned the split self-adjusts, and a container that grows takes headroom only from measured slack. memory.high stays under its own memory.max as today. The policy note names every term. No new constant.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 3 (p1). W1-T8889's re-scope per ruling R2 is filed as an amendment of W1-T8889's own shard in its own PR, depending on this task. Reducing usage stays required (R1); that work is the core memory growth task filed beside this one.
