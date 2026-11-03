@@ -1,0 +1,57 @@
+- id: W1-T11183
+  title: "The plan reconciler reads every shard the plan loader reads — readPlanShards (src/run-task.ts) takes a shard's id only from a line starting '- id:', so the 5 queued shards whose record opens with '- repo:' (W1-T10558..W1-T10562) are invisible to rmd plan-reconcile and to the cadence landing, and 4 of them (W1-T10559, W1-T10560, W1-T10561, W1-T10562) merged by trailer on 2026-10-27/28 but still read queued"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, which shard files the reconciler sees (high because a reader that admits a wrong file rewrites it); the reader moves out of src/run-task.ts into the reconcile module, and both callers keep calling it
+  band_meaning: span
+  origin: operator-session#plan-reconcile-root-cause-2026-11-03
+  plan_refs:
+    - W1-T3043
+    - W1-T3226
+    - W1-T3970
+    - W1-T5035
+    - W1-T11175
+  files:
+    - src/lib/plan-reconcile.ts
+    - src/run-task.ts
+    - test/plan/the-plan-reconciler-reads-every-shard-the-loader-reads.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The reconciler's shard reader, over a fixture tasks.d holding a record that opens with '- id:', one that opens with another key and names its id further down, and a .yml record, returns all three with the id the plan loader gives each, and reconcilePlan flips the credited queued ones whichever key opens the record
+      proof: "unit test: test/plan/the-plan-reconciler-reads-every-shard-the-loader-reads.test.ts"
+    - claim: Over plan/tasks.d on main, the set of task ids the reconciler's shard reader returns equals the set of tasks.d tasks loadPlan loads, each from the same file
+      proof: "grep: W1-T11183 criterion 2 in test/plan/the-plan-reconciler-reads-every-shard-the-loader-reads.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 at origin/main (read-only).
+    - readPlanShards (src/run-task.ts) lists plan/tasks.d/*.yaml and keeps a file only when text.match(/^- id: (\S+)/m) finds
+      its id. Both the reconcile verb (planReconcileCommand) and the measurement cadence's landing input
+      (buildMeasurementCadenceDaemonHooks -> buildPlanReconcileProductionInput) read shards through it.
+    - plan.ts's loader parses each shard as YAML (parseTasksFromYaml) and takes .yaml and .yml, so key order is free there.
+    - 5 shards on main open their record with '- repo: remudero' and carry '  id:' further down: W1-T10558, W1-T10559,
+      W1-T10560, W1-T10561, W1-T10562. All 5 read status: queued. All 5 load into the plan, and none reaches reconcilePlan.
+    - 4 of them merged by Remudero-Task trailer: W1-T10559 (74959e18e, 2026-10-27), W1-T10560 and W1-T10561 (e3319cc69,
+      2026-10-27), W1-T10562 (9b27e8321, 2026-10-28). They will read queued forever, even once W1-T11175 lets the landing land.
+    - No .yml shard exists on main today; the reader should still agree with the loader on what a shard file is.
+    Found while hand-building W1-T11175 (its lint hold had to read every shard file, not readPlanShards' records, for
+    W1-T10683's depends_on: W1-T10560 to resolve).
+  design: |
+    1. Move the reader into src/lib/plan-reconcile.ts as an exported function, and have both run-task.ts callers call it.
+       It lists the same file kinds the loader lists, and takes each file's id from the parsed record (parseTasksFromYaml,
+       the loader's own parser), not from a line regex. A file that does not parse is skipped exactly as today: the loader
+       quarantines it, and reconcile has nothing safe to rewrite.
+    2. reconcileShardStatus is unchanged: it already matches the two-space status line wherever it sits in the record.
+    3. Moving the reader out also keeps the new suite off src/run-task.ts: one more importer of the CLI entry grows the
+       affected-suite reach ratchet. Keep run-task.ts's change to the import and the two calls.
+    Tests use a fixture tasks.d written to a temp dir, and plan/tasks.d via REPO_ROOT for criterion 2.
+  falsifier: |
+    At origin/main the reader drops the record that opens with another key and the .yml record, so criterion 1 fails; over
+    main's tasks.d it returns 5 fewer ids than loadPlan loads (W1-T10558..W1-T10562), so criterion 2 fails.
+  note: |
+    reservation hand-off: plan-file-1793673270208 -> plan-file-1793673270208
+    Reserved with rmd next-task-id --branch plan-file-1793673270208. Filed 2026-11-03 at the coordinator's request, p2.

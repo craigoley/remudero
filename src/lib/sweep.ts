@@ -192,6 +192,7 @@ import {
   judgeReviewAsync,
   parseAcceptanceBlock,
   parseWhitelistedProof,
+  planOnlyDiff,
   proofChildEnv,
   proofSandboxArgv,
   proofSandboxStatus,
@@ -203,6 +204,7 @@ import {
   unknownReservationReads,
 } from "./review.js";
 import { withTempDir } from "./tmp.js";
+import { fetchPrDiff, prDiffSourceAsync } from "./pr-diff.js";
 import type {
   ArmDecision,
   AutomergeHold,
@@ -215,7 +217,7 @@ import type {
 } from "./review.js";
 import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
-import { selectRuntimeReviewWidth } from "./review-capacity.js";
+import { readReviewHostObservation, selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
   capacityDecisionText,
   publishReviewDemand,
@@ -2224,6 +2226,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "reviewerCodeStaleThisPass",
   // W1-T4415: every open draft is marked ready for review (operator ruling 2026-09-24: no drafts).
   "readyDraft",
+  "readPrHeadDiff",
+  "readPlanLaneCapacity",
   // An armed PR's body edited after the arm is re-checked for closing references every pass.
   "guardArmedBody",
   // W1-T4838: a worker's categorized refusal is held and drafted as a plan amendment, not retried.
@@ -2364,6 +2368,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "escalateInfrastructureCheck"
   | "readCiGateRollup"
   | "readCiGateRequired"
+  | "readPrHeadDiff"
+  | "readPlanLaneCapacity"
   | "liveCiRunForHead"
   | "refreshCiRunForHead"
   | "reaggregateCiGate"
@@ -3126,7 +3132,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         if (hosted !== undefined) {
           void adoptChildWork({
             runId: hosted.runId, taskId: pr.taskId ?? `PR-${pr.prNumber}`,
-            work: { kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey },
+            work: { kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey, planLane: reviewsInPlanLane(pr) },
             settled: hosted.settled, ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
           }, log);
           log("sweep.post_review.child", { pr_number: pr.prNumber, head_sha: pr.headSha, review_key: reviewKey, child_run_id: hosted.runId });
@@ -4828,6 +4834,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     readyDraft: (pr) => readyDraftImpl(pr),
+
+    readPrHeadDiff: async (pr) => {
+      const read = await fetchPrDiff(pr.prUrl, pr.headSha, prDiffSourceAsync(repoRoot));
+      if (read.kind === "refused") throw new Error(read.reason);
+      return read.diff;
+    },
+    readPlanLaneCapacity: (policy) => {
+      const unit = classEstimate("review");
+      const host = readReviewHostObservation();
+      return { headroom: productionFixPressure(policy.memoryFloorMib, ledgerPath, unit.estimateMib), unit,
+        memoryPsiSomePct: host.memoryPsiSomeAvg10Pct, cpuPsiFullPct: host.cpuPsiFullAvg10Pct };
+    },
 
     guardArmedBody: (pr) => realArmDepsAsync(() => config).closingReferences!(pr.prUrl),
 
@@ -6729,10 +6747,6 @@ export interface SweepPolicy {
    *  rotation selects against the marker, so the bound re-arms, and the window is BYTE-DRIVEN.
    *  NEVER PRE-EMPTS {@link pendingCeilingMinutes}. */
   repeatDispositionBound: number;
-  /** W1-T2439 — HOW MANY PLAN-FILING PRs THE NON-SPAWNING REVIEW LANE MAY ADMIT PER LIGHT PASS; the
-   *  spawning lane is bounded by {@link reviewLanes}. The number is DERIVED, not picked, from three
-   *  measured quantities. // Why: the daemon hit "API rate limit already exceeded". */
-  planFilingAdmissionBound: number;
 }
 
 /** The shipped default policy. A BOUNDED FAIL-SAFE (rule 2): an absent value falls back to a bounded
@@ -6906,7 +6920,6 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // literal, 50, derived against the merge-time population measured 2026-08-26 (see the field's
   // own doc for the full derivation), never a round number picked because it looked safe.
   repeatDispositionBound: 50,
-  planFilingAdmissionBound: 3,
 };
 
 /** W1-T923 — one GATE failure whose remedy is a SINGLE, unambiguous form, so the fix rung can act
@@ -13873,6 +13886,7 @@ export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>
     const admissionHeld = row.acted === false && typeof row.stand_down_reason === "string" && (
       /^not admitted this pass: semantic post-review admission bound \d+(?:, in-flight \d+)?(?:; admitted #\d+(?:, #\d+)* ahead)?(?:; queued behind reviews that need no person: .+)?$/.test(row.stand_down_reason) ||
       /^not admitted this pass: at most \d+ plan-filing post-review admissions (?:per light pass|available across light passes)$/.test(row.stand_down_reason) ||
+      /^not admitted this pass: plan-lane bound \d+, in-flight \d+$/.test(row.stand_down_reason) ||
       row.stand_down_reason === "not admitted this pass: restart latched, and the review would outlast its drain" ||
       row.stand_down_reason === "overtaken by a repair queued before it — this review keeps its place in the queue, re-derived next pass" ||
       row.stand_down_reason === "review lanes taken by repairs queued before their reviews — re-derived next pass"
@@ -14216,10 +14230,13 @@ export interface SweepDeps {
     activeWorkers?: number;
   }) => number;
   /** W1-T2584 — time-bounded gate for a next review admission; it never interrupts a running reviewer. */
-  continueReviewAdmissions?: () => boolean;
+  continueReviewAdmissions?: (reviewClass?: ReviewLaneClass) => boolean;
   /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
   workerAdmissionHold?: (kind?: "review") => string | undefined;
-  restartAdmission?: (kind: "review", surface: "light" | "light-refill") => boolean;
+  restartAdmission?: (kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean;
+  /** W1-T11148: the head diff (reviewer's source) and the plan-lane bound's readings; absent: code lane, review-width bound. */
+  readPrHeadDiff?: (pr: OpenPrView) => Promise<string>;
+  readPlanLaneCapacity?: (policy: SweepPolicy) => PlanLaneCapacityReading;
   /** Dispatch the W1-T76 fix rung carrying the mode-appropriate evidence at once — the FULL unmet
    *  set for a review dispatch, or ci-log evidence for a blocked_ci one. W1-T2231: MAY return
    *  whether this call demonstrably SPENT a strike; `undefined` reads as spent, so this widening
@@ -16675,6 +16692,7 @@ export async function drainInFlightReviews(opts: {
  *  does not own. The registry still holds the work's slot and mutex key, so the PR is not re-admitted while the child runs. */
 export interface ChildWorkRegistration {
   runId: string; kind: string; taskId: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string;
+  planLane?: boolean;
 }
 const childWork = new Map<string, ChildWorkRegistration>();
 const settledChildWork = new Set<string>();
@@ -16688,10 +16706,10 @@ export function registerChildWork(work: ChildWorkRegistration): void {
   if (work.fixKey !== undefined) inFlightFixKeys.add(work.fixKey);
 }
 
-/** How many registered children run `kind`, or all of them. */
-export function childWorkCount(kind?: string): number {
+/** How many registered children run `kind`, or all of them; W1-T11148: `lane` keeps only code or plan-lane reviews. */
+export function childWorkCount(kind?: string, lane?: "code" | "plan"): number {
   let n = 0;
-  for (const work of childWork.values()) if (kind === undefined || work.kind === kind) n++;
+  for (const work of childWork.values()) if ((kind === undefined || work.kind === kind) && (lane === undefined || (work.planLane === true) === (lane === "plan"))) n++;
   return n;
 }
 
@@ -16922,7 +16940,7 @@ export function installedDetachedWorkHost(): DetachedWorkHost | undefined {
 /** The child a boot adopted, as the registry takes it: structural, so this module imports nothing from run-child. */
 export interface AdoptedWorkChild {
   runId: string; taskId: string;
-  work: { kind: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string; inputs?: Record<string, unknown> };
+  work: { kind: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string; planLane?: boolean; inputs?: Record<string, unknown> };
   settled: Promise<unknown>;
   acknowledge?: (outcome: PromiseSettledResult<never>) => void;
 }
@@ -16936,7 +16954,8 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
   // Already settled in this process for this head: nothing to claim, post or acknowledge a second time.
   if (settledChildWork.has(childWorkSettleKey(child.runId, child.work.headSha))) return Promise.resolve();
   const { inputs, ...registered } = child.work;
-  registerChildWork({ runId: child.runId, taskId: child.taskId, ...registered });
+  const planLane = registered.planLane ?? (child.work.kind === "review" && inputs?.planOnlyFiling === true);
+  registerChildWork({ runId: child.runId, taskId: child.taskId, ...registered, ...(planLane ? { planLane } : {}) });
   return child.settled.then(
     (value) => ({ status: "fulfilled" as const, value }),
     (reason: unknown) => ({ status: "rejected" as const, reason }),
@@ -18636,12 +18655,14 @@ export async function runSweep(
     deps.repairAdmissionSurface === "full" && !deps.claimFixAdmission
       ? (deps.readActiveWorkerCount ?? activeWorkerCount)()
       : undefined;
+  const fullOutcomes: ReviewAdmissionOutcomes = {
+    delivered: prior.reviewDelivered, refused: prior.reviewRefused, retryableThrows: prior.reviewRetryableThrows,
+  };
+  if (deps.repairAdmissionSurface === "full") {
+    await resolveUnreadPlanLanes(openPrs.filter((pr) => !reviewAdmissionOutcomeKnown(pr, fullOutcomes, policy, now)), deps, policy, now);
+  }
   const fullReviewCandidates = deps.repairAdmissionSurface === "full"
-    ? reviewAdmissionCandidates(openPrs, policy, now, {
-        delivered: prior.reviewDelivered,
-        refused: prior.reviewRefused,
-        retryableThrows: prior.reviewRetryableThrows,
-      })
+    ? reviewAdmissionCandidates(openPrs, policy, now, fullOutcomes)
     : undefined;
   const fullReviewQueueDepth = fullReviewCandidates?.length;
   if (fullReviewQueueDepth !== undefined) noteIdleReviewDemand(fullReviewQueueDepth, openPrs.length, now);
@@ -23142,19 +23163,21 @@ export async function runSweep(
   const overtakenReviews = fullRepairAdmission?.overtaken() ?? new Set<number>(); // W1-T9582
   const overtakenJobs = pendingReviews.filter((job) => overtakenReviews.has(job.pr.prNumber));
   const orderedReviews = orderPendingReviewsNeedsPersonLast(pendingReviews.filter((job) => !overtakenReviews.has(job.pr.prNumber)), fullNeedsPerson);
+  type ReviewLane = { jobs: typeof orderedReviews; next: number; stop?: string; cls: ReviewLaneClass };
+  const codeLane: ReviewLane = { jobs: orderedReviews.filter((job) => !reviewsInPlanLane(job.pr)), next: 0, cls: "review" };
+  const planLane: ReviewLane = { jobs: orderedReviews.filter((job) => reviewsInPlanLane(job.pr)), next: 0, cls: "plan-review" };
   fullReviews.planned = Math.max(0, fullReviews.planned - overtakenReviews.size);
-  const reviewLanes = Math.max(0, (fullReviewLanes ?? effectiveReviewWidth(deps, policy, orderedReviews.length, now, ledgerLines)) -
+  const reviewLanes = Math.max(0, (fullReviewLanes ?? effectiveReviewWidth(deps, policy, codeLane.jobs.length, now, ledgerLines)) -
     overtakenReviews.size);
   const postReview = deps.postReview;
-  let nextReviewIndex = 0;
   let admissionStopReason: string | undefined;
 
   const closeAdmissions = (reason: string): void => {
     admissionStopReason ??= reason;
   };
 
-  const takeNextReview = (): (typeof orderedReviews)[number] | undefined => {
-    if (admissionStopReason !== undefined) return undefined;
+  const takeNextReview = (lane: ReviewLane): (typeof orderedReviews)[number] | undefined => {
+    if (admissionStopReason !== undefined || lane.stop !== undefined) return undefined;
     const workerHold = workerAdmissionHoldReason(deps, "review");
     if (workerHold) {
       closeAdmissions(workerHold);
@@ -23162,8 +23185,8 @@ export async function runSweep(
     }
     if (deps.continueReviewAdmissions) {
       try {
-        if (!deps.continueReviewAdmissions()) {
-          closeAdmissions("review admission continuation gate closed — re-derived next pass");
+        if (!deps.continueReviewAdmissions(lane.cls)) {
+          lane.stop = "review admission continuation gate closed — re-derived next pass";
           return undefined;
         }
       } catch (e) {
@@ -23177,9 +23200,9 @@ export async function runSweep(
         return undefined;
       }
     }
-    const job = orderedReviews[nextReviewIndex];
+    const job = lane.jobs[lane.next];
     if (job === undefined) return undefined;
-    nextReviewIndex += 1;
+    lane.next += 1;
     return job;
   };
 
@@ -23333,11 +23356,27 @@ export async function runSweep(
   const fullSurface = deps.repairAdmissionSurface === "full";
   let passReviewsInFlight = 0;
   let widthStopReason: string | undefined;
-  const workerCount = Math.min(reviewLanes, orderedReviews.length);
-  await Promise.all(
-    Array.from({ length: workerCount }, async () => {
+  const workerCount = Math.min(reviewLanes, codeLane.jobs.length);
+  const startReview = (job: (typeof orderedReviews)[number]): Promise<void> => trackInFlightReview(() => runReview(job), {
+    taskId: job.pr.taskId, prNumber: job.pr.prNumber, kind: job.mode.kind, admittedAtMs: deps.now?.() ?? systemClock.now(),
+  });
+  const lightAdmitted = deps.repairAdmissionSurface === "light"; // its light pass already bounded and reserved each plan review
+  const planBound = planLane.jobs.length === 0 || lightAdmitted ? undefined
+    : planLaneBoundForPass(deps, policy, planLane.jobs.length, deps.repairAdmissionSurface ?? "full");
+  const planWidthStopReason = planBound && `not admitted this pass: plan-lane bound ${planBound.bound}, in-flight ${planBound.inFlight}`;
+  const planWorkers = planLane.jobs.slice(0, planBound?.available ?? planLane.jobs.length).map(async () => {
+    const job = takeNextReview(planLane);
+    if (job === undefined) return;
+    if (!lightAdmitted) planLaneReviewsInFlight++;
+    const work = startReview(job).finally(() => { if (!lightAdmitted) planLaneReviewsInFlight--; });
+    if (deps.detachReviewWait) deps.detachReviewWait(work);
+    else await work;
+  });
+  await Promise.all([
+    ...planWorkers,
+    ...Array.from({ length: workerCount }, async () => {
       while (true) {
-        if (fullSurface && nextReviewIndex < orderedReviews.length) {
+        if (fullSurface && codeLane.next < codeLane.jobs.length) {
           const { bound, inFlight } = reviewAdmissionBound(reviewLanes);
           if (bound === 0 && passReviewsInFlight === 0) {
             widthStopReason = `not admitted this pass: semantic post-review admission bound 0${inFlightNote(inFlight)}`;
@@ -23348,17 +23387,14 @@ export async function runSweep(
             continue;
           }
         }
-        const job = takeNextReview();
+        const job = takeNextReview(codeLane);
         if (job === undefined) return;
         if (fullSurface) {
           fullPassReviewsInFlight++;
           passReviewsInFlight++;
           fullReviews.started++;
         }
-        const tracked = trackInFlightReview(() => runReview(job), {
-          taskId: job.pr.taskId, prNumber: job.pr.prNumber, kind: job.mode.kind,
-          admittedAtMs: deps.now?.() ?? systemClock.now(),
-        });
+        const tracked = startReview(job);
         const work = !fullSurface ? tracked : tracked.finally(() => {
           fullPassReviewsInFlight--;
           passReviewsInFlight--;
@@ -23372,7 +23408,7 @@ export async function runSweep(
         await work;
       }
     }),
-  );
+  ]);
   fullReviews.pulling = false; // W1-T9498: an unstarted tail is never started by this pass, so it reserves nothing.
 
   // Only a named admission stop can leave an unstarted tail. W1-T2771: these jobs were discovered
@@ -23383,8 +23419,7 @@ export async function runSweep(
       "overtaken by a repair queued before it — this review keeps its place in the queue, re-derived next pass",
       undefined, undefined, undefined);
   }
-  const unstartedReviews = orderedReviews.slice(nextReviewIndex);
-  for (const job of unstartedReviews) {
+  for (const [lane, job] of [codeLane, planLane].flatMap((lane) => lane.jobs.slice(lane.next).map((job) => [lane, job] as const))) {
     await finalizeDisposition(
       job.index,
       job.pr,
@@ -23394,7 +23429,7 @@ export async function runSweep(
       false,
       false,
       undefined,
-      admissionStopReason ?? widthStopReason ?? (overtakenJobs.length > 0
+      admissionStopReason ?? lane.stop ?? (lane === codeLane ? widthStopReason : planWidthStopReason) ?? (overtakenJobs.length > 0
         ? "review lanes taken by repairs queued before their reviews — re-derived next pass"
         : "review admissions stopped — re-derived next pass"),
       undefined,
@@ -23906,7 +23941,6 @@ export async function runLightPassRefreshAdmission(
 // W1-T4732: overlapping light passes share review admissions. Reserve synchronously at
 // selection time, before either pass can reach an asynchronous reviewer.
 let lightPassSpawningReservations = 0;
-let lightPassPlanFilingReservations = 0;
 const lightPassReservedHeads = new Set<string>();
 // W1-T5901: at most one plan PR direct-merges across overlapping light passes. The claim is the
 // owning pass's token, released when ITS candidate's sweep settles, not when that whole pass ends:
@@ -23960,7 +23994,7 @@ function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: n
 /** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
   // W1-T9114: a review child holds its slot while it runs, adopted or not.
-  const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight + childWorkCount("review");
+  const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight + childWorkCount("review", "code");
   return { bound: Math.max(0, width - inFlight), inFlight };
 }
 
@@ -24047,6 +24081,7 @@ export async function runSweepLightPass(
     freshnessBackoffs,
   };
   observeReviewEligibility(openPrs, deps, policy, now, selectionLedgerLines, outcomes, "light");
+  await resolveUnreadPlanLanes(openPrs.filter((pr) => !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)), deps, policy, now);
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
   // W1-T7095: candidates for the host-memory demand row, read BEFORE this pass reserves its own spawning heads.
   const demandCandidates = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
@@ -24058,30 +24093,30 @@ export async function runSweepLightPass(
   const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
-  const availablePlanFilings = Math.max(0, policy.planFilingAdmissionBound - lightPassPlanFilingReservations);
+  const unreserved = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
+  const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length)
+    .planFilings.length, "light");
   const needsPerson = needsPersonPredicate(selectionLedgerLines);
-  const selected = selectReviewAdmissions(
-    openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-    { ...policy, planFilingAdmissionBound: availablePlanFilings }, now, outcomes, semanticBound, needsPerson,
-  );
-  recordReviewOrderShadow(deps, selectionLedgerLines, reviewAdmissionCandidates(
-    openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr))), policy, now, outcomes), selected.spawning, now, semanticBound);
+  const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available, needsPerson);
+  recordReviewOrderShadow(deps, selectionLedgerLines, reviewAdmissionCandidates(unreserved, policy, now, outcomes),
+    selected.spawning, now, semanticBound);
   const latchHeld = new Set<number>();
-  const admitAfterLatch = (pr: OpenPrView): boolean => deps.restartAdmission?.("review", "light") !== false || !latchHeld.add(pr.prNumber);
+  const admitAfterLatch = (pr: OpenPrView): boolean =>
+    deps.restartAdmission?.(reviewsInPlanLane(pr) ? "plan-review" : "review", "light") !== false || !latchHeld.add(pr.prNumber);
   const spawning = selected.spawning.filter(admitAfterLatch);
   const planFilings = selected.planFilings.filter(admitAfterLatch);
   publishLightPassReviewDemand(demandCandidates, spawning, policy, now, outcomes, deps);
   // W1-T7734: what this pass leaves waiting is what an idle daemon should keep a light pass running for.
   noteIdleReviewDemand(Math.max(0, queueDepth - spawning.length), openPrs.length, now);
   lightPassSpawningReservations += spawning.length;
-  lightPassPlanFilingReservations += planFilings.length;
+  planLaneReviewsInFlight += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
   const spawningNumbers = new Set(spawning.map((pr) => pr.prNumber));
   // The eligible spawning-lane PRs this pass could not admit, oldest first. A lane this pass frees
   // admits the next of them at once (`refillFreedLanes` below) instead of idling until another pass.
   const refillTail = selectReviewAdmissions(
     openPrs.filter((pr) => !spawningNumbers.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-    policy, now, outcomes, openPrs.length, needsPerson,
+    policy, now, outcomes, openPrs.length, undefined, needsPerson,
   ).spawning;
   let refillArmed = false;
   // W1-T2584 parity: provider capacity is account-wide, so a pass whose review met the gh budget
@@ -24139,7 +24174,7 @@ export async function runSweepLightPass(
       if (spawningNumbers.has(pr.prNumber)) {
         lightPassSpawningReservations--;
         unsettledSpawning--;
-      } else lightPassPlanFilingReservations--;
+      } else planLaneReviewsInFlight--;
       lightPassReservedHeads.delete(lightPassHeadKey(pr));
       releaseReviewSlot();
       if (spawningNumbers.has(pr.prNumber)) onOwnLaneFreed();
@@ -24216,11 +24251,8 @@ export async function runSweepLightPass(
                       : heldElsewhere.has(lightPassHeadKey(pr))
                       // W1-T7955: the review is running, admitted by an overlapping pass — not a lost admission.
                       ? "review already in flight for this head (admitted by an overlapping light pass)"
-                      : pr.isPlanFiling === true
-                      ? `not admitted this pass: at most ${availablePlanFilings} plan-filing ` +
-                        (availablePlanFilings === policy.planFilingAdmissionBound
-                          ? "post-review admissions per light pass"
-                          : "post-review admissions available across light passes")
+                      : reviewsInPlanLane(pr)
+                      ? `not admitted this pass: plan-lane bound ${planBound.bound}, in-flight ${planBound.inFlight}`
                       : `not admitted this pass: semantic post-review admission bound ${semanticBound}` +
                         inFlightNote(reviewsInFlight) +
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : "") +
@@ -24343,7 +24375,7 @@ export async function runSweepLightPass(
     refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
       freshViews.filter((pr) => !spawningNumbers.has(pr.prNumber) && !refilledHeads.has(lightPassHeadKey(pr)) &&
         !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-      policy, refillViewReadAtMs, outcomes, freshViews.length, needsPerson,
+      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson,
     ).spawning);
   };
   const admitOneRefill = async (): Promise<boolean> => {
@@ -24559,7 +24591,7 @@ export function publishLightPassReviewDemand(
 ): void {
   if (deps.dryRun) return;
   const eligible = candidates.filter((pr) =>
-    pr.isPlanFiling !== true &&
+    !reviewsInPlanLane(pr) &&
     isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) &&
     !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now));
   const root = dirname(dirname(deps.ledgerPath));
@@ -24620,16 +24652,102 @@ export function selectReviewAdmission(
   return selectReviewAdmissions(openPrs, policy, now).spawning[0];
 }
 
-/** W1-T2439 — THE SPLIT ADMISSION, AND WHY THE PREDICATE IS `isPlanFiling` AND NOT THE REVIEW'S
- *  OUTCOME: the outcome is written AFTER the review runs, so this function cannot see it. TWO LANES,
- *  AND ONLY ONE CAN SPAWN — every PR not flagged a plan filing, at the configured review width, and
- *  plan filings, at {@link SweepPolicy.planFilingAdmissionBound}. FAIL-OPEN: `undefined` is SPAWNING. */
+export type ReviewLaneClass = "review" | "plan-review";
+export interface PlanLaneCapacityReading {
+  headroom: Pick<FixHostPressure, "availableMib" | "floorMib" | "reason">;
+  unit: LearnedEstimate;
+  memoryPsiSomePct?: number;
+  cpuPsiFullPct?: number;
+}
+export interface PlanLaneBound {
+  bound: number; inFlight: number; available: number;
+  tier: "fits" | "pressure-shrunk" | "short-progress-one" | "short";
+  basis: "headroom" | "review-width";
+  headroomMib?: number; unitMib?: number; unitSamples?: number; pressurePct: number; reason?: string;
+}
+let planLaneReviewsInFlight = 0;
+
+/** W1-T11148 — DERIVED, NEVER A LITERAL: headroom over the learned review reservation, shrunk by memory or CPU PSI (so it
+ *  recovers as pressure relieves); unread headroom uses the review width; with nothing in flight it admits one. */
+export function derivePlanLaneBound(reading: PlanLaneCapacityReading | undefined, policy: SweepPolicy, inFlight: number): PlanLaneBound {
+  const finitePct = (v: number | undefined): number => (typeof v === "number" && Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : 0);
+  const pressurePct = Math.max(finitePct(reading?.memoryPsiSomePct), finitePct(reading?.cpuPsiFullPct));
+  const headroomMib = reading && reading.headroom.reason === undefined && reading.unit.estimateMib > 0
+    ? Math.max(0, reading.headroom.availableMib - reading.headroom.floorMib) : undefined;
+  const slots = headroomMib === undefined ? Math.max(1, policy.reviewLanes) : Math.floor(headroomMib / reading!.unit.estimateMib);
+  const shrunk = Math.floor(slots * (1 - pressurePct / 100));
+  const bound = shrunk >= 1 ? shrunk : inFlight === 0 ? 1 : 0;
+  return {
+    bound, inFlight, available: Math.max(0, bound - inFlight),
+    tier: shrunk >= 1 ? (shrunk < slots ? "pressure-shrunk" : "fits") : bound === 1 ? "short-progress-one" : "short",
+    basis: headroomMib === undefined ? "review-width" : "headroom", pressurePct,
+    ...(headroomMib === undefined ? {} : { headroomMib, unitMib: reading!.unit.estimateMib, unitSamples: reading!.unit.samples }),
+    ...(reading?.headroom.reason === undefined ? {} : { reason: reading.headroom.reason }),
+  };
+}
+
+function planLaneBoundForPass(deps: SweepDeps, policy: SweepPolicy, eligible: number, surface: SweepRepairSurface): PlanLaneBound {
+  let reading: PlanLaneCapacityReading | undefined;
+  try {
+    reading = deps.readPlanLaneCapacity?.(policy);
+  } catch (error) {
+    reading = { headroom: { availableMib: 0, floorMib: 0, reason: `plan-lane capacity unreadable: ${String(error)}` }, unit: { estimateMib: 0, samples: 0 } };
+  }
+  const derived = derivePlanLaneBound(reading, policy, planLaneReviewsInFlight + childWorkCount("review", "plan"));
+  if (eligible > 0 && !deps.dryRun) {
+    (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step: "sweep.plan_lane_bound",
+      surface, eligible, bound: derived.bound, in_flight: derived.inFlight, available: derived.available, tier: derived.tier,
+      basis: derived.basis, pressure_pct: derived.pressurePct, cpu_cost: "unmeasured",
+      ...(derived.headroomMib === undefined ? { review_lanes: policy.reviewLanes } : {
+        headroom_mib: derived.headroomMib, unit_mib: derived.unitMib, unit_samples: derived.unitSamples,
+        unit_source: derived.unitSamples === 0 ? "prior" : "learned" }),
+      ...(derived.reason === undefined ? {} : { reason: derived.reason }) });
+  }
+  return derived;
+}
+const planOnlyHeadDiffs = new Map<number, { headSha: string; planOnly: boolean | undefined }>();
+
+/** W1-T11148: the plan lane is a plan filing, or an unread classification whose head diff the reviewer's predicate calls plan-only. */
+export function reviewsInPlanLane(pr: Pick<OpenPrView, "prNumber" | "headSha" | "isPlanFiling" | "planFilingSource">): boolean {
+  if (pr.isPlanFiling === true) return true;
+  const read = pr.planFilingSource === "unreadable" ? planOnlyHeadDiffs.get(pr.prNumber) : undefined;
+  return read?.headSha === pr.headSha && read.planOnly === true;
+}
+
+/** Reads each review-eligible unread head's diff once per process; a failed read is remembered as unknown, so it stays code. */
+export async function resolveUnreadPlanLanes(
+  openPrs: readonly OpenPrView[], deps: Pick<SweepDeps, "readPrHeadDiff">, policy: SweepPolicy, now: number,
+): Promise<void> {
+  const readDiff = deps.readPrHeadDiff;
+  if (readDiff === undefined) return;
+  const unread = openPrs.filter((pr) => pr.isPlanFiling !== true && pr.planFilingSource === "unreadable" &&
+    planOnlyHeadDiffs.get(pr.prNumber)?.headSha !== pr.headSha &&
+    isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition));
+  for (const pr of unread) planOnlyHeadDiffs.set(pr.prNumber, { headSha: pr.headSha, planOnly: undefined });
+  await Promise.all(unread.map(async (pr) => {
+    let planOnly: boolean | undefined;
+    try {
+      planOnly = planOnlyDiff(await readDiff(pr));
+    } catch (error) {
+      void error; // An unread diff decides nothing: the PR keeps today's code lane, and its review reads the diff itself.
+    }
+    if (planOnlyHeadDiffs.get(pr.prNumber)?.headSha === pr.headSha) planOnlyHeadDiffs.set(pr.prNumber, { headSha: pr.headSha, planOnly });
+  }));
+}
+
+export function resetPlanLaneHeadDiffs(): void {
+  planOnlyHeadDiffs.clear();
+}
+
+/** W1-T2439 — TWO LANES, keyed before the outcome exists: code PRs at the review width, plan-lane PRs at
+ *  {@link derivePlanLaneBound}'s width (W1-T11148). FAIL-OPEN: an unresolved classification is SPAWNING. */
 export function selectReviewAdmissions(
   openPrs: readonly OpenPrView[],
   policy: SweepPolicy,
   now: number,
   outcomes: ReviewAdmissionOutcomes = EMPTY_REVIEW_ADMISSION_OUTCOMES,
   reviewWidth: number = Math.max(1, policy.reviewLanes),
+  planLaneWidth: number = derivePlanLaneBound(undefined, policy, 0).available,
   needsPerson?: (pr: OpenPrView) => boolean,
 ): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
   // W1-T2583: selection and execution must agree on outcome-keyed eligibility, so the caller folds
@@ -24638,8 +24756,8 @@ export function selectReviewAdmissions(
   const eligible = openPrs.filter((pr) =>
     isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) &&
     !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now));
-  const filings = eligible.filter((pr) => pr.isPlanFiling === true);
-  const rest = eligible.filter((pr) => pr.isPlanFiling !== true);
+  const filings = eligible.filter(reviewsInPlanLane);
+  const rest = eligible.filter((pr) => !reviewsInPlanLane(pr));
 
   const oldestFirst = (a: OpenPrView, b: OpenPrView): number => {
     // W1-T11153: a PR that needs a person to merge is admitted only after every one that does not.
@@ -24653,12 +24771,9 @@ export function selectReviewAdmissions(
     return ab !== aa ? ab - aa : a.prNumber - b.prNumber;
   };
 
-  // The cheap lane, oldest-first on the SAME immutable key, truncated at its own bound. Sorting
-  // by the key rather than repeatedly calling `oldestByKey` keeps one ordering definition.
-  const bound = Math.max(0, policy.planFilingAdmissionBound);
-  const planFilings = [...filings]
-    .sort(oldestFirst)
-    .slice(0, bound);
+  // The cheap lane, oldest-first on the SAME immutable key. Sorting by the key rather than
+  // repeatedly calling `oldestByKey` keeps one ordering definition.
+  const planFilings = [...filings].sort(oldestFirst).slice(0, Math.max(0, planLaneWidth));
 
   const spawning = [...rest].sort(oldestFirst).slice(0, Math.max(0, reviewWidth));
   return { spawning, planFilings };
@@ -24677,7 +24792,7 @@ function reviewAdmissionQueueDepth(
 function reviewAdmissionCandidates(openPrs: readonly OpenPrView[], policy: SweepPolicy, now: number,
   outcomes: ReviewAdmissionOutcomes): OpenPrView[] { // W1-T9582: the spawning review candidates themselves.
   return openPrs.filter((pr) =>
-    pr.isPlanFiling !== true &&
+    !reviewsInPlanLane(pr) &&
     isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) &&
     !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)
   );

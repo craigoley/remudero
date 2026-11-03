@@ -16,6 +16,9 @@
     - src/lib/draft-routing.ts
     - .remudero/mounts.yaml
     - test/routing/an-inbox-draft-route-that-never-drafts-clean-is-skipped.test.ts
+  # refusal-amendment (W1-T11073, run DAEMON-1793643571744@c58f698bcc766f4e9a6b8717134743db96bf24b3, 2026-11-02T21:03:39.657Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The required measured cap cannot be derived because clean-draft turn counts are unavailable in permitted sources.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:

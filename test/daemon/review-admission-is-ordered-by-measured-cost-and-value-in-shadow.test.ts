@@ -58,11 +58,11 @@ test("a review that needs a person is admitted only after every eligible review 
   assert.equal(needsPersonToMerge(ready, ledger), undefined);
 
   const needsPerson = needsPersonPredicate(ledger);
-  const picked = selectReviewAdmissions([held, ready], oneLane, NOW, undefined, 1, needsPerson).spawning;
+  const picked = selectReviewAdmissions([held, ready], oneLane, NOW, undefined, 1, undefined, needsPerson).spawning;
   assert.deepEqual(picked.map((p) => p.prNumber), [2], "the mergeable review takes the only slot");
   assert.deepEqual(selectReviewAdmissions([held, ready], oneLane, NOW, undefined, 1).spawning.map((p) => p.prNumber), [1],
     "positive control: oldest-first alone picks the head that needs a person");
-  assert.deepEqual(selectReviewAdmissions([held], oneLane, NOW, undefined, 1, needsPerson).spawning.map((p) => p.prNumber), [1],
+  assert.deepEqual(selectReviewAdmissions([held], oneLane, NOW, undefined, 1, undefined, needsPerson).spawning.map((p) => p.prNumber), [1],
     "with nothing else eligible it is admitted as today");
   assert.deepEqual(orderPendingReviewsNeedsPersonLast([{ pr: held }, { pr: ready }], needsPerson).map((job) => job.pr.prNumber), [2, 1],
     "the full pass orders the same way");

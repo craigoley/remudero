@@ -1,0 +1,36 @@
+- id: W1-T11143
+  title: "serve takes a change to its baked runtime source by an in-container handoff, not a container replace — serve's container was replaced 23 times in a week for 'serve image drift' on its 32 baked runtime source files (BAKED_RUNTIME_SOURCE_PATHS), and each replace is a console UI outage, while the supervisor's slot handoff already moves serving between generations without dropping the socket"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, a source-only drift is delivered by handoff; it spans the convergence decision and the supervisor that performs it
+  band_meaning: span
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs:
+    - W1-T9504
+    - W1-T9509
+    - W1-T8171
+    - W1-T9542
+  files:
+    - src/lib/serve-policy-convergence.ts
+    - src/lib/serve-supervisor.ts
+    - test/console-api/serve/serve-takes-a-baked-runtime-change-by-handoff-not-a-replace.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When serve's only drift is in baked runtime source (BAKED_RUNTIME_SOURCE_PATHS), with no node, dependency, Dockerfile, mount or resource-policy drift, runServePolicyCycle asks the running supervisor to take the newer source by a handoff instead of replacing the container, and the supervisor's next generation runs that source
+      proof: "unit test: test/console-api/serve/serve-takes-a-baked-runtime-change-by-handoff-not-a-replace.test.ts"
+    - claim: Any other drift, a supervisor too old to accept the request, the handoff kill switch, or a handoff that fails or is deferred past its own measured spacing keeps today's container replace
+      proof: "grep: W1-T11143 criterion 2 in test/console-api/serve/serve-takes-a-baked-runtime-change-by-handoff-not-a-replace.test.ts"
+  rationale: |
+    MEASURED, week to 2026-10-27 (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02): serve's container was replaced 23 times for "serve image drift" on 32 baked runtime source files. Each replace is a console UI outage. serve also carries the largest CPU weight (303) and 222% CPU, so each replace's cold start lands on a CPU-bound host.
+    READ at origin/main d04469fa2: BAKED_RUNTIME_SOURCE_PATHS (src/lib/baked-runtime-inputs.ts) lists the 32 files the image-resident supervisor executes. runServePolicyCycle (src/lib/serve-policy-convergence.ts) treats `serve image drift (expected=… actual=…)` (:131) like any resource or mount drift, and replaces the container. The supervisor (src/lib/serve-supervisor.ts) already hands serving between generation slots on one shared fd (rmd.handoff_request → prepare → promote → drain), sized against measured overlap (W1-T9542), with a kill switch.
+    NOT COVERED: W1-T9504 and W1-T9509 (merged) stop a memory deferral and a ledger rotation from holding the replace; they do not avoid it. W1-T8171 (blocked) is one boot per advance for the core daemon, not serve.
+  design: |
+    Split serve's drift into baked-source-only and everything else, using the image's recorded build sha and the changed paths between it and main. For source-only drift, send the running supervisor a handoff request that names the newer tree. The supervisor's prepare step loads the generation from that tree's copy of the baked files (copied into its generations directory, never the live mount), and the existing promote and drain path does the rest. The image still catches up at the next real image rebuild. The convergence row records `delivered_by: handoff | replace`. Every non-source drift, an old supervisor that does not acknowledge the request, the kill switch, or an aborted handoff falls back to replace.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 12 (p3). W1-T9504 and W1-T9509 were checked first, as the findings asked. Both merged and neither covers this.

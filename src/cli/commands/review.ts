@@ -3,7 +3,7 @@ import type { GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure, type CensusChildResult } from "./run-task-verb.js";
 import { buildBaseProofDir, hostWorktreeGitAtTopLevel } from "../../lib/check-proof.js";
 import { execFileSync, spawn } from "node:child_process";
-import { currentReviewSignal, withheldReviewRefusalRow } from "../../lib/sweep.js";
+import { checksStateFromRollup, currentReviewSignal, withheldReviewRefusalRow } from "../../lib/sweep.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -17,7 +17,8 @@ import { withTempDir } from "../../lib/tmp.js";
 import { reapWorkerScratch } from "../../lib/worker-scratch.js";
 import { resolveInstallRoot } from "../../lib/install-root.js";
 import { escalate, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
-import { combinedStatusRestArgs, mapRestPr, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
+import { combinedStatusRestArgs, mapRestPr, rollupForAsync, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
+import { ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger } from "../../lib/ledger.js";
 import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
 import { classifyReviewOutcome, recordedReviewVerdictLines, reviewReplayLedgerFields, type ReviewReplayInput, type ReviewOutcomeDecision } from "../../lib/review-outcome-class.js";
@@ -32,7 +33,7 @@ import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-ju
 import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
-import { readLedgerLines } from "../../lib/status.js";
+import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
 import { isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
@@ -49,7 +50,7 @@ import { asOwnerRepoUnresolvable } from "../../lib/owner-repo.js";
 import { flagValue } from "../../lib/cli-args.js";
 import { resolveReviewTarget, reviewTaskIdFromBody, reviewPrNumber, reviewViewArgs } from "../../lib/report-commands.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "../../lib/staged-install.js";
-import { UNTASKED_REVIEW_BUDGET_USD, isPlanOnlyFilingPr, resolveReviewTaskId, usesUntaskedReviewMetadata } from "../../lib/tick-read-worker.js";
+import { UNTASKED_REVIEW_BUDGET_USD, isPlanOnlyFilingPr, resolveReviewTaskId, reviewStateFromRollup, usesUntaskedReviewMetadata } from "../../lib/tick-read-worker.js";
 
 export interface ReviewCommandHost {
   readonly GIT_UNTRACKED_FILES_ALL: string;
@@ -384,6 +385,20 @@ export function reappendLostReviewPosted(
  * FIELD FINDING 12 self-updater race) never blocks the gate — the deterministic
  * floor still posts, fail-closed.
  */
+
+/** W1-T11163 — this head's required checks green (branch protection's own list) and its review success, read fresh. */
+export async function readChecksGreenReviewedAtHead(
+  owner: string,
+  repo: string,
+  headSha: string,
+  readJson: (args: string[]) => unknown = ghJsonAsync,
+  readText: (args: string[]) => Promise<string> = ghTextAsync,
+): Promise<boolean> {
+  const required = await readRequiredStatusCheckContextsAsync(owner, repo, "main", readText);
+  if (required.kind !== "contexts") return false;
+  const rollup = await rollupForAsync(owner, repo, headSha, readJson);
+  return checksStateFromRollup(rollup, required.contexts) === "green" && reviewStateFromRollup(rollup) === "success";
+}
 
 export async function runReview(host: ReviewCommandHost, args: {
   owner: string;
@@ -1324,7 +1339,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   // that landed after this verdict. No `posted.posted` guard is needed: that branch already returned.
   reappendLostReviewPosted({ ledgerPath: args.ledgerPath, runId: args.runId, headSha, decisionDigest, prUrl,
     row: reviewPostedRow, log, say });
-  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
+  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log,
+    readChecksGreenReviewed: (_url: string, head: string) => readChecksGreenReviewedAtHead(owner, repo, head) };
   // W1-T9549: AWAITED. The daemon runs this review (`trackInFlightReview`), so the arm's gh and git leave its loop free.
   await armIfVerdictPermitsAsync(verdict, armCtx, { arm: args.arm });
   // Record after both authoritative posting and auto-merge eligibility. The recorder
