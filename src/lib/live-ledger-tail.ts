@@ -23,6 +23,11 @@ function rowMs(row: Record<string, unknown>): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function retained(row: Record<string, unknown>, cutoff: number): boolean {
+  const t = rowMs(row);
+  return t !== undefined && t > cutoff;
+}
+
 function parseLines(path: string, text: string, out: Array<Record<string, unknown>>): void {
   for (const raw of text.split("\n")) {
     const line = raw.trim();
@@ -93,12 +98,9 @@ export function createLiveLedgerTail(path: string, retainMs: number): LiveLedger
         anchor = bytesAt(fd, offset - Math.min(ANCHOR_BYTES, offset), Math.min(ANCHOR_BYTES, offset));
       }
       const cutoff = nowMs - retainMs;
-      rows = rows.filter((row) => {
-        const t = rowMs(row);
-        return t !== undefined && t > cutoff;
-      });
+      rows = rows.filter((row) => retained(row, cutoff));
       const pending = tentativeRow(chunk.subarray(end).toString("utf8"));
-      return pending ? [...rows, pending] : rows;
+      return pending && retained(pending, cutoff) ? [...rows, pending] : rows;
     } catch (error) {
       reset();
       throw error;

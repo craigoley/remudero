@@ -26,7 +26,7 @@ function fullRead(path: string, nowMs: number) {
 function assertSameAsFullRead(tail: ReturnType<typeof createLiveLedgerTail>, path: string, nowMs: number, label: string) {
   const got = tail(nowMs);
   const want = fullRead(path, nowMs);
-  assert.deepEqual(got.filter((r) => typeof r.ts === "string" && Date.parse(r.ts) > nowMs - RETAIN_MS), want.rows, `${label}: rows`);
+  assert.deepEqual(got, want.rows, `${label}: rows`);
   assert.deepEqual(evaluateIncidentInvariants(got, nowMs), want.findings, `${label}: findings`);
 }
 
@@ -49,6 +49,10 @@ test("W1-T11210 criterion 1: the tail returns what a full read returns across ap
     assert.equal(evaluateIncidentInvariants(tail(nowMs), nowMs).some((f) => f.ruleId === LOOP_LAG_RULE_ID), true, "positive control: the loop-lag rule fires");
     appendFileSync(path, "\n" + "{\"ts\":\"" + new Date(nowMs).toISOString());
     assertSameAsFullRead(tail, path, nowMs, "the pending row completed, a new one half written");
+    appendFileSync(path, "\"}\n" + row(nowMs - RETAIN_MS - 60_000, "pending.too.old"));
+    assertSameAsFullRead(tail, path, nowMs, "a trailing row older than the window");
+    appendFileSync(path, "\n" + "{\"no\":\"ts\"}");
+    assertSameAsFullRead(tail, path, nowMs, "a trailing row with no ts");
 
     const next = join(dir, "ledger.next");
     writeFileSync(next, lagRow(nowMs - 20_000, 100) + "\n");
