@@ -209,7 +209,10 @@ async function productionSamplingPins(t: TestContext) {
       permissionDenials: [], childEnvKeys: [], tokens: { ...TOKENS, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
       compactionEvents: [], qualitySuspect: false } as WorkerResult;
   });
-  for (const _ of served) await spawn({ ...MOUNT, prompt: "judge", cwd: root, config: { root } as Config } as SpawnWorkerArgs);
+  for (const _ of served) {
+    await spawn({ cwd: root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "judge",
+      model: MOUNT.model, effort: MOUNT.effort, maxTurns: 1, config: { root } as Config });
+  }
   const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
     .map(line => ({ ...JSON.parse(line), ts: T(10) }) as Record<string, unknown>);
   assert.deepEqual(rows.filter(row => row.step === "worker.attempt").map(row => row.sampling_pin), [
