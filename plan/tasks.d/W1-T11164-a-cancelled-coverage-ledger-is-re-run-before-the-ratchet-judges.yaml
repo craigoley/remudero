@@ -19,16 +19,16 @@
   files:
     - .github/workflows/ci.yml
     - src/lib/sweep.ts
-    - test/sweep/a-cancelled-coverage-ledger-is-re-run-before-the-ratchet-judges.test.ts
+    - test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: When the coverage-shard matrix is skipped and needs.coverage-ledger.result is cancelled, the coverage-ratchet aggregator fails with a distinct line naming coverage-ledger-cancelled and the run's head, not the generic never-ran text; any other skipped matrix keeps today's message and exit
-      proof: "unit test: test/sweep/a-cancelled-coverage-ledger-is-re-run-before-the-ratchet-judges.test.ts"
+      proof: "unit test: test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts"
     - claim: A pull request whose red at its current head is that named coverage-ledger cancellation is re-run once through the sweep's existing rerunFailedChecks gateway (rerun-failed-jobs on that workflow run) before any fix worker is dispatched for it, and the claim row keeps a second pass from re-running the same head again
-      proof: "grep: W1-T11164 criterion 2 in test/sweep/a-cancelled-coverage-ledger-is-re-run-before-the-ratchet-judges.test.ts"
+      proof: "grep: W1-T11164 criterion 2 in test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts"
     - claim: A second coverage-ledger cancellation at the same head after that re-run is not re-run again; it reaches the ordinary blocked-CI path with the cancellation named, so a persistently cancelling job is visible rather than retried forever
-      proof: "grep: W1-T11164 criterion 3 in test/sweep/a-cancelled-coverage-ledger-is-re-run-before-the-ratchet-judges.test.ts"
+      proof: "grep: W1-T11164 criterion 3 in test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts"
   rationale: |
     MEASURED 2026-11-02/03 over the last 30 completed pull_request runs of ci.yml (GitHub REST through the broker; read-only),
     32 coverage-ledger job attempts:
