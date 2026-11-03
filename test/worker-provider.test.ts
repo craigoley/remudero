@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
+import type { Config } from "#src/lib/config.js";
 import {
   CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES,
   CodexToolchainBlockedError,
@@ -26,6 +27,9 @@ import {
   routingDrawValue,
   selectWorkerProvider,
   spawnCodexWorker,
+  spawnOpenWeightWorker,
+  FOUNDRY_CLAUDE_API_KEY_ENV,
+  FOUNDRY_CLAUDE_ENDPOINT_ENV,
   type ProviderCapacity,
   type RoutingDrawSeed,
 } from "#src/lib/worker-provider.js";
@@ -46,6 +50,10 @@ import {
 } from "#src/lib/worker.js";
 import { withLiveSpawnAllowed } from "#src/lib/spawn-guard.js";
 import type { CapabilityLadder } from "#src/lib/mounts.js";
+import { DatabaseSync } from "node:sqlite";
+import { fixedClock } from "#src/lib/clock.js";
+import { CASH_WEB_SEARCH_KEY_ENV } from "#src/lib/cash-web-bridge.js";
+import { issueCanaryPilotBudgetCapability, withCanaryPilotBudget } from "#src/lib/model-canary-pilot-budget.js";
 
 function capacity(provider: "claude" | "codex", ...usedPercent: number[]): ProviderCapacity {
   return {
@@ -1538,4 +1546,102 @@ test("W1-T3490 criterion 3: Codex worker clock bound tears down the contained pr
     },
   );
   assert.equal(teardownCalls, 1, "the independent clock bound still owns one contained teardown");
+});
+
+test("Foundry Claude OpenAI chat and brokered search reserve through the pilot-aware helper", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-pilot-provider-adapters-")));
+  const allowance = join(root, "fleet-allowance.json");
+  const config = { root, dailyCapUsd: 10, claudeBin: "/unused", workerProviders: {
+    enabled: ["cash"], fleetCashAllowancePath: allowance, cashEndpoint: "https://chat.example.test/",
+    cashWebSearch: true,
+  } } as Config;
+  const capability = issueCanaryPilotBudgetCapability({ phase: "smoke", sharedAllowancePath: allowance });
+  const at = Date.parse("2026-10-07T12:00:00Z");
+  const baseEnv = { RMD_OPENWEIGHT_API_KEY: "fixture-worker-key", [CASH_WEB_SEARCH_KEY_ENV]: "fixture-search-key",
+    [FOUNDRY_CLAUDE_API_KEY_ENV]: "fixture-foundry-key", [FOUNDRY_CLAUDE_ENDPOINT_ENV]: "https://foundry.example.test/anthropic" };
+  const dbPath = `${allowance}.model-canary-pilot.sqlite`;
+  try {
+    writeFileSync(allowance, JSON.stringify({ utcDay: "2026-10-07", fleetCapUsd: 10, reservations: {} }), { mode: 0o600 });
+    await withCanaryPilotBudget(capability, async () => {
+      const foundry = await spawnOpenWeightWorker({ cwd: root, workerHome: join(root, "foundry-home"), prompt: "one answer",
+        env: baseEnv, clock: fixedClock(at), fetchImpl: async () => new Response(JSON.stringify({ id: "foundry-1",
+          model: "claude-haiku-5-5", stop_reason: "end_turn", content: [{ type: "text", text: "ok" }],
+          usage: { input_tokens: 100, output_tokens: 20 } }), { status: 200 }),
+      }, config, { model: "claude-haiku-5-5", effort: "low" });
+      assert.equal(foundry.isError, false, JSON.stringify(foundry));
+
+      let chatTurn = 0;
+      const openweight = await spawnOpenWeightWorker({ cwd: root, workerHome: join(root, "openweight-home"),
+        prompt: "search and summarize", tools: ["Read", "WebSearch"], maxTurns: 4,
+        env: baseEnv, clock: fixedClock(at), fetchImpl: async (url: string | URL | Request, init?: RequestInit) => {
+          if (String(url).includes("/openai/responses")) return new Response(JSON.stringify({
+            output: [{ type: "web_search_call" }, { type: "message", content: [{ type: "output_text", text: "grounded",
+              annotations: [{ type: "url_citation", url: "https://nodejs.org/" }] }] }],
+            usage: { input_tokens: 100, output_tokens: 20 },
+          }), { status: 200, headers: { "content-type": "application/json" } });
+          chatTurn += 1;
+          if (chatTurn === 1) return new Response(JSON.stringify({ id: "chat-1", usage: { prompt_tokens: 100, completion_tokens: 10 },
+            choices: [{ message: { content: null, tool_calls: [{ id: "search-1", function: { name: "web_search",
+              arguments: JSON.stringify({ query: "Node.js" }) } }] } }] }), { status: 200 });
+          const request = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ role?: string }> };
+          assert.ok(request.messages?.some((message) => message.role === "tool"), "the second model turn receives the brokered search result");
+          return new Response(JSON.stringify({ id: "chat-2", usage: { prompt_tokens: 120, completion_tokens: 12 },
+            choices: [{ message: { content: "grounded summary", tool_calls: [] } }] }), { status: 200 });
+        },
+      }, config, { model: "gpt-oss-120b", effort: "low" });
+      assert.equal(openweight.isError, false, openweight.text);
+      assert.equal(openweight.webSearchAccepted, 1);
+      assert.equal(chatTurn, 2);
+    });
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const rows = db.prepare("SELECT phase,state,committed_micros,reserved_micros FROM canary_pilot_reservations_v1 ORDER BY rowid").all() as Array<{
+        phase: string; state: string; committed_micros: number; reserved_micros: number;
+      }>;
+      assert.equal(rows.length, 4, "Foundry, two OpenAI chat turns, and brokered search all use the same pilot guard");
+      assert.ok(rows.every((row) => row.phase === "smoke" && row.state === "settled"));
+      assert.ok(rows.every((row) => row.committed_micros <= row.reserved_micros));
+    } finally { db.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("pilot reservation and shared fleet reservation both commit before the fake transport starts", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-pilot-before-transport-")));
+  const allowance = join(root, "fleet-allowance.json");
+  const config = { root, dailyCapUsd: 10, claudeBin: "/unused", workerProviders: {
+    enabled: ["cash"], fleetCashAllowancePath: allowance, cashEndpoint: "https://chat.example.test/",
+  } } as Config;
+  const capability = issueCanaryPilotBudgetCapability({ phase: "smoke", sharedAllowancePath: allowance });
+  let calls = 0;
+  try {
+    writeFileSync(allowance, JSON.stringify({ utcDay: "2026-10-07", fleetCapUsd: 10, reservations: {} }), { mode: 0o600 });
+    const result = await withCanaryPilotBudget(capability, async () => spawnOpenWeightWorker({
+      cwd: root, workerHome: join(root, "worker-home"), prompt: "one bounded answer",
+      env: { RMD_OPENWEIGHT_API_KEY: "fixture-only" }, clock: fixedClock(Date.parse("2026-10-07T12:00:00Z")),
+      fetchImpl: async () => {
+        calls += 1;
+        const global = JSON.parse(readFileSync(allowance, "utf8")) as {
+          reservations: Record<string, { reservedUsd: number; settledUsd: number | null }>;
+        };
+        assert.equal(Object.keys(global.reservations).length, 1, "shared daily reservation exists before transport");
+        const globalReservation = Object.values(global.reservations)[0]!;
+        assert.equal(globalReservation.settledUsd, null, "the original global reservation remains held at transport entry");
+        const db = new DatabaseSync(`${allowance}.model-canary-pilot.sqlite`, { readOnly: true });
+        try {
+          const row = db.prepare("SELECT state,committed_micros,reserved_micros FROM canary_pilot_reservations_v1").get() as {
+            state: string; committed_micros: number; reserved_micros: number;
+          };
+          assert.equal(row.state, "held", "pilot conservative reservation exists before transport");
+          assert.equal(row.committed_micros, row.reserved_micros);
+          assert.equal(row.reserved_micros, Math.ceil(globalReservation.reservedUsd * 1_000_000),
+            "the additional sublimit preserves the unchanged global reservation amount");
+        } finally { db.close(); }
+        return new Response(JSON.stringify({ id: "precommit-chat", usage: { prompt_tokens: 100, completion_tokens: 10 },
+          choices: [{ message: { content: "ok", tool_calls: [] } }] }), { status: 200 });
+      },
+    }, config, { model: "gpt-oss-120b", effort: "low" }));
+    assert.equal(calls, 1);
+    assert.equal(result.isError, false, result.text);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
