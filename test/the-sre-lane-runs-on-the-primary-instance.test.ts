@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
+import { resolveOwnerRepo } from "#src/lib/repo-location.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { REGISTERED_GARDEN_NAMES } from "../src/lib/garden-registry.js";
 import { resolveSreLaneInstance, sreLaneDecision, sreLaneEnabled, sreLaneStartRow, type SreLaneInstance } from "../src/lib/sre-lane.js";
@@ -170,7 +171,10 @@ test("selected lifecycle shadow reaches actual deploy pause and daemon consumers
   const root = makeTempDir("selected-lifecycle-cli"), stateRoot = join(root, "owner");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const registry = daemonInstanceRegistryPath(root), selected = join(root, "selected.yaml");
-  const text = `instances:\n  owner:\n    github_repo: fixture/owner\n    primary: true\n    state_dir: ${stateRoot}\n    container_name: owner-container\n  other:\n    github_repo: fixture/other\n    state_dir: ${join(root, "other")}\n`;
+  // The daemon targets this checkout's own origin (--allow-self-target), which differs per host/CI;
+  // the selected registry must list that repo or the selected lookup is correctly refused.
+  const self = resolveOwnerRepo();
+  const text = `instances:\n  owner:\n    github_repo: ${self.owner}/${self.repo}\n    primary: true\n    state_dir: ${stateRoot}\n    container_name: owner-container\n  other:\n    github_repo: fixture/other\n    state_dir: ${join(root, "other")}\n`;
   mkdirSync(dirname(registry), { recursive: true });
   mkdirSync(join(stateRoot, "state"), { recursive: true });
   mkdirSync(join(root, "other", "state"), { recursive: true });

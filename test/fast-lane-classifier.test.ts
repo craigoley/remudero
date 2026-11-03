@@ -954,6 +954,30 @@ test("W1-T3512 acceptance 3: an unreadable changed-file list runs the full gate 
   assert.doesNotMatch(installStep!.run ?? "", /steps\.classify\.outputs\.class/, "commitlint's shared Install step must not re-derive or consult the class at all");
 });
 
+test("mutation-ratchet skips its SWC-backed trigger on PLAN_ONLY while keeping the required job registered", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  const doc = parseYaml(ciYml) as {
+    jobs: Record<string, { if?: string | boolean; steps?: Array<{ id?: string; name?: string; if?: string; run?: string }> }>;
+  };
+  const job = doc.jobs[MUTATION_RATCHET_OWN_JOB];
+  assert.ok(job, "mutation-ratchet remains a registered job");
+  assert.equal(job.if, "github.event_name == 'pull_request'", "the job remains registered for pull requests rather than being class-filtered at job level");
+  const steps = job.steps ?? [];
+  const classifyIndex = steps.findIndex((step) => step.id === "classify");
+  const installIndex = steps.findIndex((step) => step.name === "Install (clean, from lockfile)");
+  const triggerIndex = steps.findIndex((step) => step.id === "trigger");
+  assert.ok(classifyIndex >= 0 && installIndex > classifyIndex && triggerIndex > installIndex, "classification and the dependency install precede the mutation trigger");
+  assert.match(steps[classifyIndex].run ?? "", /\|\| CLASS="SOURCE"/, "classification errors still fail closed to SOURCE");
+  assert.equal(steps[triggerIndex].if, "steps.classify.outputs.class == 'SOURCE'", "PLAN_ONLY and DOCS_ONLY skip the step that imports @swc/core after npm ci was skipped");
+  assert.match(steps[triggerIndex].run ?? "", /node scripts\/mutation-ratchet\.mjs --changed-files/, "the guarded step remains the real mutation-ratchet trigger");
+  const downstream = steps.slice(triggerIndex + 1).filter((step) =>
+    step.name === "Restore Stryker incremental cache" || step.name?.startsWith("Stryker mutation run") || step.name?.startsWith("Mutation ratchet ("),
+  );
+  assert.equal(downstream.length, 3, "cache, Stryker and ratchet remain behind the existing matched output");
+  for (const step of downstream) assert.equal(step.if, "steps.trigger.outputs.matched == 'true'");
+});
+
 test("W1-T3512 acceptance 4: a SOURCE diff still runs every source-only gate — every classify-gated step executes its real command end to end", () => {
   for (const { jobId, stepName, command } of FAST_LANE_GUARDED_STEPS) {
     const source = workflowRunForClass(jobId, stepName, "SOURCE");
