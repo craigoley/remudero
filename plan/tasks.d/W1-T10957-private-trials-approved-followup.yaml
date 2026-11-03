@@ -17,6 +17,8 @@
     - W1-T10875
     - W1-T4574
   files:
+    - src/lib/config-schema.ts
+    - test/host-capability-fixtures.test.ts
     - src/lib/model-canary-coding.ts
     - src/lib/model-canary-runner.ts
     - src/lib/model-canary-command.ts
@@ -27,7 +29,6 @@
     - src/lib/model-canary-config-census.ts
     - src/lib/model-canary-owner.ts
     - src/lib/model-canary-private-corpus.ts
-    - src/lib/model-canary-trace-grader.ts
     - src/lib/model-canary-coding-adapter.ts
     - src/lib/model-canary-coding-capabilities.ts
     - src/lib/model-canary-coding-port-capability.ts
@@ -49,7 +50,16 @@
     - test/routing/model-canary-systemd-runtime-readback.test.ts
     - test/routing/model-canary-service-wrapper-protocol.test.ts
     - test/routing/model-canary-profile-observation.test.ts
-    - test/routing/model-canary-config-inventory.test.ts
+    - src/lib/model-canary-replay-private.ts
+    - test/ci/gates/model-canary-config-inventory.test.ts
+    - test/model-canary-adoption.test.ts
+    - test/model-canary-runner.test.ts
+    - test/routing/model-canary-coding-command.test.ts
+    - test/routing/model-canary-private-replay.cli.test.ts
+    - test/worker/spawn/worker-attribution-and-accounting-follow-actual-execution.test.ts
+    - src/lib/model-canary-paired-analysis.ts
+    - src/lib/model-canary-report.ts
+    - test/model-canary-paired-analysis.test.ts
   status: queued
   priority: 2
   attempts: 0
@@ -103,6 +113,14 @@
     private-corpus, trace and owner integration paths. The native selector must not start coding
     integration before those source contracts merge. This orders existing work; it creates no
     additional full Linux qualification, allowance, schedule, host executor or release authority.
+    The 2026-11-03 publication reconciliation declares the existing private replay controls and
+    synthetic-source reporting separation, worker attribution fixture and computed census test
+    path. This preserves prior source and zero-provider controls without granting activation,
+    a new full Linux run, extra allowance or changes to shared ownership.
+    Census reconciliation registers the existing child-profile protocol variables and declares
+    private mode-stat fixtures using the established host-capability fixture metadata. It
+    does not change census enforcement, thresholds or runtime permissions. Changed profile-source
+    bindings require one targeted zero-provider host probe; ordinary SOURCE CI owns the full suite.
   acceptance:
     - claim: the existing private coding executor contains filesystem and credential effects and closes
         its real descendants
@@ -120,6 +138,8 @@
       proof: "grep: codingLedgerSave( in src/lib/model-canary-command.ts"
     - claim: First-class coding cases retain their identity through full census validation
       proof: 'unit test: coding cases retain first class identity through matrix census validation'
+    - claim: Native private replay reaches the app-owned control runner without asserting model execution
+      proof: 'grep: replayPrivateControl( in src/lib/model-canary-command.ts'
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

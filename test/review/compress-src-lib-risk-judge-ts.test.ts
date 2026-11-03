@@ -5,8 +5,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "@babel/parser";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { compressionPinBase } from "#test/helpers/compression-pin.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function snapshot(source: string) {
   const parsed = parse(source, {
@@ -32,7 +32,7 @@ test("W1-T11058: comment compression preserves executable code", () => {
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/risk-judge.ts"), "utf8"));
   const before = compressionPinBase("src/lib/risk-judge.ts", import.meta.url);
   if (before !== undefined) {
-    // Only on the PR that adds this pin: later feature edits to the module stay free (#16082).
+    // Only on the PR that adds this pin (#16007): later feature edits to the module stay free (#16082).
     const base = snapshot(before);
     assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
       [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
