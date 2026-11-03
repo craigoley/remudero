@@ -2557,8 +2557,19 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       const failure = db.meta(INBOX_QUALIFICATION_ERROR_META), raw = db.meta(INBOX_QUALIFICATION_POPULATION_META);
       if (failure !== undefined) throw new Error(`committed Inbox producer refusal: ${failure}`);
       if (raw === undefined) throw new Error("committed Inbox population is unavailable");
-      // Reuse the producer's validator and committed incarnations: a whole missing filter group must fail too.
-      const population = restoreInboxShadowPopulation(raw, current.map(([, entry]) => ({ key: entry.key, data: entry.body.data, sources: entry.body.sources })), clock.now());
+      // Unchanged ETags suppress body messages even when the producer commits fresh source timestamps.
+      // Bind each cached payload to its committed body before using that body's current provenance.
+      const pages = current.map(([, entry]) => {
+        const row = db!.prepare("SELECT version, etag, body FROM view_body WHERE view = ? AND key = ?").get(INBOX_VIEW_NAME, entry.key);
+        const identity = storedBodyQualification(db!.meta(bodyQualificationKey(INBOX_VIEW_NAME, entry.key)), String(row?.etag));
+        if (!row || row.etag !== entry.etag || row.version !== entry.version || identity.reason !== undefined || identity.qualificationGeneration !== generation)
+          throw new Error("cached Inbox body does not match committed provenance");
+        const body = JSON.parse(String(row.body)) as ViewBody;
+        if (body.view !== entry.body.view || body.version !== entry.body.version || body.stale !== entry.body.stale || JSON.stringify(body.data) !== JSON.stringify(entry.body.data))
+          throw new Error("cached Inbox payload does not match the committed body");
+        return { key: entry.key, data: entry.body.data, sources: body.sources };
+      });
+      const population = restoreInboxShadowPopulation(raw, pages, clock.now());
       if (population.generation !== generation || population.snapshotKey !== snapshotKey || population.scope.instance !== inboxScope.instance ||
         population.scope.repository !== inboxScope.repository) throw new Error("committed Inbox population does not match the current message");
       db.exec("COMMIT");
