@@ -377,9 +377,13 @@ export function builtLedgerSource(built: ViewSource, state: ReadModelInstanceSta
 export const readModelStatusView: ReadModelView = {
   name: READ_MODEL_STATUS_VIEW,
   version: 1,
-  // Status's ledger rows are quarantined rows; generation and lease state are in inputDigest.
+  // Status reads every applied row (its generation) and every quarantined one, so its as-of is the newer of the
+  // last applied row (a rowid read on fact's seq) and the newest quarantined row (its key's lead column); generation
+  // and lease state are in inputDigest. Quarantine alone read null on a clean ledger, so the body claimed no as-of
+  // at all (test/views-from-the-read-model.test.ts, red since #16413).
   ledgerReads: db => {
-    const row = db.prepare("SELECT MAX(ts_ms) AS last_ms FROM quarantine").get();
+    const row = db.prepare("SELECT MAX(last_ms) AS last_ms FROM (SELECT ts_ms AS last_ms FROM (SELECT ts_ms FROM fact " +
+      "ORDER BY seq DESC LIMIT 1) UNION ALL SELECT MAX(ts_ms) FROM quarantine)").get();
     return row?.last_ms == null ? null : fixedClock(Number(row.last_ms)).iso();
   },
   materialize: ({ now, instances, shadow }) => [{
