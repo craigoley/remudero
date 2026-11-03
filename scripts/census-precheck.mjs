@@ -34,8 +34,8 @@ import { parse, parseExpressionAt } from "acorn";
 import { isTrustRootPath, scanTrustRootText, trustRootFor } from "../src/lib/trust-root-text.ts";
 import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
 import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { loadavg, tmpdir } from "node:os";
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { availableParallelism, homedir, loadavg, tmpdir } from "node:os";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
@@ -638,6 +638,66 @@ export function censusReaderBudget(measurement, context, policy, nowMs, margin =
   return Math.min(budgetMs, CENSUS_SUITE_CHILD_TIME_BOUND_MS);
 }
 
+/**
+ * W1-T11100 — A READER'S BUDGET FROM ITS OWN HISTORY. The history keeps a reader's newest measured qualification
+ * runtimes per test file and runtime fingerprint, never per tree: censusReaderContext hashes the whole tree, so a
+ * context-keyed entry would never be seen again after the next commit. PRIMARY CONTROL of the history's size: the
+ * median a history budget is priced from is taken over this many newest measurements.
+ */
+export const CENSUS_READER_HISTORY_WINDOW = 9;
+/** `act` lets a reader with history run once under its history budget; anything else (the default) is shadow. */
+export const CENSUS_READER_HISTORY_ENV = "RMD_CENSUS_READER_HISTORY";
+
+export function censusReaderHistoryPath(home = homedir()) {
+  return join(home, ".cache", "remudero", "census-reader-history.json");
+}
+
+export function censusReaderHistoryKey(file, runtime = { version: process.version, platform: process.platform, arch: process.arch, cores: availableParallelism() }) {
+  return [file, runtime.version, runtime.platform, runtime.arch, runtime.cores].join("|");
+}
+
+/** The history map, or an empty one with why when the file is absent, unreadable or not this shape. */
+export function readCensusReaderHistory(path) {
+  if (!path || !existsSync(path)) return { runs: {}, reason: "no history file" };
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    if (parsed?.version !== 1 || typeof parsed.runs !== "object" || parsed.runs === null || Array.isArray(parsed.runs)) {
+      return { runs: {}, reason: "history file is not version 1" };
+    }
+    const runs = {};
+    for (const [key, list] of Object.entries(parsed.runs)) {
+      if (Array.isArray(list)) runs[key] = list.filter((ms) => Number.isFinite(ms) && ms > 0).slice(-CENSUS_READER_HISTORY_WINDOW);
+    }
+    return { runs };
+  } catch (error) {
+    return { runs: {}, reason: `history file unreadable (${String(error?.message ?? error)})` };
+  }
+}
+
+/** Append one accepted measurement, keeping the window; written 0600 by atomic rename. A failure is reported, never a verdict. */
+export function recordCensusReaderRuntime(path, key, ms) {
+  if (!path || !(Number.isFinite(ms) && ms > 0)) return;
+  try {
+    const { runs } = readCensusReaderHistory(path);
+    runs[key] = [...(runs[key] ?? []), Math.ceil(ms)].slice(-CENSUS_READER_HISTORY_WINDOW);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const next = `${path}.${process.pid}.tmp`;
+    writeFileSync(next, `${JSON.stringify({ version: 1, runs })}\n`, { mode: 0o600 });
+    renameSync(next, path);
+  } catch (error) {
+    console.error(`census-precheck: reader history NOT recorded (${String(error?.message ?? error)}); the verdict is unaffected`);
+  }
+}
+
+/** The history budget: censusReaderBudget's rule over the floored median of the reader's history, capped at the backstop. */
+export function censusReaderHistoryBudget(runs, policy) {
+  if (!Array.isArray(runs) || runs.length === 0) return undefined;
+  const sorted = [...runs].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  return Math.min(Math.ceil(Math.max(policy.floorMs, median) * policy.multiple), CENSUS_SUITE_CHILD_TIME_BOUND_MS);
+}
+
 const CENSUS_CAPTURE_DISPOSITION = Symbol("census capture disposition");
 
 function completeCensusCapture(dir, owner, result) {
@@ -747,7 +807,8 @@ function censusReaderContext(root, child, options) {
  * signal, no `# tests` summary, zero tests, a non-zero exit its TAP does not explain): never `[]` for those.
  */
 export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
-  readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0] }) {
+  readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0],
+  history = { path: censusReaderHistoryPath(), mode: process.env[CENSUS_READER_HISTORY_ENV] === "act" ? "act" : "shadow" } }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
@@ -837,6 +898,36 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       throw new Error("source-reader runtime is UNKNOWN: invalid calibration policy");
     }
     const context = readContext(root, child, options);
+    const historyKey = censusReaderHistoryKey(files[0], history?.runtime);
+    const known = history?.path ? readCensusReaderHistory(history.path) : { runs: {}, reason: "history off" };
+    const historyRuns = known.runs[historyKey] ?? [];
+    const historyBudgetMs = censusReaderHistoryBudget(historyRuns, readerRuntimePolicy);
+    if (history?.mode === "act" && historyBudgetMs !== undefined) {
+      // W1-T11100 act: one run under the history budget; an overrun falls back to the calibrate-then-qualify path below.
+      options.timeout = historyBudgetMs;
+      let single;
+      try {
+        single = once();
+      } catch (e) {
+        if (e?.readerBudgetOverrun !== true) throw e;
+        console.log(`census-reader-history-fallback: ${JSON.stringify({ file: files[0], historyBudgetMs, reason: e.message })}`);
+      }
+      if (single !== undefined) {
+        if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during the history run");
+        if (single.failing.length > 0) {
+          finish(single, false, "failed history-run assertions");
+          return single.failing;
+        }
+        if (!single.passed) throw new Error("source-reader runtime is UNKNOWN: the history run has no complete unskipped pass");
+        finish(single, true, "accepted history run");
+        recordCensusReaderRuntime(history.path, historyKey, single.elapsedMs);
+        console.log(`census-reader-runtime: ${JSON.stringify({ file: files[0], context, tests: single.tests, cases: single.identities,
+          budgetMs: historyBudgetMs, measuredMs: Math.ceil(single.elapsedMs), budgetSource: "history", historyRuns: historyRuns.length,
+          assurance: "fresh-timing-only-no-cached-verdict" })}`);
+        return single.failing;
+      }
+      options.timeout = CENSUS_SUITE_CHILD_TIME_BOUND_MS;
+    }
     const calibration = once();
     if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during calibration");
     if (calibration.failing.length > 0) {
@@ -887,6 +978,13 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       cases: measured.identities, calibrationMs: Math.ceil(calibration.elapsedMs), budgetMs: options.timeout,
       measuredMs: Math.ceil(measured.elapsedMs), ...(overruns.length > 0 ? { remeasuredAfter: overruns[0] } : {}),
       assurance: "fresh-timing-only-no-cached-verdict" })}`);
+    if (history?.path && measured.passed && measured.failing.length === 0) {
+      console.log(`census-reader-history-shadow: ${JSON.stringify(historyBudgetMs === undefined
+        ? { file: files[0], historyRuns: 0, reason: known.reason ?? "no history for this reader" }
+        : { file: files[0], historyRuns: historyRuns.length, historyBudgetMs, qualificationMs: Math.ceil(measured.elapsedMs),
+          wouldFit: measured.elapsedMs <= historyBudgetMs, wouldSaveMs: Math.ceil(calibration.elapsedMs) })}`);
+      recordCensusReaderRuntime(history?.path, historyKey, measured.elapsedMs);
+    }
     return measured.failing;
   } catch (error) {
     for (const sample of pending) {
