@@ -1,0 +1,60 @@
+- id: W1-T11191
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/routing-quarantine-resolution.test.ts cost 7 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.35
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/routing-quarantine-resolution.test.ts"
+  files:
+    - src/lib/routing-quarantine-resolution.ts
+    - test/routing/check-test-test-routing-quarantine-resolution-test-ts.test.ts
+  acceptance:
+    - claim: "a recorded check:test:test/routing-quarantine-resolution.test.ts round, replayed through the real code path in src/lib/routing-quarantine-resolution.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11191: check:test:test/routing-quarantine-resolution.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/routing-quarantine-resolution.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/routing-quarantine-resolution.test.ts cost 7 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/routing-quarantine-resolution.ts: test/routing-quarantine-resolution.test.ts imports it
+    - test/routing-quarantine-resolution.test.ts: named by the failing check
+    - the rounds name a failing test: test/routing-quarantine-resolution.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #16276 (https://github.com/craigoley/remudero/pull/16276) at 2026-11-03T00:35:46.715Z: ci-log round — coverage-shard (7/8): test/routing-quarantine-resolution.test.ts
+        failing tests: the private resolution reader uses the checked descriptor when its pathname becomes a symlink; an exact CLI quarantine resolution qualifies only trial inputs and retains the raw warning, resolving an irrelevant future row never clears malformed or invalid timestamp evidence, the real daily CLI reads its default private resolution file and preserves unreadable refusal, the private resolution reader uses the checked descriptor when its pathname becomes a symlink
+        log excerpt:
+          | ...
+          | not ok 8 - the private resolution reader uses the checked descriptor when its pathname becomes a symlink
+          |   ---
+          |   duration_ms: 711.360777
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/routing-quarantine-resolution.test.ts:157:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     Expected values to be strictly equal:
+          |     + actual - expected
+          | 
+          |     + 'observed-partial'
+          |     - 'observed'
+          |                ^
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 1 occurrence(s) across 7 day(s), last seen 2026-11-03T00:35:46.715Z, and the record declares no privileged path"
+    judged_at: "2026-11-03T11:11:44.404Z"
+    pin: "d154c6e32adc7b93a17ad5b7200f6385793cb438b85f307aae065e02f72afa5e"
