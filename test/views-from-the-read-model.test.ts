@@ -188,7 +188,8 @@ test("a stale source makes the view stale and names the source", async (t) => {
   t.after(() => handle.stop());
   handle.start();
   const deadline = Date.now() + 30_000;
-  while ((!handle.body("read-model") || handle.state().instances.get("core")?.tickedAt === undefined) && Date.now() < deadline) await sleep(20);
+  // A first tick can publish the body before the projector has applied any row (asOf still null), so wait for a body that has.
+  while ((!handle.body("read-model")?.body.asOf || handle.state().instances.get("core")?.tickedAt === undefined) && Date.now() < deadline) await sleep(20);
   const tickedAt = handle.state().instances.get("core")?.tickedAt;
   assert.ok(tickedAt !== undefined && handle.body("read-model"), "the worker materialized the read-model view");
   let now = tickedAt;
