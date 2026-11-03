@@ -399,3 +399,34 @@ test("the default replay selection names a checkout it cannot fetch", async () =
   const workspace = gitRepo({ kind: "shadow-replay-nofetch" });
   await assert.rejects(gardener.selectorShadowReplaySelection(workspace.dir, { id: 1, headSha: "0".repeat(40) }, ["test/a.test.ts"]), /git fetch .* exited/);
 });
+
+test("the default repair check re-selects a run's own diff over origin/main, where a later edge selects the missed suite", async () => {
+  const origin = gitRepo({ kind: "shadow-repair-origin" });
+  await mkdir(join(origin.dir, "src"));
+  await mkdir(join(origin.dir, "test"));
+  await mkdir(join(origin.dir, "scripts"));
+  await writeFile(join(origin.dir, "src", "a.ts"), "export function alpha(): number {\n  return 1;\n}\n");
+  await writeFile(join(origin.dir, "test", "a.test.ts"), "// reaches nothing yet\n");
+  await writeFile(join(origin.dir, "scripts", "diff-class.mjs"), "process.exit(0);\n");
+  origin.git("add", "-A");
+  origin.git("commit", "-q", "-m", "base");
+  const baseSha = origin.git("rev-parse", "HEAD");
+  origin.git("checkout", "-q", "-b", "pr");
+  await writeFile(join(origin.dir, "src", "a.ts"), "export function alpha(): number {\n  return 2;\n}\n");
+  origin.git("commit", "-q", "-am", "head");
+  const headSha = origin.git("rev-parse", "HEAD");
+  origin.git("checkout", "-q", "main");
+  // The repair merges after the run: main's suite now reaches the symbol the run's head changed.
+  await writeFile(join(origin.dir, "test", "a.test.ts"), "import { alpha } from \"../src/a.js\";\nalpha();\n");
+  origin.git("commit", "-q", "-am", "edge");
+  const workspace = gitRepo({ cloneFrom: origin.dir, kind: "shadow-repair-ws" });
+  const run = { id: 1, headSha, baseSha };
+  const atHead = await gardener.selectorShadowReplaySelection(workspace.dir, run, ["test/a.test.ts"]);
+  assert.deepEqual(atHead.record.failures, [{ file: "test/a.test.ts", floor: atHead.record.failures[0]!.floor, narrow: "missed" }],
+    "the run's own head tree misses the suite (the control)");
+  const atMain = await gardener.selectorShadowRepairSelection(workspace.dir, run, ["test/a.test.ts"]);
+  assert.equal(atMain.record.fullRun, false);
+  assert.equal(atMain.record.failures[0]!.narrow, "selected", "today's selector over main's tree selects it");
+  assert.equal(workspace.git("rev-parse", "HEAD"), origin.git("rev-parse", "main"), "the checkout was moved to origin/main");
+  await assert.rejects(gardener.selectorShadowRepairSelection(workspace.dir, { id: 2, headSha }, ["test/a.test.ts"]), /no base sha/);
+});

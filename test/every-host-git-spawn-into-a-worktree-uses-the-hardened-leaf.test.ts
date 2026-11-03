@@ -206,7 +206,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/review-findings.ts": { count: 2, reason: "CHECKOUT: fileLine/extractReviewFindings read the review root (-C root)" },
   "src/lib/review-worktree-reclaim.ts": { count: 1, reason: "CHECKOUT (W1-T6122's file): defaultReadRemoteHeadSha reads the managed checkout (-C repoDir)" },
   "src/lib/review.ts": { count: 6, reason: "CHECKOUT: review's ref and blob reads of the managed checkout (-C repoDir/repoRoot)" },
-  "src/lib/selector-shadow-gardener.ts": { count: 1, reason: "CHECKOUT: selectorShadowReplaySelection reads the repo root (cwd: root)" },
+  "src/lib/selector-shadow-gardener.ts": { count: 1, reason: "CHECKOUT: selectionCheckoutGit (selectorShadowReplaySelection, selectorShadowRepairSelection) reads the gardener's selection checkout (cwd: root)" },
   "src/lib/self-sync.ts": { count: 5, reason: "CHECKOUT: self-sync's freshness reads of the service and reviewer checkouts" },
   "src/lib/serve-plan-reload.ts": { count: 1, reason: "CHECKOUT: gitAsync reads the serve plan checkout" },
   "src/lib/serve-policy-convergence.ts": { count: 1, reason: "CHECKOUT: realServePolicyDeps reads the install checkout" },

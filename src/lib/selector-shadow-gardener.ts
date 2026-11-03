@@ -56,8 +56,9 @@ export interface SelectorShadowFailure {
   impact?: SelectorShadowVerdict;
   /** The file's own retry in its shard (scripts/select-affected-suites.mjs's retryOutcomes). */
   retry?: "recovered" | "failed";
-  /** Set once, when the gardener stores the observation: evidence read then that the diff did not cause it. */
-  unattributed?: "base_red" | "flake_history";
+  /** Set once, when the gardener stores the observation: evidence read then that the diff did not cause it.
+   *  "repaired" is never stored: each pass sets it afresh when today's selector selects the file. */
+  unattributed?: "base_red" | "flake_history" | "repaired";
 }
 
 /** Why a missed failure is not charged to the selector. A miss counts only when the diff plausibly
@@ -66,9 +67,11 @@ export interface SelectorShadowFailure {
  *  - base_red: main's own CI failed the file at the run's base sha (W1-T5409's reader).
  *  - flake_history: a coverage shard's retry recovered the file in a run inside the live window.
  *  - mass: the run missed more than SELECTOR_SHADOW_MASS_FAILURE_FILES distinct files (W1-T5350).
+ *  - repaired: today's selector, re-run on the run's own diff over main's tree, selects the file in
+ *    every arm that missed it (operator decision 2026-11-03). It is re-asked each pass, never stored.
  *  An environmental signature (timeout, ENOSPC, a killed runner) is not among them: the kept job-log
  *  evidence does not record one. */
-export type SelectorShadowUnattributedReason = "retry_recovered" | "base_red" | "flake_history" | "mass";
+export type SelectorShadowUnattributedReason = "retry_recovered" | "base_red" | "flake_history" | "mass" | "repaired";
 
 const SELECTOR_SHADOW_RETRY_OUTCOMES = new Set(["recovered", "failed"]);
 const SELECTOR_SHADOW_STORED_REASONS = new Set(["base_red", "flake_history"]);
@@ -883,6 +886,8 @@ export interface SelectorShadowReplay {
   readJson?: (args: string[]) => Promise<unknown>;
   readText?: (args: string[]) => Promise<string>;
   select?: (run: SelectorShadowReplayRun, failed: readonly string[]) => Promise<SelectorShadowReplaySelection>;
+  /** Today's selection for a stored run's diff, made over main's tree (selectorShadowRepairSelection). */
+  selectAtMain?: (run: SelectorShadowReplayRun, failed: readonly string[]) => Promise<SelectorShadowReplaySelection>;
 }
 
 export interface SelectorShadowReplayPass {
@@ -894,16 +899,23 @@ export interface SelectorShadowReplayPass {
   capped: boolean;
 }
 
+/** Git in the gardener's own selection checkout (cwd: root); a non-zero exit throws with its stderr. */
+type SelectionCheckoutGit = (...args: string[]) => string;
+
+function selectionCheckoutGit(root: string, spawn: PreflightSpawn): SelectionCheckoutGit {
+  return (...args) => {
+    const result = spawn("git", args, { cwd: root });
+    if (result.status !== 0) throw new Error(`git ${args.join(" ")} exited ${result.status}: ${(result.stderr ?? "").trim().slice(0, 200)}`);
+    return result.stdout;
+  };
+}
+
 /** The narrow selection CI's shadow step (scripts/select-affected-suites.mjs) makes for the run's diff
  *  against its base, recomputed by the same functions in `root` checked out at the run's head. */
 export async function selectorShadowReplaySelection(
   root: string, run: SelectorShadowReplayRun, failed: readonly string[], spawn: PreflightSpawn = defaultPreflightSpawn,
 ): Promise<SelectorShadowReplaySelection> {
-  const git = (...args: string[]): string => {
-    const result = spawn("git", args, { cwd: root });
-    if (result.status !== 0) throw new Error(`git ${args.join(" ")} exited ${result.status}: ${(result.stderr ?? "").trim().slice(0, 200)}`);
-    return result.stdout;
-  };
+  const git = selectionCheckoutGit(root, spawn);
   git("fetch", "--quiet", "origin", run.headSha, ...(run.baseSha === undefined ? [] : [run.baseSha]));
   git("checkout", "--quiet", "--detach", run.headSha);
   const range = `${run.baseSha ?? "origin/main"}...${run.headSha}`;
@@ -915,17 +927,51 @@ export async function selectorShadowReplaySelection(
   return { record: shadowRecord(selection, failed), reasons: selection.reasons };
 }
 
+/** Today's selection for a stored run's diff: the same functions as selectorShadowReplaySelection,
+ *  but over origin/main's tree, so a selector edge merged since the run is what answers. The changed
+ *  files' own text (for changed symbols) is read at the run's head. */
+export async function selectorShadowRepairSelection(
+  root: string, run: SelectorShadowReplayRun, failed: readonly string[], spawn: PreflightSpawn = defaultPreflightSpawn,
+): Promise<SelectorShadowReplaySelection> {
+  const git = selectionCheckoutGit(root, spawn);
+  if (run.baseSha === undefined) throw new Error(`selector shadow: run ${run.id} has no base sha to diff`);
+  git("fetch", "--quiet", "origin", "main", run.headSha, run.baseSha);
+  git("checkout", "--quiet", "--detach", "origin/main");
+  const range = `${run.baseSha}...${run.headSha}`;
+  const changed = git("diff", "--name-only", range).split("\n").map((line) => line.trim()).filter(Boolean);
+  // The head was just fetched, so a failed show is a path the head deleted: changedSymbols' ENOENT arm.
+  const atHead = (path: string): string => {
+    try { return git("show", `${run.headSha}:${path}`); }
+    catch (error) { throw Object.assign(new Error(`${path} is absent at ${run.headSha}`, { cause: error }), { code: "ENOENT" }); }
+  };
+  const selection = affectedSelectionOrFull(changed, () => {
+    const symbols = changedSymbols(git("diff", "-U0", range), atHead);
+    return readAffectedSuitesInput(root, changed, { symbolSuites: callerReachableSuites(symbols, root, spawn).suites });
+  });
+  return { record: shadowRecord(selection, failed), reasons: selection.reasons };
+}
+
 /** The default selection: one gardener checkout per pass, given the daemon's node_modules for tsx. */
-function workspaceReplaySelector(deps: GardenerDeps) {
+interface SelectorShadowPassSelector {
+  select: NonNullable<SelectorShadowReplay["select"]>;
+  selectAtMain: NonNullable<SelectorShadowReplay["selectAtMain"]>;
+  dispose: () => Promise<void>;
+}
+
+/** One pass's selections: an injected seam, else one gardener checkout opened on first use and shared
+ *  by the replay (at each run's head) and the repair check (at origin/main); each checks out its tree. */
+function passSelector(deps: GardenerDeps, replay: SelectorShadowReplay): SelectorShadowPassSelector {
   let workspace: GardenCheckout | GardenCheckoutAsync | undefined;
+  const root = async (): Promise<string> => {
+    if (workspace === undefined) {
+      workspace = await deps.openWorkspace();
+      linkWorktreeNodeModules(deps.repoRoot, workspace.root);
+    }
+    return workspace.root;
+  };
   return {
-    select: async (run: SelectorShadowReplayRun, failed: readonly string[]) => {
-      if (workspace === undefined) {
-        workspace = await deps.openWorkspace();
-        linkWorktreeNodeModules(deps.repoRoot, workspace.root);
-      }
-      return selectorShadowReplaySelection(workspace.root, run, failed);
-    },
+    select: replay.select ?? (async (run, failed) => selectorShadowReplaySelection(await root(), run, failed)),
+    selectAtMain: replay.selectAtMain ?? (async (run, failed) => selectorShadowRepairSelection(await root(), run, failed)),
     dispose: async () => { await workspace?.dispose(); },
   };
 }
@@ -1004,7 +1050,7 @@ async function replaySelectorShadowRun(replay: SelectorShadowReplay, select: Non
 /** W1-T5925: one bounded replay pass over pull_request CI runs older than the live window, newest first.
  *  The cursor is saved after every pass, so the next resumes where this one stopped. */
 async function replaySelectorShadowHistory(
-  deps: GardenerDeps, replay: SelectorShadowReplay, known: ReadonlySet<number>, replayed: number,
+  deps: GardenerDeps, replay: SelectorShadowReplay, selector: SelectorShadowPassSelector, known: ReadonlySet<number>, replayed: number,
 ): Promise<{ observations: SelectorShadowObservation[]; pass: SelectorShadowReplayPass }> {
   const state = readReplayState(deps, (deps.clock ?? systemClock).now());
   const observations: SelectorShadowObservation[] = [];
@@ -1017,9 +1063,8 @@ async function replaySelectorShadowHistory(
     selectorShadowRunListArgs(replay.owner, replay.repo, SELECTOR_SHADOW_REPLAY_PAGE, `<${state.before}`)));
   // A listing that ignored its own created filter answers nothing older than the cursor.
   const rows = listed.filter((row) => row.createdMs < beforeMs).sort((a, b) => b.createdMs - a.createdMs);
-  const selector = replay.select ? { select: replay.select, dispose: async () => {} } : workspaceReplaySelector(deps);
   let stopped = false;
-  try {
+  {
     for (const row of rows) {
       if (row.createdMs < horizonMs) {
         state.exhausted = true;
@@ -1041,8 +1086,6 @@ async function replaySelectorShadowHistory(
         observations.push(outcome);
       }
     }
-  } finally {
-    await selector.dispose();
   }
   if (!stopped && (listed.length < SELECTOR_SHADOW_REPLAY_PAGE || rows.length === 0)) state.exhausted = true;
   writeAtomic(join(deps.stateDir, SELECTOR_SHADOW_REPLAY_STATE_FILE), JSON.stringify(state) + "\n");
@@ -1059,10 +1102,64 @@ export interface SelectorShadowSourceReport {
 /** The report a pass ledgers: the whole store folded, with the live window and each source beside it. */
 export interface SelectorShadowAccumulatedReport extends SelectorShadowReport {
   window: Pick<SelectorShadowReport, "runsRequested" | "runsComplete" | "runsSkipped" | "runsIncomplete" | "verdict">;
-  observations: { live: number; replay: number; appended: number; reattributed: number; unreadable: number };
+  observations: { live: number; replay: number; appended: number; reattributed: number; repaired: number; unreadable: number };
   live: SelectorShadowSourceReport;
   replay: SelectorShadowSourceReport;
   replayPass?: Partial<SelectorShadowReplayPass> & { error?: string };
+}
+
+/** Each arm that missed the failure, as the fold charges it: impact only without a fallback. */
+function missedArms(failure: SelectorShadowFailure, run: Pick<SelectorShadowObservation, "impactFallback">): Array<"floor" | "narrow" | "impact"> {
+  return (["floor", "narrow", "impact"] as const).filter((arm) =>
+    failure[arm] === "missed" && !(arm === "impact" && run.impactFallback !== undefined));
+}
+
+/** Mark "repaired" each charged miss that today's record selects in EVERY arm that missed it. A full
+ *  run, a flake rescue or an arm today's record lacks is not a repair: the miss stays charged. */
+export function selectorShadowRepairedObservation(
+  observation: SelectorShadowObservation, today: SelectorShadowReplaySelection["record"],
+): SelectorShadowObservation {
+  if (today.fullRun) return observation;
+  const now = new Map(today.failures.map((f) => [f.file, f]));
+  const failures = observation.failures.map((f): SelectorShadowFailure => {
+    const arms = missedArms(f, observation);
+    if (arms.length === 0 || selectorShadowUnattributedReason(f, observation) !== undefined) return f;
+    const later = now.get(f.file);
+    return later !== undefined && arms.every((arm) => later[arm] === "selected") ? { ...f, unattributed: "repaired" } : f;
+  });
+  return { ...observation, failures };
+}
+
+/** Operator decision 2026-11-03: a stored miss stops counting only when today's selector, re-run on that
+ *  run's own diff, selects the file. Bounded per pass; an unanswerable check leaves the miss charged. */
+async function repairSelectorShadowMisses(
+  deps: GardenerDeps, selector: SelectorShadowPassSelector, all: Map<number, SelectorShadowObservation>,
+): Promise<number> {
+  const charged = [...all.values()].filter((o) => o.failures.some((f) =>
+    missedArms(f, o).length > 0 && selectorShadowUnattributedReason(f, o) === undefined)).slice(0, SELECTOR_SHADOW_REATTRIBUTE_PER_PASS);
+  if (charged.length === 0) return 0;
+  let repaired = 0;
+  {
+    for (const observation of charged) {
+      const run: SelectorShadowReplayRun = { id: observation.runId, headSha: observation.headSha,
+        ...(observation.baseSha === undefined ? {} : { baseSha: observation.baseSha }),
+        ...(observation.prNumber === undefined ? {} : { prNumber: observation.prNumber }) };
+      try {
+        const today = await selector.selectAtMain(run, observation.failures.map((f) => f.file));
+        const again = selectorShadowRepairedObservation(observation, today.record);
+        const files = again.failures.filter((f, i) => f.unattributed !== observation.failures[i]?.unattributed).map((f) => f.file);
+        if (files.length > 0) {
+          all.set(observation.runId, again);
+          repaired += 1;
+        }
+        deps.log("selector-shadow.repair_checked", { ci_run_id: observation.runId, repaired: files,
+          ...(today.record.fullRun ? { full_run: today.reasons[0] ?? "full" } : {}) });
+      } catch (error) {
+        deps.log("selector-shadow.repair_unchecked", { ci_run_id: observation.runId, error: errorText(error) });
+      }
+    }
+  }
+  return repaired;
 }
 
 /** Append each newly complete window run once, replay a bounded slice of history, and fold the whole
@@ -1096,15 +1193,23 @@ async function accumulateSelectorShadow(
     }
   }
   let replayPass: SelectorShadowAccumulatedReport["replayPass"];
+  let repaired = 0;
   if (replay !== undefined) {
+    const selector = passSelector(deps, replay);
     try {
-      const replayed = [...all.values()].filter((o) => o.source === "replay").length;
-      const result = await replaySelectorShadowHistory(deps, replay, new Set(all.keys()), replayed);
-      for (const observation of result.observations) append(await attribute(observation));
-      replayPass = result.pass;
-    } catch (error) {
-      deps.log("selector-shadow.replay_failed", { error: errorText(error) });
-      replayPass = { error: errorText(error) };
+      try {
+        const replayed = [...all.values()].filter((o) => o.source === "replay").length;
+        const result = await replaySelectorShadowHistory(deps, replay, selector, new Set(all.keys()), replayed);
+        for (const observation of result.observations) append(await attribute(observation));
+        replayPass = result.pass;
+      } catch (error) {
+        deps.log("selector-shadow.replay_failed", { error: errorText(error) });
+        replayPass = { error: errorText(error) };
+      }
+      // After the replay, so a miss it just stored is asked about today's selector in the same pass.
+      repaired = await repairSelectorShadowMisses(deps, selector, all);
+    } finally {
+      await selector.dispose();
     }
   }
   const observations = [...all.values()];
@@ -1121,7 +1226,7 @@ async function accumulateSelectorShadow(
     runsRequested: window.runsRequested, runsSkipped: window.runsSkipped, runsIncomplete: window.runsIncomplete,
     fullSuiteSize: window.fullSuiteSize, ...fold, ...selectorShadowVerdict(fold),
     window: { runsRequested: window.runsRequested, runsComplete: window.runsComplete, runsSkipped: window.runsSkipped, runsIncomplete: window.runsIncomplete, verdict: window.verdict },
-    observations: { live: live.runs, replay: replayed.runs, appended, reattributed, unreadable: stored.unreadable },
+    observations: { live: live.runs, replay: replayed.runs, appended, reattributed, repaired, unreadable: stored.unreadable },
     live, replay: replayed,
     ...(replayPass === undefined ? {} : { replayPass }),
   };
