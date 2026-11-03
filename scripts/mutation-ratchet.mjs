@@ -22,7 +22,7 @@
 // Why: the full per-mode usage docs and the W1-T2524/W1-T133 incident history are archived in
 // docs/forensics/mutation-ratchet.md#module-header.
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import { parseArgs } from 'node:util';
@@ -319,10 +319,10 @@ export function importSpecifiers(source) {
 function importPath(spec, fromFile, imports) {
   if (spec.startsWith('.')) return { path: posix.normalize(posix.join(posix.dirname(fromFile), spec)) };
   if (!spec.startsWith('#')) return {};
-  const keys = Object.keys(imports).sort((a, b) => {
-    const prefix = (key) => key.includes('*') ? key.indexOf('*') + 1 : key.length + 1;
-    return prefix(b) - prefix(a) || b.length - a.length;
-  });
+  // Node's package imports order: an exact key first, then patterns by longest prefix, then longest key.
+  const patterns = Object.keys(imports).filter((key) => key.includes('*'))
+    .sort((a, b) => b.indexOf('*') - a.indexOf('*') || b.length - a.length);
+  const keys = Object.hasOwn(imports, spec) && !spec.includes('*') ? [spec, ...patterns] : patterns;
   for (const key of keys) {
     const [prefix, suffix] = key.split('*');
     const wildcard = suffix !== undefined;
@@ -399,7 +399,7 @@ export function deriveDirectImporters(srcModules, testFiles, readFile, options =
         if (!path?.startsWith('src/')) continue;
         const candidates = importCandidates(path);
         const target = candidates.find((candidate) => known.has(candidate));
-        if (!target && !candidates.some((candidate) => existsSync(join(root, candidate)))) {
+        if (!target && !candidates.some((candidate) => statSync(join(root, candidate), { throwIfNoEntry: false })?.isFile())) {
           throw new Error(`src target does not exist (${path})`);
         }
         srcTests.add(testFile);

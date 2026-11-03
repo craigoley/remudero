@@ -43,6 +43,9 @@ test("W1-T10354: the alias targets come from package.json imports", (t) => {
   assert.deepEqual([...derive().keys()].sort(), ["src/lib/a.ts", "src/lib/b.ts"]);
   fixture.put("package.json", JSON.stringify({ imports: { "#fresh/*": "./scripts/*", "#one": "./src/lib/b.ts" } }));
   assert.equal(derive().has("src/lib/a.ts"), false, "aliases are re-read on every derivation");
+  fixture.put("package.json", JSON.stringify({ imports: { "#fresh/*": "./scripts/*", "#one*": "./src/lib/a.ts", "#one": "./src/lib/b.ts" } }));
+  assert.deepEqual(derive().get("src/lib/b.ts"), ["test/a.test.ts"], "an exact key wins over a pattern that also matches, as Node resolves it");
+  assert.equal(derive().has("src/lib/a.ts"), false, "the overlapping pattern is not used for the exact key");
 });
 
 test("W1-T10354: a literal dynamic import of a src module is an importer edge", (t) => {
@@ -77,6 +80,12 @@ test("W1-T10354: the nightly plan fails loudly on a src or alias import it canno
   fixture.put("test/relative.test.ts", `import ${JSON.stringify("../src/lib/missing.js")};`);
   assert.throws(() => deriveDirectImporters([], ["test/relative.test.ts"], fixture.read, { repoRoot: fixture.root }),
     /test\/relative.test.ts: "\.\.\/src\/lib\/missing.js": src target does not exist/);
+  fixture.put("src/lib/a.ts", "export const a = 1;");
+  for (const specifier of ["../src/lib", "#src/lib"]) {
+    fixture.put("test/directory.test.ts", `import ${JSON.stringify(specifier)};`);
+    assert.throws(() => deriveDirectImporters(["src/lib/a.ts"], ["test/directory.test.ts"], fixture.read, { repoRoot: fixture.root }),
+      /test\/directory.test.ts: .*src target does not exist/, `a directory is not a module: ${specifier}`);
+  }
   fixture.put("test/broken.test.ts", 'import "#src/lib/w1-t10354-missing.js"; import "#unknown/a.js";');
   fixture.put("candidates.txt", "src/lib/classify.ts\n");
   fixture.put("tests.txt", `${testPath}\n`);
