@@ -96,7 +96,7 @@ export const RUN_CHILD_FAILURE_CLASSES: readonly RunChildFailureClass[] = [
 export const RUN_CHILD_FAILURE_TEXT_BOUND = 16_384;
 
 /** A failure carrying exactly the fields the settle loop's predicates read: `message`, `stderr`, `code`, the
- *  `reasonClass` tag, and the `name` / `refusalClass` pair of a PR-open refusal. */
+ *  `reasonClass` tag, the `name` / `refusalClass` pair of a PR-open refusal, and a spawn error's call (W1-T11136). */
 export interface RunChildFailure {
   class: RunChildFailureClass;
   reasonClass: string;
@@ -106,7 +106,15 @@ export interface RunChildFailure {
   code?: string;
   refusalClass?: string;
   operation?: "api" | "command";
+  /** W1-T11136: a spawn error's `syscall`, `path` and bounded first `spawnargs` element, so drain.ts still names an
+   *  output overflow (code ENOBUFS, syscall `spawnSync <file>`) and the call that overflowed after the round trip. */
+  syscall?: string;
+  path?: string;
+  spawnArg?: string;
 }
+
+/** W1-T11136: the bound on the one spawn argument a failure carries; it names the call, it is not the argv. */
+export const RUN_CHILD_SPAWN_ARG_BOUND = 120;
 
 export interface RunChildStatus {
   schema: RunChildSchema;
@@ -251,7 +259,7 @@ function parseFailure(v: unknown): RunChildFailure | undefined {
     reasonClass: str(v.reasonClass) ?? (known ?? "unknown"),
     message: v.message as string,
   };
-  for (const key of ["name", "stderr", "code", "refusalClass"] as const) {
+  for (const key of ["name", "stderr", "code", "refusalClass", "syscall", "path", "spawnArg"] as const) {
     const value = str(v[key]);
     if (value !== undefined) failure[key] = value;
   }
@@ -469,6 +477,12 @@ export function toRunChildFailure(error: unknown): RunChildFailure {
   if (f.code !== undefined) failure.code = f.code;
   if (typeof tagged.refusalClass === "string") failure.refusalClass = tagged.refusalClass;
   if (error instanceof GhJsonUnreadableResponseError) failure.operation = error.operation;
+  const spawn = tagged as { syscall?: unknown; path?: unknown; spawnargs?: unknown };
+  if (typeof spawn.syscall === "string") failure.syscall = bounded(spawn.syscall);
+  if (typeof spawn.path === "string") failure.path = bounded(spawn.path);
+  if (Array.isArray(spawn.spawnargs) && spawn.spawnargs.length > 0) {
+    failure.spawnArg = String(spawn.spawnargs[0]).slice(0, RUN_CHILD_SPAWN_ARG_BOUND);
+  }
   return failure;
 }
 
@@ -514,6 +528,10 @@ function withFields(error: Error, failure: RunChildFailure): Error {
   if (failure.stderr !== undefined) extra.stderr = failure.stderr;
   if (failure.code !== undefined) extra.code = failure.code;
   if (failure.refusalClass !== undefined) extra.refusalClass = failure.refusalClass;
+  const spawn = error as Error & { syscall?: string; path?: string; spawnargs?: string[] };
+  if (failure.syscall !== undefined) spawn.syscall = failure.syscall;
+  if (failure.path !== undefined) spawn.path = failure.path;
+  if (failure.spawnArg !== undefined) spawn.spawnargs = [failure.spawnArg];
   if (failure.class === "terminal_error" && failure.reasonClass !== "unknown") extra.reasonClass = failure.reasonClass;
   return error;
 }
