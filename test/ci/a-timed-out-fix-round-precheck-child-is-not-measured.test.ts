@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
+import { LoopBoundedChildTimeout } from "#src/lib/loop-bounded-child.js";
 import { checkFixCensusSnapshot, checkFixCensusSnapshotAsync, spawnCensusChild } from "#src/run-task.js";
 import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
@@ -14,6 +15,22 @@ const killedByBound = { status: null, signal: "SIGTERM", stdout: "", stderr: "",
 const failedSuite = { status: 1, signal: null, stdout: "TAP version 13\n1..1\n# tests 1\n# pass 0\n# fail 1\n", stderr: "" };
 
 type Event = { step: string; data?: Record<string, unknown> };
+// A child that writes more than the refusal's 4,000-character tail to stderr, then outlives any budget below.
+const noisySleeper = `process.stderr.write("x".repeat(5000)); setTimeout(() => {}, 30_000);`;
+
+test("a census child stopped by its own time bound says so, where an outside SIGTERM stays a bare signal", async () => {
+  const bounded = await spawnCensusChild(process.execPath, ["-e", noisySleeper], { encoding: "utf8", timeout: 300 });
+  assert.equal(bounded.status, null);
+  assert.equal(bounded.signal, "SIGTERM");
+  assert.ok(bounded.error instanceof LoopBoundedChildTimeout, "the bound's kill keeps its named error beside the signal, as spawnSync's ETIMEDOUT does");
+  assert.equal(bounded.error.budgetMs, 300);
+  assert.match(bounded.error.message, /stopped by SIGTERM at its 300ms loop-available budget$/);
+  assert.equal(bounded.stderr.length, 5000, "the child's output stays on stderr, not inside the error's text");
+
+  const outside = await spawnCensusChild(process.execPath, ["-e", "process.kill(process.pid, 'SIGTERM')"], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(outside.signal, "SIGTERM");
+  assert.equal(outside.error, undefined, "a SIGTERM the bound did not send carries no budget error");
+});
 
 // The controller's budget inspector runs for real; the precheck and the reach suite get the given results in order.
 function runSync(results: unknown[]) {
@@ -49,11 +66,10 @@ test("W1-T10332: a precheck that times out is not measured and names the prechec
 
   // The daemon's async form, a real child stopped by spawnCensusChild's own loop bound.
   const events: Event[] = [];
-  const sleeper = `setTimeout(() => {}, 30_000);`;
   const live = await checkFixCensusSnapshotAsync("/unused-injected-root", "/unused-snapshot", (step, data) => events.push({ step, data }),
     (file, args, options) => args.includes("--snapshot-budget") ? spawnCensusChild(file, args, options)
-      : spawnCensusChild(process.execPath, ["-e", sleeper], { ...options, timeout: 300 }));
-  assert.equal(live?.refusal, undefined);
+      : spawnCensusChild(process.execPath, ["-e", noisySleeper], { ...options, timeout: 300 }));
+  assert.equal(live?.refusal, undefined, "a timeout is not measured, so it never refuses the commit/push guard");
   assert.match(live!.unmeasured!, /^census-precheck: not measured — scripts\/census-precheck\.mjs timed out at 0\.3 s \(SIGTERM\)/m);
   assert.match(live!.unmeasured!, /^census-precheck: not measured — test\/the-affected-suite-reach-ratchet\.test\.ts timed out at 0\.3 s/m);
   assert.equal(events.at(-1)?.data?.outcome, "partially-measured");

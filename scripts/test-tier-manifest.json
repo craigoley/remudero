@@ -1849,7 +1849,6 @@
     "test/daemon-worker-home-sweep.test.ts": 5000,
     "test/daemon-worktrees-pushes-and-arms-never-block-the-loop.test.ts": 19000,
     "test/daemon.test.ts": 13000,
-    "test/daemon/a-precheck-child-stopped-by-its-bound-names-the-budget.test.ts": 3300,
     "test/daemon/a-released-task-is-dispatched-by-the-daemon.test.ts": 2600,
     "test/daemon/a-restart-drain-names-what-it-waits-on.test.ts": 1500,
     "test/daemon/check-test-test-quiet-hours-dispatch-gate-test-ts-flaky.test.ts": 1600,
