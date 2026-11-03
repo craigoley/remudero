@@ -8,13 +8,11 @@
  * test/push-ci-on-main.test.ts, test/workflow-single-suite-run.test.ts and
  * test/the-slow-tier-runs-on-main.test.ts.
  *
- * A pull request runs the SELECTED suites through a flag this task also builds: `ci`'s Test step
- * can now run the live W1-T4404 selector (src/lib/affected-suites.ts) instead of deferring a
- * SOURCE diff to coverage-ratchet's full run. The switch is ONE FLAG
- * (`RMD_AFFECTED_SUITE_LIVE`, this workflow's own top-level env), default "0" per design note (iv)
- * — every pull_request behavior the tests above already pin stays byte-for-byte unchanged until
- * the W1-T4404 shadow record earns the flip. Both arms of that flag are driven here, through the
- * REAL step body, so a later default flip is a one-line change with no new test to write.
+ * A pull request runs the SELECTED suites through a flag this task also builds. The switch is ONE
+ * FLAG (`RMD_AFFECTED_SUITE_LIVE`, this workflow's own top-level env), default "0" per design note
+ * (iv). W1-T5705 moved its reader into the coverage lane and W1-T5930 removed it from `ci`'s Test
+ * step, so a SOURCE diff keeps one instrumented test verdict at either value. Both arms are driven
+ * here through the REAL step bodies, so a later default flip is a one-line change.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -171,64 +169,32 @@ test("W1-T4406: the merge group runs the full instrumented suite", () => {
 test("W1-T4406: a pull request runs the selected suites", () => {
   assert.equal(doc.env?.RMD_AFFECTED_SUITE_LIVE, "0", "the ONE FLAG must default off — no existing pull_request behavior may move yet");
 
+  // W1-T5930: the selection moved to its coverage owner (W1-T5705). ci's Test step takes the
+  // W1-T3207 skip at EITHER flag value, so a SOURCE diff never gains a second, uninstrumented run.
   const testStep = findStep("ci", "Test").run!;
   const body = testStep.replaceAll("${{ matrix.shard }}", "1").replaceAll("${{ steps.classify.outputs.class }}", "SOURCE");
+  for (const flag of ["0", "1"]) {
+    const r = runStep(body, { GITHUB_EVENT_NAME: "pull_request", GITHUB_BASE_REF: "main", RMD_AFFECTED_SUITE_LIVE: flag });
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /W1-T3207: coverage-ratchet owns/);
+    assert.doesNotMatch(r.calls, /--import tsx -e|--run fast|--run-candidates/, `flag ${flag} must reach neither a selector nor a test runner in ci`);
+  }
 
-  // Flag OFF (the default): byte-for-byte the pre-existing W1-T3207 skip, no live selection call.
-  const off = runStep(body, { GITHUB_EVENT_NAME: "pull_request", GITHUB_BASE_REF: "main" });
-  assert.equal(off.status, 0, off.out);
-  assert.match(off.out, /W1-T3207: coverage-ratchet owns/);
-  assert.doesNotMatch(off.calls, /--import tsx -e|--run fast|--run-candidates/, "flag off must reach neither the live selector nor a test runner");
-
-  // Flag ON, selector narrows: the live selection is fed through the SAME candidate-shard
-  // machinery the plan-reading lane already uses, and the old skip never fires.
-  const narrowStub = `#!/usr/bin/env bash
-echo "node $*" >> "$CALL_LOG"
-case "$*" in
-  *--import\\ tsx\\ -e*) printf 'test/x.test.ts\\n' > affected-suites-selected.txt; echo "W1-T4406: live selection for 1 changed file(s) -> 1 suite(s)" ;;
-  *--select-candidates*) cat "$3"; echo "test-tier-manifest: plan-reading shard summary candidate_count=1" >&2 ;;
-  *) echo "# tests 1"; echo "# pass 1"; echo "# fail 0" ;;
-esac
-`;
-  const narrow = runStep(body, { GITHUB_EVENT_NAME: "pull_request", GITHUB_BASE_REF: "main", RMD_AFFECTED_SUITE_LIVE: "1" }, narrowStub);
-  assert.equal(narrow.status, 0, narrow.out);
-  assert.doesNotMatch(narrow.out, /W1-T3207: coverage-ratchet owns/, "flag on must not take the coverage-owns-it skip");
-  assert.match(narrow.calls, /--import tsx -e/, "flag on must invoke the live W1-T4404 selector");
-  assert.equal(readFileSync(join(narrow.dir, "plan-reading-suites.txt"), "utf8").trim(), "test/x.test.ts", "the selector's own suite list must feed the candidate runner");
-  assert.match(
-    narrow.calls,
-    new RegExp(`test-tier-manifest\\.mjs --run-candidates plan-reading-suites\\.txt --shard 1/${CI_SHARD_COUNT}`),
-    "the selected suite(s) must run through the ci matrix's own shard denominator",
-  );
-
-  // Flag ON, selector says fullRun (a config/lockfile/workflow/helper change): CLASS stays SOURCE
-  // and the ordinary full fast tier runs, exactly as design note (ii) requires.
-  const fullStub = `#!/usr/bin/env bash
-echo "node $*" >> "$CALL_LOG"
-case "$*" in
-  *--import\\ tsx\\ -e*) printf 'full\\n' > affected-suites-selected.txt; echo "W1-T4406: live selection -> FULL" ;;
-  *) echo "# tests 1"; echo "# pass 1"; echo "# fail 0" ;;
-esac
-`;
-  const full = runStep(body, { GITHUB_EVENT_NAME: "pull_request", GITHUB_BASE_REF: "main", RMD_AFFECTED_SUITE_LIVE: "1" }, fullStub);
-  assert.equal(full.status, 0, full.out);
-  assert.doesNotMatch(full.out, /W1-T3207: coverage-ratchet owns/);
-  assert.match(full.calls, new RegExp(`test-tier-manifest\\.mjs --run fast --shard 1/${CI_SHARD_COUNT}`), "a fullRun verdict must still run the ordinary full fast tier, never a narrowed one");
-  assert.doesNotMatch(full.calls, /--run-candidates/);
-
-  // The live selector is a real, executable script (not a stub-only fiction): extract it from the
-  // step body and run it for real against this very repo, proving it actually reaches
+  // The live selector is a real, executable script in its coverage owner: extract it from the
+  // coverage step and run it for real against this very repo, proving it actually reaches
   // src/lib/affected-suites.ts's exported, shared selector (the same one `rmd preflight` uses).
-  const script = /node --import tsx -e '\n([\s\S]*?)\n\s*' changed-files\.txt affected-suites-selected\.txt/.exec(testStep);
-  assert.ok(script, "the live-selection step must invoke node --import tsx -e '<script>' changed-files.txt affected-suites-selected.txt");
+  const coverageStep = findStep("coverage-ratchet", "Test with coverage").run!;
+  const script = /node --import tsx -e '\n([\s\S]*?)\n\s*' changed-files\.txt "\$\{RUNNER_TEMP\}\/affected\.diff" coverage-narrow-suites\.txt/.exec(coverageStep);
+  assert.ok(script, "the coverage step must invoke node --import tsx -e '<script>' changed-files.txt <diff> coverage-narrow-suites.txt");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4406-real-`));
   writeFileSync(join(dir, "changed.txt"), "docs/comment-standard.md\n");
-  const real = spawnSync(process.execPath, ["--import", "tsx", "-e", script![1]!, join(dir, "changed.txt"), join(dir, "out.txt")], {
+  writeFileSync(join(dir, "affected.diff"), "");
+  const real = spawnSync(process.execPath, ["--import", "tsx", "-e", script![1]!, join(dir, "changed.txt"), join(dir, "affected.diff"), join(dir, "out.txt")], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: { ...process.env, GITHUB_WORKSPACE: REPO_ROOT },
   });
   assert.equal(real.status, 0, real.stdout + real.stderr);
-  assert.match(real.stdout, /W1-T4406: live selection for 1 changed file\(s\)/);
+  assert.match(real.stdout, /W1-T5705: live coverage selection -> /);
   assert.ok(existsSync(join(dir, "out.txt")), "the real selector must write its output file");
 });
