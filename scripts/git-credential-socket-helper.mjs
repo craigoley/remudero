@@ -10,6 +10,7 @@
 // Only "get" round-trips to the socket. "store" and "erase" are deliberate no-ops: this helper
 // persists nothing, ever, so there is never a cached token on disk for git to ask it to erase.
 
+import { writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 
 const [, , socketPath, operation] = process.argv;
@@ -35,9 +36,14 @@ async function fillOverSocket(request) {
 
 async function main() {
   if (operation !== "get") return;
-  const request = await readStdin();
+  const raw = await readStdin();
+  const consumer = process.env.RMD_CREDENTIAL_CONSUMER;
+  const request = consumer ? `${raw.replace(/\n*$/, "\n")}rmd_consumer=${consumer}\n\n` : raw;
   const reply = await fillOverSocket(request);
-  process.stdout.write(reply);
+  const lines = reply.split("\n");
+  const receipt = lines.filter((line) => line.startsWith("rmd_"));
+  if (receipt.length > 0 && process.env.RMD_CREDENTIAL_RECEIPT) writeFileSync(process.env.RMD_CREDENTIAL_RECEIPT, `${receipt.join("\n")}\n`);
+  process.stdout.write(lines.filter((line) => !line.startsWith("rmd_")).join("\n"));
 }
 
 main().catch(() => {

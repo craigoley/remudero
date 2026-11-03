@@ -17,6 +17,11 @@ import {
 } from "./ledger-path.js";
 import { NEVER_ROTATE_FILENAME } from "./log-rotation.js";
 
+type LedgerExactDedupeOptions = import("./ledger-exact-dedupe.js").LedgerExactDedupeOptions & {
+  createLedgerExactDedupe: typeof import("./ledger-exact-dedupe.js").createLedgerExactDedupe;
+};
+type LedgerExactIndex = ReturnType<typeof import("./ledger-exact-dedupe.js").createLedgerExactDedupe>;
+
 export interface MemoSize { entries: number; approx_bytes: number }
 
 /** Serialized payload bytes, including nested Maps/Sets; an estimate, not a V8 heap measurement. */
@@ -61,7 +66,8 @@ const gunzipAsync = promisify(nodeGunzip);
  * unescaped, so a valid row carrying either character read as two damaged ones and was dropped from
  * every union read. The decoder keeps a multi-byte character whole across a chunk boundary.
  */
-export async function* ndjsonLines(input: AsyncIterable<Buffer | string>): AsyncGenerator<string> {
+export async function* ndjsonLines(input: AsyncIterable<Buffer | string>, maxRowBytes = Infinity,
+  rowLimitError: () => Error = () => new RangeError("ledger-row-byte-bound")): AsyncGenerator<string> {
   const decoder = new StringDecoder("utf8");
   let pending = "";
   const line = (text: string): string => (text.endsWith("\r") ? text.slice(0, -1) : text);
@@ -69,12 +75,15 @@ export async function* ndjsonLines(input: AsyncIterable<Buffer | string>): Async
     pending += typeof chunk === "string" ? chunk : decoder.write(chunk);
     let start = 0;
     for (let newline = pending.indexOf("\n"); newline >= 0; newline = pending.indexOf("\n", start)) {
+      if ((newline - start) * 2 > maxRowBytes) throw rowLimitError();
       yield line(pending.slice(start, newline));
       start = newline + 1;
     }
     pending = pending.slice(start);
+    if (pending.length * 2 > maxRowBytes) throw rowLimitError();
   }
   pending += decoder.end();
+  if (pending.length * 2 > maxRowBytes) throw rowLimitError();
   if (pending) yield line(pending);
 }
 
@@ -418,6 +427,10 @@ function scanLedgerBuffer(
 }
 
 export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
+  exactDedupe?: LedgerExactDedupeOptions;
+  onExactDedupeStats?: (stats: ReturnType<LedgerExactIndex["stats"]>) => void;
+  onSourceRead?: (source: { path: string; form: LedgerFileForm | "live" }) => void;
+  /** Controls replay Sets; an explicit exact index owns dedupe independently. */
   dedupe?: boolean;
   /** Excludes the mutable live ledger from this scan. Archive-only audit readers use this so
    * callers can overlay the current live file at decision time instead of freezing it at boot. */
@@ -543,6 +556,9 @@ export async function* openLedgerUnion(
   if (opts.dedupe === false && opts.dedupeWindowPerStep !== undefined) {
     throw new TypeError("openLedgerUnion: dedupe=false and dedupeWindowPerStep are contradictory");
   }
+  if (opts.exactDedupe && opts.dedupeWindowPerStep !== undefined) {
+    throw new TypeError("openLedgerUnion: exactDedupe requires whole-corpus dedupe");
+  }
   const { rotations } = listedLedgerFiles(stateDir, io, opts.onUnreadDirectory);
   const livePath = ledgerLivePath(stateDir);
   const resumedRotations = opts.afterRotation === undefined
@@ -586,6 +602,8 @@ export async function* openLedgerUnion(
     return false;
   };
 
+  const exact = opts.exactDedupe ? opts.exactDedupe.createLedgerExactDedupe(opts.exactDedupe) : undefined;
+  try {
   for (const entry of entries) {
     opts.signal?.throwIfAborted();
     if (entry.path === livePath && !io.existsSync(entry.path)) continue;
@@ -632,7 +650,8 @@ export async function* openLedgerUnion(
         if (gunzip) addAbortSignal(opts.signal, gunzip);
       }
       const skip = opts.rotationStartOffset?.name === basename(entry.path) ? opts.rotationStartOffset.offset : 0;
-      for await (const raw of ndjsonLines(skip > 0 ? skipBytes(input, skip) : input)) {
+      for await (const raw of ndjsonLines(skip > 0 ? skipBytes(input, skip) : input,
+        opts.exactDedupe?.maxRowBytes ?? (exact ? 1024 * 1024 : Infinity), exact?.rowLimitError)) {
         opts.signal?.throwIfAborted();
         rowOrdinal += 1;
         if (pendingLiveBad) {
@@ -669,7 +688,9 @@ export async function* openLedgerUnion(
         // Filter BEFORE dedupe: identical lines filter identically, so a row the filter drops never needs a
         // sighting, and the Set holds the stream's own rows rather than every line of the corpus.
         if (!recordMatchesFilters(parsed, opts, minimumTs)) continue;
-        if (opts.dedupe !== false && opts.dedupeWindowPerStep === undefined) {
+        if (exact) {
+          if (!exact.add(line)) continue;
+        } else if (opts.dedupe !== false && opts.dedupeWindowPerStep === undefined) {
           if (seen.has(line)) continue;
           seen.add(line);
         }
@@ -683,7 +704,9 @@ export async function* openLedgerUnion(
         ? { ...pendingLiveBad, kind: "live-torn-tail", resumeOffset: lastLineStartOffset }
         : pendingLiveBad);
       if (entry.path === livePath && !archiveUnread) opts.onLiveRead?.({ ino: liveIno, endOffset: liveBytes });
+      if (!archiveUnread) opts.onSourceRead?.({ path: entry.path, form: entry.path === livePath ? "live" : entry.form });
     } catch (error) {
+      if (exact?.isError(error)) throw error;
       if (opts.signal?.aborted) throw opts.signal.reason ?? error;
       // deliberate: an unreadable file costs that file, not the whole best-effort stream.
       // Console-style readers are best effort; audit-style refusal is handled by resolveLedgerUnion.
@@ -699,6 +722,10 @@ export async function* openLedgerUnion(
       source?.destroy();
     }
     if (entry.path !== livePath && opts.stopAfterRotation?.(entry.path)) return;
+  }
+  } finally {
+    try { if (exact) opts.onExactDedupeStats?.(exact.stats()); }
+    finally { exact?.close(); }
   }
 }
 

@@ -677,9 +677,14 @@ interface ReadModelOracleData {
   escalationRepository?: string;
 }
 
-/** C5: the parent's execArgv with the oracle's own heap ceiling in place of any the parent carries. */
-export function oracleChildExecArgv(inherited: readonly string[]): string[] {
-  return [...inherited.filter((flag) => !/^--max[-_]old[-_]space[-_]size=/.test(flag)), `--max-old-space-size=${READ_MODEL_ORACLE_HEAP_MB}`];
+/**
+ * C5: the parent's execArgv with the oracle's own heap ceiling in place of any the parent carries, then `heapArgs`
+ * (W1-T10290: the children's growth flag, which serve hands the worker thread in its data) in place of any growth
+ * flag the parent carries. NODE_OPTIONS refuses `--heap-growing-percent`, so it goes on the child's own command line.
+ */
+export function oracleChildExecArgv(inherited: readonly string[], heapArgs: readonly string[] = []): string[] {
+  const kept = inherited.filter((flag) => !/^--max[-_]old[-_]space[-_]size=/.test(flag) && (heapArgs.length === 0 || !/^--heap[-_]growing[-_]percent=/.test(flag)));
+  return [...kept, `--max-old-space-size=${READ_MODEL_ORACLE_HEAP_MB}`, ...heapArgs];
 }
 
 type OracleChildMessage = { type?: string; id?: number; result?: OracleSliceResult; maxRssBytes?: number };
@@ -696,6 +701,8 @@ export function childOracle(opts: {
   log: (step: string, extra: Record<string, unknown>) => void;
   clock?: Clock;
   fork?: typeof forkWorkerEntry;
+  /** W1-T10290: the node flags each child starts with beside its heap ceiling; absent, V8's default growth factor. */
+  heapArgs?: readonly string[];
 }): ReadModelOracle {
   const clock = opts.clock ?? systemClock;
   let seq = 0;
@@ -706,9 +713,10 @@ export function childOracle(opts: {
       const id = ++seq;
       const started = clock.now();
       let launched: WorkerEntryFork;
+      const execArgv = oracleChildExecArgv(process.execArgv, opts.heapArgs);
       try {
         launched = (opts.fork ?? forkWorkerEntry)(import.meta.url, [READ_MODEL_ORACLE_CHILD_ARG, opts.escalationRepository ?? ""],
-          { execArgv: oracleChildExecArgv(process.execArgv), serialization: "advanced", stdio: ["ignore", "inherit", "inherit", "ipc"] },
+          { execArgv, serialization: "advanced", stdio: ["ignore", "inherit", "inherit", "ipc"] },
           { override: opts.workerUrl });
       } catch (error) {
         const message = String((error as Error)?.message ?? error);
@@ -730,7 +738,7 @@ export function childOracle(opts: {
         opts.log(READ_MODEL_ORACLE_CHILD_STEP, {
           instance: request.instance, outcome: !answer ? "died" : answer.result?.ok ? "ok" : "failed", code, signal, entry: launched.kind,
           spawn_sync_ms: Math.round(launched.spawnSyncMs * 10) / 10, ready_ms: readyMs ?? null, wall_ms: clock.now() - started,
-          child_max_rss_bytes: answer?.maxRssBytes ?? null,
+          child_max_rss_bytes: answer?.maxRssBytes ?? null, node_args: execArgv,
         });
       };
       child.on("message", (msg: OracleChildMessage) => {
@@ -2226,6 +2234,9 @@ export interface ReadModelWorkerData {
   signal: SharedArrayBuffer;
   /** `owner/name` the oracle's escalations are filed on; the worker builds its own issue gateway. */
   escalationRepository?: string;
+  /** W1-T10290: the node flags the oracle child starts with (the growth percent), computed on serve's main thread
+   *  because the policy lives in a module variable that this isolate's copy never set. */
+  childHeapArgs?: string[];
   /** The slow lane's units (read-model-slow-lane.ts); absent, no slow lane runs. */
   slowLane?: SlowLaneConfig;
   viewsModule?: string;
@@ -2298,7 +2309,7 @@ export function runReadModelWorker(
     catch (error) { log("read_model.daily_publication_refused", { reason: String((error as Error).message).slice(0, 2048) }); }
   } });
   // C5: one short-lived child per slice, so a slice's memory leaves serve when it is done.
-  const oracleRunner = childOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
+  const oracleRunner = childOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), ...(data.childHeapArgs ? { heapArgs: data.childHeapArgs } : {}), log });
   const ticker = createReadModelTicker({
     stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder, stopRequested, post, views: [], oracleRunner,
     integrityCheck: threadIntegrityCheck(), ...(escalation ? { escalation } : {}),
@@ -2480,6 +2491,8 @@ export interface ReadModelWorkerOptions {
   workerUrl?: URL;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   escalationRepository?: string;
+  /** W1-T10290: handed to the worker thread in its data for the oracle child's command line. */
+  childHeapArgs?: readonly string[];
   /** Opens or closes a recycle loop's issue off serve's event loop; absent, one thread per request on `escalationRepository`. */
   issueRequest?: (request: ReadModelIssueRequest) => Promise<ReadModelIssueAnswer>;
   every?: (run: () => void, ms: number) => () => void;
@@ -2731,6 +2744,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared, ...(opts.registry ? { registry: opts.registry } : {}),
       ...(selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent }),
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
+      ...(opts.childHeapArgs?.length ? { childHeapArgs: [...opts.childHeapArgs] } : {}),
       ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
       ...(opts.viewsModule ? { viewsModule: opts.viewsModule } : {}),
       ...(opts.modelApprovalConfig ? { modelApprovalConfig: opts.modelApprovalConfig } : {}),

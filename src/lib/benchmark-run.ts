@@ -441,6 +441,8 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
       && result.tokens.cacheRead === 0 && result.tokens.cacheCreation === 0)
     : fields.token_usage_state === "observed");
   return {
+    // The private ledger row owns attempt identity; the public-safe benchmark envelope below does not.
+    ...(fields.execution_evidence === undefined ? {} : { execution_evidence: fields.execution_evidence }),
     served_model: fields.served_model,
     // W1-T4650: the reason rides beside the null it explains; dropping it left every row generic.
     ...(fields.served_model_reason !== undefined ? { served_model_reason: fields.served_model_reason } : {}),

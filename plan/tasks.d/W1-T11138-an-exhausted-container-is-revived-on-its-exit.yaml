@@ -1,0 +1,33 @@
+- id: W1-T11138
+  title: "A fleet container whose on-failure:5 restarts are spent is revived when it exits, not on the next 5-minute watchdog tick — revival after docker gave up took 170 s p50 and 974 s p90 over 10-20..10-27 (6 such outages on core), dark time that is pure waiting for the timer"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: install-host-units.sh adds an exit-driven trigger for the existing revival path
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs:
+    - W1-T2874
+  files:
+    - deploy/install-host-units.sh
+    - test/deploy/an-exhausted-container-is-revived-on-its-exit.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The installed host units run the existing rmd-relaunch revival as soon as a fleet container exits non-zero with its RestartCount at the policy maximum (a docker events die trigger), and the 5-minute rmd-fleet-watchdog timer stays as the backstop
+      proof: "unit test: test/deploy/an-exhausted-container-is-revived-on-its-exit.test.ts"
+    - claim: The trigger never revives an exit 0 or an instance with state/STOP, shares the launcher's lock so it and the timer never revive the same container twice, and an exit docker is still retrying is left to docker
+      proof: "grep: W1-T11138 criterion 2 in test/deploy/an-exhausted-container-is-revived-on-its-exit.test.ts"
+  rationale: |
+    MEASURED, restart census 2026-10-20 → 10-27 (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - 6 core outages were OOM ×6, `on-failure:5` exhausted, then watchdog revival; 1 more was a plain watchdog revival and 2 were error stops after which docker gave up.
+    - Watchdog revival took 170 s p50 and 974 s p90. The tick is 5 minutes: docker gives up, then the fleet waits for the timer.
+    READ at origin/main d04469fa2: deploy/install-host-units.sh installs rmd-fleet-watchdog with OnUnitActiveSec=5min (:1684). The header (:22-26) records why on-failure:5 is deliberate (an exit 0 STOP must not be undone) and why it is a count, not a rate. Nothing reacts to the exit itself.
+    NOT COVERED: W1-T2874 (queued) makes the heartbeat report an exhausted dead container honestly; it does not revive it. W1-T5724 / W1-T8197 (boot path) and W1-T10737 (held boot) are elsewhere in the restart path.
+  design: |
+    Install one more small unit, rmd-fleet-exit-watch.service, running `docker events --filter type=container --filter event=die` for the fleet's container names. On each die it reads only State.ExitCode and RestartCount (never Cmd, Env or Args), and when the exit is non-zero and RestartCount has reached the policy's maximum it invokes the existing launcher, which already refuses on state/STOP, an unmounted state root or a live daemon, and appends its revival record. It takes the same lock the watchdog tick takes. Nothing new decides whether to revive; the trigger only removes the wait. If the events stream ends, systemd restarts the unit, and the 5-minute tick covers any gap.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 7 (p2). Pairs with the tiered crash throttle (item 6), which reaches the on-failure:5 limit sooner in a loop.
