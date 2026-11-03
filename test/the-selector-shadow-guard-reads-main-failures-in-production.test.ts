@@ -155,3 +155,23 @@ test("W1-T5409: with no gh on PATH the default reader fails loudly instead of re
   t.after(() => { process.env.PATH = oldPath; });
   await assert.rejects(registry.selectorShadowMainFailures("acme", "remudero")("sha"));
 });
+
+test("a file red on main only in its slow tier is read as main's failure at that sha", async () => {
+  const jobs = (slow: { status: string; conclusion: string }) => ({
+    total_count: 11,
+    jobs: [
+      ...mainJobs(7).jobs.map((job) => (job.name.startsWith("ci-shard") ? { ...job, conclusion: "success" } : job)),
+      { id: 701, name: "test-slow-shard (1/2)", ...slow },
+      { id: 702, name: "test-slow-shard (2/2)", status: "completed", conclusion: "success" },
+    ],
+  });
+  const reads: string[] = [];
+  const reader = (slow: { status: string; conclusion: string }) => registry.selectorShadowMainFailures("acme", "remudero", {
+    readJson: async (args) => (args[1]!.includes("runs?branch=main") ? { workflow_runs: [{ id: 7, status: "completed", conclusion: "failure" }] } : jobs(slow)),
+    readText: async (args) => (reads.push(args[1]!),
+      "2026-11-03T13:16:53.3089094Z FLAKE-RETRY-FILES: retrying 1 failed file(s) — test/views-from-the-read-model.test.ts"),
+  });
+  assert.deepEqual(await reader({ status: "completed", conclusion: "failure" })("bbf2c2836"), ["test/views-from-the-read-model.test.ts"]);
+  assert.deepEqual(reads, ["repos/acme/remudero/actions/jobs/701/logs"], "only the failed slow shard's log is read");
+  await assert.rejects(reader({ status: "in_progress", conclusion: "" })("bbf2c2836"), /main run 7 has an incomplete slow-tier shard/);
+});
