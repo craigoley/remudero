@@ -1,0 +1,128 @@
+- id: W1-T11195
+  title: A product target with no runner configuration refuses before the plan journal or handoff, with a named recoverable state instead of a native ENOENT
+  repo: remudero
+  depends_on: [W1-T11085]
+  dispatch_hold: false
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30
+  risk: high
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: ["§7B", "§9", W1-T10823, W1-T11078, W1-T11085, W1-T3951, W1-T10621]
+  files:
+    - src/lib/mounts.ts
+    - src/lib/product-target-config.ts
+    - src/lib/product-plan-operation.ts
+    - src/lib/product-routes.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/dispatch/product-plan-runner-config.test.ts
+    - test/console-api/serve/product-routes.test.ts
+  status: queued
+  attempts: 0
+  rationale: >-
+    The signed-in saved Wreckterra plan operation
+    b829cc798bc1cc08714e1242691e709203ff18983ea6cae6b7b5929adf480215 (product
+    prd_ca604fb69b319193b4d5128b6c858d4b, craigoley/wreckterra main) exited before plan.start with
+    ENOENT opening .remudero/mounts.yaml. That was a native operation failure, not a human refusal.
+    Current source explains it: planCommand (src/run-task.ts) calls
+    loadMounts(mountsPath(repoRoot)) before it logs plan.start, and repoRoot is the --repo-root
+    target checkout the product handoff supplies. loadMounts (src/lib/mounts.ts) wraps every
+    readFileSync failure, ENOENT included, as "mounts.yaml is not valid YAML", so absence is
+    misreported as malformed. ProductPlanOperationService.propose
+    (src/lib/product-plan-operation.ts) checks identity, enrollment, the proof runner and the
+    starter bootstrap, but never whether the target carries runner configuration. So it journals
+    and hands off a child that can only fail.
+    Settled by lookup: is this already filed or already decided? -> not filed. W1-T10823 covers
+    the operation, W1-T11078 the checkout resolver, W1-T11085 the gateway and W1-T10621 an empty
+    plan base. None checks target runner configuration (plan/tasks.d). MASTER-PLAN.md, DECISIONS.md
+    and LEARNINGS.md hold no entry for it. Settled by lookup: may the plan child fall back to the
+    install root's mounts table instead? -> no. W1-T3951 (merged) keeps "the target's own
+    mounts/plan/feedback paths ... read from repoRoot unchanged (no policy weakening: the target's
+    mount table is still what gates risk)". worker.ts says worker checkouts carry the
+    repository-owned capability policy. A silent fallback would re-decide that. Settled by lookup:
+    is mounts.yaml the only target-owned file the plan path requires? -> yes for settings and
+    hooks: W1-T3951 proves a mounts-only target renders them from the install root. planCommand
+    reads no target skills. The implementer re-verifies this with the fixture below. Settled by
+    lookup: is "runner_missing" this state? -> no. runnerRegistered is the acceptance proof-runner
+    registry (W1-T10614, explainUnitTestProofRefusal in src/lib/product-build.ts), a different
+    prerequisite. Settled by lookup: Core or Console surface? -> Core. Both the failing read and
+    the missing preflight are in Core source. The Console only renders the served failure code
+    through the openapi contract and generated client in this repo. Settled by lookup: is there
+    open-head overlap? -> none by title. The 19 open craigoley/remudero PRs listed on 2026-11-03
+    (#16495 down to #15532) name no mounts, runner-configuration, bootstrap or product-plan
+    subject. This headless pass could not grep head trees, so refresh the all-open-head subject
+    audit at filing review. It depends on W1-T11085, and through it on W1-T11078, because all three
+    edit the product plan operation and the served product route suite.
+    Settled by lookup: is the hold release already decided or filed? -> yes, by explicit operator
+    instruction in run PLAN-clarify-1793710900267, after filing PR #16497 merged with its
+    plan-only review and hosted checks green, and prerequisite W1-T11085 merged. This release
+    clears only dispatch_hold. Scope (8 files), the USD30 cap, high risk, depends_on, acceptance,
+    tests and every normal ownership, admission, TDD, review, CI and protected-merge gate stay
+    exactly as filed. W1-T11196 and W1-T11197 stay dispatch-held. Settled by lookup: how is a hold
+    released? -> by setting dispatch_hold false on the task record alone, as done for W1-T11078
+    and W1-T11085 (plan/tasks.d).
+  design: |
+    (1) Name absence truthfully. In src/lib/mounts.ts, add a MountsMissingError subclass of
+    MountsError that loadMounts throws only when the read fails with a confirmed ENOENT. Its
+    message names the missing path as absent runner configuration. Every other read or parse
+    failure keeps today's MountsError text and type. Every existing `catch (MountsError)` and
+    fallback (resolveWorkerCapabilities, machine-filing-judge) behaves exactly as before. The
+    native `rmd plan` verb therefore still refuses before plan.start, but with a named cause.
+    (2) One bounded reader. Add src/lib/product-target-config.ts and export
+    readTargetRunnerConfig(checkout, head). It reads `.remudero/mounts.yaml` from the committed
+    tree at the exact frozen head (git ls-tree / cat-file through the existing
+    hostWorktreeGitAsync helper), never from the working tree. It returns:
+    - present, with a sha256 digest, when the blob validates through validateMounts. That
+      includes the G-17 Tier Invariant.
+    - absent, only when a successful tree read at a valid commit lacks the path.
+    - invalid, when the path is a symlink, a non-blob or a blob that fails validation.
+    - unreadable, on any git or transport failure. A failure never becomes absent.
+    Mirror W1-T10621's confirmed-absence discipline.
+    (3) Preflight before freezing. In ProductPlanOperationService.propose, call it after the
+    checkout resolves and verifies, and before the journal commit, stage-evidence append or
+    handOff. absent refuses runner_config_missing. invalid refuses runner_config_invalid.
+    unreadable refuses target_unreadable. A refusal writes no journal record, product record,
+    ID block or ledger handoff. Retrying the same saved command after the configuration lands
+    starts exactly one plan. Replay of an already-journaled operation is unchanged and never
+    re-reads or retargets.
+    (4) Recoverable served state. Map both new codes to 409 in src/lib/product-routes.ts. Declare
+    them in the plan-proposal failure schema in openapi/daemon.yaml, and regenerate
+    packages/api-client/src/schema.d.ts with the maintained generator. The Console can then show
+    "runner configuration missing/invalid at <head>" as a distinct state the operator can act
+    on, never a generic unavailable.
+    Tests use real local Git fixtures with fixture-local author identity, a real mounts table
+    copied from this repo's validated fixture, and no model or network spend. Cover: a target
+    without the file, a malformed table, a G-17 violation, a symlinked path, a failed git read,
+    a dirty working-tree file absent from the committed head, and a present valid table that
+    reaches the existing handoff once. Exercise the served route through the existing product
+    route suite. Confirm test placement with rmd test-place on final imports.
+    Out of scope: creating or proposing configuration (W1-T11196, W1-T11197), any install-root
+    fallback, any change to the rmd plan verb's gates, hold releases, budgets, access and
+    Console UI source.
+  acceptance:
+    - claim: a target without runner configuration, or with an invalid or unreadable table, refuses with a distinct code before any journal record, product write or handoff, and a valid table reaches exactly one handoff
+      proof: "unit test: test/dispatch/product-plan-runner-config.test.ts"
+    - claim: the plan operation consumes the bounded committed-tree reader
+      proof: "grep: readTargetRunnerConfig( in src/lib/product-plan-operation.ts"
+    - claim: an absent mounts table is named as missing runner configuration rather than invalid YAML
+      proof: "grep: MountsMissingError in src/lib/mounts.ts"
+    - claim: the served contract declares the recoverable refusal
+      proof: "grep: runner_config_missing in openapi/daemon.yaml"
+    - claim: the served plan proposal returns the named refusal through authenticated route composition
+      proof: "unit test: test/console-api/serve/product-routes.test.ts"
+  falsifier: |
+    Remove the preflight call. The absent-config fixture must then observe a journal record and
+    a handoff, and fail. Collapse a failed git read into absent. The unreadable fixture must
+    fail. Read the working tree instead of the committed head. The dirty-tree fixture must fail.
+    Record real nonzero test summaries for each mutant and for the restored implementation.
+    Fixture success is not a live Wreckterra plan receipt.
+  note: >-
+    Released (dispatch_hold false) after filing PR #16497 merged and W1-T11085 merged, by explicit
+    operator instruction. It enters normal ownership and admission only. W1-T11196 and W1-T11197
+    depend on it and remain held. It grants no live plan, retry, budget,
+    access, gameplay, deployment or device claim. Keep the original-IP, mobile-first and OSM
+    attribution constraints and the existing-setup/USD30 Wreckterra envelope unchanged.
