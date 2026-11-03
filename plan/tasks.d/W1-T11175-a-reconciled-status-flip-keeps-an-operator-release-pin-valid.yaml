@@ -1,0 +1,92 @@
+- id: W1-T11175
+  title: "A reconciled status flip keeps an operator release pin valid, and the plan-reconcile landing lands every flip that keeps the plan lint-clean — operatorReleasePin (#13992, 2026-10-24) hashes a task's status, so flipping any operator-released shard from queued to merged reads as a changed approved contract (operator-release-contract, block); the landing's shard-census then refused the whole write set 8 times from 2026-10-27 to 2026-10-30, nothing has landed since #14125 (2026-10-25T09:37Z), and 251 of 257 shards whose task merged since then still read queued"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, why a plan-status reconciliation cannot land; it spans the release pin that misreads a status flip as a contract change and the landing that refuses every flip for one bad one; high because the pin guards operator approvals
+  band_meaning: span
+  origin: operator-session#plan-reconcile-root-cause-2026-11-03
+  plan_refs:
+    - W1-T3043
+    - W1-T3226
+    - W1-T3970
+    - W1-T9695
+    - W1-T3086
+    - W1-T10233
+  files:
+    - src/lib/operator-release.ts
+    - src/lib/measurement-cadence.ts
+    - src/run-task.ts
+    - test/plan/a-reconciled-status-flip-keeps-an-operator-release-pin-valid.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: For a task whose risk_ruling.operator_release_pin was computed while it read status queued, setting status to merged (or any other lifecycle status the control plane writes) leaves operatorReleaseContractChanged false, both for a pin written before this change and for one written after it, while any edit to its title, files, acceptance, design or verify still reads changed; the fixtures are W1-T10431's and W1-T10970's real shards on main
+      proof: "unit test: test/plan/a-reconciled-status-flip-keeps-an-operator-release-pin-valid.test.ts"
+    - claim: Running reconcilePlan over every shard on main with a credit set that includes W1-T10431, W1-T10787, W1-T10829, W1-T10874, W1-T10898, W1-T10917, W1-T10942 and W1-T10970 yields a plan whose lintPlan adds no blocking operator-release-contract violation, so the landing's shard-census (W1-T3086's violating-shard baseline) stays at its baseline
+      proof: "grep: W1-T11175 criterion 2 in test/plan/a-reconciled-status-flip-keeps-an-operator-release-pin-valid.test.ts"
+    - claim: When some flips in a reconcile write set would still make a shard newly violate a blocking lint rule, the production landing (buildPlanReconcileProductionInput's land) lands every other flip, holds those, and names each held task id and its rule in the measurement_cadence.ran row's plan_reconcile field, instead of throwing for the whole set; a landing refused for any other reason still throws, as W1-T9695 requires
+      proof: "grep: W1-T11175 criterion 3 in test/plan/a-reconciled-status-flip-keeps-an-operator-release-pin-valid.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 (read-only; the core ledger union on the Azure host, /mnt/rmd/state2/state, 408 archives from 2026-10-24
+    plus the live file, read niced and streamed back to the Mac; origin/main read at the time of filing).
+    THE CADENCE. `rmd plan-reconcile`'s landing runs only inside the daemon's measurement cadence: runMeasurementCadence ->
+    buildPlanReconcileProductionInput -> planReconcileCadence -> planReconcileLanding, branch plan-reconcile-landing. It lands only
+    when drift reaches the threshold (10). A refused landing throws, and the cadence logs measurement_cadence.run_failed.
+    WHAT IT DID SINCE #14125:
+    - The last successful run (measurement_cadence.ran) was 2026-10-25T09:15Z, and it landed #14125 at 09:37Z. No ran row
+      since.
+    - 8 runs, 2026-10-27T04:12Z through 2026-10-30T21:56Z, reached the landing and failed: "plan-PR preflight refused the
+      plan-reconcile-landing push: [shard-census] not ok 2 - W1-T3086: violating shard files cannot grow past the recorded
+      baseline".
+    - 34 runs, 2026-10-27 and 2026-10-31 through 2026-11-03, ended "exited without a result" with "FATAL ERROR: ... JavaScript
+      heap out of memory" after 1,172-6,519 s. 17 also logged "board gateway: batched PR fetch failed (auth) ... gh: Bad
+      credentials (HTTP 401)". 2 others timed out in updateProposalRegistry.
+    ROOT CAUSE OF THE REFUSAL, REPLAYED:
+    - On a scratch worktree at origin/main, every shard whose task merged since 2026-10-25T09:30Z (a Remudero-Task trailer on
+      main, 257 ids) was flipped queued to merged: 251 flips.
+    - `rmd lint-plan --all` went from 53 to 61 failing. The 8 new failures are exactly the 8 operator-released shards in the
+      flip set (W1-T10431, W1-T10787, W1-T10829, W1-T10874, W1-T10898, W1-T10917, W1-T10942 and W1-T10970), each
+      "[operator-release-contract] task ... changed its operator-approved contract; explicit reapproval required".
+    - operatorReleasePin (src/lib/operator-release.ts, #13992, merged 2026-10-24T23:35Z) hashes the loaded task minus
+      sourcePath, attempts and risk_ruling. status is in the hash. So the control plane's own status flip, which W1-T3043 and
+      W1-T3226 made the reconciler's job, reads as a changed approved contract. 9 shards on main carry an
+      operator_release_pin.
+    - The landing is all or nothing: one refused flip throws away the other 243, so each run lands nothing.
+    WHY IT MATTERS: plan status is what builders and the duplicate checks read. With W1-T9578 queued since 2026-10-25 and
+    W1-T11071, W1-T10742, W1-T11076, W1-T9114 and W1-T10870 merged but still marked queued, every filing and pre-build check
+    in the last 8 days had to re-derive merges from trailers by hand (the agent preamble's "a shard's status: queued lags merges
+    by hours"). A filing session on 2026-11-03 found W1-T9578 shipped only by reading main's log.
+    NOT COVERED, REPORTED SEPARATELY: the measurement cadence child itself ran out of heap on 34 of the last runs, which blocks
+    every cadence product, plan-reconcile included, and its board read hit HTTP 401. This task makes the landing succeed when the
+    cadence reaches it, but nothing lands until the cadence child completes. W1-T10233 (a scout task, queued) names
+    measurement_cadence.run_failed without a cause and is the existing home for that. The fixed drift threshold of 10 is left
+    as it is here.
+  design: |
+    1. PIN. operatorReleasePin excludes status, the control plane's lifecycle bookkeeping, as it already excludes attempts. New
+       pins are written in the status-free form under a "v2:" prefix. For an unprefixed (legacy) pin,
+       operatorReleaseContractChanged compares it against the legacy hash recomputed with status set to each value plan.ts's
+       status set allows. It reads unchanged when any one matches, so every pin already on main stays valid without a hand
+       recompute. Every other field stays in the hash.
+    2. LANDING. In buildPlanReconcileProductionInput's land, before the landing bridge: lint the plan as it would be after the
+       writes, with lintPlan over the loaded plan and the replaced shard texts. Drop any write whose task newly gains a blocking
+       violation. Land the rest. Return the held ids and rules so planReconcileCadence's result carries them as held:
+       [{taskId, rule}] on the plan_reconcile row. Zero landable writes is status reported, not a throw. Any other landing
+       refusal still throws (W1-T9695).
+    3. src/run-task.ts is near its comment-load ceiling. Keep its change to the call.
+    Tests go in the new file, titled verbatim as in the proofs. They use the real operatorReleasePin and lintPlan, real shards
+    read from plan/tasks.d via REPO_ROOT, and an injected landing bridge. rmd test-place computes test/plan/ for these imports.
+  falsifier: |
+    At origin/main, W1-T10431's shard with status set to merged makes operatorReleaseContractChanged return true, so the first
+    test fails. The replayed flip set adds 8 operator-release-contract blocks, so the second test fails. A write set with one
+    violating flip makes the land seam throw for all of them, so the third test's "lands every other flip" fails.
+  note: |
+    reservation hand-off: plan-file-1793668045000 -> plan-file-1793668045000
+    Reserved with rmd next-task-id --branch plan-file-1793668045000. Filed 2026-11-03 at the coordinator's request, after a
+    read-only root-cause pass on why rmd plan-reconcile has landed nothing since #14125. The cadence's heap exhaustion is the
+    second blocker and is reported, not filed, here. The 8 pinned shards named above are fixtures only: this task edits none of
+    them.
