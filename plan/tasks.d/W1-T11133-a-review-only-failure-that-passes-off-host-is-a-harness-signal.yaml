@@ -7,7 +7,8 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # one concern: fix-progress-judge.ts routes a persistent off-host-passing review failure to the harness
+  risk: high  # Rule 19 span: widened to fix, fix-progress-judge, sweep by a scope amendment for #16412
+  band_meaning: span
   origin: operator-session#review-sandbox-load-2026-11-02
   plan_refs:
     - W1-T7096
@@ -15,6 +16,8 @@
   files:
     - src/lib/fix-progress-judge.ts
     - test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-signal.test.ts
+    - "src/cli/commands/fix.ts"
+    - "src/lib/sweep.ts"
   status: queued
   attempts: 0
   acceptance:

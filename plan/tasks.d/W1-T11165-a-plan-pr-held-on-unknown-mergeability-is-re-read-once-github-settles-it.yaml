@@ -1,0 +1,58 @@
+- id: W1-T11165
+  title: A plan PR whose review arm holds it on mergeable_state unknown keeps re-reading on a back-off learned from measured settle times until GitHub settles it, then takes the plan path in that review, instead of ending on unknown after three 2 s re-reads
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, how long the plan-PR arm waits for GitHub's mergeability before it holds; it touches only arm-auto-merge.ts
+  origin: "operator decision 2026-11-02 (in chat), relayed: file the second hold cause"
+  plan_refs:
+    - W1-T5615
+    - W1-T5733
+    - W1-T9212
+    - W1-T11163
+  files:
+    - src/lib/arm-auto-merge.ts
+    - test/github/a-plan-pr-held-on-unknown-mergeability-is-re-read-once-github-settles-it.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the plan-PR arm still reads mergeable_state unknown after PLAN_PR_UNKNOWN_MAX_REREADS, it keeps re-reading on a back-off whose total wait is the measured p90 settle time from prior automerge.plan_pr_mergeability_settled rows, and a read that settles to clean, behind, unstable, has_hooks or (with W1-T11163) a green blocked takes the existing plan path in the same arm call
+      proof: "unit test: test/github/a-plan-pr-held-on-unknown-mergeability-is-re-read-once-github-settles-it.test.ts"
+    - claim: Every unknown that later settles ledgers automerge.plan_pr_mergeability_settled with the settle milliseconds and the head's behind_by, so the back-off learns from its own reads; with no settled rows the wait falls back to today's three re-reads and says so on the row
+      proof: "grep: W1-T11165 criterion 2 in test/github/a-plan-pr-held-on-unknown-mergeability-is-re-read-once-github-settles-it.test.ts"
+    - claim: A head still unknown after the learned wait is held exactly as today (plan-pr-held, remedy mergeability-unknown, the W1-T5733 escalation bound unchanged), and a plan PR is never armed for GitHub auto-merge on unknown
+      proof: "grep: W1-T11165 criterion 3 in test/github/a-plan-pr-held-on-unknown-mergeability-is-re-read-once-github-settles-it.test.ts"
+  rationale: |
+    MEASURED 2026-11-02/03 (Mac ledger ~/Remudero/state, read-only; GitHub REST through the broker):
+    - 15 of the 19 plan_pr_held rows a local review wrote on 2026-11-02 read mergeable=UNKNOWN mergeable_state=unknown after the
+      three 2 s re-reads (#16250-#16308, behind_by 6-12, 22:20-22:28Z). Six more did the same at 00:04-00:07Z (#16297, #16310,
+      #16311, #16314, #16315, #16332, behind_by 13-19). The other four held on blocked, which W1-T11163 handles.
+    - At 00:25Z, #16251, #16256, #16286, #16308 and #16332 all read mergeable=true mergeable_state=clean, unarmed and unmerged. So
+      GitHub had settled them; the arm stopped reading before it did. Only #16250 and #16269 had merged by then (22:45Z).
+    - On the core host the same hold is rare in the Nov 1-2 live window (1 review-lane and 3 sweep-lane unknown holds): the local
+      batch review of PRs many commits behind main is where it concentrates.
+    READ at origin/main 7338c1fda: attemptPlanPrMergeSteps re-reads only PLAN_PR_UNKNOWN_MAX_REREADS (3) times at
+    REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS (2 s), then holds. W1-T9212's light-pass re-evaluation sees the hold only in the ledger
+    of the daemon that wrote it, so a local review's hold is not re-evaluated by the host.
+    WHY NOT "ARM ANYWAY": GitHub's auto-merge would wait for mergeability itself, but W1-T5615 never arms a plan PR because an armed
+    PR merges behind main without the plan merge-safety ruling (#8996 and #8997 merged a duplicate key that way). A code PR already
+    arms on unknown, so this task is plan PRs only.
+    W1-T11163 DOES NOT COVER THIS: it acts only on mergeable=MERGEABLE with mergeable_state=blocked.
+  design: |
+    1. measuredPlanPrSettleWait(ledgerLines): the p90 of settle_ms over automerge.plan_pr_mergeability_settled rows, or undefined
+       with no rows. No fixed number: undefined keeps today's three re-reads.
+    2. After the three re-reads, attemptPlanPrMergeSteps keeps reading with a doubling sleep from REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS
+       until the learned wait is spent or the read settles. A settled read logs the settled row (settle_ms from the first unknown
+       read, behind_by) and falls through to the existing decision unchanged.
+    3. Nothing else moves: the hold row, its remedy, planPrUnknownElapsedMs and the W1-T5733 bound are as today.
+  falsifier: |
+    At origin/main a plan PR whose review reads mergeable_state unknown for the first 6 s and clean after is held as
+    plan-pr-held/mergeability-unknown and left unmerged, as #16251, #16256, #16286, #16308 and #16332 were on 2026-11-02.
+  note: |
+    Reserved with rmd next-task-id --branch plan-file-1793665627631. Not yet in this shard: a local review's PASS also did not
+    count for the host, which disposed #16251, #16286 and #16308 as post-review at 00:11Z. That is a different cause (the host's
+    reading of a status it did not post) and is reported separately.

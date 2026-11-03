@@ -102,7 +102,7 @@ test("W1-T3207: source PRs do not invoke the quieter ci or test-slow harnesses",
   const ci = runBash(runnable("ci", "Test"));
   assert.equal(ci.status, 0, ci.stderr + ci.stdout);
   assert.equal(ci.calls, "", "ci's source branch must exit before node/npm can run a second harness");
-  assert.match(ci.stdout, /single instrumented full-suite run/);
+  assert.match(ci.stdout, /single instrumented test verdict/);
 
   const slow = runBash(runnable("test-slow-shard", "Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)"), {
     "STEPS_PLAN_READING_OUTPUTS_ESTABLISHED": "false",
@@ -131,7 +131,7 @@ test("W1-T3207: a PUSH to main still runs the ci harness — the skip is event-c
   );
   assert.doesNotMatch(
     push.stdout,
-    /single instrumented full-suite run/,
+    /single instrumented test verdict/,
     "the coverage-owns-the-run skip must not fire on a push, where coverage-ratchet does not run",
   );
 

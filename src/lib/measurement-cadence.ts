@@ -57,7 +57,7 @@ import {
   type WipeTestRunResult,
 } from "./wipe-test.js";
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
-import { loadPlan, loadPlanFromYaml, type Task, type TaskRisk } from "./plan.js";
+import { loadPlan, loadPlanFromYaml, mergePlanBlobsQuarantiningDuplicates, PlanBlobCache, type Plan, type Task, type TaskRisk } from "./plan.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
@@ -81,7 +81,7 @@ import {
   type InjectCoverageImprovementResult,
 } from "./coverage-improvement.js";
 import { handRunCensus, type HandRunCensusCadenceOpts, type HandRunCensusCadenceResult } from "./hand-run-census.js";
-import { lintTask } from "./task-linter.js";
+import { lintPlan, lintTask, type LintResult } from "./task-linter.js";
 import { machineShardFilingRefusal, machineShardHeaderLines } from "./machine-filing.js";
 import { mechanicalRulingRow, type MechanicalDecision } from "./mechanical-rulings.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
@@ -1091,7 +1091,7 @@ function escapeVerbCensusRegExp(s: string): string {
 export function runVerbCensus(opts: {
   checkoutDir?: string;
   stateDir: string;
-  ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult;
+  ledgerUnion: (stateDir: string, pattern: RegExp, fsDeps?: undefined, opts?: LedgerUnionOptions & { keep?: (line: string) => boolean }) => LedgerUnionResult;
   allowlist?: ReadonlyMap<string, string>;
   /** See {@link VerbCensusReaddir}. Absent ⇒ the real `readdirSync`, unchanged. */
   readdirImpl?: VerbCensusReaddir;
@@ -1138,23 +1138,21 @@ export function runVerbCensus(opts: {
   }
 
   const pattern = new RegExp(`"step":"(?:${measurable.map((m) => escapeVerbCensusRegExp(m.prefix)).join("|")})\\.`);
-  const union = opts.ledgerUnion(opts.stateDir, pattern);
+  const counts = new Map<string, number>();
+  const tally = (line: string): false => {
+    const m = /"step":"([^"]+)"/.exec(line);
+    const dot = m ? m[1].indexOf(".") : -1;
+    if (m && dot !== -1) counts.set(m[1].slice(0, dot), (counts.get(m[1].slice(0, dot)) ?? 0) + 1);
+    return false;
+  };
+  const union = opts.ledgerUnion(opts.stateDir, pattern, undefined, { keep: tally });
   if (!union.ok) {
     return refuse(
       `ledger corpus incomplete under ${union.stateDir} (${union.archiveCount} archive(s), ${union.unread.length} unread)`,
       { measurableCount: measurable.length, unmeasurableCount: unmeasurableVerbs.length, unmeasurableVerbs },
     );
   }
-
-  const counts = new Map<string, number>();
-  for (const line of union.matches) {
-    const m = /"step":"([^"]+)"/.exec(line);
-    if (!m) continue;
-    const dot = m[1].indexOf(".");
-    if (dot === -1) continue;
-    const prefix = m[1].slice(0, dot);
-    counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
-  }
+  for (const line of union.matches) tally(line);
 
   const allow = opts.allowlist ?? EMISSIONS_ALLOWLIST;
   const silentVerbs: string[] = [];
@@ -1495,10 +1493,15 @@ export interface PlanReconcileCadenceResult {
   drift: number;
   /** WHICH ones — a count with no names cannot be checked, and this report exists to be checked. */
   taskIds: string[];
-  /** `clear` = no drift; `reported` = drift below the threshold, nothing landed; `landed` = the
-   *  writes were handed to the caller's landing seam. */
+  /** `clear` = no drift; `reported` = below the threshold or every write held; `landed` = landable writes went to the landing seam. */
   status: "clear" | "reported" | "landed";
   threshold: number;
+  held?: PlanReconcileHeld[];
+}
+
+export interface PlanReconcileHeld {
+  taskId: string;
+  rule: string;
 }
 
 /** {@link planReconcileCadence}'s input. `land` is the ONLY way this function can affect the
@@ -1510,9 +1513,8 @@ export interface PlanReconcileCadenceOpts {
   isCreditedMerged: (taskId: string) => boolean | undefined;
   /** How much drift is worth a plan diff. Below it the cadence reports and lands nothing. */
   threshold: number;
-  /** Caller-owned landing bridge; absent = report only. Never dirty the daemon checkout:
-   *  `checkCliFreshness` would refuse it and break self-sync. */
-  land?: (writes: ReadonlyArray<{ taskId: string; text: string }>) => void;
+  /** Caller-owned landing bridge; absent = report only. Never dirty the daemon checkout (`checkCliFreshness` refuses it). */
+  land?: (writes: ReadonlyArray<{ taskId: string; text: string }>) => void | { held: PlanReconcileHeld[]; landed: number };
 }
 
 /** Schedule `reconcilePlan` unchanged: report every cycle; land only at or above the threshold. */
@@ -1527,8 +1529,10 @@ export function planReconcileCadence(opts: PlanReconcileCadenceOpts): PlanReconc
   if (taskIds.length < opts.threshold || opts.land === undefined) {
     return { drift: taskIds.length, taskIds, status: "reported", threshold: opts.threshold };
   }
-  opts.land(writes);
-  return { drift: taskIds.length, taskIds, status: "landed", threshold: opts.threshold };
+  const outcome = opts.land(writes);
+  const held = outcome?.held ?? [];
+  const status = outcome !== undefined && outcome.landed === 0 ? "reported" : "landed";
+  return { drift: taskIds.length, taskIds, status, threshold: opts.threshold, ...(held.length > 0 ? { held } : {}) };
 }
 
 export interface PlanReconcileShardRecord {
@@ -1543,6 +1547,43 @@ export interface PlanReconcileCadenceInputOptions {
   creditedMergedIds: () => ReadonlySet<string>;
   land: (inputs: readonly { relPath: string; content: string }[]) => void;
   threshold?: number;
+  lint?: PlanReconcileLint;
+}
+
+type PlanReconcileWrite = { taskId: string; text: string };
+export type PlanReconcileHold = (checkoutRoot: string, records: readonly PlanReconcileShardRecord[], writes: readonly PlanReconcileWrite[]) => { landable: PlanReconcileWrite[]; held: PlanReconcileHeld[] };
+export type PlanReconcileLint = (plan: Plan, only: ReadonlySet<string>, checkoutRoot: string) => Map<string, LintResult>;
+
+const lintAsTheShardCensus: PlanReconcileLint = (plan, only, root) => lintPlan(plan, () => ({ moduleExists: (rel) => existsSync(join(root, rel)) }), only);
+
+/** W1-T11175: hold each flip whose task newly gains a blocking lint rule, so one bad flip cannot refuse the rest. */
+export function planReconcileLintHold(lint: PlanReconcileLint = lintAsTheShardCensus): PlanReconcileHold {
+  return (checkoutRoot, records, writes) => {
+    const ids = new Set(writes.map((w) => w.taskId));
+    const replaced = new Map(writes.map((w) => [w.taskId, w.text]));
+    const shardDir = records.length > 0 ? dirname(records[0].path) : "";
+    const monolith = shardDir !== "" ? join(dirname(shardDir), "tasks.yaml") : "";
+    const head = { label: monolith, text: monolith !== "" && existsSync(monolith) ? readFileSync(monolith, "utf8") : "[]\n" };
+    const byPath = new Map(records.map((r) => [r.path, r]));
+    const onDisk = shardDir !== "" && existsSync(shardDir) ? readdirSync(shardDir).filter((f) => /\.ya?ml$/.test(f)).sort().map((f) => join(shardDir, f)) : [];
+    const shards = [...new Set([...onDisk, ...byPath.keys()])].map((path) => ({ path, record: byPath.get(path), text: byPath.get(path)?.text ?? readFileSync(path, "utf8") }));
+    const cache = new PlanBlobCache();
+    const blocking = (flipped: boolean): Map<string, LintResult> => {
+      const blobs = shards.map((s) => ({ label: s.path, text: (flipped && s.record ? replaced.get(s.record.taskId) : undefined) ?? s.text }));
+      return lint(mergePlanBlobsQuarantiningDuplicates([head, ...blobs], cache).plan, ids, checkoutRoot);
+    };
+    const rulesOf = (results: Map<string, LintResult>, id: string) => new Set((results.get(id)?.violations ?? []).filter((v) => v.severity === "block").map((v) => v.check));
+    const before = blocking(false);
+    const after = blocking(true);
+    const held: PlanReconcileHeld[] = [];
+    const landable = writes.filter((w) => {
+      const was = rulesOf(before, w.taskId);
+      const gained = [...rulesOf(after, w.taskId)].filter((rule) => !was.has(rule));
+      for (const rule of gained) held.push({ taskId: w.taskId, rule });
+      return gained.length === 0;
+    });
+    return { landable, held };
+  };
 }
 
 /** W1-T3970: adapt the production shard/credit readers to the pure cadence reducer. The caller
@@ -1557,12 +1598,14 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
     isCreditedMerged: (taskId) => credited.has(taskId),
     threshold: deps.threshold ?? 10,
     land: (writes) => {
-      const inputs = writes.map((write) => {
+      const { landable, held } = planReconcileLintHold(deps.lint)(deps.checkoutRoot, records, writes);
+      const inputs = landable.map((write) => {
         const path = byId.get(write.taskId);
         if (path === undefined) throw new Error(`plan reconciliation could not resolve shard ${write.taskId}`);
         return { relPath: relative(deps.checkoutRoot, path), content: write.text };
       });
-      deps.land(inputs);
+      if (inputs.length > 0) deps.land(inputs);
+      return { held, landed: inputs.length };
     },
   };
 }
@@ -2383,9 +2426,11 @@ export function buildKnowledgeMeasuredRow(result: KnowledgeMeasurementResult): R
 export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts): MeasurementCadenceRunResult {
   const registryPath = opts.registryPath ?? join(opts.stateDir, "inbox-proposals.json");
   const ledgerUnion = opts.ledgerUnion ?? resolveLedgerUnion;
+  noteMeasurementCadencePhase("previous_metrics");
   const previousMetrics = previousMeasurementCadenceMetrics(opts.stateDir, ledgerUnion);
 
   // ── rule-efficacy: no git needed, escalation is the ONE write in this whole module ──────────
+  noteMeasurementCadencePhase("rule_efficacy");
   const efficacyReport: RuleEfficacyReport = opts.ruleSignatures ? ruleEfficacyReport(opts.stateDir, opts.ruleSignatures) : ruleEfficacyReport(opts.stateDir);
   let escalatedProposalIds: string[] = [];
   if (opts.escalate) {
@@ -2415,10 +2460,13 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
         };
 
   // ── verdict-calibration + autonomy-rate share the ONE git dump read ──────────────────────────
+  noteMeasurementCadencePhase("verdict_calibration");
   const verdictMining = mineVerdictRows(opts.stateDir);
   const { rows } = verdictMining;
+  noteMeasurementCadencePhase("autonomy_rate");
   const autonomyLedger = mineAutonomyLedgerLines(opts.stateDir);
 
+  noteMeasurementCadencePhase("git_log");
   let gitDump = "";
   let gitReadError: string | undefined;
   try {
@@ -2430,6 +2478,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
 
   const vReport = verdictCalibrationReport(rows, gitDump, { gitReadError });
   const anyVerdictMeasurable = (vReport.byLane ?? []).some((c) => c.revertRate !== null);
+  noteMeasurementCadencePhase("blocked_ci_share");
   const blockedCiShare = blockedCiShareFromLedger(opts.stateDir, ledgerUnion);
 
   // ── W1-T3082: drift classification + escalation — see verdict-calibration.ts's own doc ───────
@@ -2494,6 +2543,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     zeroTouchRate: aReport.zeroTouchRate,
   };
 
+  noteMeasurementCadencePhase("revert_recall");
   let revertRecall: RevertRecallCadenceResult;
   if (!verdictMining.ledger.ok) {
     revertRecall = {
@@ -2535,6 +2585,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   }
 
   // ── the fourth verb: the adoption report (W1-T2266) ──────────────────────────────────────────
+  noteMeasurementCadencePhase("adoption_report");
   const adoptionReport = runAdoptionReport({
     checkoutDir: opts.checkoutDir,
     stateDir: opts.stateDir,
@@ -2543,6 +2594,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   });
 
   // ── the sixth verb: the verb census (W1-T2485) — see that section's own header doc above ───
+  noteMeasurementCadencePhase("verb_census");
   const verbCensus = runVerbCensus({
     checkoutDir: opts.checkoutDir,
     stateDir: opts.stateDir,
@@ -2550,11 +2602,13 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   });
 
   // ── wipe-test's report seat (W1-T2659): per-factor aggregates only above the pairing floor ──
+  noteMeasurementCadencePhase("wipe_test");
   const wipeTest = runWipeTestCadenceReport({
     stateDir: opts.stateDir,
     ledgerUnion,
   });
   // ── coverage-improvement: daemon-side reader for CI's merged coverage artifact ─────────────
+  noteMeasurementCadencePhase("coverage_improvement");
   const coverageImprovement = opts.coverageImprovement
     ? runCoverageImprovementCadence({ ...opts.coverageImprovement, stateDir: opts.stateDir, landingStateRoot: opts.landingStateRoot })
     : undefined;
@@ -2563,6 +2617,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   // each verb sequence that recurs across the policy floor of distinct days — see
   // hand-run-census.ts's module doc for the full design. Opt-in like coverageImprovement above,
   // for the same reason: its own ledger marker needs a caller-supplied run_id.
+  noteMeasurementCadencePhase("hand_run_census");
   const handRunCensusResult = opts.handRunCensus ? handRunCensus({ ...opts.handRunCensus, stateDir: opts.stateDir,
     landingStateRoot: opts.landingStateRoot }) : undefined;
 
@@ -2593,6 +2648,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   }
 
   // ── the board-review rung (W1-T2304): reads the whole open board, never one PR ───────────────
+  noteMeasurementCadencePhase("board_review");
   const boardReview = opts.boardReview
     ? buildBoardReview({
         policy: opts.boardReview.policy,
@@ -2607,6 +2663,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   // ── proof-queue-audit's offenders — a second producer into the same minter. Skipped when
   // `opts.proofDebt` is absent. `proofQueueAudit` never throws, so this can't turn a cadence tick
   // into a failure however large the backlog is.
+  noteMeasurementCadencePhase("proof_debt");
   let proofDebtReport: ProofQueueAuditReport | undefined;
   let proofDebtMint: ProofDebtMintCadenceResult | undefined;
   if (opts.proofDebt) {
@@ -2628,9 +2685,11 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   // ── W1-T3226: the plan-status drift report. Skipped when `opts.planReconcile` is absent.
   // `planReconcileCadence` performs no I/O of its own — its only outward effect is the caller's
   // `land` seam — so this cannot turn a cadence tick into a failure however large the drift is.
+  noteMeasurementCadencePhase("plan_reconcile");
   const planReconcile = opts.planReconcile ? planReconcileCadence(opts.planReconcile) : undefined;
 
   // ── W1-T4243: the knowledge rung, opt-in; its product is its own `knowledge.measured` row ─────
+  noteMeasurementCadencePhase("knowledge");
   const knowledge = opts.knowledge
     ? runKnowledgeMeasurement({ ...opts.knowledge, stateDir: opts.stateDir, now: nowDate, checkoutDir: opts.checkoutDir })
     : undefined;
@@ -2694,6 +2753,7 @@ export async function runMeasurementCadenceReportAsync(opts: MeasurementCadenceR
       wanted.set(keyOf(file, needle), { file, needle });
       return "unknown";
     };
+    noteMeasurementCadencePhase("adoption_ship_dates");
     const corpus = buildAdoptionCorpus(checkoutDir);
     scanUnadoptedSymbols(checkoutDir, corpus, record);
     scanUnadoptedFields(checkoutDir, record);
@@ -3441,6 +3501,27 @@ export interface MeasurementCadenceChildState {
   status: "running" | "done" | "failed" | "discarded";
   result?: MeasurementCadenceRunResult;
   error?: string;
+  phase?: MeasurementCadencePhase;
+}
+
+export interface MeasurementCadencePhase {
+  verb: string;
+  heapUsedMb: number;
+  heapLimitMb: number;
+  at: string;
+}
+
+let cadencePhaseSink: ((verb: string) => void) | undefined;
+
+/** W1-T11178: names the verb the cadence is entering; a child records it, since a heap abort leaves no JS stack. */
+export function noteMeasurementCadencePhase(verb: string): void {
+  cadencePhaseSink?.(verb);
+}
+
+function phaseAccount(phase: MeasurementCadencePhase | undefined): string {
+  return phase === undefined
+    ? "it died before the report's first verb"
+    : `last verb ${phase.verb}, heap ${phase.heapUsedMb} of ${phase.heapLimitMb} MB at ${phase.at}`;
 }
 
 export type MeasurementCadenceChildSpawn = (runId: string, statePath: string) => number;
@@ -3538,7 +3619,7 @@ export function measurementCadenceChildRunner(opts: {
         if (state?.status === "done" && state.result) return resolve(state.result);
         if (state?.status === "failed") return reject(new Error(`measurement cadence child ${runId} failed: ${state.error ?? "no error recorded"}`));
         if (state?.status === "running" && isAlive(pid)) return void setTimeout(look, pollMs).unref?.();
-        reject(new Error(`measurement cadence child ${runId} (pid ${pid}) exited without a result; stderr: ${measurementCadenceChildDeathDetail(opts.statePath)}`));
+        reject(new Error(`measurement cadence child ${runId} (pid ${pid}) exited without a result; stderr: ${measurementCadenceChildDeathDetail(opts.statePath)}; ${phaseAccount(state?.phase)}`));
       };
       look();
     });
@@ -3596,6 +3677,11 @@ export async function measurementCadenceChildMain(
       ? read.state
       : { runId, pid: process.pid, attempt: 1, startedAt: systemClock.date().toISOString(), status: "running" };
   };
+  cadencePhaseSink = (verb) => {
+    const heap = getHeapStatistics();
+    const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
+    writeChildState(statePath, { ...recorded(), phase: { verb, heapUsedMb: mb(heap.used_heap_size), heapLimitMb: mb(heap.heap_size_limit), at: systemClock.iso() } });
+  };
   try {
     const result = await run();
     writeChildState(statePath, { ...recorded(), status: "done", result });
@@ -3603,6 +3689,8 @@ export async function measurementCadenceChildMain(
   } catch (e) {
     writeChildState(statePath, { ...recorded(), status: "failed", error: String((e as Error)?.message ?? e) });
     return 1;
+  } finally {
+    cadencePhaseSink = undefined;
   }
 }
 

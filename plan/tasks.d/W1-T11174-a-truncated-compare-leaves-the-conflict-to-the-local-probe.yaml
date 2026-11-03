@@ -1,0 +1,45 @@
+- id: W1-T11174
+  title: A compare truncated at GitHub's 300-file cap, or one that found no shared path, is missing conflict evidence, so the local merge probe supplies it, and every dirty PR waiting on its files is probed that pass
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, where a dirty PR's conflict files come from, read in the compare producer and the merge probe; high because probe evidence admits the merge-conflict worker
+  band_meaning: blast-radius
+  origin: operator-session#conflict-findings-2026-11-03
+  plan_refs:
+    - W1-T9454
+    - W1-T984
+    - W1-T9723
+    - W1-T4914
+    - W1-T11062
+  files:
+    - src/lib/open-prs-rest.ts
+    - src/lib/merge-probe.ts
+    - test/ci/a-truncated-compare-leaves-the-conflict-to-the-local-probe.test.ts
+    - test/a-dirty-pr-takes-its-conflict-evidence-from-the-local-merge-probe.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Replaying #15520 (W1-T10842, head 8a8bdb3, merge base 2871269): when either compare side lists GitHub's full 300 files, hydrateMergeConflictEvidence records a gap naming the cap and no evidence, while a complete list still yields its intersection; applyMergeProbeEvidence gives a dirty PR whose compare evidence is empty the probe's files, and captured compare evidence still wins; and probeOpenPrMerges probes every dirty PR without captured files in one pass even when that exceeds its limit"
+      proof: "unit test: test/ci/a-truncated-compare-leaves-the-conflict-to-the-local-probe.test.ts"
+    - claim: The compare producer names GitHub's 300-file compare cap as GITHUB_COMPARE_FILE_LIST_CAP
+      proof: "grep: GITHUB_COMPARE_FILE_LIST_CAP in src/lib/open-prs-rest.ts"
+  rationale: |
+    OBSERVED in ~/Remudero-notes/conflict-evidence-1103 (7-day conflict rows, origin/main 7338c1fd) and re-read on origin/main c0a6f1c74.
+    - mergeConflictEvidenceSteps (src/lib/open-prs-rest.ts) intersects two GitHub compare responses by path. The header above it (about line 1485) calls the result "a superset of git's". GitHub's compare lists at most 300 files, so past 300 that is false.
+    - #15520 (W1-T10842, head 8a8bdb386f9d): since the merge base 2871269 the PR touched 6 paths and main 942 (git diff --name-only, re-measured locally). The one conflicting path, test/worker/spawn/compress-src-lib-worker-provider-ts.test.ts, is 922nd of main's 942. Every pass from 2026-11-02T18:38Z to 19:54Z disposed "no valid conflicting-file evidence was captured: GitHub's compare found no path changed on both sides since the merge base". The local probe found that path at 20:37:38Z, too late: the PR was hand-fixed (the only hand fix of the 42 PRs that went dirty in 7 days).
+    - applyMergeProbeEvidence (src/lib/merge-probe.ts, about line 86) skips any PR whose mergeConflict is not undefined, so an empty list outranks a probe conflict. The W1-T9454 test pins that: "even an empty compare result takes precedence". 33 conflict-disposed passes on 4 PRs read empty or missing compare evidence.
+    - probeOpenPrMerges already ranks dirty and unknown heads first, but stops at MERGE_PROBE_LIMIT (3) for every PR. A dirty PR with no files beyond the third waits a pass per main move, and its disposition waits or escalates in the meantime.
+  design: |
+    1. mergeConflictEvidenceSteps throws when either compare response lists GITHUB_COMPARE_FILE_LIST_CAP (300) files or more, naming the count and the cap. The existing per-PR catch records it as the PR's mergeConflictGap and leaves mergeConflict undefined. The header's superset sentence is reworded in place to say it holds only under the cap.
+    2. applyMergeProbeEvidence skips only a PR whose compare evidence is captured (hasCapturedMergeConflictEvidence). An undefined or empty one takes the probe's evidence.
+    3. probeOpenPrMerges keeps its limit for optional probes. Every eligible PR GitHub reads dirty (mergeState or mergeableState) that lacks captured files, and has no probe for this (head, main) yet, is added to that pass's targets.
+    4. The W1-T9454 test's "even an empty compare result takes precedence" assertion is inverted: the empty list now takes the probe's files. That is the only existing assertion this changes.
+    5. Tests replay #15520's counts through hydrateMergeConflictEvidence with a fake fetcher, and drive probeOpenPrMerges and applyMergeProbeEvidence over a gitRepo() fixture with two real conflicts and limit 1. Show delete-the-fix: the new tests go red with src/lib/open-prs-rest.ts and src/lib/merge-probe.ts restored from base.
+    Comment-neutral in src. Out of scope: GitHub-dirty but locally-clean merges (#15602 rename skew, findings item 7), and a no-worker merge for that case (findings item 4).
+  note: |
+    Reserved with rmd next-task-id for plan-file-1793667957440. Operator ruling 2026-11-02: rmd must resolve merge conflicts automatically, with a gardener as the backstop. Findings item 3 (local probe evidence beats empty or truncated compare) of ~/Remudero-notes/conflict-findings-2026-11-03.md, built as the brief's item 2. Hand-built on a run-W1-T11174 branch.

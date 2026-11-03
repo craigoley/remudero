@@ -15,6 +15,11 @@
     - src/lib/public-model-vocabulary.ts
     - src/lib/field-trials-flow.ts
     - test/routing/the-field-trials-snapshot-counts-guardrail-fires-per-model.test.ts
+    - "src/lib/benchmark-run.ts"
+    - "src/lib/escalate.ts"
+    - "src/lib/inbox.ts"
+    - "src/lib/relint.ts"
+    - "src/lib/risk-judge.ts"
   status: queued
   attempts: 0
   rationale: |

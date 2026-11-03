@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -23,3 +23,13 @@
     Add the named regression in test/github/compress-src-lib-branch-reaper-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The description and files list show a comment-only edit to one source file plus one new test file; no secrets, auth, deploy, merge or review policy is named."
+      - "Acceptance requires executable tokens to be preserved and verified by a unit test against the pre-compression source, so any behavioral drift can be checked."
+      - "The family track record is 33 merged and 0 declined, and the plan explicitly grants no restart, release or publication override. The only absent file is the new test the change itself creates."
+    judged_at: "2026-11-03T03:42:37.581Z"
+    pin: "a1a8cae118bc99e96cd16c4dfbcc5b840b8875a9c271b786f6937ace7fd07e29"

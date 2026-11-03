@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { test } from "node:test";
@@ -8,6 +8,7 @@ import { parse, stringify } from "yaml";
 import { inboxBakeoffCommand } from "#src/run-task.js";
 import { inboxDraftPrompt } from "#src/lib/inbox.js";
 import { loadPlan } from "#src/lib/plan.js";
+import { CASH_TPM_STATE_FILE, resetLearnedCashCapacity } from "#src/lib/worker-provider.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
@@ -110,5 +111,26 @@ test("a monolith-only plan still reaches one non-spending bakeoff replay", async
       return [];
     }), 0);
     assert.equal(replays, 1);
+  });
+});
+
+test("the production replay hands the bake-off each deployment's learned per-minute limit", async () => {
+  await withFixture(undefined, async ({ command }) => {
+    const configPath = join(process.env.HOME!, ".config", "remudero", "config.json");
+    const config = JSON.parse(readFileSync(configPath, "utf8")) as { root: string; workerProviders?: unknown };
+    const endpoint = "https://fixture.example/openai";
+    writeFileSync(configPath, JSON.stringify({ ...config, workerProviders: { cashEndpoint: endpoint } }));
+    writeFileSync(join(config.root, "state", CASH_TPM_STATE_FILE), JSON.stringify({
+      [JSON.stringify([endpoint, "DeepSeek-V4-Flash"])]: { limitTokens: 20000, renewalSeconds: 60, observedAt: "2026-11-02T00:00:00.000Z" },
+    }));
+    resetLearnedCashCapacity();
+    try {
+      let seen: number | undefined;
+      assert.equal(await command(async ({ learnedLimit }) => {
+        seen = learnedLimit?.("DeepSeek-V4-Flash");
+        return [];
+      }), 0);
+      assert.equal(seen, 20000);
+    } finally { resetLearnedCashCapacity(); }
   });
 });
