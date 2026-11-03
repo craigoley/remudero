@@ -41,6 +41,8 @@ import {
 } from "../src/lib/relint.js";
 import { lintTask } from "../src/lib/task-linter.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { ghShim } from "./helpers/gh-shim.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
