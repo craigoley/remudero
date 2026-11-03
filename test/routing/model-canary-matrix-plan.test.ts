@@ -61,6 +61,23 @@ function census(cases: readonly CanaryCase[], rows: ModelCanaryConfigRow[], opti
   return { ...body, digest: hash(body), rows };
 }
 
+function censusWithRows(base: ModelCanaryConfigCensusV1, rows: ModelCanaryConfigRow[]): ModelCanaryConfigCensusV1 {
+  const canonicalRows = [...rows].map(row => ({ ...row,
+    eligibility: { ...row.eligibility, reasons: [...row.eligibility.reasons].sort(compareCodeUnits) },
+    caseEligibility: [...row.caseEligibility].map(evidence => ({ ...evidence,
+      reasons: [...evidence.reasons].sort(compareCodeUnits) })).sort((a, b) => compareCodeUnits(a.caseId, b.caseId)) }))
+    .sort((a, b) => compareCodeUnits(a.configId, b.configId));
+  const body = { version: base.version, asOf: base.asOf, maxEvidenceAgeMs: base.maxEvidenceAgeMs,
+    evidenceDigest: base.evidenceDigest, sourceDigests: base.sourceDigests,
+    caseSet: { suiteVersion: base.caseSet.suiteVersion, caseDigest: base.caseSet.caseDigest,
+      caseIds: [...base.caseSet.caseIds].sort(compareCodeUnits) },
+    declarations: base.declarations,
+    declarationCoverage: { ...base.declarationCoverage, reasons: [...base.declarationCoverage.reasons].sort(compareCodeUnits) },
+    tableCoverage: { ...base.tableCoverage, reasons: [...base.tableCoverage.reasons].sort(compareCodeUnits) },
+    rows: canonicalRows };
+  return { ...base, ...body, digest: hash(body), rows };
+}
+
 test("matrix shards cover every eligible configuration and case once within 128 slots", () => {
   const cases = commonCanarySuite().slice(0, 2);
   const a = configRow({ model: "model-a", cases });
@@ -150,6 +167,25 @@ test("matrix readiness stays incomplete with no eligible slots and preserves den
   assert.ok(incomplete.eligibility[0]!.reasons.includes("native-pin-incomplete"));
   assert.deepEqual(incomplete.denominator.slots, { eligible: 0, excluded: 0, unknown: 1, planned: 0 });
   assert.equal(incomplete.shards.length, 0);
+});
+
+test("matrix census rejects duplicate and conflicting configuration identities", () => {
+  const cases = commonCanarySuite().slice(0, 1);
+  const row = configRow({ model: "duplicate-check", cases });
+  const base = census(cases, [row]);
+  const input = { cases, day: "2026-11-02", seed: "duplicate-check", replicates: 1 };
+
+  const duplicate = censusWithRows(base, [base.rows[0]!, structuredClone(base.rows[0]!)]);
+  assert.throws(() => planCanaryMatrix({ census: duplicate, ...input }), /canary-matrix-duplicate-config-id/);
+
+  const aliasConfiguration = { ...base.rows[0]!.configuration,
+    provider: "openweight" as ModelCanaryConfigRow["configuration"]["provider"] };
+  assert.equal(modelCanaryConfigId(aliasConfiguration), row.configId,
+    "deprecated provider alias hashes to the same canonical configuration ID");
+  assert.notDeepEqual(aliasConfiguration, base.rows[0]!.configuration,
+    "raw census identity retains the submitted provider spelling");
+  const conflicting = censusWithRows(base, [base.rows[0]!, { ...base.rows[0]!, configuration: aliasConfiguration }]);
+  assert.throws(() => planCanaryMatrix({ census: conflicting, ...input }), /canary-matrix-conflicting-config-id/);
 });
 
 test("matrix shard digests are deterministic across input ordering", () => {

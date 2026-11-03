@@ -228,6 +228,11 @@ test("configuration census rejects non JSON scorer values before hashing", () =>
   const largeCases = ["large-a", "large-b"].map(id => ({ ...withExpected({ text: largeExpected }), id }));
   assert.throws(() => census([], { cases: largeCases }), /canary-config-census-case-set-byte-bound/);
 
+  const oversizedUtf8String = "é".repeat(1_048_577);
+  assert.ok(Buffer.byteLength(oversizedUtf8String, "utf8") > 2 * 1024 * 1024);
+  assert.throws(() => census([], { cases: [withExpected({ text: oversizedUtf8String })] }),
+    /canary-config-census-case-set-byte-bound/);
+
   // A work sentinel makes removing the byte guard fail without exhausting the test host.
   let leafVisits = 0;
   let expanded: unknown = new Proxy({ leaf: true }, {
@@ -583,6 +588,18 @@ test("configuration census requires explicit current evidence for model and effo
   assert.equal(withOverride.declarations.find(row => row.projection === "override")!.scope, "configuration-override");
   assert.equal(withOverride.declarationCoverage.declared,
     withOverride.declarations.filter(row => row.scope === "mounted-route").length);
+
+  const staleOverride = census([config], { capabilities: [capability], access: [access],
+    overrides: [{ ...override, asOf: "2026-11-02T11:59:59.000Z" }], caseEvidence: [caseRow] });
+  assert.equal(staleOverride.rows[0]!.eligibility.state, "unknown");
+  assert.ok(staleOverride.rows[0]!.eligibility.reasons.includes("model-override-evidence-not-current-or-eligible"));
+  assert.ok(staleOverride.rows[0]!.eligibility.reasons.includes("effort-override-evidence-not-current-or-eligible"));
+
+  const ineligibleOverride = census([config], { capabilities: [capability], access: [access],
+    overrides: [{ ...override, state: "unknown", reasons: ["override-not-qualified"] }], caseEvidence: [caseRow] });
+  assert.equal(ineligibleOverride.rows[0]!.eligibility.state, "unknown");
+  assert.ok(ineligibleOverride.rows[0]!.eligibility.reasons.includes("model-override-evidence-not-current-or-eligible"));
+  assert.ok(ineligibleOverride.rows[0]!.eligibility.reasons.includes("effort-override-evidence-not-current-or-eligible"));
   assert.throws(() => census([config], { capabilities: [capability], access: [access],
     overrides: [{ ...override, apiKey: "secret-test-value" } as ModelCanaryConfigOverrideEvidence] }), /override-evidence-invalid/);
 });
