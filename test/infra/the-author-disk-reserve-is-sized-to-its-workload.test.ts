@@ -110,6 +110,8 @@ test("W1-T10947: unbounded profiles, full coverage, missing allocation evidence 
     ['unbounded-profile', {...genuine, budgets: {}}],
     ['unbounded-profile:scratch', {...genuine, budgets: {...budgets, scratch: uncosted}}],
     ['unbounded-profile:scratch', {...genuine, budgets: {...budgets, scratch: {...budget, runtimeBytes: -1}}}],
+    ['unbounded-profile:overflow:diagnostics+workspace', {...genuine, budgets: {...budgets,
+      diagnostics: {...budget, allocationBytes: Number.MAX_SAFE_INTEGER}, workspace: {...budget, allocationBytes: Number.MAX_SAFE_INTEGER}}}],
     ['missing-allocation-evidence:no-context', genuine, null],
     ['missing-allocation-evidence:none-observed', genuine, {...context, allocations: {}}],
     ['missing-allocation-evidence:scratch', genuine, {...context, allocations: {...context.allocations,
