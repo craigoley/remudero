@@ -7,7 +7,10 @@
   type: recon
   verify: human
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=5c5d87130dbf1b9b
+  # backlog gardener: placed=2026-11-03T14:49:44.494Z
   attempts: 0
   files:
     - src/run-task.ts
