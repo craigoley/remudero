@@ -19,6 +19,7 @@
     - src/run-task.ts
     - src/cli/commands/run-task-verb.ts
     - scripts/census-precheck.mjs
+    - src/lib/config-schema.ts
     - test/ci/gates/a-light-pre-open-gate-is-measured-beside-the-full-one.test.ts
   status: queued
   attempts: 0
@@ -57,4 +58,4 @@
   note: |
     reservation hand-off: run-unfiled-1793629687846 -> run-unfiled-1793629687846
     Reserved with rmd next-task-id from the operator checkout (W1-T11105 on run-unfiled-1793629687846). Operator ruling 2026-11-02: "Shadow first, then switch". The test path is where rmd test-place puts a suite importing src/lib/preopen-gate.ts; a builder whose final imports place it elsewhere amends this record first.
-    Amended 2026-11-03 before any build (scope-amendment/W1-T11105-derived-shadow): it derives the shadow from the full gate's step log instead of running a second gate; scripts/census-precheck.mjs joins files.
+    Amended 2026-11-03 before any build (scope-amendment/W1-T11105-derived-shadow): it derives the shadow from the full gate's step log instead of running a second gate; scripts/census-precheck.mjs joins files, and src/lib/config-schema.ts joins them because RMD_CENSUS_COUNTS_LOG must be registered in ENV_REGISTRY (test/env-var-registry.test.ts).
