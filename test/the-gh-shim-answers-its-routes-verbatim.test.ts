@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ghShim } from "./helpers/gh-shim.js";
+import { ghShim, withGhShim } from "#test/helpers/gh-shim.js";
 
 function run(shim: { dir: string }, ...args: string[]) {
   return spawnSync("gh", args, {
@@ -51,5 +51,48 @@ test("W1-T6107: a writes route leaves its file byte for byte, in a directory it 
     assert.equal(readFileSync(target, "utf8"), content);
   } finally {
     rmSync(out, { recursive: true, force: true });
+  }
+});
+
+
+test("the shared gh fixture owns executable lookup and cleanup after a returned value", async () => {
+  const previous = process.env.PATH;
+  let owned = "";
+  const value = await withGhShim([{ when: "scoped", stdout: "scoped fixture" }], async shim => {
+    owned = shim.dir;
+    assert.ok(process.env.PATH?.startsWith(`${owned}:`));
+    const child = spawnSync("gh", ["scoped"], { encoding: "utf8" });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout, "scoped fixture\n");
+    return 17;
+  });
+  assert.equal(value, 17);
+  assert.equal(process.env.PATH, previous);
+  assert.equal(existsSync(owned), false);
+});
+
+test("the shared gh fixture restores its caller and removes its executable after a synchronous throw", async () => {
+  const previous = process.env.PATH, failure = new Error("fixture callback failed");
+  let owned = "";
+  await assert.rejects(withGhShim([], shim => { owned = shim.dir; throw failure; }), error => error === failure);
+  assert.equal(process.env.PATH, previous);
+  assert.equal(existsSync(owned), false);
+});
+
+test("the shared gh fixture preserves an absent environment entry after an asynchronous rejection", async () => {
+  const previous = process.env.PATH, failure = new Error("async fixture callback failed");
+  let owned = "";
+  delete process.env.PATH;
+  try {
+    await assert.rejects(withGhShim([], async shim => {
+      owned = shim.dir;
+      await Promise.resolve();
+      throw failure;
+    }), error => error === failure);
+    assert.equal(process.env.PATH, undefined);
+    assert.equal(existsSync(owned), false);
+  } finally {
+    if (previous === undefined) delete process.env.PATH;
+    else process.env.PATH = previous;
   }
 });
