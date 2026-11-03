@@ -5,8 +5,9 @@ import { acquireDrainLock, DrainLockError } from "./drain-lock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import { renderBakeoff, type BakeoffCandidate, type BakeoffRow } from "./inbox-bakeoff.js";
+import { CASH_RESPONSES_DEPLOYMENTS } from "./cash-responses.js";
 import { readLedgerUnionRecordsSync } from "./ledger-grep.js";
-import { OPENWEIGHT_REASONING_EFFORTS } from "./worker-provider.js";
+import { isFoundryClaudeDeployment, OPENWEIGHT_REASONING_EFFORTS } from "./worker-provider.js";
 
 export interface DeployedModel {
   model: string;
@@ -33,7 +34,10 @@ export function findUntrialedModels(deployed: readonly DeployedModel[], trialed:
 
 export function deploymentCandidates(models: readonly DeployedModel[], incumbent: DeploymentBakeoffCandidate): DeploymentBakeoffCandidate[] {
   return [incumbent, ...models.flatMap((model) => {
-    const efforts = model.billing === "cash" ? OPENWEIGHT_REASONING_EFFORTS[model.model] ?? model.efforts : model.efforts;
+    // Responses and Foundry Claude send effort natively; a chat deployment with no effort row drops reasoning_effort
+    // at transport, so its effort arms would only repeat thinking off.
+    const native = CASH_RESPONSES_DEPLOYMENTS[model.model] !== undefined || isFoundryClaudeDeployment(model.model);
+    const efforts = model.billing !== "cash" ? model.efforts : OPENWEIGHT_REASONING_EFFORTS[model.model] ?? (native ? model.efforts : []);
     const arms: Array<string | undefined> = model.billing === "cash" ? [undefined, ...new Set(efforts)] : [...new Set(efforts)];
     return arms.map((effort) => ({
       id: `${key(model)}:${effort ?? "off"}`, label: `${model.billing} ${model.model} (${effort ?? "thinking off"})`,

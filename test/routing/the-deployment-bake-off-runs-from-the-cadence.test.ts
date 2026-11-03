@@ -9,7 +9,7 @@ import { runDeploymentBakeoff, readBakeoffTrialState, type DeployedModel } from 
 import { scoreCandidate } from "#src/lib/inbox-bakeoff.js";
 import { loadProposalRegistry } from "#src/lib/inbox.js";
 import { loadMounts, mountsPath } from "#src/lib/mounts.js";
-import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_REASONING_EFFORTS, OpenWeightAllowanceExhaustedError, OpenWeightRequestTooLargeError, openWeightDeploymentReady, selectOpenWeightModel, markOpenWeightDeploymentAbsent, clearOpenWeightAbsence } from "#src/lib/worker-provider.js";
+import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_REASONING_EFFORTS, isFoundryClaudeDeployment, OpenWeightAllowanceExhaustedError, OpenWeightRequestTooLargeError, openWeightDeploymentReady, selectOpenWeightModel, markOpenWeightDeploymentAbsent, clearOpenWeightAbsence } from "#src/lib/worker-provider.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "#src/lib/cash-responses.js";
 import type { Config } from "#src/lib/config.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
@@ -97,7 +97,9 @@ test("W1-T10840: the measurement cadence runs the deployment bake-off once for a
     const models = measurementBakeoffDeployments(mounts);
     for (const model of models.filter((model) => model.billing === "cash")) {
       const admitted = OPENWEIGHT_REASONING_EFFORTS[model.model];
-      for (const effort of admitted ?? model.efforts!) {
+      // Only a native-effort transport (Responses, Foundry Claude) sends an effort a deployment has no row for.
+      const native = CASH_RESPONSES_DEPLOYMENTS[model.model] !== undefined || isFoundryClaudeDeployment(model.model);
+      for (const effort of admitted ?? (native ? model.efforts! : [])) {
         assert.ok(f.selected.some((selection) => selection.trial && selection.model === model.model && selection.effort === effort),
           `${model.model}/${effort} must reach the real worker's provider boundary`);
       }

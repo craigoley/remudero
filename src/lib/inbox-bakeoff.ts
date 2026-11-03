@@ -1,6 +1,8 @@
 import { systemClock, type Clock } from "./clock.js";
 import { inboxDraftPrompt, runDraftRung, type DraftSpawn, type Proposal } from "./inbox.js";
-import { cashCapacityReadiness, OPENWEIGHT_MAX_COMPLETION_TOKENS, openWeightEstimatedTokens, OpenWeightTruncatedReplyError } from "./worker-provider.js";
+import { cashDeploymentEndpoint, type Config } from "./config-schema.js";
+import { cashCapacityReadiness, hydrateCashCapacity, learnedCashLimit, OPENWEIGHT_MAX_COMPLETION_TOKENS, openWeightEstimatedTokens,
+  OpenWeightTruncatedReplyError } from "./worker-provider.js";
 
 /**
  * `rmd inbox-bakeoff` (W1-T4907) — the inbox-draft lead is chosen from MEASURED clean drafts per dollar, on the
@@ -78,6 +80,13 @@ export interface InboxBakeoffPorts {
   runId?: string;
   /** Endpoint-resolved learned limit; omission leaves an unlearned deployment eligible. */
   learnedLimit?: (model: string) => number | undefined;
+}
+
+/** The production `learnedLimit` port: each deployment's per-minute limit as its own endpoint last reported it
+ *  (W1-T10856's state file), so a capacity-short arm is skipped before it spends. */
+export function learnedBakeoffLimit(config: Pick<Config, "root" | "workerProviders">): (model: string) => number | undefined {
+  hydrateCashCapacity(config);
+  return (model) => learnedCashLimit(model, cashDeploymentEndpoint(config, model));
 }
 
 type Captured = { step: string; extra: Record<string, unknown> };

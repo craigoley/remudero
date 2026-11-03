@@ -39,8 +39,8 @@ test("W1-T4926: the trial covers every thinking level the model accepts", () => 
   const candidates = deploymentCandidates(deployed, incumbent);
   assert.deepEqual(candidates.map((c) => [c.model, c.effort]), [
     ["gpt-oss-120b", "medium"],
+    // W1-T10857: gpt-5-nano has no effort row, so Chat Completions drops reasoning_effort and only thinking off is real.
     ["gpt-5-nano", undefined],
-    ...["low", "medium", "high"].map((effort) => ["gpt-5-nano", effort]),
     ...["low", "medium", "high"].map((effort) => ["claude-sonnet-5-5", effort]),
   ]);
   assert.ok(candidates.every((candidate) => candidate.tools), "each deployed effort is an independently measured lane");
@@ -56,7 +56,7 @@ test("W1-T4926: the result is one proposal with the ranked table, and routing is
     const proposals = loadProposalRegistry(join(stateDir, "inbox-proposals.json"));
     assert.equal(proposals.length, 1);
     assert.match(proposals[0].summary, /\| rank \| candidate/);
-    assert.match(proposals[0].summary, /gpt-5-nano.*high/);
+    assert.match(proposals[0].summary, /gpt-5-nano \(thinking off\)/);
     assert.match(proposals[0].summary, /notional \(subscription\)/);
     assert.match(proposals[0].summary, /contract errors/);
     assert.deepEqual(JSON.parse(readFileSync(routingPath, "utf8")), mount);

@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { deploymentCandidates, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffCandidate } from "#src/lib/bakeoff-trigger.js";
-import { rankBakeoff, renderBakeoff, runInboxBakeoff, type BakeoffRow } from "#src/lib/inbox-bakeoff.js";
+import { learnedBakeoffLimit, rankBakeoff, renderBakeoff, runInboxBakeoff, type BakeoffRow } from "#src/lib/inbox-bakeoff.js";
 import { inboxDraftExampleFragmentYaml, inboxDraftPrompt } from "#src/lib/inbox.js";
-import { OPENWEIGHT_MAX_COMPLETION_TOKENS, OPENWEIGHT_REASONING_EFFORTS, OpenWeightTruncatedReplyError, openWeightEstimatedTokens } from "#src/lib/worker-provider.js";
+import { CASH_RESPONSES_DEPLOYMENTS } from "#src/lib/cash-responses.js";
+import { CASH_TPM_STATE_FILE, OPENWEIGHT_MAX_COMPLETION_TOKENS, OPENWEIGHT_REASONING_EFFORTS, OpenWeightTruncatedReplyError,
+  openWeightEstimatedTokens, resetLearnedCashCapacity } from "#src/lib/worker-provider.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 
 const incumbent = { id: "incumbent", label: "incumbent", model: "sonnet", billing: "subscription" as const, tools: true };
@@ -99,4 +101,39 @@ test("an unlearned arm runs and an ordinary spawn failure stays an other error",
   assert.equal(row.otherErrors, 1);
   assert.equal(row.truncated, 0);
   assert.equal(row.contractErrors, 0);
+});
+
+test("a cash chat deployment with no effort row is trialed thinking off only; a native-effort deployment keeps its efforts", () => {
+  const efforts = ["low", "medium", "high"];
+  assert.equal(OPENWEIGHT_REASONING_EFFORTS["gpt-5-nano"], undefined, "positive control: gpt-5-nano has no effort row");
+  const nano = deploymentCandidates([{ model: "gpt-5-nano", billing: "cash", efforts }], incumbent);
+  assert.deepEqual(nano.slice(1).map(c => c.effort), [undefined]);
+  const sol = Object.keys(CASH_RESPONSES_DEPLOYMENTS)[0]!;
+  assert.equal(OPENWEIGHT_REASONING_EFFORTS[sol], undefined);
+  const responses = deploymentCandidates([{ model: sol, billing: "cash", efforts }], incumbent);
+  assert.deepEqual(responses.slice(1).map(c => c.effort), [undefined, ...efforts]);
+  const foundry = deploymentCandidates([{ model: "claude-haiku-5-5", billing: "cash", efforts }], incumbent);
+  assert.deepEqual(foundry.slice(1).map(c => c.effort), [undefined, ...efforts], "Foundry Claude sends output_config.effort");
+  const subscription = deploymentCandidates([{ model: "haiku", billing: "subscription", efforts }], incumbent);
+  assert.deepEqual(subscription.slice(1).map(c => c.effort), efforts);
+});
+
+test("the production learned-limit port reads each deployment's persisted limit at its own endpoint", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-bakeoff-learned-limit-"));
+  try {
+    resetLearnedCashCapacity();
+    const endpoint = "https://fixture.example/openai";
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(join(root, "state", CASH_TPM_STATE_FILE), JSON.stringify({
+      [JSON.stringify([endpoint, "DeepSeek-V4-Flash"])]: { limitTokens: 20000, renewalSeconds: 60, observedAt: "2026-11-02T00:00:00.000Z" },
+    }));
+    const limit = learnedBakeoffLimit({ root, workerProviders: { cashEndpoint: `${endpoint}/` } });
+    assert.equal(limit("DeepSeek-V4-Flash"), 20000);
+    assert.equal(limit("Kimi-K2.6"), undefined, "an unlearned deployment stays eligible");
+    resetLearnedCashCapacity();
+    assert.equal(learnedBakeoffLimit({ root })("DeepSeek-V4-Flash"), undefined, "no endpoint resolves, so nothing is learned");
+  } finally {
+    resetLearnedCashCapacity();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
