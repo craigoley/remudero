@@ -1515,6 +1515,9 @@ export const SERVE_HANDOFF_COALESCE_MS = 15 * 60_000;
 
 /** W1-T4229 BACKSTOP: fires only on a connection that never ends by itself (SSE, a hung client). */
 export const SERVE_RESTART_DRAIN_BOUND_MS = 10_000;
+/** W1-T10290, OPEN OPERATOR DECISION: whether serve's read-model oracle children start under the daemon's
+ *  `daemonMemory.heapGrowingPercent`. False until the operator rules: the plumbing ships with an empty flag list. */
+const SERVE_CHILDREN_UNDER_GROWTH_POLICY = false;
 
 /** {@link gateStaleCodeExit}'s constructor deps — every side effect injectable, same discipline
  *  {@link gatePrewarmOnClients} already follows for this module's other refcount gate. */
@@ -3324,8 +3327,16 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   });
   // W1-T9370: each worker module's first start (bundle or .ts source) is ledgered as worker.entry_resolved.
   setWorkerEntryLog(deps.log);
-  // W1-T10290: serve's read-model oracle children start under the daemon's growth percent; serve's own heap is unchanged.
-  const childHeapArgs = deps.readModel ? recordChildHeapGrowingPercent(readDaemonMemoryPolicy(policyPath(deps.questionsRoot)).policy) : [];
+  // W1-T10290: the plumbing carries the children's node flags to the read-model worker thread in its data; serve's own
+  // heap is never changed. OPEN OPERATOR DECISION (design 4, not taken here): do serve's per-pass oracle children start
+  // under `daemonMemory.heapGrowingPercent` (50 today, the row the daemon reads) or stay out of that policy? Until the
+  // operator rules, the shipped default is the empty flag list: no child changes. Expected saving if ruled in: the
+  // policy's own measurement is a 45% lower peak heap for about 14% less synthetic throughput at 50
+  // (DEFAULT_DAEMON_MEMORY_POLICY, 2026-10-10); it is NOT measured on the oracle child, whose peak
+  // `read_model.oracle_child_exited` (`child_max_rss_bytes` beside the new `node_args`) will show. To rule it in, set
+  // SERVE_CHILDREN_UNDER_GROWTH_POLICY to true.
+  const childHeapArgs = deps.readModel && SERVE_CHILDREN_UNDER_GROWTH_POLICY
+    ? recordChildHeapGrowingPercent(readDaemonMemoryPolicy(policyPath(deps.questionsRoot)).policy) : [];
   const readModel = deps.readModel && withNeedsYouView(createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository,
     childHeapArgs,
     selectedRegistryObservation: deps.selectedRegistryObservation,
