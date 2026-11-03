@@ -224,6 +224,28 @@ test("canary owner readback rejects stored private-grade disagreement", () => fi
   assert.equal(readOwnedPrivateTraceReceipt(dir, slot, valid.privateTrace.binding).state, "unavailable");
 }));
 
+test("canary owner readback refuses an unavailable run carrying a stored grade", () => fixture(dir => {
+  const [slot] = slots(), owner = openOwner(dir), base = outcome(slot);
+  const trace = privateTrace(slot, base.run.id);
+  const unavailable = { ...base, privateTrace: trace,
+    privateGrade: { state: "unavailable" as const, reason: base.reason } };
+  try { assert.equal(owner.claim(slot), "claimed"); owner.terminal(slot, unavailable); }
+  finally { owner.close(); }
+  const control = readOwnedPrivateTraceReceipt(dir, slot, trace.binding);
+  assert.equal(control.state, "available");
+  if (control.state === "available") assert.equal(control.receipt.binding.runId, base.run.id);
+  const db = new DatabaseSync(join(dir, "model-canary-slots.sqlite"));
+  try {
+    const row = db.prepare("SELECT receipt FROM canary_slots_v1 WHERE id=?").get(slot.id) as { receipt: string };
+    const stored = JSON.parse(row.receipt) as { grade: unknown };
+    assert.equal(stored.grade, null);
+    stored.grade = { passed: true, reason: "verified", schemaValid: true };
+    db.prepare("UPDATE canary_slots_v1 SET receipt=? WHERE id=?").run(JSON.stringify(stored), slot.id);
+  } finally { db.close(); }
+  assert.deepEqual(readOwnedPrivateTraceReceipt(dir, slot, trace.binding),
+    { state: "unavailable", reason: "canary-owner-private-trace-unavailable-grade-invalid" });
+}));
+
 test("canary owner preserves legacy receipt shape and refuses tampered private traces", () => fixture(dir => {
   const [legacySlot, tracedSlot] = slots(), owner = openOwner(dir);
   try {

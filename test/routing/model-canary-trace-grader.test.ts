@@ -121,3 +121,79 @@ test("missing traces and scorer errors remain unavailable", () => {
   const malformed = { ...item, item: { ...item.item, expected: { value: undefined } } };
   assert.deepEqual(validatePrivateCorpus(bundle(malformed)), { state: "unavailable", reason: "private-corpus-json-invalid" });
 });
+
+test("trace grader refuses malformed bindings before consulting owner custody", () => {
+  const item = sampleCase(), corpus = validatePrivateCorpus(bundle(item));
+  assert.equal(corpus.state, "available");
+  if (corpus.state !== "available") return;
+  const malformed = { ...binding(corpus.corpus, item.item.id), self: {} };
+  malformed.self = malformed;
+  let reads = 0;
+  assert.deepEqual(loadPrivateTraceFromCustody(corpus.corpus, item.item.id, malformed, () => {
+    reads++;
+    return { state: "unavailable", reason: "should-not-read" };
+  }), { state: "unavailable", reason: "private-trace-binding-mismatch" });
+  assert.equal(reads, 0);
+});
+
+test("trace grader withholds receipts exceeding canonical depth or encoded size limits", () => {
+  const item = sampleCase(), corpus = validatePrivateCorpus(bundle(item));
+  assert.equal(corpus.state, "available");
+  if (corpus.state !== "available") return;
+  const expectedBinding = binding(corpus.corpus, item.item.id);
+  for (const depth of [60, 62]) {
+    const recorder = createApplicationTraceRecorder(corpus.corpus, item.item.id, expectedBinding);
+    let args: unknown = "leaf";
+    for (let index = 0; index < depth; index++) args = { child: args };
+    const event = recorder.dispatch("unlisted-tool", args);
+    assert.equal(event.denied, true);
+    const answer = JSON.stringify(item.item.expected), trace = recorder.finish(answer);
+    if (depth === 60) {
+      assert.ok(capturedPrivateTraceReceipt(trace), "shallower event retains a receipt");
+      const grade = gradePrivateTrace(corpus.corpus, item.item.id, answer, trace, expectedBinding);
+      assert.equal(grade.state, "scored");
+      if (grade.state === "scored") assert.equal(grade.reason, "unauthorized-action");
+    } else {
+      assert.equal(capturedPrivateTraceReceipt(trace), null);
+      assert.deepEqual(gradePrivateTrace(corpus.corpus, item.item.id, answer, trace, expectedBinding),
+        { state: "unavailable", reason: "private-trace-receipt-size-bound" });
+    }
+  }
+  for (const answer of ["x".repeat(65_536), "\u0000".repeat(65_536)]) {
+    const recorder = createApplicationTraceRecorder(corpus.corpus, item.item.id, expectedBinding);
+    const trace = recorder.finish(answer);
+    if (answer.startsWith("x")) {
+      const receipt = capturedPrivateTraceReceipt(trace);
+      assert.ok(receipt, "an answer within both raw and encoded limits retains a receipt");
+      assert.equal(receipt.finalText, answer);
+    } else {
+      assert.equal(capturedPrivateTraceReceipt(trace), null);
+      assert.deepEqual(gradePrivateTrace(corpus.corpus, item.item.id, answer, trace, expectedBinding),
+        { state: "unavailable", reason: "private-trace-receipt-size-bound" });
+    }
+  }
+});
+
+test("trace grader cannot establish binding equality when canonical serialization fails", t => {
+  const item = sampleCase(), corpus = validatePrivateCorpus(bundle(item));
+  assert.equal(corpus.state, "available");
+  if (corpus.state !== "available") return;
+  const expectedBinding = binding(corpus.corpus, item.item.id);
+  const answer = JSON.stringify(item.item.expected);
+  const trace = createApplicationTraceRecorder(corpus.corpus, item.item.id, expectedBinding).finish(answer);
+  const control = gradePrivateTrace(corpus.corpus, item.item.id, answer, trace, expectedBinding);
+  assert.equal(control.state, "scored");
+  if (control.state === "scored") assert.equal(control.passed, true);
+  const stringify = JSON.stringify;
+  let failures = 0;
+  const serializer = t.mock.method(JSON, "stringify", (...args: Parameters<typeof JSON.stringify>) => {
+    if (args[0] === expectedBinding.runId) { failures++; throw new Error("serializer-unavailable"); }
+    return stringify(...args);
+  });
+  try {
+    assert.deepEqual(gradePrivateTrace(corpus.corpus, item.item.id, answer, trace, expectedBinding),
+      { state: "unavailable", reason: "private-trace-binding-mismatch" });
+    assert.equal(failures, 1, "the canonical binding comparison reached the failing serializer");
+  } finally { serializer.mock.restore(); }
+  assert.deepEqual(gradePrivateTrace(corpus.corpus, item.item.id, answer, trace, expectedBinding), control);
+});

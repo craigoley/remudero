@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import test from "node:test";
 import { buildPrivateCanaryRequest, privateCorpusCaseMatches, privateCorpusMetadata, validatePrivateCorpus,
-  canonicalPrivateCanaryJson, type PrivateCanaryBundleV1, type PrivateCanaryCaseV1,
+  canonicalPrivateCanaryJson, snapshotPrivateCanaryJson, type PrivateCanaryBundleV1, type PrivateCanaryCaseV1,
   type PrivateCanaryPayloadV1 } from "#src/lib/model-canary-private-corpus.js";
 import { commonCanarySuite } from "#src/lib/model-canary-suite.js";
 
@@ -113,6 +113,41 @@ test("private corpus verifies signed holdout JSON with numeric object keys in le
   assert.deepEqual(result, { state: "unavailable", reason: "private-corpus-scorer-invalid" },
     "signature verification must succeed before the intentionally invalid scorer shape is rejected");
   assert.equal(canonicalPrivateCanaryJson({ "2": "two", "10": "ten" }), '{"10":"ten","2":"two"}');
+});
+
+test("private corpus charges exact encoded bytes for unicode strings", () => {
+  const samples = [
+    ["😀", '"😀"'],
+    ["\ud800", '"\\ud800"'],
+    ["\ud800a", '"\\ud800a"'],
+    ["\udc00", '"\\udc00"'],
+    ["é", '"é"'],
+    ["漢", '"漢"'],
+  ];
+  for (const [value, expected] of samples) {
+    const bytes = Buffer.byteLength(expected, "utf8");
+    assert.equal(snapshotPrivateCanaryJson(value, bytes), value);
+    assert.throws(() => snapshotPrivateCanaryJson(value, bytes - 1), /private-corpus-json-bound/);
+    assert.equal(canonicalPrivateCanaryJson(value, bytes), expected);
+    assert.throws(() => canonicalPrivateCanaryJson(value, bytes - 1), /private-corpus-json-bound/);
+  }
+});
+
+test("private corpus case matching refuses cyclic and accessor inputs without reading getters", () => {
+  const source = item("case-matching", "development", "matching-family", "matching-root");
+  const result = validatePrivateCorpus(bundle([source]));
+  assert.equal(result.state, "available");
+  if (result.state !== "available") return;
+  assert.equal(privateCorpusCaseMatches(result.corpus, source.item), true);
+  const cycle: Record<string, unknown> = {};
+  cycle.self = cycle;
+  assert.equal(privateCorpusCaseMatches(result.corpus, { ...source.item, expected: cycle }), false);
+  let getterCalls = 0;
+  const accessor = Object.defineProperty({ ...source.item }, "prompt", {
+    enumerable: true, get() { getterCalls++; return source.item.prompt; },
+  });
+  assert.equal(privateCorpusCaseMatches(result.corpus, accessor), false);
+  assert.equal(getterCalls, 0);
 });
 
 test("private corpus rejects enum arrays instead of coercing them into supported values", () => {
