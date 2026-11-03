@@ -1,0 +1,24 @@
+- id: W1-T11176
+  title: "THE PLAN PR review_queue_wait STAGE SLOWED ON THE LIGHT SURFACE — p50 11.3 min against a 0.2 min baseline over the last 24 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 3
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-regression:plan:review_queue_wait:light"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/the-plan-review-queue-wait-flow-stage-recovers.test.ts
+  acceptance:
+    - claim: "the plan review_queue_wait stage on the light surface returns under 2x its baseline p50"
+      proof: "grep: test(\"the plan review_queue_wait stage recovers\" in test/sweep/the-plan-review-queue-wait-flow-stage-recovers.test.ts"
+  note: "Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open."
+  rationale: |
+    plan PRs, stage review_queue_wait on the light surface: p50 11.3 min against a 0.2 min baseline (rolling).
+    Last 24 h: n 44, p50 11.3, p90 237.4 min.
+    Slowest PRs: #16191 (383.7 min), #16147 (344.6 min), #16210 (271.5 min).
+    Find what these PRs share at this stage before changing a bound.
