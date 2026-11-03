@@ -1,6 +1,7 @@
 // W1-T5723: the measurement cadence's child-process entry, spawned by `childMeasurementCadenceSpawn`. W1-T11179: it
 // mints and renews its own App token, as the daemon does, instead of reading the GH_TOKEN it was spawned with.
 // W1-T6495: it measures the config the daemon named, never one from $HOME, resolved inside the run (a bad one fails).
+import type { Clock } from "./lib/clock.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { appendLedger, type LedgerLine } from "./lib/ledger.js";
 import { ledgerPathFor } from "./lib/ledger-path.js";
@@ -18,7 +19,7 @@ export async function withMeasurementCadenceChildToken(opts: {
   refresh?: Parameters<typeof startInstallationTokenRefresh>[0]["refresh"];
   setTimer?: Parameters<typeof startInstallationTokenRefresh>[0]["setTimer"];
   clearTimer?: Parameters<typeof startInstallationTokenRefresh>[0]["clearTimer"];
-  now?: () => number;
+  clock?: Clock;
 }): Promise<number> {
   const env = opts.env ?? process.env;
   const ledger = opts.ledger ?? ((row: LedgerLine) => appendLedger(ledgerPathFor(namedMeasurementCadenceChildConfig(env) ?? loadConfig()), row));
@@ -27,7 +28,7 @@ export async function withMeasurementCadenceChildToken(opts: {
     refresh: opts.refresh ?? refreshReviewPublisherToken,
     setTimer: opts.setTimer,
     clearTimer: opts.clearTimer,
-    now: opts.now,
+    now: opts.clock ? () => opts.clock!.now() : undefined,
     log: (step, extra) => ledger({ run_id: opts.runId, task_id: "DAEMON", lane: "measurement-cadence", step, ...extra } as LedgerLine),
   });
   if (token.ready) await token.ready;

@@ -48,7 +48,7 @@ function harness(responses: Array<{ status: number; token?: string }>) {
     clearTimer: (timer: { unref?: () => void }) => {
       (timer as { cleared: boolean }).cleared = true;
     },
-    now: () => now,
+    clock: { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() },
     ledger: (row: LedgerLine) => rows.push(row),
   };
   return { deps, timers, calls, rows, advance: (ms: number) => (now += ms) };
