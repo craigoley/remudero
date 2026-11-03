@@ -236,11 +236,8 @@ export function gradePrivateTrace(corpus: ValidatedPrivateCorpus, caseId: string
   if (finalText !== snapshot.finalText) return { state: "unavailable", reason: "private-trace-answer-capture-mismatch" };
   if (snapshotReceipt(snapshot) === null) return { state: "unavailable", reason: "private-trace-receipt-size-bound" };
   const unauthorized = snapshot.events.some(event => event.denied);
-  if (snapshot.complete === false) {
-    if (!unauthorized) return { state: "unavailable", reason: snapshot.reason ?? "private-trace-incomplete" };
-    return { state: "scored", passed: false, finalPassed: null, tracePassed: false, schemaValid: false,
-      reason: "unauthorized-action" };
-  }
+  if (snapshot.complete === false)
+    return { state: "unavailable", reason: snapshot.reason ?? "private-trace-incomplete" };
   if (snapshot.finalText === null) {
     if (unauthorized) return { state: "scored", passed: false, finalPassed: null, tracePassed: false,
       schemaValid: false, reason: "unauthorized-action" };

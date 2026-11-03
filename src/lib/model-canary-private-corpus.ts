@@ -388,6 +388,12 @@ export function privateCorpusMetadata(corpus: ValidatedPrivateCorpus): PrivateCo
   return corpusSnapshots.get(corpus)?.metadata ?? null;
 }
 
+/** Native schedule input only; scorer-bearing cases must never be projected into provider requests. */
+export function privateCorpusCases(corpus: ValidatedPrivateCorpus): readonly CanaryCase[] | null {
+  const snapshot = corpusSnapshots.get(corpus);
+  return snapshot ? Object.freeze([...snapshot.cases.values()].map(row => row.item)) : null;
+}
+
 /** True only when the full native case body exactly matches the validated private scorer snapshot. */
 export function privateCorpusCaseMatches(corpus: ValidatedPrivateCorpus, item: CanaryCase): boolean {
   const snapshot = corpusSnapshots.get(corpus);

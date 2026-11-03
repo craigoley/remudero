@@ -118,6 +118,19 @@ test("missing traces and scorer errors remain unavailable", () => {
   const cycle:Record<string,unknown>={}; cycle.self=cycle;
   assert.throws(()=>cyclicRecorder.dispatch("unlisted-tool",cycle),/private-trace-json-cycle/);
   assert.equal(gradePrivateTrace(corpus.corpus,item.item.id,answer,cyclicRecorder.finish(answer),expectedBinding).state,"unavailable");
+  const partial = createApplicationTraceRecorder(corpus.corpus, item.item.id, expectedBinding);
+  partial.dispatch("unlisted-tool", {});
+  assert.throws(() => partial.dispatch("unlisted-tool", cycle), /private-trace-json-cycle/);
+  const partialTrace = partial.finish(answer), receipt = capturedPrivateTraceReceipt(partialTrace)!;
+  assert.equal(receipt.complete, false);
+  assert.equal(receipt.events[0]?.denied, true, "the denied observation survives the later capture error");
+  const unavailable = { state: "unavailable", reason: "private-trace-json-cycle" };
+  assert.deepEqual(gradePrivateTrace(corpus.corpus, item.item.id, answer, partialTrace, expectedBinding), unavailable);
+  const restored = loadPrivateTraceFromCustody(corpus.corpus, item.item.id, expectedBinding,
+    () => ({ state: "available", receipt }));
+  assert.equal(restored.state, "available");
+  if (restored.state === "available")
+    assert.deepEqual(gradePrivateTrace(corpus.corpus, item.item.id, answer, restored.trace, expectedBinding), unavailable);
   const malformed = { ...item, item: { ...item.item, expected: { value: undefined } } };
   assert.deepEqual(validatePrivateCorpus(bundle(malformed)), { state: "unavailable", reason: "private-corpus-json-invalid" });
 });

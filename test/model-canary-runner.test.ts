@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { executeCanary, type CanaryExecutionPorts, type CanaryResponse } from "#src/lib/model-canary-runner.js";
 import { canarySuiteDigest, commonCanarySuite, type CanaryCase } from "#src/lib/model-canary-suite.js";
-import { validatePrivateCorpus, type PrivateCanaryBundleV1, type PrivateCanaryCaseV1 } from "#src/lib/model-canary-private-corpus.js";
+import { privateCorpusCases, validatePrivateCorpus, type PrivateCanaryBundleV1, type PrivateCanaryCaseV1 } from "#src/lib/model-canary-private-corpus.js";
+import { buildCanarySchedule, executeCanarySchedule } from "#src/lib/model-canary-schedule.js";
 const cases = commonCanarySuite(), pin = { model: "model", route: "subscription", effort: "low", suiteHash: canarySuiteDigest(cases), billing: "subscription" as const };
 const resources = { durationMs: 1, firstTextMs: null, generationMs: null, inputTokens: 1, outputTokens: 1,
   cacheReadTokens: null, cacheWriteTokens: null, reasoningTokens: null, usageRatedUsd: null,
@@ -20,7 +21,7 @@ function privateExecutionCase(source: CanaryCase, suffix: string) {
   } };
   const validated = validatePrivateCorpus(bundle);
   if (validated.state !== "available") throw new Error(`private-runner-fixture:${validated.reason}`);
-  return { item, context: { corpus: validated.corpus, slotId: `native-slot-${suffix}` } };
+  return { item, bundle, context: { corpus: validated.corpus, slotId: `native-slot-${suffix}` } };
 }
 test("canary runner gates every request and owns real scripted tool failures", async () => {
   const item = cases.find(c => c.tools === "retry")!; let calls = 0, admits = 0, saves = 0;
@@ -75,15 +76,29 @@ test("canary runner observes missing duration and preserves bounded and incomple
 });
 
 test("runner grades app-owned traces and rejects imported trust claims", async () => {
-  const { item, context } = privateExecutionCase(cases[0]!, "app-owned");
+  const { item, bundle, context } = privateExecutionCase(cases[0]!, "app-owned");
+  const nativeCases = privateCorpusCases(context.corpus)!;
+  const nativePin = { ...pin, suiteHash: canarySuiteDigest(nativeCases) };
+  const plan = buildCanarySchedule("2026-11-03", "native-app-owned", nativeCases, [nativePin]);
   let savedGrade: { passed: boolean; reason: string; schemaValid: boolean } | null = null;
   let requestPin: Record<string, unknown> | undefined;
+  let result: Awaited<ReturnType<typeof executeCanary>> | undefined;
+  const order: string[] = [];
   const ports: CanaryExecutionPorts = { monotonicMs: () => 0, admit: async () => ({ state: "admitted" }),
     request: async input => { requestPin = input.pin; assert.equal(input.prompt, item.prompt); assert.deepEqual(input.allowedTools, []);
       return { text: JSON.stringify(item.expected), toolCalls: [{ name: "unlisted-tool",
         args: { importedTrace: [{ origin: "app", denied: false }] } }], resources }; },
-    save: async (_run, grade) => { savedGrade = grade; } };
-  const result = await executeCanary(item, pin, ports, undefined, context);
+    save: async (run, grade) => { order.push("save"); savedGrade = grade;
+      assert.equal(run.verified, false, "trusted grading precedes ordinary persistence");
+      assert.equal(grade?.reason, "unauthorized-action"); } };
+  await executeCanarySchedule(plan, bundle, {
+    eligibility: async () => ({ sourceAdopted: true, adapterQualified: true, productionBusy: false, squeeze: false,
+      spareSubscription: true, experimentalCashAllowed: false, premium: false }),
+    claim: async () => { order.push("claim"); return "claimed"; }, ports: () => ports,
+    terminal: async (_slot, outcome) => { order.push("terminal"); result = outcome; },
+  });
+  assert.deepEqual(order, ["claim", "save", "terminal"]);
+  assert.ok(result);
   assert.equal("suiteHash" in requestPin!, false, "provider request does not expose the native suite digest");
   assert.equal(result.privateGrade?.state, "scored");
   if (result.privateGrade?.state !== "scored") return;
@@ -93,8 +108,25 @@ test("runner grades app-owned traces and rejects imported trust claims", async (
   assert.equal(result.run.verified, false);
   assert.deepEqual(savedGrade, { passed: false, reason: "unauthorized-action", schemaValid: true });
   assert.equal(result.privateTrace?.binding.runId, result.run.id);
-  assert.equal(result.privateTrace?.binding.slotId, context.slotId);
+  assert.equal(result.privateTrace?.binding.slotId, plan.slots[0]!.id);
   assert.equal(result.privateTrace?.binding.caseId, item.id);
+});
+
+test("runner retains a denied observation without scoring an incomplete trace", async () => {
+  const { item, context } = privateExecutionCase(cases[0]!, "partial-denial");
+  const cycle: Record<string, unknown> = {}; cycle.self = cycle;
+  const result = await executeCanary(item, pin, {
+    monotonicMs: () => 0, admit: async () => ({ state: "admitted" }),
+    request: async () => ({ text: JSON.stringify(item.expected), toolCalls: [
+      { name: "unlisted-tool", args: {} }, { name: "unlisted-tool", args: cycle },
+    ], resources }),
+    save: async (run, grade) => { assert.equal(run.verified, null); assert.equal(grade, null); },
+  }, undefined, context);
+  assert.equal(result.state, "unavailable");
+  assert.equal(result.reason, "private-trace-json-cycle");
+  assert.deepEqual(result.privateGrade, { state: "unavailable", reason: "private-trace-json-cycle" });
+  assert.equal(result.privateTrace?.complete, false);
+  assert.equal(result.privateTrace?.events[0]?.denied, true);
 });
 
 test("private grading preserves refusal, transport, and terminal causes when evidence is unavailable", async () => {

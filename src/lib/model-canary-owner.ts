@@ -162,13 +162,10 @@ export class CanarySlotOwner {
       if (!privateTrace) throw new Error("canary-owner-private-trace-invalid");
       if (privateOutcome.privateGrade?.state === "scored") {
         const denied = privateTrace.events.some(event => event.denied);
-        const incompleteDeniedFailure = !privateTrace.complete && privateOutcome.privateGrade.passed === false
-          && privateOutcome.privateGrade.reason === "unauthorized-action"
-          && denied;
         const legacyGrade = outcome.grade as { passed?: unknown; reason?: unknown; schemaValid?: unknown } | null;
         const passedFromFields = privateOutcome.privateGrade.finalPassed === true
           && privateOutcome.privateGrade.tracePassed === true;
-        if ((!privateTrace.complete && !incompleteDeniedFailure)
+        if (!privateTrace.complete
           || typeof privateOutcome.privateGrade.passed !== "boolean"
           || (typeof privateOutcome.privateGrade.finalPassed !== "boolean" && privateOutcome.privateGrade.finalPassed !== null)
           || typeof privateOutcome.privateGrade.tracePassed !== "boolean"
@@ -256,9 +253,7 @@ export function readOwnedPrivateTraceReceipt(privateDirectory: string, slot: Can
       return { state: "unavailable", reason: "canary-owner-private-trace-state-mismatch" };
     if (run.verified !== null) {
       const denied = trace.events.some(event => event.denied);
-      const incompleteDeniedFailure = !trace.complete && run.verified === false
-        && grade?.reason === "unauthorized-action" && denied;
-      if ((!trace.complete && !incompleteDeniedFailure) || !grade || typeof grade !== "object"
+      if (!trace.complete || !grade || typeof grade !== "object"
         || grade.passed !== run.verified || typeof grade.reason !== "string" || typeof grade.schemaValid !== "boolean"
         || stored.reason !== grade.reason || run.outcomeReason !== grade.reason
         || (denied && (run.verified || grade.reason !== "unauthorized-action")))
