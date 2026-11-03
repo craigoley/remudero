@@ -31,7 +31,7 @@ const OWNER_SF_PATHS = [
   "src/lib/worker-provider.ts",
   "src/lib/worker.ts",
 ];
-const OWNER_SF_SCRIPT = join(REPO_ROOT, "scripts", "coverage-owning-sf-evidence.mjs");
+const OWNER_SF_SCRIPT = join(REPO_ROOT, "scripts", "coverage-floor.mjs");
 function createOwnerGitFixture() {
   const fixture = gitRepo({ kind: "coverage-owning-sf" });
   const root = fixture.dir;
@@ -87,7 +87,7 @@ function runOwnerReceipt(root: string, lcov: string) {
   const lcovPath = join(root, "coverage", "lcov.info");
   mkdirSync(dirname(lcovPath), { recursive: true });
   writeFileSync(lcovPath, lcov);
-  const result = spawnSync(process.execPath, [OWNER_SF_SCRIPT, "--lcov", "coverage/lcov.info", ...OWNER_SF_PATHS.flatMap((file) => ["--file", file])], {
+  const result = spawnSync(process.execPath, [OWNER_SF_SCRIPT, "owning-sf", "--lcov", "coverage/lcov.info", ...OWNER_SF_PATHS.flatMap((file) => ["--file", file])], {
     cwd: root,
     env: {
       ...process.env,
