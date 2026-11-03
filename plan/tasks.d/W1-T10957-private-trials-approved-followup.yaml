@@ -3,6 +3,7 @@
   repo: remudero
   depends_on:
     - W1-T10956
+    - W1-T11117
   type: implement
   verify: auto
   principles:
@@ -22,12 +23,14 @@
     - src/lib/model-canary-suite.ts
     - src/lib/model-canary-schedule.ts
     - src/lib/model-canary-metrics.ts
+    - src/lib/model-canary-config-census.ts
     - test/model-canary-command.test.ts
     - test/model-canary-suite.test.ts
     - test/model-canary-schedule.test.ts
     - test/model-canary-metrics.test.ts
     - test/routing/model-canary-coding-isolation.test.ts
     - test/routing/model-canary-native-session.test.ts
+    - test/routing/model-canary-config-inventory.test.ts
   status: queued
   priority: 2
   attempts: 0
@@ -52,7 +55,9 @@
     runner and schedule contracts without casts or misleading review/tool family labels. Retain
     the native 128-slot and serial-owner bounds. Join actual coding resource observations through
     a separately scoped versioned metrics receipt; configured caps are not measured peaks and
-    unsupported isolation or missing resource evidence remains refused or unavailable."
+    unsupported isolation or missing resource evidence remains refused or unavailable. Extend the
+    completed census case validator with the native coding contract so first-class coding cases
+    survive full matrix preparation; do not bypass validation or relabel their family."
   note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
     this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
     grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
@@ -68,6 +73,8 @@
     coverage evidence when its real receipts are complete; this is not an additional manual
     Azure full-suite gate. Identify a specific missing proof before adding a targeted run.
     Keep runtime-version provenance explicit; a Node24 result is not a Node22 test result.
+    The 2026-11-02 integration reconciliation adds the census prerequisite and validator/test
+    paths required by the native coding case contract; this grants no execution or release.
   acceptance:
     - claim: the existing private coding executor contains filesystem and credential effects and closes
         its real descendants
@@ -84,6 +91,8 @@
     - claim: The real default production path invokes codingLedgerSave; an unused export, declaration or
         re-export is insufficient.
       proof: "grep: codingLedgerSave( in src/lib/model-canary-command.ts"
+    - claim: First-class coding cases retain their identity through full census validation
+      proof: 'unit test: coding cases retain first class identity through matrix census validation'
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

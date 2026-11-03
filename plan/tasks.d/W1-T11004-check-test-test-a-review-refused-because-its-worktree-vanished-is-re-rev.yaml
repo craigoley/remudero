@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.34
+  # refusal-amendment (W1-T11004, run W1-T11004-1793634912334, 2026-11-02T20:57:57.587Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The recorded wording defect is already repaired in sweep.ts; the declared review.ts scope contains no remaining defect demonstrated by this replay.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
