@@ -291,7 +291,8 @@ export function flowOpenQueueReader(
   owner: string, repo: string, readJson: (args: string[]) => Promise<unknown> = ghJsonAsync, clock: Clock = systemClock,
 ): (sinceIso: string) => Promise<FlowOpenQueueRead> {
   return async (sinceIso) => {
-    const query = `query($q:String!){repository(owner:"${owner}",name:"${repo}"){pullRequests(states:OPEN,first:100,orderBy:{field:UPDATED_AT,direction:DESC}){totalCount pageInfo{hasNextPage} nodes{number createdAt updatedAt headRefOid headRefName reviewDecision statusCheckRollup{state}}}} search(query:$q,type:ISSUE,first:100){issueCount pageInfo{hasNextPage} nodes{... on PullRequest{number createdAt updatedAt mergedAt closedAt headRefOid headRefName reviewDecision statusCheckRollup{state}}}}}`;
+    const fields = "number createdAt updatedAt headRefOid headRefName reviewDecision commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}";
+    const query = `query($q:String!){repository(owner:"${owner}",name:"${repo}"){pullRequests(states:OPEN,first:100,orderBy:{field:UPDATED_AT,direction:DESC}){totalCount pageInfo{hasNextPage} nodes{${fields}}}} search(query:$q,type:ISSUE,first:100){issueCount pageInfo{hasNextPage} nodes{... on PullRequest{${fields} mergedAt closedAt}}}}`;
     const q = `repo:${owner}/${repo} is:pr updated:>=${sinceIso.slice(0, 10)}`;
     const body = await readJson(["api", "graphql", "-f", `query=${query}`, "-F", `q=${q}`]) as Record<string, unknown> | null;
     const data = object(body?.data);
@@ -305,7 +306,10 @@ export function flowOpenQueueReader(
       if (!Number.isSafeInteger(number) || number <= 0 || !Number.isFinite(createdAtMs) || !Number.isFinite(updatedAtMs) || !headSha) return undefined;
       const mergedAtMs = typeof pr.mergedAt === "string" ? Date.parse(pr.mergedAt) : undefined;
       const closedAtMs = typeof pr.closedAt === "string" ? Date.parse(pr.closedAt) : undefined;
-      const checksState = typeof object(pr.statusCheckRollup).state === "string" ? String(object(pr.statusCheckRollup).state) : "UNKNOWN";
+      const commits = object(pr.commits).nodes;
+      const commit = Array.isArray(commits) && commits.length === 1 ? object(object(commits[0]).commit) : {};
+      const rollup = String(object(commit.statusCheckRollup).state);
+      const checksState = commit.oid === headSha && ["SUCCESS", "FAILURE", "PENDING", "ERROR", "EXPECTED"].includes(rollup) ? rollup : "UNKNOWN";
       return { number, createdAtMs, updatedAtMs, headSha, headRefName: String(pr.headRefName ?? "unknown"), checksState,
         ...(mergedAtMs !== undefined && Number.isFinite(mergedAtMs) ? { mergedAtMs } : {}),
         ...(closedAtMs !== undefined && Number.isFinite(closedAtMs) ? { closedAtMs } : {}) };

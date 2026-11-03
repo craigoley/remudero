@@ -14,6 +14,25 @@ const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
 const at = (ms: number) => new Date(ms).toISOString();
 
+function censusResponse(cohort: FlowOpenQueueRead) {
+  const node = (pr: FlowOpenQueuePr) => ({ number: pr.number, createdAt: at(pr.createdAtMs), updatedAt: at(pr.updatedAtMs),
+    headRefOid: pr.headSha, headRefName: pr.headRefName,
+    commits: { nodes: [{ commit: { oid: pr.headSha, statusCheckRollup: { state: pr.checksState } } }] },
+    ...(pr.mergedAtMs === undefined ? {} : { mergedAt: at(pr.mergedAtMs) }),
+    ...(pr.closedAtMs === undefined ? {} : { closedAt: at(pr.closedAtMs) }) });
+  return { data: {
+    repository: { pullRequests: { totalCount: cohort.open.length, pageInfo: { hasNextPage: false }, nodes: cohort.open.map(node) } },
+    search: { issueCount: cohort.window.length, pageInfo: { hasNextPage: false }, nodes: cohort.window.map(node) },
+  } };
+}
+
+function assertCommitRollupQuery(args: string[]) {
+  const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+  assert.equal(query.match(/commits\(last:1\)\{nodes\{commit\{oid statusCheckRollup\{state\}\}\}\}/g)?.length, 2,
+    "both PR selections must request the rollup on Commit");
+  assert.equal(query.match(/statusCheckRollup/g)?.length, 2, "no rollup may be requested directly on PullRequest");
+}
+
 function census(now: number): FlowOpenQueueRead {
   const open: FlowOpenQueuePr[] = [
     { number: 16147, createdAtMs: now - 8 * HOUR, updatedAtMs: now, headSha: "head-16147", headRefName: "run-W1-T16147-1", checksState: "PENDING" },
@@ -185,7 +204,11 @@ test("the daily flow pass emits a reason-bearing shadow row from one batched cen
       log: (step, extra = {}) => events.push({ step, extra }) }, {
       mintTaskId: () => "W1-T11111",
       readLedger: () => ({ ok: true, rows: refusalRows(now), unread: [] }),
-      readOpenQueue: async () => { censusReads++; return census(now); },
+      readOpenQueue: flowOpenQueueReader("acme", "remudero", async (args) => {
+        censusReads++;
+        assertCommitRollupQuery(args);
+        return censusResponse(census(now));
+      }, fixedClock(now)),
       readCi: async () => { perPrCiReads++; return undefined; },
       planTasks: () => [],
     });
@@ -194,7 +217,8 @@ test("the daily flow pass emits a reason-bearing shadow row from one batched cen
     assert.equal(row.extra.mode, "shadow");
     assert.equal(row.extra.permission, "not-granted");
     assert.equal(row.extra.action, "none");
-    assert.equal(typeof row.extra.reason, "string");
+    assert.equal(row.extra.status, "OBSERVED");
+    assert.equal(row.extra.reason, "complete-window-no-confirmed-pressure");
     assert.deepEqual(row.extra.window, { fromMs: now - DAY, toMs: now });
     assert.equal(row.extra.producer, "plan-task-workers");
     const cohort = row.extra.cohort as Record<string, number>;
@@ -219,24 +243,43 @@ test("the daily flow pass emits a reason-bearing shadow row from one batched cen
 test("the production reader batches open and recent-terminal census data in one GitHub query and refuses a truncated page", async () => {
   const node = (number: number, updates: Record<string, unknown> = {}) => ({ number, createdAt: "2026-11-02T10:00:00.000Z",
     updatedAt: "2026-11-02T11:00:00.000Z", headRefOid: `head-${number}`, headRefName: "run-W1-T11111-1",
-    statusCheckRollup: { state: "SUCCESS" }, ...updates });
+    commits: { nodes: [{ commit: { oid: `head-${number}`, statusCheckRollup: { state: "SUCCESS" } } }] }, ...updates });
   const body = { data: {
     repository: { pullRequests: { totalCount: 1, pageInfo: { hasNextPage: false }, nodes: [node(1)] } },
     search: { issueCount: 2, pageInfo: { hasNextPage: false }, nodes: [node(1), node(2, { mergedAt: "2026-11-02T11:00:00.000Z" })] },
   } };
   const calls: string[][] = [];
-  const readJson = async (args: string[]) => { calls.push(args); return body; };
+  const readJson = async (args: string[]) => { calls.push(args); assertCommitRollupQuery(args); return body; };
   const observedAtMs = Date.parse("2026-11-02T12:00:00.000Z");
   const read = await flowOpenQueueReader("acme", "remudero", readJson, fixedClock(observedAtMs))("2026-11-01T12:00:00.000Z");
   assert.equal(read.observedAtMs, observedAtMs);
   assert.equal(calls.length, 1);
   assert.equal(read.complete, true);
   assert.equal(read.open[0]?.number, 1);
+  assert.equal(read.open[0]?.checksState, "SUCCESS");
+  assert.equal(read.window.find((pr) => pr.number === 2)?.checksState, "SUCCESS");
   assert.equal(read.window.find((pr) => pr.number === 2)?.mergedAtMs, Date.parse("2026-11-02T11:00:00.000Z"));
   body.data.repository.pullRequests.totalCount = 101;
   const truncated = await flowOpenQueueReader("acme", "remudero", readJson, fixedClock(observedAtMs))("2026-11-01T12:00:00.000Z");
   assert.equal(truncated.complete, false);
   assert.equal(truncated.reason, "census-page-cap-exceeded");
+});
+
+test("the production reader never credits a missing or different-head commit rollup as merge-ready", async () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  for (const commits of [undefined, { nodes: [] }, { nodes: [{}, {}] }, { nodes: [{ commit: {
+    oid: "old-head", statusCheckRollup: { state: "SUCCESS" },
+  } }] }, { nodes: [{ commit: { oid: "head-16186", statusCheckRollup: null } }] },
+  { nodes: [{ commit: { oid: "head-16186", statusCheckRollup: { state: "UNRECOGNIZED" } } }] }]) {
+    const body = censusResponse(census(now));
+    const node = body.data.repository.pullRequests.nodes.find((pr) => pr.number === 16186)!;
+    Object.assign(node, { commits });
+    const read = await flowOpenQueueReader("acme", "remudero", async () => body, fixedClock(now))(at(now - DAY));
+    assert.equal(read.open.find((pr) => pr.number === 16186)?.checksState, "UNKNOWN");
+    const report = openQueueShadow(read, rows(now), undefined, now);
+    assert.equal(report.cohort.ready_to_direct_merge, 0, "a current-head review also needs current-head green checks");
+    assert.equal(report.cohort.open, 3, "unknown checks do not remove right-censored open PRs");
+  }
 });
 
 
