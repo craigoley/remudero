@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildOpenPrViews } from "#src/run-task.js";
+import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
 import {
   needsPersonPredicate, needsPersonToMerge, orderPendingReviews, orderPendingReviewsNeedsPersonLast, reviewHistoryFromLedger, reviewOrderShadow,
   reviewPriority, selectReviewAdmissions,
@@ -84,8 +84,8 @@ test("a standing CHANGES_REQUESTED at the head needs a person; an answered escal
   assert.equal(needsPersonToMerge(answered, [escalatedAt(answered)]), undefined, "an unspent operator answer releases it");
 });
 
-/** The production view producer over one green PR awaiting review, with the given review listing. */
-function producedReviewQueueView(reviews: unknown[]): { view: OpenPrView; reviewReads: number } {
+/** The production (async) view producer the light pass reads, over one green PR awaiting review, with the given review listing. */
+async function producedReviewQueueView(reviews: unknown[]): Promise<{ view: OpenPrView; reviewReads: number }> {
   const head = "c0ffee0000000000000000000000000000000001";
   const url = "https://github.com/craigoley/remudero/pull/16500";
   let reviewReads = 0;
@@ -107,8 +107,9 @@ function producedReviewQueueView(reviews: unknown[]): { view: OpenPrView; review
   try {
     const path = join(dir, "rows.ndjson");
     writeFileSync(path, "");
-    const views = buildOpenPrViews("craigoley", "remudero", path, {
-      fetch, requiredContexts: () => ["ci-gate"], readMainPlan: () => ({ tasks: [], byId: new Map() }),
+    const views = await buildOpenPrViewsAsync("craigoley", "remudero", path, {
+      fetchAsync: async (args) => fetch(args), readRequiredContextsAsync: async () => ["ci-gate"],
+      readMainPlan: () => ({ tasks: [], byId: new Map() }),
     });
     assert.equal(views.length, 1);
     return { view: views[0], reviewReads };
@@ -117,10 +118,10 @@ function producedReviewQueueView(reviews: unknown[]): { view: OpenPrView; review
   }
 }
 
-test("the open-PR read takes a review-queue PR's human CHANGES_REQUESTED hold, which no other read covers", () => {
+test("the open-PR read takes a review-queue PR's human CHANGES_REQUESTED hold, which no other read covers", async () => {
   const changesRequested = { id: 9, state: "CHANGES_REQUESTED", commit_id: "older", submitted_at: "2026-11-02T20:30:00Z",
     user: { login: "cao825", type: "User" } };
-  const { view, reviewReads } = producedReviewQueueView([changesRequested]);
+  const { view, reviewReads } = await producedReviewQueueView([changesRequested]);
   assert.equal(view.checksState, "green");
   assert.notEqual(view.reviewState, "success");
   assert.equal(view.scannerBlocker, undefined, "the scanner read covers only reviewed PRs");
@@ -128,10 +129,10 @@ test("the open-PR read takes a review-queue PR's human CHANGES_REQUESTED hold, w
   assert.equal(view.reviewQueueHold?.kind, "changes-requested");
   assert.match(needsPersonToMerge(view, []) ?? "", /CHANGES_REQUESTED review from cao825/);
 
-  const approved = producedReviewQueueView([{ ...changesRequested, state: "APPROVED" }]).view;
+  const approved = (await producedReviewQueueView([{ ...changesRequested, state: "APPROVED" }])).view;
   assert.equal(approved.reviewQueueHold, undefined, "positive control: no standing hold, nothing to queue behind");
   assert.equal(needsPersonToMerge(approved, []), undefined);
-  const bot = producedReviewQueueView([{ ...changesRequested, user: { login: "remudero-fleet[bot]", type: "Bot" } }]).view;
+  const bot = (await producedReviewQueueView([{ ...changesRequested, user: { login: "remudero-fleet[bot]", type: "Bot" } }])).view;
   assert.equal(bot.reviewQueueHold, undefined, "a bot's review is never a person's hold");
 });
 
