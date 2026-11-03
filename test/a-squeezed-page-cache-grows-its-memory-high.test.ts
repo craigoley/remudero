@@ -387,10 +387,16 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
       assert.equal(run.status, 0, run.stderr);
       assert.equal(run.signal, null, "a signalled fixture is not a result");
       const argv = readFileSync(argvPath, "utf8").split("\0\0").filter(Boolean).map(command => command.split("\0"));
-      assert.deepEqual(argv, [
-        ["inspect", "--format", "{{.Id}}", row.current],
-        ...(row.fault === "short-inspect" ? [] : [["ps", "--no-trunc", "--format", "{{.Names}} {{.ID}}"]]),
-      ], "the real shell must ask Docker for full IDs with the documented ps field");
+      // The policy read the tuner makes (W1-T11130) also records each fleet container's cgroup memory.peak,
+      // one `docker inspect --format {{.Id}} <fleet name>` per container. Those probes are the only calls
+      // allowed beyond the tuner's own; any other argv, or a probe of a non-fleet name, still fails here.
+      const fleetNames = ["remudero-daemon", "remudero-serve", "remudero-console-daemon", "remudero-site-daemon"];
+      const isPeakProbe = (c: string[]) => c.length === 4 && c[0] === "inspect" && c[1] === "--format" && c[2] === "{{.Id}}" && fleetNames.includes(c[3]!);
+      assert.deepEqual(argv[0], ["inspect", "--format", "{{.Id}}", row.current], "the tuner's first call identifies its own container");
+      assert.deepEqual(argv.slice(1).filter((c) => !isPeakProbe(c)),
+        row.fault === "short-inspect" ? [] : [["ps", "--no-trunc", "--format", "{{.Names}} {{.ID}}"]],
+        "the real shell must ask Docker for full IDs with the documented ps field");
+      if (row.fault === "short-inspect") assert.equal(argv.length, 1, "a short identity holds before any policy read or peak probe");
       assert.equal(readFileSync(join(h.cg, "memory.high"), "utf8").trim(), String(row.target * MIB), run.stdout);
       assert.match(run.stdout, new RegExp(row.action === "hold" ? "hold" : row.action + " .*via systemd"));
       const calls = readFileSync(h.calls, "utf8");
