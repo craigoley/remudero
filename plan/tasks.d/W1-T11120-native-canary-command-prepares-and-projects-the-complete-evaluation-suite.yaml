@@ -1,0 +1,59 @@
+- id: W1-T11120
+  title: Native canary command prepares and projects the complete evaluation suite without implicit activation
+  repo: remudero
+  depends_on: [W1-T10956, W1-T10957, W1-T11117, W1-T11118, W1-T11119]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: blast-radius
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: operator-approved-router-evaluation-plan:2026-11-02
+  files:
+    - src/lib/model-canary-command.ts
+    - src/lib/model-canary-report.ts
+    - test/routing/model-canary-benchmark-command.test.ts
+    - test/routing/model-canary-benchmark-report.test.ts
+  rationale: >-
+    Pure census, corpus and analysis helpers must become a usable native benchmark rather than
+    unused exports. Integration must follow the existing execution/accounting and isolated
+    coding owners, preserving the native prepared-not-activated state and private output rules.
+  design: >-
+    Extend the existing standalone canary command with bounded preparation and projection paths
+    that actually call the completed census, corpus, deterministic matrix and clustered/private
+    comparison helpers. Produce a reproducible private bundle with configuration/case coverage,
+    exclusions, complete shard membership, version/source/scorer pins and a conservative
+    configuration-by-case-by-replicate cost/resource plan including retries and graders.
+    Requests exclude scorer expectations. Keep request replay for regrading distinct from fresh
+    inference and repeated reliability. Add private report sections for evidence funnels,
+    clustered differences, field-trial comparisons and inert improvement proposals. No command
+    preparation/project path may invoke a provider, acquire an execution lease, create a
+    schedule, reserve paid allowance, promote a case or change routing. Existing qualified
+    execution remains owned by its established admission/owner paths. Missing execution,
+    identity, budget or qualification evidence stays NOT READY. Require a pinned A/A and a
+    bounded admitted pilot before reporting benchmark results; source readiness is distinct
+    from actual execution and routing adoption.
+  note: >-
+    Adopted by the operator's 2026-11-02 implementation-plan approval. Reconcile all prerequisite
+    merged PRs and active owners before editing these shared integration paths. This record
+    grants no extra private allowance, new schedule, limit increase, worker stop, public release
+    or live routing promotion. Preserve existing failed, refused and unrun receipts.
+  acceptance:
+    - claim: Native preparation reaches the complete census corpus and matrix helpers and keeps execution unarmed
+      proof: 'unit test: native benchmark preparation covers the registry and remains prepared not activated'
+    - claim: The native projection path reaches clustered analysis and private field comparison without mixing outcomes
+      proof: 'unit test: native benchmark projection preserves benchmark and field trial populations'
+    - claim: Native entrypoints never invoke providers or grant execution through prepared artifacts
+      proof: 'unit test: native benchmark preparation and projection make no provider or activation calls'
+    - claim: Private report renders explicit coverage missingness and inert proposals with safe text handling
+      proof: 'unit test: native benchmark report displays unavailable evidence and unmeasured proposals safely'
+    - claim: The complete cost and resource ceiling includes repeats retries and graders and refuses unknown inputs
+      proof: 'unit test: benchmark ceilings include retries and graders and reject unknown inputs'
+  falsifier: >-
+    Exercise the real standalone command in a contained subprocess with private temporary
+    inputs and outputs. Assert complete physical-file TAP and exact bundle pins. Remove a real
+    helper call or execution-state guard and require its named test to fail; restore and pass.
+    Keep input/output symlink, malformed/oversized data, duplicate IDs and cancellation controls.

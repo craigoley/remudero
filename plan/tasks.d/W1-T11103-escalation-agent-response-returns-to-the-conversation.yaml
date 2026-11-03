@@ -11,7 +11,7 @@
   band_meaning: span
   budget_usd: 25
   origin: human#2026-11-02-console-email-conversation
-  plan_refs: [W1-T2494, W1-T2496, W1-T2499, W1-T2500, W1-T11096, CONSOLE-T164]
+  plan_refs: [W1-T2494, W1-T2496, W1-T2499, W1-T2500, W1-T11096, W1-T11059, CONSOLE-T164]
   files:
     - src/lib/escalation-correspondence.ts
     - src/lib/escalation-conversation.ts
@@ -25,6 +25,8 @@
     - packages/api-client/src/schema.d.ts
     - test/inbox/escalation-correspondence.test.ts
     - test/inbox/escalation-correspondence-serving.test.ts
+    - test/triage-plan-deps-seam.test.ts
+    - test/github/compress-src-lib-github-transport-ts.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -36,6 +38,9 @@
     W1-T2500's merged PR3389 explicitly excluded live wiring. Its pure handoff is not adoption.
     A 27-open-head subject sweep at core 4edd4e937 found no added runtime bridge; its positive
     controls were 40 runtime subject lines and 86 plan subject lines. W1-T8887 remains execution's owner.
+    W1-T11059 compressed transport comments while preserving executable code. This task intentionally
+    adds bounded fresh-read behavior and updates the exact executable fingerprint for that change;
+    it preserves that task's compression bounds and the strict identity assertions.
   design: |
     Join the existing native reply intent, feedback entry and real agent intake outcome; add no
     parallel message store, timer, agent, executor or model call. Preserve existing source owners.
@@ -62,6 +67,13 @@
     executor seams. Fresh reply guards must revalidate both the issue and canonical feedback;
     bypassing only the per-service cache does not establish a current native question. Add no
     broker bypass, credential path, transport floor override, retry loop or additional service.
+    Put the real triage-publication integration case in the existing triage-plan-deps-seam
+    suite. Keep new run-task importers within the current affected-reach ceiling; do not raise
+    its baseline or hide an import behind an untracked launcher. Preserve the transport comment
+    compression test and its strict executable-token and AST equality checks. Refresh its exact
+    expected fingerprint only for the declared fresh-read code change, with control/mutant/restored
+    evidence; retain the existing comment-line and byte bounds. No scanner exclusion, advisory
+    ignore, broader allowance or gate waiver is authorized by this scope amendment.
     Use real stores and the assembled authenticated service for save, intake acknowledgement,
     needs-input, no-more-input while work runs, archive, reopen, repeated outcome, lost response,
     failed publication, foreign thread and closed-origin follow-up cases. No live fixture writes.

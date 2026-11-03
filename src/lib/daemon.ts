@@ -2101,8 +2101,8 @@ function ghLaneReadFailure(err: unknown): { detail: string } | undefined {
   return { detail };
 }
 
-/** BACKSTOP — the maximum time the inter-phase review clock's stop may wait for an idle wait to notice its phase
- * ended. The wait seam is deliberately promise-only with no cancellation handle, so waiting out the whole poll
+/** BACKSTOP — the maximum time the inter-phase review clock's stop may wait for its runner and active passes.
+ * The wait seam is deliberately promise-only with no cancellation handle, so waiting out the whole poll
  * interval would add up to 60 seconds to every phase transition. The clock therefore subdivides only its in-process
  * wait into one-second quanta, while the poll interval stays the cadence that may start a light pass. No read or
  * reconciliation runs on the quantum itself (W1-T2852). */
@@ -2130,7 +2130,7 @@ export function lightPassFixAdmitted(scope?: LightPassScope): boolean {
 }
 
 interface InterphaseReviewClock {
-  /** Stops new admission, lets an already-started pass settle, and reports whether this clock
+  /** Stops new admission, waits up to the stop bound for started passes, and reports whether this clock
    * consumed an event edge that the ordinary full-sweep gate still needs to reconcile, and how
    * many passes it admitted. */
   stop(): Promise<{ eventWakeSeen: boolean; passes: number; held: number }>;
@@ -2280,7 +2280,9 @@ export function startInterphaseReviewClock(
   let elapsedMs = 0;
   let passes = 0;
   let held = 0;
-  const activePasses = new Set<Promise<void>>();
+  const activePasses = new Map<Promise<void>, {
+    pass: number; trigger: string; review_only: boolean; started_at_ms: number;
+  }>();
   const phase = scope === "drain" ? "freshness_drain" : scope === "pause" ? "pause" : "interphase";
   const scopeTag: Record<string, boolean> =
     scope === "drain" ? { during_drain: true } : scope === "pause" ? { during_pause: true } : {};
@@ -2341,6 +2343,7 @@ export function startInterphaseReviewClock(
             continue;
           }
           passes += 1;
+          const startedAtMs = interphaseClock.now();
           const pass = (async () => {
             try {
               const named = { reviewOnly: true, scope: scope ?? "interphase-review" } as const;
@@ -2351,7 +2354,7 @@ export function startInterphaseReviewClock(
               log("daemon.sweep_light.failed", { phase, ...scopeTag, error: String((e as Error)?.message ?? e) });
             }
           })();
-          activePasses.add(pass);
+          activePasses.set(pass, { pass: passes, trigger, review_only: reviewOnly, started_at_ms: startedAtMs });
           void pass.finally(() => activePasses.delete(pass));
         }
       })()
@@ -2360,8 +2363,30 @@ export function startInterphaseReviewClock(
   return {
     stop: async () => {
       active = false;
-      if (runner) await runner;
-      if (activePasses.size > 0) await Promise.all(activePasses);
+      // Preserve the old zero-work fast path: Promise.race adds an event-loop turn even when
+      // there is no runner or admitted pass to wait for, which can release unrelated work.
+      if (!runner && activePasses.size === 0) return { eventWakeSeen, passes, held };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          (async () => {
+            if (runner) await runner;
+            if (activePasses.size > 0) await Promise.all(activePasses.keys());
+          })(),
+          new Promise<void>((resolve) => { timer = setTimeout(resolve, INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS); }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (activePasses.size > 0) {
+        const stoppedAtMs = interphaseClock.now();
+        log("daemon.review_clock.stop_bound_exceeded", {
+          phase, ...scopeTag, bound_ms: INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS,
+          active_passes: [...activePasses.values()].map((pass) => ({
+            ...pass, elapsed_ms: Math.max(0, stoppedAtMs - pass.started_at_ms),
+          })),
+        });
+      }
       return { eventWakeSeen, passes, held };
     },
     handWake: () => {

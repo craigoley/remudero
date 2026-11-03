@@ -469,6 +469,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("REMUDERO_SESSION_ID", "Identifies the session owning a fleet pause request.", ["src/lib/fleet-control.ts"]),
   envEntry("REMUDERO_TASK_ID", "Carries task attribution into worker process trees.", ["src/lib/worker-containment.ts"]),
   envEntry("REMUDERO_WORKER_SCOPE", "Carries worker scope attribution into process trees.", ["src/lib/worker-containment.ts", "src/lib/ledger.ts"]),
+  envEntry("RMD_AUTHOR_CENSUS_ANSWERED", "Set only by the author preflight for its static stage: the HEAD sha and outcome its census-precheck step answered, so the fast gate does not run that census again.", ["src/lib/ci-parity.ts"]),
   envEntry("RMD_ACCOUNT_FILE_PATH", "Points serve account-usage reads at the operator's account file copy.", ["src/lib/serve.ts"]),
   envEntry("RMD_ALLOW_LIVE_SPAWN", "Opt-in guard for live worker spawn boundaries.", ["src/lib/spawn-guard.ts"]),
   envEntry("RMD_ALLOW_LIVE_WRITES", "Opt-in guard for live write boundaries under tests.", ["src/lib/live-write-guard.ts", "src/run-task.ts"]),

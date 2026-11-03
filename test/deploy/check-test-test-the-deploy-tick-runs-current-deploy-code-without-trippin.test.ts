@@ -1,8 +1,10 @@
 // @source-text-subject: test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts — this suite's subject is how that suite spawns the real CLI.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { withTempDir } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 /**
@@ -87,4 +89,51 @@ test("W1-T10409: the spawn shape that overran the 30 s budget is refused by name
     "inherits the parent's NODE_V8_COVERAGE session",
   ]);
   assert.deepEqual(realCliSpawnDefects("{ env: { NODE_V8_COVERAGE: undefined } }", ""), ["budget absent is below 120000 ms"]);
+});
+
+test("W1-T10999: check:test:test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts is prevented, not retried", async () => {
+  await withTempDir("deploy-sweep", async (root) => {
+    // A real CLI child inherits the test context, but never loads the test setup's global marker.
+    // Its private TMPDIR stands in for the shared root; no sweep here can see another session.
+    const code = `
+      import assert from "node:assert/strict";
+      import { existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
+      import { tmpdir } from "node:os";
+      import { join } from "node:path";
+      import { TEST_PROCESS_MARKER, sweepStaleTempDirs, sweepStaleTempDirsAsync }
+        from "#src/lib/tmp.js";
+      assert.equal(globalThis[TEST_PROCESS_MARKER], undefined);
+      const shiftedNow = () => Date.now() + 2 * 86_400_000;
+      for (const sweep of [sweepStaleTempDirs, sweepStaleTempDirsAsync]) {
+        const fixture = join(tmpdir(), "rmd-deploy-code-fixture");
+        const installer = join(fixture, "install-host-units.sh");
+        mkdirSync(fixture);
+        writeFileSync(installer, "fixture");
+        const aged = new Date(Date.now() - 2 * 86_400_000);
+        utimesSync(fixture, aged, aged);
+        const result = await sweep({ now: shiftedNow });
+        if (process.env.NODE_TEST_CONTEXT) {
+          assert.match(result.refused, /test process/);
+          assert.equal(existsSync(installer), true, "the child must preserve the deploy fixture");
+          assert.deepEqual(result.removed, []);
+          const explicit = await sweep({ root: tmpdir(), now: shiftedNow });
+          assert.equal(explicit.refused, undefined);
+          assert.deepEqual(explicit.removed, ["rmd-deploy-code-fixture"]);
+        } else {
+          assert.equal(result.refused, undefined);
+          assert.deepEqual(result.removed, ["rmd-deploy-code-fixture"]);
+        }
+        assert.equal(existsSync(fixture), false, "an authorized sweep still reclaims stale dirs");
+      }
+    `;
+    for (const context of [process.env.NODE_TEST_CONTEXT, "test-setup", undefined, ""]) {
+      const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
+        cwd: REPO_ROOT,
+        env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root, NODE_TEST_CONTEXT: context, NODE_V8_COVERAGE: "" },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      assert.equal(child.status, 0, `context=${String(context)}: ${child.error ?? ""}\n${child.stdout}\n${child.stderr}`);
+    }
+  });
 });
