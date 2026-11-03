@@ -85,7 +85,7 @@ test("W1-T11167 criterion 1: a PR GitHub reads dirty that git merges cleanly acr
   const f = await fixture(t);
   assert.equal(f.probe.verdict, "clean", "git's ort merge follows the rename");
   // `merge-tree -X` needs git >= 2.40, so the rename-blind control is a real merge in a scratch worktree.
-  const scratch = `${f.repo.dir}-blind`;
+  const scratch = join(f.repo.dir, "blind");
   f.repo.git("worktree", "add", "-q", "--detach", scratch, f.headSha);
   t.after(() => { rmSync(scratch, { recursive: true, force: true }); });
   const blind = spawnSync("git", ["-C", scratch, "merge", "-s", "ort", "-X", "no-renames", "--no-commit", "--no-ff", f.mainSha],
