@@ -34466,12 +34466,12 @@ async function triageCommandLocked(
         { name: "feedback_raw", value: triageFeedbackBlock, external: true },
       ]),
     });
-    const loop = await runRelintLoop({
+    const loop = await runRelintLoop<{ decision: ReturnType<typeof decideTriage>; changedFiles: string[] }>({
       lane: "triage",
       filedIds: reservedIds,
       initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1), triageFeedbackBlock),
       log,
-      run: async (prompt, attempt) => {
+      run: async (prompt, attempt, previous) => {
         worker = await spawn({
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
@@ -34499,7 +34499,14 @@ async function triageCommandLocked(
         const changedFiles = worktreeChangedFiles(worktreePath);
         const verdict = parseTriageVerdict(workerTranscript(worker));
         const citation = verdict?.kind === "already_decided" ? unresolvedCitationReferents(verdict.citation, worktreeCitationEvidence(worktreePath)) : undefined;
-        return { decision: decideTriage({ verdict, changedFiles, citation }), changedFiles };
+        const decision = decideTriage({ verdict, changedFiles, citation });
+        // A verdictless repair may retain only the proposal whose complete file scope it preserves.
+        if (decision.action === "error" && decision.cause === "unparseable_verdict" &&
+            previous?.decision.action === "propose" && changedFiles.length === previous.changedFiles.length &&
+            changedFiles.every(file => previous.changedFiles.includes(file))) {
+          return { decision: { ...previous.decision, files: changedFiles }, changedFiles };
+        }
+        return { decision, changedFiles };
       },
       filed: (r) => r.decision.action === "propose",
       lint: () =>
