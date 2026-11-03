@@ -1514,12 +1514,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (now - viewBuildsFrom < 10 * 60_000) return;
     for (const [unit, tally] of viewBuilds) {
       if (tally.calls === 0 && tally.ms === 0) continue;
+      const { skipped, ...counts } = tally;
       log("read_model.view_builds", {
         view: unit.view.name,
         ...(unit.slot ? { instance: unit.slot.instance.name } : {}),
         thread: viewsOnly ? "views" : "projector",
         ...(opts.lane ? { lane: opts.lane } : {}),
-        ...tally, window: [viewBuildsFrom, now],
+        ...counts, ...(skipped > 0 ? { skipped } : {}), window: [viewBuildsFrom, now],
       });
     }
     viewBuilds.clear();
