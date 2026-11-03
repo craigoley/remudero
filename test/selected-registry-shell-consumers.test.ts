@@ -116,7 +116,7 @@ function bash32(t: { after(fn: () => void): void; diagnostic(message: string): v
   return { shell: shell!, env: {} as NodeJS.ProcessEnv, version: version!, measured: false };
 }
 
-test("selected shell qualification recognizes a maintained child whose argv case sits past any fixed header", t => {
+test("selected shell capability probe reads the whole trusted child script", t => {
   const root = mkdtempSync(join(tmpdir(), "rmd-shadow-supports-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const deep = join(root, "deep.sh"), old = join(root, "old.sh");
