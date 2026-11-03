@@ -18,12 +18,6 @@
     "coverage-ratchet-required#4: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
       "reason": "Fourth of the four identical fast-lane skips in this job -- the one guarding the diff-coverage read, so an always-skip here is precisely the vacuous diff-coverage pass this repo already names as its worst class."
     },
-    "ci#1: if [ \"$CLASS\" = \"SOURCE\" ] && [ \"${GITHUB_EVENT_NAME}\" = \"pull_request\" ] && [ \"$TEST_ONLY_RUN\" != \"full\" ] && [ \"${RMD_AFFECTED_SUITE_LIVE:-0}\" = \"1\" ]; then": {
-      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
-    },
-    "ci#1: if [ \"$(head -n 1 affected-suites-selected.txt 2>/dev/null || true)\" != \"full\" ]; then": {
-      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
-    },
     "ci#1: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
       "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
     },

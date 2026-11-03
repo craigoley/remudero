@@ -769,6 +769,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   const options = { ...input.options };
   if (options.selectedRegistryIntent !== undefined) options.selectedRegistryIntent = copySelectedRegistryIntent(options.selectedRegistryIntent);
   const clock = ports.clock ?? Date.now;
+  const launchStartedAt = clock();
   const log: Log = (step, extra) => {
     try {
       input.log(step, extra);
@@ -787,6 +788,12 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   let dir: string;
   let launch: EngineChildLaunch;
   let engineSha = "";
+  let engineMs = 0;
+  let entryMs = 0;
+  let planMs = 0;
+  let admissionWaitMs = 0;
+  let admittedAt = 0;
+  let spawnedAt = 0;
   const nodeArgs = childHeapPolicyArgs();
   try {
     options.selectedRegistryIntent = await qualifySelectedRegistryIntent(options.selectedRegistryIntent);
@@ -795,13 +802,21 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...ports.engine });
     if (!engine) return unavailable("no current engine tree for main");
     engineSha = engine.sha;
+    const engineResolvedAt = clock();
+    engineMs = engineResolvedAt - launchStartedAt;
     const entry = (ports.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(engine, [], log);
     if (input.work) await requireDetachedWorkEntry(entry, input.work.kind);
+    const entryResolvedAt = clock();
+    entryMs = entryResolvedAt - engineResolvedAt;
     const admitted = await input.plan();
     dir = runDir(input.stateRoot, runId);
     launch = { ...entry, argv: [...entry.argv, "--run-dir", dir] };
     log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow(RUN_CHILD_ENTRY.name, "run", launch));
+    const admissionStartedAt = clock();
+    planMs = admissionStartedAt - entryResolvedAt;
     const waited = await reserveWhilePending(input, ports, launch.kind, runId, clock, log);
+    admittedAt = clock();
+    admissionWaitMs = admittedAt - admissionStartedAt;
     if (!("held" in waited)) return waited;
     reservation = waited.held;
     // W1-T10001: the wait can outlast a PAUSE that began meanwhile; no child starts past it. It takes the abandoned path:
@@ -833,6 +848,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     } as RunChildSpec);
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
+    spawnedAt = clock();
     child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, [...nodeArgs, ...launch.argv], {
       cwd: launch.cwd, env: { ...(ports.env ?? process.env) }, stderrFd,
     });
@@ -868,9 +884,20 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   input.signal?.addEventListener("abort", onAbort, { once: true });
   if (input.signal?.aborted) onAbort();
   let detach: (() => void) | undefined;
+  let heartbeatObserved = false;
   const settled = awaitRunChild({
     taskId: input.taskId, runId, dir, child, entryKind: launch.kind, probe: ports.probe, pollMs: ports.pollMs ?? RUN_CHILD_POLL_MS, watch: ports.watch !== false, log,
     onWatch: (stop) => { detach = stop; },
+    onStatus: () => {
+      if (heartbeatObserved) return;
+      heartbeatObserved = true;
+      log("run_child.launch_segments", {
+        task_id: input.taskId, run_id: runId, lane: input.lane ?? "implement",
+        engine_ms: engineMs, entry_ms: entryMs, entry_kind: launch.kind, entry_reason: launch.reason,
+        plan_ms: planMs, admission_wait_ms: admissionWaitMs, setup_ms: spawnedAt - admittedAt,
+        spawn_to_heartbeat_ms: clock() - spawnedAt,
+      });
+    },
     onEnd: () => {
       inFlightRunDirs.delete(dir);
       input.signal?.removeEventListener("abort", onAbort);
@@ -899,6 +926,7 @@ interface AwaitRunChild {
   log: Log;
   onEnd: () => void;
   onWatch?: (stop: () => void) => void;
+  onStatus?: () => void;
 }
 
 /**
@@ -956,6 +984,7 @@ function awaitRunChild(a: AwaitRunChild): Promise<RunResult> {
       if (done) return;
       boundStderrLog(stderrPath);
       const read = readStatus(a.dir);
+      if (read.ok) a.onStatus?.();
       if (read.ok && isTerminalState(read.value.state)) return settleTerminal(read.value);
       if (exit !== undefined) {
         return lost(`the child exited (${exit.code ?? exit.signal}) in state ${read.ok ? read.value.state : `unreadable: ${read.detail}`}`);
@@ -964,6 +993,7 @@ function awaitRunChild(a: AwaitRunChild): Promise<RunResult> {
       if (classified.kind === "lost" || classified.kind === "dead") {
         // The status was read BEFORE the pid probe: a child that wrote `done` and exited in between reads as gone. Re-read first.
         const settledSince = readStatus(a.dir);
+        if (settledSince.ok) a.onStatus?.();
         if (settledSince.ok && isTerminalState(settledSince.value.state)) return settleTerminal(settledSince.value);
         lost(classified.detail ?? classified.kind);
       }
