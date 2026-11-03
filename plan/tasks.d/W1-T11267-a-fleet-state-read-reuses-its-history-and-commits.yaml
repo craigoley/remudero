@@ -7,13 +7,15 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # how one prelude stage reads ledger history and immutable commit bodies; the rows it reconciles are unchanged
+  risk: high # how one prelude stage reads ledger history and immutable commit bodies; spans the W1-T9781 prelude-timing pin, whose commit-read count the cache lowers
+  band_meaning: span
   origin: operator-session#review-throughput-2026-11-03
   plan_refs:
     - W1-T4817
   files:
     - src/lib/sweep.ts
     - test/sweep/a-fleet-state-read-reuses-its-history-and-commits.test.ts
+    - test/the-full-prelude-names-where-fleet-state-spends-its-time.test.ts # its W1-T9781 commit-read count drops by the cached reads
   status: queued
   attempts: 0
   acceptance:
