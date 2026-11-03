@@ -1,0 +1,46 @@
+id: onboarding-is-a-code-edit-20261103
+ts: 2026-11-03T14:05:00.000Z
+raw: >-
+  Operator direction, 2026-11-03: prove that a clean repository
+  (craigoley/remudero-quickstart-demo) reaches its first auto-merged fleet PR.
+  Agent finding while preparing that repository.
+
+  OBSERVED at origin/main 2026-11-03. Enrolling a new target takes three
+  hand edits to core source, each in a closed table keyed on owner/repo:
+  (1) .remudero/managed-repos.json; (2) SUITE_REGISTRY in src/lib/review.ts,
+  without which parseWhitelistedProof returns null for every unit test proof on
+  the target; (3) PROFILES in src/lib/ci-project-preflight.ts, without which
+  resolveProjectPreflight returns kind "unavailable" ("unregistered quality
+  profile") and a worker's preflight on that target cannot pass. Every target
+  also needs .remudero/mounts.yaml, which W1-T11195..W1-T11197 address.
+
+  OBSERVED. The gate stack that rmd project init generates for profile ts-node
+  is not admissible by that same preflight. Its .github/workflows/ci.yml runs
+  "npx tsc -p tsconfig.json --noEmit" and "npm test". resolveProjectPreflight
+  requires a declared "npm run <name>" line for each profile script, and for
+  any repository other than wreckterra it requires typecheck and test:unit.
+  So a repository onboarded by our own generator fails our own consumer
+  preflight until someone writes a bespoke profile row and edits the
+  repository-specific branches in resolveProjectPreflight.
+
+  INFERRED. A customer cannot onboard without a core release, and each new repo
+  adds another repository-name branch to resolveProjectPreflight. The closed
+  registry is deliberate (W1-T3525: an unregistered target must refuse, never
+  inherit another repo's runner), so the fix should keep the refusal and move
+  the rows, not open the gate.
+
+  ASK. Make enrollment one reviewed data change: one registry record per target
+  (suite roots, runner, profile scripts and their CI declarations) that review,
+  preflight and enrollment all read, with refusal for any target that has no
+  record. Make rmd project init emit the CI declarations that record expects
+  for its profile, and add a test that a project init ts-node stack passes
+  resolveProjectPreflight. The quickstart demo is the first case.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: operator-direction:onboarding-is-a-code-edit:20261103
+thread_id: null
