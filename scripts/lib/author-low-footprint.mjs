@@ -4,6 +4,8 @@ import {tmpdir} from 'node:os';
 import {join, resolve, sep} from 'node:path';
 import {parseArgv} from './argv.mjs';
 import {captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES} from './author-step-capture.mjs';
+import {AUTHOR_CONTEXT_FORMAT, observeAuthorContext, requireAuthorContext} from './author-context-compatibility.mjs';
+import {authorDependencyProvenance as dependencyProvenance} from './author-dependency-provenance.mjs';
 import {focusedMacWorkload, readMacAuthorAdmission, readMacFocusedAdmission} from './mac-author-admission.mjs';
 import {prepareJudgedRun, judgedNodeTestArgs, closeJudgedRun} from '../pure-test-pool.mjs';
 import {acquireTestSlot, TEST_FILE_PEAK_BYTES, testSlotExecutionAllowed} from '../../src/lib/test-slot.ts';
@@ -102,6 +104,8 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
     if (git(['rev-parse', '--is-shallow-repository']).trim() !== 'false') throw new Error('complete Git history required');
     git(['fetch', 'origin', 'main']);
     receipt.headSha = git(['rev-parse', 'HEAD']).trim();
+    const dependencyBefore = dependencyProvenance(root);
+    const sourceBefore = observeAuthorContext({root, git, dependency: () => dependencyBefore}).source;
     receipt.baseSha = git(['rev-parse', 'origin/main']).trim();
     receipt.publicationIdentity = publicationIdentity({headRef: options.headRef, publicationSha: options.headSha,
       headSha: receipt.headSha, baseSha: receipt.baseSha}, git);
@@ -130,6 +134,15 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
     scratch = makeScratch(options.scratchBytes);
     receipt.scratch = {writableCapacityBytes: scratch.writableCapacityBytes, imageBytes: scratch.imageBytes};
     for (const dir of ['t', 'h']) mkdirSync(join(scratch.volume, dir));
+    // Bind the committed head/tree and installed dependencies seen at entry to the slot owner and every allocation.
+    const observeNow = () => observeAuthorContext({root, git, slot, allocations: {diagnostics, scratchVolume: scratch.volume,
+      scratchDir: scratch.dir, tmp: tmpdir()}});
+    const first = observeNow();
+    const bound = {format: AUTHOR_CONTEXT_FORMAT, source: sourceBefore, dependency: dependencyBefore,
+      owner: first.owner, allocations: first.allocations};
+    requireAuthorContext(bound, first, 'start');
+    receipt.nativeContext = {format: AUTHOR_CONTEXT_FORMAT, intent: 'start', head: sourceBefore.head, tree: sourceBefore.tree,
+      ownerNonce: first.owner.ownerNonce, allocations: Object.keys(first.allocations)};
     const env = {...authorEnvironment(process.env), ...slot.childEnvironment, TMPDIR: join(scratch.volume, 't'),
       HOME: join(scratch.volume, 'h'), TSX_DISABLE_CACHE: '1', npm_config_offline: 'true',
       ...(workload ? {NODE_OPTIONS: `--max-old-space-size=${workload.heapMiB}`} : {})};
@@ -143,6 +156,8 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
     command('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, '-e', code, probe, outside, forbidden], {env});
     if (!existsSync(probe) || existsSync(outside) || existsSync(forbidden)) throw new Error('native write containment control failed');
     receipt.testAdmission = admit(root, tmpdir(), options.minimumFreeBytes, workload);
+    // Only the exact head/tree, dependencies, slot owner nonce and allocations bound above may start the tests.
+    requireAuthorContext(bound, observeNow(), 'start');
     judged = prepareJudgedRun({makeDir: () => mkdtempSync(join(scratch.volume, 'j-'))});
     const args = judgedNodeTestArgs([...(workload ? [`--max-old-space-size=${workload.heapMiB}`] : []),
       '--test', '--test-reporter=tap', '--test-concurrency=1', '--import', 'tsx',
@@ -151,6 +166,8 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
       cwd: root, env: {...env, ...judged.env}, stdoutPath: join(diagnostics, 'tests.stdout.log'),
       stderrPath: join(diagnostics, 'tests.stderr.log'), resultPath: join(diagnostics, 'native.json'),
       runtimeMs: options.runtimeMs, trackParent: true, heartbeat: slot.heartbeat});
+    // A group not proven closed is neither a pass nor a free slot: `judged` stays set, so scratch and slot are retained.
+    if (native.groupClosed === false) throw new Error('native process group did not close; scratch and slot retained');
     const result = closeJudgedRun(judged, options.files, {status: native.status ?? 1, root, role: 'low-footprint'});
     judged = undefined;
     receipt.tests = {status: native.status, signal: native.signal, durationMs: native.durationMs,

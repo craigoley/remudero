@@ -1,0 +1,56 @@
+- id: W1-T11160
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  priority: 2
+  budget_usd: 25
+  risk: high
+  band_meaning: span
+  author_class: machine
+  origin: research:infoq-context-memory-2026-11-02
+  status: queued
+  attempts: 0
+  title: Bounded source-change observations reach actual learning preparation without turning unknown into zero
+  plan_refs:
+    - §4E
+    - §8A
+    - W1-T4681
+    - W1-T4682
+    - W1-T11115
+  files:
+    - src/lib/learnings.ts
+    - src/lib/wipe-test.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/a-fact-shows-its-freshness.test.ts
+    - test/wipe-test.test.ts
+  rationale: "OBSERVED at Remudero 1368db581715998e712a80ad6b0db9a87410e63c: computeCorpusChurn and computeEntryChurn exist, but the whole-src caller census finds no production computeCorpusChurn call; computeMatchedLearningsForArm calls renderMatchedLearnings(selected) without its optional corpusChurn argument. The default reader runs git log once per entry and returns zero on exceptions. A missing observation therefore neither reaches normal injection nor distinguishes unreadable history from measured zero. W1-T4681 already owns the source-churn algorithm and advisory note; W1-T4682 owns repair proposals for stale cited evidence. This task closes their concrete preparation/measurement gap, rather than refiling freshness or citation repair generally. Sources: https://www.infoq.com/articles/agentic-ai-context-memory-knowledge/ ; https://arxiv.org/abs/2410.10813v2 ; https://github.com/craigoley/remudero/blob/1368db581715998e712a80ad6b0db9a87410e63c/src/lib/learnings.ts#L798 ; https://github.com/craigoley/remudero/blob/1368db581715998e712a80ad6b0db9a87410e63c/src/lib/wipe-test.ts#L112 . Source churn is evidence about commits in an explicit window, not a probability of truth or observed live harm. Implementation credit is independently established by GitHub API state MERGED, exact Remudero-Task trailer and run branch for PR #7792 (merge 66fbca9fe2e626ab40186506ef842c3cbddc14da, W1-T4681) and PR #7771 (merge 8b5d41454f7b2b3c856930a70cca792432aeafbc, W1-T4682). PR #7792 changed only learnings.ts and its direct helper/render tests; it did not modify the actual computeMatchedLearningsForArm or runTaskBody injection caller. Its original task promised injected notes, but current source still has no production computeCorpusChurn caller and the committed reader conflates failure with zero. This is a repair of that credited delivery gap, bounded capture and annotation-budget correctness, not a second source-churn algorithm. PR #7771 owns reviewed stale-citation repair proposals and remains unchanged. Earning evidence: https://github.com/craigoley/remudero/pull/7792 ; https://github.com/craigoley/remudero/pull/7771 ."
+  design: |-
+    Wire a bounded versioned source-change observation through the existing asynchronous run preparation boundary into computeMatchedLearningsForArm and renderMatchedLearnings. Reuse W1-T4681's per-fact source-change counting/rendering semantics where compatible, and W1-T4682's existing proposal path rather than creating another citation-repair engine. Perform any history capture asynchronously off the daemon's hot event loop, using the maintained bounded child/capture primitives and a shared batch or compatible cache; never add synchronous git log per learning at dispatch. Bound history work, output, concurrency and cache population through existing repository resource conventions. No new daemon, scheduler, network fetch, model judgment or paid experiment is created.
+    Bind a cache/observation to the actual repository/source snapshot, relevant corpus and applicability revisions, anchor/window semantics, reader version and completeness. The existing cited field is last-cited time, so describe the measured window honestly; do not label citation recency as a verified earning date or claim current factual validity. A stale or missing observation, dirty/unresolved required source context, absent/invalid anchor, unreadable Git, timeout, output truncation or incomplete population is an explicit unknown/not-measurable reason, not zero and not a last-good result relabeled current. A complete observation with no matching commits is a measured zero. Do not silently turn per-layer ambiguity into another layer's measurement. Preserve bounded covered/unknown denominators and capture identity without raw private content or filesystem paths in ledger events.
+    The real preparation consumer must receive the typed observation and expose advisory verify-first information only when it is compatible. Keep reviewed semantic learnings active unless existing lifecycle/authority changes them; no blanket age expiry, quarantine, ranking feedback, new retries, spending or rule promotion follows from churn. Preserve existing matching/ranking, selected and dropped IDs, propensity and masking behavior. Do not drop selected facts or enlarge the context cap to accommodate annotations: account for actual delivered bytes under the established knowledge budget, omit optional notes with a bounded reason when space is unavailable, and distinguish measured observation from delivered annotation. A healthy fixture with room must prove the real rendered worker context carries A's source-change note while unchanged B is a measured zero. Existing prompt manifests remain observational; record annotation format/source identity so later comparisons do not mistake a changed prompt treatment for a change in fact semantics. No new outcome estimator is part of this task.
+    Extend the existing freshness and wipe-test physical suites through the production preparation seam. Use a real temporary Git repository for the default capture path and a refused/unreadable-path case, alongside deterministic bounded/cache seams. Control commit timestamps and the fixture observation window together; set Git identity inside the fixture, never skip CI behavior. New test code uses package aliases and the shared repo-root helper; a new standalone file, if needed, first uses rmd test-place's computed folder. Preserve prior assertions except where an explicitly demonstrated incorrect zero-on-failure contract is replaced by the truthful unknown case.
+  acceptance:
+    - claim: the real learning preparation path consumes compatible source-change evidence and renders an advisory note within the existing budget
+      proof: "unit test: learning preparation consumes bounded source-change observations in delivered context"
+    - claim: the default history path distinguishes unreadable incomplete missing-anchor and stale observations from a complete measured zero
+      proof: "unit test: learning source-change observation keeps unknown distinct from measured zero"
+    - claim: history capture and cache reuse are bounded source-bound and off the hot launch loop rather than one synchronous shell per entry
+      proof: "unit test: learning source-change observation bounds history work and source-compatible cache reuse"
+    - claim: notes preserve masking selection propensity lifecycle privacy and authority and cannot overrun the context budget
+      proof: "unit test: learning source-change notes preserve selection budget masking and observational authority"
+  falsifier: In a controlled Git fixture change only A's referent and show the actual preparation caller delivers A's compatible source-change note while B is a complete measured zero. Replace a failed history read with zero, reuse a stale head/corpus observation, omit part of the population, or bypass the real producer call; each isolated change must fail a dedicated test. A process-spawn spy must catch per-entry synchronous history work. An exhausted-budget fixture must preserve selected facts and the original cap while counting omitted optional notes; a masked arm must touch no memory source. Preserve failed captures and restore every mutation before a passing verified-suite summary. No source-change count is an efficacy, authority or current-truth claim.
+  note: Operator authorized research, canonical plan updates and task filing. This record does not authorize immediate product execution, a paid experiment, a new scheduler or memory database, increased allowances, worker stops or retries, rule promotion, service mutation, release or hold changes. Preserve normal task admission, capacity, source ownership, proof, review and merge gates; preserve failed and unknown evidence. This is planning custody, not implementation, live adoption or measured benefit.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description and files list show an in-process change to learning preparation, rendering and tests (learnings.ts, wipe-test.ts, run-task-verb.ts, and two test files). Nothing in them touches secrets, credentials, auth, permissions, merge/deploy/review policy, or deletion of data or history."
+      - "The plan record explicitly excludes new daemons, schedulers, network fetches, paid experiments, allowance increases and rule promotion. It preserves existing admission, review and merge gates, so it asks for no operator-only decision."
+      - "It is coherent with the plan: it repairs the delivery gap left by W1-T4681 (no production computeCorpusChurn caller) and reuses W1-T4682's proposal path. All 5 declared files exist at the base, and four unit-test acceptance criteria give it a verifiable proof path."
+      - "The research family has no track record (Beta mean 0.50), and the change is moderately broad because it touches the run-task-verb injection path. This is a mild caution, not a HIGH trigger, and the PR still passes CI and review."
+    judged_at: "2026-11-02T22:51:29.072Z"
+    pin: "260c5f43c28d08bdfc33cac5119bb5b1360137122ff08848b7c206abcfb3bf35"

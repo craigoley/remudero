@@ -22,6 +22,7 @@
     - src/lib/non-worker-verdict.ts
     - src/lib/stranded-task-detector.ts
     - src/lib/daemon.ts
+    - src/lib/config-schema.ts
     - test/review/a-push-refused-for-auth-after-a-finished-build-is-a-harness-failure.test.ts
   rationale: |
     RE-VERIFIED 2026-10-26 on origin/main 860537bf7. Ledger reads were read-only, niced and bounded on the host:

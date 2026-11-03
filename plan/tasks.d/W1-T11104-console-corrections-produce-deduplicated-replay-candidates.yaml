@@ -18,6 +18,8 @@
     - src/lib/panel-actions.ts
     - src/lib/feedback.ts
     - src/lib/feedback-docket.ts
+    - src/lib/triage.ts
+    - src/run-task.ts
     - src/lib/feedback-record-merge.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
@@ -32,6 +34,9 @@
     and normal review. A new service, synthetic accept-rate target or autonomous live decision loop
     would duplicate that machinery and optimize the wrong outcome. W1-T11096 provides exact native
     conversation/revision evidence; W1-T11103 owns subsequent correspondence and must stay distinct.
+    The maintained run-task docket rung currently projects rejected feedback to id/ts/raw, and
+    triage feedbackEntryBlock carries raw/contribution only. Those real consumers need explicit
+    correction metadata; a pure helper plus fixtures would not complete this runtime path.
   design: |
     Add a closed, explicitly chosen wording-correction kind to the existing conversation feedback
     path, advertised only when this native contract is served. Verify repository, native issue,
@@ -39,12 +44,24 @@
     the rendered template/version or digest and the operator's correction; do not collect keystrokes,
     unsent drafts, full private threads or acceptance rates as analytics. Legacy prose replies remain
     ordinary replies; do not guess corrective intent from arbitrary message text.
+    A wording correction is a separate typed feedback receipt, not an operator business answer.
+    It must not append a reply that clears Action required, archive the discussion, stage a grill
+    answer or invoke the business reply interpreter. Advertise and validate the explicit kind on
+    the existing mounted reply route; preserve legacy answer validation and receipt semantics.
+    Treat the rendered version/digest as operator-reported context, not a server attestation of
+    what the browser displayed. Retain only bounded source facts and curated replay case ids.
     Use existing feedback records, immutable merge rules and intake/docket ownership. Deduplicate by
     verified symptom/source kind and implementation version while retaining distinct source evidence
     and conflicting corrections. A repeated symptom is an observation, not a shared root-cause claim.
     Wire the real docket/intake path to produce one bounded candidate with source links, sanitized
     replay input, independent expected facts/unknowns, allowed and forbidden actions, before/after
-    wording and the proposed fixture/template change. The normal pipeline prepares and reviews any
+    wording and the proposed fixture/template change. Carry the explicit correction metadata
+    through the real run-task feedback-docket rung and triage feedback envelope; neither may
+    discard it by projecting only raw text. Keep the existing untrusted-input envelope and normal
+    weekly docket/proposal limits. Do not add a run-task test importer or another intake pipeline.
+    A correction may propose a fixture/template repair, not automatic changes to CLAUDE.md or
+    unrelated operational policy. Preserve legacy feedback behavior when this kind is absent.
+    The normal pipeline prepares and reviews any
     resulting patch; feedback cannot approve a live recommendation, release a hold or alter gates.
     Add deterministic evaluation for evidence preservation and action/receipt semantics. Replay
     stale and unauthorized reads, missing diagnosis, exact units/time zones/denominators, changed

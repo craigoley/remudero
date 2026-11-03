@@ -1,0 +1,70 @@
+- id: W1-T11153
+  title: "Review admission stops spending its slot on a queue head that needs a person, refills from a fresh read of the queue, and records in shadow the order it would pick by measured cost and value with measured aging — the oldest-first head could not merge without a person in 333 of 709 light passes (47%) and in 40 of them took the only slot so no review started; refills used a snapshot a median 16.3 min old and jumped 103 of 301 times, adding up to 41.2 h of wait; oldest-first sent 42% of code-lane hours to PRs with 3 or more FAILs"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern, which review the lane admits next; one module (the admission selectors in sweep.ts) and its test; the cost/value order is shadow only
+  origin: operator-session#review-lane-findings-2026-11-02
+  plan_refs:
+    - W1-T1218
+    - W1-T11076
+    - W1-T10992
+    - W1-T2583
+  files:
+    - src/lib/sweep.ts
+    - test/daemon/review-admission-is-ordered-by-measured-cost-and-value-in-shadow.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A review-eligible PR that cannot merge without a person (a standing human CHANGES_REQUESTED review, or an open needs-human escalation for its head) is admitted only after every eligible PR that does not need one, in the light pass, its refills and the full pass, so it never takes the lane while a mergeable review waits; when nothing else is eligible it is admitted as today
+      proof: "unit test: test/daemon/review-admission-is-ordered-by-measured-cost-and-value-in-shadow.test.ts"
+    - claim: A light-pass refill of a freed lane re-derives eligibility and order from the current open-PR view rather than the pass-start snapshot, so a PR that became eligible after the snapshot is ordered by its own admission key and is not jumped by a younger one; the refill row records the age of the view it used
+      proof: "grep: W1-T11153 criterion 2 in test/daemon/review-admission-is-ordered-by-measured-cost-and-value-in-shadow.test.ts"
+    - claim: Each admission also computes a shadow order ranking every eligible review by measured expected value per expected lane-minute (cost is its class's median review duration, plan-only or code by proof count; value is its class's measured PASS rate given its prior FAIL count and its sweep.disposed loop_decision route) plus its wait in units of the lane's median service time, and ledgers sweep.review_order_shadow with the actual picks, the shadow picks, each candidate's terms and the wait the other order would have given; with no history for a class the shadow order equals the actual order, and the shadow order never decides a pick
+      proof: "grep: W1-T11153 criterion 3 in test/daemon/review-admission-is-ordered-by-measured-cost-and-value-in-shadow.test.ts"
+  rationale: |
+    MEASURED 2026-11-02, W1-T10992's recon report (#16312) over the ledger from 2026-10-26 to 2026-11-02:
+    - Blocked queue head: the oldest-first head could not merge without a person in 333 of 709 light passes (47%) — a human
+      CHANGES_REQUESTED review in 100 (94 of them #14793) and an open needs-human escalation in 233. In 40 passes that head took the
+      only slot and no review started.
+    - Stale refill snapshot: light-pass refills used a snapshot a median 16.3 min old (max 155 min). 103 of 301 refills jumped an
+      older PR that became eligible after the snapshot, adding up to 41.2 h of wait.
+    MEASURED 2026-11-02 over a 7-day ledger union (~/Remudero-notes/review-lane-findings-2026-11-02.md, read-only):
+    - Admission is picked once per pass, oldest createdAt first; the bound is re-checked per slot. There is no cost class.
+    - Oldest-first sent 42% of code-lane hours to PRs with 3 or more FAILs. On 2026-11-02 #15532, #15638 and #15656 each held the
+      single lane for 48-94 minutes. Code FAIL rate 36%; code reviews median 379 s, plan reviews 82 s.
+    - Code wait from green-and-unreviewed to review start: 7-day median 15.5 min, p90 92 min; today median 189 min, p90 375 min.
+    READ at origin/main 1368db581, src/lib/sweep.ts:
+    - orderPendingReviews (W1-T1218) and selectReviewAdmissions' oldestFirst sort by the immutable createdAt / reviewAdmissionKey only.
+      Nothing in either reads whether the PR needs a person to merge.
+    - refillFreedLanes (sweep.review_refilled) takes its refill tail from the pass-start selection.
+    - W1-T11076 (merged, #16095) writes loop_decision {trigger, route: push-through | split | close-and-rebuild} on sweep.disposed
+      rows in shadow (decideLoopOutcome, src/lib/loop-decision.ts); nothing reads it for admission.
+    NOT COVERED: W1-T10992 (verify: human) is the recon itself; #16312 is its report. W1-T11149 to W1-T11152 (filed beside this)
+    change how many reviews run, not which. The plan-only fast lane (CI scope, in-process plan review, same-pass arm) is filed by
+    another agent, and the operator session's item 1 gives plan-only reviews their own lane; this covers what still shares a lane.
+  design: |
+    1. A needs-a-person predicate over the open-PR view and the ledger the pass already reads: a standing human CHANGES_REQUESTED
+       review, or an open needs-human escalation keyed to the head. Both selectors (selectReviewAdmissions, the full pass) and the
+       refill put such PRs after every other eligible PR, keeping oldest-first within each group. The stand-down text names it.
+    2. refillFreedLanes re-reads eligibility through the same reader the pass started with, at refill time, and orders the fresh
+       list; it records view_age_ms on sweep.review_refilled.
+    3. A pure reviewPriority(candidate, history): cost = class median review lane-minutes (class = plan-only, or code bucketed by
+       declared proof count, buckets from the population's own quartiles); value = the class's PASS rate given prior FAIL count,
+       times the PASS rate of PRs whose latest loop_decision has the same route; age = wait / median service time. Rank = value /
+       cost + age. It builds the shadow order over the same eligible list and width; the picks stay as in 1.
+    4. sweep.review_order_shadow {pass, width, actual, shadow, terms, would_wait_ms}. Promotion of the cost/value order to
+       enforcement is a separate, operator-approved change made on these rows.
+    Tests go in test/daemon/review-admission-is-ordered-by-measured-cost-and-value-in-shadow.test.ts, titled verbatim as in the
+    proofs, over synthetic open-PR views and ledgers (a needs-person head, a late-eligible PR across a refill, known class medians).
+  note: |
+    reservation hand-off: plan-file-1793657968812 -> plan-file-1793657968812
+    Reserved with rmd next-task-id --branch plan-file-1793657968812 from the operator checkout. Filed 2026-11-02 from the review-lane
+    findings, item 4 (p2), with the coordinator's fold-in of W1-T10992's recon results (#16312): the needs-a-person head and the
+    stale refill snapshot. Those two act now, because a head that needs a person cannot merge whatever its review says and a fresh
+    read only removes a jump. The cost/value order is shadow first, since its input W1-T11076's loop decision is itself shadow; its
+    switch waits for the operator's yes on the measured hours.

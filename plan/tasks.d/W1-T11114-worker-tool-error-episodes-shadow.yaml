@@ -1,0 +1,49 @@
+- id: W1-T11114
+  title: Busy worker tool error episodes become a redacted shadow observation
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  priority: 2
+  budget_usd: 12
+  risk: high
+  band_meaning: span
+  author_class: machine
+  origin: research:omnigent-2026-11-02
+  plan_refs:
+    - §Self-improvement
+    - W1-T10763
+  files:
+    - src/lib/worker-tool-lineage.ts
+    - test/worker-tool-lineage-outcomes.test.ts
+    - test/worker-tool-lineage-redaction.test.ts
+    - test/worker-tool-lineage-joins.test.ts
+  status: queued
+  attempts: 0
+  rationale: "OBSERVED: worker-tool-lineage.ts joins provider/stream/run/turn/call identities and classifies success/error/unknown. quiet-worker-watchdog.ts observes silence and shell polling; fix-progress-judge reasons between fix rounds. Neither is a measurement of an active worker repeatedly receiving tool errors inside one round. Omnigent safety policy detects exact repeated calls; its rolling error heuristic examines a result prefix. Sources: https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/omnigent/policies/builtins/safety.py ; https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/omnigent/policies/builtins/context.py . Adapt the observation using existing verified outcomes rather than raw output heuristics or another kill bound."
+  design: |-
+    Extend existing metadata-only tool-lineage fold with bounded per-run/provider/tool-class consecutive-error episode observations. Only unique, unambiguous joined error results contribute. A joined success closes/resets the streak; unknown, duplicate, orphan, interrupted, ambiguous and unsupported events are separately counted and cannot establish either success or an error streak across an evidence gap. Define ordering and continuity explicitly per stream/run; never merge episodes across workers, provider streams, restarts or turns whose continuity is unknown. Cap memory/cardinality and emit an explicit incomplete/unknown summary on exhaustion or delivery failure.
+    Emit a fixed-schema shadow ledger summary on existing worker closure, naming observed eligible results, error episodes/lengths, successes and excluded categories with window/completeness and bounded identifiers. Keep no tool arguments, raw outputs, paths, prompts, model prose or secrets. Existing tool result is not task outcome or permission. Healthy repeated checks with successful results are ordinary activity; do not label an episode root cause, nonprogress, model failure or wasted dollars without independent evidence. This measurement enables the existing flywheel/retro to price a later targeted remedy: no new scheduler, watchdog bound, kill, retry, denial, paid replay or policy action. Retain all original lineage events. Test interleaving, duplicate/replayed events, ambiguous results, success reset, gaps, caps and injected sensitive sentinels in existing suites; any later intervention requires its own observed population, proposal and normal gates.
+  acceptance:
+    - claim: only unique continuous joined errors form an episode and success or an evidence gap breaks its claim
+      proof: "unit test: tool error episode shadow requires continuous unique joined error evidence"
+    - claim: duplicate orphan replay ambiguous and unsupported observations are excluded and counted
+      proof: "unit test: tool error episode shadow counts exclusions without inflating the streak"
+    - claim: healthy repeated successful checks are not classified as tool error episodes
+      proof: "unit test: tool error episode shadow preserves healthy repeated checks"
+    - claim: bounded summaries preserve redaction incompleteness and observational authority
+      proof: "unit test: tool error episode shadow stays bounded private and cannot stop or retry a worker"
+  falsifier: Count a duplicate result twice, bridge an unknown gap, merge two streams, or treat successful repeated checks as an error loop; each isolated change must fail a deterministic fixture. Independently disclose a sentinel argument/output to prove the summary redaction test fails. Restore all source; no live stuck rate or savings is claimed.
+  note: Operator requested research, plan updates and task filing, not immediate product execution or paid experiments. Normal risk judgment, native capacity, source ownership, proof, review and merge gates remain. No installed Omnigent dependency, new scheduler, automatic guard change, model promotion or live capability proof is authorized by this record. This record is planning custody, not evidence of implementation or benefit.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The filing proposes bounded metadata-only shadow observations in existing lineage infrastructure, with explicit continuity, exclusion, completeness and redaction requirements."
+      - "The stated scope excludes worker control, retries, policy changes, paid experiments and authority expansion; normal proof, review and merge gates remain."
+      - "All four declared files exist at base, and acceptance specifies tests for evidence gaps, exclusions, healthy activity and observational limits. This filing-time judgment does not establish implementation correctness."
+    judged_at: "2026-11-02T18:21:04.520Z"
+    pin: "e7f059894a34b4d970c30847a074162b32c513e93f9c51a7a17a3c3e49b44099"

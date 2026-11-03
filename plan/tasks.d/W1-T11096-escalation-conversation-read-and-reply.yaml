@@ -40,7 +40,14 @@
     anchored Task/Class/Cause/Options/Recommendation format, preserving missing/unknown information.
     Derive the SAME task/class/cause/PR thread identity as escalate.ts, read the existing store and
     return bounded messages plus source recommendation/options. Missing or unreadable history is an
-    explicit state and disables reply; do not treat a source read as dispatch authority.
+    explicit state and disables ordinary reply; do not treat a source read as dispatch authority.
+    For a legacy escalation with no saved messages, advertise an explicit startConversation capability
+    only after positively reading an existing healthy native store and verifying the open native source.
+    A GET never writes. A bound first reply imports the verified original source and appends the exact
+    answer under the existing store mutation lock. Missing, corrupt or partial stores cannot start one.
+    Native recommendationReplies may advertise exact Accept and Decline prose while input is needed.
+    Bind the current recommendation, response kind and exact answer to the same immutable reply intent.
+    These controls record input only; they do not execute repair, approve a task or close an issue.
     Extend the existing LOW escalation reply with optional bounded intentId and current source/thread
     binding. Use native durable append identity so repeated identical intent does not append twice,
     and conflicting text or changed source refuses. Preserve legacy callers. Return saved-answer
@@ -61,6 +68,10 @@
       proof: 'unit test: escalation reply intent records once without claiming completed work'
     - claim: the real authenticated service mounts the escalation conversation read
       proof: 'unit test: assembled service serves an authenticated escalation conversation'
+    - claim: a positively empty native store can start the legacy escalation discussion only on a bound reply
+      proof: 'unit test: an existing native escalation without saved history starts one conversation on the first reply'
+    - claim: recommendation controls record exact native prose without approving or executing work
+      proof: 'unit test: native Accept and Decline record the exact recommendation answer without approving work'
   falsifier: |
     On the filing base there is no escalation conversation read, and only proposal ids resolve in the
     inbox detail. Removing the exact cause/PR identity or treating append as completed work fails the
