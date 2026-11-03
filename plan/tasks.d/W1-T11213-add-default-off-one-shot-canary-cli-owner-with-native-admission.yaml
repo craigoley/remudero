@@ -25,7 +25,7 @@
     - src/lib/model-canary-pilot-approval.ts
     - src/lib/model-canary-pilot-execution.ts
     - test/model-canary-owner.test.ts
-    - test/worker.test.ts
+    - test/routing/model-canary-provider-invocation-guard.test.ts
     - test/routing/model-canary-pilot-approval.test.ts
     - test/routing/model-canary-pilot-execution.test.ts
     - test/routing/model-canary-pilot-cli.test.ts
@@ -94,7 +94,7 @@
     - claim: Approval binds exact source/runtime and corpus/scorer digests and cannot be created from JSON or a prepared manifest.
       proof: 'unit test: pilot approval is owner written and bound to the exact source runtime and corpus'
     - claim: The optional `beforeProviderInvocation` hook runs at every selection/fallback boundary outside telemetry catches; pin/context mismatch or a throwing hook aborts before the provider adapter call.
-      proof: 'unit test: test/worker.test.ts'
+      proof: 'unit test: test/routing/model-canary-provider-invocation-guard.test.ts'
     - claim: The synchronous guard rejects thenables and malformed/refuse results; any guard failure is fatal and cannot reach a fallback provider.
       proof: 'unit test: provider invocation guard rejects async refusal and never launches fallback'
     - claim: A fresh ineligible route or active-worker snapshot defers; fake transport captures the exact model/effort body and a one-turn cap bounds each arm to one send.
