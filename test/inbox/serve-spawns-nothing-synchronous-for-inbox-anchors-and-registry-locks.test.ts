@@ -3,7 +3,7 @@
 // record EVERY synchronous child_process call while the served paths run and expect none.
 import assert from "node:assert/strict";
 import childProcess, { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -76,15 +76,30 @@ test("a served inbox render reaches no synchronous child_process call: the regis
     inboxMainSha: () => "a".repeat(40),
     inboxGrepAnchor: () => true,
   };
-  // A live foreign holder of the registry lock that lets go shortly: the prune must wait it out WITHOUT blocking.
+  // A live foreign holder of the registry lock. The release is driven by the loop itself, not a wall clock: the lock
+  // lets go only once the prune has been REFUSED the lock at least once and the loop has then ticked 3 times. A
+  // blocked loop never ticks, never releases, and the prune's 2000 ms deadline rejects the render — so the assertion
+  // cannot be raced by a loaded host the way a fixed-delay release could (it flaked at ticks: 2).
   const lockPath = `${registry}.lock`;
   holdLock(lockPath, liveForeignHolder(t));
-  const release = setTimeout(() => unlinkSync(lockPath), 120);
-  t.after(() => clearTimeout(release));
+  let refusals = 0;
+  const realOpen = fs.promises.open.bind(fs.promises) as (...args: unknown[]) => Promise<unknown>;
+  t.mock.method(fs.promises, "open", async (...args: unknown[]) => {
+    try {
+      return await realOpen(...args);
+    } catch (err) {
+      if (args[0] === lockPath && (err as NodeJS.ErrnoException).code === "EEXIST") refusals += 1;
+      throw err;
+    }
+  });
 
   const spawns = recordSyncSpawns(t);
   let ticks = 0;
-  const heartbeat = setInterval(() => void (ticks += 1), 10);
+  const heartbeat = setInterval(() => {
+    if (refusals === 0) return;
+    ticks += 1;
+    if (ticks === 3) unlinkSync(lockPath);
+  }, 10);
   t.after(() => clearInterval(heartbeat));
   const refreshed = await refreshInboxClassification(deps, {});
   clearInterval(heartbeat);
@@ -92,6 +107,7 @@ test("a served inbox render reaches no synchronous child_process call: the regis
   assert.equal(refreshed.pruned, 1, "the ratified proposal is pruned");
   assert.deepEqual((JSON.parse(readFileSync(registry, "utf8")) as { proposals: Proposal[] }).proposals.map((p) => p.id), ["ruling:open"]);
   assert.deepEqual(spawns.calls, [], "no synchronous child_process call during the served render");
+  assert.ok(refusals >= 1, "the prune met the held lock and waited rather than finding it free");
   assert.ok(ticks >= 3, `the event loop kept turning while the lock was held (ticks: ${ticks})`);
 });
 

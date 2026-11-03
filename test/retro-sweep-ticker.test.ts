@@ -486,13 +486,14 @@ test("W1-T463: NO BLOCKING SLEEP SURVIVES in src/run-task.ts -- the regression t
   // statement form so the explanatory prose above the two loops cannot satisfy it.
   const realCalls = src.split("\n").filter((l) => /^\s*execFileSync\("sleep"/.test(l));
   assert.deepEqual(realCalls, [], `a blocking sleep came back to the daemon's own file: ${realCalls.join(" | ")}`);
-  // POSITIVE CONTROL on that zero: the same predicate DOES find the two deferred, non-daemon sites.
+  // POSITIVE CONTROL on that zero: the same predicate DOES find the deferred, non-daemon site. (W1-T11128 moved
+  // src/lib/inbox.ts's registry-lock poll onto Atomics.wait, so src/spike.ts is the one site left.)
   const deferred = ["src/lib/inbox.ts", "src/spike.ts"].filter((p) =>
     readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", p), "utf8")
       .split("\n")
       .some((l) => /^\s*execFileSync\("sleep"/.test(l)),
   );
-  assert.deepEqual(deferred, ["src/lib/inbox.ts", "src/spike.ts"], "the predicate must be able to find one at all");
+  assert.deepEqual(deferred, ["src/spike.ts"], "the predicate must be able to find one at all");
 });
 
 test("W1-T463: the DEFAULT gh read is driven for real -- an async execFile, not the sync one it replaced", async () => {
