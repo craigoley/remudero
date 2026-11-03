@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { test, type TestContext } from "node:test";
+import { test } from "node:test";
 import { withTempDir } from "#src/lib/tmp.js";
+import { accountOwnedFixtureRoot } from "#test/helpers/account-owned-fixture-root.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function host(root: string) {
@@ -96,14 +96,9 @@ test("temporary state is refused across os temp roots and rmd fixture ancestors"
   });
 });
 
-function accountOwnedFixtureRoot(t: TestContext, parent: string, prefix: string): string {
-  const previous = process.umask(0o022);
-  t.after(() => { process.umask(previous); });
-  return realpathSync(mkdtempSync(join(parent, prefix)));
-}
-
 test("a hand-built env cannot restore a temporary state's manifest into the default scratch root", async (t) => {
-  const root = accountOwnedFixtureRoot(t, tmpdir(), "rmd-scratch-fixture-restore-");
+  // The rmd- prefix is the ancestor the planner reads as "fixture state" outside the OS temp root.
+  const root = accountOwnedFixtureRoot(t, "rmd-scratch-fixture-restore-");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   {
     const state = join(root, "state");
