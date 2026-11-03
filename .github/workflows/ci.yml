@@ -2385,6 +2385,7 @@ jobs:
           npm ci
       - name: Determine whether this diff can move src/lib/classify.ts's mutation score
         id: trigger
+        if: steps.classify.outputs.class == 'SOURCE'
         run: |
           set -euo pipefail
           git diff --name-only HEAD^1...HEAD > changed-files.txt
