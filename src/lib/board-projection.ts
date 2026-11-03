@@ -78,6 +78,8 @@ export const BOARD_ORACLE_RECURRENCE_MS = 24 * 60 * 60_000;
 /** OPERATOR DECISION (W1-T9718), operator ruling 2026-10-17: six slices. At 10-minute passes every task is audited
  *  hourly, a recently healed one every pass; a pass reads ~1/N of a full re-derive (N=1 1,170 MB, N=6 290 MB offline). */
 export const BOARD_ORACLE_SLICES = 6;
+/** W1-T9716: the task-bucket cache's bound, in fact-row body bytes (operator ruling 2026-11-03: "64 MiB, LRU"). */
+export const BOARD_TASK_CACHE_BYTES = 64 * 1024 * 1024;
 const ORACLE_SLICE_META = "board.oracle_slice";
 /** Steps some task's derivation reads across the whole ledger, whatever task they name. */
 export const BOARD_CROSS_TASK_STEPS: ReadonlySet<string> = new Set(["daemon.boot"]);
@@ -431,6 +433,8 @@ export interface BoardProjectionOptions {
   onIngest?: (rows: ReadonlyArray<Row>) => void;
   /** W1-T9718: the slices one oracle rotation audits in turn; {@link BOARD_ORACLE_SLICES} when omitted. */
   oracleSlices?: number;
+  /** W1-T9716: the task-bucket cache's bound in body bytes; {@link BOARD_TASK_CACHE_BYTES} when omitted, 0 turns it off. */
+  taskCacheBytes?: number;
 }
 
 /**
@@ -695,6 +699,51 @@ function bucketDigest(bucket: StepBucket, more: readonly StepRow[] = []): StepDi
   return { n, s, t };
 }
 
+/** W1-T9716: the task-bucket cache's reads since the last `read_model.board_oracle` row: hits (extended_rows the only
+ *  store rows they read), full_reads, evictions at the bound, not_admitted (no room but the buckets this index already
+ *  used: a re-derive larger than the bound keeps what it holds rather than evicting each bucket before its next use),
+ *  resets on a moved digest; and what it holds (tasks, bytes). */
+export interface BoardTaskReads {
+  hits: number;
+  extended_rows: number;
+  full_reads: number;
+  evictions: number;
+  not_admitted: number;
+  resets: number;
+  tasks: number;
+  bytes: number;
+}
+
+function noTaskReads(): BoardTaskReads {
+  return { hits: 0, extended_rows: 0, full_reads: 0, evictions: 0, not_admitted: 0, resets: 0, tasks: 0, bytes: 0 };
+}
+
+/** W1-T9716: a task's own and alias rows in (ts_ms, seq) order to `high`, never mutated; `n`/`s` are the store's
+ *  index-only count and seq sum of them, which a deleted row moves. */
+interface TaskBucket {
+  readonly rows: readonly Row[];
+  readonly tsMs: readonly number[];
+  readonly seqs: readonly number[];
+  readonly bytes: number;
+  readonly high: number;
+  readonly n: number;
+  readonly s: number;
+}
+
+function mergeTaskRows(held: Pick<TaskBucket, "rows" | "tsMs" | "seqs">, more: Pick<TaskBucket, "rows" | "tsMs" | "seqs">): { rows: Row[]; tsMs: number[]; seqs: number[] } {
+  const [rows, tsMs, seqs]: [Row[], number[], number[]] = [[], [], []];
+  let [i, j] = [0, 0];
+  while (i < held.rows.length || j < more.rows.length) {
+    const takeHeld = j >= more.rows.length || (i < held.rows.length &&
+      (held.tsMs[i]! < more.tsMs[j]! || (held.tsMs[i] === more.tsMs[j] && held.seqs[i]! < more.seqs[j]!)));
+    const [src, at] = takeHeld ? [held, i++] : [more, j++];
+    rows.push(src.rows[at]!);
+    tsMs.push(src.tsMs[at]!);
+    seqs.push(src.seqs[at]!);
+  }
+  return { rows, tsMs, seqs };
+}
+
 function noStepReads(): BoardStepReads {
   return {
     indexes: 0, fullReads: 0, fullRows: 0, fullBytes: 0, extendedRows: 0, extendedBytes: 0, reusedRows: 0, reusedBytes: 0,
@@ -785,6 +834,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     latest: db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
     taskFacts: db.prepare(`SELECT seq, ts_ms, step, body FROM fact WHERE task_id = ? AND seq <= ? AND step NOT IN (${unreadSql})
       UNION ALL SELECT f.seq, f.ts_ms, f.step, f.body FROM fact_alias a JOIN fact f ON f.seq = a.seq WHERE a.task = ? AND f.seq <= ? AND f.step NOT IN (${unreadSql})`),
+    taskFactsAfter: db.prepare(`SELECT seq, ts_ms, step, body FROM fact WHERE task_id = ? AND seq > ? AND seq <= ? AND step NOT IN (${unreadSql})
+      UNION ALL SELECT f.seq, f.ts_ms, f.step, f.body FROM fact_alias a JOIN fact f ON f.seq = a.seq WHERE a.task = ? AND a.seq > ? AND f.seq <= ? AND f.step NOT IN (${unreadSql})`),
+    taskDigest: db.prepare("SELECT count(*) AS n, sum(seq) AS s FROM fact WHERE task_id = ? AND seq <= ?"),
+    taskAliasDigest: db.prepare("SELECT count(*) AS n, sum(f.seq) AS s FROM fact_alias a JOIN fact f ON f.seq = a.seq WHERE a.task = ? AND a.seq <= ?"),
     seqFact: db.prepare("SELECT seq, ts_ms, step, body FROM fact WHERE seq = ?"),
     stepFacts: db.prepare("SELECT seq, ts_ms, body FROM fact WHERE step = ? AND seq <= ? ORDER BY ts_ms, seq"),
     planOnlyFacts: db.prepare(`SELECT step, body FROM fact WHERE step IN ('pr.opened', 'review.posted', ?) AND seq <= ? AND json_type(body, '$.plan_only') = 'true'`),
@@ -877,6 +930,12 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   let planOnlyDigest: StepDigest | undefined;
   const cacheStrings = strings ? new Map<string, string>() : undefined;
   let stepReads = noStepReads();
+  const taskCache = new Map<string, TaskBucket>();
+  const taskUsedBy = new Map<string, number>();
+  let indexGeneration = 0;
+  const taskCacheLimit = Math.max(0, opts.taskCacheBytes ?? BOARD_TASK_CACHE_BYTES);
+  let taskCacheHeld = 0;
+  let taskReads = noTaskReads();
   let lastCredit: { credit: CreditStore; overrides: string } = { credit: {}, overrides: "" };
   let latestTsMs = 0;
   const held = new Map<string, Held>();
@@ -1293,6 +1352,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     planOnlyAudited = false;
     planOnlyPending = [];
     planOnlyDigest = undefined;
+    taskCache.clear();
+    taskUsedBy.clear();
+    taskCacheHeld = 0;
     cacheStrings?.clear();
   }
 
@@ -1305,7 +1367,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   /** W1-T9604: drops the cache when an index-only digest says a cached step's row was deleted under it (the consistency
    *  oracle's heal deletes corrupt or duplicate rows; facts otherwise only grow by seq), or the store reads behind it. */
   function checkStepCache(): void {
-    if (stepCache.size === 0 && !planOnlyCache) return;
+    if (stepCache.size === 0 && !planOnlyCache && taskCache.size === 0) return;
     const moved = [...stepCache].some(([step, bucket]) => !sameDigest(bucketDigest(bucket, stepPending.get(step)), storeDigest(step)))
       || (planOnlyDigest !== undefined && !sameDigest(planOnlyDigest, storeDigest(undefined)));
     const reason = moved ? "deleted" : Number(sql.maxSeq.get()?.seq ?? 0) < lastSeq ? "behind" : undefined;
@@ -1358,6 +1420,77 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return own;
   }
 
+  function taskDigest(id: string, upTo: number): { n: number; s: number } {
+    const own = sql.taskDigest.get(id, upTo);
+    const alias = sql.taskAliasDigest.get(id, upTo);
+    return { n: Number(own?.n ?? 0) + Number(alias?.n ?? 0), s: Number(own?.s ?? 0) + Number(alias?.s ?? 0) };
+  }
+
+  function readTaskRows(rowsOf: Iterable<Record<string, unknown>>): { rows: Row[]; tsMs: number[]; seqs: number[]; bytes: number } {
+    const read: Array<{ row: Row; tsMs: number; seq: number }> = [];
+    let bytes = 0;
+    for (const r of rowsOf) {
+      const body = String(r.body);
+      bytes += body.length;
+      const row = parse(body);
+      if (cacheStrings) internRowStrings(row, cacheStrings);
+      read.push({ row, tsMs: Number(r.ts_ms), seq: Number(r.seq) });
+    }
+    read.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq);
+    return { rows: read.map((r) => r.row), tsMs: read.map((r) => r.tsMs), seqs: read.map((r) => r.seq), bytes };
+  }
+
+  /** W1-T9716: `id`'s held bucket, made current to `upTo`: extended by the rows past its high seq when its digest still
+   *  matches the store, read in full otherwise. Held most recently used last; the least recent go at the bound. */
+  function cachedTask(id: string, upTo: number, generation: number): TaskBucket {
+    let bucket = taskCache.get(id);
+    if (bucket) {
+      const digest = taskDigest(id, bucket.high);
+      if (digest.n !== bucket.n || digest.s !== bucket.s) {
+        forgetTask(id);
+        taskReads.resets++;
+        bucket = undefined;
+      }
+    }
+    if (bucket) {
+      taskReads.hits++;
+      if (upTo > bucket.high) {
+        const more = readTaskRows(sql.taskFactsAfter.iterate(id, bucket.high, upTo, ...unread, id, bucket.high, upTo, ...unread));
+        taskReads.extended_rows += more.rows.length;
+        const digest = taskDigest(id, upTo);
+        bucket = { ...(more.rows.length > 0 ? mergeTaskRows(bucket, more) : bucket), bytes: bucket.bytes + more.bytes, high: upTo, n: digest.n, s: digest.s };
+      }
+    } else {
+      const full = readTaskRows(sql.taskFacts.iterate(id, upTo, ...unread, id, upTo, ...unread));
+      taskReads.full_reads++;
+      const digest = taskDigest(id, upTo);
+      bucket = { ...full, high: upTo, n: digest.n, s: digest.s };
+    }
+    forgetTask(id);
+    taskCache.set(id, bucket);
+    taskUsedBy.set(id, generation);
+    taskCacheHeld += bucket.bytes;
+    for (const [oldest, held] of taskCache) {
+      if (taskCacheHeld <= taskCacheLimit) break;
+      if (oldest === id || taskUsedBy.get(oldest) === generation) {
+        forgetTask(id);
+        taskReads.not_admitted++;
+        break;
+      }
+      forgetTask(oldest);
+      taskReads.evictions++;
+    }
+    return bucket;
+  }
+
+  function forgetTask(id: string): void {
+    const held = taskCache.get(id);
+    if (!held) return;
+    taskCache.delete(id);
+    taskUsedBy.delete(id);
+    taskCacheHeld -= held.bytes;
+  }
+
   /** What the cache holds, queued rows included; the plan-only sets keep no row, so their entries are counted. */
   function heldStepCache(): BoardStepReads["held"] {
     let [rowCount, bytes] = [0, 0];
@@ -1370,11 +1503,14 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
 
   /** Audits this slice and every new cache member against an uncached index at the same seq; a mismatch drops all. */
   function auditStepCache(fresh: LedgerIndex, index: number, of: number): {
-    steps: number; rows: number; mismatches: string[]; slice: { index: number; of: number }; audited: number; held_back: number;
+    steps: number; rows: number; mismatches: string[]; slice: { index: number; of: number }; audited: number; held_back: number; tasks: number;
   } {
     // The audit's own look at the cache is not a build's: of its counts, only a reset it finds is kept.
     const counted = stepReads;
+    const countedTasks = taskReads;
     stepReads = noStepReads();
+    // W1-T9716: this slice's held task buckets only (W1-T9718), chosen before the audit's own reads touch the cache.
+    const selectedTasks = [...taskCache.keys()].sort().filter((id) => boardOracleSliceOf(id, of) === index);
     const mine = storeIndex(rows);
     const cachedSteps = [...stepCache.keys()].sort();
     const selected = cachedSteps.filter((step) => !auditedSteps.has(step) || boardOracleSliceOf(step, of) === index);
@@ -1393,13 +1529,19 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       if (sorted(mine) !== sorted(fresh)) mismatches.push("plan_only");
       planOnlyAudited = true;
     }
+    for (const id of selectedTasks) {
+      const [have, want] = [mine.byTask.get(id) ?? [], fresh.byTask.get(id) ?? []];
+      if (have.length !== want.length || have.some((row, at) => JSON.stringify(row) !== JSON.stringify(want[at]))) mismatches.push(`task:${id}`);
+    }
+    taskReads = countedTasks;
     if (mismatches.length > 0) {
       dropStepCache();
       stepReads.resets.audit++;
     }
     const found = stepReads.resets;
     stepReads = { ...counted, resets: { deleted: counted.resets.deleted + found.deleted, behind: counted.resets.behind + found.behind, audit: counted.resets.audit + found.audit } };
-    return { steps: cachedSteps.length, rows: compared, mismatches, slice: { index, of }, audited: selected.length, held_back: cachedSteps.length - selected.length };
+    return { steps: cachedSteps.length, rows: compared, mismatches, slice: { index, of }, audited: selected.length, held_back: cachedSteps.length - selected.length,
+      tasks: selectedTasks.length };
   }
 
   /**
@@ -1413,6 +1555,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
    */
   function storeIndex(bound: ReadonlyArray<Row>, cached = true, tally?: { rows: number; bytes: number }): LedgerIndex {
     const upTo = lastSeq;
+    const generation = cached ? ++indexGeneration : 0;
     if (cached) {
       stepReads.indexes++;
       checkStepCache();
@@ -1439,8 +1582,13 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     };
     const taskBucket = (id: string): Row[] => {
       const facts: Array<{ row: Row; key: [number, number, number] }> = [];
-      const source = aliasReady ? sql.taskFacts.iterate(id, upTo, ...unread, id, upTo, ...unread) : sql.taskFacts.iterate(id, upTo, ...unread, "\u0000", 0, ...unread);
-      for (const r of source) facts.push({ row: parse(counted(r.body)), key: [Number(r.ts_ms), 0, Number(r.seq)] });
+      if (cached && aliasReady && taskCacheLimit > 0) {
+        const held = cachedTask(id, upTo, generation);
+        for (let at = 0; at < held.rows.length; at++) if (held.seqs[at]! <= upTo) facts.push({ row: held.rows[at]!, key: [held.tsMs[at]!, 0, held.seqs[at]!] });
+      } else {
+        const source = aliasReady ? sql.taskFacts.iterate(id, upTo, ...unread, id, upTo, ...unread) : sql.taskFacts.iterate(id, upTo, ...unread, "\u0000", 0, ...unread);
+        for (const r of source) facts.push({ row: parse(counted(r.body)), key: [Number(r.ts_ms), 0, Number(r.seq)] });
+      }
       if (!aliasReady) {
         if (!aliasSeqs) {
           // A store whose writer has not yet backfilled `fact_alias`: one scan of the fact bodies, held for this index only.
@@ -1730,8 +1878,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       });
     }
     // W1-T9604: what the step cache read and reused since the last oracle row, and its audit: the saving, measured.
-    const stepCacheRow = fromRows ? {} : { step_cache: { ...stepReads, held: heldStepCache(), ...(audit ? { audit } : {}) } };
+    const stepCacheRow = fromRows ? {} : { step_cache: { ...stepReads, held: heldStepCache(), ...(audit ? { audit } : {}),
+      task_cache: { ...taskReads, tasks: taskCache.size, bytes: taskCacheHeld } } };
     stepReads = noStepReads();
+    taskReads = noTaskReads();
     const crossTask = crossTotals;
     crossTotals = { rows: 0, rederived: 0, reused: 0 };
     log("read_model.board_oracle", {
