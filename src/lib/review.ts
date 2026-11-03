@@ -7536,11 +7536,11 @@ export function parseReviewerVerdicts(text: string, count: number): (boolean | u
   return semantic;
 }
 
-/** Longest clause {@link parseReviewerVerdictClauses} carries into a criterion's reason — the structured finding
- *  channel's mechanism budget (review-findings.ts), told to the reviewer, so a runaway line still cannot reach the
- *  ledger whole (W1-T2263) while a written finding arrives entire (W1-T11209). */
+/** BACKSTOP: the longest clause {@link parseReviewerVerdictClauses} carries into a criterion's reason — the structured
+ *  finding channel's mechanism budget (review-findings.ts), told to the reviewer, so a runaway line still cannot reach
+ *  the ledger whole (W1-T2263) while a written finding arrives entire (W1-T11209). */
 export const REVIEWER_CLAUSE_MAX_CHARS = 500;
-const CLAUSE_CUT_RE = / \[…clause cut at (\d+) of (\d+) chars\]$/;
+export const CLAUSE_CUT_RE = / \[…clause cut at (\d+) of (\d+) chars\]$/;
 
 /** Cut an over-budget clause at its last sentence end inside the budget, else its last word boundary, never mid-word. */
 function cutClause(inner: string): string {

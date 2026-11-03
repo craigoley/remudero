@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import {
-  clauseCutLength, judgeCriterion, parseReviewerVerdictClauses, REVIEWER_CLAUSE_MAX_CHARS, reviewerVerdictContract,
+  CLAUSE_CUT_RE, clauseCutLength, judgeCriterion, parseReviewerVerdictClauses, REVIEWER_CLAUSE_MAX_CHARS, reviewerVerdictContract,
 } from "#src/lib/review.js";
 
 const CRITERION: AcceptanceCriterion = { claim: "the widget renders", proof: "widget renders densely above the fold" };
@@ -50,6 +50,8 @@ test("W1-T11209 criterion 2: an over-budget clause is cut at a sentence end insi
   const [hard] = parseReviewerVerdictClauses(`REVIEW_VERDICT 1: FAIL (${runaway})`, 1);
   assert.ok(hard!.length < 5000 && clauseCutLength(hard) === 5000, "a runaway line is still bounded and says how long it was");
   assert.equal(clauseCutLength("plain clause"), undefined);
+  assert.equal(CLAUSE_CUT_RE.test(cut!), true, "the cut marker is recognized on a cut clause");
+  assert.equal(CLAUSE_CUT_RE.test(FINDING), false, "a whole clause carries no cut marker");
 });
 
 test("W1-T11209 criterion 3: the reviewer contract names the clause budget the parse cuts at", () => {
