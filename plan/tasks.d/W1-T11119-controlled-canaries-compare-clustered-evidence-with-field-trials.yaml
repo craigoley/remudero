@@ -1,0 +1,77 @@
+- id: W1-T11119
+  title: Controlled canaries compare clustered evidence with field trials and export unmeasured improvement proposals
+  repo: remudero
+  depends_on: [W1-T11117, W1-T11118]
+  plan_refs: [W1-T10956, W1-T10957, W1-T100001]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: operator-approved-router-evaluation-plan:2026-11-02
+  files:
+    - src/lib/model-canary-cluster-analysis.ts
+    - src/lib/model-canary-field-comparison.ts
+    - src/lib/model-canary-proposal-export.ts
+    - src/lib/model-canary-command.ts
+    - test/routing/model-canary-cluster-analysis.test.ts
+    - test/routing/model-canary-field-comparison.test.ts
+    - test/routing/model-canary-proposal-export.test.ts
+  rationale: >-
+    The approved benchmark must measure router value without treating observational model win
+    rates as a randomized comparison. Existing paired analysis is descriptive and supplies no
+    uncertainty estimate. Repeated attempts are not independent cases. Failure patterns can
+    inform a bounded improvement proposal without executing that proposal.
+  design: >-
+    Add pure private post-processing helpers over immutable manifests and existing canary and
+    field-trial evidence contracts. Preserve observational versus registered randomized
+    field-trial design, assignment probabilities and audit provenance; neither may be silently
+    relabeled or pooled with descriptive benchmark cohorts. Match serving configuration, scaffold, corpus/scorer pins,
+    role and observation window. Keep benchmark and observational denominators separate and
+    label unmatched/unknown evidence. Resample paired independent task/incident families,
+    carrying repeats and variants together with a pinned deterministic analysis seed and
+    bounded work. Predeclare endpoints/comparison families and withhold unsupported uncertainty
+    or small-sample claims; never count repeats as new independent cases. Keep first-attempt,
+    all-repeat and best-of-k outcomes distinct. Compare frozen router decisions made from
+    pre-outcome features with development-selected qualified static baselines; any empirical
+    per-case oracle is explicitly an optimistic diagnostic. Derive private proposal drafts
+    from repeated failure signatures with source evidence, a falsifiable hypothesis, bounded
+    scope, unmeasured outcome and rollback/verification requirements. Do not write field-trial
+    counts, ledger events, new tasks, schedules, routing policy or promotion state. Reuse the
+    existing proposal/experiment contract only where compatible; otherwise return unavailable.
+    Add bounded private analysis and proposal-export modes to the existing offline command that
+    call all three helpers directly. Serialize these command edits after W1-T11118.
+  note: >-
+    The operator approved coordinated implementation on 2026-11-02. Proposal export is an
+    inert artifact, not an approval, autonomous self-modification or new allowance. Native source
+    ownership and all ordinary author, hosted, security and review gates remain required.
+  acceptance:
+    - claim: Paired uncertainty uses independent source families rather than treating repeats as new cases
+      proof: 'unit test: cluster paired analysis keeps repeated attempts within independent task families'
+    - claim: Incomplete or insufficient evidence withholds confirmatory uncertainty
+      proof: 'unit test: cluster paired analysis withholds uncertainty for incomplete or undersized evidence'
+    - claim: Synthetic outcomes never increase observed field-trial completion counts
+      proof: 'unit test: private field comparison separates benchmark and field trial denominators'
+    - claim: Serving or scaffold mismatches prevent model-attribution claims
+      proof: 'unit test: field comparison withholds attribution for mismatched serving identity or scaffold'
+    - claim: Improvement drafts remain unmeasured and have no promotion or policy side effects
+      proof: 'unit test: experiment proposal export stays unmeasured and writes no promotion event'
+    - claim: Field-trial experiment designs and assignment provenance are not conflated
+      proof: 'unit test: field comparison preserves observational and randomized design provenance'
+    - claim: Improvement export invokes no ledger task schedule routing or activation writers
+      proof: 'unit test: improvement proposal export is pure and invokes no writer or activation effects'
+    - claim: Native offline analysis actually consumes clustered paired evidence
+      proof: 'grep: analyzeClusterPairedCanaries( in src/lib/model-canary-command.ts'
+    - claim: Native offline comparison actually consumes separate field-trial evidence
+      proof: 'grep: compareCanaryToFieldTrials( in src/lib/model-canary-command.ts'
+    - claim: Native offline export actually builds the private unmeasured proposal
+      proof: 'grep: buildExperimentProposal( in src/lib/model-canary-command.ts'
+  falsifier: >-
+    Use paired positive controls and known missing/mismatched inputs. Duplicate repeats within
+    each family and require the independent-family count to stay fixed. Remove identity/split
+    guards or replace family resampling with attempt resampling and require named controls to
+    fail. Remove the inert-proposal guard and require the no-side-effects control to fail.

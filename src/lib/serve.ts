@@ -1,4 +1,5 @@
 import { buildImprovementThreadRoutes } from "./improvement-thread.js";
+import { buildEscalationConversationRoute, createEscalationConversationReader } from "./escalation-conversation.js";
 /**
  * `rmd serve` assembler: route builders, GET / shell, port resolution and token persistence
  * (W1-T139, MASTER-PLAN §7/§7B). Reuse service.ts, board.ts, panel-actions.ts and panel-graph.ts
@@ -343,6 +344,8 @@ export interface ServeDeps {
   ledgerPath: string;
   /** `gh issue close` gateway shared by every panel-actions write route that needs it. */
   issues: IssueCloser;
+  /** Offline seam for the native issue read; production uses the existing paced GitHub transport. */
+  escalationConversation?: { readIssue: (issueUrl: string) => Promise<unknown> };
   /** Fleet-control flag-file root — MUST equal the `config.root` `rmd daemon`/`rmd drain` check (see module header). */
   fleetControlRoot: string;
   /** Approved research transport for /v1/products/research; absent means research is reported unavailable. */
@@ -2751,11 +2754,19 @@ function assembleServeRoutes(
   githubCredential.state.armed = githubAppRefresh.armed;
   // W1-T4088: the thread store is wired in production at last — the SAME file the inbox thread
   // routes and the daemon's responder use — so an escalation reply is accepted, not refused.
+  const readEscalationConversation = createEscalationConversationReader({ repository: deps.assistantRepository,
+    threadStorePath: inboxThreadStorePath(deps.fleetControlRoot), ledgerPath: deps.ledgerPath,
+    knownIssue: (url, identity) => {
+      const state = deps.boardSnapshotSource?.current();
+      return state?.state === "ready" && state.snapshot.tasks.some(task => task.escalationIssueUrl === url
+        && task.taskId === identity.taskId && task.escalationUnverified !== true);
+    }, ...deps.escalationConversation });
   const fleetControlDeps: PanelActionDeps = {
     root: deps.fleetControlRoot,
     ledgerPath: deps.ledgerPath,
     issues: deps.issues,
     threadStorePath: inboxThreadStorePath(deps.fleetControlRoot),
+    readEscalationConversation,
   };
   const questionDeps: PanelActionDeps = { root: deps.questionsRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
   const linkRefusals = createLinkRefusalRollup({ ledgerPath: deps.ledgerPath, clock: systemClock });
@@ -2958,6 +2969,7 @@ function assembleServeRoutes(
     // note below). W1-T4088 gave `fleetControlDeps` its `threadStorePath`, so a reply to an
     // escalation that has a thread is accepted; one with no thread is still refused, never filed
     // unattached.
+    buildEscalationConversationRoute(readEscalationConversation),
     buildEscalationReplyRoute(fleetControlDeps),
     // W1-T2696: the ping's own answer links. MOUNTED for the reason the note above states — a
     // declared-but-unreachable route is this module's recurring defect. Both are

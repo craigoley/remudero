@@ -94,6 +94,8 @@ import { type DispatchGovernorDeps } from "../../lib/dispatch-governor.js";
 import { focusGateFor } from "../../lib/focus-gardener.js";
 import { captureHeavyNewBuildStartupGate } from "../../lib/heavy-ready-startup.js";
 import { hostWorktreeGitAsync } from "../../lib/worktree-git.js";
+import { startHoldReadinessObserver } from "../../lib/hold-readiness.js";
+import { mainEvidenceReader } from "../../lib/stall-verifier.js";
 import { step } from "../../lib/git-push.js";
 import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "../../lib/worker-home.js";
 import { acquireDrainLock, DrainLockError } from "../../lib/drain-lock.js";
@@ -1296,6 +1298,8 @@ export async function daemonCommand(
   cleanup.push({ resource: "sigint_listener", close: () => { process.removeListener("SIGINT", onSignal); } });
   process.once("SIGTERM", onSignal);
   cleanup.push({ resource: "sigterm_listener", close: () => { process.removeListener("SIGTERM", onSignal); } });
+  const holdReadiness = startHoldReadinessObserver({ planCheckout: daemonTargetCheckoutRoot(target, config.root), creditCheckouts: [repoRoot], log });
+  cleanup.push({ resource: "hold_readiness_observer", close: () => holdReadiness.close() });
 
   log("daemon.start", {
     max: opts.max ?? null,
@@ -1785,6 +1789,7 @@ export async function daemonCommand(
           ledgerPath,
           runId,
           judge: productionDispatchBreakJudge({ cwd: repoRoot, settingsFile: join(repoRoot, "settings", "worker.json") }),
+          mainEvidence: mainEvidenceReader(daemonTargetCheckoutRoot(target, config.root)),
         }),
         // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
         // daemon flushes one bounded batch after the pass and routes it through the existing judge;

@@ -1004,10 +1004,32 @@ function openSse(req: IncomingMessage, res: ServerResponse, route: SseRoute, pat
   });
 }
 
+/** cloudflared's default `originRequest.keepAliveTimeout`: it reuses an idle origin socket this long. */
+export const CLOUDFLARED_ORIGIN_KEEP_ALIVE_MS = 90_000;
+/**
+ * How long the server keeps an idle keep-alive socket (W1-T10872). It must outlive
+ * {@link CLOUDFLARED_ORIGIN_KEEP_ALIVE_MS}. Node's 5 s default reset every POST that cloudflared
+ * sent on a socket idle past 5 s, and cloudflared does not retry a POST. Measured on 2026-10-27:
+ * 361 GitHub webhook deliveries failed in 4 h. A drain still sweeps idle sockets after its own
+ * grace (serve-drain.ts), so this does not lengthen a swap. BACKSTOP: cloudflared normally retires
+ * its own idle socket first, so the healthy path never reaches this.
+ */
+export const SERVICE_KEEP_ALIVE_TIMEOUT_MS = 120_000;
+/** BACKSTOP just above {@link SERVICE_KEEP_ALIVE_TIMEOUT_MS}, so the headers clock cannot cut a reused
+ *  socket's next request. It stays within Node's 300 s `requestTimeout`. */
+export const SERVICE_HEADERS_TIMEOUT_MS = SERVICE_KEEP_ALIVE_TIMEOUT_MS + 1_000;
+
 /** Build (but do not start) the daemon's single-port service surface — the caller owns
  *  `.listen(port)`/`.close()`. No side effect this module didn't get injected (mirrors
  *  lib/daemon.ts). */
 export function createService(opts: ServiceOptions): Server {
+  const server = createRoutedServer(opts);
+  server.keepAliveTimeout = SERVICE_KEEP_ALIVE_TIMEOUT_MS;
+  server.headersTimeout = SERVICE_HEADERS_TIMEOUT_MS;
+  return server;
+}
+
+function createRoutedServer(opts: ServiceOptions): Server {
   const routes = opts.routes ?? [];
   const sseRoutes = opts.sse ?? [];
   const log = opts.log ?? (() => {});
