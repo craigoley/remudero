@@ -1,0 +1,81 @@
+- id: W1-T11212
+  title: Reserve a shared lifetime cash cap for one-shot canary requests
+  repo: remudero
+  depends_on:
+    - W1-T10956
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: high
+  band_meaning: blast-radius
+  origin: operator-approved-followups:2026-11-03
+  plan_refs:
+    - W1-T10956
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/model-canary-pilot-budget.ts
+    - test/worker-provider.test.ts
+    - test/routing/model-canary-pilot-budget.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: >-
+    Add an additional shared SQLite lifetime reservation for one fixed pilot identity while
+    preserving the current normal global daily, fleet, and Foundry caps; do not enable squeezed or
+    emergency caps. The pilot reservation must be
+    conjunctive with the existing global reservation and must precede transport. A task budget is
+    engineering scope, not pilot funding or permission to run a provider.
+  design: >-
+    Add an opaque pilot-budget capability held only in process-local AsyncLocalStorage. The actual
+    one-shot owner will wrap the real `spawnWorker()` call in `AsyncLocalStorage.run()`; do not use
+    `enterWith`, environment variables, JSON, or serialized worker arguments. Keep ordinary requests
+    outside that context on the existing shared fleet path. For a cash request in the pilot context,
+    acquire the existing global lock first,
+    validate the ordinary daily/fleet/Foundry limits, commit a conservative pilot SQLite reservation
+    in the shared-path sibling DB, then commit the daily JSON reservation, release locks, and only
+    then call transport. An unknown or interrupted request remains held at its full amount. Keep the
+    fixed pilot ledger path derived from the configured shared allowance path; use SQLite DELETE
+    journal mode and synchronous=EXTRA, and verify PRAGMA readbacks at open. Refuse if that shared
+    path and its ownership/mode/realpath/no-symlink checks are not valid. Read the opaque capability
+    directly from AsyncLocalStorage in the shared `reserveOpenWeightBudget` and
+    `settleOpenWeightBudget` helpers. Existing Foundry Claude, OpenAI-compatible chat/responses, and
+    brokered web-search paths already pass through those helpers, so leave their call sites unchanged.
+    Use a fresh request key per actual provider
+    send and a nonserialized invocation nonce that permits only the same in-process CAS callback retry.
+    Settle the global reservation first; reduce a pilot hold only when the original numeric
+    `actualUsd` is finite, nonnegative and no greater than the pilot reservation, and the returned
+    global settlement matches the same request identity and exact numeric charge. The global helper
+    clamps over-reservation usage, so a clamped global row alone is not proof of the actual charge.
+    Missing, over-reserved, mismatched or clamped-only settlement leaves the entire pilot amount held.
+    Preserve existing global accounting and do not widen its policy. Do not add a second wallet or
+    reserve in the canary admission callback. Keep all tests transport-fake-only.
+  acceptance:
+    - claim: The shared pilot ledger enforces a $10 lifetime cap and a $2 smoke sublimit inside it; ordinary JSON cannot change either cap.
+      proof: 'unit test: lifetime and smoke caps stay fixed across requests and JSON reload'
+    - claim: A pilot request commits its lifetime reservation and unchanged global reservation before any transport call.
+      proof: 'unit test: pilot reservation and shared fleet reservation both commit before the fake transport starts'
+    - claim: A pilot reservation consumes shared global room and an ordinary reservation consumes that same room.
+      proof: 'unit test: pilot and ordinary cash requests contend on the same global fleet cap'
+    - claim: All three cash transport reservation sites require the same opaque pilot capability when a pilot request is present.
+      proof: 'unit test: Foundry Claude OpenAI chat and brokered search reserve through the pilot-aware helper'
+    - claim: AsyncLocalStorage context reaches all three reservation/settlement boundaries across awaits and concurrent runs, while ordinary calls outside the context remain ordinary.
+      proof: 'unit test: pilot budget context reaches all three cash paths and isolates concurrent callers'
+    - claim: A CAS callback retry is idempotent only for the same live invocation nonce; restart or new invocation cannot reuse a request key.
+      proof: 'unit test: only an exact same-invocation CAS retry reuses the pilot reservation'
+    - claim: Missing, mismatched or ambiguous settlement keeps the full pilot reservation held across UTC-day rollover and restart.
+      proof: 'unit test: unknown settlement remains fully reserved across restart and UTC rollover'
+    - claim: A clamped global settlement cannot release pilot funds unless the original bounded charge and exact identity are independently verified.
+      proof: 'unit test: clamped global settlement keeps pilot hold when original charge exceeds reservation'
+  falsifier: >-
+    Delete the lifetime cap check and require the over-cap request test to fail. Change the configured
+    JSON caps and require both fixed-cap tests to fail. Remove AsyncLocalStorage propagation at any
+    cash boundary and require its site test to fail; calls outside the pilot context must continue to
+    use the ordinary path. Remove pilot
+    reservation from one transport site and require the three-site caller census and that site's
+    fake-transport test to fail. Accept a repeated request key under a new invocation nonce and
+    require the duplicate-after-restart test to fail. Allow unknown settlement to release a hold
+    and require the restart/rollover test to fail. Accept a clamped global settlement without checking
+    the original numeric charge and require the over-reservation case to fail. Preserve all existing
+    daily/fleet and Foundry cap tests. Verify SQLite DELETE/synchronous=EXTRA readbacks at open. No real provider transport, paid usage, or allowance funding is in scope.
