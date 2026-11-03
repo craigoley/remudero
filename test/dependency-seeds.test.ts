@@ -32,6 +32,53 @@ function fixture(body: (root: string, donor: string, checkout: string) => void):
 }
 const identityOptions = { npmVersion: "11.19.0", env: {}, platform: "linux" as const };
 
+test("W1-T10949: repeated commands reuse the correct immutable dependency generation without an independent install", () => fixture((root, donor, checkout) => {
+  let installs = 0;
+  const opts = { ...identityOptions, root: join(root, "seeds"), sourceDir: donor,
+    runInstall: () => { installs++; throw new Error("independent install forbidden"); } };
+  const first = materializeDependencySeed(checkout, opts);
+  assert.equal(first.status, "materialized");
+  if (first.status !== "materialized") throw new Error("seed required");
+  const seedFile = join(first.seed, "node_modules/dep/index.js");
+  const inode = statSync(seedFile).ino;
+  for (let n = 0; n < 3; n++) {
+    assert.deepEqual(materializeDependencySeed(checkout, opts), { status: "present" });
+    assert.equal(execFileSync(process.execPath, ["-e", "console.log(require('dep'))"], { cwd: checkout, encoding: "utf8" }).trim(), "1");
+  }
+  const second = join(root, "second"); mkdirSync(second);
+  for (const name of ["package.json", "package-lock.json"]) writeFileSync(join(second, name), readFileSync(join(checkout, name)));
+  const reused = materializeDependencySeed(second, opts);
+  assert.equal(reused.status, "materialized");
+  if (reused.status !== "materialized") throw new Error("reuse required");
+  assert.equal(reused.seed, first.seed); assert.equal(reused.installed, false);
+  assert.equal(statSync(seedFile).ino, inode); assert.equal(installs, 0);
+  assert.throws(() => materializeDependencySeed(checkout, { ...opts, npmVersion: "different" }), /identity mismatch/);
+  // A generation whose payload became writable is unsafe even when its key still matches.
+  chmodSync(seedFile, 0o644);
+  assert.throws(() => materializeDependencySeed(checkout, opts), /immutable/);
+  rmSync(join(second, "node_modules"), { recursive: true });
+  assert.throws(() => materializeDependencySeed(second, opts), /immutable/);
+  assert.equal(installs, 0); assert.equal(readFileSync(seedFile, "utf8"), "module.exports = 1;\n");
+  chmodSync(seedFile, 0o444);
+  chmodSync(join(donor, "node_modules/dep/index.js"), 0o444);
+  chmodSync(dirname(seedFile), 0o755);
+  const escaped = join(first.seed, "node_modules/dep/escape"); symlinkSync(join(donor, "node_modules/dep/index.js"), escaped);
+  chmodSync(dirname(seedFile), 0o555);
+  assert.throws(() => materializeDependencySeed(checkout, opts), /escapes/);
+  chmodSync(dirname(seedFile), 0o755);
+  rmSync(escaped);
+  const metadataLink = join(first.seed, "node_modules/dep/metadata"); symlinkSync(join(first.seed, "ready.json"), metadataLink);
+  chmodSync(dirname(seedFile), 0o555);
+  assert.throws(() => materializeDependencySeed(checkout, opts), /immutable/);
+  chmodSync(dirname(seedFile), 0o755);
+  rmSync(metadataLink);
+  chmodSync(dirname(seedFile), 0o555);
+  const input = join(first.seed, "package.json"), original = readFileSync(input, "utf8");
+  chmodSync(input, 0o644); writeFileSync(input, '{"name":"changed-input"}'); chmodSync(input, 0o444);
+  assert.throws(() => materializeDependencySeed(checkout, opts), /inputs changed/);
+  chmodSync(input, 0o644); writeFileSync(input, original); chmodSync(input, 0o444);
+}));
+
 test("dependency seed identity separates workspace manifests, toolchains and proof policy", () => fixture((root, donor, checkout) => {
   const first = dependencySeedIdentity(checkout, identityOptions).key;
   assert.equal(first, dependencySeedIdentity(donor, identityOptions).key);

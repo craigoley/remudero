@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
+import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 import { REGISTERED_GARDEN_NAMES } from "../src/lib/garden-registry.js";
 import { resolveSreLaneInstance, sreLaneDecision, sreLaneEnabled, sreLaneStartRow, type SreLaneInstance } from "../src/lib/sre-lane.js";
 import * as runTask from "../src/run-task.js";
@@ -162,4 +164,49 @@ test("W1-T8232: a refused registry disables the lane with the parser error", (t)
     step: "sre_lane.disabled",
     fields: { instance: null, reason },
   });
+});
+
+test("selected lifecycle shadow reaches actual deploy pause and daemon consumers: CLI composition", async t => {
+  const root = makeTempDir("selected-lifecycle-cli"), stateRoot = join(root, "owner");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const registry = daemonInstanceRegistryPath(root), selected = join(root, "selected.yaml");
+  const text = `instances:\n  owner:\n    github_repo: fixture/owner\n    primary: true\n    state_dir: ${stateRoot}\n    container_name: owner-container\n  other:\n    github_repo: fixture/other\n    state_dir: ${join(root, "other")}\n`;
+  mkdirSync(dirname(registry), { recursive: true });
+  mkdirSync(join(stateRoot, "state"), { recursive: true });
+  mkdirSync(join(root, "other", "state"), { recursive: true });
+  writeFileSync(registry, text); writeFileSync(selected, text);
+  const home = join(root, "cli-home"), configDir = join(home, ".config", "remudero");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({ root: stateRoot, claudeBin: "/bin/true",
+    selectedRegistryMode: { mode: "shadow", registryPath: selected } }));
+  const saved = { HOME: process.env.HOME, RMD_INSTANCE_REGISTRY: process.env.RMD_INSTANCE_REGISTRY,
+    RMD_INSTANCE_NAME: process.env.RMD_INSTANCE_NAME }, savedArgv = process.argv;
+  process.env.HOME = home; process.env.RMD_INSTANCE_REGISTRY = registry; process.env.RMD_INSTANCE_NAME = "owner";
+  const exit = new Error("fixture CLI exit");
+  const exitMock = t.mock.method(process, "exit", ((code: number) => { assert.equal(code, 0); throw exit; }) as never);
+  try {
+    for (const verb of ["pause", "resume"]) {
+      process.argv = [process.execPath, "run-task.js", verb];
+      await assert.rejects(runTask.main({ checkFreshness: () => ({ status: "guarded" }) }), error => error === exit);
+    }
+    const plan = join(root, "tasks.yaml");
+    writeFileSync(plan, "[]\n");
+    process.argv = [process.execPath, "run-task.js", "daemon", "--allow-self-target", "--plan", plan, "--max", "0"];
+    await assert.rejects(runTask.main({ checkServiceFreshness: () => ({ status: "guarded" }),
+      dispatch: async (_verb, rest) => runTask.daemonCommand(rest, {
+        gardenPassSpawn: async () => 0,
+        runDaemon: async () => ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 }),
+      }),
+    }), error => error === exit);
+    const receipts = readFileSync(join(stateRoot, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    for (const action of ["pause", "resume", "sre-target"]) {
+      assert.ok(receipts.some(row => row.action === action && row.target_instance === "owner"
+        && row.selected_state === "unknown" && row.publication_permission === "not-granted"));
+    }
+  } finally {
+    exitMock.mock.restore(); process.argv = savedArgv;
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
 });
