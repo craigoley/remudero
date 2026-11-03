@@ -1,0 +1,64 @@
+- id: W1-T11150
+  title: "The review shed checks its own effect: a shed that does not lower core's CPU pressure stops shedding and hands its lanes back, and width restores in proportion to the relief instead of holding 1 until PSI reaches a calm line — all 78 cpu-pressure sheds in the window were attributed to host-load, width sat at 1 for 75% of the last 24 h while core CPU PSI full held at a median of 29%, and recovery needs PSI full <= 5 with memory PSI <= 5, so the 5-20 band holds the floor"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern, the review shed's response to its own measured effect; one module and its test
+  origin: operator-session#review-lane-findings-2026-11-02
+  plan_refs:
+    - W1-T2853
+    - W1-T2985
+    - W1-T3025
+  files:
+    - src/lib/review-capacity.ts
+    - test/review/a-review-shed-that-does-not-lower-pressure-stops-shedding.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Each CPU shed records the pressure reading that triggered it and the width before it; once a review's measured CPU phase (the median setup-plus-proofs time from the ledger) has elapsed, a shed whose pressure did not fall by more than that reading's own sample-to-sample spread is judged ineffective, the width returns to what it was before the shed, and further CPU sheds on that pressure source are suspended until the source or the review lane's own CPU share changes
+      proof: "unit test: test/review/a-review-shed-that-does-not-lower-pressure-stops-shedding.test.ts"
+    - claim: While pressure is falling, width is restored in proportion to the relief (the fraction of the shedding reading's excess over its post-restore reading that has gone), one or more lanes per sample, never above base and never past the host worker budget; a reading that rises again sheds as before
+      proof: "grep: W1-T11150 criterion 2 in test/review/a-review-shed-that-does-not-lower-pressure-stops-shedding.test.ts"
+    - claim: The review.capacity row carries shed_effect (effective, ineffective or pending), the pre-shed and current readings, the spread used and a suspended flag, so every shed's effect is auditable from the ledger
+      proof: "grep: W1-T11150 criterion 3 in test/review/a-review-shed-that-does-not-lower-pressure-stops-shedding.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 over a 7-day ledger union (~/Remudero-notes/review-lane-findings-2026-11-02.md, read-only):
+    - Review width was 1 for 64% of the week (25% at 4, mean 1.91), and 75% of the last 24 h (3% at 4, mean 1.49).
+    - Core cgroup CPU PSI full median was 29% in the last 24 h. All 78 cpu-pressure review.capacity rows named host-load as the
+      pressure source. Core's cpu.weight is 59 against serve's 303 (deploy/resource-policy.sh), so core's PSI moves with serve's share.
+    - For 51% of code-PR waiting time no code review was running, so shedding reviews could not have been what lowered the pressure.
+    READ at origin/main 1368db581, src/lib/review-capacity.ts selectAdaptiveReviewWidth:
+    - directPressure("cpu-pressure") drops one lane per sample while cpuPsiFullAvg10Pct >= cpuPsiHighPct (plan/policy.yaml, 20), down to
+      reviewLanes.min (1). Nothing checks whether the shed lowered the reading.
+    - restoreBase() runs only when psiCalm: CPU PSI full <= cpuPsiLowPct (5) AND memory PSI some <= memoryPsiLowPct (5). Between 5 and
+      20 neither arm fires, so the width holds wherever the shed left it, usually 1.
+    Operator ruling Q2 (2026-11-02): do not raise reviewLanes.min (a fixed floor); the durable fix is a proof-only CPU gate
+    (W1-T11149) plus a self-checking shed (this task). The operator's standing rules apply: no hard thresholds; tiered, self-healing.
+    NOT COVERED: W1-T11129 (#16251, open) replaces the fixed cpuPsiHighPct comparison with a CPU verdict learned from cgroup cpu.stat
+    and judges PSI against core's weight share. It decides WHEN the shed fires; this task decides whether a shed that fired helped,
+    and how width comes back. It reads whatever pressure signal W1-T11129 leaves, so it works on today's PSI reading too.
+    W1-T3025 (blocked) is the widener above base. W1-T2985 (merged) moved the signal from PSI some to full.
+  design: |
+    1. ReviewCapacityState gains the open shed: { atMs, reading, widthBefore, source }. directPressure("cpu-pressure") opens it.
+    2. Effect check. The settle time is the median setup-plus-proofs duration of recent reviews (review rows already give it; with
+       W1-T11149 the phase rows give it exactly). With no history it is one telemetry cadence. After it, compare the reading to the
+       shed's: the noise band is the reading's own median absolute sample-to-sample change over the settlement window. Fall beyond
+       the band: effective, keep. Otherwise: ineffective; width returns to widthBefore and state records suspendedSource.
+    3. Suspension lifts when the pressure source attribution changes, or when the review lane's own CPU share rises (more review
+       children in their CPU phase than when it was suspended). Memory, provider and health arms are unchanged and still shed.
+    4. Proportional restore replaces the calm-line restoreBase for the CPU arm: target = widthAtShed + (base - widthAtShed) x
+       relief, where relief is the fraction of the shedding reading's excess that has gone, measured against the lowest reading
+       seen since. It never exceeds base or the host worker budget, and a rising reading sheds again.
+    5. The review.capacity row gains shed_effect, shed_reading, current_reading, noise_band and shed_suspended.
+    Tests go in test/review/a-review-shed-that-does-not-lower-pressure-stops-shedding.test.ts, titled verbatim as in the proofs,
+    over the real selectAdaptiveReviewWidth with sample sequences (shed then flat, shed then falling, falling then rising).
+  note: |
+    reservation hand-off: plan-file-1793657965812 -> plan-file-1793657965812
+    Reserved with rmd next-task-id --branch plan-file-1793657965812 from the operator checkout. Filed 2026-11-02 from the review-lane
+    findings, item 2 (p1), under operator ruling Q2. Ordering: build after W1-T11129 (#16251), which rewrites the same arm of
+    review-capacity.ts, and not in parallel with W1-T11149, which edits the same module; neither is in depends_on because neither
+    is on main at filing.
