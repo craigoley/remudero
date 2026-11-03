@@ -546,6 +546,7 @@ export async function runReview(host: ReviewCommandHost, args: {
    * isolated status-poster contract. */
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
 }): Promise<ReviewRunResult> {
+  const phases: Record<string, number> = { started: systemClock.now() };
   const { attributeWorkerStreamEvent, ledgeredNonDispatchSpawn, lintPlanForReview, readHeadShaRest, reviewPostedDescription } = host;
   const { owner, repo, prUrl, task, report, log, say } = args;
   const laneSignal = currentReviewSignal();
@@ -627,7 +628,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   // W1-T3093: `gh pr diff` is refused above 300 files; only that size case falls back to a local comparison.
   // Both reads awaited and bounded (MEASURED 2026-10-06: the sync read held the daemon loop); a read killed at its
   // bound is a named refusal below, never a hang.
-  const phases: Record<string, number> = { started: systemClock.now() };
+  phases.diffStart = systemClock.now();
   const diffOutcome = await fetchPrDiff(prUrl, headSha, prDiffSourceAsync(repoRoot));
   phases.diff = systemClock.now();
   if (diffOutcome.kind === "refused") {
@@ -2326,7 +2327,7 @@ export function planOnlyPhaseFields(marks: Record<string, number>, armedAt: numb
   const span = (from: string, to: string): number => Math.max(0, (marks[to] ?? marks[from] ?? 0) - (marks[from] ?? 0));
   return {
     ...(materializeMs === undefined ? {} : { materialize_ms: materializeMs }),
-    diff_ms: span("started", "diff"), decision_ms: span("diff", "decision"), lint_ms: span("lintStart", "lint"),
+    diff_ms: span("diffStart", "diff"), decision_ms: span("diff", "decision"), lint_ms: span("lintStart", "lint"),
     judge_ms: span("lint", "judge"), post_ms: span("postStart", "post"),
     arm_ms: Math.max(0, armedAt - (marks.armStart ?? armedAt)), total_ms: Math.max(0, armedAt - (marks.started ?? armedAt)),
   };

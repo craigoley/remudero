@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { systemClock } from "#src/lib/clock.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, spawnWorker } from "#src/lib/worker.js";
 import { ledgeredNonDispatchSpawn, runReview } from "#src/run-task.js";
@@ -134,13 +135,23 @@ test("reviewerOutcome reports the plan-only skip DISTINCTLY, without disturbing 
 
 type Driven = { spawns: number; outcome: string; steps: string[]; summary: string; rows: Array<Record<string, unknown>> };
 
-async function driveReview(diffText: string): Promise<Driven> {
+async function driveReview(diffText: string, controlledClock = false): Promise<Driven> {
   const root = mkdtempSync(join(tmpdir(), "rmd-plan-only-spawn-"));
   const binDir = mkdtempSync(join(tmpdir(), "rmd-plan-only-spawn-gh-"));
   const oldPath = process.env.PATH;
   const oldClaudeBin = process.env[CLAUDE_BIN_ENV_OVERRIDE];
   const oldToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const realNow = systemClock.now;
+  const clockFile = join(root, "clock-ms");
+  const advanceClock = (ms: number): void => {
+    if (controlledClock) writeFileSync(clockFile, String(Number(readFileSync(clockFile, "utf8")) + ms));
+  };
   try {
+    if (controlledClock) {
+      const epoch = realNow();
+      writeFileSync(clockFile, "0");
+      systemClock.now = () => epoch + Number(readFileSync(clockFile, "utf8"));
+    }
     writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "test-token-never-sent-reviewerQueryFn-intercepts-the-spawn";
     const fakeClaude = join(binDir, "claude");
@@ -154,10 +165,18 @@ async function driveReview(diffText: string): Promise<Driven> {
     writeFileSync(
       join(binDir, "gh"),
       `#!/bin/sh
+advance_clock() {
+  ${controlledClock ? `clock_ms=$(cat ${JSON.stringify(clockFile)})
+  if [ "$1" = 101 ] && [ "$clock_ms" != 0 ]; then return; fi
+  echo "$((clock_ms + $1))" > ${JSON.stringify(clockFile)}` : ":"}
+}
 case "$1 $2" in
   "api "*)
     case "$*" in
-      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"}}' ;;
+      *pulls/*) advance_clock 101; echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"}}' ;;
+      *statuses/*state=pending*) advance_clock 203; echo '{}' ;;
+      *statuses/*state=*) advance_clock 601; echo '{}' ;;
+      *commits/*/status*) echo '{"statuses":[]}' ;;
       *) echo '{}' ;;
     esac ;;
   "pr view")
@@ -166,7 +185,7 @@ case "$1 $2" in
       *state*) echo '{"state":"OPEN"}' ;;
       *) echo '{}' ;;
     esac ;;
-  "pr diff") cat ${JSON.stringify(diffFile)} ;;
+  "pr diff") advance_clock 307; cat ${JSON.stringify(diffFile)} ;;
   *) exit 0 ;;
 esac
 `,
@@ -212,12 +231,12 @@ esac
       // Both arm seams injected: the plan-only fixture PASSES, so runReview reaches
       // armIfVerdictPermits, which refuses to touch its production dependency under the test
       // runner without an explicit seam. Nothing live happens on either path.
-      arm: () => "skipped",
+      arm: () => { steps.push("fixture.arm"); advanceClock(503); return "skipped"; },
       disarm: () => {},
       reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
       headCheckoutDir: REPO_ROOT,
       // W1-T4423: the plan-only lint seam, so this harness never fetches or lints the real checkout.
-      lintPlanForReviewFn: async () => CLEAN_PLAN_LINT,
+      lintPlanForReviewFn: async () => { advanceClock(409); return CLEAN_PLAN_LINT; },
       materializeMs: 1_234,
       ledgerPath,
       runId: "REVIEW-PLAN-ONLY-SPAWN-1",
@@ -228,6 +247,7 @@ esac
     const ledgerSteps = readLedgerLines(ledgerPath).map((l) => String(l.step));
     return { spawns, outcome: verdict.reviewerOutcome, steps: [...steps, ...ledgerSteps], summary: verdict.summary, rows };
   } finally {
+    systemClock.now = realNow;
     process.env.PATH = oldPath;
     if (oldClaudeBin === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE];
     else process.env[CLAUDE_BIN_ENV_OVERRIDE] = oldClaudeBin;
@@ -287,17 +307,25 @@ test("DRIVEN: the plan-only verdict summary still reads as deterministically gat
 });
 
 test("W1-T11162 criterion 2: a plan-only review ledgers one row of its phases after its arm; a code review writes none", async () => {
-  const plan = await driveReview(PLAN_ONLY_DIFF);
+  const plan = await driveReview(PLAN_ONLY_DIFF, true);
   const phases = plan.rows.filter((row) => row.step === "review.plan_only_phases");
   assert.equal(phases.length, 1, `one phase row per plan-only review; saw ${plan.steps.join(", ")}`);
   const row = phases[0]!;
   assert.equal(typeof row.head_sha, "string", "the row names the head it timed; the run id names the PR");
   assert.equal(row.materialize_ms, 1_234, "the caller's materialization time rides on the row");
+  assert.equal(row.total_ms, 101 + 203 + 307 + 409 + 601 + 503,
+    "the total includes the head lookup and awaited pending post before the diff, through the arm");
+  assert.equal(row.diff_ms, 307, "the diff duration excludes the head lookup and pending post");
+  assert.equal(row.lint_ms, 409);
+  assert.equal(row.post_ms, 601);
+  assert.equal(row.arm_ms, 503);
   for (const field of ["diff_ms", "decision_ms", "lint_ms", "judge_ms", "post_ms", "arm_ms", "total_ms"]) {
     assert.equal(typeof row[field], "number", `${field} is measured`);
     assert.ok((row[field] as number) >= 0 && (row[field] as number) <= (row.total_ms as number), `${field} lies inside the review`);
   }
   assert.ok(plan.steps.indexOf("review.posted") < plan.steps.indexOf("review.plan_only_phases"), "the row is written after the post");
+  assert.ok(plan.steps.includes("fixture.arm"), "the review reached its injected arm");
+  assert.ok(plan.steps.indexOf("fixture.arm") < plan.steps.indexOf("review.plan_only_phases"), "the row is written after the arm completes");
 
   const code = await driveReview(PLAN_PLUS_SRC_DIFF);
   assert.equal(code.rows.filter((r) => r.step === "review.plan_only_phases").length, 0, "a review that is not plan-only writes no phase row");
