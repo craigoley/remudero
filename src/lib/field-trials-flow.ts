@@ -114,11 +114,12 @@ export interface FlowRow {
   provider?: string | null;
   servedModel: string | null;
   servedModelReason?: string | null;
-  /** W1-T10875: bounded worker.attempt fields the cohort's attribution reads (see projectOutcomeSignals). */
+  /** Bounded attempt and fix-terminal attribution fields (see projectOutcomeSignals). */
   outcomeSignals?: Readonly<Record<string, unknown>>;
   /** W1-T10877: a non-dispatch worker.attempt's own `lane`, and an inbox draft's lint verdict. */
   lane?: string;
   lintClean?: boolean;
+  fixRoundId?: string;
   notionalCostUsd?: number | null;
   notionalCostReported?: boolean;
   repair?: RepairCostContext;
@@ -155,10 +156,10 @@ function flowRelevant(row: Record<string, unknown>): boolean {
     || (row.actor === "operator" && typeof row.task_id === "string");
 }
 
-/** W1-T10875: the bounded worker.attempt fields attributeAttemptOutcome reads; strings, finite numbers and
+/** The bounded attempt and fix-terminal fields attributeAttemptOutcome reads; strings, finite numbers and
  *  observed {state,value} cells only, so a prompt or body can never ride along. */
 function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<string, unknown>> | undefined {
-  if (row.step !== "worker.attempt") return undefined;
+  if (row.step !== "worker.attempt" && !GUARDRAIL_STEPS.has(String(row.step))) return undefined;
   const cell = (value: unknown) => {
     const observed = record(value);
     return observed && typeof observed.state === "string"
@@ -211,6 +212,7 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     ...(projectOutcomeSignals(row) ? { outcomeSignals: projectOutcomeSignals(row) } : {}),
     ...(row.step === "worker.attempt" && text(row.lane) ? { lane: row.lane as string } : {}),
     ...(row.step === "inbox.drafted" && typeof row.lint_clean === "boolean" ? { lintClean: row.lint_clean } : {}),
+    ...(text(row.round_id) ? { fixRoundId: row.round_id as string } : {}),
     notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
     repair: projectRepairCostContext(row),
     importedModule: importedModuleOf(benchmark?.loadedModule),
@@ -756,6 +758,57 @@ function adoptionUnits(ctx: SourceContext, caseFiles: readonly TaskCaseFile[] | 
 /** The lanes whose public unit is a draft (inbox.drafted), never the calls that produced it. */
 const DRAFT_UNIT_LANES = new Set(["inbox-draft"]);
 
+function guardrailAttribution(row: FlowRow) {
+  return attributeAttemptOutcome({ ...row.outcomeSignals, success: row.success, served_model: row.servedModel,
+    ...(row.servedModelReason != null ? { served_model_reason: row.servedModelReason } : {}),
+    ...(row.costUsd != null ? { total_cost_usd: row.costUsd } : {}) });
+}
+
+/** Join terminal fix events to the final worker attempt in their round, within the caller's run.
+ * Exhaustion has no round id in production; it belongs to the latest preceding round in that run. */
+function guardrailFixRounds(rows: FlowRow[]) {
+  const rounds = new Map<string, { attempt: FlowRow; events: FlowRow[] }>();
+  const aliases = new Map<string, string>();
+  const latest = new Map<string, string>();
+  const context = (row: FlowRow) => JSON.stringify([row.host, row.taskId, row.runId]);
+  const identities = (row: FlowRow) => [
+    ["round", row.fixRoundId ?? row.repair?.roundId], ["worker", row.repair?.workerRunId], ["assignment", row.assignmentId],
+  ].flatMap(([kind, id]) => id ? [JSON.stringify([context(row), kind, id])] : []);
+  const ordered = [...rows].sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? "")
+    || Number(b.step === "worker.attempt") - Number(a.step === "worker.attempt"));
+  for (const row of ordered) {
+    const ids = identities(row);
+    if (row.step === "worker.attempt" && (row.repair?.rung === "fix" || row.lane === "fix" || row.workLane === "fix")) {
+      if (ids.length === 0) continue;
+      const key = ids[0]!;
+      const round = rounds.get(key) ?? { attempt: row, events: [] };
+      round.attempt = row;
+      rounds.set(key, round);
+      for (const id of ids) aliases.set(id, key);
+      latest.set(context(row), key);
+    } else if (GUARDRAIL_STEPS.has(row.step) && row.step !== "inbox.drafted") {
+      if (ids.length === 0 && (row.taskId === null || row.runId === null)) continue;
+      // An explicit but unjoined round must never borrow an earlier round's attribution.
+      const key = ids.length > 0 ? aliases.get(ids[0]!) : latest.get(context(row));
+      if (ids.length > 0) {
+        if (key === undefined) latest.delete(context(row));
+        else latest.set(context(row), key);
+      }
+      if (key !== undefined) rounds.get(key)!.events.push(row);
+    }
+  }
+  return [...rounds.values()].filter(({ attempt, events }) => {
+    const { outcome } = guardrailAttribution(attempt);
+    const signalled = events.some((row) => {
+      const signals = row.outcomeSignals;
+      if (signals === undefined) return false;
+      return signals.worker_exit === "signal" || text(signals.worker_exit_signal) !== null;
+    });
+    return (outcome === "success" || outcome === "model") && events.length > 0
+      && signalled === false;
+  });
+}
+
 /**
  * W1-T10877: one unit per (attributable call, draft or fix round) x guardrail class it could fire. Only a
  * worker.attempt attributeAttemptOutcome reads as success or model counts, so a pre-request refusal or an
@@ -779,9 +832,7 @@ function guardrailUnits(rows: FlowRow[]): GuardrailUnit[] {
       const assignment = row.assignmentId === null ? undefined : assignments.get(row.assignmentId);
       const lane = row.lane ?? row.workLane ?? assignment?.workLane ?? null;
       if (lane === null || DRAFT_UNIT_LANES.has(lane)) continue;
-      const { outcome, signal } = attributeAttemptOutcome({ ...row.outcomeSignals, success: row.success, served_model: row.servedModel,
-        ...(row.servedModelReason != null ? { served_model_reason: row.servedModelReason } : {}),
-        ...(row.costUsd != null ? { total_cost_usd: row.costUsd } : {}) });
+      const { outcome, signal } = guardrailAttribution(row);
       if (outcome !== "success" && outcome !== "model") continue;
       add(row, row.servedModel ?? assignment?.selectedModel ?? row.selectedModel ?? "unknown", lane, {
         "draft-contract-dirty": signal === "draft-contract",
@@ -791,11 +842,15 @@ function guardrailUnits(rows: FlowRow[]): GuardrailUnit[] {
       const modelId = row.servedModel ?? row.requestedModel;
       if (modelId !== null) add(row, modelId, "inbox-draft", { "draft-contract-dirty": row.lintClean === false,
         "served-model-unnamed": row.servedModel === null });
-    } else if (GUARDRAIL_STEPS.has(row.step)) {
-      // A fix round's own worker.attempt already counts its call; the round adds only whether its bounded rounds ran out.
-      const modelId = row.servedModel ?? row.requestedModel;
-      if (modelId !== null) add(row, modelId, "fix", { "fix-rounds-exhausted": row.step === "fix.exhausted" });
     }
+  }
+  for (const { attempt, events } of guardrailFixRounds(rows)) {
+    const row = events.findLast((event) => event.servedModel !== null || event.requestedModel !== null);
+    const lane = attempt.lane ?? attempt.workLane ?? "fix";
+    if (row === undefined) continue;
+    const fingerprint = sha256([attempt.fingerprint, ...events.map((event) => event.fingerprint)].sort().join("\n"));
+    add({ ...row, fingerprint }, (row.servedModel ?? row.requestedModel)!, lane,
+      { "fix-rounds-exhausted": events.some((event) => event.step === "fix.exhausted") });
   }
   return units;
 }

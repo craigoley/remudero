@@ -84,6 +84,15 @@ function attempt(id: string, fields: Record<string, unknown>): Record<string, un
 
 const TOKENS = { input: 1200, output: 300 };
 
+function fixRound(id: string, model: string, fields: Record<string, unknown> = {}): Record<string, unknown>[] {
+  const receipt = { host: "host-a", task_id: "task-fix", run_id: "fix-run", repair_round_id: id,
+    worker_run_id: `worker-${id}`, worker_rung: "fix", selection_assignment_id: `selection-${id}` };
+  return [
+    { ts: T(10, 4), step: "worker.attempt", ...receipt, success: true, served_model: model, tokens: TOKENS, ...fields },
+    { ts: T(10, 5), step: "fix.done", ...receipt, round_id: id, requested_model: "sonnet", served_model: model },
+  ];
+}
+
 function snapshotOf(rows: Record<string, unknown>[], prior?: ReturnType<typeof buildFieldTrialsFlowSnapshot>) {
   return buildFieldTrialsFlowSnapshot({ asOf: T(11), sources: [{ label: "core", repo: "acme/core", ledger: observedRead(rows) }],
     github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } }, ...(prior ? { prior } : {}) });
@@ -114,9 +123,13 @@ test("W1-T10877: guardrail fires are counted per model, category and class", () 
     { ts: T(10, 3), step: "inbox.drafted", proposal_id: "p1", requested_model: "haiku", served_model: "gpt-oss-120b", lint_clean: false },
     { ts: T(10, 3), step: "inbox.drafted", proposal_id: "p2", requested_model: "haiku", served_model: null,
       served_model_reason: "the provider reported no served model for this call", lint_clean: true },
-    // Fix rounds: one exhausted its bounded rounds, one finished, and one ran no worker (no model fields).
-    { ts: T(10, 4), step: "fix.exhausted", task_id: "task-f1", run_id: "fix-1", requested_model: "sonnet", served_model: sonnet },
-    { ts: T(10, 4), step: "fix.done", task_id: "task-f2", run_id: "fix-2", requested_model: "sonnet", served_model: sonnet },
+    // Fix rows join their own worker receipts. Refusal + done + exhaustion still describe one round.
+    ...fixRound("f1", sonnet),
+    { ts: T(10, 5), step: "fix.commit_refused", host: "host-a", task_id: "task-fix", run_id: "fix-run",
+      round_id: "f1", requested_model: "sonnet", served_model: sonnet },
+    { ts: T(10, 6), step: "fix.exhausted", host: "host-a", task_id: "task-fix", run_id: "fix-run",
+      requested_model: "sonnet", served_model: sonnet },
+    ...fixRound("f2", sonnet).map((row) => ({ ...row, ts: T(10, row.step === "worker.attempt" ? 7 : 8) })),
     { ts: T(10, 4), step: "fix.done", task_id: "task-f3", run_id: "fix-3" },
   ];
   const snapshot = snapshotOf(rows);
@@ -128,6 +141,9 @@ test("W1-T10877: guardrail fires are counted per model, category and class", () 
     cell(sonnet, "code-review", "schema-validated-output", 1, 1),
     cell(sonnet, "code-review", "served-model-verification", 1, 0),
     cell(sonnet, "repository-change", "bounded-retry-then-escalate", 2, 1),
+    cell(sonnet, "repository-change", "output-cap-truncation-check", 2, 0),
+    cell(sonnet, "repository-change", "schema-validated-output", 2, 0),
+    cell(sonnet, "repository-change", "served-model-verification", 2, 0),
     cell(sol, "repository-change", "output-cap-truncation-check", 3, 1),
     cell(sol, "repository-change", "schema-validated-output", 3, 0),
     cell(sol, "repository-change", "served-model-verification", 3, 1),
@@ -146,4 +162,61 @@ test("W1-T10877: guardrail fires are counted per model, category and class", () 
   for (const internal of ["run-task", "inbox-draft", "fix.exhausted", OpenWeightTruncatedReplyError.name, "draft-contract\""]) {
     assert.equal(text.includes(internal), false, internal);
   }
+});
+
+test("W1-T10877: fix opportunities exclude infrastructure, refusals, unknown and missing attempts", () => {
+  const model = "claude-sonnet-5-5";
+  const excluded = [
+    { success: false, worker_exit: "signal", worker_exit_signal: "SIGKILL" },
+    { success: false, worker_failure: "orphaned-by-process-exit" },
+    { success: false, served_model: null, tokens: {}, error_class: OpenWeightRequestTooLargeError.name },
+    { success: false, served_model: null, tokens: {} },
+    { success: null },
+  ];
+  for (const [index, fields] of excluded.entries()) {
+    const rows = [...fixRound("control", model), ...fixRound(`excluded-${index}`, model, fields)];
+    rows.push({ ts: T(10, 6), step: "fix.exhausted", host: "host-a", task_id: "task-fix", run_id: "fix-run",
+      round_id: `excluded-${index}`, requested_model: "sonnet", served_model: model });
+    const cell = snapshotOf(rows).families.guardrails[`${model}|repository-change|bounded-retry-then-escalate`]?.cells;
+    assert.deepEqual(cell, { modelId: model, category: "repository-change",
+      guardrailClass: "bounded-retry-then-escalate", opportunities: 1, fires: 0 }, JSON.stringify(fields));
+  }
+  const [, done] = fixRound("no-attempt", model);
+  assert.deepEqual(snapshotOf([done!]).families.guardrails, {});
+  // A terminal signal is authoritative even when a worker receipt reports a success envelope.
+  const signalled = fixRound("signal", model);
+  signalled[1] = { ...signalled[1], worker_exit: "signal", worker_exit_signal: "SIGTERM" };
+  assert.equal(snapshotOf(signalled).families.guardrails[`${model}|repository-change|bounded-retry-then-escalate`], undefined);
+});
+
+test("W1-T10877: fix events consolidate by round and cannot borrow another run's attribution", () => {
+  const model = "claude-sonnet-5-5";
+  const rows = fixRound("round-1", model, { success: false, worker_failure: "draft-contract" });
+  rows.push({ ...rows[1], step: "fix.commit_refused" }, { ...rows[1], step: "fix.stood_down" },
+    { ...rows[1], step: "fix.exhausted", ts: T(10, 6) });
+  const key = `${model}|repository-change|bounded-retry-then-escalate`;
+  const expected = { modelId: model, category: "repository-change", guardrailClass: "bounded-retry-then-escalate",
+    opportunities: 1, fires: 1 };
+  const snapshot = snapshotOf(rows);
+  assert.deepEqual(snapshot.families.guardrails[key]?.cells, expected);
+  assert.deepEqual(snapshotOf([...rows].reverse()).families.guardrails[key]?.cells, expected);
+  // Older receipts can join by worker or assignment id when round fields are absent.
+  for (const identity of ["worker_run_id", "selection_assignment_id"]) {
+    const legacy = { ts: T(10, 6), step: "fix.exhausted", host: "host-a", task_id: "task-fix", run_id: "fix-run",
+      [identity]: rows[0]![identity], requested_model: "sonnet", served_model: model };
+    assert.deepEqual(snapshotOf([rows[0]!, legacy]).families.guardrails[key]?.cells, expected, identity);
+  }
+  const anonymous = rows.map((row) => ({ ...row, task_id: null, run_id: null }));
+  assert.equal(snapshotOf([anonymous[0]!, { ts: T(10, 6), step: "fix.exhausted", host: "host-a",
+    requested_model: "sonnet", served_model: model }]).families.guardrails[key], undefined);
+  for (const field of ["host", "task_id", "run_id", "round_id"]) {
+    const foreign = { ...rows[1], [field]: "another", step: "fix.exhausted" };
+    assert.equal(snapshotOf([rows[0]!, foreign]).families.guardrails[key], undefined, field);
+  }
+  // A later infrastructure result in the same round cannot reuse an earlier model fallback.
+  const killed = { ...rows[0], ts: T(10, 5), success: false, worker_failure: "spawn-threw-before-result",
+    worker_exit: "signal", worker_exit_signal: "SIGKILL" };
+  const repaired = snapshotOf([rows[0]!, killed, ...rows.slice(1)], snapshot);
+  assert.equal(repaired.families.guardrails[key], undefined);
+  assert.deepEqual(snapshotOf(rows, repaired).families.guardrails[key]?.cells, expected);
 });
