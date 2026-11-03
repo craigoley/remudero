@@ -1,11 +1,13 @@
 import { execFile, execFileSync, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { systemClock, type Clock } from "./clock.js";
 import { loadConfig, type Config } from "./config.js";
 import { auditThisReuse, dropPushGatePass, gateVerdictsDir, harnessRecipe, pushGateKeyDigest, recordPushGatePass, reusablePushGatePass, type PushGateKey } from "./gate-verdict-record.js";
+import { refreshInstallationToken } from "./github-app.js";
+import { PUSH_AUTH_REFUSAL_RE } from "./non-worker-verdict.js";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { daemonOwnedProcess, openLearnedReservation } from "./host-memory-learning.js";
@@ -602,6 +604,61 @@ function pushFailure(err: unknown): PushFailedError {
   return new PushFailedError(`${String((err as Error)?.message ?? err)}\n${text}`.trimEnd(), text, err);
 }
 
+export const PUSH_AUTH_REFUSED_STEP = "push.auth_refused";
+export const CREDENTIAL_CONSUMER_ENV = "RMD_CREDENTIAL_CONSUMER";
+export const CREDENTIAL_RECEIPT_ENV = "RMD_CREDENTIAL_RECEIPT";
+
+export class PushAuthRefusedError extends PushFailedError {
+  readonly authRefused = true;
+  constructor(failure: PushFailedError) {
+    super(failure.message, failure.stderrText, failure.cause);
+    this.name = "PushAuthRefusedError";
+  }
+}
+
+export interface PushCredentialUse { credential_path: "socket" | "ambient"; scope: string; expires_at: string | null; age_ms: number | null }
+
+export function readCredentialReceipt(path: string, nowMs: number): PushCredentialUse {
+  const text = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const fields = new Map(text.split("\n").filter((line) => line.startsWith("rmd_")).map((line) => {
+    const eq = line.indexOf("=");
+    return [line.slice(4, eq), line.slice(eq + 1)] as const;
+  }));
+  if (!fields.has("scoped_repo")) return { credential_path: "ambient", scope: "installation", expires_at: null, age_ms: null };
+  const minted = Date.parse(fields.get("minted_at") ?? "");
+  return { credential_path: "socket", scope: fields.get("scoped_repo")!, expires_at: fields.get("expires_at") ?? null,
+    age_ms: Number.isFinite(minted) ? Math.max(0, nowMs - minted) : null };
+}
+
+export async function pushWithAuthRetry(push: (env: NodeJS.ProcessEnv) => Promise<void>, consumer: string,
+  verdicts?: Pick<PushGateVerdicts, "log" | "clock">, refreshAmbient: () => Promise<unknown> = () => refreshInstallationToken()): Promise<void> {
+  const clock = verdicts?.clock ?? systemClock;
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}push-credential-`));
+  const receipt = join(dir, "receipt");
+  const attempt = async (): Promise<{ failure?: PushFailedError; use: PushCredentialUse }> => {
+    rmSync(receipt, { force: true });
+    try {
+      await push({ [CREDENTIAL_CONSUMER_ENV]: consumer, [CREDENTIAL_RECEIPT_ENV]: receipt });
+      return { use: readCredentialReceipt(receipt, clock.now()) };
+    } catch (error) {
+      return { failure: error instanceof PushFailedError ? error : pushFailure(error), use: readCredentialReceipt(receipt, clock.now()) };
+    }
+  };
+  try {
+    const first = await attempt();
+    if (!first.failure) return;
+    if (!PUSH_AUTH_REFUSAL_RE.test(first.failure.message)) throw first.failure;
+    verdicts?.log(PUSH_AUTH_REFUSED_STEP, { attempt: 1, ...first.use, consumer: consumer, outcome: "retrying" });
+    if (first.use.credential_path === "ambient") await refreshAmbient();
+    const second = await attempt();
+    verdicts?.log(PUSH_AUTH_REFUSED_STEP, { attempt: 2, ...second.use, consumer: consumer, outcome: second.failure ? "refused" : "pushed" });
+    if (!second.failure) return;
+    throw PUSH_AUTH_REFUSAL_RE.test(second.failure.message) ? new PushAuthRefusedError(second.failure) : second.failure;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 const GATE_MAX_BUFFER = 64 * 1024 * 1024;
 
 export const PUSH_GATE_RAN_STEP = "push_gate.ran";
@@ -741,7 +798,9 @@ function runHookAsync(worktreePath: string, gate: PrePushGate): Promise<HookOutc
 
 /** {@link worktreePushExec} off the event loop; `prGates: false` (a restart checkpoint, which opens no PR) skips the PR gate. */
 export function worktreePushExecAsync(
-  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts() }: { prGates?: boolean; verdicts?: PushGateVerdicts } = {},
+  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts(), push, refreshAmbient }: {
+    prGates?: boolean; verdicts?: PushGateVerdicts; push?: typeof hostWorktreeGitAsync; refreshAmbient?: () => Promise<unknown>;
+  } = {},
 ): PushExecAsync {
   return async (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
@@ -754,12 +813,14 @@ export function worktreePushExecAsync(
       if (outcome !== undefined && opts.stdio !== "ignore") writeThrough(outcome.refused ? outcome.err : outcome.out);
       if (outcome?.refused) throw gateRefusal(worktreePath, pushArgs, outcome.err);
     }
-    try {
-      await hostWorktreeGitAsync(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout" });
-    } catch (err) {
-      if (opts.stdio !== "ignore") writeThrough(err);
-      throw pushFailure(err);
-    }
+    await pushWithAuthRetry(async (env) => {
+      try {
+        await (push ?? hostWorktreeGitAsync)(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout", env });
+      } catch (err) {
+        if (opts.stdio !== "ignore") writeThrough(err);
+        throw pushFailure(err);
+      }
+    }, basename(worktreePath), verdicts, refreshAmbient);
   };
 }
 
