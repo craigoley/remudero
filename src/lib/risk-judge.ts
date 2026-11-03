@@ -4,7 +4,7 @@ import { parse as parseYaml } from "yaml";
 import type { Mount, Mounts } from "./mounts.js";
 import { MountsError } from "./mounts.js";
 import { capStderrExcerpt, REPORT_EXCERPT_CAP, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
-import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { benchmarkNonDispatchSpawn, withGuardrailAttempt } from "./benchmark-run.js";
 import { argmaxTypedJudgmentOption, runTypedJudgment, type TypedJudgmentResult } from "./typed-judgment.js";
 
 /**
@@ -1578,7 +1578,7 @@ export function realRiskJudge(opts: {
     const spawnArgs = opts.signal === undefined ? built : { ...built, signal: opts.signal };
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (opts.signal?.aborted) throw new Error("risk judgment cancelled before its spawn");
-      const result = await spawn(spawnArgs);
+      const result = await withGuardrailAttempt("judge-retry", attempt, () => spawn(spawnArgs));
       // Recorded BEFORE the parse — an unparseable attempt still cost real money.
       opts.spend?.record({
         costUsd: result.costUsd,

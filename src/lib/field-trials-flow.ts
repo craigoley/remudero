@@ -178,6 +178,10 @@ function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<st
     return typeof state === "string" && ["complete", "truncated", "unreadable", "malformed", "absent"].includes(state)
       ? [[channel, { state }]] : [];
   })) : undefined;
+  const retry = record(row.guardrail_attempt);
+  const guardrailAttempt = retry && (retry.signal === "relint-used" || retry.signal === "judge-retry")
+    && Number.isSafeInteger(retry.attempt) && Number(retry.attempt) >= 1
+    ? { signal: retry.signal, attempt: retry.attempt as number } : undefined;
   const signals: Record<string, unknown> = {
     ...(text(row.worker_failure) ? { worker_failure: row.worker_failure } : {}),
     ...(text(row.error_class) ? { error_class: row.error_class } : {}),
@@ -188,6 +192,7 @@ function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<st
     ...(terminal && Object.keys(terminal).length > 0 ? { terminal_evidence: terminal } : {}),
     ...(counted && Object.keys(counted).length > 0 ? { tokens: counted } : {}),
     ...(retained && Object.keys(retained).length > 0 ? { output_retention: retained } : {}),
+    ...(guardrailAttempt ? { guardrail_attempt: guardrailAttempt } : {}),
   };
   return Object.keys(signals).length > 0 ? signals : undefined;
 }
@@ -761,7 +766,7 @@ function adoptionUnits(ctx: SourceContext, caseFiles: readonly TaskCaseFile[] | 
   return { units, transitions: [...transitions.values()].sort((a, b) => `${a.host}\n${a.model}`.localeCompare(`${b.host}\n${b.model}`)) };
 }
 
-/** The lanes whose public unit is a draft (inbox.drafted), never the calls that produced it. */
+/** Draft validation uses inbox.drafted; bounded retry checks use each attributable producing call. */
 const DRAFT_UNIT_LANES = new Set(["inbox-draft"]);
 
 function guardrailAttribution(row: FlowRow) {
@@ -841,10 +846,14 @@ function guardrailUnits(rows: FlowRow[]): GuardrailUnit[] {
     if (row.step === "worker.attempt") {
       const assignment = row.assignmentId === null ? undefined : assignments.get(row.assignmentId);
       const lane = row.lane ?? row.workLane ?? assignment?.workLane ?? null;
-      if (lane === null || DRAFT_UNIT_LANES.has(lane)) continue;
+      if (lane === null) continue;
       const { outcome, signal } = guardrailAttribution(row);
       if (outcome !== "success" && outcome !== "model") continue;
-      add(row, row.servedModel ?? assignment?.selectedModel ?? row.selectedModel ?? "unknown", lane, {
+      const modelId = row.servedModel ?? assignment?.selectedModel ?? row.selectedModel ?? "unknown";
+      const retry = record(row.outcomeSignals?.guardrail_attempt);
+      if (retry) add(row, modelId, lane, { [retry.signal as GuardrailSignal]: Number(retry.attempt) > 1 });
+      if (DRAFT_UNIT_LANES.has(lane)) continue;
+      add(row, modelId, lane, {
         "draft-contract-dirty": signal === "draft-contract",
         "truncated-reply": signal === `reply-${OpenWeightTruncatedReplyError.name}`,
         "output-retention": Object.values(record(row.outcomeSignals?.output_retention) ?? {})

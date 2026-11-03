@@ -9,12 +9,18 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { parse } from "yaml";
 import { buildFieldTrialsFlowSnapshot, projectFlowRow, type FieldTrialsLedgerRead } from "#src/lib/field-trials-flow.js";
 import { emptyRepoStore } from "#src/lib/field-trials-github.js";
-import { benchmarkWorkerAttemptResources } from "#src/lib/benchmark-run.js";
-import type { WorkerResult } from "#src/lib/worker.js";
+import { benchmarkNonDispatchSpawn, benchmarkWorkerAttemptResources } from "#src/lib/benchmark-run.js";
+import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import { realRiskJudge } from "#src/lib/risk-judge.js";
+import { runRelintLoop } from "#src/lib/relint.js";
+import { spawnEscalationJudgeWorker } from "#src/lib/escalate.js";
+import { inboxDraftExampleFragmentYaml, runDraftRung } from "#src/lib/inbox.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { laneMappedExplicitly, PUBLIC_CATEGORIES, PUBLIC_GUARDRAIL_CLASSES, GUARDRAIL_SIGNALS, publicCategoryOfLane,
   publicGuardrailClassOf } from "#src/lib/public-model-vocabulary.js";
 import { CODEX_SERVED_MODEL_REASON, OpenWeightRequestTooLargeError, OpenWeightTruncatedReplyError } from "#src/lib/worker-provider.js";
@@ -115,7 +121,7 @@ function snapshotOf(rows: Record<string, unknown>[], prior?: ReturnType<typeof b
     github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } }, ...(prior ? { prior } : {}) });
 }
 
-test("W1-T10877: guardrail fires are counted per model, category and class", () => {
+test("W1-T10877: guardrail fires are counted per model, category and class", async t => {
   const sol = "gpt-6.1-sol";
   const sonnet = "claude-sonnet-5-5";
   const rows: Record<string, unknown>[] = [
@@ -180,6 +186,131 @@ test("W1-T10877: guardrail fires are counted per model, category and class", () 
   const text = JSON.stringify(snapshot.families.guardrails);
   for (const internal of ["run-task", "inbox-draft", "fix.exhausted", OpenWeightTruncatedReplyError.name, "draft-contract\""]) {
     assert.equal(text.includes(internal), false, internal);
+  }
+  await productionJudgeGuardrails(t);
+});
+
+const MOUNT = { model: "haiku", effort: "medium" as const, maxTurns: 1, contextBudget: 1000 };
+const LOW_RISK = "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.9\nRISK_REASON: routine change";
+const judgeInput = { change: { description: "routine change", files: ["src/lib/inbox.ts"] },
+  gatesState: { lint: "pass" as const, typecheck: "pass" as const, tests: "pass" as const },
+  planContext: { taskId: "W1-T10877", planRefs: [] } };
+
+function productionReceipts(t: TestContext, lane: string, replies: Array<{ model: string; text: string }>) {
+  const root = ownedFixtureDir(t, "guardrail-receipts").dir;
+  let calls = 0;
+  const spawn = benchmarkNonDispatchSpawn(lane, async args => {
+    const reply = replies[calls++];
+    assert.ok(reply, "the production loop stays within its supplied response bound");
+    const id = `production-${calls}`;
+    const assignment: WorkerSelectionAssignment = { version: 1, id, phase: "pre-execution",
+      requested: { model: MOUNT.model, effort: MOUNT.effort, maxTurns: 1 },
+      selected: { provider: "codex", model: reply.model, effort: MOUNT.effort },
+      routing: { mode: "mount-affinity", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } }, candidates: [] };
+    args.onSelectionAssignment?.(assignment);
+    return { sessionId: id, selectionAssignmentId: id, provider: "codex", model: reply.model,
+      servedModel: reply.model, effort: MOUNT.effort, costUsd: 0, numTurns: 1, text: reply.text,
+      blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, permissionDenials: [],
+      childEnvKeys: [], tokens: { ...TOKENS, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
+      compactionEvents: [], qualitySuspect: false };
+  });
+  return { root, spawn: (args: SpawnWorkerArgs) => spawn({ ...args, config: { root } as Config }),
+    rows: () => readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+      .map(line => ({ ...JSON.parse(line), ts: T(10) }) as Record<string, unknown>) };
+}
+
+function assertRetryCell(rows: Record<string, unknown>[], modelId: string, category: string, opportunities: number, fires: number) {
+  const guardrailClass = "bounded-retry-then-escalate";
+  assert.deepEqual(snapshotOf(rows).families.guardrails[`${modelId}|${category}|${guardrailClass}`]?.cells,
+    { modelId, category, guardrailClass, opportunities, fires });
+}
+
+async function productionJudgeGuardrails(t: TestContext) {
+  const sol = "gpt-6.1-sol", sonnet = "claude-sonnet-5-5";
+  for (const exhausted of [false, true]) {
+    const receipts = productionReceipts(t, "risk-judge", [
+      { model: sol, text: "private unparseable output" }, { model: sol, text: "still malformed" },
+      { model: sonnet, text: exhausted ? "also malformed" : LOW_RISK }]);
+    const judge = realRiskJudge({ mount: MOUNT, cwd: receipts.root, settingsFile: "settings.json",
+      spawn: receipts.spawn, maxAttempts: 3 });
+    const verdict = await judge(judgeInput);
+    assert.equal(verdict.verdict, exhausted ? "high" : "low");
+    if (exhausted) assert.equal(verdict.availability, "unavailable");
+    const rows = receipts.rows();
+    assert.deepEqual(rows.filter(row => row.step === "worker.attempt").map(row => row.guardrail_attempt),
+      [1, 2, 3].map(attempt => ({ signal: "judge-retry", attempt })));
+    assertRetryCell(rows, sol, "short-judgment", 2, 1);
+    assertRetryCell(rows, sonnet, "short-judgment", 1, 1);
+    const initial = snapshotOf(rows);
+    const key = `${sonnet}|short-judgment|bounded-retry-then-escalate`;
+    const cleaned = rows.map(row => row.step === "worker.attempt" && row.served_model === sonnet
+      ? { ...row, guardrail_attempt: { signal: "judge-retry", attempt: 1 } } : row);
+    const rebuilt = snapshotOf(cleaned, initial);
+    assert.equal(rebuilt.families.guardrails[key]?.cells.fires, 0);
+    assert.ok(rebuilt.rebuild.rebuiltPartitions.includes(`guardrails:${key}`));
+    assert.deepEqual(snapshotOf(cleaned, rebuilt).families.guardrails, rebuilt.families.guardrails);
+    for (const excluded of [{ worker_exit: "signal", worker_exit_signal: "SIGKILL", success: false },
+      { worker_failure: "orphaned-by-process-exit", success: false }, { success: null }, { lane: "worker-smoke" }]) {
+      const altered = rows.map(row => row.step === "worker.attempt" && row.served_model === sonnet ? { ...row, ...excluded } : row);
+      assert.equal(snapshotOf(altered).families.guardrails[key], undefined);
+      assertRetryCell(altered, sol, "short-judgment", 2, 1);
+    }
+    for (const invalid of [{ signal: "private unknown signal", attempt: 2 }, { signal: "judge-retry", attempt: 0 },
+      { signal: "judge-retry", attempt: 1.5 }, { signal: "judge-retry", attempt: "2" }]) {
+      const row = rows.find(row => row.step === "worker.attempt")!;
+      const projected = projectFlowRow({ ...row, guardrail_attempt: invalid }, "invalid");
+      assert.equal(projected.outcomeSignals?.guardrail_attempt, undefined);
+      assert.equal(JSON.stringify(projected).includes("private"), false);
+    }
+  }
+}
+
+test("W1-T10877: production relints count initial opportunities and retried calls", async t => {
+  const model = "gpt-6.1-sol";
+  const receipts = productionReceipts(t, "triage", [{ model, text: "filed" }, { model, text: "filed" }]);
+  const result = await runRelintLoop({ lane: "triage", filedIds: ["W1-T10877"], initialPrompt: "file tasks", maxAttempts: 2,
+    run: (prompt) => receipts.spawn({ cwd: receipts.root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt }),
+    filed: () => true, lint: () => [{ severity: "block", check: "draft-parse", message: "malformed task" }], log: () => {} });
+  assert.equal(result.stop, "exhausted");
+  assertRetryCell(receipts.rows(), model, "diagnosis-triage", 2, 1);
+  // The async context ends with the loop; an unrelated call is never a retry opportunity.
+  const other = productionReceipts(t, "triage", [{ model, text: "ordinary call" }]);
+  await other.spawn({ cwd: other.root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "ordinary" });
+  assertRetryCell([...receipts.rows(), ...other.rows()], model, "diagnosis-triage", 2, 1);
+});
+
+test("W1-T10877: inbox retries count calls while draft checks count the final draft", async t => {
+  const model = "gpt-6.1-sol", rescue = "claude-sonnet-5-5";
+  const dirty = "=== FRAGMENT START ===\n- id: NEW-1\n  title: x\n  acceptance: not a list\n=== FRAGMENT END ===\nSTAMP: model attribution";
+  const clean = `=== FRAGMENT START ===\n${inboxDraftExampleFragmentYaml()}\n=== FRAGMENT END ===\nSTAMP: model attribution`;
+  const receipts = productionReceipts(t, "inbox-draft", [{ model, text: dirty }, { model, text: dirty },
+    { model, text: dirty }, { model: rescue, text: clean }]);
+  const drafted: Record<string, unknown>[] = [];
+  const spawn = (_proposal: unknown, prompt: string) => receipts.spawn({ cwd: receipts.root,
+    permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt });
+  const outcomes = await runDraftRung([{ id: "P9", summary: "model attribution", evidenceAnchors: [] }], "- id: W1-T1\n",
+    { spawn, escalate: spawn, log: (step, fields) => { drafted.push({ step, ...fields, ts: T(10) }); } }, "guardrail-draft");
+  assert.equal(outcomes[0]!.ok, true);
+  const rows = [...receipts.rows(), ...drafted];
+  assertRetryCell(rows, model, "long-context-drafting", 3, 2);
+  assertRetryCell(rows, rescue, "long-context-drafting", 1, 1);
+  assert.deepEqual(snapshotOf(rows).families.guardrails[`${rescue}|long-context-drafting|schema-validated-output`]?.cells,
+    { modelId: rescue, category: "long-context-drafting", guardrailClass: "schema-validated-output", opportunities: 1, fires: 0 });
+  assert.equal(snapshotOf(rows).families.guardrails[`${model}|long-context-drafting|schema-validated-output`], undefined);
+});
+
+test("W1-T10877: production escalation judgments retain their short judgment category", async t => {
+  const model = "gpt-6.1-sol";
+  const receipts = productionReceipts(t, "escalation-summary", [{ model, text: "deliver" }, { model, text: "summary" }]);
+  await spawnEscalationJudgeWorker({ escalation: { class: "BLOCKED", taskId: "W1-T10877", summary: "blocked",
+    detail: "operator decision", options: [{ label: "retry", detail: "retry the task" }], recommendation: "retry" },
+    mount: MOUNT, cwd: receipts.root, settingsFile: "settings.json", spawn: receipts.spawn });
+  await receipts.spawn({ cwd: receipts.root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "summarize" });
+  const rows = receipts.rows();
+  assert.deepEqual(rows.filter(row => row.step === "worker.attempt").map(row => row.lane), ["escalation-judge", "escalation-summary"]);
+  for (const category of ["short-judgment", "summarization"]) {
+    assert.deepEqual(snapshotOf(rows).families.guardrails[`${model}|${category}|served-model-verification`]?.cells,
+      { modelId: model, category, guardrailClass: "served-model-verification", opportunities: 1, fires: 0 });
   }
 });
 

@@ -4,6 +4,7 @@ import { importedModuleOf, type ImportedModuleEvidence } from "./prevention-sour
 import { loadConfig } from "./config.js";
 import { deriveTaskClass } from "./task-class.js";
 import { execFileSync } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -506,12 +507,22 @@ export function callerOwnsBenchmarkReceipt(args: SpawnWorkerArgs): boolean {
  *  model or effort that serves it. */
 export const BENCHMARK_RECEIPT_IDENTITY: unique symbol = Symbol("rmd.benchmarkReceiptIdentity");
 
-export function withReceiptIdentity(args: SpawnWorkerArgs, identity: { taskId: string; runId: string }): SpawnWorkerArgs {
+type ReceiptIdentity = { taskId: string; runId: string; lane?: string };
+
+export function withReceiptIdentity(args: SpawnWorkerArgs, identity: ReceiptIdentity): SpawnWorkerArgs {
   return { ...args, [BENCHMARK_RECEIPT_IDENTITY]: { ...identity } } as SpawnWorkerArgs;
 }
 
-export function receiptIdentity(args: SpawnWorkerArgs): { taskId?: string; runId?: string } {
-  return (args as { [BENCHMARK_RECEIPT_IDENTITY]?: { taskId: string; runId: string } })[BENCHMARK_RECEIPT_IDENTITY] ?? {};
+export function receiptIdentity(args: SpawnWorkerArgs): Partial<ReceiptIdentity> {
+  return (args as { [BENCHMARK_RECEIPT_IDENTITY]?: ReceiptIdentity })[BENCHMARK_RECEIPT_IDENTITY] ?? {};
+}
+
+type GuardrailAttempt = { signal: "relint-used" | "judge-retry"; attempt: number };
+const guardrailAttemptContext = new AsyncLocalStorage<GuardrailAttempt>();
+
+/** Receipt-only loop position, scoped across async callbacks without changing the routed request. */
+export function withGuardrailAttempt<T>(signal: GuardrailAttempt["signal"], attempt: number, run: () => T): T {
+  return guardrailAttemptContext.run({ signal, attempt }, run);
 }
 
 /** W1-T4616: where a worker-call receipt may be written. MEASURED 2026-09-27: most of the ~105/h
@@ -592,6 +603,8 @@ export function benchmarkNonDispatchSpawn(
     const terminalAssignmentIds = new Set<string>();
     const terminalResults = new WeakSet<WorkerResult>();
     const named = receiptIdentity(args);
+    const receiptLane = named.lane ?? lane;
+    const guardrailAttempt = guardrailAttemptContext.getStore();
     const write = (step: string, fields: Record<string, unknown>): void => {
       const path = benchmarkEvidenceLedgerPath(args.config);
       if (path === undefined) return;
@@ -599,7 +612,7 @@ export function benchmarkNonDispatchSpawn(
         ? (fields.worker_assignment as WorkerSelectionAssignment).id : fields.selection_assignment_id;
       appendLedger(path, {
         run_id: args.runId ?? named.runId ?? `${lane}-${typeof assignmentId === "string" ? assignmentId : "unassigned"}`,
-        task_id: args.taskId ?? named.taskId ?? lane.toUpperCase(), step, lane, ...fields,
+        task_id: args.taskId ?? named.taskId ?? lane.toUpperCase(), step, lane: receiptLane, ...fields,
       });
     };
     const recordAttempt = (fields: Record<string, unknown>, result?: WorkerResult): void => {
@@ -609,7 +622,8 @@ export function benchmarkNonDispatchSpawn(
         if (id ? terminalAssignmentIds.has(id) : result !== undefined && terminalResults.has(result)) return;
         const row = { step: "worker.attempt", ...fields,
           assignment_observed: id !== undefined && observedAssignmentIds.has(id) };
-        write("worker.attempt", { ...fields, benchmark_run: benchmarkRunAttemptReceipt(row) });
+        write("worker.attempt", { ...fields, ...(guardrailAttempt ? { guardrail_attempt: guardrailAttempt } : {}),
+          benchmark_run: benchmarkRunAttemptReceipt(row) });
         if (id) terminalAssignmentIds.add(id);
         if (result !== undefined) terminalResults.add(result);
       } catch {
@@ -623,7 +637,7 @@ export function benchmarkNonDispatchSpawn(
         observedAssignmentId = undefined;
         try {
           write("worker.assignment", { worker_assignment: assignment,
-            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), nonDispatchWorkerStack) });
+            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(receiptLane), nonDispatchWorkerStack) });
           observedAssignmentIds.add(assignment.id);
           observedAssignmentId = assignment.id;
         } catch {
