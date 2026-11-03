@@ -61,6 +61,7 @@ export const FIX_LANE_LADDER: LadderKind = {
   evidenceLine: (pr, hours, reason) => `- ${pr > 0 ? `PR #${pr}` : "a round"}: ${hours.toFixed(2)} PR-hours — ${reason}`,
   escalationSummary: cause => `Fix-lane defect: ${cause} still costs PR-hours`,
   fallbackFiles: FIX_LANE_CODE,
+  ownModules: ["src/lib/fix-lane-gardener.ts"],
 };
 
 export type InterventionKind = "push" | "close" | "unfiled-pr" | "update-branch" | "merge";

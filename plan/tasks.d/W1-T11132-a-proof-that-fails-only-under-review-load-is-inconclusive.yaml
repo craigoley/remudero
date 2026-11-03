@@ -1,0 +1,39 @@
+- id: W1-T11132
+  title: "A review-sandbox proof that fails only under host CPU load is inconclusive harness load, not an unmet criterion — #15532 (W1-T10573) failed review at 2026-11-02T20:22Z on a spawnSync 30 s timeout (status null !== 2) in a subtest that passes in 7 s on the Mac (92 s on the host) and in hosted CI, plus a bwrap exec_error, and the fix lane has spent 12 rounds marking it FIXED"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: review.ts classifies a load-shaped proof failure as inconclusive and re-runs it
+  origin: operator-session#review-sandbox-load-2026-11-02
+  plan_refs:
+    - W1-T10742
+    - W1-T227
+    - W1-T10252
+  files:
+    - src/lib/review.ts
+    - test/review/a-proof-that-fails-only-under-review-load-is-inconclusive.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A unit-test proof that fails in the review sandbox while hosted CI passed the same test file at the same head, or whose run ended by a timeout, a signal or a sandbox exec_error, is recorded as inconclusive harness load with the host load it ran under; it is never an unmet criterion, a FAIL verdict or a fix-round trigger
+      proof: "unit test: test/review/a-proof-that-fails-only-under-review-load-is-inconclusive.test.ts"
+    - claim: An inconclusive proof is re-run once the host's load is below the load it failed under (read from the recorded load, no fixed threshold), and the re-run's conclusive result stands; a failure that reproduces at lower load, or that hosted CI also fails, stays executed_fail as today
+      proof: "grep: W1-T11132 criterion 2 in test/review/a-proof-that-fails-only-under-review-load-is-inconclusive.test.ts"
+  rationale: |
+    OBSERVED 2026-11-02 (coordinator brief) on #15532 (W1-T10573), head dd024de:
+    - remudero-review FAILED at 2026-11-02T20:22Z with two unmet criteria.
+    - Criterion 2's proof test/shadow-instance-safety.test.ts, subtest "…: real owner CLI", failed at :1658 `assert.equal(paused.status, 2)` with `null !== 2`. spawnSync hit its `timeout: 30000` (:1648): each cold `node --import tsx` start of run-task.ts takes 20–30 s on the CPU-saturated host, and the test spawns about 8 in series.
+    - Criterion 1's proof hit an exec_error at the bwrap invocation, and the verdict fell back to keyword matching.
+    - On the Mac all 10 proof subtests pass in 15.5 s ("real owner CLI" 7 s, against 92 s on the host). Hosted CI is green.
+    - The fix lane has run 12 rounds (fix.progress_judged 20:50:03Z: change-approach, round_count 12), repeatedly marking FIXED, because no round can reproduce the failure off-host.
+    - Host load (efficiency findings, 2026-10-27 and the 11-02 handoff): load 24–30, then 34–47, CPU PSI 50–79%.
+    READ at origin/main 12783785a: review.ts's ProofExecOutcome (:341-360) has `exec_error` (threw or timed out), which leaves the keyword floor, and `executed_fail`, which overrides it. A unit-test proof whose test file runs and fails on an internal spawn timeout is executed_fail, a conclusive red, whatever load it ran under. No load is recorded beside a proof result.
+    NOT COVERED: W1-T10742 (queued) makes an inconclusive proof at PR OPEN a harness outcome, in the pre-open gate rather than the review. W1-T227 (merged) narrowed the glob for the same idle-vs-loaded split. W1-T10252 (queued) names host load on a runaway refusal.
+  design: |
+    Record /proc/loadavg (1-min) and the cgroup's cpu.pressure some avg10 at each proof's start and end, on the proof's result and the review.posted row. Add a ProofExecOutcome `inconclusive_load` for a unit-test proof whose run (a) ended by timeout, signal or exec_error, or (b) failed while the head's hosted CI check that runs the same file is success. It leaves the keyword floor like exec_error and is excluded from unmet criteria, so it triggers no fix round. When the review has an inconclusive proof, it re-runs it in the next pass whose measured load is below the recorded one, and the re-run's conclusive outcome replaces it. Coordinate with W1-T10742 so both name the same outcome.
+  note: |
+    Filed 2026-11-02 on the coordinator's request (item 17, p1, filed after the two CPU tasks). Its part (b), the progress judge's harness signal, is a separate module and filed as its own shard. Part (c), host load beside each proof result, is folded into this design because the re-run needs it.

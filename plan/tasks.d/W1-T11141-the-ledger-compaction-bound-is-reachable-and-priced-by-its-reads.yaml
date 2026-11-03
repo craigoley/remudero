@@ -1,0 +1,41 @@
+- id: W1-T11141
+  title: "Ledger compaction can reach its bound, and the bound is priced by what a union read costs — the rung logs 'over bound — 632 archive(s) > 400' and then ledger_compaction.nothing_eligible about every 20 minutes, union reads open 632 archives (1.1 GB gzipped), and the fixed 400 came from a 2026-09-10 outage on a different corpus"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: ledger-compaction-rung.ts decides from a reachable, measured bound
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs:
+    - W1-T3368
+    - W1-T4262
+    - W1-T6312
+  files:
+    - src/lib/ledger-compaction-rung.ts
+    - test/ledger/the-ledger-compaction-bound-is-reachable-and-priced-by-its-reads.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: An over-bound corpus whose last pass found nothing eligible is not fired again until the corpus changes (a new archive, or an archive crossing the age cutoff), and the decision names why nothing was eligible (archives younger than the cutoff, merged outputs at the size ceiling, lone parts)
+      proof: "unit test: test/ledger/the-ledger-compaction-bound-is-reachable-and-priced-by-its-reads.test.ts"
+    - claim: The archive-count bound is derived from the measured cost per archive of a union read (ms and bytes from the reader's own rows) against the read's budget, and when every eligible archive is a full merged output the decision reports the bound unreachable at the current ceiling and the ceiling it would need, never a silent re-fire
+      proof: "grep: W1-T11141 criterion 2 in test/ledger/the-ledger-compaction-bound-is-reachable-and-priced-by-its-reads.test.ts"
+  rationale: |
+    MEASURED 2026-10-27 on the Azure host (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - The rung logged "over bound — 632 archive(s) > 400" and the pass ended `nothing_eligible`, about every 20 minutes. Nothing reads `overBound`.
+    - Union reads open 632 archives, 1.1 GB gzipped, on a host whose CPU is the bottleneck.
+    - W1-T6312 (merged) did not fix it.
+    READ at origin/main d04469fa2:
+    - DEFAULT_LEDGER_COMPACTION_TRIGGER (src/lib/ledger-compaction-rung.ts) is maxArchives 400, maxArchiveBytes 700 MiB, minIntervalMs 30 min. The 400 was derived from the 2026-09-10 outage: 959 archives fatal, 347 healthy.
+    - decideLedgerCompaction fires whenever the count is over the bound and the interval has passed. It has no memory that the last pass found nothing.
+    - daemon.ts:5220 logs nothing_eligible and moves on.
+    - selectLedgerCompactionSources (src/lib/ledger-compact.ts:107-200) only admits rotations older than the age cutoff, and merges outputs two at a time under the size ceiling. A corpus of merged outputs at the ceiling therefore has nothing it can merge, however many archives there are.
+  design: |
+    1. Keep the last pass's outcome beside its fired-at marker: if it was nothing_eligible, a repeat fire waits for a change in the corpus's (count, newest stamp, oldest-eligible stamp) rather than the interval. The decision's reason names the classes that blocked eligibility, which selectLedgerCompactionSources already counts (eligibleCount, sizeSkippedCount, unparseableAge).
+    2. Replace the fixed 400 with a bound priced from measurement: the union reader's own timing rows give the ms and bytes per archive opened, and the bound is the archive count a union read can open within its measured budget. The 400 stays only as the fallback when no timing row is readable.
+    3. When every eligible archive is a merged output at the ceiling, report `unreachable` with the ceiling the bound would need. That is a named state for the operator, not a loop.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 10 (p2).
