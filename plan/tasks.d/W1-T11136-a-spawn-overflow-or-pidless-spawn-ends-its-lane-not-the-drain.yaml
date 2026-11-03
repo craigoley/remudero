@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # one concern: drain.ts classifies two spawn failures as one lane's delivery failure
+  risk: high # one concern, whether a spawn failure ends its lane or the daemon, which spans the drain classifier and the run-child status contract every lane error crosses
   origin: operator-session#efficiency-findings-2026-10-27
   plan_refs:
     - W1-T5344
@@ -15,6 +15,7 @@
     - W1-T9091
   files:
     - src/lib/drain.ts
+    - src/lib/run-child-contract.ts
     - test/dispatch/a-spawn-overflow-or-pidless-spawn-ends-its-lane-not-the-drain.test.ts
   status: queued
   attempts: 0
@@ -34,6 +35,7 @@
     - laneDeliveryFailure (:1082) matches PrOpenRefusedError or SPAWNED_COMMAND_FAILED_RE (`^Command failed: `). An ENOBUFS error reads `spawnSync git ENOBUFS`, and a no-pid failure reads `spawnDetachedGroup: child process has no pid`, so both stay fatal.
     NOT COVERED: W1-T10575 (#14177, merged) makes a run child's terminal error representable across the status file. Its own acceptance excludes any retry, larger output buffer or lane-local waiver, so it leaves this classification open. W1-T5344 (merged) is the lane-local arm this extends.
   design: |
-    Extend laneDeliveryFailure with two classes. The overflow is matched by structure: an Error with code === "ENOBUFS" and a syscall beginning `spawnSync` (Node's own shape). The no-pid failure (thrown at src/lib/worker-containment.ts:236) is matched by an anchored `^spawnDetachedGroup: child process has no pid ` prefix, the same shape SPAWNED_COMMAND_FAILED_RE already uses, so worker-containment.ts (a baked runtime file) is not touched. Both return a LaneDeliveryFailure with the new class, and for an overflow the row carries `path` and the first element of `spawnargs`. The single-lane path routes a runOne throw through the same classifier before returning "error". CREDENTIAL_REFUSAL_RE and in-process defects keep today's fatal path. No retry is added; a lane that failed is continued and not re-offered in this drain, exactly as W1-T5344 does.
+    Extend laneDeliveryFailure with two classes. The overflow is matched by structure: an Error with code === "ENOBUFS" and a syscall beginning `spawnSync` (Node's own shape). The no-pid failure (thrown at src/lib/worker-containment.ts:236) is matched by an anchored `^spawnDetachedGroup: child process has no pid ` prefix, the same shape SPAWNED_COMMAND_FAILED_RE already uses, so worker-containment.ts (a baked runtime file) is not touched. Both return a LaneDeliveryFailure with the new class, and for an overflow the row carries `path` and the first element of `spawnargs`. The single-lane path routes a runOne throw through the same classifier before returning "error". CREDENTIAL_REFUSAL_RE and in-process defects keep today's fatal path. THE PRODUCTION PATH IS THE RUN-CHILD ROUND TRIP (amended 2026-11-03 before any PR): daemon lanes run in run children, and a lane's error reaches the classifier through the status file. src/lib/run-child-contract.ts serializes only message, name, stderr and code, dropping syscall, path and spawnargs, so it carries syscall, path and a bounded first spawnargs element through the file. The classifier must then answer the same for an error and for its round trip (test/a-run-child-contract-round-trips-through-files.test.ts already pins that invariant). No retry is added; a lane that failed is continued and not re-offered in this drain, exactly as W1-T5344 does.
   note: |
     Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 5 (p1). DEVIATION, named: the findings also ask to fix the ENOBUFS source (Node's default 1 MiB maxBuffer). The overflowing call site is not recorded anywhere I could read without a host query, so this task makes the row name it. Fixing the named call (a measured maxBuffer, or streaming) is the follow-up once one row exists. W1-T10575 was checked for overlap, as the findings asked: it is retired and merged, and its scope excludes this.
+    Amended 2026-11-03 (scope-amendment/W1-T11136-run-child-contract): src/lib/run-child-contract.ts joins files. The hand build found that the run-child status file drops syscall, path and spawnargs, so the overflow class would never match in production.
