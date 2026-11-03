@@ -5686,6 +5686,32 @@ function proceededSinceEscalation(lines: ReadonlyArray<Record<string, unknown>>,
   return latestEscalation(lines, pr)?.decidedSince?.action === "proceed";
 }
 
+/** PR 16213: the risk judge's standing hold on THIS head, named for the stall report, or undefined when none
+ *  stands. #16213 sat `awaiting-arm` for hours behind a handed-off-head escalation and its report read
+ *  "unknown signature": the hold lived only on the `risk_judge.escalated` row and the decision before it.
+ *  A later available decision (a re-judgment) ends the hold, as {@link proceededSinceEscalation} reads it. */
+export function riskHoldAtHead(lines: ReadonlyArray<Record<string, unknown>>,
+  pr: Pick<OpenPrView, "prNumber" | "headSha">): string | undefined {
+  const latest = latestEscalation(lines, pr);
+  if (latest === undefined || latest.decidedSince !== undefined) return undefined;
+  const escalatedAt = typeof latest.row.ts === "string" ? latest.row.ts : undefined;
+  const decision = lines.findLast(line => line.step === "risk_judge.decision" && line.action === "escalate" &&
+    line.pr_number === pr.prNumber && line.head_sha === pr.headSha &&
+    (escalatedAt === undefined || typeof line.ts !== "string" || line.ts <= escalatedAt));
+  const said = typeof decision?.reason === "string" && decision.reason.trim() !== ""
+    ? boundedText(decision.reason, RISK_HOLD_REASON_CHARS) : "reason unreadable";
+  const issue = typeof latest.row.issue_url === "string" && latest.row.issue_url !== "" ? ` in ${latest.row.issue_url}` : "";
+  return `held by the risk judge${escalatedAt === undefined ? "" : ` since ${escalatedAt}`}${issue}, ` +
+    `not armed until an operator arms it or a re-judgment proceeds: ${said}`;
+}
+
+/** The share of a risk-judge reason the stall report repeats; the full text stays on its decision row. */
+const RISK_HOLD_REASON_CHARS = 600;
+
+function boundedText(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
 export function riskEscalationAwaitingRejudge(pr: Pick<OpenPrView, "prNumber" | "headSha">,
   lines: ReadonlyArray<Record<string, unknown>>, planDigest: string | undefined): "plan_context_changed" | undefined {
   if (planDigest === undefined) return undefined;
@@ -18532,6 +18558,9 @@ export async function runSweep(
       }
       diagnoses.push(`fixed-on-main (branch refresh ${outcome ?? "unavailable"})`);
     }
+    // PR 16213: a mergeable head the risk judge refused waits for a person, so the report names that hold.
+    const riskHold = fields.blocker === "awaiting-arm" ? riskHoldAtHead(currentRows, pr) : undefined;
+    if (riskHold !== undefined) diagnoses.push(riskHold);
     if (stageRows.some(row => row.step === "review.posted") &&
         !stageRows.some(row => row.step === "automerge.armed")) diagnoses.push("review loop");
     const lastFix = currentRows.findLast(row => belongs(row) && row.step === "fix.done" && row.pushed_head_sha === pr.headSha);
