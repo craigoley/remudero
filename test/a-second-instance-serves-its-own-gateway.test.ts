@@ -156,13 +156,15 @@ test("a gateway answers only for the instance it was launched for", () => {
     assert.match(stdout(site), /--name remudero-site-serve/);
     assert.doesNotMatch(stdout(site), /RMD_CONSOLE_BUILD_ROOT/, "W1-T4566: no console build is wired");
     assert.match(stdout(site), /\.\/bin\/rmd serve --host 0\.0\.0\.0 --port 4318/);
-    assert.doesNotMatch(stdout(site), /remudero-console|port 4319/);
+    // The resource-policy note names every OTHER fleet container's learned peak (remudero-console-daemon
+    // is a term of the shared host budget, W1-T11130), so the gateway check is on the gateway's identity.
+    assert.doesNotMatch(stdout(site), /remudero-console-serve|port 4319/);
 
     assert.match(stdout(console), /--name remudero-console-serve/);
     assert.match(stdout(console), /-v .*\/console-state:\/home\/node\/Remudero/);
     assert.doesNotMatch(stdout(console), /RMD_CONSOLE_BUILD_ROOT/, "W1-T4566: no console build is wired");
     assert.match(stdout(console), /\.\/bin\/rmd serve --host 0\.0\.0\.0 --port 4319/);
-    assert.doesNotMatch(stdout(console), /remudero-site|port 4318/);
+    assert.doesNotMatch(stdout(console), /remudero-site-serve|port 4318/);
   } finally {
     rmSync(root.root, { recursive: true, force: true });
   }
