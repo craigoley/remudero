@@ -50,6 +50,16 @@
     - test/routing/model-canary-service-wrapper-protocol.test.ts
     - test/routing/model-canary-profile-observation.test.ts
     - test/routing/model-canary-config-inventory.test.ts
+    - src/lib/model-canary-replay-private.ts
+    - test/ci/gates/model-canary-config-inventory.test.ts
+    - test/model-canary-adoption.test.ts
+    - test/model-canary-runner.test.ts
+    - test/routing/model-canary-coding-command.test.ts
+    - test/routing/model-canary-private-replay.cli.test.ts
+    - test/worker/spawn/worker-attribution-and-accounting-follow-actual-execution.test.ts
+    - src/lib/model-canary-paired-analysis.ts
+    - src/lib/model-canary-report.ts
+    - test/model-canary-paired-analysis.test.ts
   status: queued
   priority: 2
   attempts: 0
@@ -103,6 +113,10 @@
     private-corpus, trace and owner integration paths. The native selector must not start coding
     integration before those source contracts merge. This orders existing work; it creates no
     additional full Linux qualification, allowance, schedule, host executor or release authority.
+    The 2026-11-03 publication reconciliation declares the existing private replay controls and
+    synthetic-source reporting separation, worker attribution fixture and computed census test
+    path. This preserves prior source and zero-provider controls without granting activation,
+    a new full Linux run, extra allowance or changes to shared ownership.
   acceptance:
     - claim: the existing private coding executor contains filesystem and credential effects and closes
         its real descendants
