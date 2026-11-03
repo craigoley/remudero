@@ -134,6 +134,9 @@ import {
   createAnchorGrepCache,
   createFragmentMemo,
   gitGrepAnchorTrue,
+  gitGrepAnchorTrueAsync,
+  warmAnchorGrepCache,
+  warmedAnchorGrep,
   readOriginMainSha,
   parseDraftCache,
   parseDraftInFlightCache,
@@ -2053,10 +2056,25 @@ function inboxClassifyState(deps: PanelGraphDeps): InboxClassifyState {
 }
 
 /** The anchor-grep predicate one pass hands every proposal: answered per main commit from the deps' cache. */
-function anchorGrepFor(deps: PanelGraphDeps, sha: string | undefined): (anchor: EvidenceAnchor) => boolean {
+function anchorGrepFor(deps: PanelGraphDeps, sha: string | undefined, warmFailures?: ReadonlyMap<string, unknown>): (anchor: EvidenceAnchor) => boolean {
   const grep = deps.inboxGrepAnchor ?? gitGrepAnchorTrue;
   const cache = inboxClassifyState(deps).grep;
-  return (anchor) => cachedAnchorGrep(cache, sha, anchor, (ref, a) => grep(deps.root, ref, a));
+  const cached = (anchor: EvidenceAnchor): boolean => cachedAnchorGrep(cache, sha, anchor, (ref, a) => grep(deps.root, ref, a));
+  // A warmed pass rethrows a failed warm grep where the sync grep would have thrown; every other key is a cache hit.
+  return warmFailures === undefined ? cached : (anchor) => warmedAnchorGrep(cache, sha, warmFailures, anchor, (ref, a) => grep(deps.root, ref, a));
+}
+
+/**
+ * W1-T11128: fill the pass's anchor cache OFF THE EVENT LOOP before the sync classifier reads it, so serve's inbox
+ * refresh forks no `git grep` synchronously (execFileSync held its main thread 199 s in 5 minutes). A deps with an
+ * injected `inboxGrepAnchor` keeps that grep; an unresolved main sha warms nothing and keeps the uncached sync grep,
+ * as before. A failed or timed-out grep lands in `failures` and is rethrown at its key, never folded into "false".
+ */
+async function warmInboxAnchors(deps: PanelGraphDeps, sha: string | undefined, proposals: readonly Proposal[], failures: Map<string, unknown>): Promise<void> {
+  if (deps.inboxGrepAnchor !== undefined) return;
+  const warmed = await warmAnchorGrepCache(inboxClassifyState(deps).grep, sha, proposals.flatMap((p) => p.evidenceAnchors),
+    (ref, anchor) => gitGrepAnchorTrueAsync(deps.root, ref, anchor));
+  for (const [key, err] of warmed) failures.set(key, err);
 }
 
 /** One pass's inputs, read, with the per-proposal step still to run — so the same pass can run whole or in slices. */
@@ -2348,8 +2366,10 @@ export async function classifyAllProposalsSliced(
   }
   if (state.pending !== undefined && state.pending.generation === state.generation && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
+  const warmFailures = new Map<string, unknown>();
+  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha, warmFailures), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
   const run = async (): Promise<ClassifiedInbox> => {
+    await warmInboxAnchors(deps, fp.sha, pass.proposals, warmFailures);
     const classifications: InboxClassification[] = [];
     for (let i = 0; i < pass.proposals.length; i += INBOX_CLASSIFY_SLICE) {
       if (i > 0) await yieldNow();

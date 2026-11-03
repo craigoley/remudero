@@ -2332,14 +2332,14 @@ export async function buildStatusBoardAsync(root: string, ledgerPath: string, de
   const readRegistry = deps.readProposalRegistry ?? (() => parseProposalRegistry(readTextFileIfExists(join(root, "state", "inbox-proposals.json"))));
   const ref = "origin/main";
   const cache = createAnchorGrepCache();
-  const failures = await warmAnchorGrepCache(cache, ref, readRegistry().flatMap((p) => p.evidenceAnchors),
-    (r, anchor) => gitGrepAnchorTrueAsync(deps.repoDir, r, anchor));
-  const unwarmed = (anchor: EvidenceAnchor): boolean => {
-    throw new Error(`evidence anchor "${anchor.description}" was not warmed before the board read it`);
-  };
+  let anchors: EvidenceAnchor[] = [];
+  // A throwing registry read warms nothing; the board's own INBOX read reports it exactly as the sync board does.
+  try { anchors = readRegistry().flatMap((p) => p.evidenceAnchors); } catch { /* reported by the board's own read */ }
+  const failures = await warmAnchorGrepCache(cache, ref, anchors, (r, anchor) => gitGrepAnchorTrueAsync(deps.repoDir, r, anchor));
   return buildStatusBoard(root, ledgerPath, {
     ...deps,
-    grepAnchorTrue: (anchor) => warmedAnchorGrep(cache, ref, failures, anchor, (_ref, a) => unwarmed(a)),
+    // Past the cache's backstop bound an anchor stays a miss and takes the sync grep, as the uncached board does.
+    grepAnchorTrue: (anchor) => warmedAnchorGrep(cache, ref, failures, anchor, (r, a) => gitGrepAnchorTrue(deps.repoDir, r, a)),
   });
 }
 
