@@ -1,5 +1,5 @@
 - id: W1-T11105
-  title: A fleet build's pre-open gate also runs a light gate in shadow (census counts plus the cheap fast-gate checks, without census suites or rule-checks) and ledgers both verdicts and durations, so the switch to the light gate is decided on measured misses
+  title: A fleet build's pre-open gate derives in shadow what a light gate (census counts plus every fast-gate step but census suites and rule-checks) would have decided, from the full gate's own per-step log, and ledgers both verdicts and durations, so the switch to the light gate is decided on measured misses at no extra gate cost
   repo: remudero
   depends_on: [W1-T11098]
   priority: 1
@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: high # the pre-open gate, the preflight step selection it launches, and the gate row it writes; shadow only, the full gate still decides
+  risk: high # the pre-open gate, the preflight step log it reads, and the gate row it writes; shadow only, the full gate still decides
   origin: operator-session#preflight-throughput-2026-11-02
   plan_refs:
     - W1-T6435
@@ -18,15 +18,16 @@
     - src/lib/ci-parity.ts
     - src/run-task.ts
     - src/cli/commands/run-task-verb.ts
+    - scripts/census-precheck.mjs
     - test/ci/gates/a-light-pre-open-gate-is-measured-beside-the-full-one.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: Before the full pre-open gate, a fleet build runs a light gate (census-precheck --counts-only plus every fast-gate step except census-precheck and rule-checks) under its own short bound, and the full gate then runs and decides exactly as before
+    - claim: rmd preflight --step-log <path> appends a first line naming the phases and fast-gate jobs it will run, then one line per finished phase and per finished fast-gate job (name, ok, duration) as each finishes, and census-precheck appends its counts verdict the moment its counts are known; without the option nothing is written and every step runs as before
       proof: "unit test: test/ci/gates/a-light-pre-open-gate-is-measured-beside-the-full-one.test.ts"
-    - claim: The gate row records the light gate's result, its failed steps and duration beside the full gate's, plus a miss flag that is true only when the full gate failed on a census-suite or rule-check step the light gate does not run while the light gate passed
+    - claim: The pre-open gate passes a step log inside its harness-made HOME and, from that log alone, records light_result (pass, fail or unreached), light_failed, light_unreached and light_duration_ms beside the full gate's result, including when the backstop ended the full gate; the full gate's verdict, failed steps and bound are unchanged
       proof: "grep: W1-T11105 criterion 2 in test/ci/gates/a-light-pre-open-gate-is-measured-beside-the-full-one.test.ts"
-    - claim: rmd preflight takes an option naming fast-gate steps to leave out, used only by the light gate; with no such option every step runs as before
+    - claim: light_miss is true only when the light gate passed and the full gate failed on rule-checks or census-precheck, and light_would_save_ms is the full gate's duration minus the light gate's when the full gate passed or was unmeasured
       proof: "grep: W1-T11105 criterion 3 in test/ci/gates/a-light-pre-open-gate-is-measured-beside-the-full-one.test.ts"
   rationale: |
     MEASURED 2026-11-02, implement.preopen_gate rows in the core ledger union from 2026-11-01T12Z (about 26 h):
@@ -35,11 +36,25 @@
     - 10 passed (median 10 min). 12 failed fast: 8 on project:unavailable (environment), 4 on census-precheck.
     - Inside an author static run on 2026-11-02, census-precheck took 1,896 s and rule-checks 924 s of 3,085 s. CI runs both before merge.
     Operator ruling 2026-11-02 (AskUserQuestion): "Shadow first, then switch". The gate runs everything for 48 h while recording what the lighter gate would have decided, then the switch happens on the operator's yes, against the hit/miss numbers.
+    AMENDED 2026-11-03 (operator session, before any build): derive the shadow, do not run it.
+    - The fast gate's steps run one after another (runPreflightFast maps FAST_GATE_STEPS in order) and every light step is also a full step, so the full run already executes the light gate's whole work on the same tree.
+    - Running the light gate first, as first filed, would add about 265 s plus the counts to every fleet build for 48 h. That is 3,085 s minus 924 s and 1,896 s, on a host whose CPU PSI full median was 29% and whose review width sat at 1.
+    - Two separate runs could also disagree on a flake, which would read as a miss the light gate never made.
+    - The summary file is written only when preflight finishes, and 59% of gates are killed before that. So the derivation needs a log appended as each phase and job finishes, which survives the kill.
+    - census-precheck computes its counts before any census suite (W1-T11098), so its counts verdict is logged at that point. That is the same violation set --counts-only reports.
+    - The log path reaches census-precheck through an environment variable, not a flag: the gate runs the worktree's own script, and a tree cut before this change would reject an unknown flag and red the full gate.
   design: |
-    1. ci-parity's fast-gate run accepts a skip set (job names). rmd preflight exposes it as --skip-step <job> (repeatable). Absent, nothing changes.
-    2. preopen-gate runs the light gate first: the same contained launch with --skip-step census-precheck --skip-step rule-checks, plus census-precheck --counts-only. Its bound is the light gate's own measured p95 plus IQR once 20 rows exist, 10 min before that. Then the full gate runs exactly as today.
-    3. implement.preopen_gate gains light_result, light_failed, light_duration_ms and light_miss (full failed on census-precheck or rule-checks only, and light passed). It also gains light_would_save_ms (full duration minus light duration) when the full gate passed or was unmeasured.
-    4. Promotion (a separate operator-approved change): after 48 h of rows, report light_miss count against the full gate's real catches, and the total would-save hours.
+    1. src/run-task.ts: rmd preflight accepts --step-log <path> (PREFLIGHT_VALUE_FLAGS and the syntax line). When set, it appends JSON lines: first {"plan": {"phases": [...], "fast_jobs": [...]}} naming what this invocation will run, then {"phase", "ok", "ms", "failed"} as each phase returns. A write failure is reported once and never changes a verdict.
+    2. src/lib/ci-parity.ts: runPreflightFast takes an optional onStep(job, ok, ms), called as each job finishes and again when a re-measure changes a census entry's result. The census-precheck leaf, given a counts-log path, spawns with RMD_CENSUS_COUNTS_LOG set. When the author preflight already answered census-precheck, the leaf logs the counts unit as ok.
+    3. scripts/census-precheck.mjs: with RMD_CENSUS_COUNTS_LOG set, append {"job": "census-precheck:counts", "ok", "ms"} once the counts violations are computed, in both full and --counts-only runs.
+    4. src/lib/preopen-gate.ts: defaultRunGate passes --step-log <HOME>/preflight-steps.ndjson beside --summary-file, for the harness launcher only. It reads the log on every exit, including the backstop and exit 2.
+       deriveLightGate(log, full) builds the light set: every planned phase but "fast", every fast job but rule-checks and census-precheck, and census-precheck:counts. The light gate is "fail" if any recorded light unit failed, "pass" if every one was recorded ok, and "unreached" otherwise.
+       light_duration_ms is the sum of the light units' durations. With no planned fast phase (a consumer repo) the row carries light_unmeasured instead.
+    5. implement.preopen_gate gains light_result, light_failed, light_unreached, light_duration_ms, light_miss and light_would_save_ms (see criterion 3) through preopenGateLedgerFields.
+    6. Promotion is a separate operator-approved change. After 48 h of rows, report the light_miss count against the full gate's real catches, the unreached count, and the total would-save hours. Before it decides alone, the light gate runs --counts-only as an exit status the harness observes, because the logged counts line is written by the worktree's script.
+  falsifier: |
+    At origin/main the gate row has no light_* field. rmd preflight rejects --step-log as an unknown argument. A gate killed at its backstop leaves nothing on disk that names which steps finished.
   note: |
     reservation hand-off: run-unfiled-1793629687846 -> run-unfiled-1793629687846
     Reserved with rmd next-task-id from the operator checkout (W1-T11105 on run-unfiled-1793629687846). Operator ruling 2026-11-02: "Shadow first, then switch". The test path is where rmd test-place puts a suite importing src/lib/preopen-gate.ts; a builder whose final imports place it elsewhere amends this record first.
+    Amended 2026-11-03 before any build (scope-amendment/W1-T11105-derived-shadow): it derives the shadow from the full gate's step log instead of running a second gate; scripts/census-precheck.mjs joins files.
