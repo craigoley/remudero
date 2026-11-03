@@ -30834,7 +30834,7 @@ export function commitWorkerEdits(
   // `checkpoint` (W1-T8008): a restart checkpoint keeps EVERY worker change, declared or not -- the undeclared paths are
   // staged too and returned in `undeclared` (named, never dropped); scope is judged later, on the ordinary push path.
   options: { admitTests?: boolean; priorHeadSha?: string; branch?: string; checkpoint?: boolean; aliasRewriter?: TestAliasRewriter } = {},
-): WorkerEditCommit {
+): WorkerEditCommit & { readonly ignored_declared?: readonly string[] } {
   const runGit = deps.runGit ?? ((args: string[]) => hostWorktreeGit(
     repoDir,
     args,
@@ -30869,7 +30869,23 @@ export function commitWorkerEdits(
 
   const status = runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]);
   const changed = workerChangedPaths(status);
-  if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+  if (changed.length === 0) {
+    const existing = declaredPaths.filter((path) => existsSync(join(repoDir, path)));
+    const ignored = existing.length === 0 ? [] : runGit([
+      "status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL, "--ignored=matching", "--", ...existing,
+    ]).split("\0").filter((entry) => entry.startsWith("!! ")).map((entry) => entry.slice(3));
+    // Git may report an ignored parent directory even when scoped to a declared file inside it.
+    const ignored_declared = existing.filter((path) => pathIsUnderDeclaredSurface(path, ignored));
+    if (ignored_declared.length > 0) {
+      const details = ignored_declared.map((path) => {
+        const rule = runGit(["check-ignore", "-v", "--", path]).split("\t")[0];
+        return `${path} (rule ${rule})`;
+      });
+      return { committed: false, undeclared: [], ignored_declared,
+        reason: `declared path ignored by .gitignore: ${details.join(", ")}` };
+    }
+    return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+  }
 
   // W1-T4450: a REGISTERED REGENERABLE ARTIFACT (a gate's own baseline, whose failure message names
   // it as the remedy) is staged although undeclared. The fix prompt and the scope guard already grant
