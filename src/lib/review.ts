@@ -361,10 +361,12 @@ export type ProofExecOutcome =
   | "stale_self_path";
 
 /** One host-load reading (W1-T11132): the 1-minute `/proc/loadavg` and the cgroup's CPU PSI `some avg10`. A field the
- *  host does not expose is ABSENT, never 0 — "measured idle" and "never measured" are different facts. */
+ *  host does not expose is ABSENT, never 0 — "measured idle" and "never measured" are different facts. `unreadable` names
+ *  each source that could not be read, with the reason, so an absent field is explained rather than silent. */
 export interface HostLoadSample {
   load1?: number;
   cpuPsiSomeAvg10Pct?: number;
+  unreadable?: string[];
 }
 
 /** The host load at a proof's start and end, recorded on its {@link CriterionVerdict} (W1-T11132). */
@@ -376,17 +378,29 @@ export interface ProofLoadRecord {
 /** Read the host load now. `read` is the file-reading seam. An unreadable or malformed source leaves its field absent. */
 export function sampleHostLoad(read: (path: string) => string = (path) => readFileSync(path, "utf8")): HostLoadSample {
   const sample: HostLoadSample = {};
+  const unreadable: string[] = [];
   try {
     const load1 = Number(read("/proc/loadavg").trim().split(/\s+/)[0]);
     if (Number.isFinite(load1) && load1 >= 0) sample.load1 = load1;
-  } catch { /* an unreadable /proc/loadavg leaves load1 absent, which the sweep reads as "no comparison possible" */ }
+    else unreadable.push("/proc/loadavg: malformed");
+  } catch (e) {
+    const reason = e instanceof Error ? e.message.slice(0, 80) : "unreadable";
+    unreadable.push(`/proc/loadavg: ${reason}`);
+  }
   for (const path of ["/sys/fs/cgroup/cpu.pressure", "/proc/pressure/cpu"]) {
     let text: string;
-    try { text = read(path); } catch { continue; }
+    try {
+      text = read(path);
+    } catch (e) {
+      const reason = e instanceof Error ? e.message.slice(0, 80) : "unreadable";
+      unreadable.push(`${path}: ${reason}`);
+      continue;
+    }
     const psi = Number(/^some\b.*\bavg10=([0-9.]+)/m.exec(text)?.[1]);
     if (Number.isFinite(psi)) { sample.cpuPsiSomeAvg10Pct = psi; break; }
+    unreadable.push(`${path}: malformed`);
   }
-  return sample;
+  return unreadable.length > 0 ? { ...sample, unreadable } : sample;
 }
 
 /** True when a thrown proof-executor error carries a marker of a run CUT SHORT rather than a failure of the proof: a

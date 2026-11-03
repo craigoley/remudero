@@ -100,8 +100,15 @@ test("sampleHostLoad reads loadavg and the cgroup cpu pressure, leaving an unrea
   };
   const read = (path: string): string => { if (path in files) return files[path]; throw new Error(`ENOENT ${path}`); };
   assert.deepEqual(sampleHostLoad(read), { load1: 24.5, cpuPsiSomeAvg10Pct: 63.25 });
-  assert.deepEqual(sampleHostLoad(() => { throw new Error("ENOENT"); }), {});
-  assert.deepEqual(sampleHostLoad((path) => path === "/proc/loadavg" ? "garbage" : (() => { throw new Error("x"); })()), {});
+  const none = sampleHostLoad(() => { throw new Error("ENOENT"); });
+  assert.equal(none.load1, undefined);
+  assert.equal(none.cpuPsiSomeAvg10Pct, undefined);
+  assert.equal(none.unreadable?.length, 3, "each unreadable source is named with its reason");
+  assert.match(none.unreadable?.[0] ?? "", /^\/proc\/loadavg: ENOENT/);
+  const garbage = sampleHostLoad((path) => path === "/proc/loadavg" ? "garbage" : (() => { throw new Error("x"); })());
+  assert.equal(garbage.load1, undefined);
+  assert.equal(garbage.unreadable?.[0], "/proc/loadavg: malformed");
+  assert.equal(sampleHostLoad((path) => path === "/proc/loadavg" ? "1.0 2 3" : "none\n").unreadable?.length, 2);
 });
 
 // ── W1-T11132 criterion 2: the sweep's load-gated re-review ────────────────────────────────────────
