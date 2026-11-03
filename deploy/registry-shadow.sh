@@ -17,7 +17,7 @@ case "$registry_shadow_deadline_s" in ''|*[!0-9]*|0) registry_shadow_deadline_s=
 registry_shadow_supports() {
   [ -f "$1" ] && [ -r "$1" ] || return 1
   [ "$(wc -c < "$1")" -le 4194304 ] || return 1
-  grep -F -- '--selected-registry-shadow)' "$1" >/dev/null
+  grep -F -- '--selected-registry-shadow)' "$1" >/dev/null && grep -F -- '--selected-registry-pin)' "$1" >/dev/null
 }
 
 registry_shadow_call() (

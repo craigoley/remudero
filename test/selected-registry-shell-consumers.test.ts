@@ -12,7 +12,7 @@ import { isAbsolute, join } from "node:path";
 import { test } from "node:test";
 import { selectedRegistryShadowMain } from "#src/selected-registry-shadow-main.js";
 import { selectedRegistryShadowChild } from "#src/lib/child-entry-argv.js";
-import { selectedRegistryLifecycleExec } from "#src/lib/selected-registry-consumers.js";
+import { SELECTED_REGISTRY_LAUNCH_WRAPPER, selectedRegistryLifecycleExec } from "#src/lib/selected-registry-consumers.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { registryShellFixture } from "#test/helpers/registry-shell-fixture.js";
@@ -96,36 +96,35 @@ if [ "$1" = -l ]; then cat "$CRONTAB_SNAPSHOT"; else cat > "$CRONTAB_SNAPSHOT"; 
 }
 
 /**
- * The historical Bash 3.2 interpreter, never vendored: (a) the host's own /bin/bash when it is 3.2 (macOS),
- * (b) an absolute executable named by RMD_TEST_BASH32 (provided outside the repository, e.g. a pinned CI
- * install), its version verified. (c) Otherwise the 3.2 leg is UNMEASURED: a named, visible diagnostic, and
- * the leg runs under the current bash so no assertion is skipped, but nothing claims it was 3.2.
+ * A real historical Bash 3.2, never vendored and never substituted: the host's /bin/bash when it reports 3.2 (macOS),
+ * else an absolute RMD_TEST_BASH32 executable whose BASH_VERSION is 3.2. Undefined otherwise; every 3.2 leg then
+ * skips under {@link BASH32_SKIP}, so a current bash is never counted as a 3.2 qualification.
  */
-function bash32(t: { after(fn: () => void): void; diagnostic(message: string): void }) {
-  const probe = (shell: string) => spawnSync(shell, ["-c", 'printf "%s" "$BASH_VERSION"'], { encoding: "utf8" });
+const BASH32_SKIP = "needs a real bash 3.2 (native /bin/bash 3.2 or RMD_TEST_BASH32); W1-T11263 builds one in CI";
+function bash32(): { shell: string; env: NodeJS.ProcessEnv; version: string } | undefined {
   const candidates = [process.platform === "darwin" ? "/bin/bash" : undefined, process.env.RMD_TEST_BASH32]
     .filter((shell): shell is string => typeof shell === "string" && isAbsolute(shell));
   for (const shell of candidates) {
-    const version = probe(shell);
-    if (version.status === 0 && /^3\.2\./.test(version.stdout)) return { shell, env: {} as NodeJS.ProcessEnv, version: version.stdout, measured: true };
+    const version = spawnSync(shell, ["-c", 'printf "%s" "$BASH_VERSION"'], { encoding: "utf8" });
+    if (version.status === 0 && /^3\.2\./.test(version.stdout)) return { shell, env: {} as NodeJS.ProcessEnv, version: version.stdout };
   }
-  const current = spawnSync("bash", ["-c", 'command -v bash; printf "%s" "$BASH_VERSION"'], { encoding: "utf8" });
-  assert.equal(current.status, 0, String(current.error ?? current.stderr));
-  const [shell, version] = current.stdout.split("\n");
-  t.diagnostic(`UNMEASURED: bash 3.2 leg ran under bash ${version} (${shell}); no native 3.2 /bin/bash and no RMD_TEST_BASH32 executable reporting 3.2`);
-  return { shell: shell!, env: {} as NodeJS.ProcessEnv, version: version!, measured: false };
+  return undefined;
 }
+const CURRENT_BASH = { shell: "bash", env: {} as NodeJS.ProcessEnv };
 
 test("selected shell capability probe reads the whole trusted child script", t => {
   const root = mkdtempSync(join(tmpdir(), "rmd-shadow-supports-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const deep = join(root, "deep.sh"), old = join(root, "old.sh");
-  writeFileSync(deep, "#!/usr/bin/env bash\n" + "# filler\n".repeat(300) + "case \"$1\" in\n  --selected-registry-shadow) shift ;;\nesac\n");
+  writeFileSync(deep, "#!/usr/bin/env bash\n" + "# filler\n".repeat(300) + "case \"$1\" in\n  --selected-registry-shadow) shift ;;\n  --selected-registry-pin) shift ;;\nesac\n");
+  const half = join(root, "half.sh");
+  writeFileSync(half, "#!/usr/bin/env bash\n" + "# filler\n".repeat(300) + "case \"$1\" in\n  --selected-registry-shadow) shift ;;\nesac\n");
   writeFileSync(old, "#!/usr/bin/env bash\n" + "# filler\n".repeat(300) + "echo legacy\n");
   const supports = (script: string) => spawnSync("bash", ["-c", '. "$1" && registry_shadow_supports "$2"', "_",
     join(REPO_ROOT, "deploy/registry-shadow.sh"), script], { encoding: "utf8" }).status;
   assert.equal(supports(deep), 0, "a maintained child is recognized wherever its case is");
   assert.equal(supports(old), 1, "an older child without the grammar keeps its original arguments");
+  assert.equal(supports(half), 1, "a child that accepts only the session, not its pin, keeps its original arguments");
   assert.equal(supports(join(REPO_ROOT, "deploy/recycle-container.sh")), 0, "the maintained recycler (case past line 256 since #15532) is recognized");
   assert.equal(supports(join(root, "absent.sh")), 1);
 });
@@ -135,6 +134,10 @@ function supervisorFixture(t: { after(fn: () => void): void }) {
   writeFileSync(f.legacy, `instances:\n  core:\n    repo: remudero\n    github_repo: craigoley/remudero\n    state_dir: ${f.state}\n    container_name: remudero-daemon\n    primary: true\n    image: fixture.azurecr.io/remudero:latest\n    claude_dir: ${f.env.RMD_CLAUDE_DIR}\n    codex_dir: ${f.env.RMD_CODEX_DIR}\n    container_config_dir: ${f.env.RMD_CONTAINER_CONFIG_DIR}\n`);
   mkdirSync(join(f.state, "daemon-install/.remudero"));
   writeFileSync(join(f.state, "daemon-install/.remudero/daemon-instances.yaml"), readFileSync(f.legacy));
+  // W1-T10573 (#15532) reads RMD_INSTANCE_REGISTRY as the ACTIVE selection in the recycler, serve and deploy-run. This
+  // supervisor is the legacy, unselected one: its children read the install's default registry above; the shadow
+  // candidate travels only in the session.
+  delete f.env.RMD_INSTANCE_REGISTRY;
   assert.equal(f.install().status, 0);
   mkdirSync(join(f.state, "remudero/bin"));
   symlinkSync(join(REPO_ROOT, "src"), join(f.state, "remudero/src"));
@@ -187,12 +190,8 @@ process.exit(r.status ?? 99);
 
 test("selected shell shadow reaches real lifecycle and heartbeat consumers: generated deploy-run supervisor", t => {
   const f = supervisorFixture(t);
-  const historical = bash32(t), historicalBin = join(f.root, "historical-bin"); mkdirSync(historicalBin);
-  symlinkSync(historical.shell, join(historicalBin, "bash"));
-  f.env.PATH = `${historicalBin}:${f.env.PATH}`;
-  Object.assign(f.env, historical.env);
   const offset = f.rows().length;
-  const launch = f.run(join(f.output, "launcher"), [], { FIXTURE_RUNNING: "1" }, historical.shell);
+  const launch = f.run(join(f.output, "launcher"), [], { FIXTURE_RUNNING: "1" });
   assert.equal(launch.status, 0, launch.stdout + launch.stderr);
   assert.match(launch.stdout, /asking the supervisor/);
   const call = f.receipts().find(c => c.bin === "rmd" && c.args[0] === "deploy-run");
@@ -227,6 +226,37 @@ test(`selected shell revisions invalidate generated child and heartbeat observat
   }
 });
 }
+
+test("selected shell defaults and failures remain shadow only without live effects: supervisor transports under the active selection wrapper", t => {
+  const f = fixture(t), deploy = join(f.root, "deploy"); mkdirSync(deploy);
+  const recycler = join(deploy, "recycle-container.sh"), serve = join(deploy, "serve-container.sh");
+  // The maintained recycler's option cases sit past line 256 and 16 KiB since #15532; place the stub's deeper still.
+  const filler = "# filler line kept so the option cases sit far past any fixed header window\n".repeat(400);
+  const cases = 'case "${1:-}" in --selected-registry-shadow) : ;; --selected-registry-pin) : ;; esac\n';
+  for (const script of [recycler, serve]) writeFileSync(script, "#!/usr/bin/env bash\n" + filler + cases + "printf '%s\\n' \"$@\"\n");
+  assert.ok(readFileSync(recycler, "utf8").indexOf("--selected-registry-shadow)") > 16384, "the cases sit past 16 KiB");
+  const binding = { session: f.session, pin: "b".repeat(64) };
+  const exec = selectedRegistryLifecycleExec(f.root, binding);
+  const captured = { session: binding.session, pin: binding.pin };
+  binding.session = "changed after capture"; binding.pin = "c".repeat(64);
+  const shadow = ["--selected-registry-shadow", captured.session, "--selected-registry-pin", captured.pin];
+  const packet = ["/private/selected.yaml", "d".repeat(64), "binding-fixture"];
+  const lines = (out: string) => out.trim().split("\n");
+  assert.deepEqual(lines(exec("bash", [recycler, "--instance", "core"])), ["--instance", "core", ...shadow],
+    "a deep option case is still recognized");
+  assert.deepEqual(lines(exec("bash", ["-c", SELECTED_REGISTRY_LAUNCH_WRAPPER, "selected-registry-launch", ...packet,
+    recycler, "--instance", "core"])), ["--instance", "core", ...shadow], "the exact active-selection wrapper forwards the captured binding");
+  assert.deepEqual(lines(exec("bash", ["-c", SELECTED_REGISTRY_LAUNCH_WRAPPER, "selected-registry-launch", ...packet,
+    "-c", 'export RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$1}"; shift; exec bash "$@"', "recycle-wait", "15", recycler, "--instance", "core"])),
+  ["--instance", "core", ...shadow], "the wrapper around the derived-wait wrapper forwards too");
+  assert.deepEqual(lines(exec("bash", ["-c", 'printf "%s\\n" "$@"; exit 0', "selected-registry-launch", ...packet, recycler])),
+    ["selected-registry-launch", ...packet, recycler].slice(1), "any other -c text under the same label is not the maintained wrapper");
+  const old = join(f.root, "old/deploy"); mkdirSync(old, { recursive: true });
+  writeFileSync(join(old, "recycle-container.sh"), "#!/usr/bin/env bash\n" + filler + "printf '%s\\n' \"$@\"\n");
+  const olderExec = selectedRegistryLifecycleExec(join(f.root, "old"), { session: f.session, pin: "b".repeat(64) });
+  assert.deepEqual(lines(olderExec("bash", ["-c", SELECTED_REGISTRY_LAUNCH_WRAPPER, "selected-registry-launch", ...packet,
+    join(old, "recycle-container.sh"), "--instance", "core"])), ["--instance", "core"], "an older child without the grammar keeps its arguments");
+});
 
 test("selected shell defaults and failures remain shadow only without live effects: supervisor transports", t => {
   const f = fixture(t), deploy = join(f.root, "deploy"); mkdirSync(deploy);
@@ -305,9 +335,11 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers", asy
   assert.equal(result.status, 0, result.stderr);
   assert.ok(result.calls.some(call => call.startsWith("run ")));
   assert.ok(refresh.rows().some(row => row.action === "field-trials"));
-  const serve = f.run(join(REPO_ROOT, "deploy/serve-container.sh"), ["--replace"]);
+  // W1-T10573 (#15532) makes RMD_INSTANCE_REGISTRY serve's ACTIVE selection; the legacy control is its genuine absence.
+  const unselected = { RMD_INSTANCE_REGISTRY: undefined };
+  const serve = f.run(join(REPO_ROOT, "deploy/serve-container.sh"), ["--replace"], unselected);
   assert.equal(serve.status, 0, serve.stdout + serve.stderr);
-  const selectedServe = f.run(join(REPO_ROOT, "deploy/serve-container.sh"), ["--replace", "--selected-registry-shadow", f.session]);
+  const selectedServe = f.run(join(REPO_ROOT, "deploy/serve-container.sh"), ["--replace", "--selected-registry-shadow", f.session], unselected);
   assert.equal(selectedServe.status, 0, selectedServe.stdout + selectedServe.stderr);
   assert.ok(f.rows().some(row => row.action === "serve"));
   const host = f.run(join(REPO_ROOT, "deploy/host-update.sh"), ["--print-daemon-run", "--selected-registry-shadow", f.session]);
@@ -316,8 +348,9 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers", asy
 });
 
 test("selected shell shadow reaches real lifecycle and heartbeat consumers: installed field trials command", t => {
-  const historical = bash32(t);
-  for (const interpreter of [{ shell: "bash", env: {} }, historical]) {
+  const historical = bash32();
+  if (!historical) t.diagnostic(`bash 3.2 leg not run: ${BASH32_SKIP}`);
+  for (const interpreter of [CURRENT_BASH, ...(historical ? [historical] : [])]) {
     const f = refreshFixture(t);
     const installer = join(REPO_ROOT, "deploy/install-field-trials-refresh.sh");
     const installed = join(f.root, ".local/bin/rmd-field-trials-refresh");
@@ -374,8 +407,9 @@ test("selected shell qualification preserves mixed version legacy effects: a hea
 
 for (const phase of ["capture", "observation"] as const) {
 test(`selected shell defaults and failures remain shadow only without live effects: observer deadlines (${phase})`, t => {
-  const historical = bash32(t);
-  for (const base of [{ shell: "bash", env: {} as NodeJS.ProcessEnv }, historical]) {
+  const historical = bash32();
+  if (!historical) t.diagnostic(`bash 3.2 leg not run: ${BASH32_SKIP}`);
+  for (const base of [CURRENT_BASH, ...(historical ? [historical] : [])]) {
       // The production backstop is 20 s; pinning 5 s keeps this hung-observer proof fast.
       const interpreter = { ...base, env: { ...base.env, RMD_REGISTRY_SHADOW_DEADLINE_S: "5" } };
       const f = registryShellFixture(t);
@@ -674,53 +708,6 @@ test("selected shell qualification preserves mixed version legacy effects", t =>
   assert.ok(install, "generated launcher must execute the older child, never just probe it");
   assert.ok(!install.args.includes("--selected-registry-shadow") && !install.args.includes(host.session));
   assert.match(readFileSync(join(host.output, "systemd/rmd-fleet.service"), "utf8"), /\[Service\]/);
-  const historical = bash32(t);
-  for (const script of [join(pinned, "deploy/field-trials-refresh.sh"), join(REPO_ROOT, "deploy/field-trials-refresh.sh")]) {
-    const result = f.run([], script, historical.shell, historical.env);
-    assert.equal(result.status, before.status, result.stderr);
-    assert.equal(result.stdout, before.stdout);
-    assert.deepEqual(withoutVersionReceipt(result.calls, script),
-      withoutVersionReceipt(before.calls, join(REPO_ROOT, "deploy/field-trials-refresh.sh")));
-  }
-  const qualified32 = f.run(["--selected-registry-shadow", f.session], undefined,
-    historical.shell, historical.env);
-  assert.equal(qualified32.status, before.status, qualified32.stderr);
-  assert.equal(qualified32.stdout, before.stdout);
-  assert.deepEqual(qualified32.calls, before.calls);
-  const h32 = registryShellFixture(t); h32.capture();
-  const historicalBin = join(h32.root, "historical-bin"); mkdirSync(historicalBin);
-  symlinkSync(historical.shell, join(historicalBin, "bash"));
-  h32.env.PATH = `${historicalBin}:${h32.env.PATH}`;
-  h32.env.LD_LIBRARY_PATH = historical.env.LD_LIBRARY_PATH;
-  const oldDeploy32 = join(h32.root, "old-deploy"); mkdirSync(oldDeploy32);
-  for (const name of readdirSync(join(REPO_ROOT, "deploy"))) symlinkSync(
-    join(name === "install-host-units.sh" ? pinned : REPO_ROOT, "deploy", name), join(oldDeploy32, name));
-  const oldInstall32 = h32.run(join(oldDeploy32, "install-host-units.sh"), ["--install"], {}, historical.shell);
-  assert.equal(oldInstall32.status, 0, oldInstall32.stdout + oldInstall32.stderr);
-  const oldBoot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
-  assert.equal(oldBoot32.status, 0, oldBoot32.stdout + oldBoot32.stderr);
-  const oldDocker32 = h32.receipts().filter(c => c.bin === "docker");
-  writeFileSync(join(h32.root, "calls.ndjson"), "");
-  const newInstall32 = h32.run(join(REPO_ROOT, "deploy/install-host-units.sh"), ["--install"], {}, historical.shell);
-  assert.equal(newInstall32.status, oldInstall32.status, newInstall32.stdout + newInstall32.stderr);
-  const newBoot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
-  assert.equal(newBoot32.status, oldBoot32.status, newBoot32.stdout + newBoot32.stderr);
-  assert.equal(newBoot32.stdout, oldBoot32.stdout);
-  const newDocker32 = h32.receipts().filter(c => c.bin === "docker");
-  assert.deepEqual(newDocker32, oldDocker32,
-    "Bash 3.2 old and new installers and rendered launchers keep no-option Docker effects");
-  const qualifiedOffset = h32.receipts().length;
-  const install32 = h32.run(join(REPO_ROOT, "deploy/install-host-units.sh"),
-    ["--install", "--selected-registry-shadow", h32.session], {}, historical.shell);
-  assert.equal(install32.status, 0, install32.stderr);
-  const boot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
-  assert.equal(boot32.status, oldBoot32.status, boot32.stdout + boot32.stderr);
-  assert.equal(boot32.stdout, oldBoot32.stdout);
-  assert.deepEqual(h32.receipts().slice(qualifiedOffset).filter(c => c.bin === "docker"), newDocker32,
-    "Bash 3.2 qualification leaves generated launcher Docker arguments and effects unchanged");
-  assert.ok(h32.receipts().some(c => c.bin === "docker" && c.args[0] === "run"));
-  assert.ok(h32.rows().some(r => r.action === "launcher"));
-  t.diagnostic(`old/new scripts and generated launchers executed with Bash ${historical.version}`);
 });
 
 test("selected shell defaults and failures remain shadow only without live effects: input matrix and healthy stop", t => {
@@ -771,6 +758,67 @@ test("selected shell defaults and failures remain shadow only without live effec
     || (["container", "image", "network"].includes(c.args[0]!) && c.args[1] === "inspect")),
     `STOP permits only legacy read probes, never child effects: ${JSON.stringify(stopDocker)}`);
   assert.equal(readFileSync(join(stopped.state, "state/STOP"), "utf8"), "operator hold\n");
+});
+
+test("bash 3.2 runs the old and maintained shell consumers and launchers with unchanged no-option effects", t => {
+  const historical = bash32();
+  if (!historical) { t.skip(BASH32_SKIP); return; }
+  const f = refreshFixture(t);
+  const pinned = join(REPO_ROOT, "test/fixtures/selected-registry-old");
+  const before = f.run();
+  assert.equal(before.status, 0, before.stderr);
+  const withoutVersionReceipt = (calls: string[], script: string) => {
+    const bytes = readFileSync(script);
+    const blob = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+    assert.ok(calls.at(-1)?.endsWith(`--refresh-script-blob ${blob}`), "each version reports its own actual script blob");
+    return calls.map(call => call.replace(`--refresh-script-blob ${blob}`, "--refresh-script-blob VERIFIED_VERSION"));
+  };
+  for (const script of [join(pinned, "deploy/field-trials-refresh.sh"), join(REPO_ROOT, "deploy/field-trials-refresh.sh")]) {
+    const result = f.run([], script, historical.shell, historical.env);
+    assert.equal(result.status, before.status, result.stderr);
+    assert.equal(result.stdout, before.stdout);
+    assert.deepEqual(withoutVersionReceipt(result.calls, script),
+      withoutVersionReceipt(before.calls, join(REPO_ROOT, "deploy/field-trials-refresh.sh")));
+  }
+  const qualified32 = f.run(["--selected-registry-shadow", f.session], undefined,
+    historical.shell, historical.env);
+  assert.equal(qualified32.status, before.status, qualified32.stderr);
+  assert.equal(qualified32.stdout, before.stdout);
+  assert.deepEqual(qualified32.calls, before.calls);
+  const h32 = registryShellFixture(t); h32.capture();
+  const historicalBin = join(h32.root, "historical-bin"); mkdirSync(historicalBin);
+  symlinkSync(historical.shell, join(historicalBin, "bash"));
+  h32.env.PATH = `${historicalBin}:${h32.env.PATH}`;
+  h32.env.LD_LIBRARY_PATH = historical.env.LD_LIBRARY_PATH;
+  const oldDeploy32 = join(h32.root, "old-deploy"); mkdirSync(oldDeploy32);
+  for (const name of readdirSync(join(REPO_ROOT, "deploy"))) symlinkSync(
+    join(name === "install-host-units.sh" ? pinned : REPO_ROOT, "deploy", name), join(oldDeploy32, name));
+  const oldInstall32 = h32.run(join(oldDeploy32, "install-host-units.sh"), ["--install"], {}, historical.shell);
+  assert.equal(oldInstall32.status, 0, oldInstall32.stdout + oldInstall32.stderr);
+  const oldBoot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
+  assert.equal(oldBoot32.status, 0, oldBoot32.stdout + oldBoot32.stderr);
+  const oldDocker32 = h32.receipts().filter(c => c.bin === "docker");
+  writeFileSync(join(h32.root, "calls.ndjson"), "");
+  const newInstall32 = h32.run(join(REPO_ROOT, "deploy/install-host-units.sh"), ["--install"], {}, historical.shell);
+  assert.equal(newInstall32.status, oldInstall32.status, newInstall32.stdout + newInstall32.stderr);
+  const newBoot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
+  assert.equal(newBoot32.status, oldBoot32.status, newBoot32.stdout + newBoot32.stderr);
+  assert.equal(newBoot32.stdout, oldBoot32.stdout);
+  const newDocker32 = h32.receipts().filter(c => c.bin === "docker");
+  assert.deepEqual(newDocker32, oldDocker32,
+    "Bash 3.2 old and new installers and rendered launchers keep no-option Docker effects");
+  const qualifiedOffset = h32.receipts().length;
+  const install32 = h32.run(join(REPO_ROOT, "deploy/install-host-units.sh"),
+    ["--install", "--selected-registry-shadow", h32.session], {}, historical.shell);
+  assert.equal(install32.status, 0, install32.stderr);
+  const boot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
+  assert.equal(boot32.status, oldBoot32.status, boot32.stdout + boot32.stderr);
+  assert.equal(boot32.stdout, oldBoot32.stdout);
+  assert.deepEqual(h32.receipts().slice(qualifiedOffset).filter(c => c.bin === "docker"), newDocker32,
+    "Bash 3.2 qualification leaves generated launcher Docker arguments and effects unchanged");
+  assert.ok(h32.receipts().some(c => c.bin === "docker" && c.args[0] === "run"));
+  assert.ok(h32.rows().some(r => r.action === "launcher"));
+  t.diagnostic(`old/new scripts and generated launchers executed with Bash ${historical.version}`);
 });
 
 test("selected shell qualification does not disclose private inputs", async t => {
@@ -845,16 +893,17 @@ exec '${process.execPath.replaceAll("'", "'\\''")}' "$@"
 }
 
 test("selected shell installer package failures use disposable recording transports", t => {
-  const historical = bash32(t);
-  for (const shell of ["bash", historical.shell]) {
+  const historical = bash32();
+  if (!historical) t.diagnostic(`bash 3.2 leg not run: ${BASH32_SKIP}`);
+  for (const interpreter of [CURRENT_BASH, ...(historical ? [historical] : [])]) {
     for (const failure of ["none", "update", "madison", "install"]) {
-      qualifyPackageTransports(t, shell, historical.env, failure);
+      qualifyPackageTransports(t, interpreter.shell, interpreter.env, failure);
     }
   }
 });
 
 test("selected shell defaults and failures remain shadow only without live effects", async t => {
-  const historical = bash32(t);
+  const interpreter = bash32() ?? CURRENT_BASH;
   const absent = fixture(t);
   const absentPin = await capture(absent.session);
   assert.equal(await observe(absent.session, absentPin, "install"), 0);
@@ -878,7 +927,7 @@ test("selected shell defaults and failures remain shadow only without live effec
       f.capture();
       assert.equal(f.install().status, 0);
     } else {
-      qualifyPackageTransports(t, historical.shell, historical.env, "none", f);
+      qualifyPackageTransports(t, interpreter.shell, interpreter.env, "none", f);
       rmSync(join(f.root, "transports/node"));
     }
     if (failure === "sink") {

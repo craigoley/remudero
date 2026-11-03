@@ -48,13 +48,25 @@ const isLifecycleAction = (action: RegistryConsumerAction): boolean => action.st
 interface ConsumerScope { observer: SelectedRegistryObserver | undefined; active: boolean; qualifiedRun?: boolean }
 const consumerScope = new AsyncLocalStorage<ConsumerScope>();
 
+/** W1-T10573's deployer wrapper that binds an active selection before `exec bash "$@"` (src/lib/deployer.ts). */
+export const SELECTED_REGISTRY_LAUNCH_WRAPPER =
+  'export RMD_INSTANCE_REGISTRY="$1" RMD_INSTANCE_REGISTRY_DIGEST="$2" RMD_INSTANCE_REGISTRY_LAUNCH_BINDING="$3"; shift 3; exec bash "$@"';
+/** BACKSTOP on one trusted child script's size; the whole file is read, since option cases can sit anywhere. */
+export const TRUSTED_CHILD_SCRIPT_MAX_BYTES = 4 * 1024 * 1024;
+
+/** The recycler as `bash <recycler> …`, or behind the derived-wait `recycle-wait` wrapper, at `args[from]`. */
+function recyclerAt(args: readonly string[], from: number, recycler: string): boolean {
+  return args[from] === recycler
+    || (args[from] === "-c" && args[from + 2] === "recycle-wait" && args[from + 4] === recycler);
+}
+
 /** Invocation-private argv, admitted only at the supervisor's two known shell children. */
 export function selectedRegistryLifecycleExec(installRoot: string, binding: { session?: string; pin?: string }) {
   const { session, pin } = binding;
   const recycler = join(installRoot, "deploy/recycle-container.sh"), serve = join(installRoot, "deploy/serve-container.sh");
   return (cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }): string => {
-    const script = cmd === "bash" && args[0] === recycler ? recycler
-      : cmd === "bash" && args[0] === "-c" && args[2] === "recycle-wait" && args[4] === recycler ? recycler
+    const selectedLaunch = args[0] === "-c" && args[1] === SELECTED_REGISTRY_LAUNCH_WRAPPER && args[2] === "selected-registry-launch";
+    const script = cmd === "bash" && (recyclerAt(args, 0, recycler) || (selectedLaunch && recyclerAt(args, 6, recycler))) ? recycler
       : cmd === "env" && args[0]?.startsWith("RMD_STATE_DIR=") && args.at(-3) === "bash"
         && args.at(-2) === serve && args.at(-1) === "--replace" ? serve : undefined;
     let forward = false;
@@ -62,10 +74,16 @@ export function selectedRegistryLifecycleExec(installRoot: string, binding: { se
       try {
         const fd = openSync(script, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
         try {
-          if (!fstatSync(fd).isFile()) throw new Error("unsupported_child");
-          const header = Buffer.alloc(16384);
-          const count = readSync(fd, header, 0, header.length, 0);
-          const text = header.subarray(0, count).toString("utf8").split("\n").slice(0, 256).join("\n");
+          const stat = fstatSync(fd);
+          if (!stat.isFile() || stat.size > TRUSTED_CHILD_SCRIPT_MAX_BYTES) throw new Error("unsupported_child");
+          const body = Buffer.alloc(stat.size);
+          let read = 0;
+          while (read < body.length) {
+            const count = readSync(fd, body, read, body.length - read, read);
+            if (count === 0) break;
+            read += count;
+          }
+          const text = body.subarray(0, read).toString("utf8");
           forward = text.includes("--selected-registry-shadow)") && text.includes("--selected-registry-pin)");
         } finally { closeSync(fd); }
       } catch (error) {
