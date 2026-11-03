@@ -294,6 +294,8 @@ export const INCIDENT_RULE_INPUTS: Readonly<Record<string, readonly string[]>> =
   RULES.map((rule) => [rule.id, rule.inputs]),
 );
 
+export const INCIDENT_LONGEST_WINDOW_MS = Math.max(...RULES.map((rule) => rule.longMs));
+
 /**
  * Evaluate every rule over `rows` at instant `nowMs`. A rule fires (and appears in the returned
  * array) only when BOTH its long window AND its short (1/12th) confirmation window are bad — see

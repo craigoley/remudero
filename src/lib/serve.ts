@@ -150,6 +150,7 @@ import {
   type GatewayCheckoutState,
 } from "./daemon-health.js";
 import {
+  INCIDENT_LONGEST_WINDOW_MS,
   evaluateIncidentInvariants,
   eventLoopLagLedgerLine,
   invariantFindingLedgerLine,
@@ -185,7 +186,7 @@ import {
 import type { LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
 import { createLiveAnalyticsSnapshotCache, type LiveAnalyticsSnapshotCacheOptions } from "./live-analytics-snapshot-cache.js";
 import { inboxDigestsPath } from "./digest.js";
-import { readLedgerLines } from "./status.js";
+import { createLiveLedgerTail } from "./live-ledger-tail.js";
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./ledger-replay.js";
 import { createLatestMeasurementReader, latestMeasurementDetail, latestMeasurementRows, summarizeMeasurementValue, type LatestMeasurementRowsResult } from "./measurement-cadence.js";
 import type { LedgerUnionResult } from "./ledger-grep.js";
@@ -3223,7 +3224,8 @@ export function startIncidentInvariantsMonitor(
   ledgerPath: string,
   deps: NonNullable<ServeDeps["incidentInvariants"]> & { log?: ServiceOptions["log"] } = {},
 ): (() => void) & { stallProfiler: LoopStallProfiler } {
-  const readLedger = deps.readLedger ?? readLedgerLines;
+  const readLedger = deps.readLedger;
+  const liveRows = readLedger ? () => readLedger(ledgerPath) : createLiveLedgerTail(ledgerPath, 2 * INCIDENT_LONGEST_WINDOW_MS);
   const writeLedger = deps.writeLedger ?? appendLedger;
   const eventLoopLag = deps.eventLoopLag
     ?? createEventLoopLagMonitor(systemClock, () => monitorEventLoopDelay({ resolution: SERVE_LOOP_LAG_RESOLUTION_MS }));
@@ -3249,7 +3251,7 @@ export function startIncidentInvariantsMonitor(
       deps.log?.("serve.incident_invariants.loop_lag_failed", { reason: String((e as Error)?.message ?? e) });
     }
     try {
-      const rows = readLedger(ledgerPath);
+      const rows = liveRows(nowMs);
       for (const finding of evaluateIncidentInvariants(rows, nowMs)) {
         writeLedger(ledgerPath, invariantFindingLedgerLine(finding, nowMs));
       }
