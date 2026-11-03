@@ -1,0 +1,29 @@
+- id: W1-T11277
+  title: "The selected-registry launch wrapper is one exported constant that deployer.ts launches with and the shell-consumer adapter recognises, so a change to either side cannot silently drop the shadow binding back to legacy argv"
+  repo: remudero
+  depends_on: [W1-T9795]
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, the single source of the selected-registry launch wrapper text
+  origin: operator-session#registry-followups-2026-11-03
+  plan_refs:
+    - W1-T9795
+    - W1-T10573
+  files:
+    - src/lib/deployer.ts
+    - src/lib/selected-registry-consumers.ts
+    - test/deploy/the-selected-registry-launch-wrapper-has-one-source.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: deployer.ts and selected-registry-consumers.ts both take the selected-registry launch wrapper from one exported constant, and a test drives the adapter with the exact command line deployer.ts builds, so the two cannot drift apart
+      proof: "unit test: test/deploy/the-selected-registry-launch-wrapper-has-one-source.test.ts"
+  rationale: |
+    FOUND 2026-11-03 by the #15638 rebuild. W1-T9795's adapter recognises SELECTED_REGISTRY_LAUNCH_WRAPPER by a byte-for-byte copy of deployer.ts's literal, because deployer.ts was outside W1-T9795's files.
+    If either copy changes, recognition silently fails and the shadow falls back to legacy argv. A test could only catch that by reading src as text, which the source-text census forbids. One exported constant removes the duplication.
+  note: |
+    reservation hand-off: plan-file-1793744859465 -> plan-file-1793744859465
+    Reserved with rmd next-task-id --branch plan-file-1793744859465 from the operator session's ops worktree. Found 2026-11-03 by the hand rebuild of #15638 (W1-T9795) onto #15532's active selection. Operator, in chat: "fix the root causes of issues you find".

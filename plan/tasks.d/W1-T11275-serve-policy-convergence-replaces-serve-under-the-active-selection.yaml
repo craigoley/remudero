@@ -1,0 +1,30 @@
+- id: W1-T11275
+  title: "In selected mode, serve's policy convergence replaces serve under the active registry selection (its --instance and the selection wrapper), so a selected deploy-run's serve replace is not refused with instance_missing"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, how serve-policy convergence launches serve-container.sh --replace under an active registry selection
+  origin: operator-session#registry-followups-2026-11-03
+  plan_refs:
+    - W1-T10573
+    - W1-T9795
+  files:
+    - src/lib/serve-policy-convergence.ts
+    - test/console-api/serve/serve-policy-convergence-replaces-serve-under-the-active-selection.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When an active registry selection is in effect, serve-policy convergence runs serve-container.sh --replace with the selected instance and inside the same selection wrapper deploy-run uses, so the replace reaches the selected binding instead of refusing with instance_missing; with no selection the invocation is unchanged
+      proof: "unit test: test/console-api/serve/serve-policy-convergence-replaces-serve-under-the-active-selection.test.ts"
+  rationale: |
+    FOUND 2026-11-03 by the #15638 rebuild. In selected mode src/lib/serve-policy-convergence.ts runs `./deploy/serve-container.sh --replace` with no --instance and no selection wrapper. Since #15532 (W1-T10573), serve-container.sh treats RMD_INSTANCE_REGISTRY as an active selection and refuses an instance it does not hold, so every selected deploy-run's serve replace would refuse with instance_missing.
+    NOT LIVE as of 2026-11-03T19:35Z: the fleet watchdog unit sets no RMD_INSTANCE_REGISTRY, and the host journal shows no instance_missing or "selected registry unavailable" refusals in the prior 8 h. It is a latent gap that bites the first selected rollout.
+  design: |
+    Read the active selection the way deploy-run's own recycle path does (src/lib/deployer.ts and src/lib/instance-registry-selection.ts). When it is active, pass --instance <selected> and run the replace inside the selection launch wrapper. Test both modes through the real convergence entry, with a stubbed serve-container.sh recording its argv and environment.
+  note: |
+    reservation hand-off: plan-file-1793744859465 -> plan-file-1793744859465
+    Reserved with rmd next-task-id --branch plan-file-1793744859465 from the operator session's ops worktree. Found 2026-11-03 by the hand rebuild of #15638 (W1-T9795) onto #15532's active selection. Operator, in chat: "fix the root causes of issues you find".
