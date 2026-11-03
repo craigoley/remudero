@@ -159,8 +159,12 @@ test("W1-T2889: the DEFAULT reviewRunner opts in explicitly — driven through p
     await effects.postReview!({ prNumber: 806, headSha: "abc", isPlanFiling: true } as never);
 
     assert.equal(calls.length, 1, "exactly one review per PR — a second would bill twice");
+    // W1-T11151: the lane also relays the review's phase (the slot is released when the verdict posts),
+    // so the opts carry the phase observer — a function, never data — beside the two named fields.
+    const { onPhase, ...named } = calls[0].opts;
+    assert.equal(typeof onPhase, "function", "the default relays the review's phase so its slot ends at the verdict");
     assert.deepEqual(
-      calls[0].opts,
+      named,
       { executionMode: "semantic", planOnlyFiling: true },
       "the default must NAME the semantic mode and the filing flag, never let reviewCommand infer them",
     );
