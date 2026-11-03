@@ -29,7 +29,6 @@
     - src/lib/model-canary-config-census.ts
     - src/lib/model-canary-owner.ts
     - src/lib/model-canary-private-corpus.ts
-    - src/lib/model-canary-trace-grader.ts
     - src/lib/model-canary-coding-adapter.ts
     - src/lib/model-canary-coding-capabilities.ts
     - src/lib/model-canary-coding-port-capability.ts
@@ -51,7 +50,6 @@
     - test/routing/model-canary-systemd-runtime-readback.test.ts
     - test/routing/model-canary-service-wrapper-protocol.test.ts
     - test/routing/model-canary-profile-observation.test.ts
-    - test/routing/model-canary-config-inventory.test.ts
     - src/lib/model-canary-replay-private.ts
     - test/ci/gates/model-canary-config-inventory.test.ts
     - test/model-canary-adoption.test.ts
