@@ -1,5 +1,8 @@
 import { systemClock, type Clock } from "./clock.js";
-import { runDraftRung, type DraftSpawn, type Proposal } from "./inbox.js";
+import { inboxDraftPrompt, runDraftRung, type DraftSpawn, type Proposal } from "./inbox.js";
+import { cashDeploymentEndpoint, type Config } from "./config-schema.js";
+import { cashCapacityReadiness, hydrateCashCapacity, learnedCashLimit, OPENWEIGHT_MAX_COMPLETION_TOKENS, openWeightEstimatedTokens,
+  OpenWeightTruncatedReplyError } from "./worker-provider.js";
 
 /**
  * `rmd inbox-bakeoff` (W1-T4907) — the inbox-draft lead is chosen from MEASURED clean drafts per dollar, on the
@@ -50,6 +53,10 @@ export interface BakeoffRow {
   clean: number;
   /** Proposals whose output missed the fragment contract (no markers, half a marker pair, or no output). */
   contractErrors: number;
+  truncated: number;
+  status?: "capacity_shortfall";
+  needTokens?: number;
+  limitTokens?: number;
   /** Proposals that failed some other way (a spawn that threw, an account refusal). */
   otherErrors: number;
   syntheses: number;
@@ -71,6 +78,15 @@ export interface InboxBakeoffPorts {
   log: (step: string, extra?: Record<string, unknown>) => void;
   clock?: Clock;
   runId?: string;
+  /** Endpoint-resolved learned limit; omission leaves an unlearned deployment eligible. */
+  learnedLimit?: (model: string) => number | undefined;
+}
+
+/** The production `learnedLimit` port: each deployment's per-minute limit as its own endpoint last reported it
+ *  (W1-T10856's state file), so a capacity-short arm is skipped before it spends. */
+export function learnedBakeoffLimit(config: Pick<Config, "root" | "workerProviders">): (model: string) => number | undefined {
+  hydrateCashCapacity(config);
+  return (model) => learnedCashLimit(model, cashDeploymentEndpoint(config, model));
 }
 
 type Captured = { step: string; extra: Record<string, unknown> };
@@ -84,6 +100,7 @@ export function scoreCandidate(candidate: BakeoffCandidate, proposals: number, c
   let drafted = 0;
   let clean = 0;
   let contractErrors = 0;
+  let truncated = 0;
   let otherErrors = 0;
   let syntheses = 0;
   let usd = 0;
@@ -91,6 +108,8 @@ export function scoreCandidate(candidate: BakeoffCandidate, proposals: number, c
     if (step === "inbox.drafted") {
       drafted++;
       if (extra.lint_clean === true) clean++;
+    } else if (step === "inbox.draft_truncated") {
+      truncated++;
     } else if (step === "inbox.draft_error") {
       if (isContractError(extra)) contractErrors++;
       else otherErrors++;
@@ -109,6 +128,7 @@ export function scoreCandidate(candidate: BakeoffCandidate, proposals: number, c
     drafted,
     clean,
     contractErrors,
+    truncated,
     otherErrors,
     syntheses,
     cashUsd,
@@ -124,13 +144,42 @@ export async function runInboxBakeoff(deps: InboxBakeoffPorts): Promise<BakeoffR
   const now = (): number => clock.now();
   const runId = deps.runId ?? `BAKEOFF-${now()}`;
   const rows: BakeoffRow[] = [];
+  const needTokens = Math.max(0, ...deps.proposals.map((proposal) =>
+    openWeightEstimatedTokens(Buffer.byteLength(inboxDraftPrompt(proposal, deps.planText, runId), "utf8")) + OPENWEIGHT_MAX_COMPLETION_TOKENS));
   for (const candidate of deps.candidates ?? BAKEOFF_CANDIDATES) {
+    const readiness = cashCapacityReadiness(candidate.billing === "cash" ? deps.learnedLimit?.(candidate.model) : undefined, needTokens);
+    if (readiness.state === "shortfall") {
+      const row: BakeoffRow = { ...scoreCandidate(candidate, deps.proposals.length, [], 0),
+        status: "capacity_shortfall", needTokens, limitTokens: readiness.limitTokens };
+      deps.log("inbox.bakeoff", { ...row, run_id: runId });
+      rows.push(row);
+      continue;
+    }
     const captured: Captured[] = [];
+    const truncated = new Set<string>();
+    // Explicit default overrides the inbox mount's inherited effort; Chat Completions omits it.
+    const spawn = deps.spawnFor(candidate.billing === "cash" && candidate.effort === undefined
+      ? { ...candidate, effort: "default" } : candidate);
     const started = now();
     await runDraftRung(
       [...deps.proposals],
       deps.planText,
-      { spawn: deps.spawnFor(candidate), log: (step, extra = {}) => void captured.push({ step, extra }) },
+      { spawn: async (proposal, prompt, context) => {
+        try {
+          const worker = await spawn(proposal, prompt, context);
+          if (worker.isError && worker.subtype === "openweight_error" &&
+            worker.stderr.startsWith("openweight reply was TRUNCATED by the completion budget (finish_reason=")) {
+            truncated.add(proposal.id);
+            return { ...worker, text: "", blocks: [] };
+          }
+          return worker;
+        } catch (error) {
+          if (error instanceof OpenWeightTruncatedReplyError) truncated.add(proposal.id);
+          throw error;
+        }
+      }, log: (step, extra = {}) => void captured.push({
+        step: step === "inbox.draft_error" && truncated.has(String(extra.proposal_id)) ? "inbox.draft_truncated" : step, extra,
+      }) },
       runId,
     );
     const row = scoreCandidate(candidate, deps.proposals.length, captured, now() - started);
@@ -144,19 +193,21 @@ export async function runInboxBakeoff(deps: InboxBakeoffPorts): Promise<BakeoffR
  *  subscription rows follow separately, never ranked, because their cost is notional. */
 export function rankBakeoff(rows: readonly BakeoffRow[]): { cash: BakeoffRow[]; subscription: BakeoffRow[] } {
   const cash = rows
-    .filter((r) => r.billing === "cash")
+    .filter((r) => r.billing === "cash" && r.status !== "capacity_shortfall")
     .sort((a, b) => (b.cleanPerDollar ?? -1) - (a.cleanPerDollar ?? -1) || b.clean - a.clean);
-  return { cash, subscription: rows.filter((r) => r.billing === "subscription") };
+  return { cash, subscription: rows.filter((r) => r.billing === "subscription" && r.status !== "capacity_shortfall") };
 }
 
 export function renderBakeoff(rows: readonly BakeoffRow[]): string {
   const { cash, subscription } = rankBakeoff(rows);
   const line = (r: BakeoffRow, rank: string, cost: string): string =>
-    `| ${rank} | ${r.label} | ${r.drafted}/${r.proposals} | ${r.clean}/${r.proposals} | ${r.contractErrors} | ${r.syntheses} | ${cost} | ${(r.wallMs / 60000).toFixed(1)} min | ${r.cleanPerDollar === null ? "n/a" : r.cleanPerDollar.toFixed(1)} |`;
+    `| ${rank} | ${r.label} | ${r.drafted}/${r.proposals} | ${r.clean}/${r.proposals} | ${r.contractErrors} | ${r.truncated} | ${r.syntheses} | ${cost} | ${(r.wallMs / 60000).toFixed(1)} min | ${r.cleanPerDollar === null ? "n/a" : r.cleanPerDollar.toFixed(1)} |`;
   return [
-    "| rank | candidate | drafted | lint-clean | contract errors | syntheses | cost | wall | clean/$ |",
-    "|---|---|---|---|---|---|---|---|---|",
+    "| rank | candidate | drafted | lint-clean | contract errors | truncated | syntheses | cost | wall | clean/$ |",
+    "|---|---|---|---|---|---|---|---|---|---|",
     ...cash.map((r, i) => line(r, String(i + 1), `$${r.cashUsd.toFixed(3)}`)),
     ...subscription.map((r) => line(r, "—", `$${r.notionalUsd.toFixed(2)} notional (subscription)`)),
+    ...rows.filter((r) => r.status === "capacity_shortfall").map((r) =>
+      `not run: ${r.label} — capacity_shortfall (need ${r.needTokens} tokens; learned limit ${r.limitTokens})`),
   ].join("\n");
 }

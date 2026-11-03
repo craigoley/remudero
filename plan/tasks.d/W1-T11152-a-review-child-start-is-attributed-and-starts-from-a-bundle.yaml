@@ -21,6 +21,8 @@
     - src/run-task.ts
     - src/lib/child-entry-store.ts
     - test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts
+    - "bin/rmd"
+    - "scripts/build-child-entries.mjs"
   status: queued
   attempts: 0
   acceptance:
