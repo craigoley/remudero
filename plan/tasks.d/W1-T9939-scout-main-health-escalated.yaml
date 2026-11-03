@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.6
+  # refusal-amendment (W1-T9939, run W1-T9939-1793680491103, 2026-11-03T05:43:31.886Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The criterion requires fixing the escalation’s cause, but the emitter is in `src/lib/main-health-rung.ts:2835`, outside the sole declared test file; adding a test alone cannot change production behavior.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

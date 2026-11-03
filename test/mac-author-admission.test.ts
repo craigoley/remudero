@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {existsSync, readFileSync, readdirSync, statfsSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, readFileSync, readdirSync, statfsSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {test} from 'node:test';
 type Admission = {state: string; minimumFreeBytes: number; workspaceFreeBytes: number | null;
@@ -102,7 +102,7 @@ test('Mac author phase refusals save OVER-CAPACITY, start no refused phase, and 
   const authorModule = '#scripts/preflight-author.mjs';
   const {main} = await import(authorModule) as {
     main: (argv: string[], options: {root: string; select: () => {fullRun: boolean; suites: string[]; reasons: string[]};
-      admitHost: (stage: string) => {stage: string; state: string}}) => number;
+      admitHost: (stage: string, workload?: object) => {stage: string; state: string}}) => number;
   };
   const {resolveTestSlotDir} = await import('#src/lib/test-slot.js');
   for (const refusedStage of ['static-preflight', 'affected-tests']) {
@@ -114,12 +114,25 @@ test('Mac author phase refusals save OVER-CAPACITY, start no refused phase, and 
       [`node_modules/${name}`, {version: JSON.parse(readFileSync(join(fixture.dir, 'node_modules', name, 'package.json'), 'utf8')).version}]));
     writeFileSync(join(fixture.dir, 'package-lock.json'), JSON.stringify({lockfileVersion: 3, packages}));
     fixture.git('add', 'package-lock.json'); fixture.git('commit', '-m', 'test: lock the native fixture tools');
-    const status = main([], {root: fixture.dir,
+    // W1-T10947: the affected-tests phase forwards an explicit profile with the context its slot was bound to.
+    const profileArgs = refusedStage === 'affected-tests' ? ['--author-profile', 'coverage/bounded-author-profile.json'] : [];
+    const declared = {format: 'rmd-bounded-author-profile-v1', bounded: true, budgets: {}};
+    if (profileArgs.length) { mkdirSync(join(fixture.dir, 'coverage'), {recursive: true});
+      writeFileSync(join(fixture.dir, 'coverage/bounded-author-profile.json'), JSON.stringify(declared)); }
+    const workloads: Record<string, {boundedProfile?: unknown; context?: {owner?: {state?: string}}; bound?: unknown}> = {};
+    const status = main(profileArgs, {root: fixture.dir,
       select: () => ({fullRun: false, suites: ['test/a.test.ts', 'test/b.test.ts'], reasons: ['physical fixture']}),
-      admitHost: (stage: string) => {
+      admitHost: (stage: string, workload?: object) => {
+        workloads[stage] = workload ?? {};
         if (stage === refusedStage) throw new MacAuthorCapacityRefusal(stage, {state: 'not-run', pressure: 'warning'});
         return {stage, state: 'admitted'};
       }});
+    if (profileArgs.length) {
+      assert.deepEqual(workloads['affected-tests'].boundedProfile, declared);
+      assert.equal(workloads['affected-tests'].context?.owner?.state, 'held');
+      assert.ok(workloads['affected-tests'].bound, 'the slot-bound context travels with the profile');
+      assert.equal(Object.hasOwn(workloads['static-preflight'], 'boundedProfile'), false, 'no slot is held before static');
+    }
     const receipt = JSON.parse(readFileSync(join(fixture.dir, 'coverage/preflight-author.json'), 'utf8'));
     assert.equal(status, 3, JSON.stringify(receipt));
     assert.equal(receipt.verdict, 'over-capacity'); assert.equal(receipt.hostCapacity.at(-1).stage, refusedStage);
@@ -233,4 +246,77 @@ test('focused native probes are bounded and fail closed on spawn, timeout and ma
     sample: () => ({at: 0, pressure: 'warning', pageBytes: 16384, freePlusInactiveBytesApprox: 4 * 1024 ** 3, swapins: 0, swapouts: 0})});
   assert.equal(result.state, 'not-run');
   assert.ok(result.reasons.some((reason: string) => reason.includes('sampling interrupted')));
+});
+
+test("W1-T10947: a genuine bounded profile requires the larger of 10 GiB and all declared allocations on each actual filesystem", async (t) => {
+  const contextModule = '#scripts/lib/author-context-compatibility.mjs';
+  const preflightModule = '#scripts/preflight-author.mjs';
+  const {boundedAuthorRequirement, boundedAuthorProfileBinding, requireMacAuthorCapacity,
+    MAC_AUTHOR_BOUNDED_MINIMUM_BYTES, BOUNDED_AUTHOR_PROFILE_FORMAT} = await import(admissionModule);
+  const {observeAuthorContext} = await import(contextModule);
+  const {readAuthorProfile} = await import(preflightModule);
+  const {ownedFixtureDir} = await import('#test/helpers/owned-fixture-dir.js');
+  const GiB = 1024 ** 3, MiB = 1024 ** 2;
+  assert.equal(MAC_AUTHOR_BOUNDED_MINIMUM_BYTES, 10737418240);
+  // Real directories, really observed: dev/ino/realpath come from this host's own filesystem.
+  const {dir} = ownedFixtureDir(t, 'bounded-author-profile');
+  mkdirSync(join(dir, 'workspace', 'coverage'), {recursive: true}); mkdirSync(join(dir, 'scratch'));
+  const slot = {outcome: 'acquired', childEnvironment: {RMD_TEST_SLOT_PARENT: JSON.stringify({nonce: 'owner-1',
+    pid: process.pid, start: 'fixture-start', path: join(dir, 'slot.json')})}};
+  const context = observeAuthorContext({root: join(dir, 'workspace'), slot,
+    git: (args: string[]) => args[0] === 'status' ? '' : args[1] === 'HEAD' ? 'a'.repeat(40) : 'b'.repeat(40),
+    dependency: () => ({state: 'present', dependencyRoot: '/deps', dev: 1, ino: 2}),
+    allocations: {workspace: join(dir, 'workspace'), diagnostics: join(dir, 'workspace', 'coverage'), scratch: join(dir, 'scratch')}});
+  const devs = new Set(Object.values(context.allocations as Record<string, {dev?: number}>).map(row => row.dev));
+  assert.equal(devs.size, 1, JSON.stringify(context.allocations));
+  const budget = (n: number, rest = n) => ({allocationBytes: n, scratchBytes: rest, outputBytes: rest,
+    nativeBytes: rest, runtimeBytes: rest, childClosureBytes: rest});
+  const profile = (budgets: object, of = context) => ({format: BOUNDED_AUTHOR_PROFILE_FORMAT, bounded: true,
+    binding: boundedAuthorProfileBinding(of), budgets});
+  // A profile read through the CLI's own bounded reader is the profile written.
+  const small = profile({workspace: budget(MiB), diagnostics: budget(MiB), scratch: budget(MiB)});
+  writeFileSync(join(dir, 'profile.json'), JSON.stringify(small));
+  assert.deepEqual(readAuthorProfile(dir, 'profile.json'), small);
+  // Small declared allocations: the 10 GiB minimum is the larger, on the one real filesystem they share.
+  const floor = boundedAuthorRequirement(small, {context, bound: context});
+  assert.equal(floor.state, 'bounded', JSON.stringify(floor));
+  assert.deepEqual(floor.filesystems.map((row: {key: string; declaredBytes: number; minimumFreeBytes: number}) =>
+    [row.key, row.declaredBytes, row.minimumFreeBytes]), [['diagnostics+scratch+workspace', 18 * MiB, 10 * GiB]]);
+  // Large declared allocations: every budget of every allocation on that filesystem is summed and wins.
+  const large = profile({workspace: budget(GiB), diagnostics: budget(GiB), scratch: budget(GiB, 0)});
+  assert.equal(boundedAuthorRequirement(large, {context, bound: context}).filesystems[0].minimumFreeBytes, 13 * GiB);
+  // Two actual filesystems: each is priced by ITS OWN allocations and read independently.
+  const split = {...context, allocations: {...context.allocations,
+    scratch: {...context.allocations.scratch, dev: context.allocations.scratch.dev + 1}}};
+  const diag = split.allocations.diagnostics.path, scratch = split.allocations.scratch.path;
+  const workload = {selection: 'full-fallback', workers: 1, boundedProfile: profile(large.budgets, split), context: split, bound: split};
+  const reader = (free: Record<string, number>, calls: string[] = [], pressure = '1') => (root: string, options: object) =>
+    readMacAuthorAdmission(root, {...options, platform: 'darwin', spawn: () => ({status: 0, stdout: pressure}),
+      statfs: (p: string) => { calls.push(p); if (!(p in free)) throw Object.assign(new Error('io'), {code: 'EIO'}); return {bavail: free[p], bsize: 1}; }} as AdmissionOptions);
+  const calls: string[] = [];
+  const admitted = requireMacAuthorCapacity('/w', 'affected-tests', reader({[diag]: 12 * GiB, [scratch]: 10 * GiB}, calls), workload);
+  assert.equal(admitted.state, 'admitted', JSON.stringify(admitted));
+  assert.deepEqual(calls, [diag, scratch], 'one independent read per actual filesystem');
+  assert.equal(admitted.reserveBasis, 'bounded-profile'); assert.equal(admitted.minimumFreeBytes, 12 * GiB);
+  assert.deepEqual(admitted.allocationFreeBytes, {'diagnostics+workspace': 12 * GiB, scratch: 10 * GiB});
+  assert.deepEqual(admitted.boundedProfile.filesystems.map((row: {key: string; minimumFreeBytes: number}) =>
+    [row.key, row.minimumFreeBytes]), [['diagnostics+workspace', 12 * GiB], ['scratch', 10 * GiB]]);
+  // Without the profile the same host keeps the 20 GiB full-run reserve and is refused.
+  assert.throws(() => requireMacAuthorCapacity('/w', 'affected-tests', (root: string, options: object) =>
+    readMacAuthorAdmission(root, {...options, platform: 'darwin', spawn: normal, statfs: () => ({bavail: 12 * GiB, bsize: 1})} as AdmissionOptions),
+  {selection: 'full-fallback', workers: 1}), MacAuthorCapacityRefusal);
+  const refusal = (free: Record<string, number>, pressure = '1') => {
+    try { requireMacAuthorCapacity('/w', 'affected-tests', reader(free, [], pressure), workload); }
+    catch (error) { assert.ok(error instanceof MacAuthorCapacityRefusal); return (error as unknown as {admission: Admission}).admission.reasons; }
+    assert.fail('admitted');
+  };
+  assert.deepEqual(refusal({[diag]: 12 * GiB - 1, [scratch]: 10 * GiB}), ['allocation:diagnostics+workspace:below-bounded-profile-reserve']);
+  assert.deepEqual(refusal({[diag]: 12 * GiB, [scratch]: 10 * GiB - 1}), ['allocation:scratch:below-bounded-profile-reserve']);
+  assert.deepEqual(refusal({[diag]: 12 * GiB}), ['allocation:scratch:unavailable:EIO']);
+  // Memory pressure and UNKNOWN refusals are untouched by the bounded route.
+  assert.deepEqual(refusal({[diag]: 12 * GiB, [scratch]: 10 * GiB}, '2'), ['pressure:warning']);
+  assert.deepEqual(refusal({[diag]: 12 * GiB, [scratch]: 10 * GiB}, 'bad'), ['pressure:unknown']);
+  // No allocation reserve below the approved 10 GiB minimum reaches the reader.
+  assert.throws(() => readMacAuthorAdmission('/w', {platform: 'darwin', statfs: ample, spawn: normal,
+    allocations: [{key: 'x', path: '/x', minimumFreeBytes: 10 * GiB - 1}]} as AdmissionOptions), /invalid bounded author allocation reserve/);
 });

@@ -1,0 +1,49 @@
+id: session-draft-filing-lane-20261103
+ts: 2026-11-03T13:20:00.000Z
+raw: >-
+  Operator direction, 2026-11-03 (thread "Map Remudero against product goal"):
+  stop hand-filing plan tasks and let the fleet file them. This entry is an
+  agent finding with a proposed mechanism, not an operator ruling on its shape.
+
+  OBSERVED, core main 10-27..11-03 (git log --author, shallow-since fetch). 894
+  commits; 446 are chore/docs/fix(plan). Craig Oley authored 266, and 132 of
+  those touch plan/tasks.d. Their subjects are mostly "file W1-T<n>, ..." from
+  agent sessions that diagnosed a fleet defect and filed the task directly.
+
+  OBSERVED, why sessions hand-file instead of using feedback. (a) A cloud
+  session cannot reserve an id. On 2026-11-03 a push of a non-heads ref from
+  this session's proxy ended "send-pack: unexpected disconnect", which matches
+  doctrine file-from-the-operator-checkout (refs/rmd-id/* needs CREATE outside
+  refs/heads/*). (b) Feedback is slow. At f15de9f, plan/feedback held 157
+  entries at status: new, the oldest from 2026-10-22. Status flips from new in
+  git were about 6 to 10 a day from 10-27 to 11-03, with none on 10-31.
+  auto-triage is oldest-first, so a new entry waits behind the whole backlog.
+
+  PROPOSED MECHANISM: a session-draft lane. A session submits a COMPLETE draft
+  shard (no id; every field a filer writes today, including acceptance and
+  files) as a feedback entry with a structured draft field, or under one
+  reviewed path such as plan/drafts/<slug>.yaml. The host side, which can
+  reserve, then (1) mints the id with rmd next-task-id (reserving), (2) runs
+  lint-plan and the open-PR-head subject sweep, (3) lands the shard through the
+  existing machine-filing header, so machine-filing-judge rules on verify and
+  risk, and (4) records the draft-to-id mapping on the draft. A draft that fails
+  lint returns to the submitter with the linter's own text, never silently
+  dropped. Reuse the CiLearningShardDraft landing path in
+  src/lib/feedback-landing.ts (it already mints and lands machine drafts)
+  rather than a second filer.
+
+  SUCCESS MEASURE (pre-registered): over the 14 days after merge, the share of
+  commits touching plan/tasks.d authored by the fleet rises from 310 of 442 (70%,
+  10-27..11-03) to at least 90%, with no rise in task-id-existence reds.
+  Rollback: revert the lane; hand filing keeps working throughout.
+  Ground against every open PR head and the feedback landing code before
+  filing.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: operator-direction:session-draft-filing-lane:20261103
+thread_id: null

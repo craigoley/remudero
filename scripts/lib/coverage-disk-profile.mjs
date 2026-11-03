@@ -7,11 +7,9 @@ function validProfile(profile) {
     profile.minimumFreeBytes >= MAC_AUTHOR_FREE_RESERVE_BYTES;
 }
 
-/** An omitted profile means the existing reserve only, not a claim of a zero-byte peak. */
-export function coverageDiskProfile(file, { read = readSync } = {}) {
-  if (file === undefined) return { mode: 'existing-floor-only', profile: {
-    minimumFreeBytes: MAC_AUTHOR_FREE_RESERVE_BYTES, reservedBytes: 0, estimatedPeakBytes: 0,
-  }, estimatedPeakBasis: 'not-supplied' };
+/** One bounded, no-follow, change-detected read of a small regular JSON file. The coverage profile and the
+ * W1-T10947 bounded author profile share it; each caller still applies its OWN validity rule. */
+export function readBoundedJsonFile(file, { read = readSync } = {}) {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = fstatSync(fd);
@@ -20,11 +18,20 @@ export function coverageDiskProfile(file, { read = readSync } = {}) {
     if (count !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs ||
         path.isSymbolicLink() || path.dev !== before.dev || path.ino !== before.ino || path.uid !== before.uid)
       throw new Error('disk profile changed or was read incompletely');
-    const profile = JSON.parse(bytes.subarray(0, count).toString('utf8'));
-    if (!validProfile(profile)) throw new Error('disk profile cannot lower the existing coverage reserve');
-    return { mode: 'profiled', profile: { minimumFreeBytes: profile.minimumFreeBytes,
-      reservedBytes: profile.reservedBytes, estimatedPeakBytes: profile.estimatedPeakBytes }, estimatedPeakBasis: 'declared-profile' };
+    return JSON.parse(bytes.subarray(0, count).toString('utf8'));
   } finally { closeSync(fd); }
+}
+
+/** An omitted profile means the existing reserve only, not a claim of a zero-byte peak. Full coverage keeps
+ * its 20 GiB floor: the bounded author minimum (W1-T10947) never applies here. */
+export function coverageDiskProfile(file, { read = readSync } = {}) {
+  if (file === undefined) return { mode: 'existing-floor-only', profile: {
+    minimumFreeBytes: MAC_AUTHOR_FREE_RESERVE_BYTES, reservedBytes: 0, estimatedPeakBytes: 0,
+  }, estimatedPeakBasis: 'not-supplied' };
+  const profile = readBoundedJsonFile(file, { read });
+  if (!validProfile(profile)) throw new Error('disk profile cannot lower the existing coverage reserve');
+  return { mode: 'profiled', profile: { minimumFreeBytes: profile.minimumFreeBytes,
+    reservedBytes: profile.reservedBytes, estimatedPeakBytes: profile.estimatedPeakBytes }, estimatedPeakBasis: 'declared-profile' };
 }
 
 /** Check every allocation path, including an external TMPDIR. Unknown capacity never admits work. */

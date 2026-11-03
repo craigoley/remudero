@@ -22,3 +22,11 @@
     Last 24 h: n 11, p50 233, p90 583.3 min.
     Slowest PRs: #16042 (679 min), #16171 (583.3 min), #16187 (446 min).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.62
+    reasons:
+      - "low-confidence verdict (0.62 < 0.7) — on the change's description/files alone, no diff was read — The declared files are src/lib/sweep.ts and a new test file. Nothing in the description touches secrets, auth, permissions, data deletion, or merge/deploy/review policy, and nothing is irreversible.; on the change's description/files alone, no diff was read — The task is a flow-latency regression on 11 gardener PRs (p50 233 min vs 35 min baseline). It is an ordinary implement task, and its PR still passes CI and review.; on the change's description/files alone, no diff was read — The acceptance is a grep for a test name, which is weak verification, and the family track record is mixed (0 merged, 2 approved, 2 declined). These lower confidence but do not meet the escalation criteria."
+    judged_at: "2026-11-03T05:41:44.027Z"
+    pin: "d53643bfb0586ed8fce7e41faae895517ca127d1759d921434b55332faec1eb6"

@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.19
   status: queued
@@ -30,10 +30,12 @@
     - #15065's round (DAEMON-1793172279613:1:1793175423257) dispatched and finished at 2026-10-28T08:20:27Z, so only its fix.needs_design survived. The read found 0 completed rounds, returned "unavailable", and the PR held in wait from 2026-10-29T17:10Z on.
     The fix makes the handoff resolvable after rotation: either the read consults the ledger union for that one round, or rotation carries a round's fix.dispatch and fix.done for as long as it carries the round's fix.needs_design. A handoff whose round rows are truly absent still reads unavailable.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.91
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
     reasons:
-      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The record requires automatic clearance of “terminal design handoff context unavailable,” but supplies neither the missing design context nor an authorized remedy for PR #15065, whose stated disposition is “no fix admitted.”; on the change's description/files alone, no diff was read — The sole acceptance proof checks for a test declaration; it does not establish that automatic clearance preserves the design review decision. The supplied record cannot verify that distinction, triggering the stated escalation condition."
-    judged_at: "2026-10-30T11:03:07.252Z"
-    pin: "0419475e2c69921dd4519bcf2ad930b463cd76ba1ec75f70ddb1c74f130a6f83"
+      - "Declared files are src/lib/sweep.ts and a new test file. Neither is described as touching secrets, auth, permissions, merge/deploy/review policy, or data deletion."
+      - "The acceptance criterion is a grep for a named test in the new test file, so it can be checked automatically. The one absent declared file is the new test the change creates."
+      - "The family track record is 11 merged with a Beta mean of 0.91, and the gates state is clean (filingTime true, machine author). The task is coherent with its stated fix-lane owner."
+    judged_at: "2026-11-03T11:11:54.537Z"
+    pin: "a17ea7dc1f2d593a4697b86af96337958a6082c4ec3abc9c67892ef4f71c0f97"

@@ -831,6 +831,15 @@ export function isHumanHoldCandidate(pr: HumanHoldCandidateInput): boolean {
   return (pr.autoMergeArmed === true || mergesDirectlyAsPlanPr(pr)) && greenReviewedButBlocked(pr);
 }
 
+/** W1-T11153 — the review queue: a non-draft PR whose checks are green and whose head carries no review
+ *  verdict yet. Review admission orders it, so a person's CHANGES_REQUESTED hold on it is read too. */
+export function isReviewQueueHoldCandidate(pr: Pick<ScannerBlockerCandidateInput, "isDraft" | "checksState" | "reviewState">): boolean {
+  return pr.isDraft !== true && pr.checksState === "green" && pr.reviewState !== "success" && pr.reviewState !== "failure";
+}
+
+/** BACKSTOP: one review listing per review-queue PR per pass, oldest first; admission order matters at the queue head. */
+export const REVIEW_QUEUE_HOLD_READ_CAP = 8;
+
 export interface ScannerAlertIdentity {
   alertNumber: number;
   ruleId: string;
@@ -1114,6 +1123,26 @@ export function* hydrateScannerBlockerObservationsSteps(
       ? yield* observeChangesRequestedSteps(owner, repo, candidate, fetch)
       : yield* observeScannerBlockerSteps(owner, repo, candidate, fetch);
     if (observation !== undefined) out.set(candidate.number, observation);
+  }
+  return out;
+}
+
+/**
+ * W1-T11153 — the human CHANGES_REQUESTED holds standing on review-queue PRs ({@link isReviewQueueHoldCandidate}),
+ * one review listing each, the oldest `cap` candidates first. Only a `changes-requested` observation is kept: an
+ * unreadable listing leaves the PR absent, so admission orders it exactly as before.
+ */
+export function* hydrateReviewQueueHoldsSteps(
+  owner: string,
+  repo: string,
+  candidates: readonly ScannerBlockerCandidate[],
+  fetch: GhApiFetcher,
+  cap: number = REVIEW_QUEUE_HOLD_READ_CAP,
+): GhReadSteps<Map<number, ScannerBlockerObservation>> {
+  const out = new Map<number, ScannerBlockerObservation>();
+  for (const candidate of candidates.slice(0, cap)) {
+    const observation = yield* observeChangesRequestedSteps(owner, repo, candidate, fetch);
+    if (observation?.kind === "changes-requested") out.set(candidate.number, observation);
   }
   return out;
 }
@@ -1484,7 +1513,7 @@ export function createGhReadWarmer(
  *
  * Invariant: only a path present in BOTH responses becomes a {@link ConflictFileDiff}, and REST's
  * "touched since merge base" is broader than "git would conflict here". The set is a superset of
- * git's, which makes {@link isPureConcurrentAddition} stricter and never looser: it cannot manufacture
+ * git's (W1-T11174: only while each list is under GitHub's 300-file cap), so {@link isPureConcurrentAddition} is never looser:
  * a false true from a genuine deletion. A later reader must not narrow it to an exact git-conflict set
  * without re-deriving that argument.
  * ──────────────────────────────────────────────────────────────────────────────────────────── */
@@ -1553,6 +1582,7 @@ function* contentBytes(owner: string, repo: string, path: string, ref: string, f
 }
 
 const REDUNDANT_REFIX_COMPARE_PATH_CAP = 25;
+export const GITHUB_COMPARE_FILE_LIST_CAP = 300; // BACKSTOP: GitHub's own compare file-list cap; a list this long is incomplete
 
 function* redundantRefixEvidence(
   owner: string,
@@ -1607,6 +1637,10 @@ function* mergeConflictEvidenceSteps(
   const mergeBaseSha = ours.merge_base_commit?.sha;
   if (!mergeBaseSha) throw new Error("conflict evidence compare carried no merge_base_commit.sha");
   const theirs = (yield* ghRead(fetch, compareRestArgs(owner, repo, mergeBaseSha, targetBranch))) as RestCompareResponse;
+  const listed = Math.max(ours.files?.length ?? 0, theirs.files?.length ?? 0);
+  if (listed >= GITHUB_COMPARE_FILE_LIST_CAP) {
+    throw new Error(`a compare listed ${listed} files, GitHub's ${GITHUB_COMPARE_FILE_LIST_CAP}-file cap, so its intersection can miss a conflicting path`);
+  }
 
   const oursDeletions = new Map((ours.files ?? []).filter((f) => f.filename).map((f) => [f.filename as string, f.deletions ?? 0]));
   const theirsDeletions = new Map((theirs.files ?? []).filter((f) => f.filename).map((f) => [f.filename as string, f.deletions ?? 0]));

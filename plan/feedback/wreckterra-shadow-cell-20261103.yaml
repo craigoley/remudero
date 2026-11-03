@@ -1,0 +1,37 @@
+id: wreckterra-shadow-cell-20261103
+ts: 2026-11-03T13:25:00.000Z
+raw: >-
+  Operator direction, 2026-11-03: adopt craigoley/wreckterra as a fleet repo.
+  Agent finding, not a ruling on host capacity.
+
+  OBSERVED. Wreckterra is enrolled in .remudero/managed-repos.json and has no
+  instance in .remudero/daemon-instances.yaml, so nativeTargetAdmission
+  (src/lib/product-build.ts) reads it as "native". The core daemon runs one
+  bounded job per console Build kick (W1-T10799, #15041). Its plan has six
+  tasks; wreckterra PR #6 releases WRECK-T1 only. Fleet output on the repos
+  that do have their own daemon, 10-27..11-03: console 18 fleet merges, site 11.
+  The native path is one task per human kick, so a six-task frontier needs six
+  kicks.
+
+  ASK. After WRECK-T1 merges through the native path, provision a wreckterra
+  cell in mode: shadow (W1-T4265 onboarding gate). Its row would follow the
+  site and console rows, with values measured on the host: state_dir,
+  claude_dir (the owner's read-only credential mount, W1-T4863/W1-T6061),
+  memory budget (see W1-T11130), and GitHub App installation on the repository.
+  Promote to live through requestGoLive (src/lib/onboarding-golive.ts) once
+  shadow evidence clears minShadowRuns. The host instance identity now lives in
+  the private remudero-ops overlay, so the row's host values belong there, per
+  its README, not in this public repository.
+
+  ALSO OBSERVED (docs drift, separate concern): docs/operator-guide.md section
+  "Onboarding a new project" says rmd onboard phases 2-4 are "not yet built",
+  while docs/cli-reference.md documents recon, session and synthesize.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: operator-direction:wreckterra-shadow-cell:20261103
+thread_id: null

@@ -1,0 +1,48 @@
+id: metered-customer-instance-20261103
+ts: 2026-11-03T13:25:00.000Z
+raw: >-
+  Operator direction, 2026-11-03 (thread "Map Remudero against product goal"):
+  make the paid API ("cash") lane the default for a customer instance. Customers
+  pay for model use on their own keys, and the operator's subscription stays a
+  private path. This entry asks for the design, a measured trial, and then the
+  default. It is not a ruling on pricing or tenancy.
+
+  OBSERVED at core f15de9f. (a) A cash-only host is a supported config shape.
+  validateConfig (src/lib/config.ts) accepts workerProviders.enabled ["cash"]
+  and requires dailyCapUsd for it; tests already build that shape
+  (test/routing/terra61-router-switch.test.ts, test/foundry-opus-cash-emergency.test.ts).
+  (b) In production, cash is a fallback. It is reached after a blocked
+  subscription auction (cashFallbackWhenBlocked), or by mount affinity, under
+  the fleet cash allowance (docs/model-routing.md). (c) rmd init
+  (src/lib/init.ts) resolves a subscription tier (pro|max5x|max20x) and has no
+  metered choice. (d) README.md requires subscription OAuth for workers.
+  (e) Paired-trial machinery already exists: benchmark-paid-pilot (W1-T4603,
+  $100 over 7 days, consented repos) and benchmark-aa.
+
+  NOT KNOWN (needs a host check or a probe): whether every non-worker lane
+  (review, fix, triage, inbox drafting, risk judge) can run with no subscription
+  enabled, or whether any of them hard-requires the claude or codex provider.
+  The first task should answer that with a census of provider requirements per
+  lane, citing each call site.
+
+  PROPOSED, in order. (1) Census: which lanes run cash-only today. (2) A
+  "metered" profile: rmd init --billing metered writes enabled ["cash"], a
+  required dailyCapUsd, and the instance's own cash endpoint and key env names.
+  It never reads or copies the operator's subscription credential. (3) A
+  bounded trial on one shadow instance (remudero-quickstart-demo is being seeded
+  for this): N tasks of comparable class, measured against the subscription
+  lane on merge rate, review pass rate, repair rounds, and dollars per merged
+  task, using the existing paired-trial reports. (4) Only after the trial meets
+  its bar, make metered the rmd init default for a non-operator instance, and
+  update README's billing section. Missing or below-floor evidence reads
+  unmeasurable, never a pass. Rollback for each step: the subscription path is
+  untouched.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: operator-direction:metered-customer-instance:20261103
+thread_id: null
