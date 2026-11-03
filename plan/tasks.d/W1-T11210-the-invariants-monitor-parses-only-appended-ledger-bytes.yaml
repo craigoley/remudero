@@ -1,0 +1,45 @@
+- id: W1-T11210
+  title: Serve's incident-invariants monitor parses only the live-ledger bytes appended since its last tick, instead of re-reading and re-parsing the whole live ledger on the main thread every minute
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # three source files, one concern: how the minute-tick monitor reads the live ledger; findings, profiler, cadence and every other reader unchanged
+  origin: operator-session#serve-status-latency-2026-11-03
+  plan_refs:
+    - W1-T4384
+    - W1-T10074
+  files:
+    - src/lib/live-ledger-tail.ts
+    - src/lib/serve.ts
+    - src/lib/incident-invariants.ts
+    - test/sre/a-live-ledger-tail-matches-a-full-read.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: createLiveLedgerTail returns the rows a full readLedgerLines read returns within the retained window, and the same incident findings, across appends, a torn complete line, a trailing line with no newline, a rotation rename, an in-place truncation or rewrite, deletion and recreation
+      proof: "unit test: test/sre/a-live-ledger-tail-matches-a-full-read.test.ts"
+    - claim: A read error clears the tail's state and is rethrown, the next read starts over, and a call with no new bytes parses nothing
+      proof: "grep: W1-T11210 criterion 2 in test/sre/a-live-ledger-tail-matches-a-full-read.test.ts"
+    - claim: The monitor's default reader is the tail over its own live ledger, retaining twice the longest rule window, while an injected readLedger is used as before
+      proof: "grep: createLiveLedgerTail(ledgerPath in src/lib/serve.ts"
+  rationale: |
+    OBSERVED 2026-11-03 on the served generation /home/node/rmd-serve-gens/a (git b724e88eb, loading src/lib directly; /app is 0e933d77 and the mounted checkout 5340e3d65, neither serving):
+    - serve's main event loop stalled 502, 737 and 561 s in the 11Z, 12Z and 13Z hours (runtime.loop_stall_profile rows). The per-minute runtime.loop_lag max ran p50 1.7-4.6 s, p90 11.4-12.2 s, max 18.1-23.7 s.
+    - In the 12:33-13:33Z hour, readLedgerLines -> parseLedgerContent (status.ts) was the largest named frame (7.2 s self, 45 of 187 stalls) and incident-invariants rowTimeMs added 2.4 s. readLedgerLines' only serve.ts caller is startIncidentInvariantsMonitor's minute tick, which reads the whole live ledger (15.7 MB at 13:28Z) every 60 s.
+    - Rotation renames a staged new live file into place (rotateLedger, ledger.ts), so the file identity changes on rotation.
+    - Every rule reads rows by ts window, and the longest is 4 h (no-merges-with-green-queue). Rows only ever come from the live file.
+    - Open PR heads swept 2026-11-03 (35): only #15532 touches serve.ts, with no monitor lines. No plan task owns this reader.
+  design: |
+    A new src/lib/live-ledger-tail.ts, createLiveLedgerTail(path, retainMs), returns a per-tick reader that keeps parsed rows, file identity (dev:ino), byte offset and 64-byte head/anchor fingerprints.
+    - Each call reads only [offset, size). It parses complete lines with readLedgerLines' rules and keeps file order. A torn complete line is dropped and logged once. A trailing line with no newline is parsed for the call but not consumed.
+    - It restarts from the top on a new identity, a size below the offset, or changed head/anchor bytes. A missing file reads as []. Any other error resets and is rethrown, so the monitor's existing evaluate_failed path logs it.
+    - It drops rows with no parseable ts or older than nowMs - retainMs.
+    - serve.ts uses it when deps.incidentInvariants.readLedger is absent, with retainMs = 2 x INCIDENT_LONGEST_WINDOW_MS, a new export of incident-invariants.ts. An injected readLedger keeps its current call.
+    - No change to the rules, the profiler, the tick interval, other readers, analytics writes, workers or the generation cadence.
+  note: |
+    reservation hand-off: run-unfiled-1793714238914 -> run-unfiled-1793714238914
+    Reserved with rmd next-task-id (W1-T11210 on run-unfiled-1793714238914). Hand-built by the operator session on run-W1-T11210-<epochMs>. Baseline for the before/after comparison saved at ~/rmd-recon-slo-1029/invariants-baseline/ on the Azure host.

@@ -1,5 +1,5 @@
 - id: W1-T9795
-  title: Selected registry shell lifecycle and heartbeat qualification remains shadow only
+  title: Selected registry shell lifecycle and heartbeat qualification remains shadow only and coexists with W1-T10573's active selection, observing at every real shell effect boundary without changing the active or legacy launch
   repo: remudero
   depends_on: [W1-T9793, W1-T9571]
   priority: 2
@@ -10,8 +10,8 @@
   risk: high
   band_meaning: span
   origin: "operator instruction 2026-10-16: qualify real shell and heartbeat consumers before private ops staging, no live replacement or new schedules"
-  plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T9571, W1-T9572, W1-T9793]
-  files: [deploy/install-host-units.sh, deploy/recycle-container.sh, deploy/serve-container.sh, deploy/host-update.sh, deploy/field-trials-refresh.sh, deploy/registry-shadow.sh, scripts/fleet-heartbeat.sh, src/selected-registry-shadow-main.ts, src/lib/selected-registry-consumers.ts, src/lib/child-entry-argv.ts, src/run-task.ts, test/selected-registry-shell-consumers.test.ts, test/host-units-install.test.ts, test/recycle-container.test.ts, test/serve-launch-uniformity.test.ts, test/fleet-heartbeat.test.ts, test/field-trials-flow.test.ts, test/cli-registry-dispatches.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json, src/lib/repo-location.ts, test/the-registry-names-one-primary-instance.test.ts]
+  plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T9571, W1-T9572, W1-T9793, W1-T10573]
+  files: [deploy/field-trials-refresh.sh, deploy/host-update.sh, deploy/install-host-units.sh, deploy/recycle-container.sh, deploy/registry-shadow.sh, deploy/serve-container.sh, docs/instance-registry-selection-contract.md, scripts/fleet-heartbeat.sh, src/lib/child-entry-argv.ts, src/lib/repo-location.ts, src/lib/selected-registry-consumers.ts, src/run-task.ts, src/selected-registry-shadow-main.ts, test/a-disk-reclaim-that-refuses-while-the-fleet-is-up-can-never-be-scheduled.test.ts, test/cli-registry-dispatches.test.ts, test/fixtures/selected-registry-old/deploy/field-trials-refresh.sh, test/fixtures/selected-registry-old/deploy/install-host-units.sh, test/fixtures/selected-registry-old/PROVENANCE.json, test/helpers/registry-shell-fixture.ts, test/recycle-container.test.ts, test/selected-registry-shell-consumers.test.ts, test/serve-starts-its-workers-from-current-worker-bundles.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -25,6 +25,16 @@
     credential-mount work remains distinct and uncredited in the exact named
     search; do not take it over or use it as activation authority. Current own
     open-head diffs do not implement selected shell qualification.
+    AMENDED 2026-11-03 (operator ruling, in chat: "Re-scope onto #15532"):
+    - #15532 (W1-T10573, merged 2026-11-03T17:57Z) made RMD_INSTANCE_REGISTRY the ACTIVE selection in the recycler and serve launchers. An explicit invalid or incomplete selection refuses; genuine absence keeps the public behaviour. Those launchers now bind one invocation's selection by physical identity, mount it read-only and forward its digest and binding.
+    - That supersedes this task's "independently resolved selected path and generated child forwarding" for recycle and serve. What remains is this task's own concern: the SHADOW observation at every shell consumer's real effect boundary (install, generated launcher and watchdog, recycle, serve, host update, heartbeat, field trials). It must coexist with the active selection: the same invocation's launch, active or legacy, is unchanged by the shadow option.
+    - Merging #15532 exposed two defects in this task's shell layer:
+      1. #15532's shared guards pushed recycle-container.sh's `--selected-registry-shadow)` case from line 104 to 387. registry_shadow_supports read only the first 256 lines, so the maintained recycler read as an old child and lost its observations. The probe now reads the whole trusted file, under a size backstop.
+      2. The recycler, installer and serve passed the bare `repo` field as the shadow's repository, while the binding matches `owner/name` (RegistryInstance.repo, from github_repo). So no selected recycle could resolve a target. They now pass github_repo.
+    - The vendored 628 KB Ubuntu bash-3.2 .deb fixtures, which the risk judge escalated, are removed. The historical-interpreter leg uses (a) the host's native /bin/bash when it reports 3.2 (macOS), (b) an absolute RMD_TEST_BASH32 executable provided outside the repository (a pinned CI install), or (c) a named UNMEASURED diagnostic, while the leg runs under the current bash so no assertion is skipped and nothing claims it was 3.2.
+    - An official bash:3.2 container was ruled out: the scripts under test call the host's node, and the recording transports are node scripts writing host paths, which a musl container without node cannot run.
+    - files: is re-derived from the files the PR actually touches. The six previously declared but untouched tests and docs index are dropped; the old-script fixtures, the shell fixture helper and two adjusted tests are added.
+    FOLLOW-UP, not in this task (it is live behaviour): the installer-generated launcher forwards its baked RMD_INSTANCE_REGISTRY to the watchdog's recycle but adds --instance only when the install named one. So a default (no --instance) install made with the variable set yields a watchdog recycle that #15532 refuses with instance_missing.
   design: |
     1. Re-census the real shell readers and trusted generated launcher/child
        arguments across install, recycle, serve, host update, heartbeat and
@@ -32,17 +42,18 @@
        vocabulary through a small shared data-only adapter if needed. It is not
        a daemon, scanner, new scheduler or a second permissive YAML parser.
        A new entry must use the maintained entry contract, real defaults and
-       controlled Bash3.2/Linux fixtures, not production-only fake call text.
+       controlled fixtures, not production-only fake call text.
        The actual maintained run-task command dispatch must invoke the bounded
        selectedRegistryShadowMain entry; test real CLI dispatch and supported
        argv alongside script effects. A dummy call added for grep is not wiring.
     2. Require an explicit SHADOW qualification option; environment path presence
-       alone never enables policy or observations. Preserve true absence versus
-       explicit invalid selection in observations while leaving the independent
-       legacy command/output/effects unchanged. Snapshot bounded selected bytes,
+       alone never enables policy or observations. RMD_INSTANCE_REGISTRY is
+       W1-T10573's active selection, never a shadow channel: the shadow candidate
+       is the session captured by the option. Snapshot bounded selected bytes,
        digest/capabilities and actual instance identity; recheck at the real
        attempted launch/write/measurement observation, including generated
        launchers and later heartbeat reads, not only a parent process's startup.
+       Name the target by owner/name (github_repo), the identity the binding matches.
     3. Keep host/container/repository-relative namespaces distinct and name
        unsupported mappings unknown. Propagate private selected input only to
        explicitly trusted readers through their supported transport; do not add
@@ -54,31 +65,26 @@
        explicit empty/missing/malformed/truncated/symlink/revised input, cancelled
        reads, failed observer and sink, same-named different instances and healthy
        legacy traps. SHADOW observes would-refuse alongside actual unchanged
-       legacy outcomes; it must not block/restart/remount/retarget them. Test
-       actual scripts and rendered launchers with recording Docker/Azure/GitHub/
+       legacy or active outcomes; it must not block/restart/remount/retarget them.
+       Test actual scripts and rendered launchers with recording Docker/Azure/GitHub/
        systemctl transports, temporary HOME/state/lock/output roots and a real
        default reader. No genuine installer, heartbeat job, field-trial scan,
        mount, credential read or container operation is run against live data.
-    5. Cover every new catch/default, immutable mutation during waits and all
+       The capability probe recognizes a maintained child wherever its argv case
+       sits, reading the whole trusted file under a size backstop.
+    5. The historical Bash 3.2 leg is never vendored: native /bin/bash 3.2, else an
+       absolute RMD_TEST_BASH32 executable whose BASH_VERSION is verified, else a
+       named UNMEASURED diagnostic with the leg run under the current bash.
+    6. Cover every new catch/default, immutable mutation during waits and all
        independent children; delete real forwarding/binding/recheck arms and
-       observe failures, then exact restoration. Shell qualification uses actual
-       effect/argument receipts; TS mapped coverage must instrument every changed
-       source SF. Commit before verified-path/tsx/tmp/shipped-slot tests. Retain
-       every native failure and reproduce each title on its actual unchanged
-       pinned base before repair; unknown causes remain unknown, never waived.
-    6. Refresh both scope-time checks, ALL OPEN-head subjects, actual package
-       selector and ordinary ownership before build/publication. No contested
-       reclaim or duplicate W6095/fix-lane work. A demonstrated extra source,
-       environment-registration or entry-census edit requires a normally merged
-       files-only amendment first; no baseline widening or detector exemption.
-       Record automatic build/self-update implications without calling source
-       merge a deployment or enabling the new opt-in.
+       observe failures, then exact restoration. Retain every native failure and
+       reproduce each title on its actual unchanged pinned base before repair;
+       unknown causes remain unknown, never waived.
     7. WORKERS CONTINUE for isolated source/tests. No schedules, production
        selection or admission activation. Live launcher/mount/image replacement
-       needs separate human exact-instance drain; incompatible shared state,
-       claims, credentials/config/access needs FULL AFFECTED WRITER STOP, ALL
-       only if ALL affected. Preserve owner/admin override, trusted PR flow,
-       scoped services and the complete public Apache implementation/templates.
+       needs separate human exact-instance drain. Preserve owner/admin override,
+       trusted PR flow, scoped services and the complete public Apache
+       implementation/templates.
   acceptance:
     - claim: Maintained CLI dispatch reaches the bounded data-only shell observer entry
       proof: 'grep: selectedRegistryShadowMain( in src/run-task.ts'
@@ -92,9 +98,18 @@
       proof: 'unit test: selected shell qualification does not disclose private inputs'
     - claim: Real bounded defaults and catches execute only disposable recording transports
       proof: 'unit test: selected shell defaults and failures remain shadow only without live effects'
+    - claim: Under W1-T10573's active selection the shadow option leaves the recycler's launch byte-identical and still records its observation of the named target
+      proof: 'unit test: selected shell shadow coexists with the active selection'
+    - claim: The capability probe recognizes a maintained child whose argv case sits past any fixed header, and an older child without the grammar keeps its original arguments
+      proof: 'unit test: selected shell capability probe reads the whole trusted child script'
+    - claim: The historical Bash 3.2 leg is never vendored and resolves through native 3.2 or RMD_TEST_BASH32, else names itself UNMEASURED
+      proof: 'grep: RMD_TEST_BASH32 in test/selected-registry-shell-consumers.test.ts'
   falsifier: |
     Existing scripts select paths independently and have no shared bounded
     qualification at generated-child/heartbeat effect boundaries. Behavioral
     tests must fail when their real binding or forwarding is removed, not simply
-    find a helper string. Restored output/effects equal legacy controls even when
-    the observation would refuse. Qualification is not live blocking or staging.
+    find a helper string. Restored output/effects equal legacy or active controls
+    even when the observation would refuse. Qualification is not live blocking or
+    staging. At the pre-amendment head, merged with main, the maintained recycler
+    is read as an old child (its argv case past line 256) and its observations are
+    lost; a selected recycle's observation names no target.
