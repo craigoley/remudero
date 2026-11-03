@@ -796,7 +796,7 @@ export function buildEscalationJudgeSpawnArgs(opts: {
     // W1-T3614: mount affinity, the same field every other routed spawn passes. Undefined leaves
     // the capacity auction untouched, so an unrouted table behaves exactly as it always did.
     ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
-  }, { taskId: opts.escalation.taskId, runId: escalationJudgeRunId(opts.escalation), lane: "escalation-judge" });
+  }, { taskId: opts.escalation.taskId, runId: escalationJudgeRunId(opts.escalation), guardrailLane: "escalation-judge" });
 }
 
 /** Spawn the real judge and parse its verdict. Untested by unit (it shells out via the SDK); {@link

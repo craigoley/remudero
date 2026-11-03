@@ -221,7 +221,7 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     servedModel: text(row.served_model),
     servedModelReason: text(row.served_model_reason),
     ...(projectOutcomeSignals(row) ? { outcomeSignals: projectOutcomeSignals(row) } : {}),
-    ...(row.step === "worker.attempt" && text(row.lane) ? { lane: row.lane as string } : {}),
+    ...(row.step === "worker.attempt" && (text(row.guardrail_lane) ?? text(row.lane)) ? { lane: (text(row.guardrail_lane) ?? text(row.lane))! } : {}),
     ...(row.step === "inbox.drafted" && typeof row.lint_clean === "boolean" ? { lintClean: row.lint_clean } : {}),
     ...(text(row.round_id) ? { fixRoundId: row.round_id as string } : {}),
     notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
@@ -849,15 +849,19 @@ function guardrailUnits(rows: FlowRow[]): GuardrailUnit[] {
       if (lane === null) continue;
       const { outcome, signal } = guardrailAttribution(row);
       if (outcome !== "success" && outcome !== "model") continue;
-      const modelId = row.servedModel ?? assignment?.selectedModel ?? row.selectedModel ?? "unknown";
+      const named = row.servedModel ?? assignment?.selectedModel ?? row.selectedModel;
+      const modelId = named ?? "unknown";
       const retry = record(row.outcomeSignals?.guardrail_attempt);
       if (retry) add(row, modelId, lane, { [retry.signal as GuardrailSignal]: Number(retry.attempt) > 1 });
-      if (DRAFT_UNIT_LANES.has(lane)) continue;
-      add(row, modelId, lane, {
-        "draft-contract-dirty": signal === "draft-contract",
+      const truncation = {
         "truncated-reply": signal === `reply-${OpenWeightTruncatedReplyError.name}`,
         "output-retention": Object.values(record(row.outcomeSignals?.output_retention) ?? {})
-          .some((evidence) => record(evidence)?.state !== "complete"),
+          .some((evidence) => record(evidence)?.state !== "complete") };
+      if (DRAFT_UNIT_LANES.has(lane)) {
+        if (named !== null && named !== undefined) add(row, modelId, lane, truncation);
+        continue;
+      }
+      add(row, modelId, lane, { "draft-contract-dirty": signal === "draft-contract", ...truncation,
         "served-model-unnamed": row.servedModel === null });
     } else if (row.step === "inbox.drafted") {
       const modelId = row.servedModel ?? row.requestedModel;

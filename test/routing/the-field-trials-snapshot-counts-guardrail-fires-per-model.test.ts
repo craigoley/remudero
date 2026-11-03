@@ -307,7 +307,8 @@ test("W1-T10877: production escalation judgments retain their short judgment cat
     mount: MOUNT, cwd: receipts.root, settingsFile: "settings.json", spawn: receipts.spawn });
   await receipts.spawn({ cwd: receipts.root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "summarize" });
   const rows = receipts.rows();
-  assert.deepEqual(rows.filter(row => row.step === "worker.attempt").map(row => row.lane), ["escalation-judge", "escalation-summary"]);
+  assert.deepEqual(rows.filter(row => row.step === "worker.attempt").map(row => [row.lane, row.guardrail_lane]),
+    [["escalation-summary", "escalation-judge"], ["escalation-summary", undefined]], "the receipt keeps its spawn lane");
   for (const category of ["short-judgment", "summarization"]) {
     assert.deepEqual(snapshotOf(rows).families.guardrails[`${model}|${category}|served-model-verification`]?.cells,
       { modelId: model, category, guardrailClass: "served-model-verification", opportunities: 1, fires: 0 });
@@ -351,6 +352,24 @@ test("W1-T10877: output retention survives the producer and projection and fires
     prompt: { state: "truncated", reason: "private" } } };
   assert.equal(JSON.stringify(projectFlowRow(untrusted, "unknown")).includes("private"), false);
   assert.deepEqual(snapshotOf([rows[0]!, untrusted]).families.guardrails[key]?.cells, expected(0));
+});
+
+test("W1-T10877: an attributable inbox-draft call counts its truncation fires, and its draft contract only on inbox.drafted", () => {
+  const model = "gpt-6.1-sol";
+  const truncation = `${model}|long-context-drafting|output-cap-truncation-check`;
+  const contract = `${model}|long-context-drafting|schema-validated-output`;
+  const call = { ...retainedCodexAttempt("draft", RETAINED), lane: "inbox-draft" };
+  const alone = snapshotOf([dispatched("draft", model), call]).families.guardrails;
+  assert.deepEqual(alone[truncation]?.cells, { modelId: model, category: "long-context-drafting",
+    guardrailClass: "output-cap-truncation-check", opportunities: 1, fires: 1 }, "a truncated draft call fires");
+  assert.equal(alone[contract], undefined, "the producing call is never a draft-contract opportunity");
+  const clean = { ...call, output_retention: { text: { state: "complete" } } };
+  assert.equal(snapshotOf([dispatched("draft", model), clean]).families.guardrails[truncation]?.cells.fires, 0);
+  const drafted = { ts: T(10, 3), step: "inbox.drafted", proposal_id: "p9", requested_model: model, served_model: model, lint_clean: false };
+  const both = snapshotOf([dispatched("draft", model), call, drafted]).families.guardrails;
+  assert.deepEqual(both[contract]?.cells, { modelId: model, category: "long-context-drafting",
+    guardrailClass: "schema-validated-output", opportunities: 1, fires: 1 }, "the draft contract is counted once, on inbox.drafted");
+  assert.equal(both[truncation]?.cells.opportunities, 1, "inbox.drafted adds no truncation opportunity");
 });
 
 test("W1-T10877: fix opportunities exclude infrastructure, refusals, unknown and missing attempts", () => {

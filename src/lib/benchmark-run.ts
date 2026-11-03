@@ -507,7 +507,7 @@ export function callerOwnsBenchmarkReceipt(args: SpawnWorkerArgs): boolean {
  *  model or effort that serves it. */
 export const BENCHMARK_RECEIPT_IDENTITY: unique symbol = Symbol("rmd.benchmarkReceiptIdentity");
 
-type ReceiptIdentity = { taskId: string; runId: string; lane?: string };
+type ReceiptIdentity = { taskId: string; runId: string; guardrailLane?: string };
 
 export function withReceiptIdentity(args: SpawnWorkerArgs, identity: ReceiptIdentity): SpawnWorkerArgs {
   return { ...args, [BENCHMARK_RECEIPT_IDENTITY]: { ...identity } } as SpawnWorkerArgs;
@@ -603,7 +603,6 @@ export function benchmarkNonDispatchSpawn(
     const terminalAssignmentIds = new Set<string>();
     const terminalResults = new WeakSet<WorkerResult>();
     const named = receiptIdentity(args);
-    const receiptLane = named.lane ?? lane;
     const guardrailAttempt = guardrailAttemptContext.getStore();
     const write = (step: string, fields: Record<string, unknown>): void => {
       const path = benchmarkEvidenceLedgerPath(args.config);
@@ -612,7 +611,8 @@ export function benchmarkNonDispatchSpawn(
         ? (fields.worker_assignment as WorkerSelectionAssignment).id : fields.selection_assignment_id;
       appendLedger(path, {
         run_id: args.runId ?? named.runId ?? `${lane}-${typeof assignmentId === "string" ? assignmentId : "unassigned"}`,
-        task_id: args.taskId ?? named.taskId ?? lane.toUpperCase(), step, lane: receiptLane, ...fields,
+        task_id: args.taskId ?? named.taskId ?? lane.toUpperCase(), step, lane,
+        ...(named.guardrailLane === undefined ? {} : { guardrail_lane: named.guardrailLane }), ...fields,
       });
     };
     const recordAttempt = (fields: Record<string, unknown>, result?: WorkerResult): void => {
@@ -637,7 +637,7 @@ export function benchmarkNonDispatchSpawn(
         observedAssignmentId = undefined;
         try {
           write("worker.assignment", { worker_assignment: assignment,
-            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(receiptLane), nonDispatchWorkerStack) });
+            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), nonDispatchWorkerStack) });
           observedAssignmentIds.add(assignment.id);
           observedAssignmentId = assignment.id;
         } catch {
