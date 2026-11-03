@@ -1,0 +1,33 @@
+id: incident-bd741d0ae69a4558
+ts: 2026-11-03T05:25:33.405Z
+raw: >-
+  Incident bd741d0ae69a: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  Corpus completeness requires the original ledger files; saved corrections
+  resolve arithmetic and interpretation errors but cannot substantiate the
+  missing coverage measurement.
+
+  First seen: 2026-11-03T05:22:09.471Z
+
+  Last seen: 2026-11-03T05:22:09.471Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16312 escalated: already escalated (reason unreadable: no escalation of this PR at head f5ac341 is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793680047510:1:1793682843733) — Corpus completeness requires the original ledger files; saved corrections resolve arithmetic and interpretation errors but cannot substantiate the missing coverage measurement.
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#bd741d0ae69a455875609b1e25a14e440458812dea2d878cbe3c2c8cc494c3bf
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

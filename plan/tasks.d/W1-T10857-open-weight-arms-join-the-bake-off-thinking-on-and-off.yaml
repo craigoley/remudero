@@ -16,6 +16,7 @@
     - src/lib/bakeoff-trigger.ts
     - src/lib/inbox-bakeoff.ts
     - test/routing/open-weight-arms-join-the-bake-off-thinking-on-and-off.test.ts
+    - "src/run-task.ts"
   status: queued
   attempts: 0
   rationale: |

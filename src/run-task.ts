@@ -544,7 +544,8 @@ import { dropTierRowsBeforePush, prePushGateRefusal } from "./lib/pre-push-refus
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
-import { buildProjectInit, parseProjectInitArgs } from "./lib/project-init.js";
+import { buildProjectInit, parseProjectInitArgs, ProjectInitError } from "./lib/project-init.js";
+import { writeProjectInit } from "./lib/project-init-write.js";
 import {
   OnboardError,
   parseOnboardArgs,
@@ -831,6 +832,8 @@ import {
   runCiParityAdmitted,
   runPreflightCoverage,
   runPreflightFast,
+  createPreflightStepLog,
+  preflightStepLogPlan,
   runTreeAdvisoryLine,
   judgedTestShellOut,
   prepareJudgedTestRun,
@@ -1072,7 +1075,7 @@ import {
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
-import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
+import { learnedBakeoffLimit, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import type { DeployedModel, DeploymentBakeoffCandidate } from "./lib/bakeoff-trigger.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
@@ -1317,7 +1320,8 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
-import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, observeSelectedRegistrySync,
+  selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -2858,6 +2862,7 @@ import {
   gitPushEmptyCommit,
   isNonFastForwardRejection,
   LanePushForeignHeadError,
+  PushAuthRefusedError,
   runStepsAsync,
   runStepsSync,
   step,
@@ -10503,6 +10508,7 @@ export function runErrorCause(err: unknown): RunErrorCause {
   if (err instanceof SubscriptionOnlyRefusedError) return "subscription-only-refused";
   const text = String((err as Error)?.message ?? err);
   if (/^census-precheck:/m.test(text)) return "census-refused-push";
+  if (err instanceof PushAuthRefusedError) return "push-auth-refused";
   if (/^Command failed: git (?:-C \S+ )?push /m.test(text)) return "git-push-failed";
   if (/^Command failed: git (?:-C \S+ )?commit /m.test(text)) return "git-commit-failed";
   if (/^Command failed: gh (?:api --method POST \S+\/pulls |pr create)/m.test(text)) return "pr-create-failed";
@@ -12031,6 +12037,10 @@ function depReviewProposalCapture(landingStateRoot: string | undefined): NonNull
   };
 }
 
+export function depReviewNodePinCheckout(configRoot: string, repo: string): string {
+  return join(configRoot, "repos", repo);
+}
+
 export function defaultNodePinSyncIo(
   root: string,
   options: { git?: (args: string[], cwd: string) => string } = {},
@@ -12194,7 +12204,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     const sync = syncNodePinForImageBump(
       diff,
       { sha: view.headRefOid, ref: view.headRefName },
-      deps.nodePin ?? defaultNodePinSyncIo(config.root),
+      deps.nodePin ?? defaultNodePinSyncIo(depReviewNodePinCheckout(config.root, repo)),
     );
     if (sync.kind === "synced") {
       log("dep-review.node_pin_synced", { pr_url: view.url, from: sync.from, to: sync.to, head_sha: view.headRefOid, pushed_sha: sync.pushedSha });
@@ -19192,7 +19202,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
 }
 
 /**
- * `rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]` —
+ * `rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--step-log <path>]` —
  * W1-T221's hand-route commit gate. Runs {@link runPreflight}'s three independent steps (commitlint, `tsc --noEmit`,
  * and lib/commit-message.ts's own header/body checks) over the commit range not yet on
  * `origin/main`, prints every step's own pass/fail line UNCONDITIONALLY (never only on
@@ -19244,7 +19254,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  *  and exported for the falsifying test (W1-T2646,
  *  test/preflight-help-is-derived-not-retyped.test.ts) to gate directly: a flag added to one
  *  list and not the printed signature is now a test failure, not a reader's omission. */
-export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file"] as const;
+export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file", "--step-log"] as const;
 export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs", "--sandbox-metrics"] as const;
 
 /** W1-T3738 — what {@link runPreflightProofs} needs, all injected so a test drives it without a
@@ -19776,13 +19786,25 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     : deps.spawn;
   const boundary = <T>(run: () => T): T => metrics ? metrics.observe(run) : run();
   const onPhase = deps.onPhase ?? reportPreflightPhase;
-  const phase = <T>(name: string, run: () => T): T => observeSynchronousPreflightPhase(name, () => boundary(run), onPhase);
+  // W1-T11105: each phase's verdict is appended as it returns, so a gate killed later still shows what finished.
+  const stepLogPath = flagValue(rest, "--step-log");
+  const stepLog = stepLogPath === undefined ? undefined : createPreflightStepLog(stepLogPath);
+  const phase = <T>(name: string, run: () => T): T => {
+    const startedMs = performance.now();
+    const value = observeSynchronousPreflightPhase(name, () => boundary(run), onPhase);
+    stepLog?.phase(name, value, performance.now() - startedMs);
+    return value;
+  };
 
   const root = deps.projectRoot ?? repoRoot;
   const project = resolveProjectPreflight(root, {
     ciParity: rest.includes("--ci-parity"), coverage: rest.includes("--coverage"), proofs: rest.includes("--proofs"),
   });
   const core = project.kind === "core";
+  if (stepLog) {
+    const planned = preflightStepLogPlan(rest, core);
+    stepLog.plan(planned.phases, planned.fastJobs);
+  }
   const result = phase("default", () => core
     ? runPreflight(root, { ...deps, range, spawn, onPhase })
     // Preserve the executor identity that selects the bounded subprocess, including with metrics.
@@ -19792,7 +19814,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
   // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
   // no escape is a wall and an operator on a slow host must still be able to push.
-  const fast = !core || rest.includes("--no-fast") ? undefined : phase("fast", () => runPreflightFast(root, { spawn }));
+  const fast = !core || rest.includes("--no-fast") ? undefined : phase("fast", () => runPreflightFast(root, { spawn, ...(stepLog ? { stepLog } : {}) }));
   // W1-T4108 — RIDE THE SAME `--no-fast` ESCAPE AS `fast` ABOVE. Both are further, GitHub-free
   // additions to the same default tier that #6677/#6687/#6690/#6693 (2026-09-23) show CI, not
   // preflight, was catching: console-parity/the two census suites cost seconds like every other
@@ -28442,6 +28464,10 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
+      selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
+        settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+        record: (step, fields) => appendLedger(ledgerPathFor(effectiveConfig), { run_id: "DEPLOY", task_id: "DEPLOY", step, ...fields }),
+      } : undefined,
       ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig), { stateDir: join(effectiveConfig.root, "state"), host: hostname() }),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
@@ -28465,7 +28491,12 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
-  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root }) }, {
+  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root,
+    selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
+      settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+      record: (step, fields) => deps.log(step, fields),
+    } : undefined,
+  }) }, {
     dryRun: rest.includes("--dry-run"),
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
@@ -30834,7 +30865,7 @@ export function commitWorkerEdits(
   // `checkpoint` (W1-T8008): a restart checkpoint keeps EVERY worker change, declared or not -- the undeclared paths are
   // staged too and returned in `undeclared` (named, never dropped); scope is judged later, on the ordinary push path.
   options: { admitTests?: boolean; priorHeadSha?: string; branch?: string; checkpoint?: boolean; aliasRewriter?: TestAliasRewriter } = {},
-): WorkerEditCommit {
+): WorkerEditCommit & { readonly ignored_declared?: readonly string[] } {
   const runGit = deps.runGit ?? ((args: string[]) => hostWorktreeGit(
     repoDir,
     args,
@@ -30843,7 +30874,8 @@ export function commitWorkerEdits(
   if (message.trim().length === 0) {
     return { committed: false, undeclared: [], reason: "refusing to commit with an empty message" };
   }
-  if (declaredPaths.length === 0 && !options.checkpoint) {
+  // Fix rounds can repair admitted tests and regenerable artifacts even without a filed surface.
+  if (declaredPaths.length === 0 && !options.checkpoint && !options.admitTests) {
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
   }
 
@@ -30869,7 +30901,23 @@ export function commitWorkerEdits(
 
   const status = runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]);
   const changed = workerChangedPaths(status);
-  if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+  if (changed.length === 0) {
+    const existing = declaredPaths.filter((path) => existsSync(join(repoDir, path)));
+    const ignored = existing.length === 0 ? [] : runGit([
+      "status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL, "--ignored=matching", "--", ...existing,
+    ]).split("\0").filter((entry) => entry.startsWith("!! ")).map((entry) => entry.slice(3));
+    // Git may report an ignored parent directory even when scoped to a declared file inside it.
+    const ignored_declared = existing.filter((path) => pathIsUnderDeclaredSurface(path, ignored));
+    if (ignored_declared.length > 0) {
+      const details = ignored_declared.map((path) => {
+        const rule = runGit(["check-ignore", "-v", "--", path]).split("\t")[0];
+        return `${path} (rule ${rule})`;
+      });
+      return { committed: false, undeclared: [], ignored_declared,
+        reason: `declared path ignored by .gitignore: ${details.join(", ")}` };
+    }
+    return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+  }
 
   // W1-T4450: a REGISTERED REGENERABLE ARTIFACT (a gate's own baseline, whose failure message names
   // it as the remedy) is staged although undeclared. The fix prompt and the scope guard already grant
@@ -33527,7 +33575,9 @@ async function pauseCommand(rest: string[]): Promise<number> {
   }
   const target = pauseTargetOrRefuse("pause", rest, config);
   if (!target) return 2;
-  const info = requestPause(target.root, reason, undefined, { instance: target.instance });
+  const info = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "pause", {
+    instanceName: target.instance, stateRoot: target.root, namespace: "host",
+  }, () => requestPause(target.root, reason, undefined, { instance: target.instance }));
   appendLedger(ledgerPathFor({ ...config, root: target.root }), {
     run_id: runId,
     task_id: "FLEET",
@@ -33579,7 +33629,9 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
   }
   const target = pauseTargetOrRefuse("resume", rest, config);
   if (!target) return 2;
-  const result = resumeFleet(target.root);
+  const result = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "resume", {
+    instanceName: target.instance, stateRoot: target.root, namespace: "host",
+  }, () => resumeFleet(target.root));
   appendLedger(ledgerPathFor({ ...config, root: target.root }), {
     run_id: runId,
     task_id: "FLEET",
@@ -35540,7 +35592,7 @@ function createInboxBakeoffReplay(
           return next;
         };
       };
-      const rows = await replay({ proposals, planText, spawnFor, candidates, log: (step, extra = {}) => {
+      const rows = await replay({ proposals, planText, spawnFor, candidates, learnedLimit: learnedBakeoffLimit(config), log: (step, extra = {}) => {
         const candidate = candidates?.find((candidate) => candidate.id === extra.candidate);
         const refusal = refusals.get(String(extra.candidate));
         log(step, { ...extra, ...(candidate ? { model: candidate.model } : {}),
@@ -39912,7 +39964,9 @@ async function initCommand(rest: string[]): Promise<number> {
  * external repo (auth, default-branch detection, PR conflicts, etc.) is out of this task's
  * scope — the note on W1-T27 calls the live end-to-end provisioning a separate
  * operator-attested confirmation (Rule 18), not part of auto-verify. Keeping the live-mutation
- * path manual also keeps this command trivially safe to run against any repo name.
+ * path manual also keeps this command trivially safe to run against any repo name. `--write`
+ * only puts the generated files into a local checkout (lib/project-init-write.ts), refusing
+ * before any write when one already exists; it still pushes nothing.
  */
 async function projectCommand(rest: string[]): Promise<number> {
   const sub = rest[0];
@@ -39945,12 +39999,21 @@ async function projectCommand(rest: string[]): Promise<number> {
     `baselines captured: coverage=${payload.baselines.coveragePct}% branches=${payload.baselines.branchesPct}% ` +
       `mutation=${payload.baselines.mutationScorePct}% dup=${payload.baselines.dupPct}% (at ${payload.baselines.capturedAt})`,
   );
+  let written: string[] | undefined;
+  try {
+    written = parsed.args.writeDir === undefined ? undefined : writeProjectInit(payload, parsed.args.writeDir);
+  } catch (e) {
+    if (!(e instanceof ProjectInitError)) throw e;
+    console.error(e.message);
+    return 2;
+  }
+  if (written) console.log(`wrote ${written.length} file(s) under ${parsed.args.writeDir}: ${written.join(", ")}`);
   console.log(
     "\nThis command GENERATES the stack; it does not push/open a PR or arm branch protection " +
       "itself (manual next steps):",
   );
   console.log(
-    `  1. Write the files listed above into a branch of ${owner}/${parsed.args.repo} and open a PR gated by ci-gate + remudero-review.`,
+    `  1. ${written ? "Commit the written files to" : "Write the files listed above into"} a branch of ${owner}/${parsed.args.repo} and open a PR gated by ci-gate + remudero-review.`,
   );
   console.log(`  2. Once that PR is merged, arm branch protection:`);
   console.log(
@@ -41360,12 +41423,12 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "preflight",
-    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--sandbox-metrics]",
+    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--step-log <path>] [--sandbox-metrics]",
     summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.",
     detail:
       "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: " +
       renderFastGateScriptList(FAST_GATE_STEPS) +
-      " — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code",
+      " — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code; --step-log <path> (W1-T11105) appends one JSON line per finished phase and fast-gate job as each finishes, so a run killed part-way still records what finished",
   },
   {
     name: "pr-checks",
@@ -41840,9 +41903,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "project",
-    syntax: "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>",
+    syntax: "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n> [--write <abs-dir>]",
     summary: "Fleet-inheritance onboarding: generate the whole gate stack for a target repo.",
-    detail: "fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself",
+    detail: "fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps; --write <abs-dir> also writes every file (and .remudero/branch-protection.json) into that checkout, refusing before any write if one already exists; does not push/PR/arm protection itself",
   },
   {
     name: "onboard",

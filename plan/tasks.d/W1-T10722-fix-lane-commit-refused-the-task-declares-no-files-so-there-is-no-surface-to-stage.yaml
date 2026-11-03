@@ -3,11 +3,12 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
-  risk: high  # Rule 19 span: widened to run-task, test-tier-manifest by a scope amendment for #15602
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
+  risk: high # Rule 19 span: widened to run-task, test-tier-manifest by a scope amendment for #15602
   band_meaning: span
   priority: 1.04
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-03T12:27:12.568Z
   attempts: 0
   author_class: machine
   origin: "fix-lane:commit-refused:the task declares no files, so there is no surface to stage#r2"
@@ -15,6 +16,7 @@
     - src/run-task.ts
     - test/worker/run-task/fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts
     - "scripts/test-tier-manifest.json"
+    - "src/cli/commands/fix.ts"
   acceptance:
     - claim: "commit-refused:the task declares no files, so there is no surface to stage no longer needs an operator hand fix"
       proof: "grep: test(\"W1-T10722: fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage clears without a person\" in test/worker/run-task/fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts"
@@ -33,8 +35,8 @@
   risk_ruling:
     verdict: "high"
     action: escalate
-    confidence: 0.88
+    confidence: 0.87
     reasons:
-      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The record requests a structurally different remedy but supplies no proposed mechanism or per-PR root-cause diagnosis; the reported blocker recurrence and PR-hours do not establish which repair is justified.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for test declaration text, rather than demonstrating successful repair behavior. The finding therefore cannot be verified from what is shown, meeting the explicit escalation condition."
-    judged_at: "2026-10-30T04:34:14.533Z"
-    pin: "db3efffbd5c0d8eec05da16694cbd12fa9f9afa8c22dcf8b2a120d63cb3e7b42"
+      - "high-risk verdict at confidence 0.87 — on the change's description/files alone, no diff was read — The filing requests a structurally different remedy but specifies neither a diagnosed cause nor the proposed behavior, so its safety and scope cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The supplied evidence lists repeated blocker reasons and aggregate PR-hours; the acceptance proof checks for a test declaration rather than demonstrating recovery. This does not establish the basis for class-wide repair after the previous remedy failed to reduce the reported share."
+    judged_at: "2026-11-03T03:42:26.489Z"
+    pin: "94343cb8ef21974daaa7b027cc1c4218c5a9dd8a6c102b79e9a9ccc678131174"

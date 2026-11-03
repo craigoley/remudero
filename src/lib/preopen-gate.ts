@@ -26,6 +26,7 @@ import { delimiter, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CHILD_ENTRY_SPAWNED_STEP, childEntryArgv, childEntrySpawnedRow } from "./child-entry-argv.js";
+import { CENSUS_COUNTS_STEP_JOB, LIGHT_GATE_SKIPPED_JOBS } from "./ci-parity.js";
 import { runPushGate, type PushGateOutcome } from "./git-push.js";
 import { systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
@@ -134,7 +135,7 @@ export type PreopenGateResult = (
   | ({ kind: "fail"; failedSteps: string[]; durationMs: number; containment?: GateContainmentMode; pushGate?: PreopenPushGate } & GateStepDetail)
   | ({ kind: "unmeasured"; reason: string; durationMs: number; deadlineEnforcedBy?: GateDeadlineEnforcer; containment?: GateContainmentMode } & GateStepDetail)
   | { kind: "skipped"; reason: "gate-unhealthy"; durationMs: number }
-) & { sandboxMetrics?: GateSandboxMeasurement; containment?: GateContainmentMode; backstopMs?: number; backstopBasis?: PreopenGateHealth["backstopBasis"]; canary?: boolean };
+) & { sandboxMetrics?: GateSandboxMeasurement; containment?: GateContainmentMode; backstopMs?: number; backstopBasis?: PreopenGateHealth["backstopBasis"]; canary?: boolean; light?: LightGateShadow };
 
 /**
  * W1-T9556 — who ended a gate at its backstop: coreutils `timeout` (needs no node loop), the deadline runner
@@ -152,6 +153,8 @@ export interface GateRun {
   containment?: GateContainmentMode;
   /** W1-T9619: the failing steps read from the harness-owned summary, or why it could not be read. */
   summary?: GateSummary;
+  /** W1-T11105: the step log the child appended as it went, read on every exit, a backstop kill included. */
+  stepLog?: PreflightStepRecord[] | { unreadable: string };
   sandboxMetrics?: GateSandboxMeasurement;
 }
 
@@ -499,6 +502,107 @@ export interface RunGateContainment {
 
 /** The summary file the harness asks the gate child to write, inside the harness-made HOME. */
 export const GATE_SUMMARY_NAME = "preflight-summary.json";
+/** W1-T11105: the step log the harness asks the gate child to append, beside its summary. */
+export const GATE_STEP_LOG_NAME = "preflight-steps.ndjson";
+
+/** One line of `rmd preflight --step-log`: a plan, a finished phase, or a finished fast-gate job. */
+export type PreflightStepRecord = Record<string, unknown>;
+
+/**
+ * W1-T11105 — SHADOW ONLY: what a light gate (census counts plus every step but the census suites and rule-checks)
+ * would have decided on this run, derived from the full gate's own step log. The full gate still decides.
+ */
+export type LightGateShadow =
+  | { result: "pass" | "fail" | "unreached"; failed: string[]; unreached: string[]; durationMs: number; miss: boolean; wouldSaveMs?: number }
+  | { unmeasured: string };
+
+/** The records of a step log, or why it can't be read. */
+export function readPreflightStepLog(
+  file: string,
+  readFile: (path: string) => string = (p) => readFileSync(p, "utf8"),
+): PreflightStepRecord[] | { unreadable: string } {
+  let text: string;
+  try {
+    text = readFile(file);
+  } catch (e) {
+    return { unreadable: `no readable step log (${(e as Error).message})` };
+  }
+  const records: PreflightStepRecord[] = [];
+  for (const line of text.split("\n")) {
+    if (line.trim() === "") continue;
+    try {
+      const record: unknown = JSON.parse(line);
+      if (record && typeof record === "object" && !Array.isArray(record)) records.push(record as PreflightStepRecord);
+    } catch (error) {
+      // A line the backstop kill tore mid-write names no finished unit, so the units it would have named read unreached.
+      const torn = String((error as Error)?.message ?? error);
+      records.push({ torn });
+    }
+  }
+  return records;
+}
+
+/**
+ * W1-T11105: the light gate's verdict from the full run's step log. Its units are every planned phase but "fast",
+ * every fast-gate job but {@link LIGHT_GATE_SKIPPED_JOBS}, and the census counts. Any failed unit fails it; a unit
+ * the log never recorded leaves it unreached. `full` is the fast gate's own classification.
+ */
+export function deriveLightGate(
+  log: PreflightStepRecord[] | { unreadable: string },
+  full: Exclude<PreopenGateResult, { kind: "skipped" }>,
+): LightGateShadow {
+  if (!Array.isArray(log)) return { unmeasured: log.unreadable };
+  const plan = log.find((record) => record.plan !== null && typeof record.plan === "object")?.plan as
+    { phases?: unknown; fast_jobs?: unknown } | undefined;
+  if (!plan || !Array.isArray(plan.phases)) return { unmeasured: "the step log names no plan" };
+  const phases = plan.phases.map(String);
+  const fastJobs = Array.isArray(plan.fast_jobs) ? plan.fast_jobs.map(String) : [];
+  if (!phases.includes("fast") || fastJobs.length === 0) {
+    return { unmeasured: "this preflight ran no fast tier, so a light gate would be the full gate" };
+  }
+  const latest = new Map<string, PreflightStepRecord>();
+  for (const record of log) {
+    if (typeof record.phase === "string") latest.set(`phase:${record.phase}`, record);
+    else if (typeof record.job === "string") latest.set(record.job, record);
+  }
+  const units = [
+    ...phases.filter((phase) => phase !== "fast").map((phase) => `phase:${phase}`),
+    ...fastJobs.filter((job) => !LIGHT_GATE_SKIPPED_JOBS.includes(job)),
+    CENSUS_COUNTS_STEP_JOB,
+  ];
+  const failed: string[] = [];
+  const unreached: string[] = [];
+  let durationMs = 0;
+  for (const unit of units) {
+    const record = latest.get(unit);
+    if (!record || typeof record.ok !== "boolean") {
+      unreached.push(unit);
+      continue;
+    }
+    if (typeof record.ms === "number" && Number.isFinite(record.ms)) durationMs += record.ms;
+    if (record.ok) continue;
+    const named = Array.isArray(record.failed) ? record.failed.map(String) : [];
+    failed.push(...(unit.startsWith("phase:") && named.length > 0 ? named : [unit]));
+  }
+  const result = failed.length > 0 ? "fail" : unreached.length > 0 ? "unreached" : "pass";
+  const miss = result === "pass" && full.kind === "fail" && full.failedSteps.some((step) => LIGHT_GATE_SKIPPED_JOBS.includes(step));
+  const saves = result === "pass" && (full.kind === "pass" || full.kind === "unmeasured");
+  return { result, failed, unreached, durationMs, miss, ...(saves ? { wouldSaveMs: Math.max(0, full.durationMs - durationMs) } : {}) };
+}
+
+/** W1-T11105: the light gate's shadow fields on the `implement.preopen_gate` row. */
+export function lightGateLedgerFields(light: LightGateShadow | undefined): Record<string, unknown> {
+  if (light === undefined) return {};
+  if ("unmeasured" in light) return { light_unmeasured: light.unmeasured };
+  return {
+    light_result: light.result,
+    light_failed: light.failed,
+    light_unreached: light.unreached,
+    light_duration_ms: light.durationMs,
+    light_miss: light.miss,
+    ...(light.wouldSaveMs === undefined ? {} : { light_would_save_ms: light.wouldSaveMs }),
+  };
+}
 
 /**
  * `harnessRmd` given means the caller chose the launcher (tests): it is run as given and no bundle is considered.
@@ -523,9 +627,10 @@ export function defaultRunGate(
   const run = (sandbox: GateContainment): Promise<GateRun> => {
     if (sandbox.mode !== "sandboxed") return Promise.resolve({ exitCode: null, error: `the gate could not be contained: ${sandbox.reason}`, containment: "unmeasured" });
     const summaryFile = join(home, GATE_SUMMARY_NAME);
-    // Only our maintained launcher promises the new option. A caller-selected legacy launcher
+    const stepLogFile = join(home, GATE_STEP_LOG_NAME);
+    // Only our maintained launcher promises the new options. A caller-selected legacy launcher
     // keeps its existing argv contract and reports missing measurements explicitly.
-    const extraArgs = ["--summary-file", summaryFile, ...(harnessRmd === undefined ? ["--sandbox-metrics"] : [])];
+    const extraArgs = ["--summary-file", summaryFile, ...(harnessRmd === undefined ? ["--sandbox-metrics", "--step-log", stepLogFile] : [])];
     const { file, args } = harnessRmd === undefined
       ? preopenGateLaunch(cwd, log, join(harnessRoot, "bin", "rmd"), harnessRoot, {
         deadline_enforced_by: armedEnforcers(timeoutBin), launcher: "harness", containment: "sandboxed", env_allowlist: PREOPEN_GATE_ENV_ALLOWLIST_NAME,
@@ -539,7 +644,9 @@ export function defaultRunGate(
       const read = readGateSummary(summaryFile, startedAt, containment.readFile);
       const summary = exited.exitCode === 1 && exited.error === undefined ? read : undefined;
       const sandboxMetrics = read.sandboxMetrics ?? { sandbox_unmeasured: "unreadable" in read ? read.unreadable : "the child wrote no sandbox measurement" };
-      return { ...exited, containment: "sandboxed" as const, sandboxMetrics, ...(summary ? { summary } : {}) };
+      // W1-T11105: read on every exit, so a gate the backstop ended still says which units finished.
+      const stepLog = harnessRmd === undefined ? readPreflightStepLog(stepLogFile, containment.readFile) : undefined;
+      return { ...exited, containment: "sandboxed" as const, sandboxMetrics, ...(summary ? { summary } : {}), ...(stepLog ? { stepLog } : {}) };
     });
   };
   let env: NodeJS.ProcessEnv = {};
@@ -641,12 +748,15 @@ async function measurePreopenGate(worktreePath: string, deps: PreopenGateOptions
   const now = () => (deps.clock ?? systemClock).now();
   const run = await (deps.runGate ?? ((cwd) => defaultRunGate(cwd, undefined, deps.log, { backstopMs, clock: deps.clock }, { contain: deps.contain, readFile: deps.readFile })))(worktreePath);
   const fast = classifyGateRun(run, now() - startedAt);
-  if (fast.kind === "unmeasured") return fast;
+  // W1-T11105: the light gate's shadow is judged against the fast gate alone, before procfs or the push gate add steps.
+  const light = run.stepLog === undefined ? undefined : deriveLightGate(run.stepLog, fast);
+  const shadow = <R extends PreopenGateResult>(result: R): R => (light === undefined ? result : { ...result, light });
+  if (fast.kind === "unmeasured") return shadow(fast);
   // W1-T10267: a procfs write in a changed test blocks until timeout-minutes in CI; refuse it here, before a PR opens.
   const procfs = (deps.scanProcfsWrites ?? changedProcfsWriteOffences)(worktreePath);
   if (procfs.length > 0) {
     const steps = [...(fast.kind === "fail" ? fast.failedSteps : []), `procfs-write: a test aims a write-shaped call at /proc (it blocks, use a FILE where a directory must be): ${procfs.join("; ")}`];
-    return { kind: "fail", failedSteps: steps, durationMs: fast.durationMs, ...preopenGateStepDetail(fast), ...(fast.containment ? { containment: fast.containment } : {}), ...(fast.sandboxMetrics ? { sandboxMetrics: fast.sandboxMetrics } : {}) };
+    return shadow({ kind: "fail", failedSteps: steps, durationMs: fast.durationMs, ...preopenGateStepDetail(fast), ...(fast.containment ? { containment: fast.containment } : {}), ...(fast.sandboxMetrics ? { sandboxMetrics: fast.sandboxMetrics } : {}) });
   }
   // W1-T9602: the same harness push gate the push leaf runs, asked now on the clean committed tree. A pass is
   // recorded and the push of that identical tree reuses it; a refusal joins the steps handed back, as push-gate.
@@ -658,9 +768,9 @@ async function measurePreopenGate(worktreePath: string, deps: PreopenGateOptions
     ...(asked.kind === "pass" ? { reused: asked.reused } : asked.kind === "skipped" ? { reason: asked.reason } : {}),
     ...(asked.key ? { key: asked.key } : {}),
   };
-  if (asked.kind !== "refused") return { ...fast, pushGate };
+  if (asked.kind !== "refused") return shadow({ ...fast, pushGate });
   const failedSteps = [...(fast.kind === "fail" ? fast.failedSteps : []), `${PUSH_GATE_STEP_NAME}: ${asked.detail}`];
-  return { kind: "fail", failedSteps, durationMs: fast.durationMs, ...preopenGateStepDetail(fast), ...(fast.containment ? { containment: fast.containment } : {}), ...(fast.sandboxMetrics ? { sandboxMetrics: fast.sandboxMetrics } : {}), pushGate };
+  return shadow({ kind: "fail", failedSteps, durationMs: fast.durationMs, ...preopenGateStepDetail(fast), ...(fast.containment ? { containment: fast.containment } : {}), ...(fast.sandboxMetrics ? { sandboxMetrics: fast.sandboxMetrics } : {}), pushGate });
 }
 
 /**
@@ -710,6 +820,7 @@ export function preopenGateLedgerFields(result: PreopenGateResult): Record<strin
     ...(environmentSteps ? { environment_steps: environmentSteps } : {}),
     ...containment,
     ...(result.sandboxMetrics ?? (result.containment === "sandboxed" ? { sandbox_unmeasured: "the child wrote no sandbox measurement" } : {})),
+    ...lightGateLedgerFields(result.light),
     ...(push ? {
       push_gate: push.outcome,
       push_gate_ms: push.durationMs,

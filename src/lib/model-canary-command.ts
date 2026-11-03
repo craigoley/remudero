@@ -1,5 +1,5 @@
 /** Offline CLI preparation and projection. Provider execution requires a separately admitted adapter. */
-import { mkdirSync, writeFileSync, existsSync, realpathSync, openSync, fstatSync, readSync, closeSync, constants } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, realpathSync, lstatSync, openSync, fstatSync, readSync, closeSync, constants } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canarySuiteDigest, commonCanarySuite, weeklyCanarySuite, MODEL_CANARY_VERSION } from "./model-canary-suite.js";
@@ -9,6 +9,8 @@ import { retentionCanaryProtocol } from "./model-canary-retention.js";
 import { contextCanaryProtocol } from "./model-canary-context.js";
 import { randomBytes } from "node:crypto";
 import { rotatingCanarySuite } from "./model-canary-rotation.js";
+import { buildEffectiveConfigCensus, type BuildEffectiveConfigCensusInput } from "./model-canary-config-census.js";
+import { planCanaryMatrix } from "./model-canary-matrix-plan.js";
 
 function boundedInput(input: string, limit = 8 * 1024 * 1024): string {
   if (!Number.isInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0
@@ -34,6 +36,17 @@ function boundedInput(input: string, limit = 8 * 1024 * 1024): string {
 }
 
 function privateOutput(dir: string, name: string, data: string) {
+  const requirePrivateDirectory = () => {
+    const info = lstatSync(dir);
+    if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700
+      || typeof process.getuid !== "function" || info.uid !== process.getuid())
+      throw new Error("canary-output-private-owned-directory-required");
+  };
+  // mkdir's mode does not protect an existing directory; never follow a final symlink.
+  try { requirePrivateDirectory(); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   let parent = resolve(dir);
   // Resolve the first existing ancestor too: a new directory below a symlink is not private.
   while (!existsSync(parent)) parent = dirname(parent);
@@ -43,10 +56,40 @@ function privateOutput(dir: string, name: string, data: string) {
     const next = dirname(parent); if (next === parent) break; parent = next;
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  requirePrivateDirectory();
   writeFileSync(join(dir, name), data, { encoding: "utf8", flag: "wx", mode: 0o600 });
 }
 
 export function canaryCommand(argv: readonly string[]) {
+  if (argv[0] === "prepare-matrix") {
+    const [, outDir, input] = argv;
+    if (argv.length !== 3 || !outDir || !input)
+      throw new Error("usage: model-canary-command prepare-matrix <private-out-dir> <matrix-input.json>");
+    const value: unknown = JSON.parse(boundedInput(input));
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      throw new Error("canary-matrix-input-required");
+    const request = value as Record<string, unknown>;
+    if (request.version !== "model-canary-matrix-input-v1"
+      || typeof request.census !== "object" || request.census === null || Array.isArray(request.census)
+      || typeof request.matrix !== "object" || request.matrix === null || Array.isArray(request.matrix))
+      throw new Error("canary-matrix-input-version-or-shape-invalid");
+    const censusInput = request.census as BuildEffectiveConfigCensusInput;
+    const options = request.matrix as Record<string, unknown>;
+    if (typeof options.day !== "string" || typeof options.seed !== "string"
+      || typeof options.replicates !== "number" || (options.aa !== undefined && typeof options.aa !== "boolean"))
+      throw new Error("canary-matrix-options-invalid");
+    const census = buildEffectiveConfigCensus(censusInput);
+    const matrix = planCanaryMatrix({ census, cases: censusInput.cases,
+      day: options.day, seed: options.seed, replicates: options.replicates,
+      ...(options.aa === undefined ? {} : { aa: options.aa }) });
+    // These are private preparation artifacts. Native ownership, admission and execution remain separate.
+    const state = "prepared-not-activated" as const;
+    privateOutput(outDir, "model-canary-configuration-census.json", JSON.stringify(census, null, 2) + "\n");
+    privateOutput(outDir, "model-canary-matrix-manifest.json", JSON.stringify({ ...matrix, state,
+      requires: ["published-source", "qualified-adapter", "capacity-admission", "shared-owner", "agreed-experiment-budget"] }, null, 2) + "\n");
+    return { state, censusDigest: census.digest, matrixDigest: matrix.digest,
+      configurations: census.rows.length, shards: matrix.shards.length, readiness: matrix.readiness };
+  }
   if (argv[0] === "prepare-rotation") {
     const [, outDir, day, keyFile] = argv;
     if (argv.length !== 4 || !outDir || !day || !keyFile)

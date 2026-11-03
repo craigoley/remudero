@@ -1,0 +1,58 @@
+- id: W1-T11158
+  title: "A census refuses a new fixed timeout around a cold `node --import tsx` spawn in a test — the #15532 class: test/shadow-instance-safety.test.ts gave eight cold tsx children a fixed 30 s spawnSync timeout, each start took 20-30 s on the CPU-saturated review host, a child crossed it, the proof read `null !== 2`, and the fix lane spent 12 rounds before commit f6bfaaafd bounded the children by measured spawn time; a scan of test/ finds about 83 such sites in 67 files"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, a ratchet over fixed timeouts on cold tsx spawns in tests; it spans the census suite, its baseline and its precheck parity row
+  band_meaning: span
+  origin: operator-session#review-lane-findings-2026-11-02
+  plan_refs:
+    - W1-T10573
+    - W1-T10332
+    - W1-T9954
+  files:
+    - test/rules/a-cold-tsx-spawn-in-a-test-has-no-fixed-timeout-census.test.ts
+    - scripts/cold-tsx-spawn-timeout-baseline.json
+    - scripts/census-precheck.mjs
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The census walks every tracked test file and counts each spawnSync, execFileSync, spawn or execFile call whose argv starts tsx (`--import tsx`, `--import=tsx`, a tsx loader path or the tsx bin) and whose options set `timeout` to a numeric literal or to an identifier bound to one in the same file; it fails naming the file and line when a file's count exceeds its row in scripts/cold-tsx-spawn-timeout-baseline.json, and passes when a count falls
+      proof: "unit test: test/rules/a-cold-tsx-spawn-in-a-test-has-no-fixed-timeout-census.test.ts"
+    - claim: The census refuses a baseline row that grows and a row for a file whose count is now zero, so the baseline may only shrink, and a timeout computed from a measured spawn (as test/shadow-instance-safety.test.ts does after f6bfaaafd) or no timeout is not counted
+      proof: "grep: W1-T11158 criterion 2 in test/rules/a-cold-tsx-spawn-in-a-test-has-no-fixed-timeout-census.test.ts"
+    - claim: census-precheck's PRECHECK_PARITY models the new census, so a push that grows a count is refused before CI
+      proof: "grep: a-cold-tsx-spawn-in-a-test-has-no-fixed-timeout-census in scripts/census-precheck.mjs"
+  rationale: |
+    OBSERVED 2026-11-02 on #15532 (W1-T10573), and READ at commit f6bfaaafd on its branch (run-W1-T10573-1792872378674):
+    - remudero-review failed criterion 2's proof test/shadow-instance-safety.test.ts, subtest "real owner CLI", at
+      `assert.equal(paused.status, 2)` with `null !== 2`: spawnSync hit `timeout: 30000` around a cold
+      `node --import tsx --input-type=module -e "import { main } from '#src/run-task.js' …"`.
+    - On the Mac the subtest takes 7 s against 92 s on the host; hosted CI is green. The fix lane ran 12 rounds marking FIXED.
+    - f6bfaaafd ("bound owner cli children by measured spawn time"): the first child is the measurement, and each later child may take
+      the slowest observed spawn times the spawns after the first; a kill asserts on `signal`.
+    MEASURED 2026-11-02 (heuristic scan of `git ls-files test` at origin/main 1368db581, Mac, read-only): about 83 spawnSync or
+    execFileSync calls in 67 test files start tsx with a literal `timeout:` within the call. The census's own scanner is the exact count.
+    The operator's standing rule: no hard thresholds; a fixed spawn timeout under a load-dependent cold start is one.
+    NOT COVERED: W1-T11132 (#16266, open) makes a review proof that fails only under load inconclusive; it treats the symptom at review
+    time, this census stops new sites. W1-T10332 (queued) reports a timed-out census child as not measured. W1-T9954 (queued) stops a
+    named-pipe case hanging a run.
+  design: |
+    1. test/rules/a-cold-tsx-spawn-in-a-test-has-no-fixed-timeout-census.test.ts reads every tracked test file as text (git ls-files,
+       REPO_ROOT from #test/helpers/repo-root.js), finds spawn-family calls with a balanced-paren scan, and applies the two predicates
+       in criterion 1. A same-file `const NAME = <number>` (with or without underscores) bound to the timeout counts as literal.
+    2. scripts/cold-tsx-spawn-timeout-baseline.json records today's per-file counts, written once by the builder from the census
+       itself, never edited to admit growth.
+    3. PRECHECK_PARITY in scripts/census-precheck.mjs gets a row for test/rules/a-cold-tsx-spawn-in-a-test-has-no-fixed-timeout-census.test.ts,
+       so the pre-push precheck asks it (census parity).
+    4. Never rename or re-spell a site so the census stops seeing it; the conforming forms are a measured bound or none.
+    Tests go in the census file itself, titled verbatim as in the proofs, plus an in-memory fixture set for each predicate.
+  note: |
+    reservation hand-off: plan-file-1793657973812 -> plan-file-1793657973812
+    Reserved with rmd next-task-id --branch plan-file-1793657973812 from the operator checkout. Filed 2026-11-02 from the review-lane
+    findings, item 7 (p3). Its basename contains "census", so it is a rule suite. Ordering: W1-T11098 (#16257, open) edits
+    scripts/census-precheck.mjs; build after it merges.

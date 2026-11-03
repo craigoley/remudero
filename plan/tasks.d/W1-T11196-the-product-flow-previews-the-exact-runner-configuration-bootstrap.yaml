@@ -1,0 +1,97 @@
+- id: W1-T11196
+  title: The product flow previews the exact runner configuration a target lacks before any target change
+  repo: remudero
+  depends_on: [W1-T11195]
+  dispatch_hold: false
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: ["§7B", "§9", W1-T11195, W1-T10726, W1-T3951]
+  files:
+    - src/lib/product-target-config.ts
+    - src/lib/product-routes.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/infra/product-runner-config-preview.test.ts
+    - test/console-api/serve/product-routes.test.ts
+    - test/route-wiring.test.ts
+  status: queued
+  attempts: 0
+  rationale: >-
+    W1-T11195 makes a target without `.remudero/mounts.yaml` refuse cleanly, but the operator still
+    has no supported way to see what configuration the product flow would add. The initiative
+    needs the operator to inspect and accept the exact configuration before the first plan or
+    build. This follows the established preview-before-mutation split: W1-T10726 previews the
+    repository, and W1-T10613 performs the mutation.
+    Settled by lookup: is this already filed or already decided? -> not filed. No shard, the
+    MASTER-PLAN.md, DECISIONS.md or LEARNINGS.md previews target runner configuration. Settled by
+    lookup: does `rmd project init` already scaffold it? -> no. buildProjectInit
+    (src/lib/project-init.ts) writes workflows, principles.yaml, SECURITY.md and branch protection,
+    never mounts.yaml. Reusing it would also rewrite Wreckterra's existing workflows and
+    protection, which the initiative forbids. Settled by lookup: what content is the supported
+    source? -> the serving instance's own validated `.remudero/mounts.yaml` at its recorded source
+    commit. §9 makes mounts the operator's per-instance routing policy. That table is the existing
+    setup and validates under G-17, so copying it adds no paid service, provider or model. A
+    hand-written minimal template would be a second policy with no calibration. Settled by lookup:
+    Core or Console? -> Core serves the preview contract, and the Console renders it through the
+    generated client in this repo. The Console UI half is filed separately in the Console plan
+    after this contract merges, per the CONSOLE-T153 precedent in W1-T10767. Settled by lookup:
+    is there open-head overlap? -> none by title among the 19 open PRs on 2026-11-03. Refresh the
+    head-tree audit at filing review.
+  design: |
+    Add previewRunnerConfigBootstrap to src/lib/product-target-config.ts, call it from the existing
+    product route builder in src/lib/product-routes.ts, and pass it through serve's maintained
+    composition. Serve one bounded read-only authenticated operation behind the existing
+    verified-owner product read boundary. Its input is productId and the expected revisions only,
+    never caller-supplied bytes or paths.
+    For the bound repository, re-read live identity through the existing provider, then read the
+    verified default-branch head and the committed tree. Use W1-T11195's readTargetRunnerConfig
+    through the same verified managed checkout or the existing GitHub contents transport, never a
+    second resolver. Return one state:
+    - present, with its digest.
+    - invalid, with a bounded reason.
+    - unreadable.
+    - absent. Only absent carries a proposal: the single path `.remudero/mounts.yaml`, the exact
+      bytes, their sha256 digest, the target head, the source commit and kind (the serving
+      instance's mounts table), the G-17 validation result, and an explicit change list with
+      exactly one add and zero modify or delete operations.
+    Read source bytes from the serving install root, not the state root or the target. Validate
+    them with loadMounts before offering them. Missing or invalid source returns
+    source_unavailable, never a guessed table. Preserve existing configuration: any present or
+    invalid target file yields no proposal. Preview writes no product record, journal, branch,
+    file or resource. It is informational, and the later mutation rechecks everything.
+    Declare the operation and its states in openapi/daemon.yaml. Regenerate
+    packages/api-client/src/schema.d.ts with the maintained generator. Add an assembled HTTP proof
+    in the existing product route suite and register it in test/route-wiring.test.ts.
+    Tests use real local Git fixtures and a controlled gh executable for the default transport.
+    Cover: absent, present, invalid, unreadable, a moved head, foreign identity, a missing or
+    invalid source table, and byte-identical product/journal files after every call. Confirm test
+    placement with rmd test-place.
+    Out of scope: opening any pull request (W1-T11197), Console UI source, other target files,
+    hold releases, budgets and access changes.
+  acceptance:
+    - claim: an absent target configuration previews exactly one add of validated source bytes with their digest and head, while present, invalid, unreadable and moved targets yield no proposal and nothing is written
+      proof: "unit test: test/infra/product-runner-config-preview.test.ts"
+    - claim: the production product route invokes the preview
+      proof: "grep: previewRunnerConfigBootstrap( in src/lib/product-routes.ts"
+    - claim: the served preview matches its authenticated public contract
+      proof: "unit test: test/console-api/serve/product-routes.test.ts"
+    - claim: the preview operation is declared in the public contract
+      proof: "grep: runner-config-preview in openapi/daemon.yaml"
+  falsifier: |
+    Make preview offer bytes when the target file is present. The preserve-existing fixture must
+    fail. Skip source validation. The invalid-source fixture must fail. Remove the head binding.
+    The moved-head fixture must fail. Assert zero provider mutation calls and byte-identical
+    durable files in every case. Record real nonzero summaries for each mutant and the restored
+    code. Fixtures are not live Wreckterra receipts.
+  note: >-
+    Held until W1-T11195 merges, then ordinary filing review, merge and explicit operator
+    release. Read-only. It grants no target mutation, plan, build, deployment, gameplay or device
+    claim. The Wreckterra envelope (existing setup, USD30, original IP, mobile-first, OSM
+    attribution) is unchanged.

@@ -1,0 +1,67 @@
+- id: W1-T11164
+  title: A coverage-ledger job cancelled at its ceiling is re-run once at the same head before coverage-ratchet's red reaches a fix round, because the job had finished its own steps in 19 s and was cancelled in finalization, on code and plan pull requests alike
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes CI gating; security gates unchanged. Rule 19: one concern, a coverage-ledger cancellation is a non-result that is re-run, not a red that is fixed
+  band_meaning: span
+  origin: "operator decision 2026-11-02 (in chat), relayed: file the real cause of the coverage-ratchet reds"
+  plan_refs:
+    - W1-T9448
+    - W1-T5892
+    - W1-T1223
+    - W1-T3345
+    - W1-T11161
+  files:
+    - .github/workflows/ci.yml
+    - src/lib/sweep.ts
+    - test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the coverage-shard matrix is skipped and needs.coverage-ledger.result is cancelled, the coverage-ratchet aggregator fails with a distinct line naming coverage-ledger-cancelled and the run's head, not the generic never-ran text; any other skipped matrix keeps today's message and exit
+      proof: "unit test: test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts"
+    - claim: A pull request whose red at its current head is that named coverage-ledger cancellation is re-run once through the sweep's existing rerunFailedChecks gateway (rerun-failed-jobs on that workflow run) before any fix worker is dispatched for it, and the claim row keeps a second pass from re-running the same head again
+      proof: "grep: W1-T11164 criterion 2 in test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts"
+    - claim: A second coverage-ledger cancellation at the same head after that re-run is not re-run again; it reaches the ordinary blocked-CI path with the cancellation named, so a persistently cancelling job is visible rather than retried forever
+      proof: "grep: W1-T11164 criterion 3 in test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts"
+  rationale: |
+    MEASURED 2026-11-02/03 over the last 30 completed pull_request runs of ci.yml (GitHub REST through the broker; read-only),
+    32 coverage-ledger job attempts:
+    - 30 succeeded. Job wall from started_at to completed_at was 9-30 s (median 14 s), one 59 s. Setup job 1-2 s, checkout 2-4 s,
+      setup-node 4-6 s, every ledger step 0-9 s.
+    - 2 were CANCELLED: run 41538944616 (#16322, plan-only) at 106 s and run 41538195834 (#16212, run-W1-T10749, a code PR) at 95 s.
+      In both, EVERY step including "Complete job" had concluded success within 19 s of the job's start (22:38:18 -> 22:38:37Z;
+      22:32:59 -> 22:33:16Z). The job then stayed open until GitHub cancelled it at timeout-minutes: 1.
+    - #16297's first attempt (run 41534926238) was cancelled at 69 s; its re-run finished in 30 s.
+    So the cause is NOT a slow checkout or setup: the measured work plus setup is a fraction of the ceiling. The job is cancelled in its
+    finalization tail after its work is done, and a cancelled prerequisite skips the coverage-shard matrix, which coverage-ratchet
+    correctly refuses ("the shard matrix never ran").
+    WHY A RE-RUN AND NOT A LARGER BOUND: the 1-minute bound is the remainder of ci-gate's WAIT_CAP_SECONDS budget
+    (75 - 49 - 20 - 5, the comment above coverage-ledger; test/workflow-job-timeouts.test.ts enforces the sum). The finalization tail is
+    censored by the cancel itself, so no measured job wall bounds it; raising the ceiling would take minutes from the shard or the
+    aggregator without a measurement saying how many. A re-run costs one ~14 s job attempt plus the matrix, and both observed re-runs
+    succeeded.
+    READ at origin/main 7338c1fda: the sweep re-queues a CANCELLED REQUIRED check (W1-T1223, requeueCheck), but coverage-ledger is not a
+    required context: the red reaches ci-gate as coverage-ratchet failure, so today it waits for a fix round, whose no-commit outcome
+    then spends the one rerunFailedChecks receipt.
+    SECURITY GATES ARE UNTOUCHED: security-merge-policy and CodeQL and their required contexts are not in files:.
+  design: |
+    1. coverage-ratchet-required's skipped arm reads needs.coverage-ledger.result. Cancelled prints
+       "coverage-ratchet: coverage-ledger-cancelled — the coverage ledger job was cancelled at its ceiling at <head>; the matrix never
+       ran (W1-T11164)" and exits 1. W1-T11161's evidenced PLAN_ONLY pass, where merged, is asked first and is unchanged.
+    2. The sweep's blocked-CI rung reads that token from the failing coverage-ratchet check's output title (the rollup's check title the
+       sweep already maps) and, when it is the only failing required cause at the current head, claims a sweep.disposed receipt
+       (ledger_cancel_rerun_attempted) and calls rerunFailedChecks, the same gateway the no-commit rerun uses. It does this before fix
+       dispatch, once per head.
+    3. With the receipt present at that head, the rung does nothing new: the existing path runs and its stand-down names the cancellation.
+  falsifier: |
+    At origin/main a pull request whose coverage-ledger job was cancelled after its steps succeeded shows coverage-ratchet "the shard
+    matrix never ran", and nothing re-runs that job until a fix round has been dispatched and committed nothing.
+  note: |
+    Reserved with rmd next-task-id --branch plan-file-1793665615994. Distinct from W1-T11161 (#16332): that task makes an evidenced
+    plan-only diff not applicable; this one re-runs the cancelled prerequisite for every diff, code included.

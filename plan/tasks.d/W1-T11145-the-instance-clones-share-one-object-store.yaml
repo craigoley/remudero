@@ -1,0 +1,31 @@
+- id: W1-T11145
+  title: "The per-instance remudero clones share one object store — core, console, site and the serve repo each clone and fetch remudero on their own (316, 254, 175 and 372 MB), so every fetch downloads and stores the same objects four times on a data disk 84% full"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: the entrypoint's clone borrows objects from one shared store
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs: []
+  files:
+    - deploy/entrypoint.sh
+    - test/deploy/the-instance-clones-share-one-object-store.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the host's shared object store for the repository is mounted, the entrypoint's clone borrows from it (git clone --reference-if-able, or an objects/info/alternates entry added to an existing clone followed by a local repack), and fetches add only objects the store lacks
+      proof: "unit test: test/deploy/the-instance-clones-share-one-object-store.test.ts"
+    - claim: With no shared store, or an unreadable one, the clone is exactly today's; the shared store is a bare repository that is never pruned (gc.pruneExpire=never), so no borrower loses an object it needs
+      proof: "grep: W1-T11145 criterion 2 in test/deploy/the-instance-clones-share-one-object-store.test.ts"
+  rationale: |
+    MEASURED 2026-10-27 on the Azure host (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - remudero is cloned and fetched four times: core 316 MB, console 254 MB, site 175 MB, serve-repo 372 MB.
+    - The data disk is 84% full. The host is CPU-bound, and four fetches of one repository unpack the same packs four times.
+    READ at origin/main d04469fa2: deploy/entrypoint.sh clones with `git clone "$REPO_URL" "$TREE"` (:483) into each instance's own root. deploy/rmd-host-cleanup.sh already understands borrowed objects (its alternates scan and lender_check), so the janitor will keep a lender its borrowers need.
+  design: |
+    A bare mirror at a host path shared into each container (read-write for the fetching instance, with a lock), configured gc.pruneExpire=never and gc.auto=0. The entrypoint, when it finds that store, clones with --reference-if-able. For an existing clone it adds the alternates entry once, then runs `git repack -a -d -l` so the borrowed objects drop out of its own packs. Each instance's fetch first updates the store under its lock (one network fetch), then fetches into its own clone from the store. No store, an unreadable store or a lock wait past the fetch's own retry bound means today's path. The janitor's lender_check already protects the store.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 13 (p3), as the second of its separate mechanisms. The janitor's image and container pass is filed beside it.

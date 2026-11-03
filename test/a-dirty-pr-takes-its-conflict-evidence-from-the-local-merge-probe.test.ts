@@ -80,7 +80,7 @@ test("W1-T9454: a dirty PR with unknown mergeability is dispositioned from the m
   const emptyCompare = { files: [], oursLog: "", theirsLog: "" };
   const empty = [{ ...f.pr, mergeConflict: emptyCompare }];
   probes.applyMergeProbeEvidence(empty, summary);
-  assert.equal(empty[0]!.mergeConflict, emptyCompare, "even an empty compare result takes precedence");
+  assert.deepEqual((empty[0] as OpenPrView).mergeConflict?.files.map(file => file.path), ["conflict.txt"], "W1-T11174: an empty compare result is missing evidence, so the probe's files fill it");
   for (const blocked of [{ headRefName: "contributor-branch" }, { headRefName: "run-W1-T999-1792834905188" }]) {
     assert.equal(deriveDisposition({ ...prs[0]!, ...blocked }, DEFAULT_SWEEP_POLICY, f.now).disposition, "blocked-ambiguous");
   }

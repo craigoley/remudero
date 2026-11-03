@@ -1,0 +1,42 @@
+- id: W1-T11128
+  title: "serve's inbox reads spawn nothing synchronous — execFileSync git grep in gitGrepAnchorTrue and execFileSync sleep in defaultRegistryLockSleep (src/lib/inbox.ts) stalled serve's main thread 199 s in 5 minutes and 607 s across 81 profiles, on a host already forking 178–195 processes a second, while async forms of both already exist"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, serve's inbox path stops spawning synchronously; it spans the two serve-reachable callers and the module that owns both waits
+  band_meaning: span
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs:
+    - W1-T4261
+    - W1-T6277
+    - W1-T10292
+  files:
+    - src/lib/inbox.ts
+    - src/lib/inbox-view.ts
+    - src/lib/status-board.ts
+    - test/inbox/serve-spawns-nothing-synchronous-for-inbox-anchors-and-registry-locks.test.ts
+    - "src/lib/panel-graph.ts"
+    - "src/lib/report-commands.ts"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A served inbox render (the inbox view's registry prune and the status board's INBOX anchor check) reaches no synchronous child_process call; it uses updateProposalRegistryAsync and gitGrepAnchorTrueAsync, with the same results, deadline and refusal words
+      proof: "unit test: test/inbox/serve-spawns-nothing-synchronous-for-inbox-anchors-and-registry-locks.test.ts"
+    - claim: The synchronous registry lock's poll waits without starting a process (no `sleep` child per poll), and the CLI's synchronous callers keep their contract
+      proof: "grep: W1-T11128 criterion 2 in test/inbox/serve-spawns-nothing-synchronous-for-inbox-anchors-and-registry-locks.test.ts"
+  rationale: |
+    MEASURED 2026-10-27 on the Azure host (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - The host is CPU-bound (load 24–30, sar idle 2.9%, sys time 29–31%, 178–195 forks/s, CPU PSI some 65–83). serve used 222% CPU.
+    - serve's CPU profiles showed sync spawns on the main thread from src/lib/inbox.ts: `execFileSync("git", grep…)` in gitGrepAnchorTrue and `execFileSync("sleep")` in defaultRegistryLockSleep. They stalled the loop 199 s in 5 minutes, and 607 s across 81 profiles.
+    READ at origin/main d04469fa2:
+    - gitGrepAnchorTrue is at src/lib/inbox.ts:2629 (execFileSync at :2632). gitGrepAnchorTrueAsync (:2675, W1-T6277/#9637) exists but the status board defaults to the sync form (status-board.ts:2443).
+    - defaultRegistryLockSleep (:3263-3264) spawns `sleep` on every 20 ms poll of updateProposalRegistry (:3315). updateProposalRegistryAsync (:3437) exists, but inbox-view.ts:144 calls the sync writer.
+    NOT COVERED: W1-T4261 and W1-T6277 (merged) cache and batch the greps; they do not move serve off the sync forms. W1-T10292 (queued) is slow-lane instrumentation.
+  design: |
+    Move the serve-reachable callers to the async forms that already exist; do not add new primitives. The status board takes an async anchor reader (or a pre-warmed cache filled by gitGrepAnchorTrueAsync), and the inbox view's prune awaits updateProposalRegistryAsync. Separately, defaultRegistryLockSleep waits with Atomics.wait on a SharedArrayBuffer instead of spawning `sleep`, so a CLI caller that keeps the sync writer forks nothing per poll. No new bound or interval: the existing maxWaitMs and pollIntervalMs stand. The test records every child_process sync call during a served render and expects none.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 1 (p1, CPU first), split from the view-rebuild half (filed as W1-T11127) because it is a separate mechanism. The line numbers above were re-read on 2026-11-02 main; the findings' ~:2694 and ~:3310 had moved to :2632 and :3264.
