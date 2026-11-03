@@ -108,7 +108,7 @@ async function producedReviewQueueView(reviews: unknown[]): Promise<{ view: Open
     const path = join(dir, "rows.ndjson");
     writeFileSync(path, "");
     const views = await buildOpenPrViewsAsync("craigoley", "remudero", path, {
-      fetchAsync: async (args) => fetch(args), readRequiredContextsAsync: async () => ["ci-gate"],
+      fetchAsync: async (args) => fetch(args), readRequiredContextsAsync: async () => ({ kind: "contexts" as const, contexts: ["ci-gate"] }),
       readMainPlan: () => ({ tasks: [], byId: new Map() }),
     });
     assert.equal(views.length, 1);
