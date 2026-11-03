@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -38,11 +38,32 @@ function learn(dir: string, container: string, learned: { high?: number; peak?: 
   }
 }
 
+/**
+ * A RUNNING container whose cgroup memory.peak reads `peakMib`: a fake `docker inspect` answering with the
+ * container's id, and the cgroup scope directory the production writer looks the id up in. A container
+ * never passed here is not running, as on a real host.
+ */
+function running(dir: string, container: string, peakMib: number) {
+  const id = String(FLEET.indexOf(container) + 1).repeat(64);
+  mkdirSync(join(dir, "bin"), { recursive: true });
+  mkdirSync(join(dir, "ids"), { recursive: true });
+  writeFileSync(join(dir, "bin", "docker"),
+    `#!/bin/sh\n[ "$1" = inspect ] && [ -r "${dir}/ids/$4" ] && exec cat "${dir}/ids/$4"\nexit 1\n`, { mode: 0o755 });
+  writeFileSync(join(dir, "ids", container), id);
+  const scope = join(dir, "cgroup", "system.slice", `docker-${id}.scope`);
+  mkdirSync(scope, { recursive: true });
+  writeFileSync(join(scope, "memory.peak"), `${peakMib * 1048576}\n`);
+  return scope;
+}
+
 /** Sources the policy in a clean environment and runs `script`; every RMD_* knob is at its default. */
 function policy(dir: string, script: string, env: Record<string, string> = {}) {
   const run = spawnSync("bash", ["-c", `source "$1"; ${script}`, "policy", POLICY], {
     encoding: "utf8",
-    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", STATE_DIR: dir, RMD_MEMINFO_PATH: join(dir, "meminfo"), ...env },
+    env: {
+      PATH: `${join(dir, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`, STATE_DIR: dir,
+      RMD_MEMINFO_PATH: join(dir, "meminfo"), RMD_CGROUP_ROOT: join(dir, "cgroup"), ...env,
+    },
   });
   assert.equal(run.status, 0, `the policy is never fatal: ${run.stderr}`);
   return run.stdout;
@@ -60,12 +81,17 @@ function memoryMax(dir: string, container: string, env: Record<string, string> =
 
 test("each container's memory.max is the host less the reserve less the OTHER containers' learned peaks, serve included", (t) => {
   const dir = host(t);
-  // Peaks that fit the 29,952 MiB budget together, each learned a different way.
+  // Peaks that fit the 29,952 MiB budget together, each learned a different way. The memory.peak values are
+  // NOT written by the test into the policy's store: the running containers' cgroups report them and the
+  // production writer (resource_policy_record_peak) records them.
   const peaks: Record<string, number> = { [CORE]: 12288, [SERVE]: 6144, [CONSOLE]: 3072, [SITE]: 2560 };
-  learn(dir, CORE, { high: 11264, peak: peaks[CORE] }); // memory.peak above the learned memory.high
-  learn(dir, SERVE, { high: peaks[SERVE], peak: 5000 }); // the learned memory.high above memory.peak
-  learn(dir, CONSOLE, { peak: peaks[CONSOLE] }); // memory.peak alone
-  learn(dir, SITE, { high: peaks[SITE] }); // the learned memory.high alone
+  learn(dir, CORE, { high: 11264 });
+  running(dir, CORE, peaks[CORE]!); // memory.peak above the learned memory.high
+  learn(dir, SERVE, { high: peaks[SERVE] });
+  running(dir, SERVE, 5000); // the learned memory.high above memory.peak
+  running(dir, CONSOLE, peaks[CONSOLE]!); // memory.peak alone
+  learn(dir, SITE, { high: peaks[SITE] }); // the learned memory.high alone, and not running
+  assert.equal(policy(dir, 'resource_policy_recorded_peak remudero-daemon || echo none'), "none\n", "nothing is recorded before the policy runs");
   const budget = HOST_MIB - RESERVE_MIB;
   for (const container of FLEET) {
     const others = FLEET.filter((c) => c !== container).reduce((sum, c) => sum + peaks[c]!, 0);
@@ -79,6 +105,31 @@ test("each container's memory.max is the host less the reserve less the OTHER co
   // Serve is no longer the fixed 7,680 MiB, and no build daemon is the old total - 5120 - 2048.
   assert.notEqual(memoryMax(dir, SERVE).mib, 7680);
   assert.notEqual(memoryMax(dir, CORE).mib, HOST_MIB - 5120 - 2048);
+  // The writer left the running containers' cgroup memory.peak where the policy reads it, and only theirs.
+  assert.match(readFileSync(join(dir, "state", `memory-peak-${CORE}.json`), "utf8"), new RegExp(`"container":"${CORE}","peak_mib":12288`));
+  assert.equal(policy(dir, `resource_policy_recorded_peak ${SERVE}`), "5000");
+  assert.equal(policy(dir, `resource_policy_recorded_peak ${CONSOLE}`), "3072");
+  assert.equal(existsSync(join(dir, "state", `memory-peak-${SITE}.json`)), false, "a container that is not running gets no record");
+});
+
+test("W1-T11130: the recorded memory.peak is a high-water mark that advances as a container grows", (t) => {
+  const dir = host(t);
+  const serveScope = running(dir, SERVE, 6144);
+  running(dir, CONSOLE, 3072);
+  // Core's limit: the budget less serve's and console's measured peaks, and site's floor (it is not running).
+  const coreMax = (serve: number) => HOST_MIB - RESERVE_MIB - serve - 3072 - FLOORS[SITE]!;
+  assert.equal(memoryMax(dir, CORE).mib, coreMax(6144), "serve's measured 6144 and console's 3072 replace their floors");
+  // Serve grows to 9216 MiB: the next recycle of core gives that headroom back, from measured slack only.
+  writeFileSync(join(serveScope, "memory.peak"), `${9216 * 1048576}\n`);
+  assert.equal(memoryMax(dir, CORE).mib, coreMax(9216));
+  assert.match(memoryMax(dir, CORE).note, new RegExp(`- ${SERVE} 9216 \\(memory\\.peak\\)`));
+  // Serve restarts: its new cgroup's memory.peak starts low, but the learned peak is not forgotten.
+  writeFileSync(join(serveScope, "memory.peak"), `${1024 * 1048576}\n`);
+  assert.equal(memoryMax(dir, CORE).mib, coreMax(9216));
+  assert.equal(policy(dir, `resource_policy_recorded_peak ${SERVE}`), "9216");
+  // A non-numeric memory.peak never corrupts the record or fails the policy.
+  writeFileSync(join(serveScope, "memory.peak"), "max\n");
+  assert.equal(memoryMax(dir, CORE).mib, coreMax(9216));
 });
 
 test("W1-T11130 criterion 2: a container with no learned peak yet counts its policy floor as its peak", (t) => {

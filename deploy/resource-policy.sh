@@ -191,7 +191,8 @@ resource_policy_tuned_high() {
 # memory.max is the host's MemTotal less RMD_HOST_RESERVE_MIB less the sum of the OTHER fleet
 # containers' learned peaks. Any one of them can then reach its limit while the rest sit at their
 # peaks, and the host still holds. The fleet is the RMD_MEMORY_WEIGHTS list. A learned peak is the
-# larger of the cgroup memory.peak recorded in <state>/memory-peak-<container>.json and the learned
+# larger of the cgroup memory.peak recorded in <state>/memory-peak-<container>.json (written by
+# resource_policy_record_peak below, on every call and so every tuner tick) and the learned
 # memory.high in <state>/memory-high-tuned-<container>.json. A container with neither counts its
 # RMD_MEMORY_HIGH_FLOORS entry. Both files are read again at every call, so every recycle and every
 # W1-T4267 drift check sees the current split: a container that grows takes only measured slack.
@@ -203,11 +204,49 @@ resource_policy_tuned_high() {
 # pressure, and each move would read as drift: a recycle, and a lower cap the tuner can never grow
 # back past.
 
+# Where container $1's recorded cgroup memory.peak lives: beside memory-high-tuned-<container>.json.
+resource_policy_peak_file() {
+  local file
+  file="$(resource_policy_tuned_file "$1")" || return 1
+  printf '%s/memory-peak-%s.json' "${file%/*}" "$1"
+}
+
+# THE WRITER of memory-peak-<container>.json (W1-T11130). Reads the running container $1's cgroup
+# memory.peak (the same docker id -> RMD_CGROUP_ROOT scope lookup the tuner uses) and keeps the
+# LARGER of it and what is already recorded, as {"container","peak_mib"}. memory.peak restarts at
+# zero with every new container, so the record is a high-water mark across recycles; deleting the
+# file forgets it. Every call to resource_policy_shared_memory_max records each fleet container
+# first, and deploy/memory-high-tuner.sh reaches it on every healthy tick through its policy read, so
+# the record advances each tick and at every recycle and drift check. Best effort and never fatal:
+# a container that is not running, a cgroup without memory.peak or a state dir that cannot be
+# written leaves the record as it was.
+resource_policy_record_peak() {
+  local container="$1" file id cg raw live old tmp
+  command -v docker >/dev/null 2>&1 || return 0
+  file="$(resource_policy_peak_file "${container}")" || return 0
+  [ -d "${file%/*}" ] || return 0
+  id="$(docker inspect --format '{{.Id}}' "${container}" 2>/dev/null)" || return 0
+  case "${id}" in '' | *[!0-9a-f]*) return 0 ;; esac
+  for cg in "${RMD_CGROUP_ROOT:-/sys/fs/cgroup}/system.slice/docker-${id}.scope" "${RMD_CGROUP_ROOT:-/sys/fs/cgroup}/docker/${id}"; do
+    [ -r "${cg}/memory.peak" ] && break
+    cg=""
+  done
+  [ -n "${cg}" ] || return 0
+  raw="$(cat "${cg}/memory.peak" 2>/dev/null)" || return 0
+  case "${raw}" in '' | *[!0-9]*) return 0 ;; esac
+  live=$((raw / 1048576))
+  [ "${live}" -gt 0 ] || return 0
+  old="$(resource_policy_recorded_peak "${container}")" || old=""
+  [ -z "${old}" ] || [ "${live}" -gt "${old}" ] || return 0
+  tmp="${file}.tmp.$$"
+  printf '{"container":"%s","peak_mib":%s}\n' "${container}" "${live}" > "${tmp}" 2>/dev/null && mv -f "${tmp}" "${file}" 2>/dev/null || rm -f "${tmp}" 2>/dev/null
+  return 0
+}
+
 # The recorded cgroup memory.peak of container $1 in MiB; status 1 when none is readable.
 resource_policy_recorded_peak() {
   local file value
-  file="$(resource_policy_tuned_file "$1")" || return 1
-  file="${file%/*}/memory-peak-$1.json"
+  file="$(resource_policy_peak_file "$1")" || return 1
   [ -r "${file}" ] || return 1
   grep -q "\"container\":\"$1\"" "${file}" 2>/dev/null || return 1
   value="$(sed -n 's/.*"peak_mib":\([0-9][0-9]*\).*/\1/p' "${file}" 2>/dev/null | head -n 1)"
@@ -244,6 +283,8 @@ resource_policy_shared_memory_max() {
     return 1
   fi
   budget=$((total - RMD_HOST_RESERVE_MIB))
+  # Advance every fleet container's recorded memory.peak first, so the sum below is current.
+  for entry in ${RMD_MEMORY_WEIGHTS}; do resource_policy_record_peak "${entry%%=*}"; done
   for entry in ${RMD_MEMORY_WEIGHTS}; do
     name="${entry%%=*}"
     [ "${name}" != "${container}" ] || continue
