@@ -1,0 +1,55 @@
+- id: W1-T11159
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  priority: 2
+  budget_usd: 25
+  risk: high
+  band_meaning: span
+  author_class: machine
+  origin: research:infoq-context-memory-2026-11-02
+  status: queued
+  attempts: 0
+  title: A worker learning lookup binds the selected source and payload while honoring current eligibility
+  plan_refs:
+    - §4E
+    - §8A
+    - W1-T4094
+    - W1-T11115
+  files:
+    - src/lib/learnings.ts
+    - src/lib/wipe-test.ts
+    - src/lib/worker.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/a-worker-can-ask-for-a-rule.test.ts
+    - test/learnings-layers.test.ts
+    - test/wipe-test.test.ts
+  rationale: "OBSERVED at Remudero 1368db581715998e712a80ad6b0db9a87410e63c: computeMatchedLearningsForArm renders selected records but returns selectedIds; runTaskBody passes those IDs plus mutable homes to createWorkerRuleTool. Each lookup reloads the full layered corpus, and lookupWorkerRule finds the first matching ID and returns current fact plus evidence without its own lifecycle filter. Selection filters lifecycle and applicability first. Thus selected user-overall B can resolve to nonselected project A sharing the same slug, even without an edit; a same-ID edit can also replace the selected fact or evidence during a run. These are source-derived falsifiers, not measured live incidents. InfoQ's context/memory/knowledge distinction and LongMemEval's knowledge-update and abstention cases support an explicit consumption contract. Sources: https://www.infoq.com/articles/agentic-ai-context-memory-knowledge/ ; https://arxiv.org/abs/2410.10813v2 ; https://github.com/craigoley/remudero/blob/1368db581715998e712a80ad6b0db9a87410e63c/src/lib/worker.ts#L1390 ; https://github.com/craigoley/remudero/blob/1368db581715998e712a80ad6b0db9a87410e63c/src/lib/wipe-test.ts#L112 . W1-T11115 owns instruction-content outcome attribution; it does not bind the later lookup response or its evidence bytes."
+  design: |-
+    At the existing selection seam preserve a bounded, immutable run-local handle for the actual selected record: source/store and layer identity, slug, and exact fact/evidence payload revision. Carry it through MatchedLearningsResult, runTaskBody's ruleLookup configuration and createWorkerRuleTool, rather than reconstructing the selection from allowedIds. Use the actual selected records/source references; do not require a persisted memory store or migrate legacy corpus YAML. Reuse the canonical content identity from W1-T11115 when available, while remaining independently deliverable and extending identity to the response/evidence fields that attribution does not cover. An absent compatible identity is explicit unbound/unavailable, never invented from today's store.
+    Keep current eligibility separate from content identity. Re-read only the appropriate selected source under existing lifecycle and applicable artifact-validity semantics: a newly superseded, quarantined or contested record, a missing/unreadable source, an invalid global artifact, or an ambiguous source must not be served from a frozen snapshot as eligible. Existing personal-context revocation rules remain separate; do not inject personal context into workers. On content/evidence drift return an explicit bounded unavailable/drift result rather than silently substituting B, changing layers, or borrowing another same-ID record. Unchanged selected A remains readable when unrelated C changes; do not invalidate every lookup by whole-corpus hash or arbitrary age. Preserve unselected-ID refusal, masked-arm nonaccess and the read-only tool surface. Preserve explicit legacy/ad-hoc lookup behavior outside a run-bound contract until a caller audit justifies changing it.
+    Extend the existing knowledge.pulled observation with fixed-schema outcome and nonsecret version metadata, distinguishing exact eligible delivery, drift, ineligible, ambiguity, missing and unreadable states. No raw facts, evidence, prompts, paths, credentials or mutable caller references enter durable telemetry. Delivery is not proof of cognitive use, compliance or benefit. No new model call, retry, worker stop, spending or promotion follows from a refusal. Exercise the actual producer-to-SDK-tool path and existing physical rule, layered-learning and wipe-test suites. Use package import aliases and shared repo-root helpers for new test code; any new standalone file must first use the folder computed by rmd test-place. Do not move or erase prior assertions to simplify coverage.
+  acceptance:
+    - claim: the real selection-to-worker path binds the selected store layer and exact fact and evidence payload
+      proof: "unit test: selected learning lookup preserves the exact selected source and payload revision"
+    - claim: a same-ID cross-layer record, fact-only edit or evidence-only edit cannot silently replace the selected response
+      proof: "unit test: selected learning lookup refuses cross-layer substitution and evidence-only drift"
+    - claim: current lifecycle invalidation and unreadable sources remain unavailable while unrelated edits preserve eligible reads
+      proof: "unit test: selected learning lookup separates live eligibility from content identity"
+    - claim: the tool preserves unselected and masked boundaries and reports private bounded delivery metadata without new authority
+      proof: "unit test: selected learning lookup preserves masking privacy and observational authority"
+  falsifier: Select user-overall B whose slug also names a nonmatching project A; invoking the actual tool must not return A. Independently select A, change only its evidence or fact, and prove a bare-ID or fact-only pin fails the corresponding test. Quarantine A after selection and prove snapshot-only eligibility fails; change unrelated C and prove a whole-corpus refusal fails the healthy control. Exercise unselected and masked requests and sensitive sentinels. Delete each isolated fix, retain failing summaries, restore it and require the verified physical suites to pass. No live drift rate or causal improvement is claimed.
+  note: Operator authorized research, canonical plan updates and task filing. This record does not authorize immediate product execution, a paid experiment, a new scheduler or memory database, increased allowances, worker stops or retries, rule promotion, service mutation, release or hold changes. Preserve normal task admission, capacity, source ownership, proof, review and merge gates; preserve failed and unknown evidence. This is planning custody, not implementation, live adoption or measured benefit.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The filed design bounds the remedy to selected-source and payload identity, preserves current eligibility and read-only lookup boundaries, and specifies producer-to-tool acceptance tests."
+      - "The record explicitly preserves admission, capacity, review and merge gates and excludes permission expansion, service mutation, spending, retries and worker stops."
+      - "The supplied filing-time gates show no concerning condition; this judgment assesses the stated scope, not an unseen implementation or verified test results."
+    judged_at: "2026-11-02T22:51:17.806Z"
+    pin: "1247ffa7c2b8e0f9592d98dd6ad2e24552b7410beb468adc5474ad890e826984"

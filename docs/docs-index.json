@@ -200,6 +200,12 @@
       "grepHint": "Dependency reuse observations"
     },
     {
+      "path": "docs/dependency-seed-command-reuse.md",
+      "title": "Immutable command reuse and owner cleanup",
+      "summary": "Commands that use an existing dependency generation can repeat `prime CHECKOUT`.",
+      "grepHint": "Immutable command reuse and owner cleanup"
+    },
+    {
       "path": "docs/deploy-image-forensics.md",
       "title": "Deploy image forensics: the measured record behind `deploy/Dockerfile`",
       "summary": "Every incident, measurement and rejected alternative that `deploy/Dockerfile` used to carry inline,",
