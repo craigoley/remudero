@@ -174,6 +174,28 @@ test("partial worker token evidence is visible as partial and never projected as
   assert.equal(group.executionEvidence.attemptRows[0]!.inputTokens, null);
 });
 
+test("unavailable token usage needs a bounded reason and is otherwise rejected as invalid evidence", () => {
+  const withTokenUsage = (id: string, tokenUsage: unknown) => {
+    const row = run(id);
+    const evidence = executionEvidence(row.attempts[0]!.id);
+    (evidence.execution as unknown as { tokenUsage: unknown }).tokenUsage = tokenUsage;
+    row.attempts[0]!.executionEvidence = evidence;
+    return projectCanaryRuns([row]).groups[0]!.executionEvidence;
+  };
+  const reasoned = withTokenUsage("token-unavailable-reasoned", unavailable("provider-reported-no-usage"));
+  assert.equal(reasoned.observed, 1);
+  assert.equal(reasoned.invalid, 0);
+  for (const [id, malformed] of [
+    ["token-unavailable-no-reason", { state: "unavailable" }],
+    ["token-unavailable-empty-reason", { state: "unavailable", reason: "" }],
+    ["token-unavailable-long-reason", { state: "unavailable", reason: "r".repeat(100_000) }],
+  ] as const) {
+    const projected = withTokenUsage(id, malformed);
+    assert.equal(projected.observed, 0, id);
+    assert.equal(projected.invalid, 1, id);
+  }
+});
+
 test("unknown provider identity remains unavailable in cash accounting denominators", () => {
   const cash = run("known-cash"), unknownProvider = run("unknown-provider");
   cash.attempts[0]!.executionEvidence = executionEvidence(cash.attempts[0]!.id);
