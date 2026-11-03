@@ -15,6 +15,41 @@ Recon only. This report changes no code, configuration or ledger. Any change it 
   - Issue timelines (`reviewed` and `review_dismissed` events) for the 10 PRs whose sweep rows named a CHANGES_REQUESTED review.
   - Close times of the 45 needs-human escalation issues found at a queue head.
 
+## Corpus manifest
+
+W1-T10992 criterion 1 (amended in #16494) asks for a manifest instead of the original ledger files: compaction prunes the live file and rotates archives, so no later reader can reopen the exact corpus. The counts below were **re-read on 2026-11-03 from the surviving core ledger union**, read-only and niced, over the same window. Rows were deduplicated on step, ts, PR and head, as the original run did.
+
+- **Window:** 2026-10-26T22:10Z to 2026-11-02T22:10:43.010Z.
+- **Newest ledger ts read inside the window:** 2026-11-02T22:10:43.010Z, identical to the original run's.
+- **Files opened per form:**
+
+  | Form | Opened | Holding window rows | Original run |
+  |---|---|---|---|
+  | rotated `ledger.<ts>.ndjson.gz` (`ledger.2026-10-26T01-17-12-319Z` to `ledger.2026-11-03T17-53-57-551Z`) | 343 | 248 | 279 |
+  | live `ledger.ndjson` | 1 | 0 | 1 |
+
+  The difference is expected. The original run read the window's tail from the then-live file, which has since rotated into archives named after the window ended. So this re-read opens later archives too, and the live file now holds no window rows.
+
+- **Rows per step read, in the window:**
+
+  | Step | Rows |
+  |---|---|
+  | `sweep.review_refilled` | 301 |
+  | `sweep.review_eligible` | 1,362 |
+  | `sweep.review_admitted` | 1,303 |
+  | `sweep.disposed` | 20,101 |
+  | `review.capacity` | 1,156 |
+  | `review.posted` | 1,311 |
+  | `review.post_refused` | 81 |
+  | `escalation.issue_opened` | 736 |
+  | `escalation.superseded` | 308 |
+  | `escalation.demoted` | 3 |
+  | `pr.terminal` | 905 |
+
+- **Positive controls:**
+  - `sweep.review_refilled` re-reads at 301, the same count section 1 is built on, so the union still covers the window.
+  - The #15538 control of section 3 reproduces from these rows: refills of #15543 at 20:03:14.376Z (snapshot_age_ms 611,788), #15551 at 20:08:59.651Z (957,451) and #15553 at 20:11:52.973Z (1,126,151).
+
 ## How admission works (for reading the numbers)
 
 - **The bound.** A light pass admits reviews under `reviewAdmissionBound(width)`, which is `width` minus the reviews in flight (`src/lib/sweep.ts:23741`). Reviews in flight are light reservations, full-pass reviews and review children. Plan-filing children count too, because every full review is registered as `kind: "review"` (`src/lib/sweep.ts:3129`).
