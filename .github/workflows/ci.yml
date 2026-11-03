@@ -55,7 +55,8 @@ permissions:
 # W1-T4406: ONE FLAG — the pull_request-time switch design note (iv) calls for, so flipping it (or
 # reverting it) is a one-line, one-PR change. "0" until the W1-T4404 shadow record shows two weeks
 # with no missed real failure: every existing pull_request behavior below stays byte-for-byte
-# unchanged while it reads "0" (see the `ci` job's Test step, the one reader of this flag).
+# unchanged while it reads "0". W1-T5705/W1-T5930: only the coverage lane reads it; `ci`'s Test
+# step does not, so a SOURCE pull request keeps one instrumented test verdict at either value.
 env:
   RMD_AFFECTED_SUITE_LIVE: "0"
 
@@ -354,34 +355,15 @@ jobs:
             cp merge-group-suites.txt affected-suites-selected.txt
             CLASS="AFFECTED"
           fi
-          # W1-T4406: ONE FLAG (this workflow's own top-level env; default "0"). Until the W1-T4404
-          # shadow record earns the flip, this block never fires and a pull_request SOURCE diff
-          # takes the unchanged W1-T3207 skip below, byte-for-byte. Flipped to "1", it runs the
-          # live W1-T4404 selector (src/lib/affected-suites.ts — the SAME pure function `rmd
-          # preflight` shares) instead of deferring to coverage-ratchet, which is the mechanism
-          # that actually moves the run off every PR push. A fullRun verdict (a config, lockfile,
-          # workflow or test-helper change the selector does not model) leaves CLASS untouched, so
-          # it falls through to the ordinary full fast tier below, unmodified.
-          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ]; then
-            node --import tsx -e '
-              import { readFileSync, writeFileSync } from "node:fs";
-              const root = process.env.GITHUB_WORKSPACE || process.cwd();
-              const changed = readFileSync(process.argv[1], "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
-              const mod = await import(root + "/src/lib/affected-suites.ts");
-              const sel = mod.affectedSelectionOrFull(changed, () => mod.readAffectedSuitesInput(root, changed));
-              writeFileSync(process.argv[2], sel.fullRun ? "full\n" : sel.suites.map((s) => s + "\n").join(""));
-              console.log("W1-T4406: live selection for " + changed.length + " changed file(s) -> " + (sel.fullRun ? "FULL: " + sel.reasons[0] : sel.suites.length + " suite(s)"));
-            ' changed-files.txt affected-suites-selected.txt || echo "full" > affected-suites-selected.txt
-            if [ "$(head -n 1 affected-suites-selected.txt 2>/dev/null || true)" != "full" ]; then
-              CLASS="AFFECTED"
-            fi
-          fi
+          # W1-T5930: ONE TEST VERDICT. RMD_AFFECTED_SUITE_LIVE narrows coverage-shard (W1-T5705), the
+          # instrumented owner of a SOURCE pull request's test verdict; this step no longer reads it, so
+          # a SOURCE pull request takes the W1-T3207 skip below at either flag value.
           if [ "$CLASS" != "SOURCE" ]; then
             COUNT=0
             if [ "$CLASS" = "TEST_ONLY" ]; then
               SUITES="$(tail -n +2 test-only-run.txt)"
             elif [ "$CLASS" = "AFFECTED" ]; then
-              # W1-T4406: the live selector's own suite list, run through the exact same
+              # W1-T5940: the merge group's own suite list, run through the exact same
               # duration-balanced candidate-shard machinery the plan-reading lane below uses.
               SUITES="$(cat affected-suites-selected.txt 2>/dev/null || true)"
             else
@@ -422,9 +404,9 @@ jobs:
           # names the tokens; this comment must not, because a comment inside a run body IS part of
           # the body the census reads.) It was briefly written as two adjacent string literals to
           # dodge the census by text, which is what prompted narrowing the rule instead.
-          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" != "1" ]; then
-            echo "W1-T3207: coverage-ratchet owns the single instrumented full-suite run; ci skips the quieter second harness on PR source diffs."
-            echo "- W1-T3207: skipped the quieter ci test harness on SOURCE; coverage-ratchet owns the single instrumented full-suite run for this PR." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ]; then
+            echo "W1-T3207: coverage-ratchet owns the single instrumented test verdict; ci skips the quieter second harness on PR source diffs."
+            echo "- W1-T3207: skipped the quieter ci test harness on SOURCE; coverage-ratchet owns the single instrumented test verdict for this PR." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ "$CLASS" = "SOURCE" ]; then
