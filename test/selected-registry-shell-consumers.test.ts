@@ -359,7 +359,7 @@ test("selected shell qualification preserves mixed version legacy effects: a hea
   writeFileSync(registry, "instances:\n  core:\n    github_repo: craigoley/remudero\n    mode: shadow\n", { mode: 0o600 });
   mkdirSync(bin);
   writeFileSync(join(bin, "node"), `#!/bin/sh\nsleep 6\nexec '${process.execPath.replaceAll("'", "'\\''")}' "$@"\n`, { mode: 0o700 });
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, RMD_INSTANCE_REGISTRY: registry };
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, RMD_INSTANCE_REGISTRY: registry };
   delete env.RMD_REGISTRY_SHADOW_DEADLINE_S;
   const shadow = spawnSync("bash", ["-c", '. "$1"; registry_shadow_start --selected-registry-shadow "$2"; ' +
     'registry_shadow_observe field-trials core craigoley/remudero host', "_", join(REPO_ROOT, "deploy/registry-shadow.sh"), session],
