@@ -6472,8 +6472,71 @@ export interface components {
       /** Present on `plan_source_unavailable`: the outcome that refused the read, with its bounded failure reason. */
       planSource?: PlanSource;
     };
+    EscalationConversation: {
+      version: 1;
+      issueUrl: string;
+      repository: string;
+      identity: {
+        taskId: string;
+        class: "BLOCKED" | "MANUAL" | "HARD_STOP" | "GRILL";
+        cause?: "review" | "ci" | "conflict" | "stage-stall";
+        prRef?: string;
+      };
+      threadId: string;
+      revision: string;
+      headline: string;
+      whatHappened: string;
+      recommendation: string;
+      options: ({
+        label: string;
+        detail: string;
+        executable: false;
+      })[];
+      source: {
+        state: "current" | "stale";
+        observedAt: string;
+        updatedAt: string;
+        revision: string;
+      };
+      history: "verified" | "absent" | "unavailable" | "partial";
+      /** Correspondence state, separate from work completion. Archived requires an explicit agent message with question false after an operator reply. A later agent question reopens the conversation. */
+      attention: "needs_input" | "waiting_for_agent" | "archived" | "unknown";
+      messages: ({
+        seq: number;
+        from: "operator" | "daemon";
+        text: string;
+        ts: number;
+        intentId?: string;
+        sourceImported?: true;
+      })[];
+      canReply: boolean;
+      /** True only for a current native source with positively observed absent history and unambiguous native identity. Starting is an explicit bound write; reads never create messages. */
+      canStartConversation: boolean;
+      /** Verified original source text copied only when the operator explicitly starts this conversation. Earlier GitHub comments are not included. */
+      initialMessage?: string;
+      /** Native acceptance or decline text for recording an operator answer through the bound reply route. These are input, never task approval or repair execution. */
+      recommendationReplies?: {
+        accept?: string;
+        decline: string;
+      };
+      replyUnavailableReason?: string;
+      details: string;
+    };
+    EscalationConversationRead: {
+      state: "served";
+      conversation: EscalationConversation;
+    };
+    EscalationConversationUnavailable: {
+      state: "unavailable";
+      reason: "invalid_request" | "wrong_repository" | "source_unavailable" | "invalid_source";
+      detail: string;
+    };
     /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */
     EscalationReplyRequest: {
+      /** Opt in to recording the verified original issue body and first answer in the native store. Requires the current canStartConversation capability and all reply binding fields. */
+      startConversation?: true;
+      /** Record acceptance or decline as the exact currently advertised recommendation reply. This records an answer and grants no task approval or execution. */
+      recommendationResponse?: "accept" | "decline";
       taskId: string;
       class: string;
       cause?: string;
@@ -6481,6 +6544,10 @@ export interface components {
       prRef?: string;
       /** The prose reply; must be non-blank. */
       text: string;
+      /** Native issue URL; required together with expectedRevision and intentId for a bound reply. */
+      issueUrl?: string;
+      expectedRevision?: string;
+      intentId?: string;
     };
     /** One clarification the reply interpreter asks (src/lib/reply-interpreter.ts's `ClarifyingQuestion`). */
     ClarifyingQuestion: {
@@ -6500,8 +6567,19 @@ export interface components {
       ok: boolean;
       taskId: string;
       threadId: string;
-      feedback: FeedbackEntry;
-      interpretation: ReplyInterpretation;
+      /** Present on a bound reply once its answer is durably stored. Does not establish fleet work. */
+      saved?: {
+        intentId: string;
+        seq: number;
+        /** The exact saved reply */
+        text: string;
+      };
+      inputDelivery?: "recorded" | "unverified";
+      work?: "not_observed";
+      duplicate?: boolean;
+      detail?: string;
+      feedback?: FeedbackEntry;
+      interpretation?: ReplyInterpretation;
       /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
       landing?: "queued";
     };
@@ -8544,6 +8622,19 @@ export interface paths {
         };
     };
   };
+  "/v1/escalation/thread": {
+    get: {
+      responses: {
+          "200": EscalationConversationRead;
+          "400": EscalationConversationUnavailable;
+          "401": Error;
+          "403": Error;
+          "404": EscalationConversationUnavailable;
+          "422": EscalationConversationUnavailable;
+          "503": EscalationConversationUnavailable;
+        };
+    };
+  };
   "/v1/escalation/reply": {
     post: {
       responses: {
@@ -8551,6 +8642,8 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+          "409": Error;
+          "503": Error;
         };
     };
   };

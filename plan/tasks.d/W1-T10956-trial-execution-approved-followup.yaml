@@ -28,6 +28,7 @@
     - src/lib/benchmark-run.ts
     - src/cli/commands/run-task-verb.ts
     - test/benchmark-nondispatch-attempts.test.ts
+    - test/every-routing-decision-records-why.test.ts
   status: queued
   priority: 2
   attempts: 0
@@ -63,6 +64,10 @@
     not require a duplicate manual Azure full-suite invocation. Retain every required proof and
     identify a specific evidence gap before adding a targeted run. Keep runtime-version
     provenance explicit; a Node24 result is not a Node22 test result.
+    Native author reconciliation on 2026-11-02 reproduced a routing fixture's environment-sensitive
+    fallback assertion on the unchanged source base. Include that existing fixture to give its
+    mocked spawn an explicit environment, while retaining production routing and real unknown
+    billing evidence for legacy results without environment metadata.
   acceptance:
     - claim: attempt metrics join actual execution and measured identity without substituting router
         selection for provider evidence

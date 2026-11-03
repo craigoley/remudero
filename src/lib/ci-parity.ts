@@ -22,6 +22,7 @@ import { shortPathWhenTooLong } from "./short-path-root.js";
 import { acquireTestSlot, lowPriorityCommand, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 const require = createRequire(import.meta.url);
 
@@ -3440,7 +3441,28 @@ function withoutNodeTestContext<T>(fn: () => T): T {
  * tree, with the SAME exit reading (0 pass, 2 "could not measure" not blocking, anything else
  * refuses). Exit 2 is reported as UNMEASURED by name so it never reads as a measured pass.
  */
+export const AUTHOR_CENSUS_ANSWERED_ENV = "RMD_AUTHOR_CENSUS_ANSWERED";
+
+export function authorCensusAnswer(value: string | undefined, head: string | undefined): { sha: string; outcome: string } | undefined {
+  const answer = /^([0-9a-f]{40}):(ok|time-bound)$/.exec(value ?? "");
+  return answer && answer[1] === head ? { sha: answer[1], outcome: answer[2]! } : undefined;
+}
+
+function censusAnswerHead(repoRoot: string): { head: string } | { unreadable: string } {
+  try {
+    return { head: hostWorktreeGit(repoRoot, ["rev-parse", "HEAD"]).trim() };
+  } catch (error) {
+    return { unreadable: String((error as Error)?.message ?? error) };
+  }
+}
+
 function censusPrecheckLeaf(repoRoot: string, spawn: PreflightSpawn): CiParityLeafResult {
+  const recorded = process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+  const head = recorded ? censusAnswerHead(repoRoot) : undefined;
+  const answered = authorCensusAnswer(recorded, head && "head" in head ? head.head : undefined);
+  if (answered) {
+    return { ok: true, detail: `PASS — census-precheck answered by the author preflight's census-precheck step at ${answered.sha} (${answered.outcome}); not run again` };
+  }
   const label = "node scripts/census-precheck.mjs --base origin/main";
   const args = ["scripts/census-precheck.mjs", "--base", "origin/main"];
   const res = withoutNodeTestContext(() => spawn(process.execPath, args, { cwd: repoRoot }));
