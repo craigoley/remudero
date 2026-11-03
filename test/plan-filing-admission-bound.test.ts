@@ -12,6 +12,7 @@ import {
 } from "#src/lib/open-prs-rest.js";
 import {
   DEFAULT_SWEEP_POLICY,
+  derivePlanLaneBound,
   oldestActivityFirst,
   reviewAdmissionKey,
   selectReviewAdmission,
@@ -84,11 +85,13 @@ test("W1-T2439 (acceptance 2): the non-spawning lane admits more than one plan f
   assert.deepEqual(planFilings.map((p) => p.prNumber), [10, 11, 12], "and oldest-first by the immutable key");
 });
 
-test("W1-T11148: the cheap lane admits every eligible filing in one pass, oldest first", () => {
+test("W1-T2439/W1-T11148: the cheap lane is BOUNDED by its derived width — a deeper queue is truncated, oldest first", () => {
   const q = [14, 12, 10, 13, 11].map((n) => filing(n, `2026-08-0${n - 9}T00:00:00Z`));
-  const { planFilings } = selectReviewAdmissions(q, DEFAULT_SWEEP_POLICY, NOW);
-  assert.deepEqual(planFilings.map((p) => p.prNumber), [10, 11, 12, 13, 14],
-    "each head is admitted once by its outcome key, so the queue itself bounds the lane");
+  const { planFilings } = selectReviewAdmissions(q, DEFAULT_SWEEP_POLICY, NOW, undefined, undefined, 2);
+  assert.deepEqual(planFilings.map((p) => p.prNumber), [10, 11], "the OLDEST two at a derived width of two");
+  const cold = selectReviewAdmissions(q, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(cold.planFilings.length, Math.min(q.length, derivePlanLaneBound(undefined, DEFAULT_SWEEP_POLICY, 0).bound),
+    "with no reading the default width is derived, never unbounded");
 });
 
 // ── acceptance 3: the spawning lane uses the configured review budget ───────────────────────
@@ -176,10 +179,15 @@ test("W1-T2439 (acceptance 6): W1-T528's shared comparator is untouched", () => 
 
 // ── acceptance 7 & 8: no lane unbounded, no bound raised, nothing paces ─────────────────────
 
-test("W1-T2439 (acceptance 7): no existing bound is raised (W1-T11148 replaced the plan-filing count with the queue)", () => {
+test("W1-T2439 (acceptance 7): no lane is unbounded and no existing bound is raised", () => {
   assert.equal(DEFAULT_SWEEP_POLICY.repeatDispositionBound, 50, "the repeat bound is untouched");
   assert.equal(DEFAULT_SWEEP_POLICY.strikeCap, 2, "the strike cap is untouched");
-  assert.ok(!("planFilingAdmissionBound" in DEFAULT_SWEEP_POLICY), "the literal count is gone, not left beside the queue");
+  assert.ok(!("planFilingAdmissionBound" in DEFAULT_SWEEP_POLICY), "W1-T11148: the literal count is replaced by a derived one");
+  const q = [filing(70, "2026-08-01T00:00:00Z"), filing(71, "2026-08-02T00:00:00Z")];
+  const zero = selectReviewAdmissions(q, DEFAULT_SWEEP_POLICY, NOW, undefined, undefined, 0);
+  assert.equal(zero.planFilings.length, 0, "a derived width of 0 admits none — never all");
+  const neg = selectReviewAdmissions(q, DEFAULT_SWEEP_POLICY, NOW, undefined, undefined, -5);
+  assert.equal(neg.planFilings.length, 0, "a negative width clamps to none, never to unbounded");
 });
 
 test("W1-T2439 (acceptance 8): nothing added paces, sleeps, or arms auto-merge earlier", () => {

@@ -26,7 +26,9 @@ import {
   runSweep,
   runSweepLightPass,
   withFullSweepRepairAdmission,
+  derivePlanLaneBound,
   type OpenPrView,
+  type PlanLaneCapacityReading,
   type SweepDeps,
   type SweepPolicy,
 } from "#test/helpers/sweep-test.js";
@@ -171,19 +173,81 @@ test("W1-T11148 criterion 3: an unread classification whose head diff is plan-on
   }
 });
 
-test("W1-T11148 criterion 5: the plan-filing count is gone and a pass admits every eligible plan review", async () => {
-  assert.ok(!("planFilingAdmissionBound" in DEFAULT_SWEEP_POLICY), "no literal count survives beside the queue");
+const reading = (availableMib: number, pressure: { memoryPsiSomePct?: number; cpuPsiFullPct?: number } = {},
+  samples = 12): PlanLaneCapacityReading => ({ headroom: { availableMib, floorMib: 1000 }, unit: { estimateMib: 1500, samples }, ...pressure });
+const boundRows = (deps: SweepDeps): Record<string, unknown>[] =>
+  readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.plan_lane_bound");
+
+test("W1-T11148 criterion 5: the plan lane is bounded by measured headroom over the learned review cost, and shrinks under pressure", async () => {
+  assert.ok(!("planFilingAdmissionBound" in DEFAULT_SWEEP_POLICY), "no literal count survives beside the derived one");
   assert.ok(Number.isInteger(PLAN_FILING_FILE_MISS_CAP) && PLAN_FILING_FILE_MISS_CAP > 0,
     "the files-read miss cap it doubled as keeps a value under its own name");
-  const filings = [9431, 9432, 9433, 9434, 9435];
+  // 10,000 MiB available less the 1,000 MiB floor, over a learned 1,500 MiB review: six slots.
+  assert.equal(derivePlanLaneBound(reading(10_000), DEFAULT_SWEEP_POLICY, 0).bound, 6);
+  assert.equal(derivePlanLaneBound(reading(10_000, { cpuPsiFullPct: 50 }), DEFAULT_SWEEP_POLICY, 0).bound, 3, "CPU stalls shrink it");
+  assert.equal(derivePlanLaneBound(reading(10_000, { memoryPsiSomePct: 50 }), DEFAULT_SWEEP_POLICY, 2).available, 1, "memory stalls too");
+  assert.equal(derivePlanLaneBound(reading(10_000, { memoryPsiSomePct: 100 }), DEFAULT_SWEEP_POLICY, 0).tier, "short-progress-one",
+    "with nothing in flight the lane still admits one, so it never wedges");
+  assert.equal(derivePlanLaneBound(reading(1_500), DEFAULT_SWEEP_POLICY, 1).available, 0, "short with one running: none more");
+
+  const filings = [9431, 9432, 9433, 9434, 9435, 9436, 9437, 9438];
   const h = harness([9430, ...filings]);
+  let current = reading(10_000);
+  h.deps.readPlanLaneCapacity = () => current;
   try {
     await runSweepLightPass([eligible(9430), ...filings.map(planFiling)], h.deps, ONE_LANE);
     await settle();
-    assert.deepEqual([...h.started].sort(), [9430, ...filings], "five plan filings start in one pass beside the code review");
-    assert.ok(filings.every((n) => standDown(h.deps, n) === undefined), "none stands down on a count");
+    const admitted = filings.filter((n) => h.started.includes(n));
+    assert.equal(admitted.length, 6, "more than three when headroom allows, and no more than the derived six");
+    assert.deepEqual(admitted, filings.slice(2), "oldest first (a higher number was opened earlier here)");
+    assert.equal(standDown(h.deps, 9432), "not admitted this pass: plan-lane bound 6, in-flight 0");
+    const [row] = boundRows(h.deps);
+    assert.equal(row?.bound, 6);
+    assert.equal(row?.headroom_mib, 9000);
+    assert.equal(row?.unit_mib, 1500);
+    assert.equal(row?.unit_source, "learned");
+    assert.equal(row?.tier, "fits");
+    // The six run in process: the next pass counts them, so in-process mode is bounded too.
+    await runSweepLightPass([planFiling(9432), planFiling(9431)], h.deps, ONE_LANE);
+    assert.equal(h.started.includes(9432), false, "six in flight fill the derived bound");
+    assert.equal(standDown(h.deps, 9432), "not admitted this pass: plan-lane bound 6, in-flight 6");
+    // Pressure shrinks it below what is running, and relief restores it.
+    current = reading(10_000, { cpuPsiFullPct: 50 });
+    await runSweepLightPass([planFiling(9431)], h.deps, ONE_LANE);
+    assert.equal(boundRows(h.deps).at(-1)?.tier, "pressure-shrunk");
+    assert.equal(boundRows(h.deps).at(-1)?.bound, 3);
+    assert.equal(h.started.includes(9431), false);
   } finally {
     h.releaseAll();
+    await settle();
+  }
+  current = reading(10_000);
+  await runSweepLightPass([planFiling(9431)], h.deps, ONE_LANE);
+  await settle();
+  assert.equal(h.started.includes(9431), true, "once the running reviews settle and pressure relieves, it admits again");
+  // Cold start: no learned samples is the prior, said so on the row; no reading at all derives from the review width.
+  const cold = harness();
+  cold.deps.readPlanLaneCapacity = () => reading(10_000, {}, 0);
+  await runSweepLightPass([planFiling(9441)], cold.deps, ONE_LANE);
+  assert.equal(boundRows(cold.deps)[0]?.unit_source, "prior");
+  const none = harness();
+  await runSweepLightPass([planFiling(9451), planFiling(9452)], none.deps, ONE_LANE);
+  await settle();
+  assert.equal(boundRows(none.deps)[0]?.basis, "review-width");
+  assert.equal(boundRows(none.deps)[0]?.bound, ONE_LANE.reviewLanes);
+  assert.deepEqual(none.started, [9452], "a cold start with nothing read admits the configured width, never all");
+  // The full pass's plan pool reads the same derived bound: 2,500 MiB less the floor holds one 1,500 MiB review.
+  const full = harness([9463]);
+  full.deps.readPlanLaneCapacity = () => reading(2_500);
+  try {
+    const pass = runSweep([planFiling(9461), planFiling(9462), planFiling(9463)], withFullSweepRepairAdmission(full.deps), ONE_LANE);
+    await settle();
+    assert.deepEqual(full.started, [9463], "one plan review at a derived bound of one");
+    full.releaseAll();
+    await pass;
+    assert.equal(standDown(full.deps, 9461), "not admitted this pass: plan-lane bound 1, in-flight 0");
+  } finally {
+    full.releaseAll();
     await settle();
   }
 });
