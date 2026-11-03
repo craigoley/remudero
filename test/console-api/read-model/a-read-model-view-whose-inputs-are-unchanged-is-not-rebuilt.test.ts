@@ -110,8 +110,8 @@ test("test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-i
   const refreshed = f.messages.flatMap(m => m.type === "sources" ? m.bodies ?? [] : []).at(-1);
   assert.ok(refreshed);
   assert.deepEqual(refreshed.sources.map(s => [s.name, s.asOf, s.state, s.lagMs]), [
-    ["ledger:core", null, "fresh", 0], ["ledger:console", null, "fresh", 0],
-  ], "sources are restamped at the latest projector check, retaining the declared read-as-of");
+    ["ledger:core", "2026-11-02T12:00:05.100Z", "fresh", 0], ["ledger:console", "2026-11-02T12:00:00.000Z", "fresh", 0],
+  ], "sources are restamped at the latest projector check, each as of its projector head");
   f.tick(600_000);
   const row = f.messages.find(m => m.type === "log" && m.step === "read_model.view_builds" && m.extra.view === "read-model");
   assert.ok(row?.type === "log");
