@@ -198,6 +198,8 @@ import {
   proofSandboxStatus,
   postedArmFactsFromLedger,
   REVIEW_CONTEXT,
+  recordedLoad1,
+  sampleHostLoad,
   reviewLedgerKeyFor,
   reviewTaskNarrative,
   UNFILED_RUN_SENTINEL,
@@ -209,6 +211,7 @@ import type {
   ArmDecision,
   AutomergeHold,
   CriterionVerdict,
+  HostLoadSample,
   PlanCriteriaAtHeadResult,
   ProofExecutor,
   ProofSkipReason,
@@ -7031,7 +7034,7 @@ export interface OpenPrView {
    *  dead, which keep {@link reviewPendingIsStale}'s timeout behaviour. Only the real gateway sets
    *  this, from the durable pending ledger row. */
   reviewPendingOwnerDead?: boolean;
-  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete";
+  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load";
   reviewPendingOwnerGoneReason?: string;
   /** W1-T2299 — when the current `reviewState` reading was posted, read off the same rollup entry
    *  already scanned. NOT A BODY-EDIT TIMESTAMP, and must never be documented as one: GitHub
@@ -11783,6 +11786,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           if (pr.reviewPendingOwnerGone === "refused-after-pending") {
             return `checks green, the pending review's post was refused after it began (${pr.reviewPendingOwnerGoneReason}) — re-running the review lane on #${pr.prNumber}`;
           }
+          if (pr.reviewPendingOwnerGone === "inconclusive-load") {
+            return `checks green, its proof was inconclusive under host load and the host is quieter now — re-running the review lane on #${pr.prNumber}`;
+          }
           if (pr.reviewPendingOwnerGone === "promise-harvest-incomplete") {
             return `checks green, its promise harvest did not complete — re-running the review lane on #${pr.prNumber}`;
           }
@@ -14712,10 +14718,44 @@ function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray
     /^promise harvest (?:unavailable:|corpus is unreadable)/.test(observation.reason));
 }
 
-function promiseHarvestRetryView(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): OpenPrView {
+/** W1-T11132: a head re-reviewed for an `inconclusive_load` proof at most this many times, so a proof that keeps
+ *  timing out as the host quietens cannot be re-run forever. */
+export const INCONCLUSIVE_LOAD_MAX_RERUNS = 3;
+
+/** W1-T11132 criterion 2. True when the head's latest review is pending for NO cause but `inconclusive_load` proofs and
+ *  this pass's own host load sample is strictly below the load the proof failed under (read from the recorded load,
+ *  no fixed threshold). An unreadable sample or recording compares as "not lower": no retry on a guess. */
+export function inconclusiveLoadLowered(
+  pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample,
+): boolean {
+  if (pr.reviewState !== "pending") return false;
+  const taskId = reviewOutcomeTaskIdFor(pr);
+  const rows = lines.filter(row => row.task_id === taskId && row.pr_url === pr.prUrl && row.head_sha === pr.headSha &&
+    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+  const row = rows.at(-1);
+  if (row?.step !== "review.posted" || row.state !== "pending") return false;
+  if (row.review_input_digest !== undefined && pr.reviewInputDigest !== undefined && row.review_input_digest !== pr.reviewInputDigest) return false;
+  if (pr.reviewPendingSince && typeof row.ts === "string" && Date.parse(pr.reviewPendingSince) > Date.parse(row.ts)) return false;
+  const verdict = row.decision_verdict as ReviewVerdict | undefined;
+  const inconclusive = verdict?.criteria?.filter(criterion => criterion.proof_exec === "inconclusive_load") ?? [];
+  if (inconclusive.length === 0 || verdict?.cannotEvaluate === true || verdict?.promisedFollowUpObservation?.state === "unknown") return false;
+  const priorRuns = rows.filter(r => r.step === "review.posted" && r.state === "pending" &&
+    ((r.decision_verdict as ReviewVerdict | undefined)?.criteria ?? []).some(c => c.proof_exec === "inconclusive_load")).length;
+  if (priorRuns > INCONCLUSIVE_LOAD_MAX_RERUNS) return false;
+  const recorded = inconclusive.map(criterion => recordedLoad1(criterion.load)).filter((n): n is number => n !== undefined);
+  if (recorded.length !== inconclusive.length) return false;
+  const now = sample().load1;
+  return now !== undefined && now < Math.max(...recorded);
+}
+
+function promiseHarvestRetryView(
+  pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample = sampleHostLoad,
+): OpenPrView {
   // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
   return incompletePromiseHarvestFromLedger(pr, lines)
     ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "promise-harvest-incomplete" }
+    : inconclusiveLoadLowered(pr, lines, sample)
+    ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "inconclusive-load" }
     : pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerGone === undefined
       ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
 }
@@ -23271,6 +23311,7 @@ export async function runSweep(
       host_gap_rereview: hostGapSkips !== undefined,
       ...(hostGapSkips === undefined ? {} : { skips: [...hostGapSkips] }),
       ...(incompletePromiseHarvestFromLedger(job.pr, ledgerLines) ? { prior_cause: "promise-harvest-incomplete" } : {}),
+      ...(job.pr.reviewPendingOwnerGone === "inconclusive-load" ? { prior_cause: "inconclusive-load" } : {}),
       surface: deps.repairAdmissionSurface ?? "full",
       observation_version: 1,
     });

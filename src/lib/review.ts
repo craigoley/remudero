@@ -344,17 +344,65 @@ export type ProofSkipReason =
  * shard declares (W1-T456, plus the `grep:` extension W1-T2737 that `callSiteViolations` mandates). `stale_self_path`
  * (W1-T1071) alone REFUSES, forcing `met` false, and only when {@link ProofExecContext.forwardReferenceFiles} names a
  * path other than the proof's own target. TRAP: `workerKeychainPaths` matched two unrelated hits on the pre-work
- * commit and scored substantiated anyway (W1-T267). Per-outcome rationale: docs/forensics/review.md#second-pass-2026-09-06. */
+ * commit and scored substantiated anyway (W1-T267). `inconclusive_load` (W1-T11132) is a `unit test:` proof whose run
+ * ended by a timeout, a signal or an exec_error, or that failed while hosted CI passed the same file at this head: it
+ * concluded nothing about the criterion, is never `met` and never an unmet criterion, and holds the verdict PENDING
+ * until a re-review at lower host load. Per-outcome rationale: docs/forensics/review.md#second-pass-2026-09-06. */
 export type ProofExecOutcome =
   | "executed_pass"
   | "executed_fail"
   | "not_executable"
   | "exec_error"
   | "cannot_evaluate"
+  | "inconclusive_load"
   | "executed_stale"
   | "base_unreadable"
   | "not_yet_built"
   | "stale_self_path";
+
+/** One host-load reading (W1-T11132): the 1-minute `/proc/loadavg` and the cgroup's CPU PSI `some avg10`. A field the
+ *  host does not expose is ABSENT, never 0 — "measured idle" and "never measured" are different facts. */
+export interface HostLoadSample {
+  load1?: number;
+  cpuPsiSomeAvg10Pct?: number;
+}
+
+/** The host load at a proof's start and end, recorded on its {@link CriterionVerdict} (W1-T11132). */
+export interface ProofLoadRecord {
+  start: HostLoadSample;
+  end: HostLoadSample;
+}
+
+/** Read the host load now. `read` is the file-reading seam. An unreadable or malformed source leaves its field absent. */
+export function sampleHostLoad(read: (path: string) => string = (path) => readFileSync(path, "utf8")): HostLoadSample {
+  const sample: HostLoadSample = {};
+  try {
+    const load1 = Number(read("/proc/loadavg").trim().split(/\s+/)[0]);
+    if (Number.isFinite(load1) && load1 >= 0) sample.load1 = load1;
+  } catch { /* an unreadable /proc/loadavg leaves load1 absent, which the sweep reads as "no comparison possible" */ }
+  for (const path of ["/sys/fs/cgroup/cpu.pressure", "/proc/pressure/cpu"]) {
+    let text: string;
+    try { text = read(path); } catch { continue; }
+    const psi = Number(/^some\b.*\bavg10=([0-9.]+)/m.exec(text)?.[1]);
+    if (Number.isFinite(psi)) { sample.cpuPsiSomeAvg10Pct = psi; break; }
+  }
+  return sample;
+}
+
+/** True when a thrown proof-executor error carries a marker of a run CUT SHORT rather than a failure of the proof: a
+ *  timeout (`code: "ETIMEDOUT"`, {@link execWhitelistedProof} checks it first), a kill signal, or a spawn error
+ *  (`code: "ENOENT"`, `"EACCES"`, … — a `bwrap` that could not exec). An error with none of them stays `exec_error`. */
+function endedByTimeoutSignalOrSpawnError(e: unknown): boolean {
+  if (e === null || typeof e !== "object") return false;
+  const err = e as { code?: unknown; signal?: unknown; killed?: unknown };
+  return typeof err.code === "string" || (typeof err.signal === "string" && err.signal !== "") || err.killed === true;
+}
+
+/** The load a proof failed under: the busier of its start and end readings (W1-T11132). */
+export function recordedLoad1(load: ProofLoadRecord | undefined): number | undefined {
+  const readings = [load?.start.load1, load?.end.load1].filter((n): n is number => typeof n === "number");
+  return readings.length > 0 ? Math.max(...readings) : undefined;
+}
 
 /** The closed vocabulary an implementation worker may use to decline one acceptance criterion.
  * The judge recognises only this exact structure; free prose containing "refused" is never a
@@ -442,6 +490,8 @@ export interface CriterionVerdict {
   proof_exec: ProofExecOutcome;
   /** The bounded runner diagnostic when `proof_exec` is `cannot_evaluate`. */
   loadError?: string;
+  /** Host load at the start and end of a proof that did not pass (W1-T11132): the sweep's re-review reads it. */
+  load?: ProofLoadRecord;
   cause?: "promise-harvest-incomplete";
   /** The reviewer sandbox's own output for an `executed_fail` proof ({@link proofFailureExcerpt}): command, exit
    *  status and output tail. #10555's fix rounds saw only `reason` and could not reproduce a reviewer-only red. */
@@ -481,6 +531,14 @@ export type PromisedFollowUpObservation =
   | { state: "unknown"; reason: string; cause?: "promise-harvest-incomplete" };
 
 export interface ReviewEvidence {
+  /** W1-T11132 arm (b), filled by W1-T11200: per `unit test:` proof file, whether hosted CI concluded `passed` or
+   *  `failed` at THIS head. ABSENT (the field, or a file) switches the arm off: a proof that fails stays `executed_fail`. */
+  hostedCiFilePassed?: ReadonlyMap<string, "passed" | "failed">;
+  /** W1-T11132: the recorded load of a prior `inconclusive_load` review of this head. A failure that reproduces while the
+   *  proof starts BELOW it is conclusive (`executed_fail`) rather than load-attributed again. */
+  priorInconclusiveLoad1?: number;
+  /** Host-load seam for the proof start/end readings; defaults to {@link sampleHostLoad}. */
+  sampleLoad?: () => HostLoadSample;
   /** The RESOLVED canonical `owner/repo` this review's proofs execute against (W1-T3525) — reused
    *  from wherever the caller already resolved it (e.g. `resolveDaemonTarget`, W1-T1062), never
    *  re-derived here. Absent is the LEGACY default: this repo's own two suite roots, unconditionally,
@@ -3762,6 +3820,11 @@ export function vitestNameFilteredOutcome(stdout: string, stderr = ""): ProofRes
 /** PR-head checkout a criterion's proof may be executed against (W1-T65). */
 export interface ProofExecContext {
   cwd: string;
+  /** W1-T11132 — see {@link ReviewEvidence.hostedCiFilePassed}, {@link ReviewEvidence.priorInconclusiveLoad1} and
+   *  {@link ReviewEvidence.sampleLoad}. */
+  hostedCiFilePassed?: ReadonlyMap<string, "passed" | "failed">;
+  priorInconclusiveLoad1?: number;
+  sampleLoad?: () => HostLoadSample;
   /** Source observed by the bounded async review path, not an unverified report string. */
   proofFormCorrections?: ReadonlyMap<string, string | undefined>;
   missingExportNotes?: ReadonlyMap<string, string | undefined>;
@@ -4169,6 +4232,8 @@ export function judgeCriterion(
   // W1-DH: WHY a criterion did not execute. `proof_exec: "not_executable"` alone conflates a proof that never PARSED
   // with one that parsed and named nothing, and a CAPPED 0/N looked identical either way.
   let proofSkip: ProofSkipReason | undefined;
+  // W1-T11132: the host load around a proof that did not pass, so a re-review can tell "failed under load" apart.
+  let proofLoad: ProofLoadRecord | undefined;
   // W1-T9860: a cited test path absent at the head is resolved by its unique basename, and the verdict says so.
   let resolutionNote: string | undefined;
   if (execCtx) {
@@ -4224,6 +4289,16 @@ export function judgeCriterion(
           `failure; not executed, keyword floor applied`;
       } else {
         const exec = execCtx.exec ?? execWhitelistedProof;
+        const sampleLoad = execCtx.sampleLoad ?? sampleHostLoad;
+        const loadStart = sampleLoad();
+        // A `unit test:` proof that concluded NOTHING under load (W1-T11132); a `grep:` proof is not load-shaped.
+        const inconclusiveUnderLoad = (why: string): void => {
+          proofExec = "inconclusive_load";
+          met = false;
+          proofLoad = { start: loadStart, end: sampleLoad() };
+          reason = `${reason} — NOTE: proof (${whitelisted.kind}: ${whitelisted.label}) ${why}; inconclusive under ` +
+            `host load, not an unmet criterion — the review is pending until a re-review at lower load`;
+        };
         try {
           const outcome = exec(whitelisted, execCtx.cwd);
           const filingTarget = outcome === "pass" ? undefined : filingHeadForwardTarget(whitelisted, execCtx, outcome);
@@ -4356,12 +4431,20 @@ export function judgeCriterion(
             proofExec = "not_yet_built";
             proofSkip = "forward-reference";
             reason = filingForwardReason(reason, whitelisted, filingTarget);
+          } else if (
+            whitelisted.kind === "test" && !whitelisted.nameFiltered &&
+            execCtx.hostedCiFilePassed?.get(whitelisted.label) === "passed" &&
+            // A failure that REPRODUCES with the proof starting below the load the prior review recorded is conclusive.
+            !(execCtx.priorInconclusiveLoad1 !== undefined && (loadStart.load1 ?? Infinity) < execCtx.priorInconclusiveLoad1)
+          ) {
+            inconclusiveUnderLoad("failed here while hosted CI passed the same file at this head");
           } else {
             proofExec = "executed_fail";
             met = false;
             reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
             proofFailureOutput = whitelisted.failureOutput;
             failureTail = whitelisted.failureTail;
+            proofLoad = { start: loadStart, end: sampleLoad() };
           }
         } catch (e) {
           if (e instanceof ProofCannotLoadError) {
@@ -4400,6 +4483,10 @@ export function judgeCriterion(
               `own TAP wrapper reported the failure (a broken runtime: an unresolvable --import ` +
               `loader, an uncaught module-load error, …), not the named test; not executed, keyword ` +
               `floor applied`;
+          } else if (e instanceof PureProofIncompleteRunError && whitelisted.kind === "test") {
+            inconclusiveUnderLoad(
+              `reported ${e.completedResults} passing subtest(s) and then stopped before node's trailing summary ` +
+              "(a timeout kill, an external signal, or an OOM)");
           } else if (e instanceof PureProofIncompleteRunError) {
             proofExec = "exec_error";
             // W1-T2740, the same rule as the sibling arm: record the DISCRIMINATOR, never the stream. The bounded
@@ -4410,6 +4497,9 @@ export function judgeCriterion(
               `then stopped before node's trailing summary — an incomplete run (cut off by a ` +
               `timeout kill, an external signal, or an OOM), so it never reached a verdict about ` +
               `this criterion; not executed, keyword floor applied`;
+          } else if (whitelisted.kind === "test" && endedByTimeoutSignalOrSpawnError(e)) {
+            // A timeout, a signal or a sandbox exec_error ended the run: it reached no verdict about the criterion.
+            inconclusiveUnderLoad(`could not complete (${e instanceof Error ? e.message.split("\n")[0].slice(0, 120) : "exec error"})`);
           } else {
             proofExec = "exec_error";
             proofSkip = "exec-error";
@@ -4467,6 +4557,7 @@ export function judgeCriterion(
 
   return {
     ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}),
+    ...(proofLoad !== undefined ? { load: proofLoad } : {}),
     ...(clauseChars !== undefined ? { clauseChars } : {}),
     ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}),
     ...(proofExec === "executed_fail" || proofExec === "cannot_evaluate"
@@ -5695,6 +5786,9 @@ export function judgeReview(
         cwd: evidence.headCheckoutDir,
         proofFormCorrections: evidence.proofFormCorrections,
         missingExportNotes: evidence.missingExportNotes,
+        hostedCiFilePassed: evidence.hostedCiFilePassed,
+        priorInconclusiveLoad1: evidence.priorInconclusiveLoad1,
+        sampleLoad: evidence.sampleLoad,
         exec: proofMemo?.exec,
         target: evidence.target,
         baseCwd: evidence.baseCheckoutDir,
@@ -5792,11 +5886,14 @@ export function judgeReview(
     criteria,
   );
 
-  const unmet = verdicts.filter((v) => !v.met);
+  // W1-T11132: an `inconclusive_load` proof concluded nothing, so it is never an unmet criterion — it holds the verdict
+  // PENDING (like `cannot_evaluate`) and triggers no fix round. A conclusive failure elsewhere still fails the review.
+  const inconclusiveLoad = verdicts.some((v) => v.proof_exec === "inconclusive_load");
+  const unmet = verdicts.filter((v) => !v.met && v.proof_exec !== "inconclusive_load");
   const noCriteria = criteria.length === 0;
   // W1-T2221: hoisted ahead of `state` (was computed only for `floorState`) so `state` can consult it on a plan-only
   // diff — see `unmetForState`.
-  const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met));
+  const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met) && v.proof_exec !== "inconclusive_load");
   // On a plan-only diff, `state` is decided on the FLOOR: a semantic downgrade alone must never fail a filing that has
   // no code for the semantic lane to judge (W1-T2221 design (ii)). `planOnly` is the exemption, never "a proof
   // happened not to execute" — the same shape `criteriaTampered` uses. A code diff is byte-identical: `unmetForState
@@ -5816,7 +5913,8 @@ export function judgeReview(
     refusalContradictions.length > 0 ||
     unprovenancedDecisionsEntries.length > 0;
   // W1-T4414: an unreadable reservation is never a pass; alone, it is WITHHELD rather than posted.
-  const state: ReviewState = cannotEvaluate ? "pending" : failsWithoutUnknown || idOwnershipUnknown ? "failure" : "success";
+  const state: ReviewState = cannotEvaluate ? "pending" : failsWithoutUnknown || idOwnershipUnknown ? "failure"
+    : inconclusiveLoad ? "pending" : "success";
 
   // The reward-hacking measurement, over ALL criteria (W1-T166): visible and holdout fold into `state` identically
   // above, and this is a SEPARATE per-run measurement of the gap, never a gate. `null` when either side is empty.
@@ -5842,7 +5940,7 @@ export function judgeReview(
     refusalContradictions.length > 0 ||
     unprovenancedDecisionsEntries.length > 0
       ? "failure"
-      : "success";
+      : inconclusiveLoad ? "pending" : "success";
 
   // Nothing was OBSERVED on the head anywhere in this review, yet at least one proof was WRITTEN to be runnable
   // (W1-T72): the binding verdict fell back to the blind keyword floor on EVERY criterion. A `satisfied_by` criterion
@@ -5884,6 +5982,8 @@ export function judgeReview(
     state === "pending"
       ? (verdicts.some(v => v.loadError !== undefined)
         ? `remudero-review: cannot-evaluate — ${visibleCriteria(verdicts).find(v => v.loadError)?.loadError ?? "proof test files could not load"}`
+        : inconclusiveLoad && !cannotEvaluate
+        ? "remudero-review: inconclusive-load — a proof concluded nothing under host load; re-reviewed when load falls"
         : `remudero-review: promise-harvest-incomplete — ${promiseObservation?.state === "unknown" ? promiseObservation.reason : "harvest unfinished"}`).slice(0, 140)
       : state === "success"
       ? planOnly
