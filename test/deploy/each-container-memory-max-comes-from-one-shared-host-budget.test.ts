@@ -31,7 +31,7 @@ function host(t: TestContext, meminfo = `MemTotal:       ${HOST_MIB * 1024} kB\n
 function learn(dir: string, container: string, learned: { high?: number; peak?: number }) {
   if (learned.high !== undefined) {
     writeFileSync(join(dir, "state", `memory-high-tuned-${container}.json`),
-      `{"container":"${container}","high_mib":${learned.high},"policy_mib":1,"updated_at":"2026-10-27T02:31:00Z","reason":"grow"}\n`);
+      `{"container":"${container}","high_mib":${learned.high},"policy_mib":1,"reason":"grow"}\n`);
   }
   if (learned.peak !== undefined) {
     writeFileSync(join(dir, "state", `memory-peak-${container}.json`), `{"container":"${container}","peak_mib":${learned.peak}}\n`);
