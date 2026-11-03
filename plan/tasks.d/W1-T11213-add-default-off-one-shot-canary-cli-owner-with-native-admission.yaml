@@ -101,6 +101,10 @@
       proof: 'unit test: execute once refuses before admission when approval or pilot capability is absent'
     - claim: Approval binds exact source/runtime and corpus/scorer digests and cannot be created from JSON or a prepared manifest.
       proof: 'unit test: pilot approval is owner written and bound to the exact source runtime and corpus'
+    - claim: The actual command bootstrap creates the private approval through its source-owned approval function.
+      proof: 'grep: createCanaryPilotApproval( in src/lib/model-canary-command.ts'
+    - claim: The actual command bootstrap invokes the one-shot executor rather than leaving it as an unused export.
+      proof: 'grep: executeCanaryPilotOnce( in src/lib/model-canary-command.ts'
     - claim: The optional `beforeProviderInvocation` hook runs at every selection/fallback boundary outside telemetry catches; pin/context mismatch or a throwing hook aborts before the provider adapter call.
       proof: 'unit test: test/routing/model-canary-provider-invocation-guard.test.ts'
     - claim: The synchronous guard rejects thenables and malformed/refuse results; any guard failure is fatal and cannot reach a fallback provider.

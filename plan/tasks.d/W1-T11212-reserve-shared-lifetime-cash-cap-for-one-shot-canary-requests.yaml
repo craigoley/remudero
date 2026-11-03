@@ -68,6 +68,8 @@
       proof: 'unit test: unknown settlement remains fully reserved across restart and UTC rollover'
     - claim: A clamped global settlement cannot release pilot funds unless the original bounded charge and exact identity are independently verified.
       proof: 'unit test: clamped global settlement keeps pilot hold when original charge exceeds reservation'
+    - claim: The existing worker-provider cash budget path calls the pilot-aware current-request reservation helper.
+      proof: 'grep: reserveCurrentCanaryPilotRequest( in src/lib/worker-provider.ts'
   falsifier: >-
     Delete the lifetime cap check and require the over-cap request test to fail. Change the configured
     JSON caps and require both fixed-cap tests to fail. Remove AsyncLocalStorage propagation at any
