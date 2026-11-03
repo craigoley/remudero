@@ -3,7 +3,7 @@ import type { GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure, type CensusChildResult } from "./run-task-verb.js";
 import { buildBaseProofDir, hostWorktreeGitAtTopLevel } from "../../lib/check-proof.js";
 import { execFileSync, spawn } from "node:child_process";
-import { checksStateFromRollup, currentReviewSignal, withheldReviewRefusalRow } from "../../lib/sweep.js";
+import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow } from "../../lib/sweep.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -404,6 +404,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   owner: string;
   repo: string;
   prUrl: string;
+  onPhase?: (phase: string) => void;
   /** W1-T10269: judge, then stop before any arm, status or comment — the reviewer-health shadow. */
   shadow?: boolean;
   reviewReplaySetupInput?: ReviewReplayInput;
@@ -1130,6 +1131,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     recordReplay(classifyReviewOutcome(replayInput));
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
     log("review.post_refused", withheldReviewRefusalRow({ headSha, prUrl, reason: verdict.taskIdOwnershipWithheld, ownership: verdict.taskIdOwnership, inputDigest }));
+    (args.onPhase ?? reportReviewPhase)("posted");
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -1162,6 +1164,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     reviewerCodeFreshness,
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
   });
+  (args.onPhase ?? reportReviewPhase)("posted");
   if (posted.conflict) {
     decisionDisposition = "conflict";
     verdict = {
@@ -1529,6 +1532,7 @@ export function reviewLedgerReasonFields(args: {
  * be a brand-new, never-invoked-under-test line this same gate would then flag).
  */
 export interface ReviewCommandDeps {
+  onPhase?: (phase: string) => void;
   /** Bounded admission identity, separate from the existing worker/run and ownership conventions. */
   reviewAttemptId?: string;
   contributorAdmission?: AdmissionObserver;
@@ -2150,6 +2154,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     () =>
       withMaterialized(worktreePath, subjectRepoDir, () => whileWorkerRunLive(host, runId, () =>
         runReviewDep({
+          onPhase: deps.onPhase,
           reviewReplaySetupInput: replaySetupInput,
           owner,
           repo,
@@ -2247,6 +2252,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     } else {
       verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
     }
+    (deps.onPhase ?? reportReviewPhase)("posted");
   }
 
   console.log(

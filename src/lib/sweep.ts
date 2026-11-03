@@ -1558,7 +1558,7 @@ export interface BuildSweepEffectsDeps {
   plan: Plan;
   log: (step: string, extra?: Record<string, unknown>) => void;
   policy?: SweepPolicy;
-  reviewRunner?: (prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string) => Promise<number>;
+  reviewRunner?: (prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void) => Promise<number>;
   /** W1-T3798 — reuse/discrimination is an explicit mode, so the adapter can run the cheap
    *  deterministic path instead of silently treating both dispositions as a full review. */
   reviewReuseRunner?: (pr: OpenPrView, mode: ReviewDispatchMode, reviewAttemptId?: string) => Promise<number>;
@@ -1575,7 +1575,7 @@ export interface BuildSweepEffectsDeps {
   reviewCommandImpl?: (
     pr: string,
     args: string[],
-    opts: { executionMode: "semantic"; planOnlyFiling?: boolean; reviewAttemptId?: string },
+    opts: { executionMode: "semantic"; planOnlyFiling?: boolean; reviewAttemptId?: string; onPhase?: (phase: string) => void },
   ) => Promise<number>;
   spawnImpl?: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
   pushEmptyCommit?: typeof gitPushEmptyCommit;
@@ -2490,11 +2490,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // survives the positional-parameters-to-one-deps-object collapse verbatim — the sweep's
   // post-review lane still routes through reviewCommand, and nothing but `deps.reviewRunner`
   // can override it.
-  let reviewRunner: NonNullable<BuildSweepEffectsDeps["reviewRunner"]> = (prNumber, isPlanFiling, reviewAttemptId) =>
+  let reviewRunner: NonNullable<BuildSweepEffectsDeps["reviewRunner"]> = (prNumber, isPlanFiling, reviewAttemptId, onPhase) =>
     reviewCommandImpl(String(prNumber), ["--repo", repo], {
       executionMode: "semantic",
       planOnlyFiling: isPlanFiling,
       ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
+      ...(onPhase === undefined ? {} : { onPhase }),
     });
   if (deps.reviewRunner) reviewRunner = deps.reviewRunner;
 
@@ -3105,7 +3106,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // (sweep.ts) still marks `acted:false` + `action_error` on this PR's
     // `sweep.disposed` line — this is a MORE SPECIFIC sibling record, not a
     // replacement for it.
-    postReview: async (pr, mode = { kind: "full-review" }, reviewAttemptId) => {
+    postReview: async (pr, mode = { kind: "full-review" }, reviewAttemptId, onPhase) => {
+      let postedAtMs: number | undefined;
+      const phase = (value: string): void => {
+        if (value === "posted" && postedAtMs === undefined) postedAtMs = systemClock.now();
+        onPhase?.(value);
+      };
       await observePr(pr, "review");
       log("sweep.post_review.attempt", {
         pr_number: pr.prNumber,
@@ -3119,7 +3125,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       });
       try {
         // W1-T9114: a full review the installed host starts as a run child is not run (or waited for) here. The registry holds its
-        // slot and mutex key until the child settles, so the PR is not re-admitted while it runs, and a restart adopts it.
+        // mutex key until settlement; its slot ends at the observed posted phase (W1-T11151). A restart adopts it.
         const reviewKey = reviewOutcomeKeyForPr(pr);
         const hosted = mode.kind === "full-review"
           ? await installedWorkHost?.spawnReview({ pr, reviewKey, reviewAttemptId }) : undefined;
@@ -3127,16 +3133,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           void adoptChildWork({
             runId: hosted.runId, taskId: pr.taskId ?? `PR-${pr.prNumber}`,
             work: { kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey },
-            settled: hosted.settled, ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
+            settled: hosted.settled, readPhase: hosted.readPhase,
+            ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
           }, log);
           log("sweep.post_review.child", { pr_number: pr.prNumber, head_sha: pr.headSha, review_key: reviewKey, child_run_id: hosted.runId });
           return;
         }
-        const exit =
+        const exit = await reviewPhaseObserver.run(phase, async () =>
           mode.kind === "full-review" || !deps.reviewReuseRunner
-            ? await reviewRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId)
-            : await deps.reviewReuseRunner(pr, mode, reviewAttemptId);
+            ? await reviewRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, phase)
+            : await deps.reviewReuseRunner(pr, mode, reviewAttemptId));
         log("sweep.post_review.done", {
+          ...(postedAtMs === undefined ? {} : { post_to_settle_ms: Math.max(0, systemClock.now() - postedAtMs) }),
           pr_number: pr.prNumber,
           head_sha: pr.headSha,
           exit,
@@ -3144,6 +3152,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
       } catch (e) {
         log("sweep.post_review.failed", {
+          ...(postedAtMs === undefined ? {} : { post_to_settle_ms: Math.max(0, systemClock.now() - postedAtMs) }),
           pr_number: pr.prNumber,
           head_sha: pr.headSha,
           review_mode: mode.kind,
@@ -14187,7 +14196,7 @@ export interface SweepDeps {
    *  per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
    *  W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
    *  with each review-input key claimed synchronously before scheduling. */
-  postReview?: (pr: OpenPrView, mode?: ReviewDispatchMode, reviewAttemptId?: string) => void | Promise<void>;
+  postReview?: (pr: OpenPrView, mode?: ReviewDispatchMode, reviewAttemptId?: string, onPhase?: (phase: string) => void) => void | Promise<void>;
   /** W1-T3581 — provenance of the module graph THIS daemon process loaded at boot. A stale
    * reviewer-code refusal may bypass its ordinary time backoff only when this narrow predicate
    * proves the loaded code is at or after the refusal's recorded origin/main target. Omitted
@@ -16666,26 +16675,53 @@ export async function drainInFlightReviews(opts: {
 
 /** W1-T9114 — DETACHED WORK THAT RUNS AS A RUN CHILD. A review or a fix dispatch hosted in a child is registered here, not in
  *  {@link inFlightReviewRuns} or {@link detachedSweepActions}: those are what a restart WAITS for, and it waits for nothing it
- *  does not own. The registry still holds the work's slot and mutex key, so the PR is not re-admitted while the child runs. */
+ *  does not own. A posted review frees admission but retains its mutex key until settlement (W1-T11151). */
 export interface ChildWorkRegistration {
   runId: string; kind: string; taskId: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string;
+  readPhase?: () => string | undefined;
 }
-const childWork = new Map<string, ChildWorkRegistration>();
+interface RegisteredChildWork extends ChildWorkRegistration {
+  releasedAtPost?: number; phaseTimer?: ReturnType<typeof setInterval>; phaseReadError?: string;
+}
+const childWork = new Map<string, RegisteredChildWork>();
 const settledChildWork = new Set<string>();
 const childWorkSettleKey = (runId: string, headSha?: string): string => `${runId}@${headSha ?? ""}`;
+
+function refreshChildReviewPhase(work: RegisteredChildWork): void {
+  if (work.kind !== "review" || work.releasedAtPost !== undefined || !work.readPhase) return;
+  try {
+    if (work.readPhase() !== "review:posted") return;
+  } catch (error) {
+    const reason = String(error);
+    work.phaseReadError = reason;
+    return;
+  }
+  work.releasedAtPost = systemClock.now();
+  clearInterval(work.phaseTimer);
+  releaseReviewSlot();
+}
 
 /** Claims the slot and the mutex key of a child's work. Registering a run id again is a no-op. */
 export function registerChildWork(work: ChildWorkRegistration): void {
   if (childWork.has(work.runId)) return;
-  childWork.set(work.runId, work);
+  const registered: RegisteredChildWork = { ...work };
+  childWork.set(work.runId, registered);
   if (work.reviewKey !== undefined) inFlightReviewKeys.add(work.reviewKey);
   if (work.fixKey !== undefined) inFlightFixKeys.add(work.fixKey);
+  if (work.kind === "review" && work.readPhase) {
+    registered.phaseTimer = setInterval(() => refreshChildReviewPhase(registered), 250);
+    registered.phaseTimer.unref();
+    refreshChildReviewPhase(registered);
+  }
 }
 
-/** How many registered children run `kind`, or all of them. */
+/** Review admission excludes posted children; an unfiltered query still counts every running child. */
 export function childWorkCount(kind?: string): number {
   let n = 0;
-  for (const work of childWork.values()) if (kind === undefined || work.kind === kind) n++;
+  for (const work of childWork.values()) {
+    if (kind === "review") refreshChildReviewPhase(work);
+    if ((kind === undefined || work.kind === kind) && !(kind === "review" && work.releasedAtPost !== undefined)) n++;
+  }
   return n;
 }
 
@@ -16705,10 +16741,12 @@ export function settleChildWork(runId: string): boolean {
   const work = childWork.get(runId);
   if (work === undefined) return false;
   const settleKey = childWorkSettleKey(runId, work.headSha);
+  refreshChildReviewPhase(work);
+  clearInterval(work.phaseTimer);
   childWork.delete(runId);
   if (work.reviewKey !== undefined) inFlightReviewKeys.delete(work.reviewKey);
   if (work.fixKey !== undefined) inFlightFixKeys.delete(work.fixKey);
-  releaseReviewSlot();
+  if (work.releasedAtPost === undefined) releaseReviewSlot();
   if (settledChildWork.has(settleKey)) return false;
   settledChildWork.add(settleKey);
   return true;
@@ -16730,6 +16768,7 @@ export function childWorkHoldsReviewKey(reviewKey: string): boolean {
 export interface ReviewChildLaunch {
   runId: string;
   settled: Promise<unknown>;
+  readPhase?: () => string | undefined;
   acknowledge?: (outcome: PromiseSettledResult<never>) => void;
 }
 
@@ -16918,23 +16957,26 @@ export interface AdoptedWorkChild {
   runId: string; taskId: string;
   work: { kind: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string; inputs?: Record<string, unknown> };
   settled: Promise<unknown>;
+  readPhase?: () => string | undefined;
   acknowledge?: (outcome: PromiseSettledResult<never>) => void;
 }
 
 /**
- * W1-T9114: a booting daemon adopts a work child instead of draining it. It keeps its slot and key while it runs; when it settles
- * the registry releases them and the receipt is acknowledged exactly once, so the boot after never replays it. A terminal review
+ * W1-T9114: a booting daemon adopts a work child instead of draining it. Its key lasts until settlement; an observed posted phase
+ * frees review admission early. The receipt is acknowledged exactly once, so the boot after never replays it. A terminal review
  * posted its verdict itself (the child owns the post), so the daemon posts nothing.
  */
 export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extra?: Record<string, unknown>) => void): Promise<void> {
   // Already settled in this process for this head: nothing to claim, post or acknowledge a second time.
   if (settledChildWork.has(childWorkSettleKey(child.runId, child.work.headSha))) return Promise.resolve();
   const { inputs, ...registered } = child.work;
-  registerChildWork({ runId: child.runId, taskId: child.taskId, ...registered });
+  registerChildWork({ runId: child.runId, taskId: child.taskId, ...registered, readPhase: child.readPhase });
   return child.settled.then(
     (value) => ({ status: "fulfilled" as const, value }),
     (reason: unknown) => ({ status: "rejected" as const, reason }),
   ).then((outcome) => {
+    const work = childWork.get(child.runId);
+    if (work) refreshChildReviewPhase(work);
     const first = settleChildWork(child.runId);
     // A fix child that ended lost (a refusal at its recheck, a failure before its `fix.dispatch` row, a dead or misidentified process)
     // voids the dedup exactly as a detached in-process rejection does (`sweep.fix.dispatch_failed`), once per run id and head.
@@ -16949,6 +16991,8 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
     }
     child.acknowledge?.(outcome as PromiseSettledResult<never>);
     log("daemon.child_work_settled", {
+      ...(work?.releasedAtPost === undefined ? {} : { post_to_settle_ms: Math.max(0, systemClock.now() - work.releasedAtPost) }),
+      ...(work?.phaseReadError === undefined ? {} : { phase_read_error: work.phaseReadError }),
       run_id: child.runId, task_id: child.taskId, kind: child.work.kind, ...(child.work.prNumber === undefined ? {} : { pr: child.work.prNumber }),
       outcome: outcome.status === "fulfilled" ? "terminal" : "lost", first_settlement: first,
     });
@@ -22963,7 +23007,7 @@ export async function runSweep(
     return job;
   };
 
-  const runReview = async (job: (typeof orderedReviews)[number]): Promise<void> => {
+  const runReview = async (job: (typeof orderedReviews)[number], onPhase?: (phase: string) => void): Promise<void> => {
     const jobDisposition: Disposition =
       job.mode.kind === "full-review" ? "post-review" : job.mode.kind === "reuse" ? "review-reused" : "discriminate-only";
     const claim = await claimReview(job.reviewKey, job.pr);
@@ -23031,7 +23075,7 @@ export async function runSweep(
         if (postReview) {
           try {
           const reviewStartedAtMs = performance.now();
-          await postReview(job.pr, job.mode, reviewAttemptId);
+          await postReview(job.pr, job.mode, reviewAttemptId, onPhase);
           noteReviewDuration(performance.now() - reviewStartedAtMs);
           } catch (e) {
             acted = false;
@@ -23135,16 +23179,22 @@ export async function runSweep(
           passReviewsInFlight++;
           fullReviews.started++;
         }
-        const tracked = trackInFlightReview(() => runReview(job), {
-          taskId: job.pr.taskId, prNumber: job.pr.prNumber, kind: job.mode.kind,
-          admittedAtMs: deps.now?.() ?? systemClock.now(),
-        });
-        const work = !fullSurface ? tracked : tracked.finally(() => {
+        let released = false;
+        const release = (): void => {
+          if (!fullSurface || released) return;
+          released = true;
           fullPassReviewsInFlight--;
           passReviewsInFlight--;
           fullReviews.settled++;
           releaseReviewSlot();
+        };
+        const tracked = trackInFlightReview(() => runReview(job, (phase) => {
+          if (phase === "posted") release();
+        }), {
+          taskId: job.pr.taskId, prNumber: job.pr.prNumber, kind: job.mode.kind,
+          admittedAtMs: deps.now?.() ?? systemClock.now(),
         });
+        const work = !fullSurface ? tracked : tracked.finally(release);
         if (deps.detachReviewWait) {
           deps.detachReviewWait(work);
           return;
@@ -23696,6 +23746,10 @@ let lightPassPlanMergeOwner: symbol | undefined;
 const lightPassHeadKey = (pr: OpenPrView): string => `${pr.prNumber}@${pr.headSha}`;
 // W1-T5931: full-pass reviews in flight; with the light reservations, one process-wide review count.
 let fullPassReviewsInFlight = 0;
+const reviewPhaseObserver = new AsyncLocalStorage<(phase: string) => void>();
+export function reportReviewPhase(phase: string): void {
+  reviewPhaseObserver.getStore()?.(phase);
+}
 const reviewSlotWaiters = new Set<() => void>();
 const releaseReviewSlot = (): void => {
   for (const wake of [...reviewSlotWaiters]) wake();
@@ -23739,7 +23793,7 @@ function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: n
 
 /** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
-  // W1-T9114: a review child holds its slot while it runs, adopted or not.
+  // W1-T11151: a child's posted phase frees admission before settlement, while its key stays held.
   const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight + childWorkCount("review");
   return { bound: Math.max(0, width - inFlight), inFlight };
 }
@@ -23865,10 +23919,13 @@ export async function runSweepLightPass(
   // floor refills nothing; its tail re-derives next pass, exactly as a full pass closes admissions.
   let providerFloorMet = false;
   const basePostReview = deps.postReview;
-  const passPostReview: SweepDeps["postReview"] = basePostReview && (async (pr, mode) => {
+  const passPostReview: SweepDeps["postReview"] = basePostReview && (async (pr, mode, attempt, onPhase) => {
     try {
       const reviewStartedAtMs = performance.now();
-      await basePostReview(pr, mode);
+      await basePostReview(pr, mode, attempt, (phase) => {
+        if (phase === "posted") releases.get(pr.prNumber)?.();
+        onPhase?.(phase);
+      });
       noteReviewDuration(performance.now() - reviewStartedAtMs);
     } catch (e) {
       if (e instanceof GhPaceFloorStandDownError) providerFloorMet = true;
@@ -24020,7 +24077,7 @@ export async function runSweepLightPass(
       }
       // W1-T9743: every admitted review is detached, plan filings too — the ticker awaits this pass.
       if (releases.has(pr.prNumber)) {
-        if (spawningNumbers.has(pr.prNumber)) scopedDeps.postReview = passPostReview;
+        scopedDeps.postReview = passPostReview;
         scopedDeps.detachReviewWait = (work) => {
           detachedNumbers.add(pr.prNumber);
           void work.finally(releases.get(pr.prNumber)).catch((error) => {
@@ -24086,7 +24143,11 @@ export async function runSweepLightPass(
     repairAdmissionTelemetry: repairAdmission.snapshot,
     selectAdaptiveReviewWidth: undefined,
     claimFixAdmission,
-    postReview: passPostReview,
+    postReview: passPostReview && ((review, mode, attempt, onPhase) =>
+      passPostReview(review, mode, attempt, (phase) => {
+        if (phase === "posted") release();
+        onPhase?.(phase);
+      })),
     actionable: isReviewLaneDisposition,
     standDownReasonFor: (d) => (isReviewLaneDisposition(d) ? undefined : "deferred to full sweep (light pass)"),
     detachReviewWait: (work) => {

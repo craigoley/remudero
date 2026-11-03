@@ -656,6 +656,7 @@ export interface RunChildHandle {
   pid: number;
   /** Resolves the child's `RunResult`; rejects with the error the settle loop classifies, or with a lost run. */
   settled: Promise<RunResult>;
+  readPhase?: () => string | undefined;
   abort(): Promise<AbortRunChildOutcome>;
   /** Receipt only after the daemon processes the outcome; an unwatched child is replayed at the next boot. */
   acknowledge?: (outcome: PromiseSettledResult<RunResult>) => void;
@@ -1116,7 +1117,9 @@ export function adoptRunChildren(input: {
     });
     // Boot does more work before the pool attaches its handlers; retain the rejection on the handle.
     void settled.catch((error: unknown) => { void error; /* The pool owns and classifies this rejection. */ });
-    adopted.push({ started: true, taskId, runId, dir, pid, settled, ...(work ? { work } : {}), acknowledge: settlementReceipt(taskId, runId, input.log), detach: () => detach?.(), abort: () => abortRunChild(dir, { probe: ports.probe, log: input.log }) });
+    adopted.push({ started: true, taskId, runId, dir, pid, settled,
+      readPhase: () => readOwnedChildPhase(dir, runId), ...(work ? { work } : {}),
+      acknowledge: settlementReceipt(taskId, runId, input.log), detach: () => detach?.(), abort: () => abortRunChild(dir, { probe: ports.probe, log: input.log }) });
   }
   input.log(RUN_CHILD_ADOPTION_PASS_STEP, pass);
   return adopted;
@@ -1145,7 +1148,7 @@ export interface DetachedWorkChildHost {
     pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean };
     reviewKey: string;
     reviewAttemptId: string | undefined;
-  }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
+  }) => Promise<{ runId: string; settled: Promise<unknown>; readPhase?: () => string | undefined; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
   /** Starts a fix child, refuses abandoned admission, or returns `undefined` when it stays in process. */
   spawnFix: (input: {
     pr: { prNumber: number; headSha: string; taskId?: string };
@@ -1158,6 +1161,11 @@ export interface DetachedWorkChildHost {
 
 /** `off`: everything in process. `shadow`: a probe round-trips the contract, the work stays in process. `on`: moved kinds are children. */
 export type DetachedWorkMode = "off" | "shadow" | "on";
+
+export function readOwnedChildPhase(dir: string, runId: string): string | undefined {
+  const status = readStatus(dir);
+  return status.ok && status.value.runId === runId ? status.value.phase : undefined;
+}
 
 export interface DetachedWorkRow {
   kind: DetachedWorkKind;
@@ -1401,7 +1409,8 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
         plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
       });
       if (!launch.started) return undefined;
-      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
+      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge,
+        readPhase: () => readOwnedChildPhase(launch.dir, launch.runId) };
     },
     async spawnFix({ pr, fixKey, envelope }) {
       // A fix has no shadow probe of its own: the review's probe already round-trips the contract. Only `on` moves it.
