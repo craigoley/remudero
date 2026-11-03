@@ -623,7 +623,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
               join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
               '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
-            const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, staticAdmission.childEnvironment ?? {}, AUTHOR_STEP_RUNTIME_MS);
+            const censusAnswer = { RMD_AUTHOR_CENSUS_ANSWERED: `${receipt.headSha}:${censusTimeBound ? 'time-bound' : 'ok'}` };
+            const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, { ...(staticAdmission.childEnvironment ?? {}), ...censusAnswer }, AUTHOR_STEP_RUNTIME_MS);
             staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
             report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
             // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
