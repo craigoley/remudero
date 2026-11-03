@@ -10852,7 +10852,17 @@ function* fixCensusSnapshotSteps(
     unmeasured = `${subject}: ${String(result.error ?? result.signal ?? (output || `exit ${result.status} without a complete test summary`)).slice(-4000)}`;
     return { text: `census-precheck: NOT MEASURED — ${unmeasured}`, censuses: [], offeredBaselines: [] };
   };
-  if (!refusal && (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2))) {
+  const timedOutChildren: string[] = [];
+  const timedOut = (child: string, result: CensusChildResult, boundMs: number): boolean => {
+    const error = result.error as (Error & { code?: unknown }) | undefined;
+    if (!(error instanceof LoopBoundedChildTimeout || error?.code === "ETIMEDOUT")) return false;
+    timedOutChildren.push(child);
+    const line = `census-precheck: not measured — ${child} timed out at ${(error instanceof LoopBoundedChildTimeout ? error.budgetMs : boundMs) / 1000} s (${result.signal ?? "SIGTERM"}); CI and pre-push still measure`;
+    unmeasured = unmeasured ? `${unmeasured}\n${line}` : line;
+    return true;
+  };
+  if (!refusal && !timedOut("scripts/census-precheck.mjs", precheck, controllerTimeBoundMs) &&
+      (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2))) {
     refusal = unavailable("census precheck child", precheck, text);
   }
   if (!refusal) {
@@ -10866,10 +10876,11 @@ function* fixCensusSnapshotSteps(
       const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
       const stopped = (reason: string): CensusPushRefusal => ({ text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
         censuses: ["census-suite"], offeredBaselines: [] });
-      if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
-        refusal = unavailable(`census suite ${reach}`, result, output);
+      const reachTimedOut = timedOut(reach, result, childTimeBoundMs);
+      if (reachTimedOut || result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
+        if (!reachTimedOut) refusal = unavailable(`census suite ${reach}`, result, output);
       } else if (result.status !== 0) {
-        refusal = stopped(String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000));
+        refusal = stopped(output.slice(-4000));
         refusal.inheritedMain = yield* inheritedCensusContextSteps(root, path, runGit);
       } else {
         const verdict = judged.judge(0);
@@ -10880,7 +10891,8 @@ function* fixCensusSnapshotSteps(
     }
   }
   log("fix.census_check", { outcome: refusal ? "refused" : unmeasured ? "partially-measured" : "passed",
-    ...(refusal ? { refusal: refusal.text } : {}), ...(unmeasured ? { reason: unmeasured } : {}) });
+    ...(refusal ? { refusal: refusal.text } : {}), ...(unmeasured ? { reason: unmeasured } : {}),
+    ...(timedOutChildren.length > 0 ? { timed_out_child: timedOutChildren.join(", ") } : {}) });
   return { refusal, unmeasured };
 }
 

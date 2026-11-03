@@ -20,17 +20,15 @@ test("a census child stopped by its own time bound says so, where an outside SIG
   assert.equal(outside.error, undefined, "a SIGTERM the bound did not send carries no budget error");
 });
 
-test("a census precheck stopped by its bound refuses as NOT MEASURED and names the budget", async () => {
+test("a census precheck stopped by its bound is not measured and names the child and its budget (W1-T10332)", async () => {
   const events: Array<{ step: string; data?: Record<string, unknown> }> = [];
   const outcome = await checkFixCensusSnapshotAsync("/unused-injected-root", "/unused-snapshot", (step, data) => events.push({ step, data }),
-    // The controller's own budget inspector runs for real; only the precheck child is the over-budget sleeper.
+    // The controller's own budget inspector runs for real; the precheck and the reach suite are over-budget sleepers.
     (file, args, options) => args.includes("--snapshot-budget") ? spawnCensusChild(file, args, options)
       : spawnCensusChild(process.execPath, ["-e", noisySleeper], { ...options, timeout: 300 }));
-  assert.ok(outcome?.refusal, "an unmeasured census still refuses the commit/push guard");
-  assert.match(outcome.refusal.text, /^census-precheck: NOT MEASURED — census precheck child: LoopBoundedChildTimeout: Command failed: /);
-  assert.match(outcome.refusal.text, /stopped by SIGTERM at its 300ms loop-available budget$/);
-  assert.deepEqual(outcome.refusal.censuses, []);
-  assert.match(outcome.unmeasured!, /300ms loop-available budget/);
+  assert.equal(outcome?.refusal, undefined, "a timeout is not measured, so it never refuses the commit/push guard");
+  assert.match(outcome!.unmeasured!, /^census-precheck: not measured — scripts\/census-precheck\.mjs timed out at 0\.3 s \(SIGTERM\); CI and pre-push still measure$/m);
   assert.equal(events.at(-1)?.step, "fix.census_check");
-  assert.equal(events.at(-1)?.data?.outcome, "refused");
+  assert.equal(events.at(-1)?.data?.outcome, "partially-measured");
+  assert.match(String(events.at(-1)?.data?.timed_out_child), /^scripts\/census-precheck\.mjs, /);
 });
