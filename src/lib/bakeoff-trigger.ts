@@ -5,7 +5,9 @@ import { acquireDrainLock, DrainLockError } from "./drain-lock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import { renderBakeoff, type BakeoffCandidate, type BakeoffRow } from "./inbox-bakeoff.js";
+import { CASH_RESPONSES_DEPLOYMENTS } from "./cash-responses.js";
 import { readLedgerUnionRecordsSync } from "./ledger-grep.js";
+import { isFoundryClaudeDeployment, OPENWEIGHT_REASONING_EFFORTS } from "./worker-provider.js";
 
 export interface DeployedModel {
   model: string;
@@ -31,10 +33,17 @@ export function findUntrialedModels(deployed: readonly DeployedModel[], trialed:
 }
 
 export function deploymentCandidates(models: readonly DeployedModel[], incumbent: DeploymentBakeoffCandidate): DeploymentBakeoffCandidate[] {
-  return [incumbent, ...models.flatMap((model) => model.efforts.map((effort) => ({
-    id: `${key(model)}:${effort}`, label: `${model.billing} ${model.model} (${effort})`,
-    model: model.model, billing: model.billing, effort, tools: true,
-  })))];
+  return [incumbent, ...models.flatMap((model) => {
+    // Responses and Foundry Claude send effort natively; a chat deployment with no effort row drops reasoning_effort
+    // at transport, so its effort arms would only repeat thinking off.
+    const native = CASH_RESPONSES_DEPLOYMENTS[model.model] !== undefined || isFoundryClaudeDeployment(model.model);
+    const efforts = model.billing !== "cash" ? model.efforts : OPENWEIGHT_REASONING_EFFORTS[model.model] ?? (native ? model.efforts : []);
+    const arms: Array<string | undefined> = model.billing === "cash" ? [undefined, ...new Set(efforts)] : [...new Set(efforts)];
+    return arms.map((effort) => ({
+      id: `${key(model)}:${effort ?? "off"}`, label: `${model.billing} ${model.model} (${effort ?? "thinking off"})`,
+      model: model.model, billing: model.billing, ...(effort === undefined ? {} : { effort }), tools: true,
+    }));
+  })];
 }
 
 interface TrialState { trialed: string[]; readinessDigests?: Record<string, string>; pending?: { id: string; models: string[]; proposal?: Proposal } }
@@ -97,8 +106,8 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
       const history = readLedgerUnionRecordsSync(input.stateDir, { step: "inbox.bakeoff", refuseIncomplete: true });
       if (!history.ok) throw new Error(`bake-off ledger history is unreadable; refusing to spend: ${history.unread.join(", ")}`);
       for (const record of history.rows) {
-        const row = record as { step?: string; candidate?: string; model?: string; billing?: string };
-        if (row.step !== "inbox.bakeoff") continue;
+        const row = record as { step?: string; candidate?: string; model?: string; billing?: string; status?: string };
+        if (row.step !== "inbox.bakeoff" || row.status === "capacity_shortfall") continue;
         if (typeof row.model === "string" && (row.billing === "cash" || row.billing === "subscription"))
           state.trialed.push(`${row.billing}:${row.model}`);
         for (const model of input.deployed) {
@@ -125,7 +134,15 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
     save();
     let summary: string;
     try {
-      const rows = await input.replay(deploymentCandidates(models, input.incumbent));
+      const candidates = deploymentCandidates(models, input.incumbent);
+      const rows = await input.replay(candidates);
+      // Capacity refusals bought no trial. Keep them eligible when the learned quota changes.
+      const skipped = models.filter((model) => {
+        const arms = candidates.filter((c) => c.id.startsWith(`${key(model)}:`));
+        return arms.length > 0 && arms.every((c) => rows.some((r) => r.candidate === c.id && r.status === "capacity_shortfall"));
+      }).map(key);
+      state.trialed = state.trialed.filter((id) => !skipped.includes(id));
+      for (const id of skipped) delete state.readinessDigests[id];
       summary = `Deployment bake-off for ${ids.join(", ")}. Compare the new models and thinking levels with the incumbent; the operator picks. Routing is unchanged.\n\n${renderBakeoff(rows)}`;
     } catch (error) {
       // Preserve the provider or replay failure verbatim in the operator-facing proposal.
