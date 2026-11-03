@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { buildOpenPrViews } from "#src/run-task.js";
 import {
   needsPersonPredicate, needsPersonToMerge, orderPendingReviews, orderPendingReviewsNeedsPersonLast, reviewHistoryFromLedger, reviewOrderShadow,
   reviewPriority, selectReviewAdmissions,
@@ -67,14 +71,68 @@ test("a review that needs a person is admitted only after every eligible review 
 });
 
 test("a standing CHANGES_REQUESTED at the head needs a person; an answered escalation or another head does not", () => {
-  const held = pr(3, 100, { scannerBlocker: { kind: "changes-requested", headSha: "head-3",
-    holds: [{ login: "cao825", reviewId: 7, commitId: "head-3" }] } as OpenPrView["scannerBlocker"] });
+  const held = pr(3, 100, { reviewQueueHold: { kind: "changes-requested", headSha: "head-3",
+    holds: [{ login: "cao825", reviewId: 7, commitId: "head-3", submittedAt: "" }] } });
   assert.match(needsPersonToMerge(held, []) ?? "", /CHANGES_REQUESTED review from cao825/);
+  const reviewedHeld = pr(6, 100, { scannerBlocker: { ...held.reviewQueueHold!, headSha: "head-6" } as OpenPrView["scannerBlocker"] });
+  assert.match(needsPersonToMerge(reviewedHeld, []) ?? "", /CHANGES_REQUESTED review from cao825/,
+    "an already-reviewed PR's scanner-read hold counts the same");
   const moved = pr(4, 100);
   assert.equal(needsPersonToMerge(moved, [{ ...escalatedAt(moved), head_sha: "older-head" }]), undefined,
     "an escalation at an older head says nothing about this one");
   const answered = pr(5, 100, { pendingAnswer: { constraint: "re-dispatch with the reviewer's notes" } });
   assert.equal(needsPersonToMerge(answered, [escalatedAt(answered)]), undefined, "an unspent operator answer releases it");
+});
+
+/** The production view producer over one green PR awaiting review, with the given review listing. */
+function producedReviewQueueView(reviews: unknown[]): { view: OpenPrView; reviewReads: number } {
+  const head = "c0ffee0000000000000000000000000000000001";
+  const url = "https://github.com/craigoley/remudero/pull/16500";
+  let reviewReads = 0;
+  const fetch = (args: string[]): unknown => {
+    const path = args[args.length - 1] ?? "";
+    if (/pulls\?state=open/.test(path)) {
+      return [{ number: 16500, html_url: url, head: { ref: "run-W1-T1-1", sha: head }, created_at: "2026-11-02T20:00:00Z",
+        updated_at: "2026-11-02T21:00:00Z", body: "Remudero-Task: W1-T1", auto_merge: null, draft: false, state: "open" }];
+    }
+    if (path.includes("/check-runs")) {
+      return { check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success", started_at: "2026-11-02T20:10:00Z", completed_at: "2026-11-02T20:20:00Z" }] };
+    }
+    if (path.endsWith(`/commits/${head}/status`)) return { statuses: [] };
+    if (path.endsWith("/pulls/16500")) return { mergeable: true, mergeable_state: "blocked", head: { sha: head } };
+    if (path.includes("/pulls/16500/reviews")) { reviewReads++; return reviews; }
+    return [];
+  };
+  const dir = mkdtempSync(join(tmpdir(), "rmd-review-queue-hold-"));
+  try {
+    const path = join(dir, "rows.ndjson");
+    writeFileSync(path, "");
+    const views = buildOpenPrViews("craigoley", "remudero", path, {
+      fetch, requiredContexts: () => ["ci-gate"], readMainPlan: () => ({ tasks: [], byId: new Map() }),
+    });
+    assert.equal(views.length, 1);
+    return { view: views[0], reviewReads };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("the open-PR read takes a review-queue PR's human CHANGES_REQUESTED hold, which no other read covers", () => {
+  const changesRequested = { id: 9, state: "CHANGES_REQUESTED", commit_id: "older", submitted_at: "2026-11-02T20:30:00Z",
+    user: { login: "cao825", type: "User" } };
+  const { view, reviewReads } = producedReviewQueueView([changesRequested]);
+  assert.equal(view.checksState, "green");
+  assert.notEqual(view.reviewState, "success");
+  assert.equal(view.scannerBlocker, undefined, "the scanner read covers only reviewed PRs");
+  assert.equal(reviewReads, 1);
+  assert.equal(view.reviewQueueHold?.kind, "changes-requested");
+  assert.match(needsPersonToMerge(view, []) ?? "", /CHANGES_REQUESTED review from cao825/);
+
+  const approved = producedReviewQueueView([{ ...changesRequested, state: "APPROVED" }]).view;
+  assert.equal(approved.reviewQueueHold, undefined, "positive control: no standing hold, nothing to queue behind");
+  assert.equal(needsPersonToMerge(approved, []), undefined);
+  const bot = producedReviewQueueView([{ ...changesRequested, user: { login: "remudero-fleet[bot]", type: "Bot" } }]).view;
+  assert.equal(bot.reviewQueueHold, undefined, "a bot's review is never a person's hold");
 });
 
 test("a light pass names why a review that needs a person was queued behind the others", async () => {
@@ -123,7 +181,7 @@ test("W1-T11153 criterion 2: a refill re-reads the open PRs, so a review that be
     await runSweepLightPass([first, younger], deps, oneLane);
     await eventually(() => started.length === 1, "no review started");
     assert.deepEqual(started, [1]);
-    clock = NOW + 5 * 60_000;
+    clock = NOW + 30_000; // seconds after the snapshot: the refill still reads the queue at refill time
     hold(1).resolve();
     await eventually(() => started.length === 2, "the freed lane stayed empty");
     assert.deepEqual(started, [1, 3], "the late-eligible older PR is admitted ahead of the younger one");
@@ -131,14 +189,14 @@ test("W1-T11153 criterion 2: a refill re-reads the open PRs, so a review that be
     const refilled = rows.find((r) => r.step === "sweep.review_refilled");
     assert.equal(refilled?.pr_number, 3);
     assert.equal(refilled?.view_age_ms, 0, "the refill row records the age of the view it used");
-    assert.equal(refilled?.snapshot_age_ms, 5 * 60_000);
+    assert.equal(refilled?.snapshot_age_ms, 30_000);
   } finally {
     for (const n of [1, 2, 3]) hold(n).resolve();
     await drainInFlightReviews({ boundMs: 1000 });
   }
 });
 
-test("a refill reuses a view younger than a minute and keeps its view when the re-read fails", async () => {
+test("a refill keeps its view when the re-read fails, and does not retry GitHub for the rest of the pass", async () => {
   let clock = NOW;
   const rows: Record<string, unknown>[] = [];
   const logged: string[] = [];
@@ -160,13 +218,15 @@ test("a refill reuses a view younger than a minute and keeps its view when the r
     clock = NOW + 30_000;
     hold(1).resolve();
     await eventually(() => started.length === 2, "the freed lane stayed empty");
-    assert.equal(reads, 0, "a view younger than a minute is reused");
+    assert.equal(reads, 1, "the refill read the queue at refill time");
+    assert.ok(logged.includes("sweep.review_refill.view_unreadable"));
     clock = NOW + 120_000;
     hold(2).resolve();
     await eventually(() => started.length === 3, "a failed re-read left the lane empty");
-    assert.deepEqual(started, [1, 2, 3]);
-    assert.equal(reads, 1);
-    assert.ok(logged.includes("sweep.review_refill.view_unreadable"));
+    assert.deepEqual(started, [1, 2, 3], "the refills run from the older view");
+    assert.equal(reads, 1, "one failed read is not retried once per refill");
+    const refilled = rows.filter((r) => r.step === "sweep.review_refilled");
+    assert.deepEqual(refilled.map((r) => r.view_age_ms), [30_000, 120_000], "the rows show the older view's age");
   } finally {
     for (const n of [1, 2, 3]) hold(n).resolve();
     await drainInFlightReviews({ boundMs: 1000 });
@@ -211,6 +271,11 @@ test("W1-T11153 criterion 3: the shadow order ranks measured value per lane-minu
 
   const unknown = reviewOrderShadow([heavy, light], [heavy], reviewHistoryFromLedger([]), NOW, 1);
   assert.deepEqual(unknown.shadow, [103], "with no history for a class the shadow order equals the actual order");
+  const newestFirst = reviewOrderShadow([light, heavy], [heavy], reviewHistoryFromLedger([]), NOW, 1);
+  assert.deepEqual(newestFirst.shadow, [103], "it follows the actual picks, not the order the candidates were listed in");
+  assert.deepEqual(newestFirst.would_wait_ms, { "103": 0, "106": 0 });
+  const twoLanes = reviewOrderShadow([light, heavy], [heavy, light], reviewHistoryFromLedger([]), NOW, 2);
+  assert.deepEqual(twoLanes.shadow, [103, 106]);
 
   // In a light pass the row is written beside the actual pick, and the pick is still oldest-first.
   const rows: Record<string, unknown>[] = [];

@@ -7157,6 +7157,9 @@ export interface OpenPrView {
    *  alone for an unarmed plan PR in that state ({@link isHumanHoldCandidate}). `undefined` means not
    *  a candidate, over the per-pass cap, or no hold on such a plan PR, and every row behaves as before. */
   scannerBlocker?: ScannerBlockerObservation;
+  /** W1-T11153 — a person's CHANGES_REQUESTED hold read for a review-queue PR (green, no review verdict at this
+   *  head), which {@link scannerBlocker} never covers. `undefined`: not in the queue, over the cap, or no hold. */
+  reviewQueueHold?: ScannerBlockerObservation;
   /** W1-T5633 — the open high CodeQL alerts analysed at THIS head, read ONLY when the head's latest
    *  `CodeQL` results check concluded failure. `undefined` (no such check, a green one, an unread
    *  listing, or a head already ruled on) leaves the `mergeable` arm exactly as it was. */
@@ -17510,8 +17513,8 @@ export function needsPersonToMerge(
   pr: OpenPrView,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
 ): string | undefined {
-  const blocker = pr.scannerBlocker;
-  if (blocker?.kind === "changes-requested" && blocker.headSha === pr.headSha && blocker.holds.length > 0) {
+  for (const blocker of [pr.scannerBlocker, pr.reviewQueueHold]) {
+    if (blocker?.kind !== "changes-requested" || blocker.headSha !== pr.headSha || blocker.holds.length === 0) continue;
     return `a CHANGES_REQUESTED review from ${blocker.holds.map((hold) => hold.login).join(", ")} stands at this head`;
   }
   if (pr.pendingAnswer !== undefined && pr.pendingAnswer.spent !== true) return undefined;
@@ -17642,9 +17645,12 @@ export function reviewOrderShadow(
 ): { actual: number[]; shadow: number[]; terms: ReviewPriorityTerms[]; would_wait_ms: Record<string, number> } {
   const terms = eligible.map((pr) => reviewPriority(pr, history, nowMs));
   const known = terms.every((t): t is ReviewPriorityTerms => t !== undefined);
+  // With no history for some class there is nothing to rank by, so the shadow order IS the actual
+  // admission order: the actual picks first, then the rest of the eligible list behind them.
+  const picked = new Set(actual.map((pr) => pr.prNumber));
   const order = known
     ? [...terms].sort((a, b) => b.rank - a.rank || a.pr_number - b.pr_number).map((t) => t.pr_number)
-    : eligible.map((pr) => pr.prNumber);
+    : [...actual.map((pr) => pr.prNumber), ...eligible.map((pr) => pr.prNumber).filter((n) => !picked.has(n))];
   const lanes = Math.max(1, width);
   const costOf = new Map(terms.flatMap((t) => (t === undefined ? [] : [[t.pr_number, t.cost_ms] as const])));
   const would_wait_ms: Record<string, number> = {};
@@ -17655,7 +17661,8 @@ export function reviewOrderShadow(
   }
   return {
     actual: actual.map((pr) => pr.prNumber),
-    shadow: order.slice(0, lanes),
+    // The same number of picks as the actual order made, so the two compare slot for slot.
+    shadow: order.slice(0, actual.length),
     terms: terms.filter((t): t is ReviewPriorityTerms => t !== undefined),
     would_wait_ms,
   };
@@ -17679,9 +17686,6 @@ export function recordReviewOrderShadow(
     deps.log?.("sweep.review_order_shadow.failed", { error: String((error as Error)?.message ?? error) });
   }
 }
-
-/** W1-T11153: a light-pass refill reuses an open-PR view younger than this instead of reading GitHub again. */
-export const REFILL_VIEW_REUSE_MS = 60_000;
 
 /** The stand-down suffix naming why a PR was queued behind the others (empty when it needs no person). */
 export function needsPersonNote(pr: OpenPrView, ledgerLines: ReadonlyArray<Record<string, unknown>>): string {
@@ -24316,22 +24320,21 @@ export async function runSweepLightPass(
       });
     },
   });
-  // W1-T11153: the view the refill tail was last derived from. A refill re-reads it (at most once per
-  // REFILL_VIEW_REUSE_MS, to bound the GitHub reads) and re-derives eligibility and order from it.
+  // W1-T11153: the view the refill tail was last derived from. Every refill re-reads it at refill time
+  // and re-derives eligibility and order from it. Refills are bounded by the freed lanes, so the reads are too.
   let refillViewReadAtMs = now;
-  let refillViewTriedAtMs = now;
+  let refillViewUnreadable = false;
   const refilledHeads = new Set<string>();
   const refreshRefillTail = async (): Promise<void> => {
-    if (!deps.readOpenPrsForRefill) return;
-    const startedMs = deps.now ? deps.now() : systemClock.now();
-    // A failed read counts as an attempt too, so a refill loop never re-reads GitHub inside the window.
-    if (startedMs - refillViewTriedAtMs < REFILL_VIEW_REUSE_MS) return;
-    refillViewTriedAtMs = startedMs;
+    // After one failed read this pass keeps the older view rather than retrying GitHub once per refill.
+    if (!deps.readOpenPrsForRefill || refillViewUnreadable) return;
     let fresh: OpenPrView[];
     try {
       fresh = await deps.readOpenPrsForRefill();
     } catch (error) {
-      // Not an erasing catch: the error is logged and the refill keeps the older view it already had.
+      // Not an erasing catch: the error is logged, the refill row's view_age_ms shows the older view it
+      // kept, and the refill still runs from that view.
+      refillViewUnreadable = true;
       deps.log?.("sweep.review_refill.view_unreadable", { error: String((error as Error)?.message ?? error) });
       return;
     }
@@ -24345,6 +24348,10 @@ export async function runSweepLightPass(
   };
   const admitOneRefill = async (): Promise<boolean> => {
     if (providerFloorMet || deps.restartAdmission?.("review", "light-refill") === false) return false;
+    // Read the queue only when a lane is actually free, so a refill that admits nothing reads nothing.
+    const freeWidth = effectiveReviewWidth(deps, policy, Math.max(1, refillTail.length), deps.now ? deps.now() : systemClock.now(),
+      selectionLedgerLines, (deps.readActiveWorkerCount ?? activeWorkerCount)());
+    if (reviewAdmissionBound(freeWidth).bound === 0) return false;
     await refreshRefillTail();
     if (refillTail.length === 0) return false;
     const nowMs = deps.now ? deps.now() : systemClock.now();
