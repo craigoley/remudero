@@ -259,6 +259,21 @@ function lineBuffer(value: unknown, maxLineBytes: number): Buffer {
   return buffer;
 }
 
+/** W1-T11266: two flat rows that serialize to the same bytes: the same keys, in order, with equal primitive values. */
+function sameFlatRow(a: object, b: object): boolean {
+  const keys = Object.keys(a);
+  const other = Object.keys(b);
+  if (keys.length !== other.length) return false;
+  for (let i = 0; i < keys.length; i++) {
+    const value = (a as Record<string, unknown>)[keys[i]];
+    if (keys[i] !== other[i] || value !== (b as Record<string, unknown>)[keys[i]] || (value !== null && typeof value === "object")) return false;
+  }
+  return true;
+}
+
+type DiskRow = ClosedDiskRow | BoardIssueRest;
+type RowLines = Map<number, { row: DiskRow; line: Buffer }>;
+
 export function boardSnapshotPath(root: string, owner: string, repo: string): string {
   const repository = `${owner}/${repo}`;
   const safe = repository.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 80);
@@ -613,6 +628,17 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     }
   };
 
+  // W1-T11266: each row's serialized line from the last commit, keyed by PR or issue number. Serve rewrote the
+  // 43 MB file about 23 times an hour and stringified every row twice per rewrite, including the channel that did
+  // not change. A row whose disk form is unchanged reuses its line; the bytes written are the same.
+  const rowLines: Record<keyof SnapshotRows, RowLines> = { closed: new Map(), issues: new Map() };
+  const rowLine = (channel: keyof SnapshotRows, disk: DiskRow, next: RowLines): Buffer => {
+    const held = rowLines[channel].get(disk.number);
+    const line = held && sameFlatRow(held.row, disk) ? held.line : lineBuffer({ type: channel, row: disk }, maxLineBytes);
+    next.set(disk.number, { row: disk, line });
+    return line;
+  };
+
   const commit = (channel: keyof SnapshotRows, rows: readonly (BoardPrRest | BoardIssueRest)[]): boolean => {
     let nextRows: Map<number, BoardPrRest> | Map<number, BoardIssueRest>;
     try {
@@ -666,17 +692,22 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       counts: { closed: nextState.closed?.size ?? 0, issues: nextState.issues?.size ?? 0 },
     };
 
-    const records = function* (): Generator<unknown> {
-      yield header;
-      for (const row of nextState.closed?.values() ?? []) yield { type: "closed", row: closedForDisk(row) };
-      for (const row of nextState.issues?.values() ?? []) yield { type: "issues", row };
-      yield footer;
+    // Serialized once: the size pass keeps each line and the write pass writes the same buffers.
+    const lines: Buffer[] = [];
+    const nextLines: Record<keyof SnapshotRows, RowLines> = { closed: new Map(), issues: new Map() };
+    const records = function* (): Generator<() => Buffer> {
+      yield () => lineBuffer(header, maxLineBytes);
+      for (const row of nextState.closed?.values() ?? []) yield () => rowLine("closed", closedForDisk(row), nextLines.closed);
+      for (const row of nextState.issues?.values() ?? []) yield () => rowLine("issues", row, nextLines.issues);
+      yield () => lineBuffer(footer, maxLineBytes);
     };
 
     let expectedBytes = 0;
     try {
-      for (const record of records()) {
-        expectedBytes += lineBuffer(record, maxLineBytes).length;
+      for (const line of records()) {
+        const buffer = line();
+        lines.push(buffer);
+        expectedBytes += buffer.length;
         if (expectedBytes > maxBytes) throw new SnapshotRefusal("oversized");
       }
     } catch (error) {
@@ -692,8 +723,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     try {
       io.mkdir(dirname(path), 0o700);
       fd = io.openWrite(stage, 0o600);
-      for (const record of records()) {
-        const buffer = lineBuffer(record, maxLineBytes);
+      for (const buffer of lines) {
         writeFully(io, fd, buffer);
         digest.update(buffer);
         writtenBytes += buffer.length;
@@ -703,6 +733,8 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       fd = undefined;
       io.rename(stage, path);
       state = nextState;
+      rowLines.closed = nextLines.closed;
+      rowLines.issues = nextLines.issues;
       // A replaced data file is a new identity: no earlier sidecar can certify it.
       dataIdentity = { sha256: digest.digest("hex"), bytes: writtenBytes };
       headerObservedAt = nextState.closedObservedAt;
