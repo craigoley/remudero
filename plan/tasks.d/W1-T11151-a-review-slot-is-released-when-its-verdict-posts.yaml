@@ -19,6 +19,7 @@
     - src/lib/run-child.ts
     - src/lib/sweep.ts
     - test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts
+    - "src/run-task.ts"
   status: queued
   attempts: 0
   acceptance:
