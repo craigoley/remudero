@@ -636,6 +636,7 @@ import { readPlanBase } from "./lib/plan-base-reader.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
+import { assertInstanceRegistryRuntimeCurrent, InstanceRegistryRuntimeError, instanceRegistryRuntimePresent, runtimeInstanceRegistryText, withInstanceRegistryRuntime } from "./lib/instance-registry-selection.js";
 import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
@@ -33528,26 +33529,35 @@ async function stopCommand(rest: string[]): Promise<number> {
  * through the checkout's instance registry and this process's `config.root` (pause-target.ts),
  * never the cwd, the repository, the hostname or a pid. A refusal returns before anything is written.
  */
-function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], config: Config): PauseTarget | undefined {
-  // `RMD_INSTANCE_REGISTRY` is the override the shell readers already honor (install-host-units.sh,
-  // host-update.sh, recycle-container.sh); otherwise the checkout's own registry.
-  const override = process.env.RMD_INSTANCE_REGISTRY?.trim();
-  const registryPath = override ? override : daemonInstanceRegistryPath(repoRoot);
-  let registryText: string | undefined;
+async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], config: Config): Promise<PauseTarget | undefined> {
+  const explicit = process.env.RMD_INSTANCE_REGISTRY !== undefined;
+  const resolveTarget = async (): Promise<PauseTarget | undefined> => {
+    const registryPath = explicit ? "selected registry" : daemonInstanceRegistryPath(repoRoot);
+    let registryText: string | undefined;
+    if (explicit) {
+      await assertInstanceRegistryRuntimeCurrent();
+      registryText = runtimeInstanceRegistryText();
+    } else {
+      try {
+        registryText = readFileSync(registryPath, "utf8");
+      } catch {
+        registryText = undefined; // The legacy resolver retains its existing unreadable-target refusal.
+      }
+    }
+    const resolution = resolvePauseTarget({ configRoot: config.root, instance: flagValue(rest, "--instance"), registryText, registryPath });
+    if (resolution.ok) return resolution.target;
+    // Selected target diagnostics can contain private state directories and instance names.
+    console.error(`### rmd ${verb} — REFUSED: ${explicit ? "selected registry target unavailable — nothing was changed" : resolution.refusal}.`);
+    return undefined;
+  };
   try {
-    registryText = readFileSync(registryPath, "utf8");
-  } catch {
-    registryText = undefined; // resolvePauseTarget refuses on an unreadable registry, naming the path.
+    return explicit && !instanceRegistryRuntimePresent()
+      ? await withInstanceRegistryRuntime(resolveTarget) : await resolveTarget();
+  } catch (error) {
+    if (!(error instanceof InstanceRegistryRuntimeError)) throw error;
+    console.error(`### rmd ${verb} — REFUSED: selected registry unavailable — nothing was changed.`);
+    return undefined;
   }
-  const resolution = resolvePauseTarget({
-    configRoot: config.root,
-    instance: flagValue(rest, "--instance"),
-    registryText,
-    registryPath,
-  });
-  if (resolution.ok) return resolution.target;
-  console.error(`### rmd ${verb} — REFUSED: ${resolution.refusal}.`);
-  return undefined;
 }
 
 /**
@@ -33592,7 +33602,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     );
     return 0;
   }
-  const target = pauseTargetOrRefuse("pause", rest, config);
+  const target = await pauseTargetOrRefuse("pause", rest, config);
   if (!target) return 2;
   const info = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "pause", {
     instanceName: target.instance, stateRoot: target.root, namespace: "host",
@@ -33612,7 +33622,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     requested_by_pid: info.pid,
   });
   console.log(
-    `### rmd pause — instance '${target.instance}' (${target.root}) is PAUSED (drain-and-hold). Its in-flight task still ` +
+    `### rmd pause — instance '${target.instance}'${process.env.RMD_INSTANCE_REGISTRY === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
       `reaches merge; it spawns nothing new until \`rmd resume --instance ${target.instance}\`. No other instance is held.`,
   );
   return 0;
@@ -33646,7 +33656,7 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
     console.log(`### rmd resume --fleet — ${sharedPauseRef()} ${cleared ? "deleted" : "NOT deleted (the push did not land)"}; no instance flag was touched.`);
     return cleared ? 0 : 1;
   }
-  const target = pauseTargetOrRefuse("resume", rest, config);
+  const target = await pauseTargetOrRefuse("resume", rest, config);
   if (!target) return 2;
   const result = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "resume", {
     instanceName: target.instance, stateRoot: target.root, namespace: "host",
@@ -42998,6 +43008,12 @@ export async function main(
   if (inspectionArgv[0] === "authority" && inspectionArgv[1] === "inspect") {
     await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
     return;
+  }
+  // Recovery controls keep their existing authority and target checks even if selection is broken.
+  // PAUSE validates its target locally; --fleet retains its independent authenticated Git path.
+  if (inspectionArgv[0] !== "stop" && inspectionArgv[0] !== "pause"
+    && process.env.RMD_INSTANCE_REGISTRY !== undefined && !instanceRegistryRuntimePresent()) {
+    return withInstanceRegistryRuntime(() => main(deps));
   }
   // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's
   // own spawns included) must reach a ledger row and a named exit code, not Node's default crash.
