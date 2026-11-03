@@ -267,6 +267,20 @@ function normalizeCase(raw: unknown, split: PrivateCanarySplit): PrivateScorerCa
   const expectedToolTrace = safe.expectedToolTrace as unknown as readonly CanaryToolEvent[];
   const scorerControl = gradeCanary(itemSnapshot, JSON.stringify(itemSnapshot.expected), expectedToolTrace);
   if (!scorerControl.passed) fail("private-corpus-scorer-invalid");
+  // Goldens must fit the same bounds as an actual final response and owner-captured trace.
+  const finalText = JSON.stringify(itemSnapshot.expected);
+  if (Buffer.byteLength(finalText, "utf8") > 65_536) fail("private-corpus-scorer-invalid");
+  try { canonicalJson(expectedToolTrace, 32 * 1024); }
+  catch { // A trace that exceeds the real recorder bound cannot be a usable golden.
+    fail("private-corpus-scorer-invalid");
+  }
+  // Check the signed gold trace against the same deterministic application simulator the
+  // recorder uses. Scorer agreement with a self-consistent but impossible claimed result is
+  // insufficient (for example, inventory A is quantity 4, not an arbitrary signed quantity).
+  const dispatch = canaryTools(itemSnapshot);
+  const simulatedToolTrace = expectedToolTrace.map(event => dispatch(event.name, event.args));
+  if (canonicalJson(simulatedToolTrace, 32 * 1024) !== canonicalJson(expectedToolTrace, 32 * 1024))
+    fail("private-corpus-scorer-invalid");
   const scorerDigest = sha256(canonicalJson({ version: safe.scorerVersion, expected: itemSnapshot.expected,
     family: itemSnapshot.family, tools: itemSnapshot.tools, expectedToolTrace }));
   return Object.freeze({ item: itemSnapshot, provenance, expectedToolTrace, scorerDigest });

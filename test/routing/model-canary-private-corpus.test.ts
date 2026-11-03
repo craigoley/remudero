@@ -303,3 +303,35 @@ test("private corpus refuses malformed and unsupported holdout trust keys", () =
     "test-holdout-key": ec.publicKey.export({ type: "spki", format: "pem" }).toString(),
   }), { state: "unavailable", reason: "private-corpus-holdout-key-type-invalid" });
 });
+
+test("private corpus accepts only bounded goldens matching the deterministic tool simulator", () => {
+  const valid = item("tool-control-valid", "development", "family-valid", "root-valid");
+  valid.item = { ...valid.item, family: "tools", tools: "inventory", expected: { quantity: 4 } };
+  valid.expectedToolTrace = [{ name: "inventory", args: { item: "A" }, result: { quantity: 4 }, denied: false }];
+  assert.equal(validatePrivateCorpus(bundle([valid])).state, "available", "known-good app trace remains accepted");
+
+  const wrongArgs = item("tool-control-wrong-args", "development", "family-wrong-args", "root-wrong-args");
+  wrongArgs.item = { ...wrongArgs.item, family: "tools", tools: "inventory", expected: { quantity: 4 } };
+  wrongArgs.expectedToolTrace = [{ name: "inventory", args: { item: "B" }, result: { quantity: 4 }, denied: false }];
+  assert.deepEqual(validatePrivateCorpus(bundle([wrongArgs])),
+    { state: "unavailable", reason: "private-corpus-scorer-invalid" });
+
+  const wrongResult = item("tool-control-wrong-result", "development", "family-wrong-result", "root-wrong-result");
+  wrongResult.item = { ...wrongResult.item, family: "tools", tools: "inventory", expected: { quantity: 100 } };
+  wrongResult.expectedToolTrace = [{ name: "inventory", args: { item: "A" }, result: { quantity: 100 }, denied: false }];
+  assert.deepEqual(validatePrivateCorpus(bundle([wrongResult])),
+    { state: "unavailable", reason: "private-corpus-scorer-invalid" });
+
+  const oversizedAnswer = item("tool-control-oversized-answer", "development", "family-large-answer", "root-large-answer");
+  oversizedAnswer.item = { ...oversizedAnswer.item, family: "review", tools: "none",
+    expected: { finding: "x".repeat(70_000) } };
+  assert.deepEqual(validatePrivateCorpus(bundle([oversizedAnswer])),
+    { state: "unavailable", reason: "private-corpus-scorer-invalid" });
+
+  const oversizedTrace = item("tool-control-oversized-trace", "development", "family-large-trace", "root-large-trace");
+  oversizedTrace.item = { ...oversizedTrace.item, family: "tools", tools: "inventory", expected: { quantity: 4 } };
+  oversizedTrace.expectedToolTrace = [{ name: "inventory", args: { item: "A", pad: "x".repeat(40_000) },
+    result: { quantity: 4 }, denied: false }];
+  assert.deepEqual(validatePrivateCorpus(bundle([oversizedTrace])),
+    { state: "unavailable", reason: "private-corpus-scorer-invalid" });
+});
