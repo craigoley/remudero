@@ -9,11 +9,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { buildCreditCandidates, creditCandidatesFromProjection, creditIsReconcilable } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub, PrRef, StatusProjection } from "../src/lib/status.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { buildCreditCandidates, creditCandidatesFromProjection, creditIsReconcilable } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { GitHub, PrRef, StatusProjection } from "#src/lib/status.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T3376";
 const url = (n: number) => `https://github.com/craigoley/remudero/pull/${n}`;

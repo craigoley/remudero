@@ -1,0 +1,116 @@
+- id: W1-T11172
+  title: "A conflict gardener resolves the conflicts the sweep left stuck, as the backstop the operator ruled: it detects a PR GitHub or the local probe calls conflicted past the fleet's own measured conflict duration, acts in tiers (deterministic merge, then a merge-conflict round given both sides' intent, then clearing a stale seed, claim or hold), verifies that GitHub recomputed mergeable and CI went green, and asks an LLM progress judge after each round, escalating only when the judge sees no progress — 7 days left 3 PRs conflicted 13.8-49.6 h with no gardener acting"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, the backstop that acts on a conflict the sweep left stuck; high because it pushes to fleet branches and re-enters repair arms, under its own independent governor
+  band_meaning: span
+  origin: operator-session#conflict-findings-2026-11-03
+  plan_refs:
+    - W1-T7421
+    - W1-T4390
+    - W1-T4386
+    - W1-T9035
+    - W1-T9578
+    - W1-T9289
+    - W1-T11062
+  files:
+    - src/lib/conflict-gardener.ts
+    - src/lib/conflict-gardener-governor.ts
+    - src/lib/garden-registry.ts
+    - src/lib/daemon.ts
+    - src/lib/prompt-render.ts
+    - src/lib/sweep.ts
+    - test/gardeners/a-conflict-gardener-resolves-what-the-sweep-left-conflicted.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Each conflict-gardener pass lists every open PR that GitHub reads dirty or whose newest sweep.merge_probe row at its exact head and main tip reads conflict, keeps those whose conflict has outlived the fleet's own p90 conflict-episode duration over the trailing ledger window with no sweep act at that head since, and ranks them by blocked PR-hours; a PR holding a live fix claim, an in-flight sweep action or an operator merge hold is skipped and named, and every pass writes one conflict_garden.report row
+      proof: "unit test: test/gardeners/a-conflict-gardener-resolves-what-the-sweep-left-conflicted.test.ts"
+    - claim: For each ranked PR it acts in tier order and writes one conflict_garden.act row per act. (i) Deterministic first, through the sweep's own no-worker arms with their leases and fence (git's clean local merge, the registry regenerator, take-main where the PR's change is already on main). (ii) Then a merge-conflict round whose prompt carries the conflicted file list, both sides' logs and both sides' intent, the PR body and the subjects and bodies of the main commits since the merge base that touch each conflicted file. (iii) Then wedge clearing, where a stale fix seed, fix claim or backstop hold is re-read through the sweep's own fixSeedRead and fixDispatchHoldAtHead, and the PR re-enters the sweep's conflicted arm
+      proof: "grep: W1-T11172 criterion 2 in test/gardeners/a-conflict-gardener-resolves-what-the-sweep-left-conflicted.test.ts"
+    - claim: After each act the gardener reads GitHub's recomputed mergeability and the required checks for the PR's new head, and records verified only when mergeable_state is no longer dirty and CI is green; after each round an LLM progress judge reads that PR's round history and decides continue, change-approach or escalate, and the gardener escalates once per PR and head only on escalate, never on a count; an unavailable judge leaves the PR to the next pass
+      proof: "grep: W1-T11172 criterion 3 in test/gardeners/a-conflict-gardener-resolves-what-the-sweep-left-conflicted.test.ts"
+    - claim: An independent governor computed only from conflict_garden.act receipts maps each tier to live, slow, shadow or stopped. A tier with no record starts in shadow and records the act it would take. Shadow returns to live on a clean shadow record. A PR re-acted inside its backoff is slow. Harm seen twice, a pushed head whose CI regressed or that was reverted, is stopped. The gardener acts only on live, the core daemon evaluates the same verdict each tick, and evidence ages out, so no state is permanent
+      proof: "grep: W1-T11172 criterion 4 in test/gardeners/a-conflict-gardener-resolves-what-the-sweep-left-conflicted.test.ts"
+    - claim: The gardener is reached in production, registered as conflictGardenPass with the garden registry's pacing
+      proof: "grep: conflictGardenPass( in src/lib/garden-registry.ts"
+    - claim: The core daemon's tick evaluates the conflict gardener's governor verdict
+      proof: "grep: conflictGardenGovernorVerdict( in src/lib/daemon.ts"
+  rationale: |
+    MEASURED 2026-11-03 ~00:30Z over the 7-day conflict rows of the core ledger union (~/Remudero-notes/conflict-findings-2026-11-03.md,
+    evidence in ~/Remudero-notes/conflict-evidence-1103/, read-only). Code read at origin/main c0a6f1c74.
+    - 42 PRs went dirty. 26 were cleared by the sweep's merge-conflict round, 1 by the dirty-fleet rebase, 4 by another push and
+      7 by close or merge. 1 was hand-fixed (#15520), and 3 are still conflicted.
+    - Longest continuous conflict per PR: median 0.54 h, p90 13.8 h. Tail: #15532 49.6 h, #15679 49.2 h, #15551 36.5 h, #16044
+      22.1 h, #14176 13.8 h.
+    - Open and conflicted at ~00:30Z: #16201 (src/cli/commands/daemon.ts), #15638 (src/run-task.ts), #15602 (rename skew, clean
+      locally, dirty on GitHub) and #15532, which the operator's thread is hand-fixing. None of these files is regenerable.
+    - Every tail PR was held by a different mechanism: hysteresis that ignores main moving, the handoff deadlock, a dead
+      daemon's seed, a count backstop, a non-run head, light-pass deferral, or a compare capped at 300 files. Each is its own
+      filed task (items 1-6 of the findings). A backstop is needed because the next unanticipated wedge will hold a PR the same
+      way.
+    GARDENERS TODAY:
+    - None acts on a conflict. pr.stuck escalates once a stage-stall passes the 30-minute backstop.
+    - The flow gardener filed W1-T11062: "cleared by its owner without manual intervention", verify human, rated high risk, no
+      mechanism named.
+    - The hot-file gardener filed W1-T10603 and W1-T10743, which are preventive.
+    - The fix-lane and queue-judge gardeners only read.
+    Operator ruling 2026-11-02 (in chat): automatic conflict resolution "should absolutely be included to ensure automated
+    flow. If rmd doesn't effectively do it, a gardener should." So this gardener ACTS; it does not only escalate.
+    PATTERNS IT FOLLOWS:
+    - The fix-lane gardener (W1-T7421): ledger-union evidence, classes priced in blocked PR-hours, no fixed threshold gating an
+      act.
+    - The SRE runbooks and their independent governor (W1-T4386, W1-T4390): act only on a live verdict computed from the
+      ledger alone, with tiers live, slow, shadow and stopped, self-healing, evidence that ages out, and the daemon
+      re-evaluating the verdict every tick.
+    - Operator ruling 2026-10-13 (W1-T9035): a gardener's bound is earned from its record.
+    SUPERSEDES W1-T11062, which is withdrawn in this same filing.
+  design: |
+    1. DETECT (src/lib/conflict-gardener.ts). Read open PRs from the sweep's snapshot reader and the ledger union.
+       - Episode duration: from the first dirty sweep.disposed row, or the first probe conflict row, at a head, to the row
+         that cleared it. The p90 over the trailing window is the staleness bar. With fewer than 2 episodes there is no bar,
+         and every conflicted PR qualifies.
+       - Skip a PR with a live fix claim (claimFixDispatch's key), an in-flight sweep action, or an operator merge hold, and
+         name the skip in the report.
+       - Rank by blocked PR-hours (episode age). Ties go to the PR with more dependent queued tasks.
+    2. ACT, in tiers. Each tier exports from or calls into src/lib/sweep.ts. Nothing is reimplemented.
+       (i) Deterministic: the no-worker arms of the conflicted disposition: regenerateConflictViaGit in every mode it has, and
+           take-main on a redundant path (isRedundantRefixConflict).
+       (ii) A round: dispatchFix in merge-conflict mode. Its prompt (prompt-render.ts, the merge-conflict arm) gains an intent
+            section: the PR body, and for each conflicted file `git log --format=%s%n%b <merge-base>..<main> -- <file>`, capped
+            by the prompt's existing budget.
+       (iii) Wedge clearing: re-read the PR through fixSeedRead and fixDispatchHoldAtHead with this pass's ledger. If either
+             reads stale (orphaned or ended, or a hold whose recorded cause no longer stands), call the sweep's conflicted arm
+             for that one PR, which writes its own settlement rows. The gardener never deletes a claim ref or a ledger row.
+    3. VERIFY. On the next pass, for each act with a new head, read mergeable_state and the required check rollup through the
+       read broker's gateway, and write conflict_garden.verified with the outcome verified, pending, still-dirty or ci-red.
+    4. JUDGE. After each round (tier ii or iii), resolveFixProgress (fix-progress-judge.ts) with the PR's conflict_garden.act
+       history as remedyHistory. continue: the next pass may act again. change-approach: carry the constraint into the next
+       round's prompt. escalate: one needs-human issue per (PR, head) through escalate(). unavailable: nothing.
+    5. GOVERN (src/lib/conflict-gardener-governor.ts, a leaf like sre-governor.ts). conflictGardenGovernorVerdict(tier,
+       receipts, controls) is computed from conflict_garden.act and conflict_garden.verified rows only. Harm is a verified head
+       whose CI went red where its parent's was green, or a reverted push. Backoff and memory derive from the receipts' own
+       spacing. The core daemon evaluates it each tick and pauses the gardener on stopped, as stepSreGovernor does (src/lib/daemon.ts).
+    6. REGISTER in garden-registry.ts as conflictGardenPass, beside flowGardenPass, with the existing pacing (gardenPacingDueAsync). The gardener opens no PR of its own, so
+       it adds no MACHINE_LANE_HEAD_RE name. The acts per pass start at the W1-T9035 earned-bound default and move with its
+       verified record.
+    Tests go in the new file, titled verbatim as in the proofs, over the real gardener pass with injected snapshot, ledger,
+    git, GitHub and judge seams, and the real governor.
+  falsifier: |
+    At origin/main no module lists conflicted PRs or acts on them, so the first test's import fails. If the tier order is dropped
+    (a round before the deterministic tier), the clean-merge fixture dispatches a worker and the second test fails. If the
+    gardener escalates on a count with the judge unavailable, the third test fails. If a tier acts on a shadow or stopped
+    verdict, the fourth test fails.
+  note: |
+    reservation hand-off: plan-file-1793666136000 -> plan-file-1793666136000
+    Reserved with rmd next-task-id --branch plan-file-1793666136000. Filed 2026-11-03 from the conflict findings, item 7 (p1),
+    under the operator ruling of 2026-11-02. It supersedes W1-T11062 in the same filing, which withdraws it with
+    superseded_by: W1-T11172, as #16311 did for W1-T10316.
+    Build after the mechanisms it calls, if they are still open: W1-T11167 (clean merge), W1-T11168 (cause-aware hold),
+    W1-T11169 (seed settlement) and W1-T11170 (fleet heads), plus items 1-3, which a sibling session is building (item 1 is W1-T11166, #16362). Each tier
+    calls whatever arms are on main when it is built, and new arms join tier (i) or (iii) as they land.

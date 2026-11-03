@@ -14,12 +14,12 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { prioritizeDepReviewRepairs, reconcileDependabotRefusedPath, type DepReviewResult } from "#src/lib/dep-review.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Plan } from "../src/lib/plan.js";
-import { buildSweepEffects, depReviewCommand, type DepReviewDeps } from "./helpers/run-task-test.js";
-import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "./helpers/sweep-test.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Plan } from "#src/lib/plan.js";
+import { buildSweepEffects, depReviewCommand, type DepReviewDeps } from "#test/helpers/run-task-test.js";
+import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-10-15T23:52:00.000Z");
 const HEAD = "1da14b29fee7376616bb5a3016add44ea355aad9";

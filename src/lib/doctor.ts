@@ -435,22 +435,9 @@ export interface WorkerPattern {
   readonly needs: readonly string[];
 }
 
-/**
- * A DISPATCHED WORKER, matched on its EXECUTABLE rather than anywhere in its command line.
- *
- * TWO FALSE POSITIVES WERE MEASURED WHILE WRITING THIS, and the second is why this anchors on
- * argv[0]:
- *
- *   1. Matching `claude` anywhere counted the OPERATOR'S OWN interactive session — a live reading
- *      returned `oldest 11.5 days`, which was the editor running this change.
- *   2. Matching `--output-format stream-json` anywhere then counted a SHELL COMMAND that merely
- *      CONTAINED that text: this file was being edited by a `zsh -c` whose argv quoted the flag,
- *      and the reading picked up the shell itself.
- *
- * The second one is the dangerous shape. For a counter it is an over-count; for W1-T3629's reaper
- * it would mean sending a signal to an operator's shell. So the executable's BASENAME must match
- * exactly, and the flags are an additional condition rather than the whole test.
- */
+/** Match argv[0]'s basename exactly, then require flags (W1-T3629).
+ *  Substring matches counted an interactive editor aged 11.5 days and a `zsh -c` quoting
+ *  `--output-format stream-json`. A false match could make the reaper signal an operator's shell. */
 export const WORKER_PROCESS_PATTERNS: readonly WorkerPattern[] = [
   { exe: "claude", needs: ["--output-format stream-json"] },
   { exe: "npm", needs: ["ci"] },
@@ -507,19 +494,13 @@ function realPsSpawn(cmd: string, args: string[]): string {
   return execFileSync(cmd, args, { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
 }
 
-/** procps first, BSD second. A keyword error is not a read failure — only BOTH failing is.
- *  `spawn` is injectable (defaulted to the real one) so the BSD-fallback branch and the exact
- *  two attempted commands are assertable from a test, not just exercised by the live host's own
- *  `ps` dialect (W1-T3628 coverage-ratchet: an external-tool spawn cannot be process-boundary
- *  exempted — it must be covered by injecting the boundary itself). */
+/** Try procps then BSD; only both failing is a read failure. Inject the spawn to test both
+ *  commands, including the host's unused dialect (W1-T3628 coverage-ratchet). */
 export function defaultPs(spawn: PsSpawn = realPsSpawn): string {
   try {
     return spawn("ps", ["-eo", "pid=,ppid=,etimes=,args="]);
   } catch {
-    // BSD `ps` rejects the procps `etimes=` keyword outright rather than returning empty output,
-    // so this falls back to `etime=`, its own dialect. A REAL read failure (no `ps` binary at
-    // all, EACCES, etc.) surfaces from THIS second call instead -- into readWorkerProcesses's own
-    // catch below, never swallowed here.
+    // BSD rejects `etimes=`. Retry `etime=`; missing ps/EACCES propagate to readWorkerProcesses.
     return spawn("ps", ["-eo", "pid=,ppid=,etime=,args="]);
   }
 }
@@ -530,10 +511,7 @@ export function readWorkerProcesses(
   try {
     return parseWorkerProcesses(run());
   } catch (error) {
-    // Neither `ps` dialect could run (missing binary, EACCES, ...) -- classifyReadFailure gives
-    // the same reason vocabulary judgeCheckoutDepth and judgeLockDivergence already read, carried
-    // in `unreadableReason` for judgeLaneLessWorkers to render as UNKNOWN rather than a healthy
-    // zero (W1-T3628 design note above).
+    // Both dialects failed: carry the reason to judgeLaneLessWorkers as UNKNOWN (W1-T3628).
     return { unreadableReason: classifyReadFailure(error).reason };
   }
 }
@@ -1004,27 +982,12 @@ export function appendCaptureSurfaceFireHistory(marker: unknown, fire: CaptureSu
   return [...parseCaptureSurfaceFireHistory(marker), fire].slice(-CAPTURE_SURFACE_FIRE_HISTORY_LIMIT);
 }
 
-/**
- * W1-T3348 — does the feedback docket's INPUT still carry anything?
- *
- * `state/last-feedback-docket.json` proves only that the weekly rung FIRED. The rung fires whether
- * or not a human ever typed anything, so a cadence marker reads `fresh` over permanently-empty
- * surfaces forever. This judges the surfaces themselves, from the `counts_by_source` the docket
- * already emits on every empty fire — no new sensor, no new write.
- *
- * THREE STATES, NEVER TWO, mirroring `cadenceMarkerRows`' own discipline: `fresh` (carried an item
- * on the most recent fire), `stale` (carried one once, but not on the most recent fire) and
- * `never` (has never carried one). Reporting a never-fed channel as merely stale sends an operator
- * hunting a regression in a channel that has no history to regress from.
- *
- * IT REFUSES RATHER THAN RENDERS. The verdict rides `buildDoctorReport` into `exitCodeFor`, so a
- * dead capture surface makes `rmd doctor` exit non-zero. That is the whole point: a capture loop
- * that stops at reporting rebuilds the failure it is fixing.
- *
- * AND IT NEVER FIRES ON AN UNOBSERVED POPULATION. Below {@link CAPTURE_MIN_FIRES} observed fires
- * the check is OK and SAYS it has not yet judged — this repo's recurring defect is a bound that
- * binds on a healthy condition, and a fresh host has simply not run the rung enough times yet.
- */
+/** Judge docket input counts, not its cadence marker: a weekly fire can hide empty input forever
+ *  (W1-T3348). No new sensor or write. Like `cadenceMarkerRows`, distinguish `fresh` (fed on the
+ *  newest fire), `stale` (fed earlier) and `never` (no history, hence no regression to hunt).
+ *  `buildDoctorReport`/`exitCodeFor` make dead surfaces exit non-zero. Below {@link CAPTURE_MIN_FIRES},
+ *  return OK with "not yet judged"; an unobserved population cannot prove a fault.
+ *  FALSIFIER: test/a-capture-surface-that-never-feeds-is-refused.test.ts. */
 export function judgeCaptureSurfaceLiveness(fireHistory: ReadonlyArray<Record<string, unknown>>): Check {
   const countsOf = (row: Record<string, unknown>): Record<string, unknown> | undefined => {
     const c = row.counts_by_source;
@@ -1033,12 +996,8 @@ export function judgeCaptureSurfaceLiveness(fireHistory: ReadonlyArray<Record<st
   const allFires = fireHistory
     .filter((l) => countsOf(l) !== undefined || l.step === "feedback_docket.empty" || l.step === "feedback_docket.published")
     .sort((a, b) => (String(a.ts ?? "") < String(b.ts ?? "") ? -1 : 1));
-  // ONLY A FIRE THAT CARRIES `counts_by_source` CAN WITNESS SILENCE. `feedback_docket.published`
-  // rows carry none, and a publish is positive evidence that SOME surface fed — so counting one
-  // as a silent fire would let this check report a demonstrably live channel as `never`. MEASURED
-  // on the daemon host: both publishes came from `rejected_feedback`, which an all-fires reading
-  // called `never`. Unjudgeable fires are NAMED instead, never silently folded in either
-  // direction. Giving `.published` its own counts is a separate concern, filed as follow-up.
+  // Only counts can witness silence: two publishes without counts falsely marked rejected_feedback
+  // as never-fed. Name unjudgeable fires; adding published counts remains a separate follow-up.
   const fires = allFires.filter((f) => countsOf(f) !== undefined);
   const unjudgeable = allFires.length - fires.length;
   const unjudgeableNote =
@@ -1110,24 +1069,17 @@ export interface ProviderCapacityWindowReading {
 export interface ProviderCapacityReading {
   provider: string;
   readable: boolean;
-  /** How long this provider has read `readable: false` with no intervening readable read, in ms,
-   *  ending now. `undefined` means the duration itself is unmeasured — `rmd doctor` keeps no
-   *  history of its own between runs — and is judged as WORSE than a known long duration, never
-   *  better: a health check that stays quiet until it can prove how long a fault has run recreates
-   *  the five days of silence this arm exists to end. */
+  /** Continuous unreadability ending now, in ms. Undefined breaches the bound: doctor keeps no
+   *  history, and waiting for a measured duration recreated five days of silence (W1-T3665). */
   unreadableForMs?: number;
   windows: readonly ProviderCapacityWindowReading[];
   reason?: string;
 }
 
-/** PRIMARY CONTROL: how long a provider's capacity read may report unreadable before doctor
- *  alarms it, for a caller that DOES track the duration (`rmd doctor` itself does not — see
- *  {@link ProviderCapacityReading.unreadableForMs}, whose own missing-duration default is the
- *  actual backstop for doctor's own read). MEASURED (W1-T3665): codex's `auth.json` `id_token`
- *  expired about an hour after a 2026-09-11 refresh, and every capacity read returned
- *  `readable: false` for the next FIVE DAYS with nothing saying so — the fleet routed 100% of
- *  balanced work to Claude and Claude's weekly reached 44%. Bounded above one bad poll (a network
- *  blip the next poll clears on its own) and far below even one day. */
+/** PRIMARY CONTROL for callers tracking duration; doctor's missing-duration backstop is
+ *  {@link ProviderCapacityReading.unreadableForMs}. Above one bad poll, below one day.
+ *  W1-T3665: an expired codex id_token hid capacity for five days, routing all balanced work
+ *  to Claude. FALSIFIER: test/an-unreadable-provider-capacity-is-alarmed.test.ts. */
 export const PROVIDER_CAPACITY_UNREADABLE_BOUND_MS = 15 * 60 * 1000; // 15 minutes
 
 /** A window's usage, NAMED WITH ITS DIRECTION, never a bare percentage (W1-T3665): an operator
@@ -1141,21 +1093,9 @@ function formatCapacityWindow(w: ProviderCapacityWindowReading): string {
   return `${w.name}: ${consumed}% consumed, ${remaining}% remaining${reset}`;
 }
 
-/**
- * W1-T3665 — does the fleet's routing auction still see this provider's capacity? `rmd doctor` had
- * NO arm for this at all: codex's capacity reads returned `readable: false` for five straight days
- * while `codex login status` kept printing "Logged in", so the routing auction gave codex no
- * headroom and 100% of balanced work went to Claude — visible only in a daemon log line nobody
- * greps, never in `rmd doctor` or the fleet's heartbeat.
- *
- * REPORT ONLY, the same division every neighbouring arm in this file states: this names the
- * condition, re-authentication (the actual repair, an interactive device-auth flow) stays the
- * operator's.
- *
- * A READABLE provider never raises this arm, however tight its remaining headroom — that is
- * `worker-provider.ts`'s auction to judge, not doctor's; this arm discriminates on readability
- * alone.
- */
+/** Report capacity readability (W1-T3665): login status once stayed "Logged in" through the outage.
+ *  Re-authentication remains the operator's interactive device-auth repair. Readable providers
+ *  never alarm here; headroom belongs to worker-provider.ts's auction. */
 export function judgeProviderCapacityReadable(
   providers: readonly ProviderCapacityReading[],
   boundMs: number = PROVIDER_CAPACITY_UNREADABLE_BOUND_MS,

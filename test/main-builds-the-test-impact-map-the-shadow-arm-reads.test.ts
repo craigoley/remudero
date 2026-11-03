@@ -20,8 +20,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TSX = import.meta.resolve("tsx");

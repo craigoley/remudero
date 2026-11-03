@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 // @ts-expect-error — a plain .mjs instrument outside tsconfig's include, imported for its pure exports.
-import { classifyCoverageTier, evaluateRatchet } from "../scripts/coverage-ratchet.mjs";
+import { classifyCoverageTier, evaluateRatchet } from "#scripts/coverage-ratchet.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/coverage-baseline.json"), "utf8")) as Record<string, unknown>;

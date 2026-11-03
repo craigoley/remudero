@@ -1,0 +1,67 @@
+- id: W1-T11117
+  title: Controlled canaries enumerate effective configurations and shard the complete comparison matrix
+  repo: remudero
+  depends_on: []
+  plan_refs: [W1-T10956, W1-T10957, W1-T100001]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: blast-radius
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: operator-approved-router-evaluation-plan:2026-11-02
+  files:
+    - src/lib/model-canary-config-census.ts
+    - src/lib/model-canary-matrix-plan.ts
+    - src/lib/model-canary-command.ts
+    - test/routing/model-canary-config-inventory.test.ts
+    - test/routing/model-canary-matrix-plan.test.ts
+  rationale: >-
+    The operator approved the researched router evaluation implementation plan and Luna worker
+    coordination on 2026-11-02. The existing canary schedule bounds one plan at 128 slots, but
+    does not account for every effective provider/model/effort configuration or partition a
+    larger complete matrix. Static model identifiers alone lose provider and treatment identity.
+  design: >-
+    Add pure, versioned census and matrix-planning helpers that consume the existing parsed
+    routing policy plus explicitly supplied effective override and capability/access evidence.
+    Read no credentials and perform no availability probe. Preserve provider, deployment,
+    requested model, admitted effort, scaffold/tool/context/cache treatment, source hashes and
+    every excluded or unknown configuration with its reason. Do not manufacture a universal
+    effort cross-product or treat a source declaration as live eligibility. Canonicalize inputs,
+    reject conflicting identities and produce digest-bound deterministic shards whose union
+    contains every eligible case/configuration/replicate exactly once. Preserve paired-case
+    membership and disclose any panel too large for one bounded block. Feed existing schedule
+    contracts without changing their 128-slot bound, concurrency, owner or execution semantics.
+    Add a bounded offline preparation path in the existing model-canary command that calls both
+    helpers and writes a private manifest without invoking any provider. This offline foundation
+    does not depend on coding execution. Reconcile native overlap and serialize shared command
+    edits with W1-T10957; do not create an artificial execution dependency for pure preparation.
+  note: >-
+    The human explicitly adopted the implementation plan with 'go with all of your
+    recommendations - get this all done'. This is source preparation under normal qualification,
+    not additional private allowance or permission to change schedules, deployment, promotion,
+    existing holds, paid limits or failed receipts. Reconcile current ownership and shipped scope
+    before building. Use the computed test folders, package aliases and shared root helper.
+  acceptance:
+    - claim: Configuration identity preserves provider model effort and treatment without silently dropping exclusions
+      proof: 'unit test: configuration census preserves provider model effort and treatment identity'
+    - claim: Missing access or unsupported capability evidence remains explicit rather than eligible
+      proof: 'unit test: configuration census retains excluded rows and unknown eligibility'
+    - claim: The complete eligible matrix is partitioned without missing or duplicated slots
+      proof: 'unit test: matrix shards cover every eligible configuration and case once within 128 slots'
+    - claim: Equivalent reordered inputs produce the same manifest and shard identities
+      proof: 'unit test: matrix shard digests are deterministic across input ordering'
+    - claim: Replicates retain paired blocks and oversized panels are explicitly disclosed
+      proof: 'unit test: matrix shards preserve replicate blocks and disclose oversized panels'
+    - claim: The native offline command actually consumes the effective configuration census
+      proof: 'grep: buildEffectiveConfigCensus( in src/lib/model-canary-command.ts'
+    - claim: The native offline command actually consumes the complete bounded matrix plan
+      proof: 'grep: planCanaryMatrix( in src/lib/model-canary-command.ts'
+  falsifier: >-
+    Establish the base failure with verified test paths and complete TAP. Delete the exclusion
+    guard, provider/treatment identity component and shard membership guard individually; require
+    their named positive/negative controls to fail, restore the source and require zero failures.
+    Preserve exact source/base hashes, missingness and every failed or refused receipt.

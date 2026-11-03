@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { clearCodexCapacityCache, readCodexCapacity } from "../src/lib/worker-provider.js";
-import type { Config } from "../src/lib/config-schema.js";
+import { clearCodexCapacityCache, readCodexCapacity } from "#src/lib/worker-provider.js";
+import type { Config } from "#src/lib/config-schema.js";
 
 // W1-T3690. MEASURED on the fleet 2026-09-16, inside the daemon's own container: `codex
 // app-server --listen stdio://` answers `initialize` in 366ms with the daemon's exact filtered

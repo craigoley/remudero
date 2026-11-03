@@ -1,0 +1,30 @@
+- id: W1-T11073
+  title: An inbox-draft route whose clean-draft rate is near zero is skipped, and the inbox drafter runs under a turn cap
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which deployment drafts an inbox reply; the draft contract and its checks are unchanged
+  origin: operator-session#token-efficiency-2026-11-01
+  plan_refs:
+    - W1-T4067
+    - W1-T10876
+  files:
+    - src/lib/draft-routing.ts
+    - .remudero/mounts.yaml
+    - test/routing/an-inbox-draft-route-that-never-drafts-clean-is-skipped.test.ts
+  # refusal-amendment (W1-T11073, run DAEMON-1793643571744@c58f698bcc766f4e9a6b8717134743db96bf24b3, 2026-11-02T21:03:39.657Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The required measured cap cannot be derived because clean-draft turn counts are unavailable in permitted sources.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "chooseDraftDeployment skips a deployment whose clean-draft rate over at least its last 50 recorded attempts is below 5 percent while another eligible deployment exists, and ledgers the skip with the rate and the attempt count; a deployment with fewer than 50 recorded attempts is still sampled as today. The inbox draft mount caps its turns well below 400, at a value the PR derives from the turn counts of recorded clean drafts"
+      proof: "unit test: test/routing/an-inbox-draft-route-that-never-drafts-clean-is-skipped.test.ts"
+  rationale: |
+    OBSERVED, operator token recon 2026-11-01 (one record per worker call, 2026-10-25 to 11-01, 10,350 calls): inbox drafting is 1,068 calls and 68 percent of all uncached prompt tokens. Cash-routed drafts produced 2 clean drafts in 476 attempts, burning 173M uncached tokens and $53 of real API spend, after which the Sonnet fallback cost a median 2.9M tokens per draft ($704 for 196 drafts). draft-routing.ts samples deployments by clean rate (W1-T4067) with no floor, and synthesis.inbox_draft in .remudero/mounts.yaml allows max_turns 400. W1-T10876 (drafts name their model) supplies per-model numbers and is related but not required.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (run-unfiled-1793538128289).

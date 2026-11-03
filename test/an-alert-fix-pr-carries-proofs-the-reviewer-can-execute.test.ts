@@ -1,4 +1,3 @@
-// test/an-alert-fix-pr-carries-proofs-the-reviewer-can-execute.test.ts
 //
 // W1-T8625. THE DEFECT, read on origin/main before anything here was written:
 //   - `alertFixPrompt` asked for "an `Acceptance:` block of `- <claim> | <proof>` bullets" and never
@@ -19,19 +18,19 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ACCEPTANCE_PROOF_GRAMMAR, PR_BODY_ACCEPTANCE_GRAMMAR, inertAcceptanceProofs } from "../src/lib/proof-grammar.js";
-import { acceptanceAuthorTimeCheck, parseAcceptanceBlock, parseWhitelistedProof } from "../src/lib/review.js";
-import { breMetacharsIn } from "../src/lib/task-linter.js";
+import { ACCEPTANCE_PROOF_GRAMMAR, PR_BODY_ACCEPTANCE_GRAMMAR, inertAcceptanceProofs } from "#src/lib/proof-grammar.js";
+import { acceptanceAuthorTimeCheck, parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
+import { breMetacharsIn } from "#src/lib/task-linter.js";
 import {
   alertFixPrompt,
   dispatchAlertFixRun,
   readAlertFixPrBody,
   type AlertFixDispatchDeps,
-} from "../src/run-task.js";
-import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/run-task.js";
+import type { AlertLaneAlert } from "#src/lib/alert-lane.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const ALERT: AlertLaneAlert = {
   source: "code-scanning",

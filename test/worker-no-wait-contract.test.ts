@@ -34,9 +34,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
-import { classifyNoPrShape, noPrVerdict } from "../src/run-task.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { outputContractLines, renderAnchorBlock } from "#src/lib/compaction.js";
+import { classifyNoPrShape, noPrVerdict } from "#src/run-task.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

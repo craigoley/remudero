@@ -1,0 +1,32 @@
+- id: W1-T11147
+  title: "Concurrent rmd runs in one checkout self-sync once and never fail each other — at 2026-11-02T20:55:45Z three `./bin/rmd claim <id>` started at the same instant in ~/Remudero/remudero, each ran checkCliFreshness's `git merge --ff-only origin/main`, and two died on `.git/index.lock: File exists` with `### RUN-TASK ERROR`, so those claims were never taken"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: self-sync.ts serializes its own fast-forward across processes
+  origin: operator-session#self-sync-race-2026-11-02
+  plan_refs:
+    - W1-T445
+    - W1-T446
+  files:
+    - src/lib/self-sync.ts
+    - test/daemon/concurrent-rmd-runs-in-one-checkout-self-sync-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: N processes running checkCliFreshness at once on one behind, clean fixture checkout all return without error; exactly one fast-forwards, and the rest wait on a repo-scoped lock, re-read HEAD after acquiring it, find it at origin/main and proceed
+      proof: "unit test: test/daemon/concurrent-rmd-runs-in-one-checkout-self-sync-once.test.ts"
+    - claim: A self-sync that still cannot take the lock within its wait, or whose fast-forward fails for a reason other than a held lock, degrades with a named reason and lets the unrelated command run, never a RUN-TASK ERROR; the off-main, dirty and CI guards are unchanged
+      proof: "grep: W1-T11147 criterion 2 in test/daemon/concurrent-rmd-runs-in-one-checkout-self-sync-once.test.ts"
+  rationale: |
+    OBSERVED 2026-11-02T20:55:45Z (coordinator brief): three `./bin/rmd claim <id>` started at the same instant in ~/Remudero/remudero. Each ran self-sync (src/lib/self-sync.ts:182, checkCliFreshness, called from run-task.ts at CLI entry), which does `git -C <repo> merge --ff-only origin/main`. Two died with `error: Unable to create '…/.git/index.lock': File exists` and `### RUN-TASK ERROR`, so those claims were never taken. The third won.
+    READ at origin/main b1b191d93: checkCliFreshness (src/lib/self-sync.ts:162) fetches with fetchOriginRetryingRefLock (a ref-lock retry for the fetch only), reads HEAD and origin/main, and on the clean, behind, on-main case runs `git(["merge", "--ff-only", "origin/main"])` (:313) with no lock and no retry. A concurrent fast-forward's index.lock makes it throw, and the throw reaches the CLI entry as a run-task error for whatever command was typed.
+    NOT COVERED: no queued shard, open PR or run- branch serializes self-sync. W1-T445 and W1-T446 (merged) set its guards.
+  design: |
+    Wrap the fast-forward in an exclusive lock file under the repo's git common dir (O_EXCL create with holder pid, host and start time, the same discipline as the proposal-registry lock). Wait on it with the existing pid-liveness and stale-holder reclaim. Its wait bound is the measured duration of recent fast-forwards in this checkout (recorded beside the lock), so there is no fixed constant. After acquiring, re-read HEAD and origin/main: already equal means `status: "current"`, with no merge and no re-exec. An index.lock left by a non-rmd git process is waited out the same way. A wait that runs out returns `degraded` with a named reason, and the caller runs its command on the current tree. The test spawns N real processes against a fixture repo.
+  note: |
+    Filed 2026-11-02 on the coordinator's request (item 16, p3).

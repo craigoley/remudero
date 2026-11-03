@@ -94,13 +94,20 @@ export function runTestFile(file, root = ROOT) {
  */
 export async function screen({ files, budgetMs, concurrency, runFile, now = Date.now }) {
   const passes = new Map(files.map((f) => [f, 0]));
+  // #15638: a run started whenever any budget was left, so a ~67 s suite (far longer under the screen's own load)
+  // overran the budget into the job's 35-minute cancel. A repeat starts only if that file's slowest run still fits.
+  const slowestMs = new Map(files.map((f) => [f, 0]));
   const started = now();
   let next = 0;
   let failure;
   const slot = async () => {
-    while (failure === undefined && (next < files.length || now() - started < budgetMs)) {
-      const file = files[next++ % files.length];
+    while (failure === undefined && files.length > 0) {
+      const file = files[next % files.length];
+      if (next >= files.length && now() - started + slowestMs.get(file) > budgetMs) break;
+      next++;
+      const runStarted = now();
       const result = await runFile(file);
+      slowestMs.set(file, Math.max(slowestMs.get(file), now() - runStarted));
       if (result.ok) passes.set(file, passes.get(file) + 1);
       else failure ??= { file, passesBefore: passes.get(file), output: result.output };
     }

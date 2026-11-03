@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { parseAcceptanceBlock } from "../src/lib/review.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
 
 // ── W1-T3739 — THE FILING PROTOCOL IS TYPED WHEN A FUNCTION ALREADY PRODUCES IT ──────────────
 //

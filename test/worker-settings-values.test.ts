@@ -7,8 +7,8 @@ import {
   ALLOWED_NETWORK_DOMAINS,
   validateWorkerSettings,
   WorkerSettingsError,
-} from "../src/lib/settings.js";
-import { renderWorkerSettings } from "../src/lib/worker.js";
+} from "#src/lib/settings.js";
+import { renderWorkerSettings } from "#src/lib/worker.js";
 
 // W1-T2243 — THE WORKER TEMPLATE'S SECURITY-CRITICAL VALUES ARE UNASSERTED WHILE ITS KEYS ARE
 // PINNED. `validateWorkerSettings` already pins WHICH keys may exist (SANDBOX_KEYS /

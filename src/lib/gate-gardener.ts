@@ -558,7 +558,7 @@ export function runSuiteShiftedMeasured(repoRoot: string, file: string, shiftDay
 export type GateEdit =
   | { kind: "row"; key: string; to: number | null }
   | { kind: "demote"; gate: string; rationale: string }
-  | { kind: "defuse"; finding: ExpiringFixture; leadDays: number; urgent: boolean }
+  | { kind: "defuse"; finding: ExpiringFixture; leadDays: number; urgent: boolean; controlFailed?: boolean }
   | { kind: "false-positive"; rule: GateRepairRule; observation: GateRepairObservation; classification: GateRepairClass }
   | { kind: "compress"; finding: CommentCompressionFinding };
 
@@ -644,9 +644,11 @@ function defuseCandidates(deps: GardenerDeps, probes: GateProbes, sources: GateD
       deps.log("gate_garden.defuse_deferred", defuseEvidence(finding, leadDays));
       return [];
     }
-    if (!confirmDefuse(deps, finding, run, runSuite)) return [];
+    const verdict = confirmDefuse(deps, finding, run, runSuite);
+    if (verdict !== "confirmed" && verdict !== "control_failed") return [];
     return [{ class: "defuse", target, file: finding.file,
-      edit: { kind: "defuse", finding, leadDays, urgent: finding.daysLeft <= probes.ef!.MARGIN_DAYS },
+      edit: { kind: "defuse", finding, leadDays, urgent: finding.daysLeft <= probes.ef!.MARGIN_DAYS,
+        ...(verdict === "control_failed" ? { controlFailed: true } : {}) },
       reason: `${finding.file}:${finding.line} crosses ${finding.threshold} on ${fixedClock(finding.expiresAt).iso()} (${leadDays}-day lead).` }];
   });
 }
@@ -684,8 +686,9 @@ export function commentCompressionCandidates(deps: GardenerDeps, probes: GatePro
  * file passes at the control shift and fails shifted one day past the crossing. Anything else is
  * ledgered `gate_garden.defuse_unconfirmed`. A verdict is remembered per blob and crossing day; a
  * run with no verdict is ledgered `run_error` and retried next pass, never read as red.
+ * A control red is filed too: the CI census blocks main on that verdict inside its 24 h tier (2026-11-01).
  */
-function confirmDefuse(deps: GardenerDeps, f: ExpiringFixture, run: (cmd: string, args: string[]) => string, runSuite: (file: string, days: number) => boolean): boolean {
+function confirmDefuse(deps: GardenerDeps, f: ExpiringFixture, run: (cmd: string, args: string[]) => string, runSuite: (file: string, days: number) => boolean): DefuseVerdict | undefined {
   const crossingDate = fixedClock(f.expiresAt).iso();
   const evidence = { file: f.file, line: f.line, crossingDate };
   const path = join(deps.stateDir, DEFUSE_VERDICTS_FILE);
@@ -698,12 +701,12 @@ function confirmDefuse(deps: GardenerDeps, f: ExpiringFixture, run: (cmd: string
         : runSuite(f.file, Math.ceil(f.daysLeft) + 1) ? "shifted_passed" : "confirmed";
     } catch (e) {
       deps.log("gate_garden.defuse_unconfirmed", { ...evidence, outcome: "run_error", error: String(e) });
-      return false;
+      return undefined;
     }
     writeAtomic(path, JSON.stringify({ ...memo, [key]: verdict }, null, 2) + "\n");
     if (verdict !== "confirmed") deps.log("gate_garden.defuse_unconfirmed", { ...evidence, outcome: verdict });
   }
-  return verdict === "confirmed";
+  return verdict;
 }
 
 function defuseEvidence(f: ExpiringFixture, leadDays: number): Record<string, unknown> {
@@ -743,7 +746,7 @@ export function renderCommentCompressionShard(finding: CommentCompressionFinding
 export function renderDefuseShard(action: GateGardenAction, taskId: string) {
   if (action.edit.kind === "compress") return renderCommentCompressionShard(action.edit.finding, taskId);
   if (action.edit.kind !== "defuse") throw new Error("gate gardener: mixed defuse plan");
-  const { finding: f, leadDays, urgent } = action.edit;
+  const { finding: f, leadDays, urgent, controlFailed } = action.edit;
   const crossing = fixedClock(f.expiresAt).iso();
   const title = `${taskId}: ${f.file} stays defused across ${crossing}`;
   return renderMachineShard({
@@ -754,6 +757,11 @@ export function renderDefuseShard(action: GateGardenAction, taskId: string) {
     rationale: [
       `${f.file}:${f.line}: ${f.field} is stamped ${f.stamp}; ${f.threshold} crosses on ${crossing}.`,
       `Found ${f.daysLeft} days before crossing using a ${leadDays}-day lead horizon.`,
+      ...(controlFailed ? [
+        "The suite already fails at the census's +0.001-day clock-shift control. The shift reaches only the test process, so a",
+        "suite that compares a shifted time with one a child process stamps on the real clock fails at any shift.",
+        "Inside 24 h of the crossing the CI census blocks main on control_failed, so make the suite hold under a shifted clock.",
+      ] : []),
       "Use an exemption only when this case is judged against an injected clock; prove it by ageing the fixture across the threshold and rerunning the test, as #8673 did.",
       "Otherwise make the stamp relative to the test's clock. Moving a fixed date only re-arms the fixture.",
       "Add the task's regression to this fixture file: run the census immediately before and after crossing, and run the affected case at both clocks.",

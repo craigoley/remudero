@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runTask } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { spawnWorker } from "../src/lib/worker.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import { ProviderCapacityBlockedError } from "../src/lib/worker-provider.js";
-import { IsolationError } from "../src/lib/isolation.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { runTask } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { spawnWorker } from "#src/lib/worker.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import { ProviderCapacityBlockedError } from "#src/lib/worker-provider.js";
+import { IsolationError } from "#src/lib/isolation.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 

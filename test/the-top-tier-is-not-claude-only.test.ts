@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parse } from "yaml";
-import { validateMounts } from "../src/lib/mounts.js";
+import { validateMounts } from "#src/lib/mounts.js";
 
 // this change. An Architect that exists only while the Claude subscription has headroom is a single
 // point of failure, not a fleet. Ranking the two Azure deployments the fleet already trusts makes

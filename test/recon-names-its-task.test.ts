@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { renderReconPrompt, workerVisibleRecordPath } from "../src/run-task.js";
-import { taskRecordPath } from "../src/lib/plan.js";
+import { renderReconPrompt, workerVisibleRecordPath } from "#src/run-task.js";
+import { taskRecordPath } from "#src/lib/plan.js";
 
 /**
  * W1-T2632 — RECON IS NOW TOLD WHICH TASK IT IS RECONNING.

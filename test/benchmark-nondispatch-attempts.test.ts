@@ -13,6 +13,7 @@ import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from ".
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { spendRoleOf } from "#src/lib/spend-rows.js";
 import { captureGardenerSpendSource, foldGardenerSpend } from "#src/lib/gardener-spend.js";
+import { workerExecutionEvidence } from "#src/lib/worker-execution-evidence.js";
 
 function assignment(id: string, provider: "cash" | "codex", model: string): WorkerSelectionAssignment {
   return { version: 1, id, phase: "pre-execution",
@@ -40,6 +41,37 @@ function args(root: string): SpawnWorkerArgs {
   return { cwd: root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "sensitive-prompt-sentinel",
     config: { root } as Config };
 }
+
+test("W1-T10956: non-dispatch attempt receipts retain actual execution evidence without granting coding credit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-execution-join-"));
+  try {
+    const selected = assignment("review-assignment", "cash", "cash-actual");
+    const completed = result("cash", "cash-actual", selected.id);
+    completed.servedModel = null;
+    completed.servedModelReason = "provider response omitted identity";
+    completed.tokenUsageState = "observed";
+    completed.usageEstimateUsd = 0;
+    completed.budgetReservedUsd = 0.5;
+    completed.budgetSettledUsd = 0;
+    completed.budgetHeldUsd = 0.5;
+    completed.executionEvidence = workerExecutionEvidence("native-worker-spawn-1", completed, selected);
+    const raw = (async (input: SpawnWorkerArgs) => {
+      input.onSelectionAssignment?.(selected);
+      return completed;
+    }) as typeof spawnWorker;
+    assert.equal(await benchmarkNonDispatchSpawn("review", raw)(args(root)), completed);
+    const ledger = rows(root);
+    const attempts = ledger.filter(row => row.step === "worker.attempt");
+    assert.equal(attempts.length, 1);
+    assert.deepEqual(attempts[0]!.execution_evidence, completed.executionEvidence);
+    assert.equal(attempts[0]!.lane, "review");
+    assert.equal(attempts[0]!.served_model, null);
+    assert.equal(attempts[0]!.served_model_reason, "provider response omitted identity");
+    assert.equal(ledger.filter(row => row.step === "verdict").length, 0);
+    assert.doesNotMatch(JSON.stringify(attempts[0]!.benchmark_run), /native-worker-spawn-1|review-assignment/,
+      "private identity stays on the enclosing ledger row, outside its public-safe benchmark envelope");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("non-dispatch benchmark attempts cover cash review triage and judge lanes", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-nondispatch-"));

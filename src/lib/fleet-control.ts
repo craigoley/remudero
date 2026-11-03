@@ -9,31 +9,14 @@ import { repoScopedTaskKey } from "./ledger.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 
 /**
- * Fleet control set (MASTER-PLAN §4A/§4B) — `rmd stop|pause|resume`, plus the
- * quiet-hours toggle (W3-T5, MASTER-PLAN §7/§9).
- *
- * Flag files under `<root>/state/`, checked at the top of every drain tick
- * (lib/drain.ts, W1-T11 acceptance). Mirrors the eventual daemon/panel control
- * set (§4A): **Pause** is drain-and-hold — no new worker spawns, but an
- * in-flight task runs to FULL completion (through verdict and merge) so state
- * stays clean. **Stop** is the hard kill — checked FIRST, every tick, taking
- * precedence over PAUSE — but in this single-task-at-a-time drain loop (W1-T12's
- * daemon does not exist yet) it hits the SAME "no new spawn" boundary as PAUSE;
- * the two are logged distinctly (`drain.stop` vs `drain.pause`) so an operator
- * can tell "holding, resumable" from "operator pulled the plug" apart in the
- * ledger. `rmd resume` clears BOTH flags — the one command that always means go.
- *
- * **Quiet hours** is a THIRD, independent flag (W3-T5): "is now an OPTIONAL
- * wizard toggle, default OFF" (§9) — unlike STOP/PAUSE it does not gate the
- * drain loop. `dispatch-governor.ts` reads it for the daemon's dispatch-only
- * deferral, so new daemon spawns wait while drainage and in-flight work keep
- * completing. `rmd resume` deliberately does NOT touch it — quiet hours is a
- * schedule preference, not an emergency hold, so an operator resuming from a
- * STOP/PAUSE should not silently lose their quiet-hours setting.
- *
- * Plain flag files (not a lock — no liveness/staleness semantics like
- * drain-lock.ts/inflight-lock.ts): existence alone gates the loop, so a
- * corrupt/unreadable file still fails CLOSED (stopped/paused), never open.
+ * Fleet controls (MASTER-PLAN §4A/§4B; W1-T11/W1-T12): STOP wins over PAUSE each
+ * drain tick. PAUSE prevents new spawns while in-flight work completes through merge;
+ * STOP is the hard-kill intent, logged separately, though the original single-task
+ * drain observes both at the same spawn boundary. Resume clears both.
+ * W3-T5 (§7/§9): quiet hours defaults OFF and independently defers daemon dispatch
+ * via dispatch-governor.ts; drainage/in-flight work continue. Resume preserves it.
+ * Flags under `<root>/state/` gate by existence, even when corrupt/unreadable:
+ * fail closed, with no lock liveness/staleness semantics.
  */
 
 export interface FleetControlInfo {
@@ -42,17 +25,13 @@ export interface FleetControlInfo {
   requestedAt: string;
   pid: number;
   host: string;
-  /** W1-T4429 — design (i)'s "owner (session/host/pid)": a session id alongside pid/host, so a hold
-   *  outliving the process that set it still names something more specific than a bare pid a daemon
-   *  cycle later cannot even confirm ever existed. Only ever set on a PAUSE (see {@link requestPause}). */
+  /** W1-T4429 design (i): PAUSE owner session supplements pid/host after the setter exits. */
   sessionId?: string;
-  /** W1-T4429 — design (i): an explicit `--until`, or a default derived from the reason's class (see
-   *  {@link classifyPauseReason}). `null` marks an INDEFINITE hold — never lapses, only escalates
-   *  (design (ii), {@link evaluatePauseTier}). Only ever set on a PAUSE. */
+  /** W1-T4429 design (i)/(ii): PAUSE expiry from --until or reason class; null means
+   * indefinite (escalates, never lapses). See classifyPauseReason/evaluatePauseTier. */
   expiresAt?: string | null;
   indefinite?: boolean;
-  /** W1-T7727 — the registry instance this PAUSE holds, when the CLI resolved one (see
-   *  pause-target.ts). A flag lives under ONE instance's state root, so this only names it. */
+  /** W1-T7727: registry instance held by this root's PAUSE (pause-target.ts). */
   instance?: string;
 }
 
@@ -68,8 +47,7 @@ export function quietHoursFilePath(root: string): string {
   return join(root, "state", "QUIET_HOURS");
 }
 
-/** The extra fields only a PAUSE flag ever carries (see {@link FleetControlInfo}'s own doc) — STOP and
- *  quiet-hours keep calling {@link writeFlag} with this omitted, so their on-disk shape is unchanged. */
+/** PAUSE-only metadata; omitted for STOP/quiet-hours to preserve their disk shape. */
 interface PauseFlagExtra {
   actor_evidence: ActorEvidence;
   sessionId: string;
@@ -124,15 +102,11 @@ export function requestStop(root: string, reason?: string): FleetControlInfo {
 // expiry — clearing it needed an operator to GUESS it was abandoned. Everything below computes the
 // two facts `requestPause` (and the shared anchor `mintAnchor` mints alongside it) now records.
 
-/** Reason CLASSES pick a default hold duration (design (i): "a default derived from the reason
- *  class") — policy data, never a single flat number: a fast-moving incident should escalate soon
- *  if its setter goes quiet, while a planned maintenance/release window is legitimately longer-lived.
- *  `other` is the floor — MEASURED 2026-09-24's four-hour stall would have crossed even the floor. */
+/** W1-T4429 design (i): reason classes select default TTLs. Incidents escalate sooner
+ * than maintenance/releases; even the `other` floor catches the 2026-09-24 four-hour stall. */
 export type PauseReasonClass = "incident" | "release" | "maintenance" | "other";
 
-/** Default hold duration (ms) per {@link PauseReasonClass} — see that type's own doc for why this is
- *  a table, not a literal. Only ever consulted when `requestPause`'s caller supplies no explicit
- *  `--until`; an explicit one always wins outright. */
+/** Class TTLs apply only without explicit --until, which always wins. */
 export const PAUSE_DEFAULT_TTL_MS: Readonly<Record<PauseReasonClass, number>> = {
   incident: 60 * 60 * 1000,
   release: 4 * 60 * 60 * 1000,
@@ -140,10 +114,8 @@ export const PAUSE_DEFAULT_TTL_MS: Readonly<Record<PauseReasonClass, number>> = 
   other: 2 * 60 * 60 * 1000,
 };
 
-/** A crude keyword sniff over the operator's own `--reason` text — good enough to pick a DEFAULT
- *  duration; an explicit `--until` always overrides it, so a misclassification only ever costs the
- *  unattended default, never a hold an operator actually specified. Unclassifiable text (including
- *  no reason at all) is `"other"`, the shortest non-incident default. */
+/** Keyword defaults only: unknown/missing reasons use `other` (shortest non-incident TTL).
+ * Explicit --until overrides classification, preserving operator-specified holds. */
 export function classifyPauseReason(reason: string | undefined): PauseReasonClass {
   const text = (reason ?? "").toLowerCase();
   if (/incident|outage|urgent|sev[\s-]?1|fire/.test(text)) return "incident";
@@ -152,9 +124,7 @@ export function classifyPauseReason(reason: string | undefined): PauseReasonClas
   return "other";
 }
 
-/** {@link requestPause}'s resolved expiry: `expiresAt: null` + `indefinite: true` for a hold declared
- *  `--indefinite` (design (ii): "only escalates, never lapses"); otherwise an ISO instant, either the
- *  caller's own explicit `until` or `now` plus {@link PAUSE_DEFAULT_TTL_MS}'s class default. */
+/** Resolve --until or class TTL; --indefinite gives null expiry and never lapses (design (ii)). */
 export function resolvePauseExpiry(
   reason: string | undefined,
   until: string | undefined,
@@ -169,17 +139,13 @@ export function resolvePauseExpiry(
   return { expiresAt: fixedClock(now.getTime() + ttlMs).iso(), indefinite: false };
 }
 
-/** The owner half of design (i): pid/host, exactly as {@link writeFlag} already recorded, plus a
- *  session id — `$REMUDERO_SESSION_ID` when the caller (a dispatched worker, MASTER-PLAN's own
- *  session convention) set one, else a `host-pid` fallback that is still strictly more specific than
- *  a bare pid a later tick cannot even confirm ever ran on THIS host. */
+/** W1-T4429 design (i): REMUDERO_SESSION_ID, else host-pid, supplements pid/host ownership. */
 function resolvePauseOwnerSessionId(): string {
   const env = process.env.REMUDERO_SESSION_ID?.trim();
   return env ? env : `${hostname()}-${process.pid}`;
 }
 
-/** {@link requestPause}'s optional third argument set — an explicit `--until` (an ISO instant, or the
- *  literal `"indefinite"`), and an injectable clock for a deterministic test. */
+/** Explicit --until (ISO instant or "indefinite") and an injectable test clock. */
 export interface RequestPauseOptions {
   actorProbe?: ActorEvidenceProbe;
   until?: string;
@@ -189,13 +155,9 @@ export interface RequestPauseOptions {
 }
 
 /**
- * `rmd pause [--reason <text>] [--until <instant>|--until indefinite]` — write the PAUSE flag.
- * `deps`, when supplied (the real CLI path — see the SHARED CROSS-HOST PAUSE section below), also
- * pushes the shared hold to `origin`, carrying the SAME owner/reason/expiry in the anchor commit's
- * body (design (i): "in the ref's commit body"), so a daemon on another host sees not just THAT the
- * fleet is held but WHO held it, WHY, and UNTIL WHEN. BEST-EFFORT: the local write above ALWAYS
- * lands first and ALWAYS succeeds on its own — design (i) — so a host that cannot reach origin
- * still pauses itself; the shared push merely widens who else notices.
+ * Write the local PAUSE first, with owner/reason/expiry (W1-T4429 design (i)). Optional
+ * deps also pushes that metadata in the shared anchor body. Local pause remains effective
+ * when origin is unreachable; the shared push is best-effort. See requestFleetPause for CLI scope.
  */
 export function requestPause(
   root: string,
@@ -222,11 +184,9 @@ export interface FleetPauseResult {
 }
 
 /**
- * W1-T7727 — `rmd pause --fleet`: the EXPLICIT fleet-wide hold. It pushes `refs/rmd-pause/hold`
- * (every daemon on every host that shares this origin reads it — core, site, console and any other
- * instance) and writes no local flag. The default `rmd pause` never reaches this: it holds one
- * instance (pause-target.ts). Unlike the instance pause it is not best-effort: a push that did not
- * land held nothing, and the caller says so.
+ * W1-T7727: explicit `rmd pause --fleet` pushes refs/rmd-pause/hold for every instance
+ * sharing origin (core/site/console included), without a local flag. Default CLI pause
+ * targets one instance via pause-target.ts. A failed fleet push held nothing: report failure.
  */
 export function requestFleetPause(deps: SharedPauseGitDeps, reason?: string, options?: RequestPauseOptions): FleetPauseResult {
   const now = options?.now ?? systemClock.date();
@@ -289,12 +249,7 @@ export function pauseDetail(root: string): string | undefined {
   return `${detail}; actor: ${describeActorEvidence(info?.actor_evidence)}`;
 }
 
-/**
- * `rmd quiet-hours on|off` / the panel's quiet-hours toggle (W3-T5) — flip the flag. Unlike
- * STOP/PAUSE this is a plain boolean preference, not an emergency hold, so it has no
- * "request with a reason that survives to a detail string" shape: `on` writes the flag,
- * `off` clears it, and the return value is simply the resulting state.
- */
+/** W3-T5: quiet-hours on/off writes/clears an independent preference; returns its new state. */
 export function setQuietHours(root: string, enabled: boolean): boolean {
   if (enabled) {
     writeFlag(quietHoursFilePath(root), undefined);
@@ -305,13 +260,8 @@ export function setQuietHours(root: string, enabled: boolean): boolean {
 }
 
 
-/**
- * AUTO-CONSUME the STOP flag (one-shot lifecycle). STOP exists only to halt the CURRENTLY
- * running drain; the drain that observed it clears it as it terminates (drainCommand /
- * daemonCommand finally), so STOP can NEVER silently block a future drain — unlike PAUSE,
- * which is a persistent maintenance hold cleared ONLY by `rmd resume`. Clears STOP alone,
- * never PAUSE. Idempotent (returns false when there was nothing to consume).
- */
+/** One-shot STOP: the observing drain clears it in drainCommand/daemonCommand finally,
+ * so it cannot block a future drain. PAUSE persists until resume. Idempotent; clears only STOP. */
 export function consumeStop(root: string): boolean {
   return clearFlag(stopFilePath(root));
 }
@@ -319,20 +269,14 @@ export function consumeStop(root: string): boolean {
 export interface ResumeResult {
   clearedStop: boolean;
   clearedPause: boolean;
-  /** Only present when `resumeFleet` was called with `deps` — whether the shared-hold ref push
-   *  landed. Omitted (not `false`) when `deps` was not supplied, so every existing caller that
-   *  never passed one keeps getting back exactly `{clearedStop, clearedPause}`. */
+  /** Shared delete result only when deps was supplied; otherwise omitted, preserving legacy shape. */
   clearedSharedPause?: boolean;
 }
 
 /**
- * `rmd resume` — clear BOTH flags of ONE instance root. Idempotent; a resume with nothing to clear is
- * not an error. W1-T7727: the CLI no longer passes `deps`, so `rmd resume` never clears the fleet-wide
- * hold (that is `rmd resume --fleet`, {@link resumeFleetWide}); a caller that does pass `deps` keeps
- * the W1-T1216 behavior of also clearing the shared hold. BEST-EFFORT for
- * the same reason `requestPause`'s push is: the local clears above always run first and always
- * land regardless of whether origin is reachable, so an operator resuming a disconnected host
- * still gets THEIR OWN host moving again.
+ * Idempotently clear one instance's STOP/PAUSE first, even offline. W1-T7727: CLI resume
+ * supplies no deps; fleet resume uses resumeFleetWide. Explicit deps preserves W1-T1216's
+ * best-effort shared delete after local clears. Quiet hours is untouched.
  */
 export function resumeFleet(root: string, deps?: SharedPauseGitDeps): ResumeResult {
   const clearedStop = clearFlag(stopFilePath(root));
@@ -341,66 +285,33 @@ export function resumeFleet(root: string, deps?: SharedPauseGitDeps): ResumeResu
   return { clearedStop, clearedPause, clearedSharedPause: clearSharedPause(deps) };
 }
 
-// ── SHARED CROSS-HOST PAUSE (W1-T1216) ────────────────────────────────────────────────────────
-//
-// THE GAP THIS CLOSES. `pauseFilePath`/`pauseDetail` above are keyed to `root`, and `root` (via
-// `config.root`) resolves DIFFERENTLY per host — `join(homedir(), "Remudero")` on a mini is not
-// the same directory an Azure container resolves from identical code — and `state/` is
-// gitignored, so the file can never travel by the one channel every host already shares. A PAUSE
-// written on one host is therefore invisible to a daemon checking `pauseDetail` on another.
-//
-// AN ADDITION, NEVER A REPLACEMENT (design (i)). `pauseDetail`/`isPaused`/`pauseFilePath` above
-// are UNCHANGED — a disconnected host must still be able to pause itself with zero network
-// dependency, and `checkSharedPause` below always consults the local file FIRST, only falling
-// through to a remote read when the local file is silent.
-//
-// A GIT REF IS THE SHARED SUBSTRATE (rationale (9)/(10)), mirroring `triageClaimRef`
-// (lib/auto-triage.ts) and `refs/rmd-id/` (task-id-reservation.ts) — the same namespace family,
-// same "`git ls-remote`, never `git clone`/`git fetch`" cost profile. Unlike a triage claim this
-// is fleet-WIDE, not per-entry, so there is exactly one ref, and there is no contention to referee
-// — two operators pausing at once both want the same outcome (held), so whichever push lands
-// first is fine.
-//
-// UNREACHABLE MEANS HELD (design (ii)). `readSharedPause` discriminates ABSENT (status 0, no
-// stdout) from HELD (status 0, some stdout) from UNREACHABLE (nonzero status) — measured
-// (rationale (10)): an absent ref exits 0 with zero lines, an unreachable remote exits 128, a
-// present ref exits 0 with one line. `checkSharedPause` below folds UNREACHABLE into "paused",
-// never into "clear" — a failed read is never scored free, the same principle
-// `reserveTaskIdRemote` applies in the opposite direction (there: refuses to MINT; here: refuses
-// to DISPATCH).
-//
-// STOP IS UNTOUCHED (design (iii)). Nothing below adds a shared ref for STOP: it exists only to
-// halt the drain that observes it, auto-clears as that drain exits (`consumeStop`, above), and has
-// no cross-host question to answer — giving it a shared marker would turn a one-shot into
-// something that can outlive its own drain.
+// ── SHARED CROSS-HOST PAUSE (W1-T1216) ────────────────────────────────────────
+// Local state/ is gitignored and root differs across mini/Azure hosts; local PAUSE cannot travel.
+// Design (i): shared control supplements offline local control. Local operator holds win first.
+// Rationale (9)/(10): one fleet ref mirrors auto-triage.ts/task-id-reservation.ts namespaces,
+// using ls-remote rather than clone/fetch. Concurrent pausers both want held; either push wins.
+// Design (ii): measured absent=exit 0/no lines, held=exit 0/one line, unreachable=exit 128.
+// Unreachable holds dispatch, just as reserveTaskIdRemote refuses to mint after a failed read.
+// Design (iii): STOP stays local/one-shot (consumeStop); sharing it could outlive its drain.
 
-/** The single ref the shared cross-host PAUSE hold lives at — fleet-WIDE, unlike
- *  `triageClaimRef`'s per-entry `refs/rmd-triage/<id>`, because there is exactly one hold to ask
- *  about. Under `refs/rmd-pause/`, matching the `refs/rmd-id/`/`refs/rmd-triage/` convention: a
- *  namespace `git clone`/`git fetch` does not replicate by default and `git ls-remote --heads`
- *  (which `reapBranchesCommand` enumerates) does not see, so it costs nothing on every branch
- *  sweep already walking the remote. */
+/** Single fleet hold, outside heads/default clone/fetch namespaces (like refs/rmd-id/
+ * and refs/rmd-triage/); invisible to reapBranchesCommand's ls-remote --heads sweep. */
 export function sharedPauseRef(): string {
   return "refs/rmd-pause/hold";
 }
 
-/** What a read of the shared hold found. `"unreachable"` is a FAILED READ of the world and must
- *  never be treated as `"absent"` — see the module header's UNREACHABLE MEANS HELD note. */
+/** Failed reads are unreachable, never absent; see W1-T1216 design (ii) above. */
 export type SharedPauseRead = "absent" | "held" | "unreachable";
 
-/** The one I/O seam {@link readSharedPause}/{@link writeSharedPause}/{@link clearSharedPause}
- *  share. Mirrors {@link TriageClaimReserver} (lib/auto-triage.ts) in shape and in its own
- *  contract: `run` must NEVER throw — an unreachable remote is an OUTCOME (a non-zero status),
- *  because a throw at this seam is indistinguishable from a programmer error to the caller. */
-/** W1-T4429 — the owner/reason/expiry `mintAnchor` embeds in the anchor commit's BODY (design (i)),
- *  alongside the pid/host/timestamp line it already wrote. Every field optional: a caller that omits
- *  it (any test fixture predating this task) reproduces the exact legacy one-line message. */
+/** Shared I/O contract (like auto-triage.ts's TriageClaimReserver): run must return
+ * nonzero for unreachable, never throw; throws are indistinguishable from programmer errors. */
+/** W1-T4429 design (i): optional anchor-body metadata beside the legacy pid/host/time line.
+ * Omitting info preserves the legacy one-line message. */
 export interface SharedPauseMintInfo {
   actor_evidence?: ActorEvidence;
   reason?: string;
   sessionId?: string;
-  /** `null` marks an INDEFINITE hold (design (ii)) — mints an `expires: indefinite` line instead of
-   *  an instant. `undefined` (the field omitted) mints no `expires:` line at all. */
+  /** null emits `expires: indefinite` (design (ii)); undefined emits no expires line. */
   expiresAt?: string | null;
   indefinite?: boolean;
 }
@@ -410,30 +321,18 @@ export interface SharedPauseGitDeps {
   run(args: string[]): { status: number; stdout: string };
   /** Nonblocking read leaf. Production supplies this; synchronous fixtures retain their seam. */
   runAsync?(args: string[]): Promise<{ status: number; stdout: string }>;
-  /** A payload usable as the ref's target commit. Mirrors {@link TriageClaimReserver.mintAnchor}:
-   *  the real implementation mints an orphan commit over the empty tree; a test may return any
-   *  fixed string, since a fake remote need not validate real git object shape. W1-T4429: `info`,
-   *  when supplied, is embedded in the commit's body — see {@link SharedPauseMintInfo}. */
+  /** Mint an orphan commit over the empty tree, like TriageClaimReserver.mintAnchor;
+   * fakes may return a fixed string. W1-T4429: optional info goes in the commit body. */
   mintAnchor(info?: SharedPauseMintInfo): string;
 }
 
-/** PRIMARY CONTROL: a shared-pause read is a scheduler health probe, not an unbounded dependency.
- *
- * A shared-pause read is a scheduler health probe, not an unbounded dependency.  The daemon calls
- * it from its tick path, so a credential helper, DNS lookup, or GitHub transport stall must return
- * a named `unreachable` outcome and let the loop continue rather than freezing every review lane.
- * Keep this below the daemon's normal poll cadence while leaving enough room for one ordinary Git
- * round trip; callers can still inject a fake `run` without paying a timer in tests.
- */
+/** PRIMARY CONTROL: shared-pause reads are bounded scheduler health probes. Credential,
+ * DNS or transport stalls must return unreachable without freezing review lanes. Keep below
+ * normal daemon poll cadence, allowing an ordinary Git round trip; tests may inject run. */
 export const SHARED_PAUSE_GIT_TIMEOUT_MS = 10_000;
 
-/**
- * The real (non-test) {@link SharedPauseGitDeps} — a live `git`, scoped to `repoRoot` exactly
- * like `gitTriageClaimReserver`'s own calls (lib/auto-triage.ts). `mintAnchor` reuses that
- * function's own recipe (`hash-object` the empty tree, `commit-tree` an orphan commit over it)
- * rather than inventing a second one, so a stuck hold is inspectable with the same `git show` an
- * operator already knows to reach for on a stuck triage claim.
- */
+/** Live git scoped to repoRoot. Reuse gitTriageClaimReserver's empty-tree hash-object /
+ * orphan commit-tree recipe so operators can inspect a stuck hold with familiar git show. */
 export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
   const argv = (args: string[]): string[] => ["-C", repoRoot, ...args];
   const run = (args: string[]): { status: number; stdout: string } => {
@@ -486,8 +385,7 @@ export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
   };
 }
 
-/** One `ls-remote` outcome, carrying the sha `readSharedPause` (below) throws away — the seam
- *  {@link checkSharedPause} uses to recover WHO set the hold instead of just THAT it is held. */
+/** ls-remote status plus sha, retained for checkSharedPause's setter attribution. */
 interface SharedPauseLsRemote {
   status: number;
   /** The ref's current sha, when the read succeeded and the ref exists. */
@@ -505,22 +403,15 @@ function parseSharedPauseLsRemote(res: { status: number; stdout: string }): Shar
   return { status: 0, sha: sha || undefined };
 }
 
-/**
- * `git ls-remote origin <ref>`, classified into the three outcomes rationale (10) measured.
- * PURE given `deps` — the network round trip is `deps.run`'s problem, not this function's.
- */
+/** Classify ls-remote per rationale (10); pure given deps, which owns network I/O. */
 export function readSharedPause(deps: SharedPauseGitDeps): SharedPauseRead {
   const res = lsRemoteSharedPause(deps);
   if (res.status !== 0) return "unreachable";
   return res.sha ? "held" : "absent";
 }
 
-/** The pid/host/timestamp {@link realSharedPauseGitDeps}'s `mintAnchor` embeds in the anchor
- *  commit's message. Every field is a raw string off the commit — no parsing beyond splitting the
- *  message apart, so a reader never has to trust anything the writer didn't already commit.
- *  W1-T4429: `sessionId`/`reason`/`expiresAt`/`indefinite` recover the extra lines
- *  {@link SharedPauseMintInfo} adds (design (i)) — every one optional, since an anchor minted before
- *  this task (or by a test fixture that supplies no `info`) carries only the first line. */
+/** Raw anchor message fields; W1-T4429 metadata is optional for legacy/no-info anchors.
+ * Parsing only splits committed text; it does not reinterpret the writer's values. */
 export interface SharedPauseAnchorInfo {
   actor_evidence?: ActorEvidence;
   pid: string;
@@ -528,15 +419,12 @@ export interface SharedPauseAnchorInfo {
   timestamp: string;
   sessionId?: string;
   reason?: string;
-  /** `null` when the anchor's `expires:` line reads `indefinite`; `undefined` when the anchor has
-   *  no `expires:` line at all (a legacy anchor, or one deliberately minted without one). */
+  /** null for `expires: indefinite`; undefined for a legacy/omitted expires line. */
   expiresAt?: string | null;
   indefinite?: boolean;
 }
 
-/** Matches the exact message `mintAnchor` mints: `rmd-pause hold <pid>@<host> <ISO timestamp>`.
- *  `^`/`m` so it finds the message line regardless of the `tree`/`author`/`committer` header
- *  lines `cat-file -p` prints ahead of it. */
+/** Exact mintAnchor message; ^/m skips cat-file -p's tree/author/committer headers. */
 const ANCHOR_MESSAGE_RE = /^rmd-pause hold (\S+)@(\S+) (\S+)\s*$/m;
 // Exported (never only module-private) so a test can drive each one's own unhealthy arm directly —
 // a hold minted before W1-T4429 (or by anything that never wrote these lines) is the ordinary case
@@ -546,16 +434,9 @@ export const ANCHOR_REASON_RE = /^reason: (.+)$/m;
 export const ANCHOR_EXPIRES_RE = /^expires: (.+)$/m;
 
 /**
- * Best-effort recovery of {@link SharedPauseAnchorInfo} off a hold's anchor commit — the payload
- * `mintAnchor` already minted and every reader before this one discarded (see the module header's
- * "already computed and discarded" note). `null` on ANY failure to recover it: an unreachable
- * remote, a GC'd/missing object, or a commit whose message doesn't match the expected shape (an
- * anchor minted by something other than {@link realSharedPauseGitDeps}). A caller that gets `null`
- * still knows the ref is held — {@link checkSharedPause} never lets a failed anchor read degrade
- * "held" into "absent". The `session:`/`reason:`/`expires:` lines (design (i)) are read
- * independently of the first line and of each other — an anchor minted without `info` (or by
- * something older than W1-T4429) still resolves the pid/host/timestamp it always did, with the new
- * fields simply absent.
+ * Recover anchor metadata; return null for unreachable/missing/GC'd objects or malformed
+ * messages. checkSharedPause still holds on null. W1-T4429 session/reason/expiry lines
+ * parse independently: legacy anchors retain pid/host/time with optional fields absent.
  */
 export function readSharedPauseAnchor(sha: string, deps: SharedPauseGitDeps): SharedPauseAnchorInfo | null {
   const res = deps.run(["cat-file", "-p", sha]);
@@ -594,11 +475,9 @@ function parseSharedPauseAnchor(stdout: string): SharedPauseAnchorInfo | null {
   return info;
 }
 
-/** Create-or-update {@link sharedPauseRef}. Who "wins" a race between two operators pausing at
- *  once does not matter — the outcome either way is "held" — so unlike a triage claim this never
- *  needs create-if-absent semantics. Returns whether the push landed; callers treat a failure as
- *  BEST-EFFORT (see {@link requestPause}'s doc). W1-T4429: `info`, when supplied, rides straight
- *  through to `deps.mintAnchor` — see {@link SharedPauseMintInfo}. */
+/** Push sharedPauseRef; concurrent pausers both want held, so no create-if-absent needed.
+ * Returns push success. requestPause treats failure as best-effort; requestFleetPause reports it.
+ * W1-T4429: pass optional info through to mintAnchor. */
 export function writeSharedPause(deps: SharedPauseGitDeps, info?: SharedPauseMintInfo): boolean {
   const anchor = deps.mintAnchor(info);
   // An empty source in <source>:<ref> is Git's delete syntax, not a pause.
@@ -606,32 +485,18 @@ export function writeSharedPause(deps: SharedPauseGitDeps, info?: SharedPauseMin
   return deps.run(["push", "origin", `${anchor}:${sharedPauseRef()}`]).status === 0;
 }
 
-/** Delete {@link sharedPauseRef}. Returns whether the delete landed; callers treat a failure as
- *  BEST-EFFORT (see {@link resumeFleet}'s doc) — design (iv) still holds because the LOCAL clear
- *  `resumeFleet` performs always runs first and always lands. */
+/** Return shared-delete success. resumeFleet's local clears already ran (design (iv));
+ * a failed best-effort delete cannot undo them. */
 export function clearSharedPause(deps: SharedPauseGitDeps): boolean {
   return deps.run(["push", "origin", `:${sharedPauseRef()}`]).status === 0;
 }
 
-/**
- * Per-`deps`, per-sha memo of {@link readSharedPauseAnchor}'s verdict (W1-T3622). Keyed on the
- * `SharedPauseGitDeps` instance rather than global to the module: production wires exactly one
- * live instance for the process's whole lifetime (`run-task.ts`'s `realDeps()` memoizes
- * `composeRealDeps`'s `ComposedRealGraph` behind a module-level `??=`), so this still resolves an
- * unreachable anchor ONCE per sha for real — but a WeakMap keyed on `deps` also means two
- * unrelated test fixtures that happen to mint the same literal sha string never share a verdict,
- * with no manual reset required between tests. A `null` (unreadable) verdict is memoized exactly
- * like a resolved one — the sha that failed to resolve cannot start resolving later on its own,
- * so there is nothing to gain by re-paying the read, only the cost of stopping.
- */
+/** W1-T3622: cache attribution (including null) per deps/sha. Production realDeps memoizes
+ * one ComposedRealGraph via ??= for its lifetime; WeakMap isolates unrelated fixtures even
+ * with identical fake shas. Retry only on a changed sha, never on elapsed time. */
 const sharedPauseAnchorMemos = new WeakMap<SharedPauseGitDeps, Map<string, SharedPauseAnchorInfo | null>>();
 
-/**
- * {@link readSharedPauseAnchor}, memoized per {@link sharedPauseAnchorMemos}. Design: "resolve
- * once, remember the verdict against the ref's sha, and re-attempt only when that sha changes" —
- * a hold's anchor sha is immutable once minted, so a verdict for a given sha can never go stale;
- * only a NEW hold (a new sha, from a fresh `writeSharedPause`) is worth reading again.
- */
+/** Resolve once per immutable anchor sha; only a fresh hold warrants a new read. */
 function sharedPauseAnchorMemo(deps: SharedPauseGitDeps): Map<string, SharedPauseAnchorInfo | null> {
   let memo = sharedPauseAnchorMemos.get(deps);
   if (!memo) {
@@ -792,28 +657,20 @@ function sharedPauseReadDetail(ls: SharedPauseLsRemote, anchor: SharedPauseAncho
 
 export type PauseTier = "held" | "orphaned" | "needs_human" | "lapsed";
 
-/** Everything {@link evaluatePauseTier} needs to classify ONE hold, at ONE instant — every field a
- *  plain value, so the daemon (or a test) can drive it over a fabricated timeline with no I/O. */
+/** Pure input for one hold at one instant; supports fabricated timelines without I/O. */
 export interface PauseTierInput {
-  /** When the hold was set — {@link SharedPauseAnchorInfo.timestamp} or a local flag's
-   *  `requestedAt`. */
+  /** SharedPauseAnchorInfo.timestamp or local requestedAt. */
   setAt: string;
   /** `null` for an indefinite hold; see {@link SharedPauseMintInfo.expiresAt}. */
   expiresAt: string | null;
   indefinite: boolean;
-  /** Whether the setter's own process is still alive. `"unknown"` when liveness cannot be checked
-   *  (e.g. the hold was set on a different host than the one evaluating it) and is never treated as
-   *  dead — an unattributable/unverifiable setter is not evidence of an orphan. */
+  /** Unknown liveness (e.g. another host) is never evidence of a dead/orphaned setter. */
   setterAlive: boolean | "unknown";
   now: Date;
 }
 
-/**
- * Classify ONE hold against design (ii)'s tiers. PURE: no read, no write, no clock of its own — the
- * caller supplies `now` (real or fabricated) and every other field is a value already recovered off
- * the hold (its anchor, or its local flag). See the section header above for what each tier means
- * and {@link daemon.ts}'s `stepPauseHoldGovernor` for the caller that acts on a transition.
- */
+/** Pure W1-T4429 design (ii) classifier: caller supplies now and recovered hold values.
+ * daemon.ts's stepPauseHoldGovernor acts on tier transitions; see tier semantics above. */
 export function evaluatePauseTier(input: PauseTierInput): PauseTier {
   const { setAt, expiresAt, indefinite, setterAlive, now } = input;
   const nowMs = now.getTime();
@@ -852,10 +709,7 @@ export interface KickRequest {
   /** The console actor id (a bearer-token hash), carried from write to consume. */
   origin: string;
   requestedAt: string;
-  /** W1-T429: the repo this kick targets, when the caller supplied one — `undefined` for a
-   *  legacy/unscoped marker (pre-existing on disk, or written by a caller not yet threading a
-   *  repo through). See {@link kickFilePath}'s doc for why this is what keeps two repos sharing
-   *  a task id from colliding on the SAME marker filename. */
+  /** W1-T429: optional repo scope; absent for legacy markers/callers. See kickFilePath. */
   repo?: string;
 }
 
@@ -865,12 +719,8 @@ export interface DrainNowRequest {
   requestedAt: string;
 }
 
-/**
- * Task ids that may become a marker FILENAME. Deliberately strict (the plan's own
- * `W1-T###`/`SBX-T#` shape plus a safe superset) so a hostile or malformed id can
- * never traverse out of `state/` (`/`, `..`, NUL, whitespace all rejected). Enforced
- * fail-closed on BOTH write (`requestKick` throws) and read (`pendingKicks` skips).
- */
+/** Safe marker filenames: plan W1-T###/SBX-T# plus safe superset; reject slash, .., NUL,
+ * whitespace. Fail closed on write (requestKick throws) and read (pendingKicks skips). */
 const SAFE_TASK_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126})$/;
 
 /** True iff `taskId` is safe to embed in a marker filename (see {@link SAFE_TASK_ID}). */
@@ -878,9 +728,7 @@ export function isSafeTaskId(taskId: unknown): taskId is string {
   return typeof taskId === "string" && SAFE_TASK_ID.test(taskId) && !taskId.includes("..");
 }
 
-/** Repo names that may become part of a marker FILENAME (W1-T429) — the same shape discipline
- *  {@link SAFE_TASK_ID} applies to a task id, so a hostile/malformed repo string can never
- *  traverse out of `state/` either. Enforced fail-closed on write ({@link requestKick} throws). */
+/** W1-T429: safe repo filename component, like SAFE_TASK_ID; requestKick rejects traversal. */
 const SAFE_REPO_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,63})$/;
 
 /** True iff `repo` is safe to embed in a marker filename (see {@link SAFE_REPO_NAME}). */
@@ -993,14 +841,9 @@ export function clearPrAction(root: string, action: PrActionName, prNumber: numb
   return clearFlag(prActionFilePath(root, action, prNumber));
 }
 
-/**
- * W1-T429: `repo` is OPTIONAL and, when supplied, folds into the marker filename via
- * {@link repoScopedTaskKey} — `KICK_REQUESTED-<repo>:<taskId>` instead of the legacy
- * `KICK_REQUESTED-<taskId>` — so two repos sharing a task-id scheme (the fleet's plans do; a
- * wild-trails W1-T12 and this repo's W1-T12 are the SAME bare id) get DISTINCT marker files
- * instead of one console click silently overwriting/consuming the other's pending kick. Omitting
- * `repo` (every caller today) reproduces the exact legacy path unchanged.
- */
+/** W1-T429: optional repoScopedTaskKey yields KICK_REQUESTED-<repo>:<taskId>, preventing
+ * shared ids (e.g. wild-trails/this repo's W1-T12) from overwriting/consuming each other's kicks.
+ * Omitted repo preserves the legacy KICK_REQUESTED-<taskId> path. */
 export function kickFilePath(root: string, taskId: string, repo?: string): string {
   return join(root, "state", `${KICK_PREFIX}${repoScopedTaskKey(repo, taskId)}`);
 }
@@ -1009,12 +852,8 @@ export function drainNowFilePath(root: string): string {
   return join(root, "state", "DRAIN_REQUESTED");
 }
 
-/**
- * Write a `KICK_REQUESTED-<taskId>` marker (the console's "Run" button); `KICK_REQUESTED-
- * <repo>:<taskId>` when `repo` is supplied (W1-T429). Throws on an unsafe task id OR repo
- * BEFORE any write — a malformed id/repo performs no side effect, ever. Overwriting an existing
- * marker for the same (repo, taskId) is idempotent (still one pending kick).
- */
+/** Write one idempotent kick per (repo, taskId). W1-T429 adds optional repo scope.
+ * Reject unsafe task/repo before any side effect. */
 export function requestKick(root: string, taskId: string, origin: string, repo?: string): KickRequest {
   if (!isSafeTaskId(taskId)) throw new Error(`requestKick: unsafe task id ${JSON.stringify(taskId)}`);
   if (repo !== undefined && !isSafeRepoName(repo)) throw new Error(`requestKick: unsafe repo ${JSON.stringify(repo)}`);
@@ -1025,12 +864,8 @@ export function requestKick(root: string, taskId: string, origin: string, repo?:
   return req;
 }
 
-/**
- * Every pending kick, oldest-first (by `requestedAt`). PEEK ONLY — does not delete; the
- * daemon clears each with {@link clearKick} as it dispatches or refuses it, so a runnable
- * kick it can't service this cycle survives to the next. A file whose JSON is garbage, or
- * whose id no longer parses as safe, is skipped (fail-closed), never dispatched.
- */
+/** Peek oldest-first without deleting; daemon clearKick dispatches/refuses individually,
+ * leaving unserviceable kicks for later cycles. Skip unsafe ids/garbage JSON fail-closed. */
 export function pendingKicks(root: string): KickRequest[] {
   const dir = join(root, "state");
   let names: string[];

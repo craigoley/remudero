@@ -34,7 +34,7 @@ usage:
   rmd risk-judge-eval [--corpus <dir>]   # Replay risk-judge disposition fixtures offline and report calibration metrics.
   rmd authority [--json] | rmd authority inspect --store <snapshot.json> --at <instant> (--request <request.json> | --cases <cases.json> [--compare-cases <candidate.json>])   # Every external write the fleet may make without the operator, its gate, and its last firing.
   rmd check-proof <proof> [--allow-full-suite] [--base <ref>] [--repo <owner/name>]   # Run one acceptance proof through the reviewer's own executor and print its verdict.
-  rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
+  rmd reap-branches [--prune] [--archive-stale]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd gh [--class interactive|agent|background] [--client claude|codex|agent] [--fresh] -- <gh args>   # Run a gh READ through this Mac account's GitHub read broker; prints exactly what gh would.
@@ -95,7 +95,7 @@ usage:
   rmd away [on|off]   # Set/show operator presence; batches escalations into a recap while away.
   rmd correct <task-id> --pr <n> [--reason <text>]   # Sanctioned operator-correction writer: name a task's true merged PR.
   rmd release <task-id> --reason <text>   # Release a halted task's dispatch circuit breaker; dispatchable next tick.
-  rmd garden run <name> [--hourly] | rmd garden replay ci-friction [--days <n>] [--step-hours <h>]   # Run one pass of one registered gardener (the daemon's off-loop child).
+  rmd garden run <name> [--hourly] [--repo <owner/repo> [--plan <file>]] | rmd garden replay ci-friction [--days <n>] [--step-hours <h>]   # Run one pass of one registered gardener (the daemon's off-loop child).
   rmd review-replay refresh   # Refresh the recorded review sample from the complete retained ledger union.
   rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...   # Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.
   rmd notify <message>   # Real-time iMessage ping (osascript).
@@ -343,10 +343,10 @@ run ONE acceptance proof through the REVIEWER'S OWN parser and executor and prin
 Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
 
 ```
-rmd reap-branches [--prune]
+rmd reap-branches [--prune] [--archive-stale]
 ```
 
-W1-T447/W1-T3020: classify every remote branch as deletable, guarded or held, print a sha->name manifest, and delete only with --prune. Deletable = a merged PR head, a closed-unmerged PR head, or a no-PR head whose tip is already in origin/main; guards and the independent open-head reread always win. The CLI defaults to a dry run. The full daemon sweep uses the same command with --prune on first use, when the remote branch set changes, or after six hours; its cheap branch fingerprint runs each full tick, and the light in-flight pass never reaches this remote git write. An unreadable or empty branch listing refuses rather than becoming a healthy zero. Unknown SHAs are skipped, pushes are chunked, and each deletion prints a restore refspec. Guard drift is reported and returns non-zero but does not widen the deletion set.
+W1-T447/W1-T3020: classify every remote branch as deletable, guarded or held, print a sha->name manifest, and delete only with --prune. Deletable = a merged PR head, a closed-unmerged PR head, or a no-PR head whose tip is already in origin/main; guards and the independent open-head reread always win. The CLI defaults to a dry run. The full daemon sweep uses the same command with --prune on first use, when the remote branch set changes, or after six hours; its cheap branch fingerprint runs each full tick, and the light in-flight pass never reaches this remote git write. An unreadable or empty branch listing refuses rather than becoming a healthy zero. Unknown SHAs are skipped, pushes are chunked, and each deletion prints a restore refspec. Guard drift is reported and returns non-zero but does not widen the deletion set. --archive-stale (operator ruling 2026-11-01) asks for the repo-hygiene act mode, which runs only when plan/policy.yaml's sweep.armStaleBranchArchive is on (default off; the daemon's prune pass asks too): each stale held run branch's tip is archived under refs/rmd-recovery/reaped/<name>/<sha> and the branch deleted in one atomic leased push, at most 25 per pass, ledgered as branch_reap.hygiene_archived; restore with git fetch origin refs/rmd-recovery/reaped/<name>/<sha>:refs/rmd-recovery/reaped/<name>/<sha> && git push origin refs/rmd-recovery/reaped/<name>/<sha>:refs/heads/<name>. Unarmed, it only ledgers branch_reap.hygiene_shadow.
 
 ### `rmd memory-lint`
 
@@ -953,7 +953,7 @@ W1-T4691: the sanctioned release for a task the dispatch circuit breaker has hal
 Run one pass of one registered gardener (the daemon's off-loop child).
 
 ```
-rmd garden run <name> [--hourly] | rmd garden replay ci-friction [--days <n>] [--step-hours <h>]
+rmd garden run <name> [--hourly] [--repo <owner/repo> [--plan <file>]] | rmd garden replay ci-friction [--days <n>] [--step-hours <h>]
 ```
 
 W1-T5114: builds the named garden from the shared registry (buildRegisteredGarden) and runs exactly one pass, appending to the same ledger the daemon does. The daemon spawns this per gardener pass so no pass runs on its event loop; --hourly also refreshes the test garden's hourly CI evidence. `replay ci-friction` replays the ci-friction remedy ladder over the past --days (default 7) at --step-hours (default 6) from the ledger union and main's plan history, read-only.

@@ -1,0 +1,53 @@
+- id: W1-T11115
+  title: A learning outcome is credited to the exact selected or dropped content revision
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  priority: 2
+  budget_usd: 20
+  risk: high
+  band_meaning: span
+  author_class: machine
+  origin: research:omnigent-2026-11-02
+  plan_refs:
+    - §Self-improvement
+    - §8A
+    - W1-T4241
+    - W1-T4092
+  files:
+    - src/lib/learnings.ts
+    - src/lib/knowledge-outcome.ts
+    - src/lib/digest.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/a-learning-is-credited-by-the-outcome-of-the-runs-it-reached.test.ts
+  status: queued
+  attempts: 0
+  rationale: "OBSERVED: foldLearningOutcomes in knowledge-outcome.ts groups by learning ID; the learnings.injected producer in src/cli/commands/run-task-verb.ts emits selected/dropped IDs and propensities. usage_sha identifies usage metadata, not the learning content. Editing a learning under the same ID can therefore pool outcomes from different interventions. Omnigent separates effective harness/policy configuration from declarations and records evaluation context; the Remudero innovation is to apply exact intervention identity to its existing randomized learning exposure. No present live harm rate is measured. Sources: https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/omnigent/harness_capabilities.py ; https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/tests/harness_bench/README.md ."
+  design: |-
+    At the existing selection/injection seam compute a deterministic versioned content identity for every contested learning entry, selected AND dropped, from the exact source snapshot used for that draw. Digest the canonical bounded intervention fields (including content and applicability affecting selection), not the unrelated usage snapshot; no raw content enters the ledger. Preserve propensity, masking, scope and run/outcome joins. Duplicate IDs with conflicting content in one snapshot are ambiguous, not merged or resolved from current main. Record fixed-schema digest metadata alongside the existing learnings.injected event; never reread a later tree to backfill history.
+    Group the existing outcome report by {learningId, contentIdentity} within its current scope and window. Keep the current randomized exposure/propensity trimming and per-arm floors; absent legacy identities, malformed digests, conflicting identity for an exposure and unresolved selected/dropped entries are separately excluded/countable and cannot inherit current bytes. Stable canonical bytes yield stable identities; real content/applicability changes split cohorts. Two revisions of one ID with opposite synthetic effects remain distinct, even if pooling would look favorable. A learning edit cannot inherit its predecessor helped/hurt verdict. Preserve compatibility with historical display by explicitly labeling legacy/unmeasurable rather than silently assigning current content.
+    This is a cheap independent repair of attribution, not a new optimizer or promotion path: it requires neither the sibling runtime-cohort implementation nor paid experiments. The later runtime cohort may further stratify outcomes through a separately reviewed extension; do not couple delivery to that costlier task. No automatic learning ranking, retirement, policy change or data export follows. Extend the existing outcome physical suite, including real selection/producer path coverage and redaction sentinels; keep prior assertions and report missing evidence honestly. The existing digest renderer must label per-content cohorts without merging repeated IDs or presenting ambiguous identical labels; update it within the declared scope and exercise it through the existing outcome suite.
+  acceptance:
+    - claim: selected and dropped contested entries carry exact deterministic content identities from the source draw
+      proof: "unit test: learning outcome revision identifies both selected and dropped source content"
+    - claim: different revisions of one ID with opposite effects remain separate and cannot inherit a verdict
+      proof: "unit test: learning outcome revision separates opposite effects under one learning id"
+    - claim: legacy malformed ambiguous and missing revision evidence is excluded with counts rather than backfilled
+      proof: "unit test: learning outcome revision reports unresolved exposure identities as unmeasurable"
+    - claim: the producer fold preserves redaction masking propensity floors and observational-only behavior
+      proof: "unit test: learning outcome revision preserves randomized exposure bounds and privacy"
+  falsifier: Remove the content identity from the grouping key and show the opposite-effect fixture pools two revisions and fails. Independently backfill a legacy row from current content or omit dropped-entry digests and show dedicated tests fail. Restore exact source; run verified suite plus producer wiring checks under normal admission. No historical benefit or current effectiveness claim follows.
+  note: Operator requested research, plan updates and task filing, not immediate product execution or paid experiments. Normal risk judgment, native capacity, source ownership, proof, review and merge gates remain. No installed Omnigent dependency, new scheduler, automatic guard change, model promotion or live capability proof is authorized by this record. This record is planning custody, not evidence of implementation or benefit.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description limits the change to an observational attribution fix: content-identity digests on the existing learnings.injected event, plus regrouping of the outcome report. The declared files are 4 source files and 1 test."
+      - "The plan states that no raw content enters the ledger, that legacy evidence is excluded and counted instead of backfilled, and that no ranking, retirement, policy change or data export follows. None of the escalation categories (secrets/auth, deletion, merge/deploy/review policy, irreversible action, operator-only decision) is touched."
+      - "All four acceptance criteria are tied to named unit tests, so the work is verifiable. The research family's neutral track record (0 merged, Beta mean 0.50) does not by itself indicate a concern."
+    judged_at: "2026-11-02T18:21:23.594Z"
+    pin: "ba8d57fc4e05e2ce01a9415ff294798f4e4414881f898f43729f67034583ae24"

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { bodyContradictsDiff, failSummary, judgeReview } from "../src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { bodyContradictsDiff, failSummary, judgeReview } from "#src/lib/review.js";
 
 // ── W1-T274 ──────────────────────────────────────────────────────────────────
 //

@@ -4,13 +4,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFil
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { appendLedger, deriveLedgerActor, ledgerRowActor } from "../src/lib/ledger.js";
-import { configPath, loadConfig, type Config } from "../src/lib/config.js";
-import { ledgerPathFor } from "../src/lib/ledger-path.js";
-import { censusHandRuns, handRunCensus, parseOperatorLedgerRows } from "../src/lib/hand-run-census.js";
-import { runMeasurementCadenceReport, type MeasurementCadenceReportOpts } from "../src/lib/measurement-cadence.js";
-import { buildMeasurementCadenceDaemonHooks, main, serveCommand } from "../src/run-task.js";
-import type { LedgerUnionResult } from "../src/lib/ledger-grep.js";
+import { appendLedger, deriveLedgerActor, ledgerRowActor } from "#src/lib/ledger.js";
+import { configPath, loadConfig, type Config } from "#src/lib/config.js";
+import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import { censusHandRuns, handRunCensus, parseOperatorLedgerRows } from "#src/lib/hand-run-census.js";
+import { runMeasurementCadenceReport, type MeasurementCadenceReportOpts } from "#src/lib/measurement-cadence.js";
+import { buildMeasurementCadenceDaemonHooks, main, serveCommand } from "#src/run-task.js";
+import type { LedgerUnionResult } from "#src/lib/ledger-grep.js";
 
 type CadenceDeps = NonNullable<Parameters<typeof buildMeasurementCadenceDaemonHooks>[0]>;
 

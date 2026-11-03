@@ -6,15 +6,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
-import { canonicalWorkerProviderId, ConfigValidationError, enabledWorkerProviders, validateConfig, type Config } from "../src/lib/config.js";
-import { loadMounts, mountsPath, MountsError, TierInvariantError, validateMounts } from "../src/lib/mounts.js";
+import { canonicalWorkerProviderId, ConfigValidationError, enabledWorkerProviders, validateConfig, type Config } from "#src/lib/config.js";
+import { loadMounts, mountsPath, MountsError, TierInvariantError, validateMounts } from "#src/lib/mounts.js";
 import {
   ProviderRoutingPolicyError,
   writeProviderRoutingPolicyOverride,
   type ProviderRoutingPolicyOverrideInput,
-} from "../src/lib/provider-routing-policy.js";
-import { LiveSpawnBlockedError } from "../src/lib/spawn-guard.js";
-import { spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "../src/lib/worker.js";
+} from "#src/lib/provider-routing-policy.js";
+import { LiveSpawnBlockedError } from "#src/lib/spawn-guard.js";
+import { spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "#src/lib/worker.js";
 import {
   OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS,
   OPENWEIGHT_ALLOWANCE_FILENAME,
@@ -42,13 +42,13 @@ import {
   selectOpenWeightModel,
   spawnOpenWeightWorker,
   type OpenWeightAllowanceState,
-} from "../src/lib/worker-provider.js";
-import { inboxDraftPrompt, INBOX_DRAFT_DISALLOWED_TOOLS } from "../src/lib/inbox.js";
-import { buildEscalationJudgeSpawnArgs, judgeEscalation, type Escalation } from "../src/lib/escalate.js";
-import { buildVerifyHumanJudgeSpawnArgs, VERIFY_HUMAN_JUDGE_TOOLS } from "../src/lib/verify-human-judge.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { buildInboxDraftSpawnArgs, draftProposalBatch } from "../src/run-task.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/worker-provider.js";
+import { inboxDraftPrompt, INBOX_DRAFT_DISALLOWED_TOOLS } from "#src/lib/inbox.js";
+import { buildEscalationJudgeSpawnArgs, judgeEscalation, type Escalation } from "#src/lib/escalate.js";
+import { buildVerifyHumanJudgeSpawnArgs, VERIFY_HUMAN_JUDGE_TOOLS } from "#src/lib/verify-human-judge.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { buildInboxDraftSpawnArgs, draftProposalBatch } from "#src/run-task.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SETTINGS_FILE = join(REPO_ROOT, "settings", "worker.json");
@@ -1221,11 +1221,7 @@ test("openweight daily reservation remains charged across restart and cannot be 
     const atMs = Date.parse(atIso);
     const config = allowanceConfig(root, 5);
 
-    // A FAILED response still leaves SOMETHING charged -- the request was sent and Azure may well
-    // have billed the input tokens -- but W1-T3666 settles it down rather than stranding the whole
-    // conservative reservation the way this test used to assert: see
-    // "a failed openweight request settles rather than stranding its reservation" for the
-    // dedicated coverage of that correction.
+    // W1-T10954: an unobserved failure retains the full ceiling across process restarts.
     const failed = await spawnOpenWeightWorker(
       {
         cwd: root,
@@ -1244,9 +1240,11 @@ test("openweight daily reservation remains charged across restart and cannot be 
     const chargedAfterFailure = openWeightCommittedUsd(afterFailure);
     assert.ok(chargedAfterFailure > 0, "a failed response still commits SOME reservation");
     assert.equal(
-      Object.values(afterFailure.reservations).every((row) => row.settledUsd !== null),
+      Object.values(afterFailure.reservations).every((row) => row.settledUsd === null &&
+        row.accountingState === "held-unknown" && row.heldUsd === row.reservedUsd &&
+        row.usageEstimateUsd === null && row.billedUsd === null),
       true,
-      "W1-T3666: a failed request is settled down rather than stranded at its conservative figure",
+      "a failed request without usage retains its full reservation as held unknown",
     );
 
     // RESTART: a brand-new process reads the SAME committed file. This is real cross-process

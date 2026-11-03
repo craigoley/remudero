@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { parse } from "yaml";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // 2026-10-10: three main reds, each from a test a PR ADDED that passed the one time its PR ran it.
 // scripts/flake-screen.mjs reruns every added test file before merge; these pin what it screens,
@@ -216,4 +216,17 @@ test("shard 1 runs the guard mutation before the flake screen, and the job stamp
   assert.ok(stamp < at("node scripts/workflow-guard-mutation-ratchet.mjs"), "the stamp opens the window before the guard mutation spends from it");
   const screen = ci.steps.findIndex((s) => s.run?.trim() === "node scripts/flake-screen.mjs --shard ${{ matrix.shard }}");
   assert.ok(at("node scripts/workflow-guard-mutation-ratchet.mjs") < screen, "the screen runs last, on what is left");
+});
+
+test("a repeat run starts only if the file's slowest run still fits in the budget", async () => {
+  // #15638 (W1-T9795): ci-shard (1/8) was cancelled at the 35-minute job cap on both attempts. The screen
+  // budgeted 1896 s and started a new run of a ~67 s suite whenever any budget was left, so the last wave
+  // ran past the budget into the cancel. A first run of each file is still mandatory.
+  const slow = fakeRuns(30);
+  const fit = await flake.screen({ files: ["test/slow.test.ts"], budgetMs: 100, concurrency: 1, ...slow });
+  assert.equal(fit.passes.get("test/slow.test.ts"), 3, "runs at 0, 30 and 60 ms end by 90; one at 90 would end at 120");
+  assert.ok(slow.now() <= 100, `the screen ends inside its budget (${slow.now()} ms)`);
+  const once = fakeRuns(500);
+  const heavy = await flake.screen({ files: ["test/slow.test.ts"], budgetMs: 100, concurrency: 1, ...once });
+  assert.equal(heavy.passes.get("test/slow.test.ts"), 1, "a file slower than the whole budget still runs once");
 });

@@ -3,9 +3,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-// `configPath()` resolves `<homedir()>/.config/remudero/config.json` through the same reader the
-// config file itself is read by. Called from the orchestrator's own process, before any worker's
-// HOME is redirected, so it reads the operator's REAL home, never a worker's scratch one.
+// `configPath()` uses the config reader in the orchestrator, before worker HOME redirection,
+// resolving `<homedir()>/.config/remudero/config.json` against the operator's real home.
 // Why: docs/forensics/containment.md#the-configpath-import (W1-T2213).
 import { configPath, loadConfig, type Config } from "./config.js";
 import { validateWorkerSettingsFile } from "./settings.js";
@@ -19,23 +18,21 @@ import { WORKER_HOME_SYMLINKS } from "./worker-home.js";
 import { typecheckEnv } from "./typecheck-buildinfo.js";
 
 /**
- * Post-spawn containment probe (WS-0 verdict 7; W1-T2 acceptance #2). Spawns a worker under the
- * sandbox and confirms that an attempted write OUTSIDE its working directory is denied by the OS.
+ * Post-spawn containment probe (WS-0 verdict 7; W1-T2 acceptance #2): verify OS denial of a
+ * sandboxed worker's attempted write OUTSIDE cwd.
  *
  * INVARIANT: containment unproven means fail closed (Standing rule 11 — proven by probe, never
  * assumed from configuration; once per boot and on any change of its inputs, W1-T5346).
  *
- * TRAP: `claude -p` silently ignores a settings file it cannot apply and runs unsandboxed (FF10a,
- * LEARNINGS). The validate-before-spawn guard in settings.ts proves the file is well formed, which
- * is a different guarantee: that schema check can pass while containment is silently absent.
+ * TRAP: `claude -p` silently drops inapplicable settings and runs unsandboxed (FF10a, LEARNINGS).
+ * settings.ts validates schema before spawn; valid schema does not prove containment.
  *
- * FOUR ARMS, ONE CONTRACT. The filesystem, egress, token-read and re-anchoring arms each answer the
- * same three questions — did the forbidden thing SUCCEED, was a refusal OBSERVED, did the CONTROL
- * succeed — and each `assess*` returns the same `{contained, reason}` shape over three states:
- * proven-holding, proven-broken, and unproven carried as `contained: false` plus a reason. NO
- * FOURTH STATE. Every arm but the filesystem one is OBSERVATIONAL, NOT GATING: its behaviour under
- * the installed CLI is UNMEASURED, and this repo has already paid for bounds that fire on healthy
- * conditions, so `probeContainment` records the verdict and does not throw on it.
+ * FOUR ARMS, ONE CONTRACT: filesystem, egress, token-read and re-anchoring each ask whether the
+ * forbidden action succeeded, refusal was OBSERVED, and CONTROL succeeded. Each `assess*` returns
+ * `{contained, reason}`: proven-holding, proven-broken, or unproven (`contained: false` + reason).
+ * NO FOURTH STATE. Only filesystem gates; the other arms are OBSERVATIONAL, NOT GATING because
+ * installed-CLI behaviour is UNMEASURED. `probeContainment` records them without throwing:
+ * bounds that fire on healthy conditions have already cost this repo.
  *
  * run-task.ts reuses a PASS keyed by `probeVerdictKey` and ledgers each reuse (ruling 2026-10-02).
  * An unproven first attempt may use one more spawn with a fresh token.
@@ -46,21 +43,18 @@ import { typecheckEnv } from "./typecheck-buildinfo.js";
 /** Named error so callers (and tests) can assert the fail-closed fired by type. */
 export class ContainmentError extends Error {
   /**
-   * Structured guard cause, the containment sibling of {@link import("./isolation.js").IsolationError}'s
-   * fields. `check` names which gate fired: `sandbox-enabled` for the static config gate,
-   * `outside-cwd-denial` for the empirical probe. INVARIANT: `observed` keeps the three states —
-   * proven-holding, proven-broken, or one of {@link classifyUnprovenState}'s four sub-states — and
-   * never collapses to a boolean. TRAP: the single literal "unproven" collapsed all four and left an
-   * intermittent preflight failure undiagnosable from any ledger row.
+   * Structured cause, like {@link import("./isolation.js").IsolationError}: `check` is
+   * `sandbox-enabled` (static config) or `outside-cwd-denial` (empirical probe).
+   * INVARIANT: `observed` preserves proven-holding, proven-broken, or one of
+   * {@link classifyUnprovenState}'s four sub-states, never a boolean. TRAP: one "unproven" literal
+   * collapsed all four, making intermittent preflight failures undiagnosable from ledger rows.
    * // Why: docs/forensics/containment.md#containmenterror-check-and-observed (W1-T1281, W1-T2201).
    */
   readonly guard = "containment" as const;
   readonly check: string;
   readonly observed: string;
-  /** The probe spawn's `WorkerResult.childEnvKeys`, `[]` when gate 1 refused before any spawn ran.
-   *  Carried so the `blocked_containment` verdict line DERIVES `billing_mode`
-   *  (`billingMode(childEnvKeys)`, env.ts) instead of hardcoding a literal — a blocked run is never
-   *  free of a real billing mode just because it failed. (W1-T268) */
+  /** Probe `WorkerResult.childEnvKeys`; `[]` if gate 1 refused before spawn. Derive the blocked row's
+   *  `billing_mode` via `billingMode(childEnvKeys)` (env.ts), even on failure. (W1-T268) */
   readonly childEnvKeys: string[];
   /** W1-T268: the probe spawn's resolved account label, when one exists. */
   readonly accountLabel?: string;
@@ -74,9 +68,8 @@ export class ContainmentError extends Error {
   }
 }
 /**
- * Raw evidence from one probe execution, one field per arm question. The header above states the
- * shared contract: an absent optional field means UNOBSERVED — never "denied", "engaged" or
- * "blocked" — and a "was it refused" field is only ever set from an OBSERVED refusal.
+ * Raw evidence, one field per arm question. Absent optional fields mean UNOBSERVED, never denied,
+ * engaged or blocked; refusal fields require OBSERVED refusal (shared header contract).
  * // Why: docs/forensics/containment.md (W1-T237, W1-T292, W1-T1265, W1-T2211, W1-T2213, W1-T2249).
  */
 export interface ContainmentEvidence {
@@ -86,21 +79,16 @@ export interface ContainmentEvidence {
   osDenialSeen: boolean;
   /** CONTROL: did the write INSIDE cwd land? Without it an over-blocking sandbox reads as a good one. */
   insideWriteCreated: boolean;
-  /** Did the transcript mention this run's token — did the probe reach the outside-cwd step at all?
-   *  Split out of `osDenialSeen`'s own AND, so "attempted, no denial phrase" no longer reads the
-   *  same as "never attempted"; see {@link classifyUnprovenState}. (W1-T1281) */
+  /** Did the transcript mention this run's token? Separate from `osDenialSeen`'s AND so attempted
+   *  without denial differs from never attempted; see {@link classifyUnprovenState}. (W1-T1281) */
   outsideWriteAttempted?: boolean;
-  /** Did the probe worker die on a credential failure before attempting any write? TRAP: such a
-   *  worker writes nothing and trips no denial text, so it is byte-identical to a genuine unproven
-   *  probe unless named separately — the collapse that cost the 2026-07-21 incident two days.
-   *  Distinguished FIRST, before the write and denial checks. (W1-T237) */
+  /** Credential death before any write, checked FIRST. TRAP: no writes or denial text also looks
+   *  like an unproven probe; collapsing them cost two days in the 2026-07-21 incident. (W1-T237) */
   credentialFailure?: boolean;
-  /** Did it die on an EXPIRED copied OAuth token instead? A distinct field so recovery keys on a
-   *  stable `spawn_credential_expired` symbol: refreshing a token is a different operator action
-   *  from logging in at all. (W1-T292) */
+  /** EXPIRED copied OAuth token: stable `spawn_credential_expired` distinguishes refresh from
+   *  logging in at all. (W1-T292) */
   credentialExpired?: boolean;
-  /** Did it die on a TRANSPORT or API-side failure — a 5xx — instead? A third spawn-death shape the
-   *  two fields above do not cover: an outage, not an auth problem. (W1-T2249) */
+  /** TRANSPORT/API death (e.g. 5xx): an outage, distinct from both auth failures. (W1-T2249) */
   spawnTransportFailure?: boolean;
   /** Did the deny-floor tripwire (`./FORBIDDEN_PROBE`, INSIDE cwd) get created? `true` ⇒ the PreToolUse
    *  deny floor did not bind: the sandbox permits that path by design, so only the hook could have
@@ -111,47 +99,38 @@ export interface ContainmentEvidence {
   egressBlockedReached?: boolean;
   /** Was a refusal OBSERVED for the blocked request? */
   egressDenialSeen?: boolean;
-  /** CONTROL: did the request to an ALLOWLISTED host succeed? TRAP: without it, "the blocked
-   *  request failed" cannot be told from "this host has no network at all", and an offline machine
-   *  reads as a perfect sandbox. */
+  /** CONTROL: did an ALLOWLISTED request succeed? TRAP: without it, an offline host's blocked
+   *  request failure reads as a perfect sandbox. */
   egressAllowedReached?: boolean;
-  /** The remote address curl connected to for the BLOCKED request, from `-w '%{remote_ip}'` on the
-   *  request already made — no new destination, body still discarded. INVARIANT:
-   *  {@link assessEgressContainment} compares it against the control's, because the SAME address on
-   *  both means one local interception proxy answered both, not that the upstream was reached. */
+  /** BLOCKED request's curl `-w '%{remote_ip}'`: no new destination, body discarded. INVARIANT:
+   *  {@link assessEgressContainment} compares the control address; SAME means a local interception
+   *  proxy answered both, not proof of upstream reach. */
   egressBlockedRemoteIp?: string;
   /** The egress control's own remote address, paired with the field above. */
   egressAllowedRemoteIp?: string;
-  /** Did the probe spawn end on `error_max_turns`? This only ever ADDS a distinguishing reason to
-   *  an already `contained: false` verdict; it never flips one to `true`. (W1-T2201) */
+  /** `error_max_turns` only distinguishes an already `contained: false` reason, never passes. (W1-T2201) */
   turnsExhausted?: boolean;
-  /** `WorkerResult.numTurns`, recorded on BOTH the exhausted and the passing path — the passing
-   *  distribution is what says whether the allowance is tight. TRAP: a count means nothing against a
-   *  cap unless the cap rides the SAME row; see {@link ContainmentEvidence.maxTurns}. (W1-T2238) */
+  /** `WorkerResult.numTurns` on exhausted AND passing paths: passing distribution measures slack.
+   *  TRAP: the cap must ride the SAME row; see {@link ContainmentEvidence.maxTurns}. (W1-T2238) */
   numTurns?: number;
-  /** The `maxTurns` this call was CONFIGURED with — {@link probeTurnBudget}'s return value as an
-   *  INPUT, never a read-back (W1-T303) — so a row stays checkable against its own cap. (W1-T2238) */
+  /** Configured `maxTurns`: {@link probeTurnBudget} INPUT, never read-back (W1-T303), preserving
+   *  the row's own cap for comparison. (W1-T2238) */
   maxTurns?: number;
 
-  /** THE READ ARM. Did a read of the console's write-token path
-   *  (`<config.root>/state/service-tokens.json`) SUCCEED? `true` ⇒ the `denyRead` entry named in
-   *  design part (i) did NOT hold. (W1-T2211) */
+  /** READ ARM: `<config.root>/state/service-tokens.json` read SUCCEEDED ⇒ design part (i)'s
+   *  `denyRead` failed. (W1-T2211) */
   tokenReadSucceeded?: boolean;
   /** Was a denial actually OBSERVED for that read? An absent read outcome is not a refusal. */
   tokenReadDenialSeen?: boolean;
-  /** CONTROL: did a read of an ORDINARY state path — deliberately NOT the token — also succeed?
-   *  TRAP: without it, "the token read failed" cannot be told from "reads are broken generally", or
-   *  from a deny drawn too wide such as a blanket `state/**`. Criterion 3's own falsifier. */
+  /** CONTROL: did an ORDINARY state read succeed? TRAP: token-read failure alone also fits broken
+   *  reads or overbroad `state/**` denies. Criterion 3's falsifier. */
   stateReadSucceeded?: boolean;
 
-  /** THE RE-ANCHORING ARM, one level further out. Did a read of the operator's real
-   *  `~/.config/remudero/config.json` — a live, mode-600 file — SUCCEED? `true` ⇒ the re-anchored
-   *  `denyRead` entry did NOT hold. The read arm proves `~/..` anchoring to config.root; this one
-   *  proves the same mechanism escaping to `~/../..`. (W1-T2213) */
+  /** RE-ANCHORING ARM: reading the operator's live mode-600 `~/.config/remudero/config.json`
+   *  SUCCEEDED ⇒ re-anchored `denyRead` failed. Read arm tests `~/..` to config.root; this tests
+   *  the same mechanism escaping to `~/../..`. (W1-T2213) */
   operatorHomeReadSucceeded?: boolean;
-  /** Was a denial OBSERVED for that read? The CONTROL is deliberately the same `stateReadSucceeded`
-   *  the read arm proves: one ordinary read succeeding in the SAME run is the same fact whichever
-   *  denied path is under test (design part (vi)). */
+  /** OBSERVED denial? Shares the read arm's SAME-run `stateReadSucceeded` control (design part (vi)). */
   operatorHomeReadDenialSeen?: boolean;
 }
 
@@ -164,9 +143,8 @@ export interface ContainmentEvidence {
  * `contained: false`. FALSIFIER: test/containment.test.ts.
  */
 export function assessContainment(e: ContainmentEvidence): { contained: boolean; reason: string } {
-  // Checked BEFORE `credentialFailure` so an expired copied token is never collapsed into the
-  // never-logged-in reason: the two demand different operator actions (refresh the token vs. log
-  // in at all) and must stay textually distinct symbols, not just distinct booleans (W1-T292).
+  // Expiry precedes `credentialFailure`: refresh vs. initial login needs distinct symbols,
+  // not merely distinct booleans. (W1-T292)
   if (e.credentialExpired) {
     return {
       contained: false,
@@ -184,10 +162,8 @@ export function assessContainment(e: ContainmentEvidence): { contained: boolean;
         "attempt any write; this is NOT a containment finding (unlock the keychain, don't investigate the sandbox)",
     };
   }
-  // Checked BEFORE the outside-write and unproven tests below, mirroring the two credential arms
-  // above: a probe worker that died on a transport or API-side failure never got far enough to
-  // observe anything about the sandbox, so it must not share a name with a genuine unproven
-  // containment finding (W1-T2249).
+  // Like auth deaths, transport/API death precedes write/unproven checks: it observed no sandbox
+  // outcome and needs a distinct name. (W1-T2249)
   if (e.spawnTransportFailure) {
     return {
       contained: false,
@@ -204,9 +180,8 @@ export function assessContainment(e: ContainmentEvidence): { contained: boolean;
     };
   }
   if (!e.osDenialSeen) {
-    // A turn-exhausted spawn gets its OWN reason text: "ran out of turns while trying" and "never
-    // attempted at all" are different facts and must not share a string. `contained` stays `false`
-    // either way — this changes only what gets RECORDED (W1-T2201).
+    // Exhausted while trying differs from never attempted; record its OWN reason, keeping
+    // `contained: false`. (W1-T2201)
     if (e.turnsExhausted) {
       return {
         contained: false,
@@ -228,13 +203,10 @@ export function assessContainment(e: ContainmentEvidence): { contained: boolean;
 }
 
 /**
- * The states `assessContainment`'s `!osDenialSeen` branch used to collapse into the literal
- * "unproven", named separately so a `blocked_containment` ledger row can say which one fired.
- *
- * INVARIANT: no verdict changes — every state still means `contained: false` and still fails closed.
- * Order, per design part (iii): `probe-never-ran` (not even the inside-cwd sanity write landed),
- * `write-never-attempted` (the instrument ran, the transcript never named this run's token), then
- * `no-denial-observed` (the step was reported, nothing matched {@link OS_DENIAL_RE}).
+ * Split `assessContainment`'s former "unproven" into named `blocked_containment` ledger states.
+ * INVARIANT: all still mean `contained: false` and fail closed. Design part (iii) order:
+ * `probe-never-ran` (no inside-cwd control), `write-never-attempted` (ran but no token in transcript),
+ * `no-denial-observed` (step reported, no {@link OS_DENIAL_RE} match).
  * // Why: docs/forensics/containment.md#unprovenstate (W1-T1281).
  */
 export type UnprovenState =
@@ -244,11 +216,9 @@ export type UnprovenState =
   | "turns-exhausted";
 
 /**
- * Names which unproven state a failing probe was in. PURE, over the evidence `assessContainment`
- * already read. `turns-exhausted` is checked FIRST: an exhausted spawn also looks like
- * `probe-never-ran` or `write-never-attempted` on raw evidence, and naming the actually-observed
- * cause beats guessing from its symptoms. TRAP: three W1-T1281 transcripts all reported "the write
- * may never have been attempted", which was true of both and identified neither.
+ * PURE classification of `assessContainment` evidence. Check `turns-exhausted` FIRST: its observed
+ * cause outranks symptoms resembling `probe-never-ran` or `write-never-attempted`.
+ * TRAP: three W1-T1281 transcripts said "the write may never have been attempted", identifying neither.
  * // Why: docs/forensics/containment.md#classifyunprovenstate (W1-T2201).
  */
 export function classifyUnprovenState(e: ContainmentEvidence): UnprovenState {
@@ -259,9 +229,8 @@ export function classifyUnprovenState(e: ContainmentEvidence): UnprovenState {
 }
 
 /**
- * What one probe execution returns to the verdict layer. Same UNOBSERVED-when-absent invariant as
- * {@link ContainmentEvidence}. Most fields were already on `WorkerResult` and were simply dropped
- * one line from the row that needed them.
+ * Probe execution result; absent means UNOBSERVED, as in {@link ContainmentEvidence}.
+ * Most fields forward `WorkerResult` evidence previously dropped before the verdict row.
  * // Why: docs/forensics/containment.md (W1-T237, W1-T268, W1-T2238).
  */
 export interface ProbeExecResult {
@@ -272,17 +241,14 @@ export interface ProbeExecResult {
   insideWriteCreated: boolean;
   /** Notional cost of the probe spawn (subscription) — surfaced so the run meters it. */
   costUsd?: number;
-  /** `WorkerResult.isError` from the probe spawn's envelope: already in hand, but the preflight
-   *  tested only the transcript for denial text. Also carried so a failed spawn's stderr — folded
-   *  into `transcript` — reaches the ledger, capped, instead of dying with the process. Absent ⇒
-   *  `false`; legacy transcript-only credential matches require this signal. (W1-T237, W1-T238) */
+  /** `WorkerResult.isError`; absent ⇒ `false`. Required for legacy transcript-only credential
+   *  matches. Carries failed-spawn stderr (folded into transcript) to the capped ledger excerpt,
+   *  replacing the preflight's former transcript-only denial check. (W1-T237, W1-T238) */
   isError?: boolean;
-  /** `WorkerResult.childEnvKeys`, carried so the caller DERIVES this probe's `billing_mode`
-   *  (`billingMode`, env.ts) rather than assuming subscription. Absent ⇒ an empty key set, which
-   *  `billingMode` reads as `"subscription"`, the correct default without the valve's key. (W1-T268) */
+  /** `WorkerResult.childEnvKeys` derives `billing_mode` via env.ts's `billingMode`. Absent ⇒ empty
+   *  keys ⇒ subscription, the correct default without the valve's key. (W1-T268) */
   childEnvKeys?: string[];
-  /** `WorkerResult.accountLabel` — the account this probe's notional spend is attributed to, so the
-   *  run's `blocked_containment` line names it like every other spend-bearing line. (W1-T268) */
+  /** `WorkerResult.accountLabel` attributes probe spend on `blocked_containment` rows too. (W1-T268) */
   accountLabel?: string;
   /** Did the deny-floor tripwire land inside cwd? See
    *  {@link ContainmentEvidence.denyFloorProbeCreated}. */
@@ -297,16 +263,13 @@ export interface ProbeExecResult {
   egressBlockedRemoteIp?: string;
   /** Remote address curl connected to for the allowed control request. (W1-T2271) */
   egressAllowedRemoteIp?: string;
-  /** Did the probe spawn end on the SDK's `error_max_turns` subtype? Carried so a turn-exhausted
-   *  run is distinguishable from a probe that never attempted a step; see
-   *  {@link classifyUnprovenState}'s `"turns-exhausted"`. (W1-T2201) */
+  /** SDK `error_max_turns`, distinct from never attempted; see {@link classifyUnprovenState}. (W1-T2201) */
   turnsExhausted?: boolean;
   /** `WorkerResult.numTurns` off the probe spawn's envelope. Absent ⇒ unrecorded, never a guessed
    *  `0`. (W1-T2238) */
   numTurns?: number;
-  /** The `maxTurns` this spawn call was invoked with: `probeTurnBudget(prompt)`'s own return value,
-   *  carried as an INPUT rather than re-derived at the row-building site, so a historical row stays
-   *  checkable against the cap it ran under even if `PROBE_TURN_ALLOWANCE` moves. (W1-T2238) */
+  /** Spawn's `probeTurnBudget(prompt)` INPUT, never re-derived at row creation: historical caps
+   *  remain checkable even if `PROBE_TURN_ALLOWANCE` changes. (W1-T2238) */
   maxTurns?: number;
 
   /** Did the read of the console's write-token path succeed? (W1-T2211) */
@@ -381,9 +344,8 @@ export function containmentProbePrompt(
 }
 
 /**
- * Count of Bash commands the probe prompt instructs the worker to run, from the prompt's own
- * numbered `N)` lines. INVARIANT: deriving from the prompt TEXT, not a constant kept beside it, is
- * what makes a new command move {@link probeTurnBudget} automatically. (W1-T2201)
+ * Count Bash commands from the prompt's numbered `N)` lines. INVARIANT: prompt TEXT, not a parallel
+ * constant, makes new commands move {@link probeTurnBudget} automatically. (W1-T2201)
  */
 export function probeCommandCount(prompt: string): number {
   const matches = prompt.match(/^\d+\)/gm);
@@ -391,26 +353,18 @@ export function probeCommandCount(prompt: string): number {
 }
 
 /**
- * BACKSTOP on the scaling allowance below, which is the PRIMARY CONTROL that sizes the probe's
- * slack. PICKED, NOT MEASURED — the same admission {@link EGRESS_TIMEOUT_SECONDS} makes, rather
- * than dressing the number up as derived. Set two commands above the probe's real count today (6),
- * so a seventh and an eighth still move {@link PROBE_TURN_ALLOWANCE} while a ninth needs a
- * deliberate bump of this constant.
- *
- * COST any later raise must restate: at the ceiling a genuinely hanging probe spends up to 8 turns
- * before the fail-closed verdict engages, up from the old flat 3.
+ * BACKSTOP on {@link PROBE_TURN_ALLOWANCE}'s primary slack control. PICKED, NOT MEASURED, like
+ * {@link EGRESS_TIMEOUT_SECONDS}: two above today's six commands, allowing seven/eight to scale;
+ * a ninth requires a deliberate bump. COST any raise must restate: a hanging probe can spend
+ * eight allowance turns before fail-closed, up from the old flat three.
  * FALSIFIER: test/bound-kind-declared.test.ts. // Why: docs/forensics/containment.md (W1-T2344 Q1).
  */
 export const PROBE_TURN_ALLOWANCE_CEILING = 8;
 
 /**
- * Turn allowance beyond one Bash turn per command plus the closing REPORT turn — turns a careful
- * probe legitimately spends that are NOT worker misbehaviour. ONE named slack turn PER COMMAND,
- * capped at {@link PROBE_TURN_ALLOWANCE_CEILING}.
- *
- * Each turn is named for what it buys: re-reading an ambiguous result knowable only by checking the
- * marker files; a retry after a malformed invocation; and rework forced by the probe's own
- * deny-floor tripwire, which `hooks/deny-floor.sh` refuses even when a command merely names it.
+ * ONE slack turn PER COMMAND beyond Bash execution and closing REPORT, capped at
+ * {@link PROBE_TURN_ALLOWANCE_CEILING}. Buys marker checks for ambiguous results, malformed-call
+ * retries, and rework when `hooks/deny-floor.sh` refuses even naming the probe's tripwire.
  *
  * TRAP: a flat allowance of 3 diluted to half a turn per command as arms were added, exhausting the
  * probe's turns on 29% of dispatches. // Why: docs/forensics/containment.md (W1-T2201, W1-T2344).
@@ -434,29 +388,21 @@ export function probeTurnBudget(prompt: string): number {
 }
 
 /**
- * The blocked egress target: RFC 2606's reserved documentation domain, so contact in the failure
- * case is inert. The probe GENUINELY REACHES this host when containment fails, exactly as the
- * filesystem probe genuinely writes outside cwd — the "no third party" constraint is satisfiable
- * only in the contained case. TRAP: a guaranteed-non-resolving name (an RFC 6761 `.invalid` domain)
- * fails identically whether the sandbox engaged or the host is offline, which is structurally unable
- * to discriminate — the same defect as a proof that cannot fail. (W1-T1265)
+ * RFC 2606 documentation target: inert contact, but GENUINELY REACHED if containment fails, like
+ * the outside-cwd write. "No third party" holds only when contained. TRAP: RFC 6761 `.invalid`
+ * fails both when sandboxed and when offline, so it cannot discriminate. (W1-T1265)
  */
 export const EGRESS_BLOCKED_HOST = "example.com";
 
-/** Fallback control host, used ONLY when the settings allowlist cannot be read. The real control
- *  target is derived FROM the allowlist at probe time ({@link allowedHostFromSettings}) so the two
- *  cannot drift; this exists so a caller with no settings still probes something allowlisted rather
- *  than silently skipping the control. */
+/** Fallback ONLY for unreadable settings: still probe an allowlisted control. Normally derive it
+ *  via {@link allowedHostFromSettings} so target and policy cannot drift. */
 export const EGRESS_ALLOWED_HOST_FALLBACK = "api.github.com";
 
 /**
- * Per-request timeout, seconds. PICKED, NOT MEASURED — said plainly rather than dressed as derived,
- * the discipline `deploy/entrypoint.sh`'s `RMD_FRESHNESS_RESTART_MAX` row uses.
- *
- * INVARIANT: it is bounded at all because an unbounded connect inside the preflight would stall
- * every dispatch behind it. 10s times two requests caps the arm at about 20s against a spawn that
- * already costs tens of seconds. What would measure it: the p99 of the two requests' wall time
- * across real preflights, read off `containment.probe` rows once this arm has run in the fleet.
+ * Per-request seconds: PICKED, NOT MEASURED, like `deploy/entrypoint.sh`'s `RMD_FRESHNESS_RESTART_MAX`.
+ * INVARIANT: bound connects so preflight cannot stall every dispatch. Two 10s requests cap this
+ * arm near 20s atop a tens-of-seconds spawn. Measure using fleet `containment.probe` rows' p99
+ * wall time for both requests.
  */
 export const EGRESS_TIMEOUT_SECONDS = 10;
 
@@ -509,15 +455,10 @@ export function egressProbeCommand(allowedHost: string): string {
 }
 
 /**
- * The prefix on the line command 4 prints about itself.
- *
- * THE TURN IT SAVES: command 4 discards its body, redirects `-w` to a file and sends stderr to
- * `/dev/null`, so it produces NOTHING on the worker's transcript and success and failure look
- * identical; the worker then spends a turn reading the markers back.
- *
- * INVARIANT: a prefix, not a verdict. The lines it marks are DERIVED at runtime from the same
- * markers {@link defaultExecutor} reads with `existsSync`, and a marker is written only by a curl
- * that came back. Nothing parses it, so "no transcript parsing" is untouched. (W1-T2344 Q2)
+ * Command 4's outcome prefix saves a marker-reading turn: discarded body/stderr and redirected
+ * `-w` otherwise make success/failure look identical in the transcript. INVARIANT: prefix, not
+ * verdict; derived from curl-success markers also read by {@link defaultExecutor}'s `existsSync`.
+ * Nothing parses it; "no transcript parsing" still holds. (W1-T2344 Q2)
  */
 export const EGRESS_RESULT_PREFIX = "EGRESS-RESULT";
 

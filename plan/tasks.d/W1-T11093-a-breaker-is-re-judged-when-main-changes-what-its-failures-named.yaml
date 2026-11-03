@@ -1,0 +1,39 @@
+- id: W1-T11093
+  title: A tripped dispatch breaker is re-judged once main changes the files its failures named, so a fixed cause no longer waits days for a human release
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the breaker judge's ruling key plus its wiring in the daemon command, the drain's breaker hook and the judge prompt
+  origin: operator-session#satellite-idle-2026-11-02
+  plan_refs:
+    - W1-T7742
+    - W1-T10919
+    - W1-T100
+  files:
+    - src/lib/stall-verifier.ts
+    - src/run-task.ts
+    - src/cli/commands/daemon.ts
+    - src/lib/sweep.ts
+    - test/daemon/a-breaker-is-re-judged-when-main-changes-what-its-failures-named.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A settled escalate ruling is asked again once main changes an implicated path, the judge is told which paths changed, an unchanged main never re-asks, and a continue ruling resets the breaker
+      proof: "unit test: test/daemon/a-breaker-is-re-judged-when-main-changes-what-its-failures-named.test.ts"
+    - claim: The daemon command wires the real main-evidence reader into the breaker hook for its target repo checkout
+      proof: "grep: mainEvidence: mainEvidenceReader(daemonTargetCheckoutRoot(target, config\\.root)) in src/cli/commands/daemon.ts"
+  rationale: |
+    OBSERVED, operator recon 2026-11-02:
+    - The site daemon started no worker for five days. Its only remaining frontier task, PORTAL-T45, tripped its dispatch breaker at 2026-10-27T19:41Z after five refusals that collected zero tests: the site's vitest include read tests/unit/**/*.test.ts and the task's test was .tsx.
+    - PORTAL-T44 (#213) widened the include to {ts,tsx} at 19:56Z, 15 minutes later. Nothing re-asked the breaker; PORTAL-T46 and PORTAL-T47 waited on it until the operator ran rmd release on 2026-11-02.
+    - judgeDispatchBreak keys a ruling on task, fresh count and last run, so a settled escalate is reused forever. W1-T10919 covers only the collected-nothing refusal class, and only for refusals written after it merged.
+    - The overlap with W1-T100 is only the two shared hub files src/lib/sweep.ts and src/run-task.ts; W1-T100 routes blocked_ci PRs to the CI-log fix path, while this task touches the breaker judge's prompt and its hook's context there.
+  design: |
+    The ruling key gains a 16-hex fingerprint of origin/main's ls-tree for the implicated paths: RUNNER_CONFIG_PATHS, the task's literal files and the repo paths its attempt reasons name. The ruling row records main_digest and main_changed (paths changed on main since the last attempt's ts) or main_unreadable. The judge input carries mainChangedSinceLastAttempt and the prompt says how to weigh it. The reader is async git, off the daemon loop. The daemon's breaker hook still fires once per task per process, so a re-ruling happens on the first restart after main changes; the judge keeps the authority it already has.
+  note: |
+    reservation hand-off: run-unfiled-1793619620927 -> run-unfiled-1793619620927
+    Reserved with rmd next-task-id from the operator checkout (W1-T11093..W1-T11094 on run-unfiled-1793619620927). The operator session hand-builds it on run-W1-T11093-<epochMs>.

@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { providerEligibility, type ProviderCapacity } from "../src/lib/worker-provider.js";
+import { providerEligibility, FOUNDRY_CLAUDE_API_KEY_ENV, FOUNDRY_CLAUDE_ENDPOINT_ENV,
+  type ProviderCapacity } from "#src/lib/worker-provider.js";
 import {
   createClaudeExecutableCache,
   spawnWorker,
@@ -11,8 +12,8 @@ import {
   type SpawnWorkerArgs,
   type WorkerResult,
   type WorkerSelectionAssignment,
-} from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+} from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 
 // Every worker.assignment row must say WHY its provider was chosen: the rule that fired, the
 // providers it weighed, and each subscription's headroom at that moment. The console explains a
@@ -118,6 +119,8 @@ async function spawnBlocked(root: string, over: BlockedOverrides) {
     permissionMode: "bypassPermissions" as const,
     settingsFile: join(REPO_ROOT, "settings", "worker.json"),
     prompt: "work",
+    // This fixture exercises ordinary cash fallback independently of daemon-only Foundry keys.
+    env: {},
     model: "sonnet",
     effort: "high",
     config: {
@@ -160,7 +163,12 @@ async function spawnBlocked(root: string, over: BlockedOverrides) {
 
 test("a blocked auction diverted to cash records cash-fallback with the readings that blocked it", async () => {
   const root = fixtureRoot("rmd-decision-cash-");
+  const previousKey = process.env[FOUNDRY_CLAUDE_API_KEY_ENV];
+  const previousEndpoint = process.env[FOUNDRY_CLAUDE_ENDPOINT_ENV];
   try {
+    // A configured parent must not change this mocked ordinary-cash fixture into the Sonnet arm.
+    process.env[FOUNDRY_CLAUDE_API_KEY_ENV] = "fixture-only";
+    process.env[FOUNDRY_CLAUDE_ENDPOINT_ENV] = "https://example.invalid";
     const run = await spawnBlocked(root, { tools: ["Read", "Grep", "Glob", "RunCheck"] });
     assert.equal(run.cashSpawns, 1);
     const decision = run.assignments.at(-1)?.routing.decision;
@@ -178,6 +186,10 @@ test("a blocked auction diverted to cash records cash-fallback with the readings
     );
     assert.equal(decision?.considered.find((entry) => entry.selected)?.provider, "cash");
   } finally {
+    if (previousKey === undefined) delete process.env[FOUNDRY_CLAUDE_API_KEY_ENV];
+    else process.env[FOUNDRY_CLAUDE_API_KEY_ENV] = previousKey;
+    if (previousEndpoint === undefined) delete process.env[FOUNDRY_CLAUDE_ENDPOINT_ENV];
+    else process.env[FOUNDRY_CLAUDE_ENDPOINT_ENV] = previousEndpoint;
     rmSync(root, { recursive: true, force: true });
   }
 });

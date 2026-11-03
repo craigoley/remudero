@@ -3,12 +3,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { loadMounts, mountsPath } from "../src/lib/mounts.js";
-import { ROUTING_EXPERIMENTS, routingExperimentFor } from "../src/lib/routing-experiments.js";
+import type { Config } from "#src/lib/config.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
+import { ROUTING_EXPERIMENTS, routingExperimentFor } from "#src/lib/routing-experiments.js";
 import { openWeightAllowancePath, openWeightCommittedUsd, openWeightReservationUsd, openWeightUsageUsd,
-  selectOpenWeightModel, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
-import { workerSelectionAssignment } from "../src/lib/worker.js";
+  selectOpenWeightModel, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { workerSelectionAssignment } from "#src/lib/worker.js";
 
 const MODEL = "gpt-6.1-sol";
 const root = join(import.meta.dirname, "..");
@@ -176,6 +176,12 @@ test("Sol 6.1 missing cache write counter retains the reservation instead of und
         input_tokens_details: { cached_tokens: 60 } } }))) }, f.config, selection);
     assert.equal(result.isError, false);
     assert.equal(result.tokens.input, 100);
+    assert.equal(result.tokens.output, 20);
+    assert.equal(result.tokens.cacheRead, 60);
+    assert.equal(result.tokenUsageState, "partial");
+    assert.equal(result.usageEstimateUsd, null);
+    assert.equal(result.billedUsd, null);
+    assert.equal(result.budgetHeldUsd, result.budgetReservedUsd);
     assert.equal(result.budgetSettledUsd, result.budgetReservedUsd);
     assert.equal(result.costUsd, result.budgetReservedUsd);
   } finally { f.close(); }

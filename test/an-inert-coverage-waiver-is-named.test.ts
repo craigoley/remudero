@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 // @ts-expect-error The exercised gate is a plain .mjs script without a declaration file.
-import { formatBlockingViolation, computeBoundaryRanges, DIFF_COV_DIRECTIVES } from "../scripts/diff-coverage.mjs";
+import { formatBlockingViolation, computeBoundaryRanges, DIFF_COV_DIRECTIVES } from "#scripts/diff-coverage.mjs";
 
 const added = new Map([["src/example.ts", new Map([[2, "return 1;"]])]]);
 

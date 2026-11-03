@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { judgeReview, reviewFailureClass, reviewLedgerLegibilityFields, reviewLedgerReasons } from "../src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { judgeReview, reviewFailureClass, reviewLedgerLegibilityFields, reviewLedgerReasons } from "#src/lib/review.js";
 
 // ── W1-T304 ──────────────────────────────────────────────────────────────────
 //

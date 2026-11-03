@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { billingMode, buildWorkerEnv, isBillingClean } from "../src/lib/env.js";
+import { billingMode, buildWorkerEnv, isBillingClean } from "#src/lib/env.js";
 
 /**
  * `GH_TOKEN` ON THE WORKER ALLOWLIST — parity with the macOS worker, which already holds this

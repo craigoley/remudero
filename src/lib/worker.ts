@@ -1,5 +1,8 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
+import { BoundedOutput, readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import { workerExecutionEvidence, sdkRequestedEffort, sdkRequestedModel, type SdkRequestEvidence,
+  type WorkerExecutionEvidenceV1 } from "./worker-execution-evidence.js";
 import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, denyMcpSuccessCredit, validateWorkerMcpIsolation,
   workerMcpExposure, workerMcpIsolationEvidence, workerMcpProbeBoundary, workerPluginInventory, WORKER_MCP_STRICT,
   type WorkerPluginInventory, type WorkerMcpExposure, type WorkerMcpIsolation,
@@ -60,7 +63,7 @@ import {
 } from "./config.js";
 import { assertModelAllowed } from "./model-gate.js";
 import { chooseDraftDeployment, readDraftStats, recordDraftRouting, type DraftStats, type DraftChoice } from "./draft-routing.js";
-import { usageSnapshotFromSdk } from "./headroom.js";
+import { sdkUsageReadingCase } from "./headroom.js";
 import {
   detectCompactionEvents,
   detectCompactionFailures,
@@ -152,11 +155,14 @@ import {
   workerMarkerEnv,
   type ContainedProcess,
   type ContainedSpawnOptions,
+  type StderrFailure,
+  type StderrSink,
 } from "./worker-containment.js";
 import {
   abandonProviderWindowMeasurement,
   beginProviderWindowMeasurement,
   claudeCapacityFromUsage,
+  claudeCapacityFromUsageCase,
   finishProviderWindowMeasurement,
   providerEligibility,
   readCodexCapacity,
@@ -200,6 +206,7 @@ import {
   codexCapabilityForRequestedModel,
   codexCandidatesForCapability,
   type WorkerExit,
+  type CodexCompletionEvidence,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
@@ -259,6 +266,14 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  outputRetention?: {
+    text: Omit<FileTail, "text">;
+    blocks: Omit<FileTail, "text">;
+    stdout?: Omit<FileTail, "text">;
+    stderr: Omit<FileTail, "text">;
+    completion?: CodexCompletionEvidence;
+    originalSubtype: string;
+  };
   /** Provider-safe continuation disposition; never contains a session id or prompt. */
   continuation?: WorkerContinuationReceipt;
   notStarted?: "admission-abandoned";
@@ -275,6 +290,8 @@ export interface WorkerResult {
   provider?: WorkerProviderId;
   sessionId: string;
   costUsd: number;
+  /** W1-T10956: finite, nonnegative Claude SDK envelope rating; distinct from inferred defaults and invoices. */
+  sdkReportedUsageRatedUsd?: number;
   /** W1-T5629: Codex NOTIONAL price (`codexNotionalCostUsd`), never billed or in costUsd; absent without a Codex price row. */
   notionalCostUsd?: number;
   /** SDK num_turns on success AND error; feeds mounts.yaml calibration (W1-T5), never zeroed for failure.
@@ -284,11 +301,11 @@ export interface WorkerResult {
   /** Configured maxTurns INPUT, beside numTurns, never replacing it or read from the envelope.
    * Undefined without a cap; moving mounts.yaml cannot explain old rows (RECON_MAX_TURNS moved 8 -> 20; W1-T303). */
   maxTurns?: number;
-  /** Final result text (the `result` field of the SDK result message). */
+  /** Retained final result text; outputRetention names any loss. */
   text: string;
-  /** All assistant text blocks concatenated, in order. */
+  /** Retained assistant text blocks, in order; outputRetention names any loss. */
   blocks: string[];
-  /** Everything the child wrote to stderr — proof surface for the billing boundary. */
+  /** Retained stderr; outputRetention names any loss. */
   stderr: string;
   /** Result subtype: 'success' | 'error_max_turns' | 'error_max_budget_usd' | … */
   subtype: string;
@@ -334,6 +351,10 @@ export interface WorkerResult {
    * Retain accumulated reservation, settlement and usage evidence. */
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
+  /** Cash-only accounting evidence; absent on providers that do not expose these fields. */
+  budgetHeldUsd?: number;
+  usageEstimateUsd?: number | null;
+  billedUsd?: number | null;
   budgetRefused?: boolean;
   cashAllowanceResetAt?: string;
   /** W1-T10384: which limit refused when `budgetRefused`: the shared fleet cap or the Foundry Claude sub-cap. */
@@ -351,6 +372,8 @@ export interface WorkerResult {
   modelHealthSource?: ClaudeModelHealthSource;
   /** Configured effort INPUT, like model; absent from the SDK result envelope (W1-T6). */
   effort: string;
+  /** Final Claude SDK query options, distinct from configured and provider-served labels. */
+  sdkRequest?: SdkRequestEvidence;
   /** Cash adapter request parameters; absent for providers without this observation. */
   requestEfforts?: readonly CashRequestEffortCount[];
   /** Aggregate token usage off the result envelope (zeroed if none was seen). */
@@ -390,6 +413,9 @@ export interface WorkerResult {
   /** SDK query milliseconds around {@link collectWorkerResult}'s loop, excluding local/free setup.
    * Fixtures omit it; workerLedgerFields preserves absence rather than guessing 0 (W1-T477). */
   workerDurationMs?: number;
+  /** First nonempty assistant text relative to the same loop start; null carries a named timing gap. */
+  workerFirstTextMs?: number | null;
+  workerFirstTextReason?: string;
   /** Reset-stable subscription-window percentage points consumed while this worker exclusively owned its selected provider.
    * Present only on the opt-in multi-provider path; the default Claude-only path performs no extra capacity reads and omits
    * this field byte-for-byte. */
@@ -405,6 +431,8 @@ export interface WorkerResult {
     candidates: string[];
     searchedPaths: string[];
   };
+  /** Present on returned terminal results from the native spawn wrapper; never a provider invoice. */
+  executionEvidence?: WorkerExecutionEvidenceV1;
 }
 
 /** `model`/`effort` label logged when a call rides no explicit mount override (e.g. recon, the advisory reviewer) — an honest
@@ -549,6 +577,7 @@ export function workerFailureExcerpt(r: Pick<WorkerResult, "isError" | "stderr" 
 /** Cap terminal-success reports like {@link STDERR_EXCERPT_CAP}; run-task.ts's silent-no-op guard
  * parses them three times and used to drop reports without a PR (W1-T407). */
 export const REPORT_EXCERPT_CAP = 4000;
+export const WORKER_OUTPUT_BYTES = 256 * 1024;
 
 /** Join once. TRAP: SDK result echoes the last assistant block; hand-rolled joins double-count it.
  * Remove only that duplicate; retain ordering, non-repeats and "last marker line wins" (W1-T2205). */
@@ -572,7 +601,9 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * max_turns records the cap; stderr_excerpt requires r.isError. Always emit served_model,
  * null when unknown; unreportable models never fail runs (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
+  output_retention?: WorkerResult["outputRetention"];
   continuation?: WorkerContinuationReceipt;
+  execution_evidence?: WorkerExecutionEvidenceV1;
   mcp_isolation?: WorkerMcpIsolationEvidence;
   mcp_boundary?: typeof WORKER_MCP_STRICT;
   mcp_exposure?: WorkerMcpExposure;
@@ -631,6 +662,8 @@ export function workerLedgerFields(r: WorkerResult): {
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
+    ...(r.outputRetention && Object.values(r.outputRetention)
+      .some((output) => typeof output === "object" && output.state !== "complete") ? { output_retention: r.outputRetention } : {}),
     ...(r.mcpIsolation ? { mcp_isolation: r.mcpIsolation } : {}),
     ...(r.mcpBoundary ? { mcp_boundary: r.mcpBoundary } : {}),
     ...(r.mcpExposure ? { mcp_exposure: r.mcpExposure } : {}),
@@ -653,6 +686,7 @@ export function workerLedgerFields(r: WorkerResult): {
     ...(r.egressUnenforced ? { egress_unenforced: r.egressUnenforced } : {}),
     ...(r.provider ? { provider: r.provider } : {}),
     ...(r.continuation ? { continuation: r.continuation } : {}),
+    ...(r.executionEvidence ? { execution_evidence: r.executionEvidence } : {}),
     model: r.model,
     ...(r.routedModel ? { routed_model: r.routedModel } : {}),
     ...(r.modelHealthState ? { model_health_state: r.modelHealthState } : {}),
@@ -1228,7 +1262,7 @@ export interface SpawnWorkerArgs {
   containment?: {
     spawn?: (
       opts: ContainedSpawnOptions,
-      onStderr?: (chunk: string) => void,
+      onStderr?: StderrSink,
       onSpawnError?: (err: NodeJS.ErrnoException) => void,
     ) => ContainedProcess;
     teardown?: (pgid: number) => void;
@@ -1944,8 +1978,8 @@ export async function readClaudeProviderCapacity(
       return value;
     }
     try {
-      const value = claudeCapacityFromUsage(
-        usageSnapshotFromSdk(await method.call(session) as never),
+      const value = claudeCapacityFromUsageCase(
+        sdkUsageReadingCase(await method.call(session) as never),
         (deps.accountLabel ?? readClaudeAccountLabel)(),
       );
       claudeCapacityCache = { at: now(), value };
@@ -2354,6 +2388,23 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
 }
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  const attemptId = randomUUID();
+  let assignment: WorkerSelectionAssignment | undefined;
+  const onSelectionAssignment = args.onSelectionAssignment;
+  const spawnArgs = onSelectionAssignment ? {
+    ...args,
+    onSelectionAssignment: (value: WorkerSelectionAssignment) => {
+      const snapshot = structuredClone(value);
+      onSelectionAssignment(value);
+      assignment = snapshot;
+    },
+  } : args;
+  const result = await spawnWorkerImpl(spawnArgs);
+  result.executionEvidence = workerExecutionEvidence(attemptId, result, assignment);
+  return result;
+}
+
+async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   validateWorkerMcpIsolation(args);
   if (args.promptFor) {
     const promptFor = args.promptFor;
@@ -3150,6 +3201,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // configured. Otherwise ANTHROPIC_* is stripped as before (W1-T258).
       allowApiKey: config.overflow === "api_key" && frontierClaudeSpawn === false,
     });
+    delete childEnv.RMD_INSTANCE_REGISTRY;
     // W1-T2699: every spawn's env routes through secretBoundaryEnv, a no-op absent a model boundary (see its doc).
     // MUTATING `childEnv` in place, never rebinding it: W1-T2800's structural falsifier (test/codex-worker-home-
     // redirection.test.ts) greps this file for the literal `const childEnv = buildWorkerEnv(...)` above, so the
@@ -3181,17 +3233,23 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       }
     }
 
-    const stderrChunks: string[] = [];
-    const blocks: string[] = [];
+    const stderrOutput = new BoundedOutput(WORKER_OUTPUT_BYTES);
+    let stderrFailure: StderrFailure | undefined;
 
     // Worker process-tree containment. `pidRef` is populated lazily by the spawn closure the first time the SDK spawns, and
     // `withWorkerGroupTeardown` guarantees teardown against it once the stream settles on EITHER path, so a run's process
     // group never outlives its own teardown. That closure also owns stderr piping, because a custom spawn gets none from the
     // SDK (W1-T117).
-    const pidRef: { pid?: number } = {};
+    const pidRef: { pid?: number; outputClosed?: Promise<void> } = {};
     const spawnContainedBase = boundContainment.spawn ?? spawnDetachedGroup;
     const spawnContained: typeof spawnContainedBase = withWorkerPidReport(spawnContainedBase, args.onWorkerPid);
     const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
+    let tornDown = false;
+    const teardownOnce = (pgid: number) => {
+      if (tornDown) return;
+      tornDown = true;
+      teardownContained(pgid);
+    };
 
     // TRAP (SDK 0.3.209): passing BOTH a `settings` file path and the `sandbox` option throws "Cannot use both …". The
     // sandbox config therefore lives inside the settings file, and the probe (verdict 7) confirms empirically that it engaged
@@ -3205,11 +3263,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       settingSources: WORKER_SETTING_SOURCES, // real value: settingSources: [] (see WORKER_SPAWN_ISOLATION above)
       // Run the CLI DETACHED into its own process group and session, so teardown reaches every descendant — including one
       // outliving the CLI's own exit — with a single group signal. This REPLACES the SDK's default local spawn, so
-      // `stderrChunks` is fed from THIS closure rather than an `Options.stderr` callback, which the SDK never invokes for a
+      // `stderrOutput` is fed from THIS closure rather than an `Options.stderr` callback, which the SDK never invokes for a
       // custom spawn (W1-T117).
       spawnClaudeCodeProcess: buildContainedSpawnFn(
         spawnContained,
-        (chunk) => stderrChunks.push(chunk),
+        (chunk, failure) => {
+          stderrOutput.push(chunk);
+          if (failure) stderrFailure = failure;
+        },
         pidRef,
         args.onSpawnError,
       ),
@@ -3338,6 +3399,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // W1-T9489: EVERY Claude spawn is strict with an explicit server map (knowledge-only with ruleLookup, else none), so
       // the shared config dir's claude.ai connectors can never attach to a worker running under bypassPermissions.
       const boundaryServers = applyWorkerMcpBoundary(options);
+      const sdkRequest: SdkRequestEvidence = {
+        model: sdkRequestedModel(options),
+        effort: sdkRequestedEffort(options),
+      };
       const liveQuery = runQuery({ prompt: execution.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
@@ -3345,12 +3410,18 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         () =>
           collectWorkerResult(liveQuery, {
             childEnvKeys: Object.keys(childEnv).sort(),
-            stderrChunks,
+            stderrOutput,
+            stderrFailure: () => stderrFailure,
+            settleOutput: async () => {
+              if (pidRef.pid !== undefined) teardownOnce(pidRef.pid);
+              await pidRef.outputClosed;
+            },
             // Logged verbatim as CONFIGURED inputs, never a read-back: effort is absent from the SDK envelope, and model here
             // is the requested knob, which may differ from the envelope's `modelUsage` keys. Unset gives the honest "default"
             // label, never a guess.
             model: args.model ?? DEFAULT_MODEL_LABEL,
             effort: args.effort ?? DEFAULT_EFFORT_LABEL,
+            sdkRequest,
             accountLabel: accountId,
             // Mirrored verbatim from the SAME `options.maxTurns` this call was spawned with — see {@link
             // WorkerResult.maxTurns}. `undefined`, never guessed, when no cap was set.
@@ -3372,7 +3443,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // collectWorkerResult's own `Date.now` (W1-T1045).
             now: args.clockBound?.now,
           }),
-        teardownContained,
+        teardownOnce,
       );
       result.provider = "claude";
       result.continuation = execution.receipt;
@@ -3406,6 +3477,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       if (abandonment) throw new WorkerAbandonedError(abandonment, err);
       throw err;
     } finally {
+      stderrOutput.finish();
       stopWatchdog?.();
       unchainSignal?.();
       // Unconditional: no exit path may leave a handle for a later answer to steer into a dead session (W1-T4673).
@@ -3827,10 +3899,16 @@ export async function collectWorkerResult(
     runId?: string;
     taskId?: string;
     stderrChunks?: string[];
+    stderrOutput?: BoundedOutput;
+    stderrFailure?: () => StderrFailure | undefined;
+    /** Teardown and drain the child pipes after the SDK stream ends, before judging retained output. */
+    settleOutput?: () => Promise<void>;
     /** Configured input, logged verbatim — defaults to `DEFAULT_MODEL_LABEL`. */
     model?: string;
     /** Configured input, logged verbatim — defaults to `DEFAULT_EFFORT_LABEL`. */
     effort?: string;
+    /** Final SDK request options captured immediately before this stream was requested. */
+    sdkRequest?: SdkRequestEvidence;
     /** W1-T268: the account this call's spend is attributed to — see {@link WorkerResult.accountLabel}. */
     accountLabel?: string;
     /** W1-T303: configured input, mirrored verbatim — see {@link WorkerResult.maxTurns}. */
@@ -3851,21 +3929,25 @@ export async function collectWorkerResult(
   },
 ): Promise<WorkerResult> {
   // Started BEFORE the first `for await` pull: this function's body IS the worker call, since everything above it in
-  // spawnWorker is local, free setup. No clock injection, because existing tests already drive this loop against near-instant
-  // synthetic streams (W1-T477).
-  const startedAtMs = Date.now();
+  // spawnWorker is local, free setup. Keep resource-duration timestamps on the shared wall-clock port; the optional
+  // injected clock below remains dedicated to stream-observer/quiet-floor behavior (W1-T477).
+  const startedAtMs = systemClock.now();
   const toolLineage = createWorkerToolLineage({ provider: "claude", root: opts.root, runId: opts.runId, taskId: opts.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
-  const blocks: string[] = [];
-  const stderrChunks = opts.stderrChunks ?? [];
+  const blockOutput = new BoundedOutput(WORKER_OUTPUT_BYTES, "\n");
+  let textOutput = new BoundedOutput(WORKER_OUTPUT_BYTES);
+  const stderrOutput = opts.stderrOutput ?? new BoundedOutput(WORKER_OUTPUT_BYTES);
 
   let sessionId = "";
   let costUsd = 0;
+  let sdkReportedUsageRatedUsd: number | undefined;
   let numTurns = 0;
   // Independently counted, mid-flight approximation of "turns": one increment per raw assistant message, reported on EVERY
   // observer call including heartbeats, which carry the count without incrementing it. Never asserted to equal the terminal
   // envelope's `numTurns` above (W1-T2557).
   let turnsSoFar = 0;
+  let firstTextAtMs: number | undefined;
+  let firstTextClockInvalid = false;
   let text = "";
   let subtype = "";
   let isError = false;
@@ -3880,6 +3962,7 @@ export async function collectWorkerResult(
   // W1-T6027: only an SDK throw reports the process's end; a clean envelope saw none.
   let exit: WorkerExit = { kind: "unobserved" };
   let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+  let tokenUsageState: WorkerResult["tokenUsageState"];
   let modelUsage: Record<string, ModelUsageEntry> = {};
   // The LAST real (non-`<synthetic>`) `msg.message.model` seen on the live assistant stream — see {@link
   // WorkerResult.servedModel}. `undefined` until a genuine value is observed, so a stream carrying none falls through to the
@@ -3936,8 +4019,13 @@ export async function collectWorkerResult(
             const blockType = block && (block as { type?: string }).type;
             if (blockType === "text") {
               const text = (block as { text: string }).text;
-              blocks.push(text);
+              blockOutput.push(text);
               opts.streamObserver?.({ kind: "working", tsMs: nowFn(), text, turnsSoFar });
+              if (text.length > 0 && firstTextAtMs === undefined && !firstTextClockInvalid) {
+                const observedAtMs = systemClock.now();
+                if (!Number.isFinite(observedAtMs) || observedAtMs < startedAtMs) firstTextClockInvalid = true;
+                else firstTextAtMs = observedAtMs;
+              }
               observedThisMessage = true;
             } else if (blockType === "tool_use") {
               const { name: toolName, id: toolUseId, input: toolInput } = block as { name?: string; id?: unknown; input?: unknown };
@@ -3999,9 +4087,13 @@ export async function collectWorkerResult(
         opts.streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
         subtype = r.subtype;
         isError = r.is_error;
-        text = r.result ?? "";
+        textOutput.finish();
+        textOutput = new BoundedOutput(WORKER_OUTPUT_BYTES);
+        textOutput.push(r.result ?? "");
         sessionId = r.session_id;
         costUsd = r.total_cost_usd;
+        if (typeof r.total_cost_usd === "number" && Number.isFinite(r.total_cost_usd) && r.total_cost_usd >= 0)
+          sdkReportedUsageRatedUsd = r.total_cost_usd;
         numTurns = typeof r.num_turns === "number" ? r.num_turns : 0;
         if (typeof r.stop_reason === "string" && r.stop_reason.length > 0) envelopeStopReason = r.stop_reason;
         permissionDenials = r.permission_denials ?? [];
@@ -4011,6 +4103,12 @@ export async function collectWorkerResult(
           cacheRead: r.usage?.cache_read_input_tokens ?? 0,
           cacheCreation: r.usage?.cache_creation_input_tokens ?? 0,
         };
+        const usageCounters = [r.usage?.input_tokens, r.usage?.output_tokens,
+          r.usage?.cache_read_input_tokens, r.usage?.cache_creation_input_tokens];
+        const observedUsageCounters = usageCounters.filter((value) =>
+          typeof value === "number" && Number.isSafeInteger(value) && value >= 0).length;
+        tokenUsageState = observedUsageCounters === usageCounters.length ? "observed"
+          : observedUsageCounters > 0 ? "partial" : "unavailable";
         modelUsage = Object.fromEntries(
           Object.entries(r.modelUsage ?? {}).map(([model, u]) => [
             model,
@@ -4034,7 +4132,7 @@ export async function collectWorkerResult(
     // Otherwise the throw is the SDK's post-error-result signal; the envelope is already captured. Record the message on
     // stderr for the proof surface.
     const swallowed = String((err as Error)?.message ?? err);
-    stderrChunks.push(`\n[collectWorkerResult] error-result throw swallowed: ${swallowed}\n`);
+    stderrOutput.push(`\n[collectWorkerResult] error-result throw swallowed: ${swallowed}\n`);
     isError = true;
     exit = workerExitOfError(err);
     // CLASSIFY THE REFUSAL HERE, while the message still exists. `detectUsageLimitRefusal` (lib/classify.ts) is the fleet's
@@ -4049,22 +4147,46 @@ export async function collectWorkerResult(
       };
     }
   } finally {
+    await opts.settleOutput?.();
     toolLineage.finish(lineageEnd);
+    if (!sawResult) {
+      blockOutput.finish();
+      textOutput.finish();
+      stderrOutput.finish();
+    }
   }
 
+  for (const chunk of opts.stderrChunks ?? []) stderrOutput.push(chunk);
+  const readOutput = (path: string, maxBytes: number) => readBoundedFileTail(path, maxBytes);
+  const retainedBlocks = blockOutput.finish(readOutput);
+  const retainedText = textOutput.finish(readOutput);
+  const retainedStderr = stderrOutput.finish(readOutput);
+  const stderrFailure = opts.stderrFailure?.();
+  if (stderrFailure) retainedStderr.evidence = { ...retainedStderr.evidence, ...stderrFailure };
+  if (!sawResult) retainedText.evidence = { state: "absent", bytesRead: 0, reason: "no result envelope observed" };
+  const outputRetention = { blocks: retainedBlocks.evidence, text: retainedText.evidence,
+    stderr: retainedStderr.evidence, originalSubtype: subtype };
+  const incomplete = !sawResult || [retainedBlocks, retainedText, retainedStderr].some((r) => r.evidence.state !== "complete");
+  text = retainedText.chunks.join("");
   const finalStopReason = envelopeStopReason ?? assistantStopReason;
+  const workerDurationMs = systemClock.now() - startedAtMs;
+  const firstTextOffsetMs = firstTextAtMs === undefined ? undefined : firstTextAtMs - startedAtMs;
+  const firstTextInvalidAtEnd = firstTextOffsetMs !== undefined
+    && (!Number.isFinite(workerDurationMs) || workerDurationMs < 0 || workerDurationMs < firstTextOffsetMs);
   return {
     ...(opts.lostGrants?.length ? { lostGrants: opts.lostGrants } : {}),
     ...(opts.credentialHelperUnwired ? { credentialHelperUnwired: opts.credentialHelperUnwired } : {}),
     sessionId,
     costUsd,
+    ...(sdkReportedUsageRatedUsd === undefined ? {} : { sdkReportedUsageRatedUsd }),
     numTurns,
     maxTurns: opts.maxTurns,
     text,
-    blocks,
-    stderr: stderrChunks.join(""),
-    subtype,
-    isError,
+    blocks: retainedBlocks.chunks,
+    stderr: retainedStderr.chunks.join(""),
+    outputRetention,
+    subtype: incomplete && (!sawResult || subtype === "success") ? "error_incomplete_output" : subtype,
+    isError: isError || incomplete,
     exit,
     apiError,
     ...(usageRefusal ? { usageRefusal } : {}),
@@ -4082,14 +4204,22 @@ export async function collectWorkerResult(
       ? { servedModelReason: "no assistant message in the stream reported a real model before the call ended" }
       : {}),
     effort: opts.effort ?? DEFAULT_EFFORT_LABEL,
+    ...(opts.sdkRequest ? { sdkRequest: structuredClone(opts.sdkRequest) } : {}),
     tokens,
+    tokenUsageState,
     modelUsage,
     compactionEvents,
     initSummary: initSummary ?? unavailableWorkerInitSummary(),
     compactionFailures,
     compactionConfigured: opts.compactionConfigured ?? false,
     qualitySuspect: isQualitySuspect(compactionEvents),
-    workerDurationMs: Date.now() - startedAtMs,
+    workerDurationMs,
+    workerFirstTextMs: firstTextOffsetMs === undefined || firstTextInvalidAtEnd ? null : firstTextOffsetMs,
+    ...(firstTextAtMs === undefined
+      ? { workerFirstTextReason: firstTextClockInvalid ? "first-text-clock-nonmonotonic" : "no-nonempty-assistant-text" }
+      : firstTextInvalidAtEnd
+      ? { workerFirstTextReason: "first-text-clock-nonmonotonic" }
+      : {}),
   };
 }
 

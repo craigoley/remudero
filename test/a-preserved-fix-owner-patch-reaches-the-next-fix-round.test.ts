@@ -9,10 +9,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { PRIOR_PARTIAL_WORK_EXCERPT_CAP, readPreservedOwnerPatch } from "../src/lib/sweep.js";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { PRIOR_PARTIAL_WORK_EXCERPT_CAP, readPreservedOwnerPatch } from "#src/lib/sweep.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const PR = 6434;
 const STAGED = "src/staged-fix.ts";

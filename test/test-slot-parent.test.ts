@@ -3,7 +3,7 @@ import { chmodSync, chownSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { observeTestSlotParent, type TestSlotParentObservation } from "../src/lib/test-slot-parent.js";
+import { observeTestSlotParent, type TestSlotParentObservation } from "#src/lib/test-slot-parent.js";
 
 const posixOnly = { skip: process.platform !== "linux" && process.platform !== "darwin" };
 type TestLookup = NonNullable<Parameters<typeof observeTestSlotParent>[1]>;

@@ -1,18 +1,9 @@
 /**
- * lib/feedback-landing.ts — the durable-inbox commit bridge (W1-T243).
- *
- * `captureFeedback()` (feedback.ts) only writes to the calling checkout's filesystem, so `rmd
- * triage` — which reads a fresh origin/main worktree — cannot see an entry until something
- * commits it there. {@link landFeedback} is that one choke point every capture call inherits.
- *
- * Best-effort, never throws: the local write already satisfies durability the moment it lands on
- * disk; landing only gets it onto origin/main sooner. A failure here (offline, no `gh`) is
- * swallowed, and a later capture retries what's unlanded.
- *
- * Never touches the caller's index or local branches (the W1-T60 rule): it commits against a
- * scratch index rebuilt fresh from origin/main's tip, force-pushes one shared branch, and opens
- * or reuses one gated PR — never a direct push to main.
- * Why: the full precedent this replaced is archived in docs/forensics/feedback-landing.md#module-header.
+ * Durable-inbox commit bridge (W1-T243): {@link landFeedback} publishes captures for fresh-main readers.
+ * Best-effort, never throws; failed landings retain local durability and retry on later captures.
+ * W1-T60: use a scratch index from fresh origin/main, preserving the caller's index/local branches.
+ * Publish through one shared branch and gated PR, never directly to main.
+ * Precedent: docs/forensics/feedback-landing.md#module-header.
  */
 
 import { createHash } from "node:crypto";
@@ -50,12 +41,8 @@ import {
 } from "./plan-pr-emitter.js";
 
 /**
- * Mirrors measurement-cadence.ts's `CiLearningShardDraft`/`CiLearningFiledShard`/
- * `CiLearningFilingResult`, defined LOCALLY rather than imported (W1-T3492): measurement-cadence.ts
- * already reaches this module via `task-linter -> plan-architect -> escalate -> feedback ->
- * feedback-landing`, so importing it here — even `import type` — closes that chain into the cycle
- * `.dependency-cruiser.cjs`'s `no-circular` rule holds at zero. Structural typing keeps every real
- * caller (run-task.ts, which imports both modules) type-compatible with no cast at the call site.
+ * W1-T3492: mirror measurement-cadence.ts's filing types structurally; even a type import closes
+ * its task-linter -> plan-architect -> escalate -> feedback -> feedback-landing dependency cycle.
  */
 export interface CiLearningShardDraft {
   findingId: string;
@@ -81,6 +68,8 @@ export interface CiLearningFilingResult {
   filed: CiLearningFiledShard[];
   skipped: string[];
   refused: { findingId: string; reason: string }[];
+  /** Present when queued content reached the landing step; absent when the queue stayed empty. */
+  git?: LandingGitMeter;
   /** W1-T9753: paths the landing refused to carry forward because main changed them too. */
   carryRefused?: FeedbackRefusal[];
 }
@@ -93,9 +82,7 @@ export const LANDING_BRANCH = "feedback-landing";
 export const LANDING_PR_TITLE = "chore(feedback): land pending filings";
 
 /**
- * `plan/decisions.d` — the decision-record sibling of `plan/feedback` (W1-T191). One file per
- * resolution, never a shared growing log — sharding rules out the git append-conflict two
- * concurrent `run-task` orchestrators would hit on one shared file.
+ * W1-T191: one decision shard per resolution avoids concurrent orchestrators' append conflicts.
  * Why: docs/forensics/feedback-landing.md#decisions_rel_dir.
  */
 const DECISIONS_REL_DIR = "plan/decisions.d";
@@ -180,10 +167,8 @@ export interface LandFeedbackResult {
   prUrl?: string;
   /** Set only when landing was attempted but failed — never thrown, always swallowed by the caller. */
   error?: string;
-  /**
-   * True iff THIS call actually force-pushed the branch. False for every no-op path, including
-   * the already-landed short-circuit ({@link finishLanding}). {@link sweepFeedbackLanding} logs
-   * an acting pass (true) in detail and a quiet one (false) as a summary only.
+  /** True only when THIS call pushed; no-ops are false. The sweep logs acting passes in detail,
+   *  quiet passes as summaries.
    * Why: docs/forensics/feedback-landing.md#landfeedbackresult_pushed.
    */
   pushed?: boolean;
@@ -194,10 +179,8 @@ export interface LandFeedbackResult {
     truncated: boolean;
   };
   keptForCheckout?: number;
-  /** Present only when this call REFUSED to stage one or more feedback records because the local
-   *  copy sat at an earlier §7B lifecycle position than `origin/main`'s (W1-T3561) — never
-   *  silently dropped. A refused record is excluded from `files`/the pushed tree entirely, so it
-   *  can never ride into an armed auto-merge PR by construction. */
+  /** W1-T3561: report local feedback records behind main's §7B lifecycle; exclude them from
+   *  `files` and the pushed tree, so they cannot ride into an armed auto-merge PR. */
   refused?: FeedbackRefusal[];
   /** Paths staged under `stateRoot` for the daemon sweep this call — never pushed by it. */
   queued?: string[];
@@ -752,14 +735,10 @@ function landingRepoArgs(identity: Pick<LandingIdentity, "targetRepository">): s
 }
 
 /**
- * Whether `refs/heads/<branch>` still exists on the remote, established before {@link
- * readBranchPending} fixes `branchTipSha` (W1-T3888, design (i)(b)) — a bare fetch never prunes a
- * gone remote-tracking ref (git-fetch(1) PRUNING), so a stale local ref reads as live, fooling
- * {@link remoteBranchTree}'s own read too. `ls-remote` answers "absent" without throwing, unlike a
- * targeted fetch (which THROWS on absence, conflating it with "the read failed" — design (iii)
- * forbids that); on absence, `update-ref -d <ref> <oldvalue>` reconciles it SHA-GUARDED, the live
- * hand repair this task's rationale describes. Touches exactly this ONE ref, never the falsifier's
- * forbidden broad sweep. A throw here propagates, never "assume absent".
+ * W1-T3888: establish remote existence before fixing `branchTipSha`; bare fetch leaves stale refs.
+ * `ls-remote` distinguishes absence from read failure (targeted fetch throws for both).
+ * On absence, SHA-guard deletion of this ONE tracking ref; never sweep broadly or assume absence
+ * on a thrown read. See git-fetch(1) PRUNING.
  */
 function* refreshLandingRef(net: LandingNet, branch: string): Generator<LandingAsk, boolean, AskReply> {
   const advertised = (yield* net.git(["ls-remote", "--heads", "origin", `refs/heads/${branch}`])).trim();
@@ -784,10 +763,8 @@ function* refreshLandingRef(net: LandingNet, branch: string): Generator<LandingA
 }
 
 /**
- * The tree {@link finishLanding} is about to push, plus the exact ref value it was read
- * against — the "value the compare-and-swap is computed from" (W1-T3560). Every writer (disk
- * scan or in-memory content) produces one of these the same way: `origin/main` union
- * `origin/<branch>`'s own still-pending records union this call's own new content.
+ * W1-T3560: tree plus its compare-and-swap ref. Both writers union fresh main, the branch's own
+ * pending records and this call's new content.
  */
 interface LandingTreeBuild {
   mainSha: string;
@@ -798,10 +775,8 @@ interface LandingTreeBuild {
   /** This call's OWN new content only (never the carried-forward records) — what the commit
    *  message/PR body describe. */
   unlanded: string[];
-  /** Feedback records this build refused to stage (W1-T3561) — a local copy that sat at an
-   *  earlier §7B lifecycle position than `origin/main`'s. Always `[]` for the `decisions`/
-   *  `ci-learning` families, which carry no status lifecycle. Never included in `unlanded`/the
-   *  tree, so a refusal can never ride into an armed auto-merge PR by construction. */
+  /** W1-T3561: backward §7B records, excluded from `unlanded`/the tree. Always empty for
+   *  decisions/ci-learning, which have no status lifecycle. */
   refused: FeedbackRefusal[];
   carry?: LandingCarry;
 }
@@ -815,10 +790,8 @@ export interface FeedbackRefusal {
   reason: string;
 }
 
-/** True only for a TOP-LEVEL `plan/feedback/<id>.yaml` entry — never a nested attachment
- *  (`plan/feedback/attachments/**`), a stray non-yaml file, or any path outside the `feedback`
- *  family's own directory. Those keep the pre-existing byte-inequality behaviour: they carry no
- *  §7B status lifecycle for {@link mergeFeedbackRecord} to reason about. */
+/** Only top-level `plan/feedback/<id>.yaml` has a §7B lifecycle; attachments, non-yaml paths and
+ *  other families retain byte-inequality staging. */
 function isFeedbackRecordPath(kind: LandingKind, relPath: string): boolean {
   if (kind.family !== "feedback") return false;
   const prefix = `${kind.ownedDir}/`;
@@ -828,13 +801,9 @@ function isFeedbackRecordPath(kind: LandingKind, relPath: string): boolean {
 }
 
 /**
- * The one call site {@link mergeFeedbackRecord} has in this module (task acceptance criterion 7)
- * — both {@link landPending} and {@link landContent} route every feedback-record path through
- * this, rather than re-deciding the ordering inline the way the pre-fix `remoteSha !== localSha`/
- * `remoteSha === blobSha` checks did. `remoteSha` is only ever passed non-null (a null remote
- * means "nothing upstream yet", handled by the caller before this is reached — see both call
- * sites). Never throws: an unreadable upstream blob refuses rather than guesses a winner, the
- * same posture {@link mergeFeedbackRecord} itself takes on unparseable YAML.
+ * Both writers share {@link mergeFeedbackRecord} through {@link decideFeedbackStage}, rather
+ * than deciding lifecycle order by blob inequality. Callers handle absent remote blobs first.
+ * Unreadable upstream blobs refuse rather than guess a winner, as does unparseable YAML.
  */
 function* validateEvidenceStage(net: LandingNet, root: string, path: string, bytes: string): Generator<LandingAsk, string | undefined, AskReply> {
   let parsed = false;
@@ -921,14 +890,9 @@ export function rawDiffBases(out: string): Map<string, string | null> {
 }
 
 /**
- * The union half of the writer (W1-T3560): every owner's pending records on `origin/<branch>`. W1-T9753:
- * only what the landing's OWN commits changed since their merge base with main (`origin/main...<tip>`);
- * every other file the tip holds was inherited from an older main, and restaging it reverted main's work.
- *
- * `tipSha: undefined` means the branch was never pushed, or was deleted on the remote since
- * (W1-T3888) — either way nothing pending there. `ok: false` means the branch's content, or its
- * own remote existence, could not be established: never "assume empty", the failure mode the old
- * inline fallback-to-empty in {@link landContent} could not distinguish from "nothing pending".
+ * W1-T3560/W1-T9753: carry only changes OWNED since `origin/main...<tip>`, never inherited old main.
+ * W1-T3888: `tipSha: undefined` means confirmed remote absence; `ok: false` means an unreadable
+ * ref/content, never permission to assume an empty pending set.
  * Why: docs/forensics/feedback-landing.md#readbranchpending.
  */
 function* readBranchPending(
@@ -951,8 +915,7 @@ function* readBranchPending(
     return { ok: false, reason: `cannot read ${kind.branch}'s tip after confirming it exists on the remote: ${String((e as Error)?.message ?? e)}` };
   }
   try {
-    // Scoped to the directory this kind owns — unfiltered, this once reverted merged work
-    // with a correct parent (PR #1025), caught only because the deletions broke the build.
+    // Scope carry-forward to this kind's directory; unfiltered it reverted merged work (PR #1025).
     // Why: docs/forensics/feedback-landing.md#landcontent_scoped_carry_forward.
     const own = rawDiffBases(yield* net.git(
       ["diff", "--raw", "-z", "--no-abbrev", "--no-renames", `origin/main...${tipSha}`, "--", kind.ownedDir],
@@ -1035,17 +998,10 @@ function* landingTreeContent(net: LandingNet, b: Pick<LandingTreeBuild, "mainSha
 }
 
 /**
- * Open (or reuse) the one shared PR for `kind.branch`'s current tip. Shared by both branches of
- * {@link finishLanding} — the fresh-push path and the already-landed short-circuit — so a push
- * that succeeded but whose `gh pr create` failed still gets a PR on a later call (W1-T530).
- * Never pushes itself; the caller already decided that.
- *
- * An already-open PR is a one-call no-op (`gh pr list` only). This bridge deliberately does NOT
- * arm auto-merge: the daemon's shared post-review lane must first produce the current-head
- * `remudero-review` verdict, then its normal arm path may enable auto-merge. Arming here used to
- * create a race in which a freshly landed PR had no review context and could sit blocked until an
- * operator ran `rmd review` by hand (#5317/W1-T3990). Keeping the bridge at "open or reuse" also
- * makes a failed review retryable without a duplicate merge arm.
+ * W1-T530: open/reuse the shared PR after either a push or an already-landed short-circuit;
+ * retry failed PR creation on later calls. Never push here; an existing PR needs only its listing.
+ * #5317/W1-T3990: never arm auto-merge here. The daemon owns current-head `remudero-review`
+ * followed by arming; keeping those ordered prevents unreviewed PRs and duplicate merge arms.
  */
 function* ensurePrOpen(
   kind: LandingKind,
@@ -1146,16 +1102,10 @@ function* closeRedundantLandingPr(
 }
 
 /**
- * The commit/push/open-or-reuse-PR/arm tail every landing call shares, regardless of how its
- * tree was built ({@link landPending}'s disk scan or {@link landContent}'s in-memory content).
- * Never throws — callers already fold any error into `{ landed: false, error }`, except a
- * `gh pr create` failure, which still counts as `landed: true` since the push succeeded.
- *
- * W1-T3560: the push is a `--force-with-lease` compare-and-swap against `build.branchTipSha`. A lost
- * lease (another writer moved the tip) re-derives the union ONCE against the new tip and retries; a
- * second loss REFUSES rather than force-replacing a tip it never read. `ensurePrOpen` (the one
- * arm-origin site) is reached only after a push landed under a held lease or the short-circuit proved
- * the head already IS this tree, so the armed tree is always the complete union it was computed from.
+ * Shared commit/push/open-PR tail for disk and content writers. Callers fold errors into results;
+ * failed PR creation still means `landed: true` after a successful push.
+ * W1-T3560: lease against `build.branchTipSha`; rebuild the union ONCE on lease loss, refuse a
+ * second loss. Reach `ensurePrOpen` only after a leased push or a proven already-landed tree.
  */
 function* finishLanding(
   kind: LandingKind,
@@ -1188,9 +1138,7 @@ function* finishLanding(
   const initialNoop = yield* nothingToLand(build);
   if (initialNoop) return initialNoop;
 
-  // Push only when the tree differs from what's already on the branch: the tree is deterministic
-  // for unchanged content but `commit-tree` stamps the time, so comparing commits instead
-  // force-pushed every call and once deadlocked a PR's CI (racing cancellations, no settled sha).
+  // Compare trees: timestamped commit identities cause needless pushes and racing CI cancellations.
   // Why: docs/forensics/feedback-landing.md#finishlanding_shortcircuit.
   const bodies = new Map<LandingTreeBuild, string>();
   const bodyOf = function* (b: LandingTreeBuild): Generator<LandingAsk, string, AskReply> {
@@ -1251,10 +1199,8 @@ function* finishLanding(
       { env },
     )).trim();
 
-    // Compare-and-swap, not a bare force-push (W1-T3560): the lease asserts the branch is still
-    // exactly at `b.branchTipSha` (or still absent — never pushed, or deleted, W1-T3888) — the
-    // value the union above was read against. The #954 guard below must move WITH this call on
-    // any future refactor — dropping it silently reopens the hole #954 closed.
+    // W1-T3560/W1-T3888: lease the exact read tip (or absence). The #954 live-write guard MUST
+    // move with this push during refactors; dropping it reopens the guarded write path.
     assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
     const lane = `${kind.family}-landing`;
     let verdict = refusedPlanPrTrees.get(b.treeSha);
@@ -1277,9 +1223,7 @@ function* finishLanding(
   } catch (firstErr) {
     if (firstErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: firstErr.message }, build);
     if (!lostLease(firstErr)) return withRefused({ landed: false, files: [], error: pushFailure(kind.branch, firstErr) }, build);
-    // Lost the lease: some OTHER owner's tip moved since we read it. Re-derive the union ONCE
-    // against the NEW tip rather than force-replacing a tip we never read (W1-T3560 design (i)).
-    // Any other push failure (credentials, network) moved no tip, so it is reported as itself.
+    // W1-T3560: rebuild ONCE against the new tip on lease loss; other push failures report themselves.
     let retried: LandingTreeBuild;
     try {
       retried = yield* rebuild();
@@ -1297,9 +1241,7 @@ function* finishLanding(
     } catch (secondErr) {
       if (secondErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: secondErr.message }, retried);
       if (!lostLease(secondErr)) return moved(withRefused({ landed: false, files: [], error: pushFailure(kind.branch, secondErr) }, retried));
-      // The ref moved again even under the retry (a third writer squeezed in) — refuse rather
-      // than force-replacing a tip this call never actually read. Surfaced via `error`, never
-      // swallowed, and `ensurePrOpen` is never reached — auto-merge is never armed on a refusal.
+      // Second lease loss: report refusal, never replace an unread tip or reach `ensurePrOpen`.
       return moved(withRefused(
         {
           landed: false,
@@ -1398,13 +1340,8 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
     acknowledgement = yield* acknowledgeLandedQueueCopies(root, kind, net);
     if (queueRoot) keptForCheckout = yield* acknowledgeLandedFeedbackQueue(opts.servedRoot ?? root, queueRoot, net);
 
-    // W1-T3561: a byte inequality alone no longer decides a feedback record's fate. `new
-    // remoteSha => local wins trivially (nothing upstream yet); identical bytes => nothing to
-    // stage; otherwise a top-level `plan/feedback/<id>.yaml` entry is routed through
-    // {@link mergeFeedbackRecord} (via {@link decideFeedbackStage}), which may also REFUSE a
-    // local copy that sits at an earlier §7B lifecycle position — reported below, never dropped
-    // in the caller's tree. Every other path (attachments, a stray non-yaml file, and every
-    // `decisions`/`ci-learning` family) keeps the exact pre-fix inequality behaviour.
+    // W1-T3561: new blobs stage, identical blobs skip; changed feedback records use the shared
+    // §7B merge predicate and report backward-copy refusals. Other paths retain byte inequality.
     type LocalScan = { files: string[]; sources: Map<string, string>; contents: Map<string, string>; refused: FeedbackRefusal[] };
     const scanLocalUnlanded = function* (env?: NodeJS.ProcessEnv): Generator<LandingAsk, LocalScan, AskReply> {
       const files: string[] = [];
@@ -1463,11 +1400,8 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
     scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
     const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
 
-    // W1-T3560: UNION WRITER. Read-tree from origin/main, then carry forward whatever
-    // origin/<branch> already holds (every OTHER root's still-pending records — the disk-scanning
-    // path never did this before; {@link landContent} always has), THEN overlay this root's own
-    // local disk. `mainSha` is re-read every build so a retry after a lost lease sees a moved
-    // origin/main too, not just a moved branch tip.
+    // W1-T3560: union fresh main, other owners' pending branch records, then this root's disk.
+    // Re-read main on every build so a lost-lease retry sees both main and branch movement.
     const buildTree = function* (mainSha: string): Generator<LandingAsk, LandingTreeBuild, AskReply> {
       const pending = yield* readBranchPending(net, kind);
       if (!pending.ok) throw new Error(pending.reason);
@@ -1525,12 +1459,8 @@ export interface SweepFeedbackLandingOpts extends LandFeedbackOpts {
 }
 
 /**
- * The level-triggered backstop over {@link landFeedback} (W1-T530, ratifies P22). `captureFeedback`
- * is landFeedback's only call site, so an entry captured while landing was unavailable is
- * stranded off origin/main — this thin wrapper re-runs the same scan so a daemon poll can retry
- * it. Idempotent and best-effort, like every rung beside it (`sweep`/`sweepOrphans`/`alertPoll`).
- * Logs in detail only when it actually pushed; a quiet pass logs a count, so a fast poll cadence
- * cannot flood the ledger.
+ * W1-T530/P22: idempotent, best-effort daemon retry for captures whose landing was unavailable.
+ * Log pushed passes in detail and quiet passes as counts to avoid flooding the ledger.
  * Why: docs/forensics/feedback-landing.md#sweepfeedbacklanding.
  */
 export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpts = {}): LandFeedbackResult {
@@ -1649,11 +1579,8 @@ export interface LandContentInput {
 }
 
 /**
- * The in-memory sibling of {@link landPending}: lands explicit (path, content) pairs never
- * written to root's real working tree at all — a real local write of an already-tracked file
- * would itself count as dirt in `checkCliFreshness`'s git status (the W1-T191 defect). Content is
- * staged into a scratch tmp file outside root purely so `git hash-object -w` has bytes to read;
- * the blob lands in the repo's object database, never on disk under root.
+ * W1-T191: land explicit content through scratch files outside root and `git hash-object -w`.
+ * Never write the real working tree: tracked-file edits would trip `checkCliFreshness`.
  * Why: docs/forensics/feedback-landing.md#landcontent.
  */
 function landContent(
@@ -1702,19 +1629,12 @@ function* landContentSteps(
       // content landed on main since must not be silently reverted by this force-push.
       yield* net.git(["read-tree", "origin/main"], { env });
 
-      // Carry forward whatever an earlier, still-unmerged call already pushed here (W1-T191
-      // criterion 2, extended by W1-T3560 to the disk-scanning sibling too): this content-only
-      // path has no disk to re-scan the way {@link landPending} does, so without this a second
-      // call would drop the first call's content entirely.
+      // W1-T191/W1-T3560: carry earlier unmerged calls forward; content-only writes have no disk retry.
       const carried = pending.tipSha ? yield* stageBranchPending(net, root, kind, pending, env, scratchDir as string) : undefined;
 
       const unlanded: string[] = [];
-      // W1-T3561: `landFeedbackStatusContent` (the console's `POST /v1/feedback/decision` write
-      // path) is the one `landContent` caller whose paths carry a §7B status lifecycle
-      // (`recordDecision`/`recordRuling` use the `decisions` family, out of scope — see
-      // `isFeedbackRecordPath`) — it must obey the same monotonic predicate {@link landPending}'s
-      // disk scan does, per the task's design point (v), rather than the bare
-      // `remoteSha === blobSha` identity check this loop used before.
+      // W1-T3561: status writes obey the disk scanner's §7B monotonic predicate, not blob identity.
+      // Decision/ruling shards have no lifecycle; see `isFeedbackRecordPath`.
       const refused: FeedbackRefusal[] = [...(carried?.refused ?? [])];
       let i = 0;
       for (const { relPath, content: inputContent } of inputs) {
@@ -2164,22 +2084,16 @@ function* acknowledgeMergedCiLearningShardsSteps(
 export interface LandCiLearningShardsOptions extends LandFeedbackOpts {
   /** Daemon state root; staged shards live under `state/ci-learning-pending`, never the checkout. */
   stateRoot: string;
-  /**
-   * THE RESERVATION PATH (task-id-reservation.ts), never `max(id)+1`. The landing identity
-   * supplies the branch it will actually push, so a command started on `main` never creates an
-   * unmatchable holder claim for its isolated landing PR.
-   */
+  /** Use task-id-reservation.ts, never `max(id)+1`; reserve against the actual landing branch,
+   *  not the command's starting branch, so the isolated PR matches its holder claim. */
   mintTaskId: (filingBranch: string) => string;
   /** Every `origin:` the plan ALREADY holds. */
   planOrigins: readonly string[];
-  /** Render one draft as the shard's YAML bytes. INJECTED rather than imported from
-   *  measurement-cadence.ts's `ciLearningShardYaml` — see the cycle note on
-   *  {@link CiLearningShardDraft} above. run-task.ts passes the real renderer for both the
-   *  scheduled and directly-tested paths. */
+  /** Inject measurement-cadence.ts's `ciLearningShardYaml` via run-task.ts to avoid the cycle
+   *  documented on {@link CiLearningShardDraft}; both scheduled and tested paths use it. */
   renderShard: (draft: CiLearningShardDraft, taskId: string) => string;
-  /** Parse the rendered bytes back and lint them before they are staged. INJECTED for the same
-   *  cycle reason as `renderShard`; the real, lint-backed verdict is
-   *  measurement-cadence.ts's `ciLearningRecordVerdict`. */
+  /** Parse/lint before staging: inject measurement-cadence.ts's `ciLearningRecordVerdict`
+   *  for the same cycle reason as `renderShard`. */
   recordVerdict: (contents: string, label: string) => { ok: boolean; reason: string };
 }
 
@@ -2195,7 +2109,8 @@ export function landCiLearningShards(
   checkoutRoot: string,
   deps: LandCiLearningShardsOptions,
 ): CiLearningFilingResult {
-  return driveLanding(ciLearningLandingSteps(drafts, checkoutRoot, deps), syncPreflightOf(checkoutRoot, deps));
+  const git = newGitMeter("sync");
+  return driveLanding(ciLearningLandingSteps(drafts, checkoutRoot, deps, git), syncPreflightOf(checkoutRoot, deps), git);
 }
 
 export interface LandCiLearningShardsAsyncOptions extends Omit<LandCiLearningShardsOptions, "planPrPreflight"> {
@@ -2210,7 +2125,8 @@ export async function landCiLearningShardsAsync(
 ): Promise<CiLearningFilingResult> {
   const { planPrPreflight, ...landOpts } = deps;
   const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(checkoutRoot, sha, pr, { log: deps.log }));
-  return driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, { ...landOpts, ...asyncSeamsOf(checkoutRoot, landOpts) }), preflight);
+  const git = newGitMeter("async");
+  return driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, { ...landOpts, ...asyncSeamsOf(checkoutRoot, landOpts) }, git), preflight, git);
 }
 
 function* ciLearningLandingSteps(
@@ -2221,9 +2137,10 @@ function* ciLearningLandingSteps(
     ghAsync?: GhExecAsync;
     mintTaskIdAsync?: (filingBranch: string) => Promise<string>;
   },
+  meter: LandingGitMeter,
 ): PreflightSteps<CiLearningFilingResult> {
-  const git = deps.git ?? defaultGit(checkoutRoot);
-  const net = landingNet(git, deps.gh ?? defaultGh(), deps);
+  const gitExec = deps.git ?? defaultGit(checkoutRoot);
+  const net = landingNet(gitExec, deps.gh ?? defaultGh(), deps);
   const kind = yield* ciLearningLandingKindSteps(checkoutRoot, deps, net);
   const shardRelDir = ciLearningShardRelDir(checkoutRoot);
   const held = new Set([...deps.planOrigins, ...ciLearningPendingOrigins(deps.stateRoot, checkoutRoot)]);
@@ -2277,7 +2194,7 @@ function* ciLearningLandingSteps(
     // Best-effort acknowledgement only; pending bytes remain retryable.
   }
   const carryRefused = landing.refused?.length ? { carryRefused: landing.refused } : {};
-  if (!landing.landed || landing.error) return { filed: [], skipped, refused, ...carryRefused };
+  if (!landing.landed || landing.error) return { filed: [], skipped, refused, ...carryRefused, git: meter };
 
   const landed = new Set(landing.files);
   const filed = inputs
@@ -2285,7 +2202,7 @@ function* ciLearningLandingSteps(
     .map((input) => ciLearningFiledShardRead(input.relPath, input.content))
     .filter((read): read is { ok: true; filed: CiLearningFiledShard } => read.ok && read.filed !== undefined)
     .map((read) => read.filed);
-  return { filed, skipped, refused, ...carryRefused };
+  return { filed, skipped, refused, ...carryRefused, git: meter };
 }
 
 /** The URL of the currently-open landing PR for this identity, if any — best-effort,

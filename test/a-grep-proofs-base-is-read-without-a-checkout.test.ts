@@ -17,11 +17,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { after, before, test } from "node:test";
 
-import * as runTask from "../src/run-task.js";
-import * as review from "../src/lib/review.js";
-import * as baseStale from "../src/lib/proof-base-stale.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import * as runTask from "#src/run-task.js";
+import * as review from "#src/lib/review.js";
+import * as baseStale from "#src/lib/proof-base-stale.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const { buildBaseProofDir, checkProofCommand, CHECK_PROOF_EXIT } = runTask;
 type BaseProofDir = runTask.BaseProofDir;

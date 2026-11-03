@@ -10,12 +10,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import * as riskJudge from "../src/lib/risk-judge.js";
-import type { RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import * as riskJudge from "#src/lib/risk-judge.js";
+import type { RiskJudgeVerdict } from "#src/lib/risk-judge.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 // Read off the module namespace: at a base without this task the suite still loads and fails test by test.
-import * as sweepModule from "./helpers/sweep-test.js";
+import * as sweepModule from "#test/helpers/sweep-test.js";
 
 const TASK = "W1-T9087";
 const HEAD = "d94f2093559f";

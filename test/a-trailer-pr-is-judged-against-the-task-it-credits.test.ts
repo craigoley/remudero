@@ -1,4 +1,3 @@
-// test/a-trailer-pr-is-judged-against-the-task-it-credits.test.ts
 //
 // W1-T3658 — A PULL REQUEST'S OWN ACCEPTANCE BLOCK AND ITS TASK'S DECLARED PROOFS CAN DIVERGE
 // WITH NOTHING NOTICING. `CONSOLE-T12` shipped and merged while all four of its declared proofs

@@ -17,8 +17,8 @@ import { spawn, spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { finishJudgedRun, isJudgedRun } from "./helpers/judged-pool-run.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { finishJudgedRun, isJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

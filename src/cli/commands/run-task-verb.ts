@@ -6,6 +6,9 @@ import { type FixProgressJudge, type FixProgressVerdict } from "../../lib/fix-pr
 import { type BranchUpdateRecorder } from "../../lib/branch-update.js";
 import { retryWhileLockBusy } from "../../lib/lock-busy-retry.js";
 import { retryPollRead } from "../../lib/poll-read-retry.js";
+import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext,
+  copySelectedRegistryIntent, observeSelectedRegistry, selectedRegistryObserverInContext, hasQualifiedSelectedRegistryRunContext,
+  type SelectedRegistryIntent } from "../../lib/selected-registry-consumers.js";
 import { recyclePauseDetail } from "../../lib/recycle-yield.js";
 import { execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { rm as rmAsync } from "node:fs/promises";
@@ -39,7 +42,7 @@ import type { RunResult } from "../../lib/run-result.js";
 import { dropTierRowsBeforePush, prePushGateRefusal } from "../../lib/pre-push-refusal.js";
 import type { Tier } from "../../lib/tier.js";
 import { routeSpecialists, taskMetadataFromPrinciples } from "../../lib/specialist-panel.js";
-import { type DaemonFreshness, type WorkerBoundaryCheckpoint, pendingWorkerBoundaryHandoffs } from "../../lib/daemon.js";
+import { type DaemonFreshness, type WorkerBoundaryCheckpoint, keptRunHeadRef, pendingWorkerBoundaryHandoffs, unpushedRunHeadKeptRow } from "../../lib/daemon.js";
 import { defaultListCandidates, defaultReadMarkers, killProcessGroup } from "../../lib/worker-containment.js";
 import { sweepStaleTempDirsAsync, type TempSweepOpts, type TempSweepSummary } from "../../lib/tmp.js";
 import { IMAGE_BUILD_SHA_PATH } from "../../lib/deployer.js";
@@ -1042,6 +1045,7 @@ export interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   preopenGate?: (worktreePath: string) => Promise<PreopenGateResult>;
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   selectedModeFileIO?: RegistryFileIO;
+  selectedRegistryIntent?: SelectedRegistryIntent;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
   claimReserver?: DispatchClaimReserverAsync;
@@ -1142,6 +1146,7 @@ export interface SourceSizeGatePostureResult {
 
 export type RunErrorCause =
   | "census-refused-push"
+  | "push-auth-refused"
   | "git-push-failed"
   | "git-commit-failed"
   | "pr-create-failed"
@@ -1921,7 +1926,7 @@ function unresolvedMainConflicts(worktreePath: string, paths: readonly string[])
   });
 }
 
-async function restoreBoundaryCheckpoint(
+export async function restoreBoundaryCheckpoint(
   checkpoint: { branch: string; headSha: string },
   taskId: string,
   git: (args: string[]) => Promise<string>,
@@ -1931,7 +1936,11 @@ async function restoreBoundaryCheckpoint(
   if (remoteHead && remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
   const absence = remoteHead ? {} : { sourceBranchAbsent: true as const };
   const mainSha = (await git(["rev-parse", "HEAD"])).trim();
-  if (!remoteHead) {
+  const keptLocally = !remoteHead &&
+    (await git(["for-each-ref", "--format=%(objectname)", keptRunHeadRef(checkpoint.branch)])).trim() === checkpoint.headSha;
+  if (keptLocally) {
+    log("implement.checkpoint_restored_local", { task_id: taskId, source_branch: checkpoint.branch, head_sha: checkpoint.headSha });
+  } else if (!remoteHead) {
     try {
       await git(["merge-base", "--is-ancestor", checkpoint.headSha, mainSha]);
       return { base: "main", headSha: mainSha, ...absence };
@@ -1955,7 +1964,7 @@ async function restoreBoundaryCheckpoint(
   } else {
     await git(["fetch", "origin", checkpoint.branch]);
   }
-  const fetchedHead = (await git(["rev-parse", "FETCH_HEAD"])).trim();
+  const fetchedHead = keptLocally ? checkpoint.headSha : (await git(["rev-parse", "FETCH_HEAD"])).trim();
   if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
   const base = (await git(["merge-base", checkpoint.headSha, mainSha])).trim();
   if (base === checkpoint.headSha) return { base: "main", headSha: mainSha, ...absence }; // main already carries it
@@ -4414,6 +4423,7 @@ export async function runTask(
     implementScopeAmendmentState?: RunTaskBodyOptions["implementScopeAmendmentState"];
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     selectedModeFileIO?: RegistryFileIO;
+    selectedRegistryIntent?: SelectedRegistryIntent;
     pairedTrial?: Partial<PairedTrialInput>;
     pairedTrialHost?: "daemon";
     /** W1-T5115: the daemon's git credential socket, handed to every spawn below. Only the daemon passes it — a direct
@@ -4426,6 +4436,8 @@ export async function runTask(
   } = {},
   host: RunTaskCommandHost,
 ): Promise<RunResult> {
+  opts = { ...opts };
+  const execute = async (): Promise<RunResult> => {
   const {
     BRANCH_NAME_CONTRACT_PART,
     syncPlanOrRefuse,
@@ -5067,8 +5079,29 @@ export async function runTask(
         ctx.plan = plan;
       },
     };
-    return await runTaskBody(ctx, host);
+    return await observeSelectedRegistry(selectedRegistryObserverInContext(), "run-task-resume", { repository: `${owner}/${task.repo}` },
+      () => runTaskBody(ctx, host));
   });
+  };
+  if (hasQualifiedSelectedRegistryRunContext()) {
+    return execute();
+  }
+  const config = opts.config ?? loadConfig();
+  const intent = await qualifySelectedRegistryIntent(Object.hasOwn(opts, "selectedRegistryIntent")
+    ? opts.selectedRegistryIntent : captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY } }));
+  let runId: string | undefined;
+  const onRunCreated = opts.onRunCreated;
+  const observer = selectedRegistryObserverFromIntent(intent, (step, fields) => {
+    if (runId === undefined) throw new Error("run identity unavailable for selected observation");
+    return appendLedger(ledgerPathFor(config), { run_id: runId, task_id: taskId, step, ...fields });
+  });
+  opts = { ...opts, config, selectedRegistryIntent: intent, onRunCreated: id => { runId = id; onRunCreated?.(id); } };
+  return withSelectedRegistryContext(observer, async () => {
+    try {
+      return await observeSelectedRegistry(observer, "run-task-resume", {}, () =>
+        execute());
+    } finally { await observer?.settled(); }
+  }, { qualifiedRun: true });
 }
 
 /** The initial run uses the same branch lease as the cold fix lane; unknown owners never get reclaimed. */
@@ -5353,8 +5386,12 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
   // Hold the instance mode for the run so a registry edit cannot flip its deferred arm decision.
   const shadowInstance = instanceMode(`${owner}/${task.repo}`, (opts.instanceRegistryTextImpl ?? readInstanceRegistryText)(repoRoot)) === "shadow";
-  const selectedModeQualification = createSelectedModeQualification(config.selectedRegistryMode, `${owner}/${task.repo}`,
-    { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME }, log, opts.selectedModeFileIO);
+  const registryIntent = copySelectedRegistryIntent(opts.selectedRegistryIntent);
+  const selectedModeQualification = registryIntent?.kind === "unknown" ? undefined : registryIntent?.kind === "shadow"
+    ? createSelectedModeQualification({ mode: "shadow", instanceName: registryIntent.instanceName }, `${owner}/${task.repo}`,
+      { ...registryIntent.input, instanceName: registryIntent.instanceName }, log, opts.selectedModeFileIO)
+    : createSelectedModeQualification(Object.hasOwn(opts, "selectedRegistryIntent") ? undefined : config.selectedRegistryMode, `${owner}/${task.repo}`,
+      { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME }, log, opts.selectedModeFileIO);
 
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
@@ -5596,6 +5633,15 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     const pushed = remote.status === 0 ? remote.stdout.trim() : "";
     return /^[0-9a-f]{40}$/.test(pushed) && pushed !== restoredCheckpoint.headSha
       ? { ...restoredCheckpoint, branch, headSha: pushed } : restoredCheckpoint;
+  };
+  const keepUnpushedRunHead = (stage: string): void => {
+    try {
+      const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
+      hostWorktreeGit(worktreePath, ["update-ref", keptRunHeadRef(branch), headSha]);
+      log("implement.checkpoint_kept", unpushedRunHeadKeptRow(taskId, branch, headSha, stage));
+    } catch (error) {
+      log("implement.checkpoint_keep_unproven", { task_id: taskId, failed_stage: stage, error: String((error as Error)?.message ?? error) });
+    }
   };
   const keepFailedRunHead = (kept: WorkerBoundaryCheckpoint | undefined, stage: string): void => {
     if (kept) log("implement.checkpoint_kept", { task_id: taskId, source_branch: kept.branch, head_sha: kept.headSha, failed_stage: stage,
@@ -8318,13 +8364,14 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     }
     const shadowArmDecision = resolveShadowInstanceArmPermission(shadowInstance);
     const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
-    const armOutcome = await observeSelectedMode<ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused">(
+    const armOutcome = await observeSelectedRegistry(selectedRegistryObserverInContext(), "run-task-resume", { repository: `${owner}/${task.repo}` },
+      () => observeSelectedMode<ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused">(
       selectedModeQualification, "run-arm", async () => !shadowArmDecision.armed
       ? "shadow-instance-refused"
       : wipeTestArmDecision.armed
         ? await armAutoMergeAtOpenAsync(prUrl,
           realArmDepsAsync(() => config, selectedModeQualification), irreversible)
-        : "no-merge-boundary-refused", prUrl);
+        : "no-merge-boundary-refused", prUrl));
     // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
     // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
     // population (the "run-task" lane, the deferred arm every normal implement-task PR takes).
@@ -8454,7 +8501,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     const failedThroughThrow = !verdictWritten;
     // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause.
     endThrownRun(log, verdictWritten, "run.error", err, costUsd);
-    if (failedThroughThrow) keepCheckpointOnFailedExit("run.error", { failed_cause: runErrorCause(err) });
+    if (failedThroughThrow && runErrorCause(err) === "push-auth-refused" && !prOpened) keepUnpushedRunHead("run.error");
+    else if (failedThroughThrow) keepCheckpointOnFailedExit("run.error", { failed_cause: runErrorCause(err) });
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,
     // but clean up eagerly here too). Best-effort; the ledger already has the

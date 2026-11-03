@@ -9,7 +9,7 @@ import {
   perRunWorkerHomeDir,
   reapWorkerHome,
   sweepStaleWorkerHomes,
-} from "../src/lib/worker-home.js";
+} from "#src/lib/worker-home.js";
 
 // W1-T2463: EVERY FIX SPAWN IN ONE DAEMON RUN STILL SHARES A SINGLE WORKER HOME AND ANY ONE OF
 // THEM DELETES IT UNDER THE OTHERS. `perRunWorkerHomeDir` keyed the per-run home on `runId`

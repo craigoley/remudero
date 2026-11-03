@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RULE_15_SPLIT_REMEDY, rule15SplitStep, rule15SplitViolation } from "../src/lib/ci-parity.js";
-import { rule15SplitViolation as viaLinter } from "../src/lib/task-linter.js";
-import { checkSatisfiedByGuard } from "../src/lib/review.js";
+import { RULE_15_SPLIT_REMEDY, rule15SplitStep, rule15SplitViolation } from "#src/lib/ci-parity.js";
+import { rule15SplitViolation as viaLinter } from "#src/lib/task-linter.js";
+import { checkSatisfiedByGuard } from "#src/lib/review.js";
 
 // W1-T3099 — Standing rule 15 at AUTHOR time. The judge already refuses this; the cost being
 // removed is that it refuses after a full CI cycle (#4509 re-split only once the judge told it).

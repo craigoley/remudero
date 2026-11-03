@@ -172,7 +172,7 @@ export {
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
 import { runInboxGardener } from "./lib/inbox-gardener.js";
 import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-retirement.js";
-import { registeredGardenEnabled } from "./lib/garden-registry.js";
+import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
@@ -289,7 +289,7 @@ export {
 };
 // W1-T4678: the cheap-lane read BEFORE `escalateCircuitBreak` above — see stall-verifier.ts's
 // own doc for why this reads the evidence rather than paging straight from a tripped breaker.
-import { judgeDispatchBreak, stallShardFingerprint, verifyStalledTask, type DispatchBreakJudge } from "./lib/stall-verifier.js";
+import { judgeDispatchBreak, stallShardFingerprint, verifyStalledTask, type DispatchBreakJudge, type MainEvidenceReader } from "./lib/stall-verifier.js";
 // Compatibility re-export target: lib/arm-auto-merge" (W1-T2887) — the auto-merge arm cluster
 // (armAutoMerge/armAutoMergeDetailed/attemptArm/armAutoMergeAtOpen/disarmAutoMerge/
 // armIfVerdictPermits/realArmDeps and their classifiers) moved to src/lib/arm-auto-merge.ts;
@@ -362,11 +362,11 @@ import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
-import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
+import { issueRevalidationJudgeText, issueTaskId, loadIssueRevalidationPolicy, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { reconcileManagedImprovementEffects } from "./lib/opportunity-outcomes.js";
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
@@ -1053,6 +1053,7 @@ import {
   type DraftCache,
   type DraftSelectionContext,
   type DraftRungOutcome,
+  type DraftWorkerResult,
   type EvidenceAnchor,
   type BatchApproveResult,
   type InboxClassification,
@@ -1203,6 +1204,7 @@ import {
   type PlanPrBodyOpts,
 } from "./lib/plan-pr-emitter.js";
 import {
+  checkoutAdmission,
   findTaskShard,
   parseProofAmendmentProposal,
   type ProofAmendmentValidationInput,
@@ -1315,7 +1317,8 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
-import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, observeSelectedRegistrySync,
+  selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -2856,6 +2859,7 @@ import {
   gitPushEmptyCommit,
   isNonFastForwardRejection,
   LanePushForeignHeadError,
+  PushAuthRefusedError,
   runStepsAsync,
   runStepsSync,
   step,
@@ -2902,8 +2906,7 @@ import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
-import { runChildCredentialSocket } from "./lib/secret-boundary.js";
-import { automaticBranchReapStateFileName, branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, pruneDeletableBranches, pruneDeletableBranchesSteps, readAutomaticBranchReapState, readNamedInSource, readNamedInSourceSteps, readRemoteBranchTips, readRemoteBranchTipsSteps, readTipInMainMembership, readTipInMainMembershipSteps, remoteBranchNames, remoteBranchNamesSteps, tipInMainFor, writeAutomaticBranchReapState, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
+import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, planStaleHoldArchive, readDispatchClaimTaskIdsSteps, remoteBranchHeadsSteps, archiveStaleHoldsSteps, staleHoldRestoreCommand, STALE_HOLD_ARCHIVE_CAP, pruneDeletableBranchesSteps, readNamedInSourceSteps, readRemoteBranchTipsSteps, readTipInMainMembershipSteps, remoteBranchNamesSteps, tipInMainFor, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
 // initialiser (`resolveRepoRoot`) its own declaration (`repoRoot`) depends on — a move, never
 // an interface change. `resolveRepoRoot` is re-exported below so every existing import path
@@ -8584,6 +8587,7 @@ export function buildProofAmendmentWritePorts(
       worktreeAddFn(repoDir, wp, localBranch, "origin/main", { log });
     },
     worktreeRemove: (repoDir, wp) => worktreeRemoveFn(repoDir, wp),
+    machineFilingAdmission: checkoutAdmission, // #15766: hosted lint-plan's admission, judged before any push
     writeFile: writeFileFn,
     gitAdd: gitOps.gitAdd,
     gitCommit: gitOps.gitCommit,
@@ -10501,6 +10505,7 @@ export function runErrorCause(err: unknown): RunErrorCause {
   if (err instanceof SubscriptionOnlyRefusedError) return "subscription-only-refused";
   const text = String((err as Error)?.message ?? err);
   if (/^census-precheck:/m.test(text)) return "census-refused-push";
+  if (err instanceof PushAuthRefusedError) return "push-auth-refused";
   if (/^Command failed: git (?:-C \S+ )?push /m.test(text)) return "git-push-failed";
   if (/^Command failed: git (?:-C \S+ )?commit /m.test(text)) return "git-commit-failed";
   if (/^Command failed: gh (?:api --method POST \S+\/pulls |pr create)/m.test(text)) return "pr-create-failed";
@@ -12029,6 +12034,10 @@ function depReviewProposalCapture(landingStateRoot: string | undefined): NonNull
   };
 }
 
+export function depReviewNodePinCheckout(configRoot: string, repo: string): string {
+  return join(configRoot, "repos", repo);
+}
+
 export function defaultNodePinSyncIo(
   root: string,
   options: { git?: (args: string[], cwd: string) => string } = {},
@@ -12192,7 +12201,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     const sync = syncNodePinForImageBump(
       diff,
       { sha: view.headRefOid, ref: view.headRefName },
-      deps.nodePin ?? defaultNodePinSyncIo(config.root),
+      deps.nodePin ?? defaultNodePinSyncIo(depReviewNodePinCheckout(config.root, repo)),
     );
     if (sync.kind === "synced") {
       log("dep-review.node_pin_synced", { pr_url: view.url, from: sync.from, to: sync.to, head_sha: view.headRefOid, pushed_sha: sync.pushedSha });
@@ -14014,7 +14023,25 @@ export type ReapBranchesOpts = {
   /** Names why a pass exits non-zero (drift, a refused or failed prune), so a caller's ledger row
    *  reports the cause rather than only the code. */
   onExitReason?: (reason: string) => void;
+  /** The clock the repo-hygiene shadow ages held branches against; the system clock by default. */
+  clock?: Pick<Clock, "now">;
+  /** Overrides `sweep.armStaleBranchArchive`, read from `<root>/plan/policy.yaml` only when `--archive-stale` asks. */
+  armStaleBranchArchive?: boolean;
 };
+
+/**
+ * `sweep.armStaleBranchArchive` from the reaped checkout's own `plan/policy.yaml`: the committed row that
+ * decides whether that repository's stale held branches are archived. An unreadable policy is NOT read as
+ * unarmed silently: it returns `{ unreadable }` with the reason, which the caller prints and treats as
+ * shadow (fail closed).
+ */
+function readArmStaleBranchArchive(checkoutRoot: string): boolean | { unreadable: string } {
+  try {
+    return loadPolicy(join(checkoutRoot, "plan", "policy.yaml")).values.sweep.armStaleBranchArchive;
+  } catch (err) {
+    return { unreadable: String((err as Error)?.message ?? err) };
+  }
+}
 
 export function reapBranchesCommand(rest: string[], opts: ReapBranchesOpts = {}): number {
   return runStepsSync(reapBranchesSteps(rest, opts));
@@ -14034,7 +14061,7 @@ function branchReapExec(root: string): BranchReapExec {
 function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<number> {
   const print = opts.quiet ? (..._args: unknown[]) => {} : console.log;
   const printError = opts.quiet ? (..._args: unknown[]) => {} : console.error;
-  const badArg = unknownArgError("reap-branches", rest, [], ["--prune"]);
+  const badArg = unknownArgError("reap-branches", rest, [], ["--prune", "--archive-stale"]);
   if (badArg) {
     printError(badArg);
     printError(`usage: ${commandSyntax("reap-branches")}`);
@@ -14042,11 +14069,22 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   }
   const prune = rest.includes("--prune");
   const checkoutRoot = opts.root ?? repoRoot;
+  // REPO HYGIENE ACT MODE (operator ruling 2026-11-01): only when `--archive-stale` asks (the automatic
+  // rung's prune pass passes it) AND `sweep.armStaleBranchArchive` is on. Not asked, nothing is read.
+  let archiveStale = false;
+  if (rest.includes("--archive-stale")) {
+    const armed = opts.armStaleBranchArchive ?? readArmStaleBranchArchive(checkoutRoot);
+    if (typeof armed === "object") {
+      printError(`rmd reap-branches: --archive-stale: plan/policy.yaml could not be read — staying in shadow mode (${armed.unreadable})`);
+    }
+    archiveStale = armed === true;
+  }
   const target = opts.ownerRepo ?? resolveOwnerRepo();
   const exec =
     opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: checkoutRoot, encoding: "utf8" }).toString());
 
-  const names = yield* remoteBranchNamesSteps(exec);
+  const liveHeads = yield* remoteBranchHeadsSteps(exec);
+  const names = [...liveHeads.keys()];
   // A POSITIVE CONTROL, not a formality: an empty listing and a repo with only `main` are
   // indistinguishable in the answer, and every bucket would read empty either way.
   if (names.length === 0) {
@@ -14059,18 +14097,22 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   // candidate corpus, then read merge credit ONCE for the whole command. This enrichment can
   // change only `plan.reasons`: both named-task outcomes remain held by planBranchReap.
   const namedTaskByBranch = new Map<string, string>();
+  const runTaskByBranch = new Map<string, string>();
   let creditedTaskIds = new Set<string>();
   let creditReadSucceeded = false;
   try {
     const taskPlan = opts.plan?.() ?? (opts.loadPlan ?? loadPlan)(join(checkoutRoot, "plan", "tasks.yaml"));
     const candidates = taskPlan.tasks.map((task) => task.id);
+    const planIds = new Set(candidates);
     for (const name of names) {
       const taskId = taskIdFromSlugBranch(name, candidates);
       if (taskId !== undefined) namedTaskByBranch.set(name, taskId);
+      const runTask = taskIdFromRunBranch(name);
+      if (runTask !== undefined && planIds.has(runTask)) runTaskByBranch.set(name, runTask);
     }
-    // No resolved slug means there is no credit question to ask. Keeping this lazy avoids a
+    // No resolved slug or run task means there is no credit question to ask. Keeping this lazy avoids a
     // bounded archive walk on repositories whose branch corpus cannot use the answer.
-    if (namedTaskByBranch.size > 0) {
+    if (namedTaskByBranch.size > 0 || runTaskByBranch.size > 0) {
       let creditPath = opts.creditLedgerPath ?? opts.ledgerPath;
       if (creditPath === undefined) {
         try {
@@ -14294,7 +14336,9 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
    * Drift still fails the exit code below; it just does not veto the deletions.
    */
   if (!prune) {
-    print("DRY RUN — nothing was deleted. Re-run with --prune to delete the branches above.");
+    print(archiveStale
+      ? "DRY RUN — no deletable branch was deleted. Re-run with --prune to delete the branches above."
+      : "DRY RUN — nothing was deleted. Re-run with --prune to delete the branches above.");
   }
 
   if (opts.ledgerPath) {
@@ -14315,6 +14359,32 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
       kept_reversible_close_branches: keptReversibleClose,
       kept_handoff_receipt_branches: keptHandoffReceipts,
       reasons: plan.reasons,
+    });
+  }
+
+  // REPO HYGIENE, SHADOW (operator ruling 2026-11-01): name the held run branches stale enough to archive
+  // and reap, and ledger them. Nothing is deleted on this path; planBranchReap's hold stands. One claim read
+  // for the whole corpus, and a failed read names nothing (planStaleHoldArchive fails closed on undefined).
+  const claims = yield* readDispatchClaimTaskIdsSteps(exec);
+  const claimedTaskIds = "ids" in claims ? claims.ids : undefined;
+  const hygieneNowMs = (opts.clock ?? systemClock).now();
+  const staleHolds = planStaleHoldArchive({ facts, reasons: plan.reasons, tips: remoteTips, liveShaByName: liveHeads,
+    nowMs: hygieneNowMs, claimedTaskIds, runTaskByBranch,
+    ...(creditReadSucceeded ? { creditedTaskIds } : {}) });
+  const staleCount = (reason: string) => staleHolds.filter((c) => c.reason === reason).length;
+  if (!archiveStale) print(`stale:     ${staleHolds.length}  held run branches an archive-then-reap would remove (shadow — nothing deleted)`);
+  if (opts.ledgerPath && !archiveStale) {
+    appendLedger(opts.ledgerPath, {
+      run_id: opts.runId ?? `REAP-${hygieneNowMs}`,
+      task_id: "REAP",
+      step: "branch_reap.hygiene_shadow",
+      mode: "shadow",
+      claims_read: claimedTaskIds !== undefined,
+      ...("error" in claims ? { claims_error: claims.error } : {}),
+      would_reap: staleHolds.length,
+      credited_sibling_stale: staleCount("credited_sibling_stale"),
+      orphan_unshipped_stale: staleCount("orphan_unshipped_stale"),
+      candidates: staleHolds.map((c) => ({ name: c.name, sha: c.sha, reason: c.reason, age_days: Math.floor(c.ageMs / 86_400_000) })),
     });
   }
 
@@ -14367,6 +14437,38 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   // Printing only the first would let an operator read 140 and get 139, which is the kind of gap
   // that makes a dry run stop being trusted.
   if (screen) print(`prunable:  ${screen.proceed.length}  (deletable minus the active-branch screen)`);
+
+  // REPO HYGIENE, ACT (armed only): archive each stale hold's tip and delete its branch in one atomic,
+  // leased push (archiveStaleHoldsSteps), at most STALE_HOLD_ARCHIVE_CAP per pass. It runs AFTER the
+  // independent open-head re-read, so a branch that gained a PR since the fold is left alone, and an
+  // unread open-PR list archives nothing — the same refusal --prune makes. Restore is one line, printed
+  // per branch and carried on the row (staleHoldRestoreCommand): fetch the archive ref, then push it back.
+  if (archiveStale) {
+    const heads = openHeads;
+    const actable = heads ? staleHolds.filter((c) => !heads.has(c.name)) : [];
+    const outcome = yield* archiveStaleHoldsSteps(actable, exec);
+    print(`stale:     ${staleHolds.length} held run branches; archived ${outcome.archived.length}, ` +
+      `${outcome.failed.length} failed, ${outcome.capped} left past the cap of ${STALE_HOLD_ARCHIVE_CAP}` +
+      (openHeads ? "" : " (open pull requests unread — nothing archived)"));
+    for (const a of outcome.archived) print(`  restore: ${staleHoldRestoreCommand(a.name, a.sha)}`);
+    for (const f of outcome.failed) printError(`rmd reap-branches: archive push refused for ${f.name}, branch kept: ${f.error}`);
+    if (opts.ledgerPath) {
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId ?? `REAP-${hygieneNowMs}`,
+        task_id: "REAP",
+        step: "branch_reap.hygiene_archived",
+        mode: "act",
+        claims_read: claimedTaskIds !== undefined,
+        ...("error" in claims ? { claims_error: claims.error } : {}),
+        open_heads_read: openHeads !== undefined,
+        would_reap: staleHolds.length,
+        archived: outcome.archived,
+        failed: outcome.failed,
+        capped: outcome.capped,
+        restore: "git fetch origin refs/rmd-recovery/reaped/<name>/<sha>:refs/rmd-recovery/reaped/<name>/<sha> && git push origin refs/rmd-recovery/reaped/<name>/<sha>:refs/heads/<name>",
+      });
+    }
+  }
 
   if (prune) {
     const outcome = yield* pruneDeletableBranchesSteps(screen!.proceed, exec);
@@ -24582,7 +24684,7 @@ export function breakerDetailDep(
 export function onCircuitBreakWithVerifier(
   gate: Pick<ReturnType<typeof breakerGateFor>, "detailFor">,
   projFor: (taskId: string) => { prState?: string; merged?: boolean } | undefined,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; judge?: DispatchBreakJudge },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; judge?: DispatchBreakJudge; mainEvidence?: MainEvidenceReader },
 ): (task: Task) => Promise<void> | void {
   return (task) => {
     const detail = gate.detailFor(task.id);
@@ -24607,7 +24709,7 @@ export function onCircuitBreakWithVerifier(
     const page = () => escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, issues: ctx.issues });
     if (!ctx.judge) return page();
     // Settles off the selection pass; a throw anywhere still pages (the judge route never throws on its own).
-    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge: ctx.judge })
+    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge: ctx.judge, mainEvidence: ctx.mainEvidence })
       .then((decision) => { if (decision === "escalate") page(); }, page);
   };
 }
@@ -26449,6 +26551,7 @@ export function buildCiLearningDaemonHooks(deps: {
  *  LANDED. Reporting only drafts is what made a rung that filed nothing indistinguishable from a
  *  clean one (W1-T3324). */
 export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResult {
+  git?: CiLearningFilingResult["git"];
   windowComplete?: boolean;
   unreadablePrCount?: number;
   /** W1-T4115: what the gate fire-rate measurement over the same window found. */
@@ -26533,6 +26636,7 @@ export function buildCiLearningCadenceRunner(deps: {
     let skipped = 0;
     let refused = 0;
     let carryRefused: FeedbackRefusal[] = [];
+    let git: CiLearningFilingResult["git"];
     if (result.drafts.length > 0 || pendingOrigins.length > 0) {
       try {
         const mintTaskId = deps.mintTaskId ?? ciLearningTaskIdMinter(deps.checkoutRoot, (step, fields) =>
@@ -26555,6 +26659,7 @@ export function buildCiLearningCadenceRunner(deps: {
         skipped = filing.skipped.length;
         refused = filing.refused.length;
         carryRefused = filing.carryRefused ?? [];
+        git = filing.git;
       } catch {
         // Counts stay zero — "drafted but not filed" is a distinct outcome and the row below says so.
       }
@@ -26582,6 +26687,7 @@ export function buildCiLearningCadenceRunner(deps: {
       refusedCount: refused,
       carryRefusedCount: carryRefused.length,
       carryRefused,
+      ...(git ? { git } : {}),
     };
     (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
     return completed;
@@ -26699,6 +26805,7 @@ const daemonDefaultBuildSweepHook: typeof buildSweepHook = (...args) => {
   installDetachedWorkHost(createDetachedWorkHost({
     stateRoot: join(config.root, "state"), repoDir: args[16] ?? repoRoot, root: config.root, repo, log: args[6],
     readLedger: () => readLedgerLines(ledgerPath),
+    selectedRegistryIntent: selectedRegistryIntentForConfig(config),
   }));
   return buildSweepHook(...args);
 };
@@ -27371,9 +27478,10 @@ export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => 
 /** W1-T8864: the issue-revalidation garden's ports that live here: the plan, the reconciler's referent
  *  derivation over the garden's own issue list, and the judge on the escalation judge's mount. Each loads
  *  on first use, never at build time. `seams` stand in for the plan, the reconciler's GitHub reads and the
- *  judge's spawn in tests. */
+ *  judge's spawn in tests. `planPath` is a managed target's plan file (its daemon's), else `planRoot`'s layout, a
+ *  managed target's checkout; the judge's mount and settings stay the harness checkout's (`repoRoot`). */
 export function issueRevalidationRunTaskPorts(
-  ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; log: (step: string, extra?: Record<string, unknown>) => void },
+  ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; log: (step: string, extra?: Record<string, unknown>) => void; planRoot?: string; planPath?: string },
   seams: {
     loadPlan?: () => Plan;
     reconcile?: Pick<NonNullable<Parameters<typeof buildEscalationReconcileCandidates>[5]>, "github" | "evidenceRootFor" | "creditIo">;
@@ -27382,7 +27490,7 @@ export function issueRevalidationRunTaskPorts(
 ): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: ReturnType<typeof issueRevalidationJudgeText> } {
   const { owner, repo, repoRoot, stateDir, log } = ctx;
   let plan: Plan | undefined;
-  const planNow = (): Plan => (plan ??= (seams.loadPlan ?? (() => loadPlan(resolveRepoLayout(repoRoot).planMonolith)))());
+  const planNow = (): Plan => (plan ??= (seams.loadPlan ?? (() => loadPlan(ctx.planPath ?? resolveRepoLayout(ctx.planRoot ?? repoRoot).planMonolith)))());
   return {
     hasReferent: (issue) => {
       const taskId = issueTaskId(issue) ?? "";
@@ -27391,16 +27499,32 @@ export function issueRevalidationRunTaskPorts(
     },
     referentVerdicts: async (issues) => {
       const served = issues.map((i) => ({ number: i.number, url: i.url, title: i.title, body: i.body }));
+      // Held here so the open PR's current head is read from the SAME batched view the derivation filled:
+      // an in-memory lookup, never a per-issue API call.
+      const github = seams.reconcile?.github ?? buildBatchedGithub(owner, repo, { log });
+      const byNumber = new Map(issues.map((i) => [i.number, i]));
+      // The issue's own PR, as the batched view reads it: an open one's head, or a merged or closed one's state.
+      const prFacts = (n: number | undefined): Pick<RevalidationVerdict, "openPrHead" | "terminalPr"> => {
+        const issue = n === undefined ? undefined : byNumber.get(n);
+        const pr = issue === undefined ? undefined : prReferentFromIssueText(issue.body) ?? prReferentFromIssueText(issue.title);
+        const ref = pr === undefined ? undefined : github.prByRef(pr);
+        const state = ref?.state?.toUpperCase();
+        if (state === "OPEN" && ref?.headRefOid) return { openPrHead: { prNumber: ref.number, sha: ref.headRefOid } };
+        if (state === "MERGED" || state === "CLOSED") return { terminalPr: { prNumber: ref!.number, state: state === "MERGED" ? "merged" : "closed" } };
+        return {};
+      };
       const candidates = buildEscalationReconcileCandidates(owner, repo, planNow(), join(stateDir, LEDGER_FILENAME), log, {
         ...seams.reconcile,
+        github,
         issues: { create: () => { throw new Error("issue-revalidation never opens issues"); }, listOpen: () => served },
       });
       return new Map(candidates.filter((c) => c.issueNumber !== undefined).map((c): [number, RevalidationVerdict] => {
         const pr = c.derived.prNumber !== undefined ? `PR #${c.derived.prNumber}` : (c.derived.prUrl ?? "its PR");
         if (c.derived.indeterminate) return [c.issueNumber!, { verdict: "unknown", reason: `the referent of ${c.taskId} could not be derived` }];
-        if (c.derived.merged) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId} is merged`, citation: `${pr} merged${c.derived.prUrl ? ` (${c.derived.prUrl})` : ""}` }];
-        if (c.derived.closed) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId}'s PR closed without merging`, citation: `${pr} closed without merging` }];
-        return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open` }];
+        const facts = prFacts(c.issueNumber);
+        if (c.derived.merged) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId} is merged`, citation: `${pr} merged${c.derived.prUrl ? ` (${c.derived.prUrl})` : ""}`, ...facts }];
+        if (c.derived.closed) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId}'s PR closed without merging`, citation: `${pr} closed without merging`, ...facts }];
+        return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open`, ...facts }];
       }));
     },
     judgeText: (prompt, issueNumber, observe) => {
@@ -27443,6 +27567,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     repoRoot,
     openWorkspace: daemonGardenWorkspace(ctx, garden),
     prState: (prUrl: string) => gardenPrState(owner, repo, prUrl, ghJson),
+    closePr: (prUrl: string, reason: string) => gardenClosePr(owner, repo, prUrl, reason, (args) => ghJsonAsync(args)),
     // The daemon's tick persists the open-PR list; reading it and origin/main's ref is two file reads, no gh call.
     pendingSignal: (prUrl: string) => {
       const open = readOpenBoardSnapshot(config.root, owner, repo);
@@ -27646,11 +27771,18 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         { admission: { owner, repo, settings: config.contributorAdmission } });
     // W1-T8864: every open issue re-checked against current evidence. Shadow until the operator flips
     // `issueRevalidation.mode` to act; the plan and the judge's mount load on the first pass, not here.
-    case "issue-revalidation":
+    // Operator 2026-11-01: on a non-self managed target it reads THAT repository's issues, plan and checkout,
+    // never above shadow, its rows carry the repository, and its pacing record is keyed by it.
+    case "issue-revalidation": {
+      const managed = ctx.isSelf === false, repository = `${owner}/${repo}`;
+      const checkout = ctx.targetRoot ?? repoRoot;
+      const gardenLog = managed ? (step: string, extra: Record<string, unknown> = {}) => log(step, { ...extra, repository }) : log;
       return issueRevalidationGardenPass(stateDir, productionIssueRevalidationPorts({
-        owner, repo, stateDir, repoRoot, landingStateRoot: config.root, operatorLogins: config.operatorGithubLogins, log,
-        ...issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }),
-      }));
+        owner, repo, stateDir, repoRoot: checkout, landingStateRoot: config.root, operatorLogins: config.operatorGithubLogins, log: gardenLog,
+        ...(managed ? { managedTarget: true, policy: () => issueRevalidationPolicyForTarget(loadIssueRevalidationPolicy(), false) } : {}),
+        ...issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log: gardenLog, planRoot: checkout, planPath: managed ? ctx.planPath : undefined }),
+      }), undefined, managed ? repository : undefined);
+    }
     case "evidence-coverage":
       return withDue(() => {
         try {
@@ -27810,15 +27942,41 @@ export function gardenReplayCommand(rest: string[], opts: GardenReplayOptions = 
   return 0;
 }
 
-/** `rmd garden run <name> [--hourly]` — one pass of one registered garden, the daemon's off-loop child (W1-T5114). */
-export async function gardenCommand(rest: string[], source: { repoRoot?: string } = {}): Promise<number> {
+/** The context a garden child's `--repo <owner/repo> [--plan <file>]` names: a per-target garden over that managed
+ *  repository, its checkout (`daemonTargetCheckoutRoot`) and the plan file its daemon reads. Absent, naming self, or
+ *  naming a self-only garden, nothing changes. */
+export function gardenTargetContext(name: RegisteredGardenName, repoFlag: string | undefined, self: { owner: string; repo: string }, configRoot: string,
+  planFlag?: string): Partial<GardenBuildContext> {
+  const [owner, repo] = (repoFlag ?? "").split("/");
+  if (!owner || !repo || !registeredGardenEnabled(name, false) || `${owner}/${repo}`.toLowerCase() === `${self.owner}/${self.repo}`.toLowerCase()) return {};
+  return { owner, repo, isSelf: false, targetRoot: daemonTargetCheckoutRoot({ repo, isSelf: false }, configRoot),
+    ...(planFlag === undefined ? {} : { planPath: resolve(planFlag) }) };
+}
+
+/** The garden child's argv after `garden`: `run <name>` and its flags, or the usage error `gardenCommand` prints. */
+export function parseGardenRunArgs(rest: readonly string[]): { name: RegisteredGardenName; repoFlag?: string; planFlag?: string } | { error: string } {
   const [sub, name] = rest;
-  if (sub === "replay") return gardenReplayCommand(rest.slice(1));
-  const badArg = unknownArgError("garden", rest.slice(2), [], [GARDEN_HOURLY_FLAG]);
+  const flags = rest.slice(2);
+  const repoFlag = flagValue(flags, GARDEN_REPO_FLAG), planFlag = flagValue(flags, GARDEN_PLAN_FLAG);
+  const badArg = unknownArgError("garden", flags, [GARDEN_REPO_FLAG, GARDEN_PLAN_FLAG], [GARDEN_HOURLY_FLAG]) ??
+    (repoFlag !== undefined && !/^[^/\s]+\/[^/\s]+$/.test(repoFlag) ? `rmd garden: ${GARDEN_REPO_FLAG} takes <owner/repo>, got '${repoFlag}'` : null) ??
+    (planFlag !== undefined && repoFlag === undefined ? `rmd garden: ${GARDEN_PLAN_FLAG} names a managed target's plan and needs ${GARDEN_REPO_FLAG}` : null);
   if (sub !== "run" || name === undefined || !isRegisteredGardenName(name) || badArg) {
-    console.error(`${badArg ?? `rmd garden: usage: ${commandSyntax("garden")} — gardens: ${REGISTERED_GARDEN_NAMES.join(", ")}`}\n` + USAGE);
+    return { error: badArg ?? `rmd garden: usage: ${commandSyntax("garden")} — gardens: ${REGISTERED_GARDEN_NAMES.join(", ")}` };
+  }
+  return { name, repoFlag, planFlag };
+}
+
+/** `rmd garden run <name> [--hourly] [--repo <owner/repo> [--plan <file>]]` — one pass of one registered garden, the
+ *  daemon's off-loop child (W1-T5114); `--repo` names the managed target a per-target garden reads, `--plan` its plan. */
+export async function gardenCommand(rest: string[], source: { repoRoot?: string } = {}): Promise<number> {
+  if (rest[0] === "replay") return gardenReplayCommand(rest.slice(1));
+  const parsed = parseGardenRunArgs(rest);
+  if ("error" in parsed) {
+    console.error(`${parsed.error}\n` + USAGE);
     return 2;
   }
+  const { name, repoFlag, planFlag } = parsed;
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const self = resolveOwnerRepo();
@@ -27827,7 +27985,8 @@ export async function gardenCommand(rest: string[], source: { repoRoot?: string 
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
   const raiseDuplicate = (e: Escalation): string =>
     escalate({ ...e, runId }, { issues: ghIssueGateway(self.owner, self.repo), ledgerPath, runId });
-  return await runRegisteredGardenPass(name, rest.slice(2), { config, repoRoot: source.repoRoot ?? repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate });
+  const ctx: GardenBuildContext = { config, repoRoot: source.repoRoot ?? repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
+  return await runRegisteredGardenPass(name, rest.slice(2), { ...ctx, ...gardenTargetContext(name, repoFlag, self, config.root, planFlag) });
 }
 
 export function sweepPrTerminalRung(github: Pick<GitHub, "prByRef">, ledgerPath: string, runId: string, // W1-T5318
@@ -27969,12 +28128,30 @@ export interface RunInChildInput {
   onPending?: (pending: RunChildPending) => void;
   /** W1-T10000: asked before the run stays in-process; `false` ends the lane with a {@link TaskAdmissionError}. */
   mayRunInProcess?: (reason: string) => boolean;
+  onSelectedRegistryIntent?: (intent: RunChildSpecOptions["selectedRegistryIntent"]) => void;
 }
 
 /** W1-T9085: under `sweep.runChild.mode: on` the run's settling promise from a detached child, else `undefined` (stays in-process; ledgered). */
 export async function runInChildWhenOn(
   input: RunInChildInput,
   seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
+): Promise<RunChildHandle | undefined> {
+  const options = { ...input.options };
+  const intent = await qualifySelectedRegistryIntent(Object.hasOwn(options, "selectedRegistryIntent")
+    ? options.selectedRegistryIntent : selectedRegistryIntentForConfig(input.config));
+  options.selectedRegistryIntent = intent;
+  input.onSelectedRegistryIntent?.(intent);
+  const observer = selectedRegistryObserverFromIntent(intent, input.log);
+  return withSelectedRegistryContext(observer, async () => {
+    try {
+      return await observeSelectedRegistry(observer, "run-child-dispatch", {}, () => runInChildWithIntent({ ...input, options }, seams));
+    } finally { await observer?.settled(); }
+  });
+}
+
+async function runInChildWithIntent(
+  input: RunInChildInput,
+  seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts },
 ): Promise<RunChildHandle | undefined> {
   const mode = runChildModeIsOn(seams.readMode, seams.evidence);
   const inProcess = (reason: string): undefined => {
@@ -28272,6 +28449,10 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
+      selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
+        settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+        record: (step, fields) => appendLedger(ledgerPathFor(effectiveConfig), { run_id: "DEPLOY", task_id: "DEPLOY", step, ...fields }),
+      } : undefined,
       ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig), { stateDir: join(effectiveConfig.root, "state"), host: hostname() }),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
@@ -28295,7 +28476,12 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
-  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root }) }, {
+  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root,
+    selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
+      settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+      record: (step, fields) => deps.log(step, fields),
+    } : undefined,
+  }) }, {
     dryRun: rest.includes("--dry-run"),
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
@@ -29284,19 +29470,17 @@ export async function serveCommand(
     // planPath alone is enough, no snapshot needed here the way board.ts's does.
     // `statusGithub` backs GET /v1/drain/preview's (W1-T140) merged-set derivation --
     // the SAME batched gateway the board route above uses, never a second gateway type.
-    // W1-T193: APPROVE/REFRAME from the console hand off to the REAL `bin/rmd approve`/
-    // `bin/rmd reframe` CLI, detached — see RatifyCliGateway's own doc (panel-graph.ts) for
-    // why. `ratify` is left unset here on purpose: buildServeServer (lib/serve.ts) defaults
-    // it to a real ratifyCliGateway rooted at panelGraph.root + config.root's state/logs
-    // (config.root === fleetControlRoot below, the same root every other rmd-serve state
-    // file already lives under) — see ServeDeps.panelGraph's own doc for why the assembler,
-    // not this CLI-only wiring, owns that construction.
+    // The maintained owned gateway supplies product planning and approve/reframe from fresh
+    // source. Writable worktrees, logs and causal state belong to the control root.
     panelGraph: {
       root: repoRoot,
       planPath,
       ledgerPath,
       github: ghTraceGateway(self.owner, self.repo),
       statusGithub: boardGithub,
+      ratify: fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath, {
+        worktreeRoot: worktreesDir(config), stateRoot: config.root,
+      }),
       // W1-T191: arm the real feedback-landing bridge for POST /v1/feedback/decision — an
       // operator's accept/reject click writes against `repoRoot` (the daemon's own checkout)
       // and, without this, leaves it dirty until the next `git checkout --`/reset wipes it.
@@ -30666,7 +30850,7 @@ export function commitWorkerEdits(
   // `checkpoint` (W1-T8008): a restart checkpoint keeps EVERY worker change, declared or not -- the undeclared paths are
   // staged too and returned in `undeclared` (named, never dropped); scope is judged later, on the ordinary push path.
   options: { admitTests?: boolean; priorHeadSha?: string; branch?: string; checkpoint?: boolean; aliasRewriter?: TestAliasRewriter } = {},
-): WorkerEditCommit {
+): WorkerEditCommit & { readonly ignored_declared?: readonly string[] } {
   const runGit = deps.runGit ?? ((args: string[]) => hostWorktreeGit(
     repoDir,
     args,
@@ -30702,7 +30886,23 @@ export function commitWorkerEdits(
 
   const status = runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]);
   const changed = workerChangedPaths(status);
-  if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+  if (changed.length === 0) {
+    const existing = declaredPaths.filter((path) => existsSync(join(repoDir, path)));
+    const ignored = existing.length === 0 ? [] : runGit([
+      "status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL, "--ignored=matching", "--", ...existing,
+    ]).split("\0").filter((entry) => entry.startsWith("!! ")).map((entry) => entry.slice(3));
+    // Git may report an ignored parent directory even when scoped to a declared file inside it.
+    const ignored_declared = existing.filter((path) => pathIsUnderDeclaredSurface(path, ignored));
+    if (ignored_declared.length > 0) {
+      const details = ignored_declared.map((path) => {
+        const rule = runGit(["check-ignore", "-v", "--", path]).split("\t")[0];
+        return `${path} (rule ${rule})`;
+      });
+      return { committed: false, undeclared: [], ignored_declared,
+        reason: `declared path ignored by .gitignore: ${details.join(", ")}` };
+    }
+    return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+  }
 
   // W1-T4450: a REGISTERED REGENERABLE ARTIFACT (a gate's own baseline, whose failure message names
   // it as the remedy) is staged although undeclared. The fix prompt and the scope guard already grant
@@ -32364,6 +32564,8 @@ export function runAutomaticBranchReapRung(
     intervalMs?: number;
     exec?: BranchReapExec;
     plan?: () => Plan | undefined;
+    /** Overrides `sweep.armStaleBranchArchive` (read from the target checkout's plan/policy.yaml otherwise). */
+    armStaleBranchArchive?: boolean;
   } = {},
 ): void | Promise<void> {
   const root = opts.root ?? (repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo));
@@ -32397,6 +32599,8 @@ function* automaticBranchReapSteps(
     intervalMs?: number;
     exec?: BranchReapExec;
     plan?: () => Plan | undefined;
+    /** Overrides `sweep.armStaleBranchArchive` (read from the target checkout's plan/policy.yaml otherwise). */
+    armStaleBranchArchive?: boolean;
   } = {},
 ): Steps<void> {
   const checkoutRoot = opts.root ?? (repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo));
@@ -32435,7 +32639,8 @@ function* automaticBranchReapSteps(
   let code = 1;
   let exitReason = "unnamed non-zero exit";
   try {
-    code = yield* reapBranchesSteps(opts.prune === false ? [] : ["--prune"], {
+    // The prune pass also asks for the repo-hygiene act mode; it acts only when sweep.armStaleBranchArchive is on.
+    code = yield* reapBranchesSteps(opts.prune === false ? [] : ["--prune", "--archive-stale"], {
       onExitReason: (why) => {
         exitReason = why;
       },
@@ -32447,6 +32652,8 @@ function* automaticBranchReapSteps(
       quiet: true,
       runId,
       creditLedgerPath: ledgerPath,
+      ...(opts.clock ? { clock: opts.clock } : {}),
+      ...(opts.armStaleBranchArchive !== undefined ? { armStaleBranchArchive: opts.armStaleBranchArchive } : {}),
       // W1-T4476 design (iii)/(iv): the cache this state carries in from the LAST pass, and the
       // update this pass hands back — `state` is the one object the caller (buildSweepHook)
       // persists to disk right after this function returns, so the cache and the cadence fields
@@ -33353,7 +33560,9 @@ async function pauseCommand(rest: string[]): Promise<number> {
   }
   const target = pauseTargetOrRefuse("pause", rest, config);
   if (!target) return 2;
-  const info = requestPause(target.root, reason, undefined, { instance: target.instance });
+  const info = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "pause", {
+    instanceName: target.instance, stateRoot: target.root, namespace: "host",
+  }, () => requestPause(target.root, reason, undefined, { instance: target.instance }));
   appendLedger(ledgerPathFor({ ...config, root: target.root }), {
     run_id: runId,
     task_id: "FLEET",
@@ -33405,7 +33614,9 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
   }
   const target = pauseTargetOrRefuse("resume", rest, config);
   if (!target) return 2;
-  const result = resumeFleet(target.root);
+  const result = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "resume", {
+    instanceName: target.instance, stateRoot: target.root, namespace: "host",
+  }, () => resumeFleet(target.root));
   appendLedger(ledgerPathFor({ ...config, root: target.root }), {
     run_id: runId,
     task_id: "FLEET",
@@ -35065,18 +35276,20 @@ export async function spawnEscalatedInboxDraft(
   args: Parameters<typeof buildInboxDraftSpawnArgs>[0],
   rawSpawn: typeof spawnWorker = spawnWorker,
   readCapacity: (config: Config) => Promise<ProviderCapacity> = (config) => readClaudeProviderCapacity(config, { forceRefresh: true }),
-): Promise<WorkerResult | undefined> {
+): Promise<DraftWorkerResult | undefined> {
   const policy = resolveProviderRoutingPolicy(args.config.root, args.config);
   if (!policy.routableProviders.includes("claude")) return undefined;
   const capacity = await readCapacity(args.config);
   if (!providerEligibility(capacity, policy.reservePercent).eligible) return undefined;
-  return rawSpawn({
+  const spawnArgs = {
     ...buildInboxDraftSpawnArgs({
       ...args,
       mount: { ...args.mount, model: "sonnet", provider: "claude", effort: "medium" },
     }),
     onSelectionAssignment: undefined,
-  });
+  };
+  const requestedModel = spawnArgs.model ?? null;
+  return { ...await rawSpawn(spawnArgs), requestedModel };
 }
 
 /**
@@ -35191,8 +35404,8 @@ export async function draftProposalBatch(
       {
         repoFacts: checkoutRepoFacts(worktreePath),
         causalScope,
-        spawn: (proposal, prompt, ctx) =>
-          benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({ ...buildInboxDraftSpawnArgs({
+        spawn: async (proposal, prompt, ctx) => {
+          const spawnArgs = { ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
             settingsFile,
             mount: inboxDraftMount,
@@ -35208,7 +35421,11 @@ export async function draftProposalBatch(
             // test reads this body so a later extraction cannot silently turn the guarantee into
             // a helper-level convention.
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-          }), onSelectionAssignment: undefined }),
+          }), onSelectionAssignment: undefined };
+          const requestedModel = spawnArgs.model ?? null;
+          ctx?.onRequestedModel?.(requestedModel);
+          return { ...await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)(spawnArgs), requestedModel };
+        },
         ...(inboxDraftMount.provider === "cash" ? {
           escalate: (proposal: Proposal, prompt: string) => spawnEscalatedInboxDraft({
             cwd: worktreePath,
@@ -41249,9 +41466,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "reap-branches",
-    syntax: "rmd reap-branches [--prune]",
+    syntax: "rmd reap-branches [--prune] [--archive-stale]",
     summary: "Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.",
-    detail: "W1-T447/W1-T3020: classify every remote branch as deletable, guarded or held, print a sha->name manifest, and delete only with --prune. Deletable = a merged PR head, a closed-unmerged PR head, or a no-PR head whose tip is already in origin/main; guards and the independent open-head reread always win. The CLI defaults to a dry run. The full daemon sweep uses the same command with --prune on first use, when the remote branch set changes, or after six hours; its cheap branch fingerprint runs each full tick, and the light in-flight pass never reaches this remote git write. An unreadable or empty branch listing refuses rather than becoming a healthy zero. Unknown SHAs are skipped, pushes are chunked, and each deletion prints a restore refspec. Guard drift is reported and returns non-zero but does not widen the deletion set.",
+    detail: "W1-T447/W1-T3020: classify every remote branch as deletable, guarded or held, print a sha->name manifest, and delete only with --prune. Deletable = a merged PR head, a closed-unmerged PR head, or a no-PR head whose tip is already in origin/main; guards and the independent open-head reread always win. The CLI defaults to a dry run. The full daemon sweep uses the same command with --prune on first use, when the remote branch set changes, or after six hours; its cheap branch fingerprint runs each full tick, and the light in-flight pass never reaches this remote git write. An unreadable or empty branch listing refuses rather than becoming a healthy zero. Unknown SHAs are skipped, pushes are chunked, and each deletion prints a restore refspec. Guard drift is reported and returns non-zero but does not widen the deletion set. --archive-stale (operator ruling 2026-11-01) asks for the repo-hygiene act mode, which runs only when plan/policy.yaml's sweep.armStaleBranchArchive is on (default off; the daemon's prune pass asks too): each stale held run branch's tip is archived under refs/rmd-recovery/reaped/<name>/<sha> and the branch deleted in one atomic leased push, at most 25 per pass, ledgered as branch_reap.hygiene_archived; restore with git fetch origin refs/rmd-recovery/reaped/<name>/<sha>:refs/rmd-recovery/reaped/<name>/<sha> && git push origin refs/rmd-recovery/reaped/<name>/<sha>:refs/heads/<name>. Unarmed, it only ledgers branch_reap.hygiene_shadow.",
   },
   {
     name: "memory-lint",
@@ -41605,7 +41822,7 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "garden",
-    syntax: "rmd garden run <name> [--hourly] | rmd garden replay ci-friction [--days <n>] [--step-hours <h>]",
+    syntax: "rmd garden run <name> [--hourly] [--repo <owner/repo> [--plan <file>]] | rmd garden replay ci-friction [--days <n>] [--step-hours <h>]",
     summary: "Run one pass of one registered gardener (the daemon's off-loop child).",
     detail: "W1-T5114: builds the named garden from the shared registry (buildRegisteredGarden) and runs exactly one pass, appending to the same ledger the daemon does. The daemon spawns this per gardener pass so no pass runs on its event loop; --hourly also refreshes the test garden's hourly CI evidence. `replay ci-friction` replays the ci-friction remedy ladder over the past --days (default 7) at --step-hours (default 6) from the ledger union and main's plan history, read-only.",
   },

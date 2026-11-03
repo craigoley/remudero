@@ -1,22 +1,15 @@
 /**
- * The sweep's open-PR enumeration, over REST only.
- *
- * Invariant: nothing here reads GraphQL. `gh`'s `--json` flag is implemented over GraphQL, so the
- * single `gh pr list --json …` call this replaced put the whole sweep critical path behind the
- * GraphQL point budget; when it emptied on 2026-07-28 the sweep went blind for 22 minutes while
- * the core budget sat healthy (CLAUDE.md, "CI and merging"; PR #794, PR #796).
- * The module reproduces the existing value bit for bit over a different transport: no retry, no
- * alarming, no degraded mode, no escalation. The trade is 1 + 2N requests where GraphQL asked once
- * — 7-21 core a pass, from the budget that was never exhausted (docs/forensics/open-prs-rest.md).
+ * Enumerate the sweep's open PRs over REST; never use GraphQL, including `gh --json`.
+ * GraphQL exhaustion blinded the sweep despite a healthy core budget (PR #794, PR #796;
+ * CLAUDE.md, "CI and merging"; docs/forensics/open-prs-rest.md).
+ * Preserve values without retries, alarms, degraded modes or escalation; rollups cost 1 + 2N reads.
  */
 
 import { createHash } from "node:crypto";
 import { contributionOriginFromRest, type ContributionOrigin, type RestContributionOrigin } from "./contributor-admission.js";
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState, RedundantRefixEvidence } from "./merge-state.js";
 import type { WorkflowRunJobObservation, WorkflowRunObservation } from "./workflow-run.js";
-// W1-T2384: from the LEAF, never from sweep.js. dependency-cruiser reads a type-only import as
-// a dependency (MEASURED: importing this off sweep.js took it 13 -> 24 warnings), and sweep.ts
-// imports a VALUE back off this module — see supersession.ts's own header.
+// W1-T2384: import from the leaf; even a type import from sweep.js closes a cycle. See supersession.ts.
 import type { SupersessionVerdict } from "./supersession.js";
 import { withGhBudgetReading, type GhBudgetReading } from "./github-transport.js";
 export {
@@ -37,8 +30,7 @@ export {
   type GhRefusalBackoffOpts,
 } from "./github-transport.js";
 
-/** W1-T2779: injected from run-task.ts, which already owns the shared isInPlanScope import. Keeping
- * this leaf unaware of plan-architect avoids closing three runtime dependency cycles. */
+/** W1-T2779: run-task.ts injects isInPlanScope to avoid plan-architect dependency cycles. */
 export type PlanPathPredicate = (path: string) => boolean;
 
 /** The open-PR list argv. `per_page=100` with no `--paginate` reproduces the exact truncation
@@ -53,21 +45,15 @@ export function singlePrRestArgs(owner: string, repo: string, prNumber: number):
   return ["api", `repos/${owner}/${repo}/pulls/${prNumber}`];
 }
 
-/** Fetch one `gh api …` argv and return its parsed JSON. Injected so every parser and both
- *  orchestrators are testable with no network; the real caller passes `ghJson`.
- *  Trap: declared between two executed functions, not at the file head — the v8 coverage channel
- *  stamps `DA:<line>,0` across a module's leading and trailing source-line records, so a type-only
- *  declaration parked at either end reads to diff-coverage as uncovered code. `onRateLimit` restates
- *  `ghJson`'s optional second parameter structurally, because this module never imports from
- *  worker.ts; a fixture ignoring it is unaffected (W1-T1008). */
+/** Injected `ghJson`: parse one `gh api` response without importing worker.ts (W1-T1008).
+ *  Its optional rate-limit callback also permits offline fixtures. Keep the type between functions:
+ *  V8 can mark leading/trailing type declarations `DA:<line>,0` in coverage. */
 export type GhApiFetcher = (
   args: string[],
   onRateLimit?: (reading: { remaining?: number; limit?: number; resource?: string }) => void,
 ) => unknown;
 
-/** Narrow `ghJson`'s all-optional reading to the {@link GhBudgetReading} that can arm the floor.
- *  Invariant: a reading missing any of the three fields yields no budget at all — never a partial or
- *  zeroed one, which could read as "empty" and stand every following call down on a fluke. */
+/** Arm the floor only with a complete, finite reading; partial/zero-filled data can falsely stop calls. */
 function budgetFromRateLimitLikeReading(reading: {
   remaining?: number;
   limit?: number;
@@ -148,10 +134,8 @@ interface RestStatus {
   description?: string | null;
 }
 
-/** One composed rollup entry — GraphQL's `statusCheckRollup` union member, structurally. Not declared
- *  as `extends RollupCheckEntry` (lib/sweep.ts): that needs a type-only import at the file head, which
- *  diff-coverage reads as uncovered code. Falsifier: test/open-prs-rest.test.ts passes
- *  `rollupFromRest(...)` into `checksStateFromRollup`, so drift in either shape fails `tsc`. */
+/** GraphQL-shaped rollup, kept independent of sweep.ts to avoid a leading type import's coverage trap.
+ *  test/open-prs-rest.test.ts passes rollupFromRest into checksStateFromRollup; tsc catches shape drift. */
 export interface RestRollupEntry {
   name?: string;
   /** The posted refusing gate, distinct from a hosting bundle's check name. */
@@ -167,10 +151,8 @@ export interface RestRollupEntry {
   workflowId?: number;
   jobId?: string;
   targetUrl?: string;
-  /** W1-T2300 — when this attempt started, mapped by {@link rollupFromRest} from a check run's
-   *  `started_at` or a status context's `created_at`; absent only on a malformed row.
-   *  `dedupeRollupByLatestAttempt` sorts on it and `staleCiGateTransition` needs it to fire — an entry
-   *  carrying none sorted as though every REST attempt shared one array-order tie. */
+  /** W1-T2300: started_at/created_at from rollupFromRest; absent on malformed rows.
+   *  dedupeRollupByLatestAttempt and staleCiGateTransition need it to distinguish attempts. */
   startedAt?: string;
   /** Terminal completion time, when GitHub supplied one. Absence stays absent: consumers that
    * need to prove a verdict predates a main repair must decline rather than substitute a start. */
@@ -179,11 +161,8 @@ export interface RestRollupEntry {
   description?: string;
 }
 
-/** Uppercase a REST enum the way GraphQL reports it, preserving absent as absent. Invariant: this is
- *  load-bearing. Consumers resolve an outcome as `(state ?? conclusion ?? status ??
- *  "").toUpperCase()`, so the chain must fall through on a missing value; REST sends
- *  `conclusion: null` for an incomplete run, and mapping that to `""` would turn a queued required
- *  check into an empty outcome. */
+/** Uppercase enums while preserving absence for the state ?? conclusion ?? status fallback.
+ *  Mapping an incomplete run's null conclusion to "" would hide its queued status. */
 function upper(v: string | null | undefined): string | undefined {
   return v == null || v === "" ? undefined : v.toUpperCase();
 }
@@ -212,14 +191,9 @@ export function needsWorkflowIdentity(checkRuns: RestCheckRun[]): boolean {
   return false;
 }
 
-/** Compose one GraphQL-shaped `statusCheckRollup` from REST's two halves. REST splits GraphQL's
- *  union across two endpoints, so both are read and concatenated: reading only `/check-runs` would
- *  drop `remudero-review` and make every reviewed PR look unreviewed.
- *
- *  Invariant: the combined-status endpoint's top-level `state` is ignored — it reports "pending" for
- *  a commit with zero statuses, and an invented entry flips `checksStateFromRollup` from "none" to
- *  "pending", so only real `statuses[]` rows become entries. The two shapes map
- *  {@link RestRollupEntry.startedAt} from two different source keys (W1-T2300). */
+/** Compose statusCheckRollup from check runs AND commit statuses; /check-runs alone loses remudero-review.
+ *  Ignore combined-status's top-level state: zero statuses reports "pending", but must stay "none".
+ *  Only real statuses[] become entries; startedAt uses each shape's own key (W1-T2300). */
 export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[], workflowRuns?: readonly RestWorkflowRunIdentity[]): RestRollupEntry[] {
   const workflows = new Map(workflowRuns?.map((r) => [r.id, r.workflow_id]));
   const fromRuns = checkRuns.map((c) => {
@@ -284,10 +258,8 @@ export interface RestPullRow extends RestContributionOrigin {
   auto_merge?: unknown;
   /** The PR title (W1-T184's RECENT decoration). Absent only on a malformed row. */
   title?: string;
-  /** W1-T528: true when the PR is a draft — the operator's hold, which the sweep's update-branch rung
-   *  refuses to touch (`selectUpdateBranchTarget`, lib/sweep.ts). Returned by both endpoints, unlike
-   *  {@link RestPullRow.merged} above, because `draft` is in the `pull-request-simple` schema the list
-   *  endpoint serves. Optional: a malformed row degrades to `undefined`, never `false`. */
+  /** W1-T528: operator's draft hold, honored by selectUpdateBranchTarget (lib/sweep.ts).
+   *  Both endpoints return it; malformed absence stays undefined, never false. */
   draft?: boolean;
 }
 
@@ -302,15 +274,10 @@ export interface OpenPrRest {
   autoMergeRequest: unknown;
   contributionOrigin?: ContributionOrigin;
   statusCheckRollup?: RestRollupEntry[];
-  /** W1-T521: true when this PR's rollup fetch threw — exhaustion, a 404 on a head deleted mid-pass, a
-   *  network blip — so `statusCheckRollup` is absent rather than an observed empty rollup. Sparse,
-   *  mirroring `status.ts`'s `indeterminate` convention. `checksStateFromRollup` (lib/sweep.ts) reads an
-   *  absent rollup as "none", never "green", so such a PR cannot be disposed mergeable off a failed
-   *  read; this flag carries what "none" alone cannot. */
+  /** W1-T521: failed rollup fetch (budget, deleted head, network), distinct from observed empty.
+   *  Sparse like status.ts's indeterminate; checksStateFromRollup treats absence as "none", never green. */
   rollupUnreadable?: true;
-  /** W1-T528: GitHub's `draft`, under the `gh --json` name this interface mirrors. Consumed by
-   *  `buildOpenPrViews` (run-task.ts) as `OpenPrView.isDraft`. Preserved as `undefined` when the row
-   *  omits it — never `false`, which would launder "GitHub did not say" into "not a draft". */
+  /** W1-T528: draft hold passed to buildOpenPrViews as OpenPrView.isDraft; unknown stays undefined. */
   isDraft?: boolean;
   /** REST's `created_at`, carried for the board-review rung's age arm. Absent on a malformed row
    *  — a consumer must treat absence as "age unknown", never as age zero or age infinity. */
@@ -333,33 +300,24 @@ export function mapRestPr(row: RestPullRow): OpenPrRest {
     body: row.body ?? "",
     autoMergeRequest: row.auto_merge ?? null,
     ...(contributionOrigin === undefined ? {} : { contributionOrigin }),
-    // W1-T528: undefaulted — `?? false` would make a malformed row assert "not a draft" rather than
-    // "unknown", and the operator's hold is the one fact this rung must not guess at. Sparse like
-    // `rollupUnreadable`, so a row omitting `draft` maps to exactly the pre-W1-T528 object.
+    // W1-T528: omit unknown draft holds; defaulting to false would assert operator permission.
     ...(row.draft === undefined ? {} : { isDraft: row.draft }),
     // Same omitted-rather-than-defaulted discipline as `isDraft` directly above.
     ...(row.created_at === undefined ? {} : { createdAt: row.created_at }),
   };
 }
 
-/** REST's open/closed/merged triple, collapsed to the uppercase token `terminalStateReason` compares
- *  against.
- *
- *  Invariant: `merged_at` is the discriminator and `merged` only corroborates. The list endpoint
- *  omits `merged` — a single-PR-only field — so it reads `undefined` there and every merged pull
- *  collapsed to "CLOSED"; `merged_at` is returned by both endpoints. Trap: do not simplify to
- *  `state.toUpperCase()`, since a lower-cased "open" reads terminal and `rmd fix` would refuse every
- *  live PR. Falsifier: test/open-prs-rest.test.ts, on fixtures captured from a live list response.
- *  Why: the 2026-07-31 dispatch runaway — docs/forensics/open-prs-rest.md (#1017). */
+/** Return terminalStateReason's uppercase state. Both endpoints carry merged_at; only single-PR
+ *  carries merged. Ignoring merged_at mislabels merged list rows CLOSED; leaving open lowercase
+ *  makes rmd fix refuse live PRs. Falsifier: test/open-prs-rest.test.ts's live-list fixtures.
+ *  Record: dispatch runaway, docs/forensics/open-prs-rest.md (#1017, 2026-07-31). */
 export function prStateFromRest(row: { state?: string; merged?: boolean; merged_at?: string | null }): string {
   if (row.merged === true || row.merged_at != null) return "MERGED";
   return (row.state ?? "").toUpperCase() || "UNKNOWN";
 }
 
-/** Fetch and attach one PR head's composed rollup. Split out so both orchestrators share it, and
- *  exported for W1-T2268: run-task.ts's `pollToGate`/`waitForCiGreen` were the last GraphQL reads on
- *  the point-priced budget (`gh pr view --json statusCheckRollup`, every 6s for a whole CI wait) and
- *  migrate onto this read. Falsifier: test/poll-rollup-over-rest.test.ts. */
+/** Shared REST rollup for orchestrators and pollToGate/waitForCiGreen (W1-T2268).
+ *  Avoids repeated GraphQL reads while waiting; falsifier: test/poll-rollup-over-rest.test.ts. */
 export function rollupFor(owner: string, repo: string, sha: string, fetch: GhApiFetcher): RestRollupEntry[] {
   return runGhReadSteps(rollupSteps(owner, repo, sha, fetch));
 }
@@ -389,15 +347,9 @@ export async function rollupForAsync(
   return rollupFromRest(checks, combined?.statuses ?? [], listing === undefined ? undefined : listing?.workflow_runs ?? []);
 }
 
-/** The sweep's open-PR enumeration, REST only — a drop-in for the `gh pr list --json …` call.
- *
- *  Invariant: the list call throws, exactly as the `ghJson` call it replaced threw, because
- *  swallowing would turn an outage into a silent "zero open PRs" the sweep reads as a healthy empty
- *  queue. Once the list returns the queue size is known, so the per-PR rollup read is guarded
- *  instead: a throw yields that PR with `rollupUnreadable: true` rather than costing every other PR
- *  its disposition, and no retry, because the next pass re-derives (W1-T521). W1-T1008: the list call
- *  alone asks `fetch` for its rate-limit reading and returns it via {@link withGhBudgetReading}, for
- *  {@link paceGhEntry} to arm the floor from. */
+/** Enumerate open PRs over REST. List failures throw: an outage must never look like an empty queue.
+ *  Per-PR rollup failures set rollupUnreadable without losing other PRs; the next pass retries (W1-T521).
+ *  Only the list requests a rate-limit reading, carried by withGhBudgetReading to paceGhEntry (W1-T1008). */
 export function fetchOpenPrsRest(owner: string, repo: string, fetch: GhApiFetcher): OpenPrRest[] {
   return runGhReadSteps(fetchOpenPrsRestSteps(owner, repo, fetch));
 }
@@ -451,28 +403,17 @@ export async function fetchSinglePrRestAsync(
   };
 }
 
-/** W1-T511: `ghLiveState`'s (run-task.ts) REST substitute — one fetch, no rollup. Not
- *  {@link fetchSinglePrRest}, which also fetches the head's two rollup endpoints: the post-review
- *  disposition this replaces reads exactly one field, so an unasked-for rollup would triple the cost of
- *  a call whose point is staying cheap. The row goes to {@link prStateFromRest}, so no consumer of the
- *  token can tell which transport served it. */
+/** W1-T511: ghLiveState's REST substitute, mapped by prStateFromRest.
+ *  One read, no rollup: fetchSinglePrRest would triple the post-review disposition's cost. */
 export function liveStateFromRest(owner: string, repo: string, prNumber: number, fetch: GhApiFetcher): string {
   const row = fetch(singlePrRestArgs(owner, repo, prNumber)) as RestPullRow;
   return prStateFromRest(row);
 }
 
-/* ────────────────────────────────────────────────────────────────────────────────────────────
- * The board gateway's enumeration (W1-T265) — the second consumer of this module.
- *
- * The gateway (`buildBatchedGithub`, lib/status.ts) needs every PR in every state, with `body` and
- * `title` and no checks at all. Its GraphQL call re-downloaded an almost entirely immutable set on a
- * 15s TTL, spending ~58% of the account's GraphQL budget on one open console tab; when it ran out,
- * merged-ness became underivable and long-merged tasks stayed pinned at the head of UP NEXT. Not
- * {@link fetchOpenPrsRest}: open-only, no `title`, and 1+2N requests for rollups the board never reads.
- * It reuses {@link mapRestPr}, {@link prStateFromRest} and {@link RestPullRow}, which is why this lives
- * here. A naive full REST paginate is better on points and 4.7x worse on bytes, so the cold pass runs
- * once and every refresh reads only what changed (docs/forensics/open-prs-rest.md).
- * ──────────────────────────────────────────────────────────────────────────────────────────── */
+/** Board enumeration for buildBatchedGithub (lib/status.ts, W1-T265).
+ *  Needs all PR states, bodies and titles, without checks. GraphQL exhaustion hid merged credit;
+ *  full REST pagination inflated bytes, so refresh only changed rows after one cold pass.
+ *  Record: docs/forensics/open-prs-rest.md. */
 
 /** The board's list argv for one page of one state. Invariant: `sort=updated&direction=desc` is the
  *  entire basis of the delta's early stop. `page`/`per_page` rather than `--paginate`, for the reason
@@ -503,11 +444,8 @@ export interface BoardPrRest {
   authorType?: string;
 }
 
-/** Translate one REST pull row to the board's row shape. Everything except `state` and `title` comes
- *  from {@link mapRestPr}, so its four load-bearing translations hold by construction. Two more: `state`
- *  runs through {@link prStateFromRest}, never `state.toUpperCase()`, because the index does
- *  `all.filter((p) => p.state === "MERGED")` to build `mergedNewestFirst` and a plain uppercase would
- *  match nothing; and `title` normalises absent to `""`. */
+/** Reuse mapRestPr's translations, normalise absent title to "", and derive state with prStateFromRest.
+ *  Uppercasing REST state alone loses MERGED rows from mergedNewestFirst. */
 export function mapBoardPr(row: RestPullRow): BoardPrRest {
   const base = mapRestPr(row);
   return {
@@ -529,9 +467,7 @@ export function mapBoardPr(row: RestPullRow): BoardPrRest {
 
 /** Cold pass page size — 687 PRs is 7 requests. */
 const BOARD_FULL_PAGE_SIZE = 100;
-/** Delta page size. Smaller because a steady-state refresh only has to reach the first unchanged row
- *  it already holds — row 1 or 2 in practice, where a 100-row page moves ~2.2 MB to learn nothing
- *  happened. Page size must be constant within a run, so a second delta page pays 30 again. */
+/** Delta reads usually stop at row 1 or 2; smaller pages save bytes. Keep size constant within a walk. */
 const BOARD_DELTA_PAGE_SIZE = 30;
 /** BACKSTOP, not the primary control (a short page ends a healthy walk): a runaway guard. 200 pages is 20,000 PRs at the full size, past this repo's ~6,700 closed PRs (50 truncated every cold read). Reported, never silent. */
 export const BOARD_MAX_PAGES = 200;
@@ -549,25 +485,15 @@ export interface BoardFetchResult {
   half: BoardFetchHalf;
 }
 
-/** Which half of the board a fetch walks (W1-T2323). `"both"` is the default and is byte for byte the
- *  walk this function always performed. The halves are separable because they cost wildly different
- *  amounts and have different consumers: the open pass is 1 page against the cold closed pass's 25,
- *  and `listOpenHeadBranches` (lib/status.ts) paid all 26 for the one it used.
- *
- *  Invariant: splitting the call does not split the index. The closed half is still built, still
- *  walked with the same stop test, still shared by the merged-credit readers (W1-T377). What moves is
- *  when each half is fetched, never whether. */
+/** W1-T2323: separable fetches, shared index. Default "both" preserves the original walk.
+ *  listOpenHeadBranches need not pay for closed history; merged-credit readers still share that
+ *  history and its stop test (W1-T377). The split changes when each half is fetched, never whether. */
 export type BoardFetchHalf = "both" | "open" | "closed";
 
-/** Every PR in the repo, over REST, re-reading only what can have changed.
- *
- *  Two halves, by mutability. Hot: every open PR, re-read unconditionally, because they are the only
- *  rows whose rendered fields can still move — and unconditionally so it never depends on GitHub
- *  bumping `updated_at`, which matters most for `auto_merge`. Cold: closed and merged PRs, walked
- *  newest-updated-first, stopped at the first row already held with an identical `updated_at`.
- *  Invariant: sorted `updated_at` descending, so every changed row sorts strictly above every
- *  unchanged one and rows never reached keep their cached values. Throws on a failed page without
- *  mutating the cache — swallowing would report "the repo has zero PRs" (W1-T181). */
+/** Refresh open PRs unconditionally: auto_merge can change without an updated_at bump.
+ *  Walk closed/merged PRs by descending updated_at, stopping at the first unchanged cached row;
+ *  later rows retain cached values. Failed pages throw without cache mutation, never report an
+ *  empty repository (W1-T181). */
 export function fetchBoardPrsRest(
   owner: string,
   repo: string,
@@ -646,22 +572,11 @@ function* boardPrsWalk(
   return { rows: [...out.values()], calls, mode, truncated, half, ...(closedFloor === undefined ? {} : { closedFloor }) };
 }
 
-/* ────────────────────────────────────────────────────────────────────────────────────────────
- * The labelled-issue delta (W1-T2222) — the board gateway's other re-read, reusing the stop test
- * {@link fetchBoardPrsRest}'s cold half already proves rather than a second mechanism.
- *
- * `fetchAllIssues` (lib/status.ts) re-read the whole `needs-human` label set on every TTL refresh,
- * because its call carried no `known` and no `updated_at` comparison. `--paginate` cannot be interrupted
- * mid-walk, so this walks explicit `page`/`per_page` requests, as {@link boardPrsRestArgs} does. One
- * walk, not two halves: an issue has no field that can move without bumping `updated_at`, so there is
- * no `auto_merge`-shaped reason to carve out an open half (docs/forensics/open-prs-rest.md).
- * ──────────────────────────────────────────────────────────────────────────────────────────── */
+/** Labelled-issue delta for fetchAllIssues (lib/status.ts, W1-T2222).
+ *  Reuse the PR cold-half stop test with explicit pages: --paginate cannot stop mid-walk.
+ *  Issues always bump updated_at, so need no separate hot half. docs/forensics/open-prs-rest.md. */
 
-/**
- * One page of the board's labelled-issue walk argv — the issue counterpart of
- * {@link boardPrsRestArgs}: same `page`/`per_page` reasoning, same load-bearing
- * `sort=updated&direction=desc`, the entire basis of the delta's early stop below.
- */
+/** Issue pages, like boardPrsRestArgs: sort=updated&direction=desc makes early stopping safe. */
 export function boardIssuesRestArgs(owner: string, repo: string, label: string, page: number, perPage: number): string[] {
   return [
     "api",
@@ -915,6 +830,15 @@ export interface HumanHoldCandidateInput extends ScannerBlockerCandidateInput {
 export function isHumanHoldCandidate(pr: HumanHoldCandidateInput): boolean {
   return (pr.autoMergeArmed === true || mergesDirectlyAsPlanPr(pr)) && greenReviewedButBlocked(pr);
 }
+
+/** W1-T11153 — the review queue: a non-draft PR whose checks are green and whose head carries no review
+ *  verdict yet. Review admission orders it, so a person's CHANGES_REQUESTED hold on it is read too. */
+export function isReviewQueueHoldCandidate(pr: Pick<ScannerBlockerCandidateInput, "isDraft" | "checksState" | "reviewState">): boolean {
+  return pr.isDraft !== true && pr.checksState === "green" && pr.reviewState !== "success" && pr.reviewState !== "failure";
+}
+
+/** BACKSTOP: one review listing per review-queue PR per pass, oldest first; admission order matters at the queue head. */
+export const REVIEW_QUEUE_HOLD_READ_CAP = 8;
 
 export interface ScannerAlertIdentity {
   alertNumber: number;
@@ -1199,6 +1123,26 @@ export function* hydrateScannerBlockerObservationsSteps(
       ? yield* observeChangesRequestedSteps(owner, repo, candidate, fetch)
       : yield* observeScannerBlockerSteps(owner, repo, candidate, fetch);
     if (observation !== undefined) out.set(candidate.number, observation);
+  }
+  return out;
+}
+
+/**
+ * W1-T11153 — the human CHANGES_REQUESTED holds standing on review-queue PRs ({@link isReviewQueueHoldCandidate}),
+ * one review listing each, the oldest `cap` candidates first. Only a `changes-requested` observation is kept: an
+ * unreadable listing leaves the PR absent, so admission orders it exactly as before.
+ */
+export function* hydrateReviewQueueHoldsSteps(
+  owner: string,
+  repo: string,
+  candidates: readonly ScannerBlockerCandidate[],
+  fetch: GhApiFetcher,
+  cap: number = REVIEW_QUEUE_HOLD_READ_CAP,
+): GhReadSteps<Map<number, ScannerBlockerObservation>> {
+  const out = new Map<number, ScannerBlockerObservation>();
+  for (const candidate of candidates.slice(0, cap)) {
+    const observation = yield* observeChangesRequestedSteps(owner, repo, candidate, fetch);
+    if (observation?.kind === "changes-requested") out.set(candidate.number, observation);
   }
   return out;
 }
@@ -1730,6 +1674,8 @@ interface RestPrFile {
 export const PLAN_FILING_FILE_RESPONSE_CAP = 100;
 /** BACKSTOP: retained complete observations stay far above the measured open-PR population. */
 export const PLAN_FILING_FILE_CACHE_MAX_ENTRIES = 256;
+/** BACKSTOP: uncached file reads a pass may spend, the value W1-T2439 derived; W1-T9824 learns it (W1-T11148 moved it). */
+export const PLAN_FILING_FILE_MISS_CAP = 3;
 
 export interface PlanFilingFileCandidate {
   number: number;
@@ -1793,11 +1739,9 @@ function rememberPlanFilingMissCursor(
   }
 }
 
-/**
- * Read a bounded set of actual PR file lists. Complete positive and negative observations are
- * cached by repository, PR and head SHA; failures and capped misses remain unknown and are never
- * promoted to a plan-filing fact. A cache hit costs none of this pass's miss budget.
- */
+/** Read a bounded set of actual PR file lists. Complete positive and negative observations are
+ *  cached by repository, PR and head SHA; failures and capped misses remain unknown and are never
+ *  promoted to a plan-filing fact. A cache hit costs none of this pass's miss budget. */
 export function hydratePlanFilingFiles(
   owner: string,
   repo: string,
@@ -2145,36 +2089,14 @@ export function* hydrateMergeConflictEvidenceSteps(
 }
 
 
-// ── review-reuse-producer: THE REVIEW-REUSE PRODUCER ─────────────────────────────────────────────────────────
-//
-// W1-T3704 shipped the whole review-reuse MECHANISM — `reviewReuseVerdict` (lib/sweep.ts), the
-// `review-reused`/`discriminate-only` disposition rows that call it, `ReviewVerdict.ownDiffDigest`/
-// `mergeBaseSha`, the `own_diff_digest`/`merge_base_sha` ledger fields, and
-// `priorReviewVerdictFromLedger` reading them back. All of it tested, all of it wired.
-//
-// AND NOTHING EVER PRODUCED A SINGLE ONE OF THE FIVE INPUTS. `reviewReuseVerdict`'s own comment
-// said so out loud ("Not yet populated by the real gateway"), so every call returned `full-review`
-// unconditionally and every orphaned review was re-derived from scratch. That is the "why does it
-// need ANOTHER review?" the operator hit on #5941 — the machinery to answer "nothing changed"
-// existed and was never fed.
-//
-// ── ONE REPRESENTATION, OR THE COMPARISON IS MEANINGLESS ──────────────────────────────────────
-// The two sides of that comparison are computed in different places: the REVIEW records what it
-// judged, and a LATER SWEEP PASS asks what is true now. The review runs beside a materialised head
-// checkout; the sweep has no checkout at all. It is therefore tempting to compute the review side
-// from local git and the sweep side from this REST compare — and that would be a silent, permanent
-// bug: two representations of "the PR's own diff" that never produce equal digests, so the reuse
-// path reads "changed" forever and looks exactly like the pre-fix behaviour it replaced.
-//
-// So BOTH sides call THIS function. It is the only producer of either value, which is what makes
-// `reviewedOwnDiffDigest === currentOwnDiffDigest` a question about the PR rather than a question
-// about which code path asked.
+// review-reuse-producer: feed W1-T3704's reviewReuseVerdict and ledger readers; missing inputs
+// previously forced every orphaned review to full-review (#5941).
+// Both review and sweep MUST use this REST representation. Mixing local git and REST digests
+// makes unchanged diffs compare unequal forever; reviewedOwnDiffDigest === currentOwnDiffDigest
+// must compare PR content, independent of which caller asked.
 
-/** What a review judged, or what is true now — the pair {@link reviewReuseVerdict} (lib/sweep.ts)
- *  compares. Both fields are REQUIRED here: a partial read is returned as `undefined` by the
- *  callers below rather than as a half-filled object, because an absent digest and an absent merge
- *  base mean the same thing to every reader ("unreadable — re-review") and a shape that can express
- *  "one of the two" only invites a caller to treat the other as authoritative. */
+/** reviewReuseVerdict's required pair. Partial reads become undefined (unreadable, re-review),
+ *  never an authoritative half-answer. */
 export interface ReviewReuseFacts {
   ownDiffDigest: string;
   mergeBaseSha: string;
@@ -2196,27 +2118,11 @@ export interface OwnDiffDigestDetail {
   blobFallbackPaths: string[];
 }
 
-/** A content hash of the pull request's OWN diff, folded from a compare response's file list.
- *
- *  WHAT IT IS A STATEMENT ABOUT: the hunks this PR contributes, and nothing else. Each entry
- *  contributes its path, its change status, its hunks with line numbers removed
- *  ({@link hunksWithoutLineNumbers}), and, for a rename, the path it came from. Commit shas, commit
- *  messages, authorship, ordering and timestamps are all excluded on purpose. That is what lets
- *  the digest survive the pushes that change nothing reviewable: a rebase, a force-push of
- *  identical content, and a merge of the base branch.
- *
- *  W1-T9047 — HUNKS, NOT BLOBS. A blob sha moves when main edits a file the PR shares, so every
- *  refreshed head touching sweep.ts read "changed". With no patch, the blob sha stands in and
- *  {@link OwnDiffDigestDetail.blobFallbackPaths} names the file.
- *
- *  SORTED BEFORE HASHING, because the compare endpoint does not promise an order and an unstable
- *  digest would read as "the diff changed" on every second pass — a false negative that costs a
- *  full re-review rather than a wrong reuse, but a defect either way.
- *
- *  A FILE WITH NO `filename` IS NOT SKIPPED. It contributes a fixed marker instead, so a malformed
- *  entry can never make two genuinely different diffs digest identically; the digest degrades
- *  toward "different", never toward "same". The whole safety argument for reuse rests on that
- *  asymmetry: a false "changed" wastes a review, a false "unchanged" ships an unjudged diff. */
+/** Hash the PR's own paths, statuses, normalised hunks and rename origins, sorted before hashing.
+ *  Exclude commit metadata and ordering so equivalent rebases/refreshes keep the digest.
+ *  W1-T9047: prefer hunks; main's edits move shared-file blobs. Missing patches use blob SHAs
+ *  and record blobFallbackPaths. Missing filenames contribute a marker, never disappear:
+ *  false "changed" wastes review; false "unchanged" could ship an unjudged diff. */
 export function ownDiffDigestDetail(files: readonly RestCompareFile[] | undefined): OwnDiffDigestDetail {
   const blobFallbackPaths: string[] = [];
   const rows = (files ?? []).map((f) => {
@@ -2231,9 +2137,7 @@ export function ownDiffDigestDetail(files: readonly RestCompareFile[] | undefine
     return [name, f.status ?? "\u0000unknown", content, f.previous_filename ?? ""].join("\u0000");
   });
   rows.sort();
-  // The COUNT is hashed alongside the rows so a list that folds to the same concatenation by a
-  // different partition cannot collide — belt and braces on a value whose whole job is to be
-  // trusted when it matches.
+  // Include row count so differently partitioned lists cannot share the same concatenation digest.
   const digest = createHash("sha256").update(`${rows.length}\n${rows.join("\n")}`).digest("hex");
   return { digest, blobFallbackPaths: blobFallbackPaths.sort() };
 }
@@ -2288,12 +2192,8 @@ function* reviewReuseReachFactsSteps(
   };
 }
 
-/** One PR's {@link ReviewReuseFacts}, over REST. Throws on a failed or malformed read — the same
- *  no-retry discipline as {@link fetchMergeConflictEvidence}, whose compare call this mirrors
- *  exactly (`compare/<targetBranch>...<headSha>`, one request).
- *
- *  A COMPARE CARRYING NO `merge_base_commit.sha` THROWS rather than returning a digest alone: the
- *  reuse decision needs both, and the half-answer would otherwise be recorded as authoritative. */
+/** Fetch ReviewReuseFacts with one compare/<targetBranch>...<headSha> read, without retries.
+ *  Failures, including missing merge_base_commit.sha, throw; a digest alone cannot authorize reuse. */
 export function fetchReviewReuseFacts(
   owner: string,
   repo: string,
@@ -2317,21 +2217,15 @@ function* reviewReuseFactsSteps(
   return { ownDiffDigest: ownDiffDigestFromCompareFiles(compare.files), mergeBaseSha };
 }
 
-/** {@link fetchReviewReuseFacts}, best-effort — `undefined` on any failure, which every reader
- *  treats as "unreadable, re-review in full" (see `reviewReuseVerdict`'s five-way absence guard).
- *  This is the shape both call sites want: neither the review nor the sweep may fail because a
- *  compare did not answer. */
+/** Best-effort fetchReviewReuseFacts: undefined means unreadable, requiring full review.
+ *  A failed compare must not abort review or sweep; see reviewReuseVerdict's absence guard. */
 export function tryFetchReviewReuseFacts(
   owner: string,
   repo: string,
   targetBranch: string,
   headSha: string,
   fetch: GhApiFetcher,
-  /** Called with the failure's message when the read does not answer. NOT optional decoration:
-   *  this repo has learned repeatedly that an unrecorded failed read is byte-indistinguishable
-   *  from a genuine absence, and here the two have opposite meanings — "GitHub declined" versus
-   *  "this PR has no recorded verdict". Callers that have a logger pass one; the reason is never
-   *  simply swallowed. */
+  /** Report failed reads distinctly from absent verdicts; callers with a logger pass it here. */
   onUnreadable?: (reason: string) => void,
 ): ReviewReuseFacts | undefined {
   try {
@@ -2360,15 +2254,9 @@ export function reviewReuseHydrationOrder<T extends ReviewReuseHydrationTarget>(
     .map(({ pr }) => pr);
 }
 
-/** Current-head {@link ReviewReuseFacts} for the orphaned PRs, mirroring
- *  {@link hydrateSupersessionVerdicts} in shape and failure direction.
- *
- *  SCOPED TO ALREADY-ORPHANED PRs, and that scoping is the whole cost argument. The sweep must not
- *  spend a compare on every open PR every pass — GitHub's SECONDARY limit counts request CADENCE,
- *  not volume, so a per-pass fan-out over the full board is precisely the shape that trips it while
- *  `rate_limit` still reads full. Only a PR whose review was orphaned by a push can reach the reuse
- *  rows at all, so only those are asked about. W1-T9047: by default ALL of them, uncapped: past 25,
- *  a refreshed head got a full LLM review for want of one compare. */
+/** Hydrate current-head facts only for already-orphaned reviews, best-effort like hydrateSupersessionVerdicts.
+ *  Full-board fan-out risks secondary cadence limits even with a full rate_limit budget.
+ *  W1-T9047: default uncapped within this population; the former 25 cap forced needless full reviews. */
 export function hydrateReviewReuseFacts(
   owner: string,
   repo: string,

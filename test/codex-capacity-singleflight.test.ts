@@ -15,9 +15,9 @@ import {
   readCodexCapacity,
   readCodexRuntime,
   readCodexRuntimeOffThread,
-} from "../src/lib/worker-provider.js";
-import type { Config } from "../src/lib/config.js";
-import type { CapabilityLadder } from "../src/lib/mounts.js";
+} from "#src/lib/worker-provider.js";
+import type { Config } from "#src/lib/config.js";
+import type { CapabilityLadder } from "#src/lib/mounts.js";
 
 type RpcRequest = { id?: number; method?: string };
 type FakeIo = { stdout: PassThrough; stderr: PassThrough; proc: EventEmitter };

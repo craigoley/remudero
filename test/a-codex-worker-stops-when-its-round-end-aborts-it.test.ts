@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { spawnCodexWorker } from "../src/lib/worker-provider.js";
+import { spawnCodexWorker } from "#src/lib/worker-provider.js";
 
 // W1-T9245: `end_round` pushes the checkpoint and then aborts the spawn's signal. The Claude path chains that signal into the
 // SDK's abort; these drive the REAL Codex adapter with a fake contained process and a counting teardown, so the only thing

@@ -11,7 +11,7 @@ import {
   disarmOutcomeWithdrawn,
   lostRaceEscalation,
   mergeShaNow,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 // ── W1-T1215: a risk-refused change MERGED UNATTENDED, and everything reported success ──────
 //

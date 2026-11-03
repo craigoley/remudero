@@ -1,0 +1,42 @@
+- id: W1-T11109
+  title: The dispatch-claim and heap-ceiling suites read every fixture time from one clock, so a clock-shifted sweep no longer reads them as time bombs
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two suites' fixtures, one concern: a fixture time must come from the clock the code under test judges it by; production code unchanged
+  origin: operator-session#clock-sweep-15046-2026-11-02
+  plan_refs:
+    - W1-T9432
+    - W1-T9106
+    - W1-T9867
+  files:
+    - test/a-dispatch-claim-holds-only-while-its-holder-renews-it.test.ts
+    - test/the-daemons-heap-ceiling-is-learned-and-applied-at-boot.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The live run-branch checkpoint commit in the W1-T9432 renewal case is dated from the test's own clock
+      proof: "grep: GIT_COMMITTER_DATE: checkpointAt in test/a-dispatch-claim-holds-only-while-its-holder-renews-it.test.ts"
+    - claim: The stale heap-ceiling fixture's valid_until is past on every clock, including the launcher child's real clock
+      proof: "grep: valid_until: 1 } in test/the-daemons-heap-ceiling-is-learned-and-applied-at-boot.test.ts"
+    - claim: The dispatch-claim suite passes at clock shifts of 0, +7 and +400 days
+      proof: "unit test: test/a-dispatch-claim-holds-only-while-its-holder-renews-it.test.ts"
+      kind: guard
+    - claim: The heap-ceiling suite passes at clock shifts of 0, +7 and +400 days
+      proof: "unit test: test/the-daemons-heap-ceiling-is-learned-and-applied-at-boot.test.ts"
+      kind: guard
+  rationale: |
+    OBSERVED 2026-11-02, clock-sweep-report on PR #15046 (run 41452854299, shift +400d), and reproduced on origin/main 4edd4e937 with FK_SHIFT_DAYS=7 and a private TMPDIR:
+    - "W1-T9432: a renewed claim or a moving run branch keeps the claim": the run-branch case reads reclaim, not alive. The fixture commits its checkpoint with git's real time (readRunBranchActivity reads %ct), while mintedAtMs and nowMs come from the shifted Date.now(), so the branch reads older than the mint.
+    - "W1-T9106: the launcher applies the learned ceiling to the daemon verb only": "a stale file keeps the inherited ceiling" got the learned ceiling. The fixture writes valid_until: Date.now() - 1 on the shifted clock, and bin/rmd's launcher child judges Date.now() < valid_until on the real clock.
+    - Production reads both sides from real time in each case (a git committer time against the wall clock; a daemon-written file against the launcher's wall clock), so neither is a production time bomb. Unshifted, both suites pass.
+    - #15046 surfaced them by touching both files; clock-sweep runs over the suites a diff touches.
+  design: |
+    Dispatch claim: commit the checkpoint with GIT_COMMITTER_DATE and GIT_AUTHOR_DATE set to checkpointAt, an ISO time taken from the test's Date.now(). Heap ceiling: the stale fixture writes valid_until: 1, past on any clock. No assertion changes.
+  note: |
+    reservation hand-off: run-unfiled-1793635051706 -> run-unfiled-1793635051706
+    Reserved with rmd next-task-id from the operator checkout. The operator session hand-builds it on run-W1-T11109-<epochMs>.

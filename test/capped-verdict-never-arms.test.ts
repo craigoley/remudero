@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { armAutoMerge, armAndLogOutcome, armAutoMergeAtOpen } from "../src/run-task.js";
-import type { ArmDeps } from "../src/run-task.js";
+import { armAutoMerge, armAndLogOutcome, armAutoMergeAtOpen } from "#src/run-task.js";
+import type { ArmDeps } from "#src/run-task.js";
 
 /**
  * test/capped-verdict-never-arms.test.ts — the CAPPED-arms-anyway gap.

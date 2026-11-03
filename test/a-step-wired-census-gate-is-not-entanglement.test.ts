@@ -22,7 +22,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { detectInstrumentEntanglement } from "../src/lib/review.js";
+import { detectInstrumentEntanglement } from "#src/lib/review.js";
 
 const CI = ".github/workflows/ci.yml";
 const PARITY = "src/lib/ci-parity.ts";

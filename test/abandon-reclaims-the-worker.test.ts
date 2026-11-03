@@ -47,13 +47,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS } from "../src/lib/policy.js";
-import { reclaimAbandonedWorker, runFixRung, type FixRungOutcome } from "./helpers/run-task-test.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS } from "#src/lib/policy.js";
+import { reclaimAbandonedWorker, runFixRung, type FixRungOutcome } from "#test/helpers/run-task-test.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 function fakeWorkerResult(over: Partial<WorkerResult> = {}): WorkerResult {
   return {

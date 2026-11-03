@@ -3,6 +3,8 @@
   repo: remudero
   depends_on:
     - W1-T10956
+    - W1-T11117
+    - W1-T11118
   type: implement
   verify: auto
   principles:
@@ -19,9 +21,23 @@
     - src/lib/model-canary-runner.ts
     - src/lib/model-canary-command.ts
     - src/lib/model-canary-ledger.ts
+    - src/lib/model-canary-suite.ts
+    - src/lib/model-canary-schedule.ts
+    - src/lib/model-canary-metrics.ts
+    - src/lib/model-canary-config-census.ts
+    - src/lib/model-canary-owner.ts
+    - src/lib/model-canary-private-corpus.ts
+    - src/lib/model-canary-trace-grader.ts
     - test/model-canary-command.test.ts
+    - test/model-canary-suite.test.ts
+    - test/model-canary-schedule.test.ts
+    - test/model-canary-metrics.test.ts
+    - test/model-canary-owner.test.ts
+    - test/routing/model-canary-private-corpus.test.ts
+    - test/routing/model-canary-trace-grader.test.ts
     - test/routing/model-canary-coding-isolation.test.ts
     - test/routing/model-canary-native-session.test.ts
+    - test/routing/model-canary-config-inventory.test.ts
   status: queued
   priority: 2
   attempts: 0
@@ -42,7 +58,18 @@
     unless the exact existing contract authorizes it. Maintain separate author/refusal/partial,
     correctness, invocation, usage/cost and served-identity evidence. Keep execution unarmed until
     an owner qualifies and explicitly releases its existing controls; no new schedule or public
-    publication is authorized."
+    publication is authorized. Make coding a first-class versioned case in the existing suite,
+    runner and schedule contracts without casts or misleading review/tool family labels. Retain
+    the native 128-slot and serial-owner bounds. Join actual coding resource observations through
+    a separately scoped versioned metrics receipt; configured caps are not measured peaks and
+    unsupported isolation or missing resource evidence remains refused or unavailable. Extend the
+    completed census case validator with the native coding contract so first-class coding cases
+    survive full matrix preparation; do not bypass validation or relabel their family. Integrate
+    the first-class coding case into the validated private corpus and app-owned trace/scorer
+    contracts after W1-T11118. Preserve distinct canary-attempt, worker-spawn and host-execution
+    identities with an explicit native join. Consume each coding attempt and its source digest
+    durably through the existing slot owner before host execution; a duplicate or lost reply
+    remains owned until native cancellation and descendant closure are proved."
   note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
     this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
     grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
@@ -52,7 +79,18 @@
     Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
     coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
     requirements. Filing neither supplies a missing qualification route nor resets or transfers any
-    old head-bound allowance.
+    old head-bound allowance. The operator's 2026-11-02 implementation approval includes the
+    suite/schedule/metrics contract integration needed for honest first-class coding cases.
+    Normal trusted exact-head SOURCE CI may supply the full isolated Linux suite and owning-SF
+    coverage evidence when its real receipts are complete; this is not an additional manual
+    Azure full-suite gate. Identify a specific missing proof before adding a targeted run.
+    Keep runtime-version provenance explicit; a Node24 result is not a Node22 test result.
+    The 2026-11-02 integration reconciliation adds the census prerequisite and validator/test
+    paths required by the native coding case contract; this grants no execution or release.
+    The 2026-11-03 source reconciliation adds W1-T11118 as a real prerequisite and declares its
+    private-corpus, trace and owner integration paths. The native selector must not start coding
+    integration before those source contracts merge. This orders existing work; it creates no
+    additional full Linux qualification, allowance, schedule, host executor or release authority.
   acceptance:
     - claim: the existing private coding executor contains filesystem and credential effects and closes
         its real descendants
@@ -69,6 +107,8 @@
     - claim: The real default production path invokes codingLedgerSave; an unused export, declaration or
         re-export is insufficient.
       proof: "grep: codingLedgerSave( in src/lib/model-canary-command.ts"
+    - claim: First-class coding cases retain their identity through full census validation
+      proof: 'unit test: coding cases retain first class identity through matrix census validation'
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

@@ -1,0 +1,33 @@
+- id: W1-T11140
+  title: "Bench the 10-19 memory flags against their absence on a build daemon's own workload, before any change (operator ruling R3) — --max-semi-space-size=16 and GLIBC_TUNABLES arena_max=2 / trim_threshold=128 KiB (#12982) were benched offline on a serve-shaped process and then shipped to every daemon; core's OOM kills then climbed (2, 5, 2, 12, 19, 13 a day over 10-21..10-26), and nobody has measured the flags on core's tsc-and-ledger workload"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: a measurement script and its comparison; it changes no deploy file
+  origin: "operator ruling R3, 2026-10-27: bench the 10-19 GC/malloc flags first; the operator approves any change"
+  plan_refs:
+    - W1-T9404
+    - W1-T9106
+  files:
+    - scripts/the-memory-flags-are-benched-on-a-build-daemon-workload.mts
+    - test/memory/the-memory-flags-are-benched-on-a-build-daemon-workload.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The bench runs core's workload shape (a tsc --noEmit of the repo, a ledger-union read and a burst of worker spawns) under four interleaved arms (both flags, the node flag only, the glibc tuning only, neither) for a set number of rounds, and reports RSS peak and p50, wall time and GC pause per arm with each arm's spread
+      proof: "unit test: test/memory/the-memory-flags-are-benched-on-a-build-daemon-workload.test.ts"
+    - claim: Its verdict per flag is keep, drop or no measured effect (an arm difference inside the arms' own spread is no effect), written as a proposal for the operator; the script writes no deploy, policy or registry file
+      proof: "grep: W1-T11140 criterion 2 in test/memory/the-memory-flags-are-benched-on-a-build-daemon-workload.test.ts"
+  rationale: |
+    OPERATOR RULING R3 (2026-10-27): bench the 10-19 GC/malloc flags (#12982: `--max-semi-space-size=16`, `MALLOC_ARENA_MAX=2`, `MALLOC_TRIM_THRESHOLD_=128K`) first. The operator approves any change.
+    MEASURED (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02): core's OOM and abrupt deaths per day over 10-20 → 10-26 were 0, 2, 5, 2, 12, 19, 13. OOM victims were MainThread (anon-rss up to 5.4 GB) and tsc (2–3 GB).
+    READ at origin/main d04469fa2: deploy/resource-policy.sh:60-74 records the 10-19 evidence. It was an offline bench of a serve-shaped main plus four workers: the semi-space flag cut busy RSS from 1.41–1.65 GB to 1.02–1.12 GB, and the glibc tuning cut memory held after workers exit by 20–25%. #12982 (merged 2026-10-20) then applied both to every daemon and every node child. The tuning ships as `GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072`, the tunables form of MALLOC_ARENA_MAX and MALLOC_TRIM_THRESHOLD_. No bench has run on a build daemon's workload, which is dominated by tsc and ledger-union reads.
+    NOT COVERED: W1-T9404 (queued) is an allocator canary that sets MALLOC_ARENA_MAX from a registry entry; GLIBC_TUNABLES now carries arena_max to every daemon, so its premise may be stale, and it is a change, not a bench. W1-T9106 (merged) applies a learned heap ceiling.
+  design: |
+    A script in scripts/ that takes --rounds and --out, runs each round's four arms in a rotated order (so drift in the host load hits every arm alike), and samples each child's RSS from /proc/<pid>/status and its GC pauses from --trace-gc-nvp or perf_hooks. It writes one JSONL row per run and one summary with medians and interquartile ranges per arm. The verdict compares each arm pair's medians against their spreads; there is no fixed percentage. It proposes; it never edits deploy/resource-policy.sh. It runs in a builder's sandbox for the unit test (tiny workload) and on the fleet host only when the operator asks.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 9 (p2): measurement only, per R3. Running it on the live host is an operator action, since agents keep the host read-only.

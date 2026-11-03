@@ -1,0 +1,26 @@
+- id: W1-T11135
+  title: "Publish preflight-author with the ordinary-caller binding and guarded slot release"
+  repo: remudero
+  depends_on:
+    - W1-T10961
+  type: implement
+  verify: auto
+  risk: medium
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=285cef0b9d3731aa
+  # backlog gardener: placed=2026-11-03T04:16:36.005Z
+  attempts: 0
+  files:
+    - scripts/preflight-author.mjs
+  acceptance:
+    - claim: "The author preflight is present and its ordinary-caller binding and guarded slot release are verified together."
+      proof: "unit test: preflight-author ordinary caller binding and guarded slot release"
+  origin: "followup:DAEMON-1793426514270:2026-10-31T08:34:49.853Z:0"
+  rationale: >-
+    From the 2026-10-31 follow-up on https://github.com/craigoley/remudero/pull/15368, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: Admit `scripts/preflight-author.mjs` so the saved ordinary-caller
+    binding and guarded slot release can be published together. — from W1-T10961 (run
+    DAEMON-1793426514270, https://github.com/craigoley/remudero/pull/15368)

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { test } from "node:test";
 // @ts-expect-error The exercised script is a plain .mjs without a declaration file.
-import * as local from "../scripts/diff-coverage-local.mjs";
+import * as local from "#scripts/diff-coverage-local.mjs";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 

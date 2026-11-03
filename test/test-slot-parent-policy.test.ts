@@ -4,7 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { acquireTestSlot, type TestSlotOptions } from "../src/lib/test-slot.js";
+import { acquireTestSlot, type TestSlotOptions } from "#src/lib/test-slot.js";
 
 function fixture(run: (root: string, options: TestSlotOptions) => void) {
   const root = mkdtempSync(join(realpathSync(tmpdir()), "rmd-private-parent-policy-"));

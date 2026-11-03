@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ciGateState, waitForCiGreen } from "../src/run-task.js";
+import { ciGateState, waitForCiGreen } from "#src/run-task.js";
 
 // MEASURED 2026-09-30: 7 build runs ended "blocked_ci: ci timeout before review; pending checks: none (0 total)"
 // although CI had started within seconds with dozens of checks. The wait reads only the REQUIRED contexts

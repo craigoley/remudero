@@ -7,10 +7,10 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
-import type { AffectedSelection } from "../src/lib/affected-suites.js";
-import { probeProofSandbox, proofSandboxArgv, setProofSandboxForTests } from "../src/lib/review.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { coveragePrecheck, type CoveragePrecheck, type CoveragePrecheckPorts } from "../src/run-task.js";
+import type { AffectedSelection } from "#src/lib/affected-suites.js";
+import { probeProofSandbox, proofSandboxArgv, setProofSandboxForTests } from "#src/lib/review.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { coveragePrecheck, type CoveragePrecheck, type CoveragePrecheckPorts } from "#src/run-task.js";
 
 const SUITE = "test/feature.test.ts";
 const CREDENTIALS = { GH_TOKEN: "fixture-token", GH_APP_ID: "123", GITHUB_TOKEN: "fixture-actions-token" };

@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 // @ts-ignore executable mjs has no declaration file.
-import * as precheck from "../scripts/census-precheck.mjs";
+import * as precheck from "#scripts/census-precheck.mjs";
 
 const PROOF = "test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts";
 // The mandatory skill census joins every nonempty diff, so the base carries a healthy stand-in; the injected runs

@@ -6,14 +6,24 @@ import { promisify } from "node:util";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import type { CashReservation } from "#src/lib/cash-accounting.js";
 import type { Config } from "#src/lib/config.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
-import { OPENWEIGHT_ALLOWANCE_FILENAME, openWeightUsageUsd, openWeightReservationUsd, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { OPENWEIGHT_ALLOWANCE_FILENAME, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { createCapabilityGrant, InMemoryCapabilityGrantStore } from "#src/lib/capability-grant.js";
 import { spawnWorker, WorkerAbandonedError } from "#src/lib/worker.js";
 import { pathToFileURL } from "node:url";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+
+function assertHeld(row: CashReservation) {
+  assert.ok(row.reservedUsd > 0);
+  assert.equal(row.settledUsd, null, "no usage receipt can release the output ceiling");
+  assert.equal(row.accountingState, "held-unknown");
+  assert.equal(row.heldUsd, row.reservedUsd);
+  assert.equal(row.usageEstimateUsd, null);
+  assert.equal(row.billedUsd, null);
+}
 
 const requestId = "3a2c1a77-453a-4cad-9165-a6bb1cb26400";
 const secret = "test-only-private-key-do-not-record";
@@ -45,15 +55,14 @@ test("cash HTTP refusals retain allowlisted rate evidence through every real ada
       assert.equal(calls, 1, "observing a refusal adds no paid retry");
       for (const literal of ['"retry_after_ms":1500', '"remaining_requests":0', '"remaining_tokens":42', `"request_id":"${requestId}"`]) {
         assert.ok(result.stderr.includes(literal), result.stderr);
-        if (!model.startsWith("claude-"))
-          assert.ok(allowance.includes(literal.replaceAll('"', '\\"')), "existing settlement reason retains the same evidence");
+        assert.ok(allowance.includes(literal.replaceAll('"', '\\"')), "held reason retains the same evidence");
       }
-      const [reservation] = Object.values(JSON.parse(allowance).reservations) as Array<{ reservedUsd: number; settledUsd: number | null }>;
+      const [reservation] = Object.values(JSON.parse(allowance).reservations) as CashReservation[];
       assert.ok(reservation);
-      if (model.startsWith("claude-")) {
-        assert.equal(reservation.settledUsd, null, "Foundry Messages retains its conservative unsettled reservation");
-        assert.equal(result.budgetSettledUsd, reservation.reservedUsd);
-      } else assert.notEqual(reservation.settledUsd, null, "the existing Chat/Responses settlement path still runs");
+      assertHeld(reservation);
+      assert.equal(result.budgetSettledUsd, reservation.reservedUsd);
+      assert.equal(result.budgetHeldUsd, reservation.reservedUsd);
+      assert.equal(result.usageEstimateUsd, null);
       for (const hidden of [secret, "private response body", "private prompt", "authorization", "api-key", "set-cookie"])
         assert.equal(result.stderr.includes(hidden), false);
     });
@@ -136,9 +145,7 @@ function cashFixture(t: TestContext) {
   const args = { cwd: dir, workerHome: dir, prompt: "bounded fixture", tools: ["Read"], maxTurns: 4,
     env: { RMD_OPENWEIGHT_API_KEY: secret, RMD_FOUNDRY_CLAUDE_API_KEY: secret,
       RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.test/anthropic" } };
-  const reservations = () => Object.values(JSON.parse(readFileSync(join(dir, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "utf8")).reservations) as Array<{
-    reservedUsd: number; settledUsd: number | null; settledReason?: string;
-  }>;
+  const reservations = () => Object.values(JSON.parse(readFileSync(join(dir, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "utf8")).reservations) as CashReservation[];
   return { dir, config, args, reservations };
 }
 
@@ -162,10 +169,9 @@ test("cash positive429 continues each real protocol with identical payload and f
     assert.equal(f.reservations().length, 3, "every POST has its own reservation identity");
     assert.equal(captured.length, 3, "third reservation commits before transport");
     const failed = f.reservations()[1]!;
-    const failedBytes = Buffer.byteLength(bodies[1]!, "utf8");
-    if (model.startsWith("claude-")) assert.equal(failed.settledUsd, null);
-    else assert.equal(failed.settledUsd, model === "gpt-6.1-sol"
-      ? openWeightReservationUsd(model, failedBytes) : openWeightUsageUsd(model, failedBytes, 0));
+    assertHeld(failed);
+    assert.equal(result.budgetHeldUsd, failed.reservedUsd);
+    assert.equal(result.usageEstimateUsd, null);
     const allRows = f.reservations();
     assert.equal(result.budgetReservedUsd, allRows.reduce((sum, row) => sum + row.reservedUsd, 0));
     assert.equal(result.budgetSettledUsd, allRows.reduce((sum, row) => sum + (row.settledUsd ?? row.reservedUsd), 0),
@@ -278,8 +284,8 @@ test("cash429 revalidates revoked grants and fresh allowance without consuming o
     assert.equal(store.hasSeenNonce(grant.id, request.nonce), false);
     assert.equal(f.reservations().length, 1);
     const [charged] = f.reservations();
-    if (model.startsWith("claude-")) assert.equal(charged!.settledUsd, null);
-    else assert.ok(charged!.settledUsd! > 0);
+    assertHeld(charged!);
+    assert.equal(result.budgetHeldUsd, charged!.reservedUsd);
     if (refusal === "grant") assert.match(result.stderr, /revoked/);
     else assert.equal(result.budgetRefused, true);
   });
@@ -322,8 +328,8 @@ test("cash synchronous reservation crossing request deadline stays charged and n
     assert.match(result.stderr, /timed out|timeout/i);
     assert.equal(f.reservations().length, 1, "committed reservation is never silently refunded");
     const [row] = f.reservations();
-    if (model.startsWith("claude-")) assert.equal(row!.settledUsd, null);
-    else assert.ok(row!.settledUsd! > 0);
+    assertHeld(row!);
+    assert.equal(result.budgetHeldUsd, row!.reservedUsd);
   });
 });
 

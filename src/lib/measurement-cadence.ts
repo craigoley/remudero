@@ -57,7 +57,7 @@ import {
   type WipeTestRunResult,
 } from "./wipe-test.js";
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
-import { loadPlan, loadPlanFromYaml, type Task, type TaskRisk } from "./plan.js";
+import { loadPlan, loadPlanFromYaml, mergePlanBlobsQuarantiningDuplicates, PlanBlobCache, type Plan, type Task, type TaskRisk } from "./plan.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
@@ -81,8 +81,8 @@ import {
   type InjectCoverageImprovementResult,
 } from "./coverage-improvement.js";
 import { handRunCensus, type HandRunCensusCadenceOpts, type HandRunCensusCadenceResult } from "./hand-run-census.js";
-import { lintTask } from "./task-linter.js";
-import { machineShardHeaderLines } from "./machine-filing.js";
+import { lintPlan, lintTask, type LintResult } from "./task-linter.js";
+import { machineShardFilingRefusal, machineShardHeaderLines } from "./machine-filing.js";
 import { mechanicalRulingRow, type MechanicalDecision } from "./mechanical-rulings.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import {
@@ -1495,10 +1495,15 @@ export interface PlanReconcileCadenceResult {
   drift: number;
   /** WHICH ones — a count with no names cannot be checked, and this report exists to be checked. */
   taskIds: string[];
-  /** `clear` = no drift; `reported` = drift below the threshold, nothing landed; `landed` = the
-   *  writes were handed to the caller's landing seam. */
+  /** `clear` = no drift; `reported` = below the threshold or every write held; `landed` = landable writes went to the landing seam. */
   status: "clear" | "reported" | "landed";
   threshold: number;
+  held?: PlanReconcileHeld[];
+}
+
+export interface PlanReconcileHeld {
+  taskId: string;
+  rule: string;
 }
 
 /** {@link planReconcileCadence}'s input. `land` is the ONLY way this function can affect the
@@ -1512,7 +1517,7 @@ export interface PlanReconcileCadenceOpts {
   threshold: number;
   /** Caller-owned landing bridge; absent = report only. Never dirty the daemon checkout:
    *  `checkCliFreshness` would refuse it and break self-sync. */
-  land?: (writes: ReadonlyArray<{ taskId: string; text: string }>) => void;
+  land?: (writes: ReadonlyArray<{ taskId: string; text: string }>) => void | { held: PlanReconcileHeld[]; landed: number };
 }
 
 /** Schedule `reconcilePlan` unchanged: report every cycle; land only at or above the threshold. */
@@ -1527,8 +1532,10 @@ export function planReconcileCadence(opts: PlanReconcileCadenceOpts): PlanReconc
   if (taskIds.length < opts.threshold || opts.land === undefined) {
     return { drift: taskIds.length, taskIds, status: "reported", threshold: opts.threshold };
   }
-  opts.land(writes);
-  return { drift: taskIds.length, taskIds, status: "landed", threshold: opts.threshold };
+  const outcome = opts.land(writes);
+  const held = outcome?.held ?? [];
+  const status = outcome !== undefined && outcome.landed === 0 ? "reported" : "landed";
+  return { drift: taskIds.length, taskIds, status, threshold: opts.threshold, ...(held.length > 0 ? { held } : {}) };
 }
 
 export interface PlanReconcileShardRecord {
@@ -1543,6 +1550,43 @@ export interface PlanReconcileCadenceInputOptions {
   creditedMergedIds: () => ReadonlySet<string>;
   land: (inputs: readonly { relPath: string; content: string }[]) => void;
   threshold?: number;
+  lint?: PlanReconcileLint;
+}
+
+type PlanReconcileWrite = { taskId: string; text: string };
+export type PlanReconcileHold = (checkoutRoot: string, records: readonly PlanReconcileShardRecord[], writes: readonly PlanReconcileWrite[]) => { landable: PlanReconcileWrite[]; held: PlanReconcileHeld[] };
+export type PlanReconcileLint = (plan: Plan, only: ReadonlySet<string>, checkoutRoot: string) => Map<string, LintResult>;
+
+const lintAsTheShardCensus: PlanReconcileLint = (plan, only, root) => lintPlan(plan, () => ({ moduleExists: (rel) => existsSync(join(root, rel)) }), only);
+
+/** W1-T11175: hold each flip whose task newly gains a blocking lint rule, so one bad flip cannot refuse the rest. */
+export function planReconcileLintHold(lint: PlanReconcileLint = lintAsTheShardCensus): PlanReconcileHold {
+  return (checkoutRoot, records, writes) => {
+    const ids = new Set(writes.map((w) => w.taskId));
+    const replaced = new Map(writes.map((w) => [w.taskId, w.text]));
+    const shardDir = records.length > 0 ? dirname(records[0].path) : "";
+    const monolith = shardDir !== "" ? join(dirname(shardDir), "tasks.yaml") : "";
+    const head = { label: monolith, text: monolith !== "" && existsSync(monolith) ? readFileSync(monolith, "utf8") : "[]\n" };
+    const byPath = new Map(records.map((r) => [r.path, r]));
+    const onDisk = shardDir !== "" && existsSync(shardDir) ? readdirSync(shardDir).filter((f) => /\.ya?ml$/.test(f)).sort().map((f) => join(shardDir, f)) : [];
+    const shards = [...new Set([...onDisk, ...byPath.keys()])].map((path) => ({ path, record: byPath.get(path), text: byPath.get(path)?.text ?? readFileSync(path, "utf8") }));
+    const cache = new PlanBlobCache();
+    const blocking = (flipped: boolean): Map<string, LintResult> => {
+      const blobs = shards.map((s) => ({ label: s.path, text: (flipped && s.record ? replaced.get(s.record.taskId) : undefined) ?? s.text }));
+      return lint(mergePlanBlobsQuarantiningDuplicates([head, ...blobs], cache).plan, ids, checkoutRoot);
+    };
+    const rulesOf = (results: Map<string, LintResult>, id: string) => new Set((results.get(id)?.violations ?? []).filter((v) => v.severity === "block").map((v) => v.check));
+    const before = blocking(false);
+    const after = blocking(true);
+    const held: PlanReconcileHeld[] = [];
+    const landable = writes.filter((w) => {
+      const was = rulesOf(before, w.taskId);
+      const gained = [...rulesOf(after, w.taskId)].filter((rule) => !was.has(rule));
+      for (const rule of gained) held.push({ taskId: w.taskId, rule });
+      return gained.length === 0;
+    });
+    return { landable, held };
+  };
 }
 
 /** W1-T3970: adapt the production shard/credit readers to the pure cadence reducer. The caller
@@ -1557,12 +1601,14 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
     isCreditedMerged: (taskId) => credited.has(taskId),
     threshold: deps.threshold ?? 10,
     land: (writes) => {
-      const inputs = writes.map((write) => {
+      const { landable, held } = planReconcileLintHold(deps.lint)(deps.checkoutRoot, records, writes);
+      const inputs = landable.map((write) => {
         const path = byId.get(write.taskId);
         if (path === undefined) throw new Error(`plan reconciliation could not resolve shard ${write.taskId}`);
         return { relPath: relative(deps.checkoutRoot, path), content: write.text };
       });
-      deps.land(inputs);
+      if (inputs.length > 0) deps.land(inputs);
+      return { held, landed: inputs.length };
     },
   };
 }
@@ -3350,9 +3396,10 @@ export function ciLearningRecordVerdict(contents: string, label: string): { ok: 
   try {
     const task = loadPlanFromYaml(contents, label).tasks[0];
     const lint = lintTask(task);
-    return lint.ok
-      ? { ok: true, reason: "" }
-      : { ok: false, reason: lint.violations.map((v) => `${v.severity}:${v.check}`).join(", ") };
+    if (!lint.ok) return { ok: false, reason: lint.violations.map((v) => `${v.severity}:${v.check}`).join(", ") };
+    // A lesson creates its own path; admission must not borrow files from the daemon's tree.
+    const refused = machineShardFilingRefusal(contents, label, { pathExists: () => false });
+    return refused === undefined ? { ok: true, reason: "" } : { ok: false, reason: refused };
   } catch (e) {
     return { ok: false, reason: `unparseable: ${(e as Error).message}` };
   }

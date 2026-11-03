@@ -8,8 +8,8 @@ import {
   acceptanceAuthorTimeCheck,
   extractTaskTrailerId,
   resolvePlanCriteriaAtHead,
-} from "../src/lib/review.js";
-import { reviewTaskIdFromBody } from "../src/run-task.js";
+} from "#src/lib/review.js";
+import { reviewTaskIdFromBody } from "#src/run-task.js";
 
 // `scripts/**` sits outside tsconfig's `include` (see tsconfig.json), so a static specifier is a
 // TS7016 — reached via dynamic import instead, same as test/a-worker-branch-must-be-shaped-for-

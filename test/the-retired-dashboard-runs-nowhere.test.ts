@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CI_PARITY_TABLE, parseCiJobNames } from "../src/lib/ci-parity.js";
+import { CI_PARITY_TABLE, parseCiJobNames } from "#src/lib/ci-parity.js";
 
 const ROOT = join(import.meta.dirname, "..");
 const read = (path: string): string => readFileSync(join(ROOT, path), "utf8");

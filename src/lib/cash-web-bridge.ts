@@ -162,11 +162,12 @@ function readUsage(payload: unknown): { usage: CashWebSearchUsage; usageRead: bo
   const raw = (payload as ResponsesPayload | null)?.usage;
   const input = raw?.input_tokens;
   const output = raw?.output_tokens;
-  const usageRead = typeof input === "number" || typeof output === "number";
+  const usageRead = typeof input === "number" && Number.isSafeInteger(input) && input >= 0 &&
+    typeof output === "number" && Number.isSafeInteger(output) && output >= 0;
   return {
     usage: {
-      promptTokens: typeof input === "number" ? input : 0,
-      completionTokens: typeof output === "number" ? output : 0,
+      promptTokens: usageRead ? input as number : 0,
+      completionTokens: usageRead ? output as number : 0,
     },
     usageRead,
   };

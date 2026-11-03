@@ -4,9 +4,9 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {test} from 'node:test';
 // @ts-expect-error — native capture is plain ESM outside tsconfig source roots.
-import {captureStepSync} from '../scripts/lib/author-step-capture.mjs';
+import {captureStepSync} from '#scripts/lib/author-step-capture.mjs';
 // @ts-expect-error — pure accounting ESM outside tsconfig source roots.
-import {accountAuthorPhases} from '../scripts/lib/author-phase-accounting.mjs';
+import {accountAuthorPhases} from '#scripts/lib/author-phase-accounting.mjs';
 test('whole author gate accounting prices census and static work as well as tests and refuses partial training',()=>{
  const receipt={verdict:'passed',durationMs:1500,suites:['test/author-preflight.test.ts'],steps:[{name:'census-precheck',ok:true,durationMs:100},
   {name:'static-preflight',ok:true,durationMs:900},{name:'affected-tests',ok:true,durationMs:400,

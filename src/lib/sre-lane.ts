@@ -14,6 +14,7 @@ import { evaluateForeignPauseDetectors, FOREIGN_PAUSE_DETECTOR_ID, foreignPauseD
 import { evaluateIdleCapacityDetectors, idleCapacityDetector } from "./idle-capacity-detector.js";
 import { evaluateStrandedTaskDetectors, STRANDED_TASK_DETECTOR_ID, strandedTaskDetector } from "./stranded-task-detector.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
+import { observeSelectedRegistrySync, selectedRegistryObserverInContext } from "./selected-registry-consumers.js";
 import {
   type IncidentEvidence,
   type RunbookPassResult,
@@ -559,6 +560,19 @@ export function sreLaneStartRow(input: SreLaneStartInput): { step: "sre_lane.sta
  * {@link daemonSreLaneInput}) read it from the container's own environment.
  */
 export function resolveSreLaneInstance(input: {
+  stateRoot: string;
+  registryPath: string;
+  readText?: (path: string) => string;
+  env?: { RMD_INSTANCE_NAME?: string };
+}): SreLaneInstance {
+  const result = resolveLegacySreLaneInstance(input);
+  return observeSelectedRegistrySync(selectedRegistryObserverInContext(), "sre-target", {
+    instanceName: result.resolved ? result.name : undefined, stateRoot: input.stateRoot,
+    namespace: result.resolvedBy === "env" ? "container" : "host",
+  }, () => result);
+}
+
+function resolveLegacySreLaneInstance(input: {
   stateRoot: string;
   registryPath: string;
   readText?: (path: string) => string;
