@@ -1,27 +1,20 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { appendFileSync, renameSync, writeFileSync } from "node:fs";
 import { test, type TestContext } from "node:test";
 import { readLedgerLines } from "#src/lib/status.js";
 import { observeLightPassReviewEligibility, readLiveLedgerRows, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 // W1-T11260: 619 light passes in 6 h each parsed the whole 15 MB live ledger at least twice on the daemon's
 // thread (host daemon.loop_stall_profile rows, 2026-11-03). The light pass now reads it through one tail.
 
 const row = (n: number) => JSON.stringify({ ts: new Date(Date.UTC(2026, 10, 3, 12, 0, n)).toISOString(), step: "fixture.row", n });
 
-function ledger(t: TestContext, lines: number): string {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}light-pass-tail-`));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const path = join(dir, "ledger.ndjson");
-  writeFileSync(path, Array.from({ length: lines }, (_, n) => `${row(n)}\n`).join(""));
-  return path;
-}
+const fixturePath = (t: TestContext, lines: number): string =>
+  writeLedger(Array.from({ length: lines }, (_, n) => JSON.parse(row(n)) as Record<string, unknown>), { scope: t }).path;
 
 /** Counts JSON.parse calls whose input is one of the fixture's ledger lines. */
-function countLedgerParses(t: TestContext): { readonly count: number } {
+function countFixtureRowParses(t: TestContext): { readonly count: number } {
   const original = JSON.parse;
   const seen = { count: 0 };
   JSON.parse = ((text: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
@@ -39,7 +32,7 @@ const pr: OpenPrView = {
 };
 
 test("light pass ledger tail: the default reader returns readLedgerLines' rows, after appends and a rotation", (t) => {
-  const path = ledger(t, 5);
+  const path = fixturePath(t, 5);
   assert.deepEqual(readLiveLedgerRows(path), [...readLedgerLines(path)]);
   appendFileSync(path, `${row(5)}\n${row(6)}\n`);
   assert.deepEqual(readLiveLedgerRows(path), [...readLedgerLines(path)]);
@@ -50,15 +43,15 @@ test("light pass ledger tail: the default reader returns readLedgerLines' rows, 
 });
 
 test("light pass ledger tail: each call returns its own array, so a caller's receipt never enters the next read", (t) => {
-  const path = ledger(t, 2);
+  const path = fixturePath(t, 2);
   readLiveLedgerRows(path).push({ ts: new Date().toISOString(), step: "caller.receipt" });
   assert.deepEqual(readLiveLedgerRows(path), [...readLedgerLines(path)]);
 });
 
 test("light pass ledger tail: a second light pass over a file with no new bytes parses no line", (t) => {
-  const path = ledger(t, 40);
+  const path = fixturePath(t, 40);
   const deps = { ledgerPath: path, runId: "T11260", log: () => {} } as unknown as SweepDeps;
-  const parses = countLedgerParses(t);
+  const parses = countFixtureRowParses(t);
   const first = observeLightPassReviewEligibility([pr], deps);
   assert.equal(first.length, 40, "positive control: the first pass saw every row");
   assert.ok(parses.count >= 40, `positive control: the first pass parsed the file (saw ${parses.count})`);
