@@ -388,7 +388,10 @@ test("W1-T9114: a terminal review child settles once", async () => {
           calls++;
           assert.equal(pr, "7");
           assert.deepEqual(rest, ["--repo", "acme/remudero"]);
-          assert.deepEqual(deps, { executionMode: "semantic", planOnlyFiling: true, reviewAttemptId: "attempt-7" });
+          // W1-T11151: the child's phase writer is forwarded, so the review's posted phase reaches status.json.
+          const { onPhase, ...flags } = deps;
+          assert.equal(typeof onPhase, "function", "the child's onPhase reaches the review command");
+          assert.deepEqual(flags, { executionMode: "semantic", planOnlyFiling: true, reviewAttemptId: "attempt-7" });
           if (ending === "throw") throw new Error("review transport unreadable");
           if (ending === "unknown") throw { message: "unknown review failure", reasonClass: "future_failure" };
           if (ending === 2) {
