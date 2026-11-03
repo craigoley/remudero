@@ -22,12 +22,13 @@
 // Why: the full per-mode usage docs and the W1-T2524/W1-T133 incident history are archived in
 // docs/forensics/mutation-ratchet.md#module-header.
 
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import { parseArgs } from 'node:util';
 import { dirname, join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseSync } from '@swc/core';
 import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from './lib/repo-root.mjs';
 
@@ -291,45 +292,125 @@ export function evaluateReportValidity(report, mutateScope) {
 // and in the workflow's own output.
 // Why: docs/forensics/mutation-ratchet.md#per-file-test-mapping.
 
-const RELATIVE_IMPORT_RE = /from\s+["'](\.[^"']*)["']/g;
+/** Extract syntax nodes, never import-shaped text inside fixture strings or comments. */
+export function importSpecifiers(source) {
+  const literals = [];
+  const nonLiteral = [];
+  const visit = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (['ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration'].includes(node.type)
+        && node.source) literals.push(node.source.value);
+    if (node.type === 'CallExpression' && node.callee.type === 'Import') {
+      const arg = node.arguments[0]?.expression;
+      if (arg?.type === 'StringLiteral') literals.push(arg.value);
+      else if (arg?.type === 'TemplateLiteral' && arg.expressions.length === 0) {
+        literals.push(arg.quasis[0].cooked ?? arg.quasis[0].raw);
+      } else nonLiteral.push(node.span.start);
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === 'object') visit(value);
+    }
+  };
+  visit(parseSync(source, { syntax: 'typescript', decorators: true }));
+  return { literals, nonLiteral };
+}
+
+function importPath(spec, fromFile, imports) {
+  if (spec.startsWith('.')) return { path: posix.normalize(posix.join(posix.dirname(fromFile), spec)) };
+  if (!spec.startsWith('#')) return {};
+  // Node's package imports order: an exact key first, then patterns by longest prefix, then longest key.
+  const patterns = Object.keys(imports).filter((key) => key.includes('*'))
+    .sort((a, b) => b.indexOf('*') - a.indexOf('*') || b.length - a.length);
+  const keys = Object.hasOwn(imports, spec) && !spec.includes('*') ? [spec, ...patterns] : patterns;
+  for (const key of keys) {
+    const [prefix, suffix] = key.split('*');
+    const wildcard = suffix !== undefined;
+    if (wildcard ? !spec.startsWith(prefix) || !spec.endsWith(suffix)
+        || spec.length < prefix.length + suffix.length : spec !== key) continue;
+    const target = imports[key];
+    if (typeof target !== 'string' || !target.startsWith('./')) {
+      throw new Error(`unsupported package.json imports target for ${key}`);
+    }
+    const matched = wildcard ? spec.slice(prefix.length, spec.length - suffix.length) : '';
+    return { path: posix.normalize(wildcard ? target.replaceAll('*', matched) : target), alias: key };
+  }
+  throw new Error('matches no package.json imports key');
+}
+
+function importCandidates(path) {
+  return path.endsWith('.js') ? [`${path.slice(0, -3)}.ts`, path]
+    : posix.extname(path) ? [path] : [`${path}.ts`, path];
+}
 
 /**
- * Resolve a relative import specifier in `fromFile` to a member of `knownModules`. TypeScript
+ * Resolve an import specifier in `fromFile` to a member of `knownModules`. TypeScript
  * imports siblings with a `.js` suffix (NodeNext), rewritten here before matching.
  * @param {string} spec
  * @param {string} fromFile POSIX-style repo-relative path
  * @param {ReadonlySet<string>} knownModules
  */
-export function resolveImportTarget(spec, fromFile, knownModules) {
-  const joined = posix.normalize(posix.join(posix.dirname(fromFile), spec));
-  const candidate = joined.endsWith('.js') ? `${joined.slice(0, -3)}.ts` : joined.endsWith('.ts') ? joined : `${joined}.ts`;
-  return knownModules.has(candidate) ? candidate : undefined;
+export function resolveImportTarget(spec, fromFile, knownModules, imports = {}) {
+  const { path } = importPath(spec, fromFile, imports);
+  return path === undefined ? undefined : importCandidates(path).find((candidate) => knownModules.has(candidate));
 }
 
 /**
- * Build the module -> direct test importers map by parsing every test file's relative imports.
- * PURE apart from the injected reader, so a test can drive it against a synthetic tree.
+ * Build direct edges from real syntax; read aliases at runtime from the tree being mapped.
  * @param {readonly string[]} srcModules repo-relative paths of the mutable modules
  * @param {readonly string[]} testFiles repo-relative paths of the test files
  * @param {(path: string) => string} readFile
+ * @param {{repoRoot?: string, report?: (coverage: object) => void}} options
  * @returns {Map<string, string[]>} module -> sorted importer list (absent when nothing imports it)
  */
-export function deriveDirectImporters(srcModules, testFiles, readFile) {
+export function deriveDirectImporters(srcModules, testFiles, readFile, options = {}) {
+  const root = options.repoRoot ?? REPO_ROOT;
+  const imports = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).imports ?? {};
   const known = new Set(srcModules);
   const out = new Map();
+  const expected = [];
+  const srcTests = new Set();
+  const errors = [];
+  const coverage = { testFiles: 0, modules: 0, pairs: 0,
+    aliases: Object.fromEntries(Object.keys(imports).map((key) => [key, 0])),
+    nonLiteralImports: [], unreadableTests: [] };
   for (const testFile of testFiles) {
     let source;
     try {
       source = readFile(testFile);
-    } catch {
+    } catch (error) {
       // An unreadable test file contributes no edges. It cannot silently shrink the mapping into a
       // false pass: a module left with no importers is EXCLUDED and named by planNightlyRun below.
+      coverage.unreadableTests.push({ testFile, reason: error.message });
       continue;
     }
     const seen = new Set();
-    for (const match of source.matchAll(RELATIVE_IMPORT_RE)) {
-      const target = resolveImportTarget(match[1], testFile, known);
-      if (target) seen.add(target);
+    let extracted;
+    try {
+      extracted = importSpecifiers(source);
+    } catch (error) {
+      errors.push(`${testFile}: cannot parse imports: ${error.message}`);
+      continue;
+    }
+    for (const position of extracted.nonLiteral) coverage.nonLiteralImports.push({ testFile, position });
+    for (const spec of extracted.literals) {
+      try {
+        const { path, alias } = importPath(spec, testFile, imports);
+        if (!path?.startsWith('src/')) continue;
+        const candidates = importCandidates(path);
+        const target = candidates.find((candidate) => known.has(candidate));
+        if (!target && !candidates.some((candidate) => statSync(join(root, candidate), { throwIfNoEntry: false })?.isFile())) {
+          throw new Error(`src target does not exist (${path})`);
+        }
+        srcTests.add(testFile);
+        if (alias) coverage.aliases[alias]++;
+        if (target) {
+          seen.add(target);
+          expected.push([target, testFile]);
+        }
+      } catch (error) {
+        errors.push(`${testFile}: ${JSON.stringify(spec)}: ${error.message}`);
+      }
     }
     for (const target of seen) {
       const list = out.get(target) ?? [];
@@ -338,6 +419,14 @@ export function deriveDirectImporters(srcModules, testFiles, readFile) {
     }
   }
   for (const [, list] of out) list.sort();
+  for (const [target, testFile] of expected) {
+    if (!out.get(target)?.includes(testFile)) errors.push(`${testFile}: missing importer edge to ${target}`);
+  }
+  coverage.testFiles = srcTests.size;
+  coverage.modules = out.size;
+  coverage.pairs = [...out.values()].reduce((sum, list) => sum + list.length, 0);
+  options.report?.(coverage);
+  if (errors.length > 0) throw new Error(`mutation-nightly-plan: unresolved imports:\n${errors.join('\n')}`);
   return out;
 }
 
@@ -764,9 +853,22 @@ function main(argv) {
       typeof scopeConfig.commandBudgetMs === 'number' ? scopeConfig.commandBudgetMs : 20000;
 
     const repoRoot = REPO_ROOT;
-    const importers = deriveDirectImporters(matched, testFiles, (p) =>
-      readFileSync(join(repoRoot, p), 'utf8'),
-    );
+    let importers;
+    try {
+      importers = deriveDirectImporters(matched, testFiles, (p) => readFileSync(join(repoRoot, p), 'utf8'), {
+        report: (coverage) => {
+          console.log(`mutation-nightly-plan: import coverage -- ${coverage.testFiles} test files with src edges, ` +
+            `${coverage.modules} modules with importers, ${coverage.pairs} pairs; aliases ${JSON.stringify(coverage.aliases)}`);
+          console.log(`mutation-nightly-plan: ${coverage.nonLiteralImports.length} non-literal imports (unresolved)`);
+          for (const entry of coverage.nonLiteralImports) console.log(`  - NON-LITERAL ${entry.testFile}:${entry.position}`);
+          for (const entry of coverage.unreadableTests) console.log(`  - UNREADABLE ${entry.testFile}: ${entry.reason}`);
+        },
+      });
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode = 1;
+      return;
+    }
 
     // A REAL run of the candidate's own test command on unmutated source, killed at the budget --
     // NOT Stryker's dry run, which mutates an INSTRUMENTED copy: a test pinning the module's
