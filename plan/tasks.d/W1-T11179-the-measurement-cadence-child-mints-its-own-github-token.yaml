@@ -1,0 +1,79 @@
+- id: W1-T11179
+  title: "The measurement cadence child mints and renews its own GitHub App token instead of reading the daemon's copy from spawn — the child inherits GH_TOKEN in its spawn env and never refreshes it, so in all 24 children that died since 2026-10-31 the board gateway's 'gh: Bad credentials (HTTP 401)' appears exactly when the child outlived what was left of that token or the daemon's own token had already expired at spawn, and never otherwise"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # Rule 19: one concern, the credential the cadence child's GitHub reads carry; one file, the child's entry, minting through the daemon's existing refresher
+  band_meaning: span
+  origin: operator-session#measurement-cadence-child-failures-2026-11-03
+  plan_refs:
+    - W1-T1024
+    - W1-T2554
+    - W1-T5723
+    - W1-T6495
+    - W1-T9083
+    - W1-T11070
+    - W1-T11178
+  files:
+    - src/measurement-cadence-child.ts
+    - test/daemon/the-measurement-cadence-child-mints-its-own-github-token.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the GitHub App is configured in the child's env, the measurement cadence child starts its own installation-token refresh and awaits its first mint before the cadence's first step runs, as the automated retro and the run child already do; with no App configured it starts none and its GitHub reads use the inherited GH_TOKEN unchanged
+      proof: "unit test: test/daemon/the-measurement-cadence-child-mints-its-own-github-token.test.ts"
+    - claim: A child whose run outlives one installation token reads GitHub with the next one — with an injected clock and exchange, after the first token's renewal is due the child's process GH_TOKEN is the second mint, not the token it was spawned with, and the refresher is stopped when the child's run settles
+      proof: "grep: W1-T11179 criterion 2 in test/daemon/the-measurement-cadence-child-mints-its-own-github-token.test.ts"
+    - claim: Each of the child's mints and failed exchanges is ledgered under the child's own run id (github_app.token_refreshed with expires_at, or github_app.token_refresh_failed with its reason), never with the token, so whether a child's reads carried a live token is read from rows
+      proof: "grep: W1-T11179 criterion 3 in test/daemon/the-measurement-cadence-child-mints-its-own-github-token.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 (read-only). Rows: the core ledger union on the Azure host, /mnt/rmd/state2/state, archives from 10-30
+    plus the live file, niced and streamed to the Mac; no token was read or printed, only the rows' metadata (steps, run ids,
+    expires_at). Code: origin/main e2ee75296.
+    THE CREDENTIAL PATH. The daemon mints the App installation token in its own process: daemon.ts starts
+    startInstallationTokenRefresh, and github-app.ts's refresh writes the token into process.env.GH_TOKEN ("every consumer reads
+    process.env at call/spawn time"), renewing it REFRESH_MARGIN_MS (20 min) before its one-hour expiry.
+    childMeasurementCadenceSpawn spawns the child with { ...process.env, RMD_MEASUREMENT_CADENCE_CHILD_CONFIG }, so the child
+    holds the GH_TOKEN value of the moment it was spawned. src/measurement-cadence-child.ts never starts a refresher. The board
+    gateway the child builds (buildBatchedGithub, through creditProjectionWithReadState for the plan reconcile) and every other gh
+    read in the child use that one value for the child's whole life. daemon.ts's own comment names this gap for workers
+    ("a worker's own GH_TOKEN copy is captured at spawn and held for its whole run"); the automated retro (#7619) and the run
+    child (W1-T9083, #11794) each start their own refresher for this reason. The cadence child is the one that does not:
+    no github_app.token_* row since 10-30 carries a MEASUREMENT-CADENCE run id, against 2,450 refresh rows from the gardens,
+    serve, the retro and the daemon.
+    THE 401 IS THE TOKEN'S AGE. For each child spawned since 10-30, the token left at spawn is the daemon's last
+    github_app.token_refreshed expires_at on that host minus the spawn time:
+    - 14 children carried a 401 in their death stderr. 8 were spawned with 20.8-54.7 min left and lived 23.6-108.8 min, past
+      it. 6 were spawned after the daemon's own token had already expired (a github_app.token_expired row first; the daemon's
+      exchange failed with EPIPE 212 times and ECONNRESET 85 times since 10-30, which W1-T11070, #16120, merged 11-02, retries).
+    - 10 carried no 401. Each died before its token's expiry: 41.2-59.0 min left, 24.0-52.7 min lived.
+    That is a clean split over all 24, with no child on the wrong side. The last one was predicted before it died: pid 2611349,
+    spawned 2026-11-03T00:46Z with 48.9 min left, died at 01:25Z (39.1 min) with no 401.
+    WHAT IT COSTS. A 401 on the board read makes the credit projection read as failed. defaultCreditedMergedIds drops the
+    projection's unknownReason and returns only its ids, so a child that outlives its token reconciles from a credit set the
+    board read never filled, without saying so. Fixing that silence is left to the reconcile owners; this task removes the
+    expiry that causes it.
+    NOT COVERED: the child's heap exhaustion is W1-T11178 and kills the same children; both must land for a run to complete.
+  design: |
+    1. The child's entry starts the same refresher the daemon runs (startInstallationTokenRefresh with the daemon's
+       refreshInstallationToken, review.ts's refreshReviewPublisherToken) in its own process before measurementCadenceChildMain
+       runs, awaits ready, and stops it when the run settles. The env check (GH_APP_ID, GH_APP_INSTALLATION_ID,
+       GH_APP_PRIVATE_KEY_PATH) is the refresher's own: unarmed, the child changes nothing.
+    2. Put the wiring in one function exported from the entry itself, taking the refresher and the ledger writer as seams. The
+       entry's body already runs only when argv carries MEASUREMENT_CADENCE_CHILD_FLAG, so the test imports the entry and
+       drives the real function with no child started.
+    3. The refresher's log writes github_app.* rows through appendLedger to the config's ledger, run_id the child's run id,
+       task_id DAEMON, lane measurement-cadence. The refresher already schedules from the minted expires_at; no new interval.
+    Tests inject the exchange and the timer through startInstallationTokenRefresh's existing seams; no network, no real token.
+  falsifier: |
+    At origin/main the child never calls a token refresher: a fake refresher passed to the child's run is never started, so
+    criterion 1 fails; GH_TOKEN stays the spawn-time value after the renewal is due, so criterion 2 fails; and no
+    github_app.* row names the child's run id, so criterion 3 fails.
+  note: |
+    reservation hand-off: plan-file-1793671903112 -> plan-file-1793671903112
+    Reserved with rmd next-task-id --branch plan-file-1793671903112 --count 2 (W1-T11178, W1-T11179). Filed 2026-11-03 at the
+    coordinator's request. Credential source only, by metadata: no token value was read, printed or compared.

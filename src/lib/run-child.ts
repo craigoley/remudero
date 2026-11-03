@@ -1383,6 +1383,11 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
     hosts: HOSTED_DETACHED_WORK_KINDS,
     mode,
     async spawnReview({ pr, reviewKey, reviewAttemptId }) {
+      // W1-T11162: a plan-only filing is lint and grep proofs, so it never pays for a run child's start.
+      if (pr.isPlanFiling === true) {
+        input.log("review.placement", { pr_number: pr.prNumber, head_sha: pr.headSha, placement: "in-process", reason: "plan-only-filing" });
+        return undefined;
+      }
       const current = mode();
       const work: DetachedWorkSpec = {
         kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey,
