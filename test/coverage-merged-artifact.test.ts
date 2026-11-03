@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
-const { owningSfReadBoundedLcov, owningSfValidateOwnerFiles } = await import("#scripts/coverage-floor.mjs");
+const coverageFloorModule = "#scripts/coverage-floor.mjs";
+const { owningSfReadBoundedLcov, owningSfValidateOwnerFiles } = await import(coverageFloorModule);
 
 // ── W1-T2662: the coverage-ratchet aggregator merges the four shards' lcov into
 // coverage/lcov.info and then discards it with the runner. W1-T2661's tier-two reader
