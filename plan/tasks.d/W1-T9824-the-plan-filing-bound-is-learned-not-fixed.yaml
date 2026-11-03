@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator approval 2026-10-16 ('go with all of your recommendations'): agent Q1's finding that planFilingAdmissionBound and its read cap are fixed numbers"
   plan_refs: [W1-T9820, W1-T2864, W1-T2439, W1-T9780]
-  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/open-prs-rest.ts, test/the-plan-filing-bound-is-learned-not-fixed.test.ts]
+  files: [src/lib/sweep.ts, src/lib/tick-read-worker.ts, src/lib/open-prs-rest.ts, test/the-plan-filing-bound-is-learned-not-fixed.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -36,8 +36,8 @@
        - the read plane's available budget (the existing gh cadence and quota readers).
        It reads as many uncached heads as fit, and always at least one when any head is uncached, so the
        backlog always makes progress.
-    2. The plan-filing admission count follows the measured cost of a plan-only review (no memory charge,
-       its p50 duration) against the pass's remaining time, not a fixed 3.
+    2. The plan-filing admission count is W1-T11148's: it drops the count, so this task learns only the read budget.
+       The read cap then lives in PLAN_FILING_FILE_MISS_CAP (open-prs-rest.ts), read by src/lib/tick-read-worker.ts.
     3. Each pass ledgers one row naming the bound it chose and each input with its source. An unreadable
        input falls back to today's 3 and says so in the row.
     4. Classification and the reader are unchanged: only how many reads and admissions a pass takes moves.

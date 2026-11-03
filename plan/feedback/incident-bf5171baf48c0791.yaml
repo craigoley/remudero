@@ -1,0 +1,29 @@
+id: incident-bf5171baf48c0791
+ts: 2026-11-03T02:57:53.260Z
+raw: >-
+  Incident bf5171baf48c: flow idle-capacity:recycle_drain
+
+  First seen: 2026-11-03T01:59:31.358Z
+
+  Last seen: 2026-11-03T02:56:51.667Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - instance=core hold=PAUSE_requested:_container_recycle_(deploy/recycle-container.sh);_actor:_craigoleyagent_on_Remudero;_host_automation setter=unrecorded since=2026-11-03T01:10:18.434Z since=2026-11-03T01:10:18.434Z slot_minutes=147.65 dispatchable=3 cause=recycle_drain reason="PAUSE requested: container recycle (deploy/recycle-container.sh); actor: craigoleyagent on Remudero; host automation" — idle lane slots held by a named hold beyond the cause's own history
+    - instance=core hold=PAUSE_requested:_container_recycle_(deploy/recycle-container.sh);_actor:_craigoleyagent_on_Remudero;_host_automation setter=unrecorded since=2026-11-03T01:10:18.434Z since=2026-11-03T01:10:18.434Z slot_minutes=180 dispatchable=3 cause=recycle_drain reason="PAUSE requested: container recycle (deploy/recycle-container.sh); actor: craigoleyagent on Remudero; host automation" — idle lane slots held by a named hold beyond the cause's own history
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#bf5171baf48c0791bbd4359e1a5645a39a70ddcf82d28622bdf3acde239a75d1
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

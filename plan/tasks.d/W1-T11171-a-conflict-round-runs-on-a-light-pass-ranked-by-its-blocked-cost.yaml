@@ -1,0 +1,78 @@
+- id: W1-T11171
+  title: "A conflict's no-worker resolution runs on the light pass, and conflict rounds are admitted in order of measured blocked cost (conflict age times dependents) — 80 conflict-disposed passes over 18 PRs in 7 days read \"deferred to full sweep (light pass)\", and nothing in the walk or the fix admission ever raises a conflict's priority as it ages or as tasks pile up behind it"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, when a conflict repair may act in a pass and in what order; it spans the light-pass gate, the walk order and the fix admission
+  band_meaning: span
+  origin: operator-session#conflict-findings-2026-11-03
+  plan_refs:
+    - W1-T254
+    - W1-T7734
+    - W1-T2931
+    - W1-T9578
+    - W1-T9289
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-conflict-round-runs-on-a-light-pass-ranked-by-its-blocked-cost.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: On a light pass (the actionable gate that admits only post-review today), a conflicted PR whose resolution needs no worker (the registry regenerator, and any no-worker conflict arm the sweep has) acts in that pass under its own leases and its per-head-and-main receipt, and a conflict that needs a worker round still reads "deferred to full sweep (light pass)" with nothing spawned
+      proof: "unit test: test/sweep/a-conflict-round-runs-on-a-light-pass-ranked-by-its-blocked-cost.test.ts"
+    - claim: In a full pass where fix admission cannot admit every due conflict round, conflicted PRs are walked and admitted in descending blocked cost, the conflict's age (from the first dirty observation of that PR at its current head, read off the ledger) times one plus the count of queued plan tasks that depend on its task (transitively); no constant decides the order, and ties keep today's order
+      proof: "grep: W1-T11171 criterion 2 in test/sweep/a-conflict-round-runs-on-a-light-pass-ranked-by-its-blocked-cost.test.ts"
+    - claim: Each conflicted sweep.disposed row records conflict_age_ms, dependents and blocked_cost, and the sweep.pass summary records how many conflicted PRs acted on a light pass and how many were deferred, so the shares are measurable from the ledger
+      proof: "grep: W1-T11171 criterion 3 in test/sweep/a-conflict-round-runs-on-a-light-pass-ranked-by-its-blocked-cost.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 ~00:30Z over the 7-day conflict rows of the core ledger union (~/Remudero-notes/conflict-findings-2026-11-03.md,
+    evidence in ~/Remudero-notes/conflict-evidence-1103/, read-only). Code read at origin/main c0a6f1c74.
+    Scheduling held 1,096 conflict-disposed passes over 42 PRs:
+    - light pass deferred to the full sweep: 80 passes, 18 PRs;
+    - review-only boot or drain passes: 82 passes, 19 PRs;
+    - host capacity: 26 passes, 10 PRs.
+    Per PR: #15551 had 105 of 160 passes "deferred to full sweep (light pass)", and #16044 had 15 "plan-scoped round deferred to
+    the full sweep (light pass)". #15532 had 4 and #15602 had 2. The median longest conflict was 0.54 h, but the p90 was 13.8 h.
+    READ:
+    - W1-T254's light ticker passes actionable `d => d === "post-review"`, so every conflicted row on a light pass stands down
+      with "deferred to full sweep (light pass)". That includes the regenerator, which spawns no worker and takes no fix
+      admission (W1-T9578's design 4).
+    - The walk is sweepWalkOrder(openPrs), re-sorted by heldSinceMs only while refresh admission is not holding.
+    - claimFixAdmission is first come, first served within the walk.
+    - No term reads how long a PR has been conflicted or how many queued tasks wait on it. That is item 5's "conflict age never
+      raises priority".
+    Operator rulings: no fixed thresholds, derive from measurement; rmd must resolve merge conflicts automatically (2026-11-02).
+    NOT COVERED ELSEWHERE: W1-T11170 (item 6a) decides which heads get a conflict round, and W1-T11167 (item 4) adds a
+    no-worker clean-merge arm. This task decides when and in what order those arms act. Review-only boot and drain passes (82
+    passes) close repair lanes by design during a restart. They are reported, not changed here.
+  design: |
+    1. LIGHT PASS. The light ticker's actionable gate admits "conflicted" for the no-worker arms only. In the conflicted arm,
+       those arms (the regenerate route today, and W1-T11167's clean-merge route once it lands) run before the actionable check.
+       The worker dispatch below them keeps the check and its "deferred to full sweep (light pass)" sentence. The arms' existing
+       receipts (one attempt per head and main) and inFlightConflictRegenerations stop a light and a full pass from both acting.
+    2. BLOCKED COST. conflictBlockedCost(pr, ledger, plan) = age_ms × (1 + dependents):
+       - age_ms is now minus the first sweep.disposed row for this PR at its current head with blocker conflict;
+       - dependents is the count of queued plan tasks whose depends_on reaches pr.taskId, transitively;
+       - a PR with no task has 0 dependents.
+       It is computed only for conflicted PRs.
+    3. ORDER. After sweepWalkOrder and the heldSinceMs sort, a stable sort moves conflicted PRs among themselves into
+       descending blocked cost. Non-conflicted PRs keep their positions, so admission order changes only between conflict
+       rounds.
+    4. RECORD. The fields on sweep.disposed, and the light_conflict_acted and light_conflict_deferred counts on sweep.pass.
+    Tests go in the new file, titled verbatim as in the proofs, over the real runSweep with a light-pass actionable gate, an
+    injected regenerateConflict, and ledger and plan fixtures.
+  falsifier: |
+    At origin/main a light pass with a regenerable-only conflicted PR stands down "deferred to full sweep (light pass)" and never
+    calls regenerateConflict, so the first test fails. Two conflicted PRs walk in snapshot order whatever their age and
+    dependents, so the second test's older, depended-on PR is admitted second and fails. No conflict_age_ms field exists, so the
+    third test fails.
+  note: |
+    reservation hand-off: plan-file-1793666135000 -> plan-file-1793666135000
+    Reserved with rmd next-task-id --branch plan-file-1793666135000. Filed 2026-11-03 from the conflict findings, item 6b (p2),
+    under the operator ruling of 2026-11-02. It is split from item 6a (W1-T11170) under Rule 19: 6a is which heads a round may
+    write to, and this task is when a round acts and in what order. Build after W1-T11167 and W1-T11170 if they are still open.
+    All three edit the conflicted arm of src/lib/sweep.ts.

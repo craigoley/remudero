@@ -1,0 +1,91 @@
+- id: W1-T11178
+  title: "The measurement cadence child never holds the whole ledger union, and a child that dies names the verb it died in — the hand-run census reads the union with /\"step\"\\s*:/, which keeps every one of the union's 9,236,298 lines (5.12 GB of UTF-8, about 6.6 GB as V8 strings) to find the operator rows, against a child heap capped at 5,300-6,467 MB; 31 children since 2026-10-27 died 'JavaScript heap out of memory' at 99.9% of that cap, and the verb census keeps 3,017,720 more lines (1.53 GB) to count them"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, the cadence child's heap; it spans the hand-run census and the cadence module (the verb census and the child state that names where a heap abort happened); high because the census's refusal and the verb counts must read exactly as before
+  band_meaning: span
+  origin: operator-session#measurement-cadence-child-failures-2026-11-03
+  plan_refs:
+    - W1-T10233
+    - W1-T2697
+    - W1-T2485
+    - W1-T3335
+    - W1-T5723
+    - W1-T9106
+    - W1-T11141
+    - W1-T11134
+    - W1-T11175
+  files:
+    - src/lib/hand-run-census.ts
+    - src/lib/measurement-cadence.ts
+    - test/daemon/the-measurement-cadence-child-never-holds-the-whole-ledger-union.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Over a fixture ledger union (gzip archives plus a live file, read through the real resolveLedgerUnion) whose rows are mostly not operator rows, censusHandRuns's union reads return only operator rows, while its result, including the refusal text that names the operator row count and the population, is identical to the result at base for the same corpus
+      proof: "unit test: test/daemon/the-measurement-cadence-child-never-holds-the-whole-ledger-union.test.ts"
+    - claim: Over the same fixture union, runVerbCensus's union reads return no line it does not need to keep, and its measured, silent and unmeasurable verb lists and per-verb counts are identical to the result at base for the same corpus
+      proof: "grep: W1-T11178 criterion 2 in test/daemon/the-measurement-cadence-child-never-holds-the-whole-ledger-union.test.ts"
+    - claim: Before each cadence verb the child records that verb's name and its V8 heap used and limit in its own state file, and when the child exits without a result (a heap abort leaves no JavaScript stack), the error on the measurement_cadence.run_failed row names the last verb it entered with those two readings; a child that dies before its first verb says so instead of naming one
+      proof: "grep: W1-T11178 criterion 3 in test/daemon/the-measurement-cadence-child-never-holds-the-whole-ledger-union.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 (read-only). Rows: the core ledger union on the Azure host, /mnt/rmd/state2/state, archives from 10-25
+    plus the live file, read niced and streamed to the Mac. Union size: one niced pass over all 889 archives plus the live file.
+    Code: origin/main e2ee75296.
+    WHAT DIED. Since the last measurement_cadence.ran (2026-10-25T09:15Z) every cadence child failed:
+    - 31 died "FATAL ERROR: Reached heap limit ... JavaScript heap out of memory" (SIGABRT), 20-108 min after spawn. The last
+      Mark-Compact before each death read 5,295-5,297 MB against heap_limit_mb=5300 (10-27, 10-28) and 6,187-6,229 MB against
+      6,192 and 6,467 (10-31 on). The heap was full, not leaking slowly. The native stack ends in v8::String::NewFromOneByte and
+      NewFromTwoByte, which is Buffer.toString building strings, the union reader's per-line decode.
+    - 8 reached the plan-reconcile landing and were refused; W1-T11175 fixes that. 1 timed out in updateProposalRegistry
+      waiting on the daemon's own lock; W1-T9240 (queued) covers that. (40 run_failed rows in all, to 2026-11-03T01:25Z,
+      counted over every archive and the live file.)
+    THE HEAP CAP. measurementCadenceChildHeapLimitMb gives the child the daemon's own heap_size_limit. It was 8,240 MB when the
+    last run succeeded (10-25). W1-T9106 (#14673, 10-27T03:33Z) began learning a smaller daemon ceiling at boot, and the next
+    child ran under 5,300 MB. The daemon's ceiling is learned from the daemon's live set, not from what the child reads.
+    WHAT FILLS IT. src/lib/ledger-union.ts's rawLineCollector keeps every line its pattern matches, as a JS string, until the
+    read returns:
+    - hand-run-census.ts censusHandRuns reads with HAND_RUN_OPERATOR_LEDGER_PATTERN = /"step"\s*:/, which matches every
+      row. The union today is 9,236,298 lines and 5,124,822,293 bytes; 1,397,854 lines (1.17 GB) hold non-ASCII bytes and
+      decode as two-byte strings. Held as strings that is about 6.6 GB, above the child's whole cap. The census then
+      JSON-parses every line twice, to keep its operator rows and to count the population. On 10-25 it read 6,745,137 rows and
+      refused anyway: "mostly non-human ledger input: 2350 operator rows of 6745137".
+    - runVerbCensus reads with the 30 attributable verb prefixes ORed (review, daemon, sweep, fix, garden, serve, ...): 3,017,720
+      lines, 1.53 GB kept, to produce counts.
+    The union grows (6.75 M rows on 10-25, 9.24 M on 11-03), and compaction cannot reach its bound (W1-T11141), so a bigger cap
+    only moves the date of the next death.
+    WHY NO LIVE PROFILE. A heap abort prints no JS stack, and the host is read-only to sessions, so no profiler was attached.
+    The arithmetic above is decisive for the census on its own. Criterion 3 makes the next death name its verb from the
+    child's own state, so the next-heaviest reader is found from rows, not guessed.
+    NOT COVERED: W1-T11134 (filed, #16277) is the daemon's memory growth; W1-T11141 (filed, #16296) is the compaction bound;
+    neither touches the child. The child's 401 from the board gateway is W1-T11179. W1-T10233 (scout, queued) names
+    measurement_cadence.run_failed without a cause and is superseded by this task.
+  design: |
+    1. HAND-RUN CENSUS. The census keeps only the rows it folds: its union read filters while scanning (the reader's existing
+       `keep` predicate, or readLedgerUnionRecordsSync with onRecord), keeping a line only when it parses to an operator row
+       (the same test parseOperatorLedgerRows applies), and counting the population (a parseable row with a string step) as it
+       goes instead of filtering a kept array. The refusal and the measured result stay exactly as they are on main.
+    2. VERB CENSUS. runVerbCensus counts per prefix while scanning and keeps no line. Its result shape stays the same.
+    3. CHILD STATE. measurement-cadence.ts gets a phase note, called before each verb runMeasurementCadenceReport runs, that
+       writes {phase, heap_used_mb, heap_limit_mb, at} into the child's state file through the existing writeChildState.
+       It is a no-op outside a child. The runner's "exited without a result" error appends the last phase and both readings
+       from that file, or "before its first verb" when none was written. No threshold: the readings are reported, not judged.
+    4. No cap changes. measurementCadenceChildHeapLimitMb and the daemon's learned ceiling stay as they are (operator ruling
+       2026-10-27: the shared budget does not remove the need to reduce usage).
+    Tests use a fixture state dir written with real gzip archives and the real resolveLedgerUnion, wrapped to record each
+    read's returned lines. The "identical at base" halves compare against values computed from the fixture's own rows in the
+    test, not against a recorded snapshot. The death test spawns a real child that writes a phase and aborts.
+  falsifier: |
+    At origin/main, censusHandRuns's single union read returns every fixture line, so criterion 1's "only operator rows" fails.
+    runVerbCensus's read returns every line that names an attributable prefix, so criterion 2 fails. The child state has no
+    phase field and the runner's error carries only the stderr tail, so criterion 3 fails.
+  note: |
+    reservation hand-off: plan-file-1793671903112 -> plan-file-1793671903112
+    Reserved with rmd next-task-id --branch plan-file-1793671903112 --count 2 (W1-T11178, W1-T11179). Filed 2026-11-03 at the
+    coordinator's request after a read-only root-cause pass over the measurement cadence child's failures. Supersedes the scout
+    task W1-T10233, which is retired in the same filing.
