@@ -554,9 +554,7 @@ export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[stri
 /** W1-T5720 — BACKSTOP: the longest tick 1's cadences and the garden fan-out wait, from boot, for the
  *  first full pass. That pass's own 559 s bound normally opens the gate first, so this fires never. */
 export const BOOT_CADENCE_GATE_BOUND_MS = 10 * 60_000;
-/** How long a still-running tick goes before the due timer checks auto-triage again. Ticks run 1-4 h on the
- *  host, so once per tick meant about 6.6 fires a day against 8.6 arrivals (host ledger, 2026-11-03). The
- *  triage policy's own floor, daily cap and lock still decide whether a check fires; this only lets it ask. */
+/** How long a running tick goes before the due timer asks auto-triage again; its policy still decides any fire. */
 export const AUTO_TRIAGE_REARM_MS = 15 * 60_000;
 
 /** W1-T9119: the decompressed bytes the retro check's ledger read would open, and the rotations behind the figure. */
@@ -5817,10 +5815,7 @@ export async function runDaemon(
     }
     return false;
   });
-  /** Auto-triage is the one tick-top cadence the due timer may run again inside a tick. A tick that lasts
-   *  hours otherwise held triage to one fire per tick, whatever its policy allowed. After `autoTriageRearmMs`
-   *  since the last run started, the timer asks again with the last census a tick gave it; checkAutoTriage's
-   *  floor, cap and lock still decide whether anything fires. */
+  /** Auto-triage alone may run again inside a tick: hour-long ticks held it to one fire each (2026-11-03 ledger). */
   const autoTriageRearmMs = opts.autoTriageRearmMs ?? AUTO_TRIAGE_REARM_MS;
   let lastAutoTriageSignals: Parameters<typeof autoTriageCadence.run> | undefined;
   let lastAutoTriageRunAtMs: number | undefined;
