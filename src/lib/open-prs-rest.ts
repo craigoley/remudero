@@ -1553,7 +1553,7 @@ function* contentBytes(owner: string, repo: string, path: string, ref: string, f
 }
 
 const REDUNDANT_REFIX_COMPARE_PATH_CAP = 25;
-export const GITHUB_COMPARE_FILE_LIST_CAP = 300;
+export const GITHUB_COMPARE_FILE_LIST_CAP = 300; // BACKSTOP: GitHub's own compare file-list cap; a list this long is incomplete
 
 function* redundantRefixEvidence(
   owner: string,
