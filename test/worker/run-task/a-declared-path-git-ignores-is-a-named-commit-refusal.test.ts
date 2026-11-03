@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { commitWorkerEdits } from "#src/run-task.js";
+import { commitWorkerEdits } from "#test/helpers/run-task-commit-seam.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 
 function fixture(t: test.TestContext) {
