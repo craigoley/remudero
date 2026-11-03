@@ -14231,9 +14231,8 @@ export interface SweepDeps {
   /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
   workerAdmissionHold?: (kind?: "review") => string | undefined;
   restartAdmission?: (kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean;
-  /** W1-T11148: the PR head's unified diff, read through the reviewer's own source; absent, an unread classification stays code. */
+  /** W1-T11148: the head diff (reviewer's source) and the plan-lane bound's readings; absent: code lane, review-width bound. */
   readPrHeadDiff?: (pr: OpenPrView) => Promise<string>;
-  /** W1-T11148: the readings the plan-lane bound derives from; absent, it derives from the configured review width. */
   readPlanLaneCapacity?: (policy: SweepPolicy) => PlanLaneCapacityReading;
   /** Dispatch the W1-T76 fix rung carrying the mode-appropriate evidence at once — the FULL unmet
    *  set for a review dispatch, or ci-log evidence for a blocked_ci one. W1-T2231: MAY return
@@ -24410,9 +24409,8 @@ export interface PlanLaneBound {
 }
 let planLaneReviewsInFlight = 0;
 
-/** W1-T11148 — THE PLAN LANE'S BOUND IS DERIVED, NEVER A LITERAL. Measured headroom over the learned review reservation,
- *  shrunk by the share of time the host stalls on memory or CPU (PSI), so it recovers as pressure relieves. Unread
- *  headroom derives from the configured review width; with nothing in flight it admits one, so the lane never wedges. */
+/** W1-T11148 — DERIVED, NEVER A LITERAL: headroom over the learned review reservation, shrunk by memory or CPU PSI (so it
+ *  recovers as pressure relieves); unread headroom uses the review width; with nothing in flight it admits one. */
 export function derivePlanLaneBound(reading: PlanLaneCapacityReading | undefined, policy: SweepPolicy, inFlight: number): PlanLaneBound {
   const finitePct = (v: number | undefined): number => (typeof v === "number" && Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : 0);
   const pressurePct = Math.max(finitePct(reading?.memoryPsiSomePct), finitePct(reading?.cpuPsiFullPct));
@@ -24430,7 +24428,6 @@ export function derivePlanLaneBound(reading: PlanLaneCapacityReading | undefined
   };
 }
 
-/** The bound this pass admits plan-lane reviews under, ledgered with every input when any plan-lane review is eligible. */
 function planLaneBoundForPass(deps: SweepDeps, policy: SweepPolicy, eligible: number, surface: SweepRepairSurface): PlanLaneBound {
   let reading: PlanLaneCapacityReading | undefined;
   try {
@@ -24484,10 +24481,8 @@ export function resetPlanLaneHeadDiffs(): void {
   planOnlyHeadDiffs.clear();
 }
 
-/** W1-T2439 — THE SPLIT ADMISSION, AND WHY THE PREDICATE IS NOT THE REVIEW'S OUTCOME: the outcome is
- *  written AFTER the review runs, so this function cannot see it. TWO LANES, AND ONLY ONE CAN SPAWN —
- *  every code PR at the configured review width, and plan-lane PRs at {@link derivePlanLaneBound}'s
- *  derived width (W1-T11148). FAIL-OPEN: an unread, unresolved classification is SPAWNING. */
+/** W1-T2439 — TWO LANES, keyed before the outcome exists: code PRs at the review width, plan-lane PRs at
+ *  {@link derivePlanLaneBound}'s width (W1-T11148). FAIL-OPEN: an unresolved classification is SPAWNING. */
 export function selectReviewAdmissions(
   openPrs: readonly OpenPrView[],
   policy: SweepPolicy,
