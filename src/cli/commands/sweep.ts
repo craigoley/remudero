@@ -1179,6 +1179,8 @@ export function buildSweepLightHook(
           ...(!distanceKnown ? { standDownReasonFor: (d: Disposition) => d === "mergeable"
             ? "ready PR distance is unreadable — held until its compare succeeds" : undefined } : {}),
           readLiveStateAtAct: effects.readLiveState,
+          // W1-T11153: a refill re-reads the open PRs this pass started from.
+          readOpenPrsForRefill: readViews,
           rereadPrAtAct: effects.rereadPrAtAct ?? buildRereadPrAtAct(owner, repo, ledgerPath, {
             views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
               readMainPlan: resolvedReadMainPlan },
