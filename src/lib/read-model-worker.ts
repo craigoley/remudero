@@ -2852,6 +2852,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     } else if (msg.type === "body") {
       bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
       posted.add(readModelBodyKey(msg.entry.view, msg.entry.key));
+      // A replacement's listeners must judge its own readings, before the next sources message.
+      bodyReadings.set(readModelBodyKey(msg.entry.view, msg.entry.key), new Map(msg.entry.body.sources.map(source => [source.name, source])));
       for (const listener of bodyListeners) listener(msg.entry);
     } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
     else if (msg.type === "drop") forget(readModelBodyKey(msg.view, msg.key)); else if (msg.type === "sources") {
