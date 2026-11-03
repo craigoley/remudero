@@ -13,6 +13,8 @@ import { test } from "node:test";
 import { parse } from "yaml";
 import { buildFieldTrialsFlowSnapshot, projectFlowRow, type FieldTrialsLedgerRead } from "#src/lib/field-trials-flow.js";
 import { emptyRepoStore } from "#src/lib/field-trials-github.js";
+import { benchmarkWorkerAttemptResources } from "#src/lib/benchmark-run.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 import { laneMappedExplicitly, PUBLIC_CATEGORIES, PUBLIC_GUARDRAIL_CLASSES, GUARDRAIL_SIGNALS, publicCategoryOfLane,
   publicGuardrailClassOf } from "#src/lib/public-model-vocabulary.js";
 import { CODEX_SERVED_MODEL_REASON, OpenWeightRequestTooLargeError, OpenWeightTruncatedReplyError } from "#src/lib/worker-provider.js";
@@ -84,6 +86,21 @@ function attempt(id: string, fields: Record<string, unknown>): Record<string, un
 
 const TOKENS = { input: 1200, output: 300 };
 
+function retainedCodexAttempt(id: string, outputRetention: WorkerResult["outputRetention"]) {
+  const result: WorkerResult = { provider: "codex", sessionId: id, model: "gpt-6.1-sol", effort: "high",
+    costUsd: 0, numTurns: 1, text: "private reply", blocks: ["private block"], stderr: "private stderr",
+    subtype: "error_incomplete_output", isError: true, apiError: false, exit: { kind: "exit", code: 0 },
+    permissionDenials: [], childEnvKeys: [], modelUsage: {}, compactionEvents: [], qualitySuspect: false,
+    tokens: { ...TOKENS, cacheRead: 0, cacheCreation: 0 }, outputRetention };
+  return attempt(id, { success: !result.isError, ...benchmarkWorkerAttemptResources(result) });
+}
+
+const RETAINED: NonNullable<WorkerResult["outputRetention"]> = {
+  text: { state: "truncated", bytesRead: 1024 }, blocks: { state: "truncated", bytesRead: 1024 },
+  stdout: { state: "complete", bytesRead: 2048 }, stderr: { state: "complete", bytesRead: 0 },
+  completion: { state: "complete" }, originalSubtype: "success",
+};
+
 function fixRound(id: string, model: string, fields: Record<string, unknown> = {}): Record<string, unknown>[] {
   const receipt = { host: "host-a", task_id: "task-fix", run_id: "fix-run", repair_round_id: id,
     worker_run_id: `worker-${id}`, worker_rung: "fix", selection_assignment_id: `selection-${id}` };
@@ -108,6 +125,8 @@ test("W1-T10877: guardrail fires are counted per model, category and class", () 
       error_class: OpenWeightTruncatedReplyError.name }),
     dispatched("a3", sol), attempt("a3", { success: true, served_model: null, served_model_reason: CODEX_SERVED_MODEL_REASON,
       tokens: TOKENS }),
+    // A Codex incomplete-output result has usage but no served model or reply error class.
+    dispatched("a6", sol), retainedCodexAttempt("a6", RETAINED),
     // A pre-request refusal and an infrastructure kill are not the model's: neither a fire nor an opportunity.
     dispatched("a4", sol), attempt("a4", { success: false, served_model: null, worker_failure: "spawn-threw-before-result",
       error_class: OpenWeightRequestTooLargeError.name }),
@@ -144,9 +163,9 @@ test("W1-T10877: guardrail fires are counted per model, category and class", () 
     cell(sonnet, "repository-change", "output-cap-truncation-check", 2, 0),
     cell(sonnet, "repository-change", "schema-validated-output", 2, 0),
     cell(sonnet, "repository-change", "served-model-verification", 2, 0),
-    cell(sol, "repository-change", "output-cap-truncation-check", 3, 1),
-    cell(sol, "repository-change", "schema-validated-output", 3, 0),
-    cell(sol, "repository-change", "served-model-verification", 3, 1),
+    cell(sol, "repository-change", "output-cap-truncation-check", 4, 2),
+    cell(sol, "repository-change", "schema-validated-output", 4, 0),
+    cell(sol, "repository-change", "served-model-verification", 4, 2),
     cell("gpt-oss-120b", "long-context-drafting", "schema-validated-output", 1, 1),
     cell("gpt-oss-120b", "long-context-drafting", "served-model-verification", 1, 0),
     cell("haiku", "long-context-drafting", "schema-validated-output", 1, 0),
@@ -162,6 +181,45 @@ test("W1-T10877: guardrail fires are counted per model, category and class", () 
   for (const internal of ["run-task", "inbox-draft", "fix.exhausted", OpenWeightTruncatedReplyError.name, "draft-contract\""]) {
     assert.equal(text.includes(internal), false, internal);
   }
+});
+
+test("W1-T10877: output retention survives the producer and projection and fires once per attempt", () => {
+  const key = "gpt-6.1-sol|repository-change|output-cap-truncation-check";
+  const expected = (fires: number) => ({ modelId: "gpt-6.1-sol", category: "repository-change",
+    guardrailClass: "output-cap-truncation-check", opportunities: 1, fires });
+  for (const channel of ["text", "blocks", "stdout", "stderr", "completion"] as const) {
+    const states = channel === "completion" ? ["complete", "absent", "malformed"] as const
+      : ["complete", "truncated", "unreadable", "malformed", "absent"] as const;
+    for (const state of states) {
+      const retention = { text: { state: "complete", bytesRead: 0 }, blocks: { state: "complete", bytesRead: 0 },
+        stdout: { state: "complete", bytesRead: 0 }, stderr: { state: "complete", bytesRead: 0 },
+        completion: { state: "complete" }, originalSubtype: "success",
+        [channel]: { state, bytesRead: 0, reason: "private retention reason" } } as NonNullable<WorkerResult["outputRetention"]>;
+      const row = retainedCodexAttempt("retained", retention);
+      const projected = projectFlowRow(row, "retained");
+      assert.equal(JSON.stringify(projected).includes("private"), false);
+      assert.deepEqual(snapshotOf([dispatched("retained", "gpt-6.1-sol"), row]).families.guardrails[key]?.cells,
+        expected(state === "complete" ? 0 : 1), `${channel}: ${state}`);
+    }
+  }
+  const row = retainedCodexAttempt("both", RETAINED);
+  const rows = [dispatched("both", "gpt-6.1-sol"), row];
+  const initial = snapshotOf(rows);
+  assert.deepEqual(initial.families.guardrails[key]?.cells, expected(1));
+  const replyAndRetention = { ...row, error_class: OpenWeightTruncatedReplyError.name };
+  assert.deepEqual(snapshotOf([rows[0]!, replyAndRetention]).families.guardrails[key]?.cells, expected(1));
+  for (const excluded of [{ worker_exit: "signal", worker_exit_signal: "SIGKILL" },
+    { worker_failure: "orphaned-by-process-exit" }, { success: null }, { lane: "worker-smoke" }]) {
+    assert.equal(snapshotOf([rows[0]!, { ...row, ...excluded }]).families.guardrails[key], undefined);
+  }
+  const clean = { ...row, output_retention: { text: { state: "complete" } } };
+  const rebuilt = snapshotOf([rows[0]!, clean], initial);
+  assert.deepEqual(rebuilt.families.guardrails[key]?.cells, expected(0));
+  assert.ok(rebuilt.rebuild.rebuiltPartitions.includes(`guardrails:${key}`));
+  const untrusted = { ...row, output_retention: { text: { state: "private unknown state" },
+    prompt: { state: "truncated", reason: "private" } } };
+  assert.equal(JSON.stringify(projectFlowRow(untrusted, "unknown")).includes("private"), false);
+  assert.deepEqual(snapshotOf([rows[0]!, untrusted]).families.guardrails[key]?.cells, expected(0));
 });
 
 test("W1-T10877: fix opportunities exclude infrastructure, refusals, unknown and missing attempts", () => {

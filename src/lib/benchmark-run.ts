@@ -440,10 +440,18 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
     ? !(codexPlaceholder && result.tokens.input === 0 && result.tokens.output === 0
       && result.tokens.cacheRead === 0 && result.tokens.cacheCreation === 0)
     : fields.token_usage_state === "observed");
+  // Retain only stream states: file reasons and result text are not attempt metadata.
+  const retention = fields.output_retention;
+  const outputRetention = retention ? Object.fromEntries(
+    (["text", "blocks", "stdout", "stderr", "completion"] as const).flatMap((channel) => {
+      const state = retention[channel]?.state;
+      return state === undefined ? [] : [[channel, { state }]];
+    })) : undefined;
   return {
     // The private ledger row owns attempt identity; the public-safe benchmark envelope below does not.
     ...(fields.execution_evidence === undefined ? {} : { execution_evidence: fields.execution_evidence }),
     served_model: fields.served_model,
+    ...(outputRetention === undefined ? {} : { output_retention: outputRetention }),
     // W1-T4650: the reason rides beside the null it explains; dropping it left every row generic.
     ...(fields.served_model_reason !== undefined ? { served_model_reason: fields.served_model_reason } : {}),
     worker_duration_ms: fields.worker_duration_ms,

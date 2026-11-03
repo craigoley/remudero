@@ -156,8 +156,7 @@ function flowRelevant(row: Record<string, unknown>): boolean {
     || (row.actor === "operator" && typeof row.task_id === "string");
 }
 
-/** The bounded attempt and fix-terminal fields attributeAttemptOutcome reads; strings, finite numbers and
- *  observed {state,value} cells only, so a prompt or body can never ride along. */
+/** Bounded attribution fields and output-retention states; prompts, bodies and file reasons stay out. */
 function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<string, unknown>> | undefined {
   if (row.step !== "worker.attempt" && !GUARDRAIL_STEPS.has(String(row.step))) return undefined;
   const cell = (value: unknown) => {
@@ -173,6 +172,12 @@ function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<st
   const tokens = record(row.tokens);
   const counted = tokens ? Object.fromEntries(Object.entries(tokens)
     .filter(([, value]) => typeof value === "number" && Number.isFinite(value))) : undefined;
+  const retention = record(row.output_retention);
+  const retained = retention ? Object.fromEntries(["text", "blocks", "stdout", "stderr", "completion"].flatMap((channel) => {
+    const state = record(retention[channel])?.state;
+    return typeof state === "string" && ["complete", "truncated", "unreadable", "malformed", "absent"].includes(state)
+      ? [[channel, { state }]] : [];
+  })) : undefined;
   const signals: Record<string, unknown> = {
     ...(text(row.worker_failure) ? { worker_failure: row.worker_failure } : {}),
     ...(text(row.error_class) ? { error_class: row.error_class } : {}),
@@ -182,6 +187,7 @@ function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<st
       ? { selection_assignment_unavailable_reason: row.selection_assignment_unavailable_reason } : {}),
     ...(terminal && Object.keys(terminal).length > 0 ? { terminal_evidence: terminal } : {}),
     ...(counted && Object.keys(counted).length > 0 ? { tokens: counted } : {}),
+    ...(retained && Object.keys(retained).length > 0 ? { output_retention: retained } : {}),
   };
   return Object.keys(signals).length > 0 ? signals : undefined;
 }
@@ -821,8 +827,12 @@ function guardrailUnits(rows: FlowRow[]): GuardrailUnit[] {
   const add = (row: FlowRow, modelId: string, lane: string | null, signals: Partial<Record<GuardrailSignal, boolean>>) => {
     const category = publicCategoryOfLane(lane);
     if (category === null) return;
+    const classes = new Map<PublicGuardrailClass, boolean>();
     for (const [signal, fired] of Object.entries(signals)) {
       const guardrailClass = publicGuardrailClassOf(signal)!;
+      classes.set(guardrailClass, classes.get(guardrailClass) === true || fired === true);
+    }
+    for (const [guardrailClass, fired] of classes) {
       units.push(withDigest({ key: `${modelId}|${category}|${guardrailClass}`, modelId, category, guardrailClass,
         fired: fired === true, row: row.fingerprint }));
     }
@@ -837,6 +847,8 @@ function guardrailUnits(rows: FlowRow[]): GuardrailUnit[] {
       add(row, row.servedModel ?? assignment?.selectedModel ?? row.selectedModel ?? "unknown", lane, {
         "draft-contract-dirty": signal === "draft-contract",
         "truncated-reply": signal === `reply-${OpenWeightTruncatedReplyError.name}`,
+        "output-retention": Object.values(record(row.outcomeSignals?.output_retention) ?? {})
+          .some((evidence) => record(evidence)?.state !== "complete"),
         "served-model-unnamed": row.servedModel === null });
     } else if (row.step === "inbox.drafted") {
       const modelId = row.servedModel ?? row.requestedModel;
