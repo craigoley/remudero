@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { buildProjectInit, parseProjectInitArgs, ProjectInitError } from "#src/lib/project-init.js";
 import { projectInitFiles, writeProjectInit } from "#src/lib/project-init-write.js";
 import { resolveRepoLayout } from "#src/lib/repo-layout.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const BASELINES = { coveragePct: 73.4, branchesPct: 68.9, mutationScorePct: 61.2, dupPct: 4.2 };
 const payload = () => buildProjectInit({
@@ -14,7 +15,7 @@ const payload = () => buildProjectInit({
 });
 
 function withDir(run: (dir: string) => void): void {
-  const dir = mkdtempSync(join(tmpdir(), "project-init-write-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}project-init-write-`));
   try { run(dir); } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
