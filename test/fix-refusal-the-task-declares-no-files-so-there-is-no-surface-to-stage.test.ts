@@ -74,16 +74,33 @@ async function fixRound(t: TestContext, options: {
 }
 
 test("W1-T5377: fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage is prevented, not retried", async (t) => {
-  for (const options of [{ files: [], inherited: [] }, {}, { unreadableDiff: true }]) {
+  for (const options of [{ files: [], inherited: [] }, {}]) {
+    await t.test(JSON.stringify(options), async (t) => {
+      const { outcome, rows, calls, stagedSurface } = await fixRound(t, options);
+      assert.equal(outcome.outcome, "fixed");
+      assert.equal(outcome.strikes, 1);
+      assert.equal(outcome.retriggers, 0);
+      assert.equal(outcome.standDownReason, undefined);
+      assert.deepEqual(calls, { spawn: 1, push: 1, account: 1, review: 1, ci: 1, commit: 1 });
+      assert.deepEqual(stagedSurface, []);
+      assert.equal(rows.filter((row) => row.step === "fix.dispatch").length, 1);
+      assert.equal(rows.some((row) => row.step === "fix.stood_down" || row.step === "fix.commit_refused"), false);
+    });
+  }
+});
+
+test("an unreadable PR diff stands down before spending a worker round", async (t) => {
+  for (const options of [{ unreadableDiff: true }, { files: ["src/run-task.ts"], unreadableDiff: true }]) {
     await t.test(JSON.stringify(options), async (t) => {
       const { outcome, rows, calls } = await fixRound(t, options);
       assert.equal(outcome.outcome, "stood_down");
       assert.equal(outcome.strikes, 0);
       assert.equal(outcome.retriggers, 0);
-      assert.match(outcome.standDownReason ?? "", /no surface to stage/);
+      assert.match(outcome.standDownReason ?? "", /PR diff unreadable.*no surface to stage/);
       assert.deepEqual(calls, { spawn: 0, push: 0, account: 0, review: 0, ci: 0, commit: 0 });
       assert.equal(rows.some((row) => row.step === "fix.dispatch" || row.step === "fix.commit_refused"), false);
-      assert.equal(rows.find((row) => row.step === "fix.stood_down")?.site, "rung.empty_commit_surface");
+      assert.equal(rows.find((row) => row.step === "fix.stood_down")?.site,
+        options.files ? "rung.pr_diff_unreadable" : "rung.empty_commit_surface");
     });
   }
 });

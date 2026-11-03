@@ -544,7 +544,8 @@ import { dropTierRowsBeforePush, prePushGateRefusal } from "./lib/pre-push-refus
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
-import { buildProjectInit, parseProjectInitArgs } from "./lib/project-init.js";
+import { buildProjectInit, parseProjectInitArgs, ProjectInitError } from "./lib/project-init.js";
+import { writeProjectInit } from "./lib/project-init-write.js";
 import {
   OnboardError,
   parseOnboardArgs,
@@ -1074,7 +1075,7 @@ import {
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
-import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
+import { learnedBakeoffLimit, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import type { DeployedModel, DeploymentBakeoffCandidate } from "./lib/bakeoff-trigger.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
@@ -1837,6 +1838,8 @@ export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdict
  * stays the fail-closed floor for any PR this earlier gate misses; this is additive, not a
  * replacement. Extracted so a test can drive it against a counting fake, never a real `gh`/git call.
  */
+export type FreshTreeEntry = { kind: "bundle" | "tsx" | "unknown"; reason: string };
+
 /** W1-T3723 — what {@link buildFreshTreeReviewRunner} needs, all injected so a test drives it
  *  without git, a worktree or a spawn. A `type` whose name does NOT end in `Deps`, deliberately:
  *  `scripts/deps-interface-baseline.json`'s census can only shrink, and another `*Deps` shape is
@@ -1854,7 +1857,8 @@ export type FreshTreeReviewSeams = {
   addWorktree: (repoDir: string, worktreePath: string, revision: string) => void;
   /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code; on a
    *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
-  spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void) => Promise<number>;
+  spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void,
+    parentEnv?: NodeJS.ProcessEnv, onEntry?: (entry: FreshTreeEntry) => void) => Promise<number>;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
   /**
@@ -1963,9 +1967,10 @@ export function buildFreshTreeReviewRunner(
   rest: string[],
   freshness: { originMainSha: string },
   onFailure?: (failure: string) => void,
+  onEntry?: (entry: FreshTreeEntry) => void,
 ) => Promise<number | undefined> {
   const prepared = new Map<string, string>();
-  return async (prArg, rest, freshness, onFailure) => {
+  return async (prArg, rest, freshness, onFailure, onEntry) => {
     const sha = freshness.originMainSha;
     try {
       let worktree = prepared.get(sha);
@@ -1984,7 +1989,7 @@ export function buildFreshTreeReviewRunner(
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
-        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure);
+        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure, undefined, onEntry);
       };
       return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
     } catch (err) {
@@ -2095,17 +2100,25 @@ export function spawnRmdReviewForFreshTree(
   args: string[],
   onFailure?: (failure: string) => void,
   parentEnv: NodeJS.ProcessEnv = process.env,
+  onEntry?: (entry: FreshTreeEntry) => void,
+  store: { storeRoot?: string } = {},
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
+    const prepared = materializeMainEntryFromStore(worktree, store.storeRoot);
+    const sourceArgs = prepared.source ? ["--main-entry-source", JSON.stringify(prepared.source)] : [];
     // A daemon's installation token is copied at spawn and may expire during proof execution.
     // An App-backed child mints its own fresh token in main(); other callers keep their identity.
     const appConfigured = Boolean(parentEnv.GH_APP_ID && parentEnv.GH_APP_INSTALLATION_ID && parentEnv.GH_APP_PRIVATE_KEY_PATH);
-    const child = spawn(join(worktree, "bin", "rmd"), ["review", ...args], {
+    const child = spawn(join(worktree, "bin", "rmd"), [...sourceArgs, "review", ...args], {
       cwd: worktree,
       // W1-T4055: stderr is piped only to be TEED — every byte still reaches this process's stderr.
-      stdio: ["inherit", "inherit", "pipe"],
+      stdio: ["inherit", "inherit", "pipe", "pipe"],
       // The child IS at origin/main, so a self-sync there is a refusal and a wasted fetch.
       env: { ...parentEnv, RMD_SELF_SYNC_DONE: "1", ...(appConfigured ? { GH_TOKEN: "" } : {}) },
+    });
+    let entryReport = "";
+    (child.stdio[3] as import("node:stream").Readable).on("data", (chunk: Buffer) => {
+      entryReport = (entryReport + chunk.toString("utf8")).slice(0, 1024);
     });
     let held = "";
     child.stderr?.on("data", (chunk: Buffer) => {
@@ -2115,6 +2128,11 @@ export function spawnRmdReviewForFreshTree(
     child.on("error", reject);
     // `close`, not `exit`: only `close` guarantees the piped stderr has been read to its end.
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      const [kind, reason] = entryReport.trim().split("\t");
+      const storeReason = prepared.lookup.outcome === "miss" ? prepared.lookup.reason
+        : prepared.lookup.outcome === "hit" ? "store-hit" : "tree-current";
+      onEntry?.({ kind: kind === "bundle" || kind === "tsx" ? kind : "unknown",
+        reason: `${reason || "launcher-did-not-report"}; ${storeReason}` });
       const exitCode = code ?? 1;
       if (exitCode !== 0) onFailure?.(signal && !held.trim() ? `killed by ${signal}` : freshTreeFailureText(held));
       resolve(exitCode);
@@ -2170,6 +2188,7 @@ export function buildReviewerCodeFreshnessGate(
     rest: string[],
     freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
     onFailure?: (failure: string) => void,
+    onEntry?: (entry: FreshTreeEntry) => void,
   ) => Promise<number | undefined>,
 ): {
   call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
@@ -2196,11 +2215,12 @@ export function buildReviewerCodeFreshnessGate(
           // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
           // nothing but an exit code ledgered; the cause is what the next fix needs.
           let failure: string | undefined;
+          let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
           const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
-          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }).then((code) => {
+          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }).then((code) => {
             if (code !== undefined) {
               const why = code === 0 ? {} : { failure: failure ?? "no failure reported" };
-              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, ...why });
+              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, entry_kind: entry.kind, entry_reason: entry.reason, ...why });
               return code;
             }
             // COULD NOT RUN — fall through to the original skip rather than judging with stale
@@ -30873,7 +30893,8 @@ export function commitWorkerEdits(
   if (message.trim().length === 0) {
     return { committed: false, undeclared: [], reason: "refusing to commit with an empty message" };
   }
-  if (declaredPaths.length === 0 && !options.checkpoint) {
+  // Fix rounds can repair admitted tests and regenerable artifacts even without a filed surface.
+  if (declaredPaths.length === 0 && !options.checkpoint && !options.admitTests) {
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
   }
 
@@ -35597,7 +35618,7 @@ function createInboxBakeoffReplay(
           return next;
         };
       };
-      const rows = await replay({ proposals, planText, spawnFor, candidates, log: (step, extra = {}) => {
+      const rows = await replay({ proposals, planText, spawnFor, candidates, learnedLimit: learnedBakeoffLimit(config), log: (step, extra = {}) => {
         const candidate = candidates?.find((candidate) => candidate.id === extra.candidate);
         const refusal = refusals.get(String(extra.candidate));
         log(step, { ...extra, ...(candidate ? { model: candidate.model } : {}),
@@ -39969,7 +39990,9 @@ async function initCommand(rest: string[]): Promise<number> {
  * external repo (auth, default-branch detection, PR conflicts, etc.) is out of this task's
  * scope — the note on W1-T27 calls the live end-to-end provisioning a separate
  * operator-attested confirmation (Rule 18), not part of auto-verify. Keeping the live-mutation
- * path manual also keeps this command trivially safe to run against any repo name.
+ * path manual also keeps this command trivially safe to run against any repo name. `--write`
+ * only puts the generated files into a local checkout (lib/project-init-write.ts), refusing
+ * before any write when one already exists; it still pushes nothing.
  */
 async function projectCommand(rest: string[]): Promise<number> {
   const sub = rest[0];
@@ -40002,12 +40025,21 @@ async function projectCommand(rest: string[]): Promise<number> {
     `baselines captured: coverage=${payload.baselines.coveragePct}% branches=${payload.baselines.branchesPct}% ` +
       `mutation=${payload.baselines.mutationScorePct}% dup=${payload.baselines.dupPct}% (at ${payload.baselines.capturedAt})`,
   );
+  let written: string[] | undefined;
+  try {
+    written = parsed.args.writeDir === undefined ? undefined : writeProjectInit(payload, parsed.args.writeDir);
+  } catch (e) {
+    if (!(e instanceof ProjectInitError)) throw e;
+    console.error(e.message);
+    return 2;
+  }
+  if (written) console.log(`wrote ${written.length} file(s) under ${parsed.args.writeDir}: ${written.join(", ")}`);
   console.log(
     "\nThis command GENERATES the stack; it does not push/open a PR or arm branch protection " +
       "itself (manual next steps):",
   );
   console.log(
-    `  1. Write the files listed above into a branch of ${owner}/${parsed.args.repo} and open a PR gated by ci-gate + remudero-review.`,
+    `  1. ${written ? "Commit the written files to" : "Write the files listed above into"} a branch of ${owner}/${parsed.args.repo} and open a PR gated by ci-gate + remudero-review.`,
   );
   console.log(`  2. Once that PR is merged, arm branch protection:`);
   console.log(
@@ -41897,9 +41929,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "project",
-    syntax: "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>",
+    syntax: "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n> [--write <abs-dir>]",
     summary: "Fleet-inheritance onboarding: generate the whole gate stack for a target repo.",
-    detail: "fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself",
+    detail: "fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps; --write <abs-dir> also writes every file (and .remudero/branch-protection.json) into that checkout, refusing before any write if one already exists; does not push/PR/arm protection itself",
   },
   {
     name: "onboard",
@@ -42143,7 +42175,7 @@ import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./li
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
-import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js";
+import { buildIntoStore, childEntryStoreRoot, materializeMainEntryFromStore } from "./lib/child-entry-store.js";
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };

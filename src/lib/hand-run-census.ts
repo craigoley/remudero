@@ -17,13 +17,56 @@
  * Falsifier: test/hand-run-census.test.ts, test/the-hand-run-census-names-the-verb-not-the-step.test.ts.
  */
 import { appendLedger, type LedgerLine } from "./ledger.js";
-import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionResult } from "./ledger-grep.js";
+import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionOptions, type LedgerUnionResult } from "./ledger-grep.js";
 import { captureFeedback, stageFeedbackCapture, type CaptureFeedbackOptions, type FeedbackEntry } from "./feedback.js";
 
 // ── Reading operator rows out of the union ──────────────────────────────────────────────────
 
 /** Read the whole row population so a non-human majority cannot disappear behind a pre-filter. */
 const HAND_RUN_OPERATOR_LEDGER_PATTERN = /"step"\s*:/;
+
+export type HandRunUnionOptions = LedgerUnionOptions & { keep?: (line: string) => boolean };
+export type HandRunLedgerUnion = (stateDir: string, pattern: RegExp, fsDeps?: LedgerGrepFsDeps, opts?: HandRunUnionOptions) => LedgerUnionResult;
+
+const DIGEST_SHARDS = 64;
+
+function lineDigest(line: string): [number, number] {
+  let a = 0x811c9dc5;
+  let b = 0x01000193;
+  for (let i = 0; i < line.length; i++) {
+    const c = line.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193) >>> 0;
+    b = Math.imul(b ^ c, 0x0100019d) >>> 0;
+  }
+  return [b % DIGEST_SHARDS, a * 2 ** 21 + (b >>> 11)];
+}
+
+/** W1-T11178: count distinct step rows by a 64-shard FNV digest and keep only operator rows, never the whole union. */
+function operatorRowFilter(): { keep: (line: string) => boolean; population: () => number; called: () => boolean } {
+  const seen = Array.from({ length: DIGEST_SHARDS }, () => new Set<number>());
+  let population = 0;
+  let called = false;
+  const keep = (line: string): boolean => {
+    called = true;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return false; // a torn row counts in neither the population nor the operator rows, as before
+    }
+    if (parsed === null || typeof parsed !== "object") return false;
+    const row = parsed as { step?: unknown; actor?: unknown };
+    if (typeof row.step === "string") {
+      const [shard, value] = lineDigest(line);
+      if (!seen[shard].has(value)) {
+        seen[shard].add(value);
+        population += 1;
+      }
+    }
+    return row.actor === "operator_human" || row.actor === "operator_ai";
+  };
+  return { keep, population: () => population, called: () => called };
+}
 
 /** One operator-authored ledger row, narrowed to the fields session-mining needs. `verb` is the
  *  actual command name `logCliInvocation` (src/run-task.ts) stamps onto every `cli.invoked` row
@@ -214,10 +257,11 @@ export type HandRunCensusResult =
  *  kind. Refuse an incomplete corpus, absent operator evidence, or a non-human majority. */
 export function censusHandRuns(
   stateDir: string,
-  ledgerUnion: (stateDir: string, pattern: RegExp, fsDeps?: LedgerGrepFsDeps) => LedgerUnionResult = resolveLedgerUnion,
+  ledgerUnion: HandRunLedgerUnion = resolveLedgerUnion,
   opts: { dayFloor?: number; fsDeps?: LedgerGrepFsDeps } = {},
 ): HandRunCensusResult {
-  const union = ledgerUnion(stateDir, HAND_RUN_OPERATOR_LEDGER_PATTERN, opts.fsDeps);
+  const filter = operatorRowFilter();
+  const union = ledgerUnion(stateDir, HAND_RUN_OPERATOR_LEDGER_PATTERN, opts.fsDeps, { keep: filter.keep });
   if (!union.ok) {
     return {
       status: "refused",
@@ -228,7 +272,7 @@ export function censusHandRuns(
   if (rows.length === 0) {
     return { status: "refused", refusedReason: "no actor-stamped operator row found in the ledger union yet" };
   }
-  const population = union.matches.filter((raw) => {
+  const population = filter.called() ? filter.population() : union.matches.filter((raw) => {
     try {
       const line = JSON.parse(raw);
       return line !== null && typeof line === "object" && typeof line.step === "string";
@@ -334,10 +378,9 @@ export interface HandRunCensusCadenceOpts {
   ledgerPath: string;
   runId: string;
   dayFloor?: number;
-  /** Test seams — real callers never set these, matching `coverage-improvement.ts`'s
-   *  `InjectCoverageImprovementDeps`. */
+  /** Test seams — real callers never set these, as in `coverage-improvement.ts`'s `InjectCoverageImprovementDeps`. */
   capture?: (root: string, opts: CaptureFeedbackOptions) => FeedbackEntry;
-  ledgerUnion?: (stateDir: string, pattern: RegExp, fsDeps?: LedgerGrepFsDeps) => LedgerUnionResult;
+  ledgerUnion?: HandRunLedgerUnion;
   writeLedgerLine?: (path: string, line: LedgerLine) => void;
   land?: CaptureFeedbackOptions["land"];
 }
