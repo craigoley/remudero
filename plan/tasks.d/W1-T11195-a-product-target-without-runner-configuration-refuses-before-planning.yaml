@@ -2,7 +2,7 @@
   title: A product target with no runner configuration refuses before the plan journal or handoff, with a named recoverable state instead of a native ENOENT
   repo: remudero
   depends_on: [W1-T11085]
-  dispatch_hold: true
+  dispatch_hold: false
   priority: 1.1
   type: implement
   verify: auto
