@@ -1,6 +1,6 @@
 // @census-reads: bin/rmd scripts/build-child-entries.mjs — copied into executable fixture trees.
 import assert from "node:assert/strict";
-import { type ChildProcess } from "node:child_process";
+import { execFileSync, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
@@ -162,6 +162,7 @@ test("W1-T11152 criterion 2: a carried source hash is reused only while its sour
     const prepared = materializeMainEntryFromStore(f.tree, f.store);
     assert.deepEqual(prepared.lookup, { outcome: "hit", hash });
     assert.equal(prepared.source?.hash, hash);
+    assert.ok(JSON.stringify(prepared.source).length < 256, "the carried witness fits one process argument regardless of source-file count");
     assert.ok(sourceReads.includes(join(f.tree, "src/run-task.ts")), "positive control: the first hash read the source corpus");
     sourceReads.length = 0;
     assert.equal((await build.mainEntry(f.tree, "review", { source: prepared.source })).kind, "bundle");
@@ -173,6 +174,20 @@ test("W1-T11152 criterion 2: a carried source hash is reused only while its sour
     syncBuiltinESMExports();
     rmSync(f.root, { recursive: true, force: true });
   }
+});
+
+test("W1-T11152 criterion 2: a malformed carried witness falls back without leaking launcher arguments", () => {
+  const f = reviewerFixture();
+  try {
+    execFileSync(join(f.tree, "bin/rmd"), ["--main-entry-source", "{", "review", "7"], {
+      cwd: f.tree, env: { ...process.env, NODE_V8_COVERAGE: "" },
+    });
+    const actual = JSON.parse(readFileSync(join(f.tree, "observed.json"), "utf8"));
+    assert.equal(actual.bundled, false);
+    assert.match(actual.entry, /^tsx:invalid-source-witness:/);
+    assert.deepEqual(actual.args, ["review", "7"]);
+    assert.equal(existsSync(join(f.tree, "dist")), false);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test("W1-T11152 criterion 2: a missing, unreadable or corrupt store preserves tsx and reports why", async () => {
