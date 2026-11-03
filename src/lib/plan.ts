@@ -34,21 +34,16 @@ export type TaskRisk = (typeof TASK_RISKS)[number];
 /** Default risk when a task omits it (medium — the routing table's middle mount). */
 export const DEFAULT_RISK: TaskRisk = "medium";
 
-/**
- * Which of two things a `risk: high` band asserts (W1-T2503): Rule 19's span measure (`"span"`) or
- * a blast radius unrelated to span (`"blast-radius"`). task-linter.ts's `sizingViolation` enforces
- * it. Why: docs/forensics/plan.md#band_meanings.
- */
+/** W1-T2503: high risk means Rule 19 span or unrelated blast radius; `sizingViolation` enforces it.
+ *  Why: docs/forensics/plan.md#band_meanings. */
 export const BAND_MEANINGS = ["span", "blast-radius"] as const;
 export type BandMeaning = (typeof BAND_MEANINGS)[number];
 
 /** A dependency is "satisfied" only once it has landed. */
 const MERGED_STATUSES = new Set<TaskStatus>(["merged", "done"]);
 
-/**
- * Why a `blocked` task will never be built (W1-T1287) — an operator's closed ruling, distinct from
- * the ordinary dependency-stalled case. Never auto-written. Why: docs/forensics/plan.md#retirement_reasons.
- */
+/** W1-T1287: operator-only closed ruling, not a dependency stall; never auto-written.
+ *  Why: docs/forensics/plan.md#retirement_reasons. */
 export const RETIREMENT_REASONS = ["retired", "closed", "withdrawn"] as const;
 export type RetirementReason = (typeof RETIREMENT_REASONS)[number];
 
@@ -84,11 +79,8 @@ export interface AcceptanceCriterion {
   holdout?: boolean;
 }
 
-/**
- * Criteria a worker may be shown: every criterion except `holdout: true` ones (W1-T166). Every
- * worker-facing prompt assembler calls this rather than re-implementing the filter, so "never
- * shown to a worker" has exactly one implementation to audit. Why: docs/forensics/plan.md#visiblecriteria.
- */
+/** W1-T166: all worker prompt assemblers use this single holdout filter.
+ *  Why: docs/forensics/plan.md#visiblecriteria. */
 export function visibleCriteria<T extends { holdout?: boolean }>(criteria: T[]): T[] {
   return criteria.filter((c) => !c.holdout);
 }
@@ -103,12 +95,8 @@ export interface ContextClaim {
  *  who commissioned it. Absent reads `"operator"`, the pre-field default. */
 export type TaskAuthorClass = "machine" | "operator";
 
-/**
- * W1-T2977 — the RECORDED risk-judge ruling that lets `author_class: machine` sit at `verify:
- * auto`. RECORDED, not computed: `machineAuthorVerifyViolation` runs per task with no budget and
- * no network, so risk-judge.ts judges at FILING time and the linter only reads. ABSENT ⇒ refused,
- * the pre-W1-T2977 behaviour and risk-judge's own unavailable direction (W1-T130).
- */
+/** W1-T2977: filing-time risk-judge ruling permits machine-authored verify:auto; absent ⇒ refused
+ *  (W1-T130). `machineAuthorVerifyViolation` only reads it, with no network or judging budget. */
 export interface TaskRiskRuling {
   /** The judge's verdict label, carried verbatim rather than re-derived. */
   verdict: string;
@@ -154,9 +142,7 @@ export interface Task {
   plan_refs?: string[];
   goal?: string;
   symptom_query?: SymptomQuery;
-  /** The PR corpus a machine-filed CI-learning shard was mined from. Written by the ci-learning
-   *  rung on all 42 such shards and, until this field existed, DROPPED by the loader — so a title
-   *  claiming "36 PULL REQUESTS" reached consumers with none attached. */
+  /** Preserve the ci-learning rung's mined PR corpus through loading, not just its title. */
   ci_learning_prs?: number[];
   type: TaskType;
   verify: "auto" | "human";
@@ -194,10 +180,8 @@ export interface Task {
   /** Provenance (Rules 16/17): where this task came from — `architect`, `feedback#…`, `alert#…`,
    *  `issue#…`. Never defaulted — its absence is itself what the §5C linter's provenance check reports. */
   origin?: string;
-  /** W1-T2959 — LAW 5's author-class mark, which `origin:` does NOT satisfy ("origin tags carry
-   *  commission, not intent"): a record commissioned by an operator and CONCLUDED by a machine is
-   *  indistinguishable under `origin:` alone. Absent ⇒ a person's shard, so nothing already in the
-   *  plan changes meaning. `"machine"` is refused at `verify: auto`, parking it for an operator. */
+  /** W1-T2959: Law 5 conclusion author, distinct from `origin:` commission. Absent ⇒ person;
+   *  machine verify:auto needs the W1-T2977 ruling below, otherwise parks for an operator. */
   author_class?: TaskAuthorClass;
   /** W1-T2977 — the recorded risk-judge ruling that lets a machine-authored record dispatch. Absent
    *  on a `machine` record ⇒ refused at `verify: auto`, unchanged from W1-T2959. See
@@ -215,11 +199,8 @@ export interface Task {
   retirement?: RetirementReason;
   /** W1-T9729: the task a retirement hands its origin to; the origin stays held until that task lands. */
   superseded_by?: string;
-  /** W1-T2920 — the file this task's record was parsed FROM: the monolith path or a shard path,
-   *  set by {@link parseTasksFromYaml} at parse time from its own `sourceLabel`. This is what lets
-   *  {@link taskRecordPath} answer "which file holds this task" as a map lookup on an already-loaded
-   *  {@link Plan} instead of re-reading and re-parsing every shard to find it. Optional because a
-   *  `Task` built by hand (fixtures, tests) never went through a parse and has no file to name. */
+  /** W1-T2920: {@link parseTasksFromYaml}'s `sourceLabel` enables constant-time {@link taskRecordPath}.
+   *  Monolith/shard path or git-ref label; optional for hand-built tasks that were never parsed. */
   sourcePath?: string;
 }
 
@@ -323,18 +304,9 @@ export function unmetTaskPrecondition(task: Task, opts: TaskPreconditionOptions 
   return undefined;
 }
 
-/**
- * W1-T3206 — THE LEDGER STEP THAT RELEASES A PARKED TASK.
- *
- * `verify: human` was a ONE-WAY PARK: `isDispatchEligible` refuses it (drain.ts) and
- * {@link assertRunnable} throws, and NOTHING converted an operator's decision back into dispatch.
- * MEASURED 2026-09-08: 45 such shards queued, the oldest filed 2026-07-21 — seven weeks — and a
- * grep across src/ for any approve/release/unblock path keyed on `verify: human` returned zero.
- *
- * THE RELEASE IS NOT A PLAN EDIT. It is the row `rmd approve` ALREADY writes when an operator
- * spends his bit, so the plan record stays byte-identical, the decision is auditable, and no worker
- * ever rewrites a `verify:` field (which Standing rule 15 forbids anyway).
- */
+/** W1-T3206: `rmd approve` releases verify:human through an auditable operator ledger row.
+ *  `isDispatchEligible` and {@link assertRunnable} otherwise refuse; the plan stays byte-identical.
+ *  Standing rule 15 forbids workers rewriting `verify:` to release a task. */
 export const RELEASE_LEDGER_STEP = "ratify.approved";
 
 /** Task ids released by an operator, read from {@link RELEASE_LEDGER_STEP} rows. Pure over the
@@ -343,12 +315,7 @@ export function releasedTaskIds(ledgerLines: readonly string[], plan?: Plan): Se
   return new Set(qualifyReleaseEvidence(ledgerLines, new Map(), releaseContractPins(plan?.tasks ?? [])).authors.keys());
 }
 
-/**
- * W1-T2901: the best-behaved of this repo's ~55 hand-rolled `Error` subclasses, now adopting the
- * shared envelope (`./errors.ts`) first. `kind: "plan"` and `exitCode: 1` reproduce today's
- * observed behaviour exactly (uncaught, it already fell through `main()`'s outer catch to exit
- * 1) — this migration adds a machine-readable discriminant, not a behaviour change.
- */
+/** W1-T2901: shared RmdError envelope adds kind:plan while preserving main()'s exit code 1. */
 export class PlanError extends RmdError {
   constructor(message: string, details?: Record<string, unknown>) {
     super("plan", 1, message, details);
@@ -399,11 +366,8 @@ export function placementImports(files: readonly string[]): { module: string; re
   return files.flatMap((f) => placementModule(f) ?? []).map((module) => ({ module, reach: "direct" as const }));
 }
 
-/**
- * W1-T9875: the folder under test/ a NEW test belongs in, computed by `placeTest` from the src modules the minted task
- * names (`srcFiles`) and the test's slug — never chosen, and never flat. A test no module or name places falls back to
- * the folder of `subject`, the module the finding is about, so every minter lands somewhere the map knows.
- */
+/** W1-T9875: `placeTest` computes a new test's folder from `srcFiles` and slug, never flat.
+ *  If neither places it, fall back to the `subject` module's folder. */
 export function computedTestFolder(slug: string, srcFiles: readonly string[], subject: string): string {
   const map = placementSubsystemMap();
   const placed = placeTest({ imports: placementImports(srcFiles), name: slug, kind: "unit" }, map);
@@ -567,33 +531,10 @@ function yamlTypeOf(v: unknown): string {
   return typeof v;
 }
 
-/**
- * W1-T2908 — `acceptance:` IS THE ONE PLAN FIELD THAT WAS CAST RATHER THAN CHECKED, AND IT IS THE
- * ONE THE WHOLE REVIEW ENGINE EXECUTES. `id`, `title`, `repo` and `type` all go through
- * {@link req} in the same loop; `acceptance` went in as `e.acceptance as AcceptanceCriterion[]`,
- * a type assertion that YAML has no obligation to honour. MEASURED at this head, by loading each
- * shape and driving the first consumer that touches it:
- *
- *   `claim: 123`          -> lintTask throws `TypeError: (c.claim ?? "").slice is not a function`
- *   `claim: true`         -> the same TypeError (a real YAML boolean)
- *   `acceptance: "text"`  -> lintTask throws `TypeError: (task.acceptance ?? []).map is not a function`
- *   `proof:` (empty)      -> lints CLEAN, then the REVIEWER throws
- *                            `TypeError: Cannot read properties of null (reading 'trim')`
- *
- * §5C says the plan gate is FAIL-CLOSED. It does fail closed — but by accident, in whichever verb
- * happened to touch the record first, with a message naming no shard, no criterion and no field.
- * The last row is the worst of the four: it survives the linter entirely and detonates inside
- * review, which is the furthest possible point from the shard that caused it.
- *
- * CORRECTION TO THE FILING, MEASURED RATHER THAN REPEATED: the rationale names `claim: yes` as the
- * boolean case. It is not one here — this loader's YAML is 1.2, where `yes` parses as the STRING
- * "yes" and lints clean. `claim: true` is the real boolean, and is what this validator is tested
- * against. Reporting the filing's example unchanged would have shipped a fixture that proves
- * nothing while looking like it covers the case.
- *
- * An ABSENT `acceptance` stays legal: whether a task needs criteria at all is the linter's
- * question, not the loader's, and answering it here would reject shards the plan is full of.
- */
+/** W1-T2908: validate acceptance before lint/review can throw on a cast YAML value (§5C).
+ *  Falsifiers: numeric/boolean claims, scalar acceptance, and empty proof (previously lint-clean).
+ *  YAML 1.2 `yes` is a string; use `true` to test booleans. Missing acceptance stays legal:
+ *  requiring criteria belongs to the linter, not this loader. */
 export function validateAcceptanceShape(raw: unknown, sourceLabel: string, taskId: string): AcceptanceCriterion[] | undefined {
   if (raw === undefined || raw === null) return undefined;
   const where = `${sourceLabel}: task ${taskId}`;
@@ -609,9 +550,7 @@ export function validateAcceptanceShape(raw: unknown, sourceLabel: string, taskI
     if (typeof c.claim !== "string" || c.claim.trim() === "") {
       throw new PlanError(`${at}: 'claim' must be a non-empty string, got ${yamlTypeOf(c.claim)}`);
     }
-    // `satisfied_by` (Architect-only, §12 rule 16) stands IN PLACE OF a proof: such a criterion is
-    // judged MET by citing an earlier PR, so it has no proof text to execute and requiring one
-    // would reject the form the plan already uses.
+    // Architect-only `satisfied_by` (§12 rule 16) cites an earlier PR in place of executable proof.
     if (c.satisfied_by !== undefined) {
       if (typeof c.satisfied_by !== "string" || c.satisfied_by.trim() === "") {
         throw new PlanError(`${at}: 'satisfied_by' must be a non-empty string, got ${yamlTypeOf(c.satisfied_by)}`);
@@ -685,12 +624,8 @@ function detachStrings(node: unknown): unknown {
   return node;
 }
 
-/**
- * Parse and field-validate a YAML task-list blob into {@link Task}s (schema v1), without checking
- * that every `depends_on` id resolves. Split out of {@link loadPlanFromYaml} so a caller validating
- * a partial blob that legitimately depends on ids outside it (lib/inbox.ts's ratification-candidate
- * drafts, W1-T110) gets real per-task validation without a false "unknown task" failure.
- */
+/** Field-validate schema-v1 tasks without resolving dependencies outside this blob.
+ *  W1-T110: inbox ratification drafts need partial validation; {@link loadPlanFromYaml} resolves ids. */
 export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicate?: (id: string) => void): Task[] {
   let raw: unknown;
   try {
@@ -770,11 +705,8 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       ...([e.design, e.amendment].some(value => value !== undefined && typeof value !== "string")
         ? { narrativeUnavailable: true as const } : {}),
       origin: e.origin as string | undefined,
-      // W1-T2968 — LAW 5'S MARK MUST SURVIVE THE FILE. Omitting this line made
-      // `machineAuthorVerifyViolation` unfireable on every record that lives on disk: the field
-      // parsed to `undefined`, so a machine-authored shard at `verify: auto` linted CLEAN while the
-      // identical in-memory task blocked. W1-T2959 shipped the rule and its tests built Task objects
-      // directly, so the unit passed and the wire was never exercised.
+      // W1-T2968: retain Law 5's mark on disk; W1-T2959's hand-built tasks missed the loader drop,
+      // which made `machineAuthorVerifyViolation` pass machine verify:auto shards as undefined.
       author_class: e.author_class as TaskAuthorClass | undefined,
       risk_ruling: validateRiskRulingShape(e.risk_ruling, sourceLabel, id),
       prompt: e.prompt as string | undefined,
@@ -782,11 +714,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       files: Array.isArray(e.files) ? (e.files as string[]) : undefined,
       retirement,
       superseded_by: supersededBy,
-      // W1-T2920 — record it once, HERE, at the one place that already knows it: `sourceLabel`
-      // is the monolith path or the shard path for every disk-backed caller (`loadPlan`,
-      // `taskRecordPath`'s own fallback) and a git-ref label for `loadPlanAtRef`/`mergePlanBlobs`
-      // — either way it is exactly what {@link taskRecordPath} needs to answer "which file holds
-      // this id" without ever re-reading a file to find out.
+      // W1-T2920: capture provenance once so taskRecordPath needs no reread (see Task.sourcePath).
       sourcePath: sourceLabel,
     };
     byId.set(id, task);
@@ -835,19 +763,10 @@ const defaultTaskRecordPathIO: TaskRecordPathIO = {
   listShardFiles,
 };
 
-/**
- * Which file holds `taskId`'s record — the monolith or a shard — or `undefined`.
- *
- * W1-T2920 — CONSTANT TIME WHEN `plan` IS GIVEN. Pass the {@link Plan} {@link loadPlan} already
- * produced and this is one `Map.get` against {@link Task.sourcePath}: zero file reads, however
- * many shards the plan has. `plan` is optional (not every caller has one loaded — e.g. a caller
- * naming a DIFFERENT `planPath` than any plan it already holds, such as a fresh worktree
- * checkout) — omit it and this falls back to the original behaviour: reusing {@link
- * parseTasksFromYaml} rather than a text scan (so the answer matches {@link loadPlan}'s own),
- * re-reading and re-parsing the monolith then each shard in order until one contains the id.
- * Every read in the fallback is guarded: an unreadable file is simply not the answer, never a
- * failed run. Why: docs/forensics/plan.md#taskrecordpath.
- */
+/** W1-T2920: task record's monolith/shard path, or undefined. Given `plan`, one Map.get on
+ *  {@link Task.sourcePath}, zero reads. Without a matching loaded plan, parse the monolith then
+ *  shards via {@link parseTasksFromYaml}; unreadable files are skipped, not fatal.
+ *  Why: docs/forensics/plan.md#taskrecordpath. */
 export function taskRecordPath(
   planPath: string,
   taskId: string,
@@ -1127,14 +1046,8 @@ function validatedPlan(tasks: Task[]): Plan {
   return { tasks, byId };
 }
 
-/**
- * Load a plan through a resolved {@link RepoLayout} (W1-T2922, repo-layout.ts): the monolith at
- * `layout.planMonolith`, shards from `<layout.planDir>/tasks.d` — computed from the layout's OWN
- * `planDir`, never re-derived from the monolith's dirname, so a foreign layout whose monolith and
- * shard directory don't share a parent still finds the right shards. Running this against the
- * house layout ({@link "./repo-layout.js".resolveRepoLayout} with no override) is byte-identical
- * to `loadPlan(join(root, "plan", "tasks.yaml"))`, today's call shape.
- */
+/** W1-T2922: load `layout.planMonolith` with shards from `layout.planDir/tasks.d`, never its dirname.
+ *  Foreign layouts may separate the parents; the house layout preserves loadPlan's usual paths. */
 export function loadPlanForLayout(layout: RepoLayout, io: FileIntegrityIO = defaultIntegrityIO): Plan {
   return loadPlan(layout.planMonolith, io, join(layout.planDir, "tasks.d"));
 }
@@ -1169,14 +1082,9 @@ export function loadPlanAtRef(
     shardListing = "";
   }
   const shardRelPaths = shardPathsFromListing(shardListing);
-  // ONE `git cat-file --batch` for every shard, never one `git show` per shard: the spawn count
-  // is what made this O(tasks ever filed) on a path the write-scoped approve gate runs
-  // synchronously (see {@link readBlobsAtRef} for the measurement).
-  //
-  // Unlike loadPlan's ENOENT-skip for a shard that vanished mid-read off the working tree, there
-  // is no analogous benign race here: every `shardRelPath` just came off `git ls-tree` AT THE
-  // SAME `ref` this read resolves, and objects at a fixed ref never vanish. A failure here is a
-  // real problem (git corruption, a gc mid-read) and must throw, never skip.
+  // One batch avoids per-shard spawns on synchronous approval (see readBlobsAtRef).
+  // Unlike loadPlan's working-tree ENOENT race, paths listed at this fixed ref must resolve:
+  // corruption or gc failures throw, never skip.
   let shardBlobs: string[];
   try {
     shardBlobs = readBlobsAtRef(runGit, ref, shardRelPaths);
@@ -1256,35 +1164,16 @@ export async function loadPlanAtRefAsync(
   return mergePlanBlobs(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs));
 }
 
-/**
- * Injectable git invoker that can feed STDIN. `git cat-file --batch` takes its object list on
- * stdin, which the older `(args: string[]) => string` shape had no way to supply; the parameter
- * is OPTIONAL so every existing `(args) => string` fake stays assignable and keeps working.
- */
+/** Git invoker with optional stdin for `cat-file --batch`; old `(args) => string` fakes still work. */
 export type GitBlobRunner = (args: string[], stdin?: string) => string;
 
-/**
- * Read every blob at `<ref>:<relPath>` in ONE `git cat-file --batch`, returned in the order
- * `relPaths` was given.
- *
- * WHY A BATCH AND NOT A LOOP. The obvious `git show <ref>:<path>` per path is one PROCESS SPAWN
- * per path, and this repo's plan is one file per task: measured 2026-09-05 at 1,079 shards,
- * 1,079 spawns cost 4,258 ms (3.95 ms each) and one `cat-file --batch` over the same paths
- * returns the same bytes in 208 ms. That loop ran on every dispatching daemon tick and every
- * inbox approval, so it was per-tick cost growing linearly with the number of tasks ever filed.
- *
- * FRAMING. `--batch` answers each stdin line with `<oid> SP <type> SP <size> LF <contents> LF`,
- * or `<input> SP missing LF` for anything it cannot resolve. Sizes are BYTES, so the output is
- * sliced as a Buffer and each blob decoded afterwards — slicing the decoded string would
- * mis-position every blob after the first non-ASCII character (this corpus is full of em
- * dashes). Round-tripping through `Buffer.from(text, "utf8")` is exact for the UTF-8 the old
- * `git show` path already assumed.
- *
- * FAILS LOUD, NEVER PARTIAL: `missing`, a non-blob type, or a truncated stream throws naming the
- * path — the same contract the per-path loop had, where a torn read must never silently drop a
- * task. Callers wrap it in their own error type (`PlanError` here, `GitFetchError` on the
- * dispatch path) exactly as they wrapped the per-path failure before.
- */
+/** Read blobs in `relPaths` order through one `git cat-file --batch`.
+ *  Measured 2026-09-05: 1,079 per-shard spawns took 4,258 ms versus 208 ms batched, on every
+ *  dispatch tick and inbox approval. Keep the batch to avoid task-count-dependent spawn cost.
+ *  Framing: `<oid> SP <type> SP <size> LF <contents> LF`, or `<input> SP missing LF`.
+ *  Sizes are BYTES: slice Buffers before UTF-8 decoding, or non-ASCII shifts subsequent blobs.
+ *  Missing/non-blob/truncated results throw with the path, never silently drop a task; callers
+ *  retain their PlanError/GitFetchError wrappers. */
 export function readBlobsAtRef(runGit: GitBlobRunner, ref: string, relPaths: string[]): string[] {
   if (relPaths.length === 0) return [];
   const request = blobBatchRequest(ref, relPaths, runGit(blobIdListingArgs(ref, relPaths)));
@@ -1415,11 +1304,8 @@ export function unmetDependencies(
   });
 }
 
-/**
- * Every task that transitively depends on `taskId`, over the whole plan (a structural DAG
- * question, never scoped to `isMerged`). Backs W1-T46: an empty result means a blocked task is
- * self-contained and safe to skip; non-empty means downstream work needs it and it must not be.
- */
+/** W1-T46: whole-plan transitive dependents, independent of `isMerged`.
+ *  Empty means a blocked task is safe to skip; non-empty means downstream work still needs it. */
 export function transitiveDependents(plan: Plan, taskId: string): Set<string> {
   // Reverse edge map: task id -> the task ids that declare it as a dependency.
   const reverse = new Map<string, string[]>();
