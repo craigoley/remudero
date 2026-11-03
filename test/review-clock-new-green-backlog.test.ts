@@ -179,7 +179,7 @@ test("W1-T4732: overlapping light passes respect review width and drain on stop"
   }
 });
 
-test("W1-T4732: plan-filing losers name the local and overlapping admission limits", async () => {
+test("W1-T4732/W1-T11148: plan filings have no losers in the same pass or an overlapping one", async () => {
   const held = deferred();
   const posted: number[] = [];
   const deps = reviewDeps(async (pr) => {
@@ -187,25 +187,14 @@ test("W1-T4732: plan-filing losers name the local and overlapping admission limi
     if (pr.prNumber === 1) await held.promise;
   });
   const filing = (number: number): OpenPrView => ({ ...reviewPr(number), isPlanFiling: true });
-  const policy = { ...DEFAULT_SWEEP_POLICY, planFilingAdmissionBound: 1 };
-  const first = runSweepLightPass([filing(1), filing(2)], deps, policy);
+  const first = runSweepLightPass([filing(1), filing(2)], deps, DEFAULT_SWEEP_POLICY);
   try {
-    await eventually(() => posted.includes(1), "the first plan filing did not start review");
-    await eventually(
-      () => readLedgerLines(deps.ledgerPath).some((row) => row.step === "sweep.disposed" && row.pr_number === 2),
-      "the same-pass plan filing did not stand down",
-    );
-    await runSweepLightPass([filing(3)], deps, policy);
+    await eventually(() => posted.includes(1) && posted.includes(2), "both same-pass plan filings did not start review");
+    await runSweepLightPass([filing(3)], deps, DEFAULT_SWEEP_POLICY);
+    await eventually(() => posted.includes(3), "the overlapping pass's plan filing did not start review");
     const disposed = readLedgerLines(deps.ledgerPath).filter((row) => row.step === "sweep.disposed");
-    assert.equal(
-      disposed.find((row) => row.pr_number === 2)?.stand_down_reason,
-      "not admitted this pass: at most 1 plan-filing post-review admissions per light pass",
-    );
-    assert.equal(
-      disposed.find((row) => row.pr_number === 3)?.stand_down_reason,
-      "not admitted this pass: at most 0 plan-filing post-review admissions available across light passes",
-    );
-    assert.deepEqual(posted, [1], "neither loser starts a review while the plan-filing slot is held");
+    assert.ok(!disposed.some((row) => /plan-filing post-review admissions/.test(String(row.stand_down_reason))),
+      "no plan filing stands down on a count while one is still running");
   } finally {
     held.resolve();
     await first;

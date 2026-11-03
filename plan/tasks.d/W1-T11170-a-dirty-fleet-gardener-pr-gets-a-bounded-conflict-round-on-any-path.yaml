@@ -1,0 +1,122 @@
+- id: W1-T11170
+  title: "A dirty fleet gardener or landing PR, and an operator-session hand branch nobody is holding, gets a bounded conflict round on any path it conflicts on, with take-main or a generator before any worker and only a merge commit on a session branch — #15551 (review-replay-garden, the fleet App) sat blocked-ambiguous for 36.5 h on one recorded fixture because only a PR task's own run- branch is admitted, and W1-T9289's plan round covers plan-scope paths only; #16044 (backlog-garden) sat 22 h on one plan shard with two worker rounds and no deterministic tier; #16236 and #14277 (run-unfiled-*, cao825) were never admitted at all"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, which non-run heads a conflict round may write to (fleet-owned, or an operator-session branch shown unheld) and in what order its tiers run; high because it pushes to branches the conflict rows refuse today
+  band_meaning: blast-radius
+  origin: operator-session#conflict-findings-2026-11-03
+  plan_refs:
+    - W1-T9289
+    - W1-T9578
+    - W1-T5543
+    - W1-T2548
+    - W1-T3602
+    - W1-T1055
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-dirty-fleet-gardener-pr-gets-a-bounded-conflict-round-on-any-path.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A dirty PR whose head matches MACHINE_LANE_HEAD_RE and whose author isFleetAppAuthor gets one bounded conflict round per head and main tip, whatever paths its conflict names, instead of blocked-ambiguous "head is not this PR task's rmd-owned run branch"; a contributor's or a foreign head that is neither fleet-owned nor an operator-session branch stays blocked-ambiguous exactly as today
+      proof: "unit test: test/sweep/a-dirty-fleet-gardener-pr-gets-a-bounded-conflict-round-on-any-path.test.ts"
+    - claim: On such a head the round's deterministic tier runs before any worker, in a tree cut at the PR head under regenerateConflictViaGit's leases, sandbox and fence; a conflicted path main deleted takes main's deletion, a path whose PR change is already on main byte for byte (the redundant re-fix comparison) takes main, and a REGENERABLE_ARTIFACT_GENERATORS path takes its generator's output; it pushes only when every unmerged path is resolved, and writes a sweep.conflict_regenerated row with mode take-main or regenerate per path
+      proof: "grep: W1-T11170 criterion 2 in test/sweep/a-dirty-fleet-gardener-pr-gets-a-bounded-conflict-round-on-any-path.test.ts"
+    - claim: When the deterministic tier leaves a path unresolved, the plan-scoped round (W1-T9289) takes plan-scope conflicts and the merge-conflict fix mode takes the rest, each under the existing strike cap and fix claim; after a round that fails, the fix progress judge decides whether another round, a change of approach, or one escalation follows, and no fixed count ends the repair
+      proof: "grep: W1-T11170 criterion 3 in test/sweep/a-dirty-fleet-gardener-pr-gets-a-bounded-conflict-round-on-any-path.test.ts"
+    - claim: A dirty operator-session branch (run-unfiled-*, plan-file-*, codex/*, or any head authored by the operator account) gets the same round only when the evidence shows nobody holds it, meaning no refs/rmd-dispatch claim for its task renewed within that claim's own renewal cadence, no live inflight lock or OPERATOR- run on it, and no push by its owner more recent than the branch's own measured gap between pushes allows (no fixed age); when any of those reads is unreadable or contradicts another, the sweep escalates once per PR and head and writes nothing
+      proof: "grep: W1-T11170 criterion 4 in test/sweep/a-dirty-fleet-gardener-pr-gets-a-bounded-conflict-round-on-any-path.test.ts"
+    - claim: On an operator-session branch the only write is a merge commit whose first parent is the PR head, pushed with no force flag of any kind (no --force and no --force-with-lease), so a moved branch refuses the push; the deterministic tiers run first and a worker round's result lands as a merge commit too; after each write the sweep posts one PR comment naming the main sha merged, each conflicted path with its resolution and the ownership evidence it read
+      proof: "grep: W1-T11170 criterion 5 in test/sweep/a-dirty-fleet-gardener-pr-gets-a-bounded-conflict-round-on-any-path.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 ~00:30Z over the 7-day conflict rows of the core ledger union (~/Remudero-notes/conflict-findings-2026-11-03.md,
+    evidence in ~/Remudero-notes/conflict-evidence-1103/, read-only). Code read at origin/main c0a6f1c74.
+    Non-run branches are never repaired: 133 of 1,096 conflict-disposed passes (12.1%) across 4 PRs.
+    - #15551 (head review-replay-garden-1793300871628, author app/remudero-fleet, closed unmerged): 160 blocked-ambiguous passes
+      from 2026-10-31T00:12Z to 2026-11-01T13:25Z (36.5 h). The one file was test/fixtures/review-replay/sample.ndjson. 60
+      merge probes read conflict, and update-branch answered 422 on each try. 105 passes read "deferred to full sweep (light
+      pass)". No round was ever admitted: the conflicted row needs fixHeadAcceptable, a PR task's own run- branch, and W1-T9289's
+      planConflictRoundCandidate needs every path in plan scope.
+    - #16044 (head backlog-garden-1793547598484, the fleet App, closed unmerged): 47 rows over 22.1 h on
+      plan/tasks.d/W1-T11078-product-plan-resolves-the-managed-target-checkout.yaml: 18 wait and 29 blocked-ambiguous. 2
+      plan-scoped rounds were dispatched, 15 deferred on the light pass, and 17 read "an escalation was already filed for this
+      head". W1-T9289's round is a worker round. Nothing tries take-main or a generator first.
+    - #16236 (head run-unfiled-1793649420000) and #14277 (head run-unfiled-1792971504320), both by cao825 and both merged, were
+      dirty plan-only PRs for 1 and 4 passes, every one blocked-ambiguous "deferred to full sweep (light pass)". An operator
+      session's branch is never admitted to any conflict round today.
+    OPERATOR RULING 2026-11-03 (in chat, relayed by the coordinator): yes, include operator-session hand branches, with ownership
+    checks. Act only when no live claim or session holds the branch: no current refs/rmd-dispatch holder renewing, and no recent
+    push by its owner judged against the branch's own push cadence, not a fixed age. Write a merge commit only, never a force
+    push, with the deterministic tiers first. Comment on the PR naming what was merged and why. If ownership is ambiguous,
+    escalate once instead of writing.
+    READ: MACHINE_LANE_HEAD_RE and isFleetAppAuthor already define a fleet-owned head (the gardeners, the landings,
+    TRIAGE/APPROVE/RETRO). The plan round reads the author through readPlanRepairFacts. regenerateConflictViaGit already holds
+    the lease, sandbox and fence for a tree cut at a PR head. isRedundantRefixConflict already compares a path's PR change to
+    main byte for byte. REGENERABLE_ARTIFACT_GENERATORS already names the generators. The ownership evidence exists too:
+    dispatch-claim.ts reads a claim's anchor (readDispatchClaimAnchor) and its renewals (parseClaimRenewal); the fix claim's
+    checkout path already declines on a live inflight lock (sweep.fix.checkout_claim_declined reason inflight_lock_owner, as
+    on #15532 under holder OPERATOR-W10573-SOURCE15532-*); and a branch's push times are its commits' committer dates and the
+    PR timeline's head pushes.
+    Operator ruling 2026-11-02: rmd must resolve merge conflicts automatically, with a gardener as the backstop. Repair loops get
+    an LLM progress judge.
+    NOT COVERED ELSEWHERE: W1-T9289 (merged, #12793) covers plan-scope conflicts on these heads, by a worker. W1-T9578 (merged,
+    #13952) covers registry-only conflicts on run- branches. W1-T11167 (item 4) covers a clean local merge on run- branches.
+    W1-T11171 (item 6b) decides WHEN a conflict round may run (light passes, ranking). This task decides WHICH heads one may
+    write to and in what tier order.
+  design: |
+    1. OWNERSHIP. Add a fleetOwnedConflictHead(pr, facts) predicate: isMachineLanePlanHead(pr.headRefName) and
+       isFleetAppAuthor(facts.authorLogin), with the author read once per pass as the plan round already reads it. A dirty PR
+       that passes it and has captured conflict evidence (or a probe conflict row at the exact head and main) leaves the
+       blocked-ambiguous row for the round below.
+       1b. SESSION BRANCH. operatorSessionHead(pr, facts): a head matching run-unfiled-*, plan-file-* or codex/*, or authored by
+       the operator account. Not a contributor's fork, and not another task's run- branch. It is admitted only when
+       sessionBranchUnheld(pr, evidence) reads all three as clear:
+       (a) Claim: no refs/rmd-dispatch/<id> for the PR's task, or for any task id its body or trailer names, whose newest renewal
+           is within its own measured renewal interval (the median gap between its renewals; with one renewal, the fleet's
+           median for claims of that holder kind).
+       (b) Session: no live inflight lock or OPERATOR- run id on the branch, and no open fix claim key.
+       (c) Pushes: the time since the owner's newest push exceeds the branch's own p90 gap between its pushes. With fewer than
+           3 pushes, use the operator account's p90 gap over its branches in the trailing window.
+       All clear: admit. Any read unreadable, or the reads disagree (for example a stale claim beside a fresh push): escalate
+       once per (PR, head) with the evidence, and write nothing. Everything else keeps today's rows.
+    2. DETERMINISTIC TIER. Through regenerateConflictViaGit with a fleet-owned mode: the same fetch, leases, detached tree,
+       merge, `ls-files -u`, sandboxed generators, ancestry check and leased push. Per unmerged path: absent from main, take the
+       deletion. Present in REGENERABLE_ARTIFACT_GENERATORS, run its generator. PR change already on main byte for byte, take
+       main's blob. Any other path aborts the merge and falls to 3. The commit carries no Remudero-Task trailer when the PR has no
+       task (SWEEP). A gardener's record line in a plan shard is never edited by hand: a plan path that is not redundant falls
+       to 3. On a session branch the push is a plain `git push origin HEAD:<branch>` with no force or lease flag, after an
+       ls-remote re-check of head and main and a re-read of (b) and (c), so an owner who pushed in between wins.
+    3. ROUND. Plan-scope paths go to the existing plan-scoped round (dispatchPlanGateRound). Others go to dispatchFix in
+       merge-conflict mode with the PR's file list, both sides' logs and the PR body, keyed by escalationTaskIdFor(pr) as the
+       plan round already is. Both use the existing claimFixDispatch, claimFixAdmission and strike cap. After a failed round,
+       resolveFixProgress with the round history, as the plan round's refused-twice arm does, decides between continue,
+       change-approach and escalate. On a session branch the round's worker must land its resolution as a merge commit (the
+       merge-conflict mode's discipline already merges main; its push uses no force flag), and the same pre-push re-read runs.
+    4. RECORD. sweep.conflict_regenerated rows with mode take-main, regenerate or deleted-on-main per path, plus head_kind
+       (fleet or session) and the ownership evidence. The disposition is conflicted, with a reason naming the tier.
+    5. COMMENT. After each write to a session branch, one PR comment through the existing comment writer: the main sha merged,
+       each conflicted path and its resolution, the round (deterministic or worker), and the three ownership reads with
+       their values. Fleet heads get the same comment.
+    Tests go in the new file, titled verbatim as in the proofs, against real throwaway repos (gitRepo()), with heads named
+    review-replay-garden-<n>, backlog-garden-<n> and run-unfiled-<n>, an injected author, injected claim, lock and push-time
+    reads, and an injected judge.
+  falsifier: |
+    At origin/main a dirty review-replay-garden head conflicting on a test fixture dispositions blocked-ambiguous "head is not
+    this PR task's rmd-owned run branch" and no round runs, so the first test fails. If the redundant comparison or the
+    deletion arm is dropped, a backlog-garden fixture whose shard change is already on main dispatches a worker instead of
+    pushing take-main, and the second test fails. If a fixed round count replaces the judge, the third test's change-approach
+    fixture escalates and fails. A run-unfiled fixture is blocked-ambiguous at origin/main, so the fourth test fails. If
+    the cadence test is replaced by a fixed age, its fixture (a branch whose own push gap exceeds that age) is written while
+    still active, and the fourth test fails. If the session push carries --force-with-lease, or no comment is posted, the
+    fifth test fails.
+  note: |
+    reservation hand-off: plan-file-1793666134000 -> plan-file-1793666134000
+    Reserved with rmd next-task-id --branch plan-file-1793666134000. Filed 2026-11-03 from the conflict findings, item 6a (p2),
+    under the operator ruling of 2026-11-02. Amended 2026-11-03 before merge, under the operator's in-chat ruling that day,
+    to include operator-session hand branches behind ownership-by-evidence checks, merge-commit-only writes and a PR comment
+    (criteria 4 and 5, design 1b and 5). Build after W1-T11167, which adds the mode argument to regenerateConflictViaGit.

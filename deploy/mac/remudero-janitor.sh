@@ -13,7 +13,8 @@
 # Also removes inactive non-Git scratch directories in the account's explicit
 # Remudero/rmd-work and Mac operator-worktree roots (and Craig's /private/tmp).
 # Every descendant must be
-# idle for six hours; unversioned source/reports and persistent data are retained.
+# idle for six hours. Unversioned source/reports are retained for 7 idle days and
+# saved work (bundles, archives, patches) for 30; persistent data is retained.
 #
 # WHAT IT NEVER DOES: it never removes unpushed commits or uncommitted source, never
 # follows an artifact symlink, and never touches protected, dirty, or open
@@ -63,6 +64,10 @@ AGE_EXPLICIT=0
 WORKTREE_AGE_HOURS="${REMUDERO_JANITOR_WORKTREE_AGE_HOURS:-6}"
 MINIMUM_AGE_HOURS=6
 MIN_FREE_GIB="${REMUDERO_JANITOR_MIN_FREE_GIB:-20}"
+# Idle days before an unversioned run folder's reports/scripts, and its saved
+# work (bundles, archives, patches), stop protecting it.
+REPORT_RETENTION_DAYS="${REMUDERO_JANITOR_REPORT_RETENTION_DAYS:-7}"
+EVIDENCE_RETENTION_DAYS="${REMUDERO_JANITOR_EVIDENCE_RETENTION_DAYS:-30}"
 APPLY=0
 LOG="${REMUDERO_JANITOR_LOG:-$HOME/Library/Logs/remudero/janitor.log}"
 
@@ -75,9 +80,13 @@ for a in "$@"; do
   esac
 done
 
-for age_value in "$AGE_HOURS" "$WORKTREE_AGE_HOURS"; do
+for age_value in "$AGE_HOURS" "$WORKTREE_AGE_HOURS" "$REPORT_RETENTION_DAYS" "$EVIDENCE_RETENTION_DAYS"; do
   case "$age_value" in ''|*[!0-9]*) printf 'invalid age threshold: %s\n' "$age_value" >&2; exit 2 ;; esac
 done
+if [ "$REPORT_RETENTION_DAYS" -lt 1 ] || [ "$EVIDENCE_RETENTION_DAYS" -lt "$REPORT_RETENTION_DAYS" ]; then
+  printf 'retention days must be at least 1, with evidence at least the report retention\n' >&2
+  exit 2
+fi
 if [ "$AGE_HOURS" -lt "$MINIMUM_AGE_HOURS" ] || [ "$WORKTREE_AGE_HOURS" -lt "$MINIMUM_AGE_HOURS" ]; then
   printf 'age thresholds must be at least %sh\n' "$MINIMUM_AGE_HOURS" >&2
   exit 2
@@ -225,6 +234,21 @@ for scan_root in "${CHECKOUT_SCAN_ROOTS[@]}"; do
     [ "$seen" = "0" ] || continue
     RETAINED_CHECKOUTS+=("$candidate")
   done <<< "$markers"
+done
+# Operator tooling parks linked worktrees inside a repository's own `.git`
+# (`.git/operator-plan-workspaces/*`), where marker discovery never descends.
+# Ask each discovered repository for its registered worktrees instead, and
+# keep the ones inside this account's home.
+for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
+  [ -d "$repo/.git" ] && [ ! -L "$repo/.git" ] || continue
+  registered=$(rmd_retirement_git "$repo" worktree list --porcelain 2>/dev/null) || continue
+  while IFS= read -r line; do
+    case "$line" in "worktree $USER_HOME"/*) candidate=${line#worktree } ;; *) continue ;; esac
+    [ -d "$candidate" ] && [ ! -L "$candidate" ] && [ -f "$candidate/.git" ] && [ ! -L "$candidate/.git" ] || continue
+    seen=0
+    for existing in "${RETAINED_CHECKOUTS[@]}"; do [ "$existing" = "$candidate" ] && seen=1 && break; done
+    [ "$seen" = 0 ] && RETAINED_CHECKOUTS+=("$candidate")
+  done <<< "$registered"
 done
 
 # Whole-directory scope approved by the operator. The canonical checkout is a
@@ -463,6 +487,47 @@ artifact_index_risk() {
   return 1
 }
 
+# True when a linked worktree's `.git` file names a Git directory that no longer
+# exists (its repository was deleted), so no Git command can vouch for it.
+worktree_orphaned() {
+  local marker="$1/.git" line gitdir
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  IFS= read -r line < "$marker" 2>/dev/null || return 1
+  case "$line" in "gitdir: "/*) gitdir=${line#gitdir: } ;; *) return 1 ;; esac
+  [ ! -e "$gitdir" ] && [ ! -L "$gitdir" ]
+}
+
+# Generated output that the checkout's own ignore rules exclude.
+generated_artifact_ignored() {
+  local repo="$1" artifact="$2" relative
+  case "${artifact##*/}" in
+    node_modules|coverage|.remudero-coverage|.rmd-coverage|_cacache) ;;
+    *) return 1 ;;
+  esac
+  relative="${artifact#"$repo"/}"
+  [ "$relative" != "$artifact" ] || return 1
+  # check-ignore takes literal paths and rejects GIT_LITERAL_PATHSPECS.
+  rmd_retirement_git "$repo" check-ignore -q -- "$relative" 2>/dev/null
+}
+
+# Every file in the checkout idle for at least $2 hours. Git metadata and the
+# generated trees themselves are excluded, and so are directory times, so that
+# removing one generated tree does not make the checkout look busy.
+generated_checkout_idle() {
+  local values stamp newest=0
+  if [ "$OS_NAME" = "Darwin" ]; then
+    values=$(find "$1" \( -name .git -o -name node_modules -o -name coverage \) -prune -o -type f -exec stat -f '%m %c' {} + 2>/dev/null) || return 1
+  else
+    values=$(find "$1" \( -name .git -o -name node_modules -o -name coverage \) -prune -o -type f -exec stat -c '%Y %Z' {} + 2>/dev/null) || return 1
+  fi
+  for stamp in $values; do
+    case "$stamp" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$stamp" -gt "$newest" ] && newest="$stamp"
+  done
+  [ "$newest" -gt 0 ] || return 1
+  [ "$(( $(date +%s) - newest ))" -ge "$(( $2 * 3600 ))" ]
+}
+
 clean_artifact() {
   local artifact="$1" min_age="${2:-$AGE_HOURS}" policy="${3:-}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1" artifact_repo="" index_risk
   # Dynamically scoped to log(): only reuse this candidate's existing size probe.
@@ -485,8 +550,26 @@ clean_artifact() {
     if [ -e "$parent/.git" ]; then
       activity_root="$parent"
       artifact_repo="$parent"
+      # A worktree whose repository was deleted cannot answer Git questions,
+      # but its top-level dependency/coverage output is still regenerable.
+      if worktree_orphaned "$parent"; then
+        artifact_repo=""
+        case "$artifact" in
+          "$parent/node_modules") [ -f "$parent/package.json" ] || { log "SKIP git-unverified $artifact"; return; } ;;
+          "$parent/coverage") ;;
+          *) log "SKIP git-unverified $artifact"; return ;;
+        esac
+        generated_checkout_idle "$parent" "$min_age" || { log "SKIP recent-checkout-activity $artifact (checkout=$parent)"; return; }
+        break
+      fi
       if index_risk=$(artifact_index_risk "$artifact_repo" "$artifact"); then
         log "SKIP protected $artifact ($index_risk)"; return
+      fi
+      # Ignored, untracked generated output never holds the checkout's work, so
+      # removing it needs no clean tree or published HEAD — only an idle checkout.
+      if generated_artifact_ignored "$parent" "$artifact"; then
+        generated_checkout_idle "$parent" "$min_age" || { log "SKIP recent-checkout-activity $artifact (checkout=$parent)"; return; }
+        break
       fi
       status=$(rmd_retirement_git "$parent" status --porcelain --untracked-files=all 2>/dev/null) || {
         log "SKIP git-unverified $artifact"; return;
@@ -708,7 +791,7 @@ worktree_registration() {
 # The user's source/report preservation rule is independent of age. No name prefix
 # is required for a data-only scratch directory inside these explicit scan roots.
 scratch_directory_risk() {
-  local path="$1" root="$2" q found parent relative tracked owner mount_text mount_line
+  local path="$1" root="$2" q found parent relative tracked owner mount_text mount_line stamp idle_hours
   for q in "${DIRECTORY_ROOTS[@]+"${DIRECTORY_ROOTS[@]}"}" "${PROTECTED[@]+"${PROTECTED[@]}"}"; do
     case "$q" in "$path"|"$path"/*) printf 'protected scan container or persistent checkout'; return 0 ;; esac
   done
@@ -732,26 +815,38 @@ scratch_directory_risk() {
     printf 'ownership scan unavailable'; return 0;
   }
   [ -z "$found" ] || { printf 'contains foreign-owned content'; return 0; }
-  # Preserve all repositories, including bare object lenders, archived commits,
-  # state/history, dependency seeds and coordination files. Do not follow links.
-  found=$(find -P "$path" -xdev \( -name .git -o -name HEAD -o -name objects -o -name '*.bundle' -o -name '*.tar' -o -name '*.tgz' -o -name '*.zip' -o -name '*.gz' \
+  # Always preserve repositories, bare object lenders, state/history, keys and
+  # coordination files, and anything marked .rmd-janitor-keep. Do not follow links.
+  found=$(find -P "$path" -xdev \( -name .git -o -name HEAD -o -name objects \
     -o -name '.rmd-janitor-keep' -o -name 'ledger*' -o -name '*.ndjson' -o -name '*.jsonl' -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' \
-    -o -iname '*.patch' -o -iname '*.diff' -o -iname '*.rej' -o -iname '*.orig' \
-    -o -name '.env' -o -name '.env.*' -o -iname '*password*' -o -iname '*secret*' -o -iname '*token*' \
-    -o -iname '*credential*' -o -iname '*keychain*' -o -name '*.pem' -o -name '*.p12' -o -name '*.pfx' \
+    -o -name '.env' -o -name '.env.*' -o -iname '*keychain*' -o -name '*.pem' -o -name '*.p12' -o -name '*.pfx' \
     -o -name '*.keytab' -o -name 'id_rsa*' -o -name 'id_ed25519*' \) -print -quit 2>/dev/null) || {
     printf 'repository/state scan unavailable'; return 0;
   }
-  [ -z "$found" ] || { printf 'repository, retained evidence, credentials or coordination'; return 0; }
+  [ -z "$found" ] || { printf 'repository, state, keys or coordination'; return 0; }
+  # Saved work and run reports are kept for a bounded time, not forever: a run
+  # folder nobody has touched in weeks is finished. The clock is the newest
+  # file or metadata change anywhere in the folder.
+  idle_hours=0
+  stamp=$(artifact_mtime "$path") && idle_hours=$(( ($(date +%s) - stamp) / 3600 ))
+  if [ "$idle_hours" -lt "$((EVIDENCE_RETENTION_DAYS * 24))" ]; then
+    found=$(find -P "$path" -xdev \( -name '*.bundle' -o -name '*.tar' -o -name '*.tgz' -o -name '*.zip' -o -name '*.gz' \
+      -o -iname '*.patch' -o -iname '*.diff' -o -iname '*.rej' -o -iname '*.orig' \
+      -o -iname '*password*' -o -iname '*secret*' -o -iname '*token*' -o -iname '*credential*' \) -print -quit 2>/dev/null) || {
+      printf 'evidence scan unavailable'; return 0;
+    }
+    [ -z "$found" ] || { printf 'saved work or evidence idle %sh < %sd' "$idle_hours" "$EVIDENCE_RETENTION_DAYS"; return 0; }
+  fi
   found=$(find -P "$path" -xdev ! -type d ! -type f -print -quit 2>/dev/null) || {
     printf 'file-type scan unavailable'; return 0;
   }
   [ -z "$found" ] || { printf 'symlink, mount boundary or special file'; return 0; }
+  if [ "$idle_hours" -lt "$((REPORT_RETENTION_DAYS * 24))" ]; then
   found=$(find -P "$path" -xdev -type f \( -perm -100 -o -perm -010 -o -perm -001 \) -print -quit 2>/dev/null) || {
     printf 'executable-source scan unavailable'; return 0;
   }
-  [ -z "$found" ] || { printf 'unversioned executable or script'; return 0; }
-  # Do not treat old non-Git scripts, manifests or reports as disposable data.
+  [ -z "$found" ] || { printf 'unversioned executable or script idle %sh < %sd' "$idle_hours" "$REPORT_RETENTION_DAYS"; return 0; }
+  # Recently used non-Git scripts, manifests and reports are not disposable data.
   found=$(find -P "$path" -xdev -type f \( -iname '*.sh' -o -iname '*.bash' -o -iname '*.zsh' \
     -o -iname '*.py' -o -iname '*.js' -o -iname '*.mjs' -o -iname '*.cjs' -o -iname '*.ts' \
     -o -iname '*.tsx' -o -iname '*.jsx' -o -iname '*.rs' -o -iname '*.go' -o -iname '*.c' \
@@ -762,7 +857,8 @@ scratch_directory_risk() {
     -o -iname 'README*' -o -iname 'LICENSE*' -o -name Makefile -o -name Dockerfile \) -print -quit 2>/dev/null) || {
     printf 'unversioned source/report scan unavailable'; return 0;
   }
-  [ -z "$found" ] || { printf 'unversioned source, manifest or report'; return 0; }
+  [ -z "$found" ] || { printf 'unversioned source, manifest or report idle %sh < %sd' "$idle_hours" "$REPORT_RETENTION_DAYS"; return 0; }
+  fi
   # An ignored scratch child in a canonical repository may be cleaned, but a
   # tracked or merely untracked source child cannot. No Git state is changed.
   parent="$root"
@@ -1252,7 +1348,9 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
     for kind in "node_modules" "coverage"; do
       artifact="$repo/$kind"
       [ -d "$artifact" ] && [ ! -L "$artifact" ] || continue
-      if [ "$kind" = "node_modules" ]; then
+      if worktree_orphaned "$repo"; then
+        : # Git cannot answer for an orphan; clean_artifact applies its own narrower rule.
+      elif [ "$kind" = "node_modules" ]; then
         # `node_modules` is regenerable only in a Node checkout. Do not infer
         # ownership from the directory name alone.
         if [ ! -f "$repo/package.json" ]; then
