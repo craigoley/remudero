@@ -1074,7 +1074,7 @@ import {
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
-import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
+import { learnedBakeoffLimit, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import type { DeployedModel, DeploymentBakeoffCandidate } from "./lib/bakeoff-trigger.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
@@ -35591,7 +35591,7 @@ function createInboxBakeoffReplay(
           return next;
         };
       };
-      const rows = await replay({ proposals, planText, spawnFor, candidates, log: (step, extra = {}) => {
+      const rows = await replay({ proposals, planText, spawnFor, candidates, learnedLimit: learnedBakeoffLimit(config), log: (step, extra = {}) => {
         const candidate = candidates?.find((candidate) => candidate.id === extra.candidate);
         const refusal = refusals.get(String(extra.candidate));
         log(step, { ...extra, ...(candidate ? { model: candidate.model } : {}),
