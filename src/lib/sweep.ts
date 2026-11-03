@@ -4,7 +4,7 @@ import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown,
-  type FixProgressWitness,
+  type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
@@ -297,6 +297,7 @@ import {
   type ReviewReuseReachFacts,
   prFilesRestArgs,
   rollupFromRest,
+  rollupForAsync,
   needsWorkflowIdentity,
   runsForHeadRestArgs,
   fetchWorkflowRunObservations,
@@ -2162,6 +2163,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "headRehome",
   "readerAgreement",
   "fixProgressJudge", // W1-T7096
+  "readHostedProofResults",
   "reproduceFailingTestsOnMain",
   "readTestImportClosure", // W1-T8396
   "readReviewReuseReach", // W1-T9047
@@ -2260,8 +2262,10 @@ export function productionFixProgressJudge(opts: {
     }, mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
     const prompt = [
       "Judge whether another fix round is justified. Return only FIX_PROGRESS: followed by a JSON object.",
-      "Schema: {verdict: continue | change-approach | escalate, reason: string, approach?: string, loop?: string}.",
+      "Schema: {verdict: continue | change-approach | escalate | harness, reason: string, approach?: string, loop?: string}.",
       "change-approach requires concrete approach text; escalate requires a named loop, not a round count.",
+      "offHostPass means the persisted reviewer proof passed on the worker and exact-head hosted CI. " +
+        "Consider harness with offHostPassEvidence and the recorded review load; harness escalates without dispatching another round.",
       "Require stronger evidence of progress as the round count grows. There is no hard round ceiling.",
       "Pre-signals are evidence, never automatic decisions. A shrinking red set can justify further rounds.",
       "Consider no-op/refused rounds, repeated diffs and red sets, oscillation, operator answers and parked reasons.",
@@ -2330,6 +2334,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "readerAgreement"
   | "fixProgressJudge"
+  | "readHostedProofResults"
   | "reproduceFailingTestsOnMain"
   | "readTestImportClosure"
   | "readReviewReuseReach"
@@ -2841,6 +2846,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     readOpenEscalations: () => issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
+    readHostedProofResults: (headSha, proofs) => readHostedFixProofResults({ owner, repo, headSha, proofs },
+      { json: readJsonImpl, text: ghTextAsync }),
     readTaskContractRevision,
     readTaskSemanticRevision,
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
@@ -14121,6 +14128,7 @@ export interface SweepDeps {
   /** One shared open needs-human snapshot per pass; missing or unreadable fails toward fixing. */
   readOpenEscalations?: () => OpenIssue[] | Promise<OpenIssue[]>;
   fixProgressJudge?: FixProgressJudge;
+  readHostedProofResults?: HostedFixProofReader;
   /** W1-T9970 test seam: the running reviewer image. Default {@link readRuntimeImageSha}. */
   runtimeImageSha?: () => string | undefined;
   /** The CURRENT task contract revision ({@link taskContractRevision}) of a plan task on main, or `undefined`
@@ -16048,6 +16056,59 @@ export function buildFixProgressInput(facts: Parameters<typeof buildBaseFixProgr
   return { ...input, signals: { ...input.signals,
     refutedFlakeClaims: claims.filter(row => row.flake_claim === "refuted").length,
     repeatedFlakeClaims: claims.filter(row => row.flake_claim === "repeated").length } };
+}
+
+/** Read only the completed Actions job that actually reports the named proof file passing. */
+export async function readHostedFixProofResults(
+  target: { owner: string; repo: string; headSha: string; proofs: readonly string[] },
+  io = { json: ghJsonAsync as (args: string[]) => Promise<unknown>, text: ghTextAsync },
+): Promise<FixProgressHostedProofResult[]> {
+  const files = [...new Set(target.proofs.flatMap(proof =>
+    /^unit test:\s*(test\/[\w./-]+\.test\.[mc]?[jt]s)\s*$/.exec(proof)?.[1] ?? []))];
+  if (files.length === 0) return [];
+  const rollup = dedupeRollupByLatestAttempt(await rollupForAsync(target.owner, target.repo, target.headSha, io.json));
+  const results: FixProgressHostedProofResult[] = [];
+  for (const check of rollup) {
+    const jobId = checkJobId(check);
+    const conclusion = check.conclusion?.toLowerCase();
+    if (!jobId || (conclusion !== "success" && conclusion !== "failure")) continue;
+    const jobPath = `repos/${target.owner}/${target.repo}/actions/jobs/${jobId}`;
+    const job = await io.json(["api", jobPath]) as { head_sha?: string; conclusion?: string; name?: string };
+    if (job.head_sha !== target.headSha || job.conclusion !== conclusion || job.name !== check.name) continue;
+    const lines = (await io.text(["api", `${jobPath}/logs`], { maxBuffer: 1 << 22 }))
+      .split("\n").map(line => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s*/, "").trim());
+    for (const testFile of files) {
+      // A command echo, selection list, skipped suite or green aggregate is not an execution receipt.
+      const passing = lines.find(line => /^ok \d+ - /.test(line) && line.replace(/^ok \d+ - /, "") === testFile);
+      const failing = lines.find(line => /^not ok \d+ - /.test(line) && line.replace(/^not ok \d+ - /, "") === testFile);
+      if (failing)
+        results.push({ headSha: target.headSha, testFile, check: check.name!, result: "fail", output: failing });
+      else if (passing && conclusion === "success")
+        results.push({ headSha: target.headSha, testFile, check: check.name!, result: "pass", output: passing });
+    }
+  }
+  return results;
+}
+
+export type HostedFixProofReader = (headSha: string, proofs: readonly string[]) => Promise<FixProgressHostedProofResult[]>;
+
+/** Avoid log reads until a completed FIXED round and a repeated reviewer failure warrant corroboration. */
+export async function buildFixProgressInputWithHostedProofs(
+  facts: Parameters<typeof buildFixProgressInput>[0], read?: HostedFixProofReader,
+): Promise<ReturnType<typeof buildFixProgressInput>> {
+  const input = buildFixProgressInput(facts);
+  const round = input.rounds.at(-1);
+  const proofs = (facts.reviewFailures ?? []).filter(c => !c.met && c.proof_exec === "executed_fail" &&
+    round?.workerProofResults?.some(r => r.headSha === facts.headSha && r.proof === c.proof && r.result === "pass"))
+    .map(c => c.proof);
+  if (!read || input.signals.reviewerOnlyFailurePersists === 0 || input.pendingChecks?.length ||
+      input.currentRed.some(red => !red.startsWith("review:")) || proofs.length === 0) return input;
+  try {
+    return buildFixProgressInput({ ...facts, hostedProofResults: await read(facts.headSha, proofs) });
+  } catch (error) {
+    const reason = String(error);
+    return { ...input, harnessGuidance: `hosted proof evidence unavailable: ${reason}` };
+  }
 }
 
 /** W1-T10067: a `fix.progress_judged` row names the checks its input saw unreported. */
@@ -18489,6 +18550,7 @@ export async function runSweep(
       standInAnnounced = true;
       log("sweep.progress_judge_stand_in", { judge: "former_bound_stand_in" });
     }
+    if (input.signals.offHostPass) return { verdict: "harness", reason: "the persisted reviewer proof passes on the worker and hosted CI" };
     const pr = openPrs.find((candidate) => candidate.prNumber === input.prNumber);
     return pr !== undefined && fixProgressJudgmentDue(pr, policy)
       ? { verdict: "escalate", loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound" }
@@ -18550,11 +18612,11 @@ export async function runSweep(
       const parkedReason = pr.repeatedFixRefusal ? `refused-twice: ${pr.repeatedFixRefusal}` :
         (!isFixStrikeExhausted(pr, policy) && pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr)
           ? "fix strike repeated the identical unmet criteria" : undefined);
-      const input = buildFixProgressInput({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber, headSha: pr.headSha,
+      const input = await buildFixProgressInputWithHostedProofs({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber, headSha: pr.headSha,
         strikesSpent: pr.priorStrikes,
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
-        formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
+        formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason }, deps.readHostedProofResults);
       const judgeAndRecord = async () => {
         const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
           { ...progressWitness(pr), judge: progressJudge, firstRound: true });
@@ -19357,8 +19419,8 @@ export async function runSweep(
           blocker: slo?.blocker ?? "strikes-exhausted", owner: slo?.owner ?? "strike-ladder",
           blockerAgeMs: Math.max(slo?.ageMs ?? 0, 45 * 60_000), reasonClass: "no-op-hold",
           nowMs: now, rungHistory: history, unavailable: ["refresh"],
-        }, buildFixProgressInput({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
-          currentRed: redCheckNames(pr), ledger: strikeLadderRows, operatorAnswer: pr.pendingAnswer?.constraint }),
+        }, await buildFixProgressInputWithHostedProofs({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+          currentRed: redCheckNames(pr), ledger: strikeLadderRows, operatorAnswer: pr.pendingAnswer?.constraint }, deps.readHostedProofResults),
         deps.fixProgressJudge, record, slo?.held);
         if (progress.rung === "none") return hold(progress.reason);
         decision = { rung: progress.rung, reason: progress.reason };
@@ -20500,9 +20562,9 @@ export async function runSweep(
                   repair.reason = parkedReason;
                   return;
                 }
-                const input = buildFixProgressInput({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+                const input = await buildFixProgressInputWithHostedProofs({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
                   currentRed: redCheckNames(pr), ledger: ledgerLines, formerCeiling: 2,
-                  parkedReason: `${parkedReason}; ${JSON.stringify(history)}` });
+                  parkedReason: `${parkedReason}; ${JSON.stringify(history)}` }, deps.readHostedProofResults);
                 input.remedyHistory = history;
                 const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
                   { ...progressWitness(pr), judge: deps.fixProgressJudge });
@@ -20612,9 +20674,9 @@ export async function runSweep(
         const action = deps.fixProgressJudge
           ? await judgeCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
               planRepairCapable, judge: deps.fixProgressJudge,
-              input: { ...buildFixProgressInput({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+              input: { ...await buildFixProgressInputWithHostedProofs({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
                 currentRed: proofDiscrimination.proofs.map(proof => `proof:${proof.proof}`), ledger: ledgerLines,
-                operatorAnswer: pr.pendingAnswer?.constraint }),
+                operatorAnswer: pr.pendingAnswer?.constraint }, deps.readHostedProofResults),
                 remedyHistory: ledgerLines.filter(row => row.step === PLAN_REPAIR_DISPATCH_STEP && row.task_id === pr.taskId) },
               log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
                 task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
@@ -20893,10 +20955,10 @@ export async function runSweep(
         let rearmUnavailable = false;
         let rearmExhausted = disarmedByGitHub && rearmCounted && rearms >= MAX_REARMS_AFTER_DISARM_PER_HEAD;
         if (rearmExhausted && deps.fixProgressJudge && !deps.dryRun && !rearmEscalated) {
-          const input = buildFixProgressInput({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+          const input = await buildFixProgressInputWithHostedProofs({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
             strikesSpent: rearms, ledger: ledgerLines, currentRed: redCheckNames(pr),
             formerCeiling: MAX_REARMS_AFTER_DISARM_PER_HEAD,
-            parkedReason: `re-arm: ${rearms} merge queue ejections at this head`, operatorAnswer: pr.pendingAnswer?.constraint });
+            parkedReason: `re-arm: ${rearms} merge queue ejections at this head`, operatorAnswer: pr.pendingAnswer?.constraint }, deps.readHostedProofResults);
           input.remedyHistory = rearmRows;
           const progress = await judgeWithMemoryWait<FixProgressResult>(pr, async () => {
             const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
@@ -21625,7 +21687,7 @@ export async function runSweep(
                   standDownReason = unavailable;
                   return false;
                 }
-                const input = buildFixProgressInput({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber,
+                const input = await buildFixProgressInputWithHostedProofs({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber,
                   headSha: pr.headSha,
                   strikesSpent: Math.max(pr.priorStrikes, fixRoundTally(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha).strikes),
                   currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")),
@@ -21634,7 +21696,7 @@ export async function runSweep(
                   operatorAnswer: pr.pendingAnswer?.constraint,
                   formerCeiling: progressParkedReason?.startsWith("proof-repair-refusals") ? MAX_PROOF_REPAIR_REFUSALS_PER_HEAD
                     : progressParkedReason?.startsWith("rerun-still-red") || progressParkedReason?.startsWith("amendment-closed") ? 1
-                    : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: progressParkedReason });
+                    : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: progressParkedReason }, deps.readHostedProofResults);
                 const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
                 const latched = ledgerLines.filter(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
                   row.head_sha === pr.headSha && row.progress_escalated_key === inputKey);

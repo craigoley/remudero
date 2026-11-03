@@ -47,7 +47,7 @@ export interface FixProgressRound {
 export interface ScopeAmendmentState { number?: number; state: "pending" | "merged" | "closed" | "refused" }
 
 /** One reviewer `executed_fail` proof, identified by its claim and a digest of its recorded output. */
-export interface ReviewerProofFailure { claim: string; digest: string; excerpt?: string; proof?: string }
+export interface ReviewerProofFailure { claim: string; digest: string; excerpt?: string; proof?: string; reviewLoad?: string }
 
 export interface FixProgressWorkerProofResult {
   proof: string; headSha: string; result: "pass" | "fail"; output: string;
@@ -225,6 +225,7 @@ function failuresOfReview(row: Record<string, unknown>): ReviewerProofFailure[] 
     const v = c && typeof c === "object" ? c as Record<string, unknown> : {};
     return typeof v.claim === "string" && v.proof_exec === "executed_fail" && typeof v.proofFailureOutput === "string"
       ? [{ claim: v.claim, digest: reviewerFailureDigest(v.proofFailureOutput), excerpt: v.proofFailureOutput,
+        ...(typeof v.reviewLoad === "string" ? { reviewLoad: v.reviewLoad } : {}),
         ...(typeof v.proof === "string" ? { proof: v.proof } : {}) }] : [];
   });
 }
@@ -260,8 +261,9 @@ function offHostPassEvidenceOf(facts: {
     const ci = (facts.hostedProofResults ?? []).filter(r => r.headSha === facts.headSha && r.testFile === file);
     if (workers.length === 0 || workers.some(r => r.result !== "pass") || ci.length === 0 ||
         ci.some(r => r.result !== "pass" || !r.check.trim())) return [];
+    const reviewLoad = c.reviewLoad ?? round.reviewAfter!.find(matches)?.reviewLoad;
     return [{ claim: c.claim, proof: c.proof, reviewerOutput: c.proofFailureOutput, worker: workers.at(-1)!, ci,
-      ...(c.reviewLoad !== undefined ? { reviewLoad: c.reviewLoad } : {}) }];
+      ...(reviewLoad !== undefined ? { reviewLoad } : {}) }];
   });
 }
 const stringValue = (value: unknown): string | undefined => typeof value === "string" ? value : undefined;
