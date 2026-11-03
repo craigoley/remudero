@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 
 import { fixedClock } from "#src/lib/clock.js";
+import { logArmAttribution } from "#src/lib/arm-auto-merge.js";
 import { flowGardenPass } from "#src/lib/garden-registry.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { flowOpenQueueReader, openQueueShadow, runFlowGardener, type FlowOpenQueuePr, type FlowOpenQueueRead } from "#src/lib/flow-gardener.js";
@@ -36,6 +37,55 @@ function rows(now: number, reviewAge = 2 * HOUR) {
     { ts: at(now - 3 * HOUR), step: "automerge.direct_merge_preflight_refused", pr_number: 17000, head_sha: "head-17000" },
   ];
 }
+
+function refusalRows(now: number, head = "head-17000") {
+  const events: Record<string, unknown>[] = [];
+  logArmAttribution((step, extra) => events.push({ ts: at(now - 3 * HOUR), step, ...extra }),
+    "direct-merge-preflight-refused", "https://github.com/craigoley/remudero/pull/17000", undefined, "sweep", {}, undefined,
+    { priorHeadSha: head, remedy: "retry-later", reason: "plan_merge_unread" });
+  return [
+    ...rows(now).filter((row) => row.pr_number !== 17000),
+    { ts: at(now - 4 * HOUR), step: "review.posted", pr_number: 17000, head_sha: "head-17000", state: "success" },
+    ...events,
+  ];
+}
+
+test("production preflight refusals retain their exact head identity and observed stage age", () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const result = openQueueShadow(census(now), refusalRows(now), undefined, now);
+  assert.equal(result.cohort.merge_preflight_refused, 1);
+  assert.equal(result.cohort.merge_preflight_refusal_age_p50_ms, 3 * HOUR);
+  assert.equal(result.cohort.ready_to_direct_merge, 1);
+  assert.equal(result.cohort.ready_to_direct_merge_age_p50_ms, 2 * HOUR);
+  const stale = openQueueShadow(census(now), refusalRows(now, "old-head"), undefined, now);
+  assert.equal(stale.cohort.merge_preflight_refused, 0, "a prior head's refusal cannot block the current head");
+  assert.equal(stale.cohort.ready_to_direct_merge, 2);
+  const noCurrentReview = refusalRows(now).filter((row) => row.pr_number !== 17000 || row.step !== "review.posted");
+  noCurrentReview.push({ ts: at(now - HOUR), step: "review.posted", pr_number: 17000,
+    head_sha: "old-head", prior_head_sha: "head-17000", state: "success" });
+  const unreviewed = openQueueShadow(census(now), noCurrentReview, undefined, now);
+  assert.equal(unreviewed.cohort.merge_preflight_refused, 1);
+  assert.equal(unreviewed.cohort.ready_to_direct_merge, 1, "only refusal rows may use prior_head_sha");
+});
+
+test("#16147 and #16186 remain in review wait until their current heads are reviewed", () => {
+  const now = Date.parse("2026-11-02T17:42:00.000Z");
+  const cohort = census(now);
+  cohort.open = cohort.open.filter((pr) => pr.number !== 17000).map((pr) => ({ ...pr, checksState: "SUCCESS" }));
+  const replay = [
+    { ts: "2026-11-02T06:13:00.000Z", step: "sweep.review_eligible", pr_number: 16147, head_sha: "head-16147" },
+    { ts: "2026-11-02T13:08:00.000Z", step: "sweep.review_eligible", pr_number: 16186, head_sha: "head-16186" },
+    ...[16147, 16186].map((pr_number) => ({ ts: at(now - HOUR), step: "review.posted", pr_number, head_sha: "old-head", state: "success" })),
+  ];
+  const waiting = openQueueShadow(cohort, replay, undefined, now);
+  assert.equal(waiting.cohort.open, 2);
+  assert.equal(waiting.cohort.review_waiting, 2);
+  assert.equal(waiting.cohort.ready_to_direct_merge, 0);
+  for (const pr_number of [16147, 16186]) replay.push({ ts: at(now), step: "review.posted", pr_number, head_sha: `head-${pr_number}`, state: "success" });
+  const reviewed = openQueueShadow(cohort, replay, undefined, now);
+  assert.equal(reviewed.cohort.review_waiting, 0);
+  assert.equal(reviewed.cohort.ready_to_direct_merge, 2);
+});
 
 test("right-censors the full open cohort, separates review, preflight refusal and ready waits, then recommends only after repeated pressure", () => {
   const now = Date.parse("2026-11-02T12:00:00.000Z");
@@ -70,6 +120,41 @@ test("recommendation requires two distinct complete UTC windows with the same pr
   assert.equal(second.recommendation, "consider-slowing-plan-task-workers");
 });
 
+test("a skipped UTC day breaks the pressure streak even within 48 hours", () => {
+  const firstDay = Date.parse("2026-10-31T23:00:00.000Z");
+  const first = openQueueShadow(census(firstDay), rows(firstDay), {
+    observedAtMs: firstDay - DAY, windowDay: "2026-10-30", reviewP50: HOUR,
+    pressure: false, streak: 0, producer: "plan-task-workers",
+  }, firstDay);
+  assert.equal(first.nextState.streak, 1);
+  const skipped = firstDay + 26 * HOUR;
+  const result = openQueueShadow(census(skipped), rows(skipped, 3 * HOUR), first.nextState, skipped);
+  assert.equal(result.nextState.streak, 0);
+  assert.equal(result.recommendation, undefined);
+  const adjacent = firstDay + 2 * HOUR;
+  const control = openQueueShadow(census(adjacent), rows(adjacent, 3 * HOUR), first.nextState, adjacent);
+  assert.equal(control.nextState.streak, 2, "adjacent UTC dates still count across a month boundary");
+  assert.equal(control.recommendation, "consider-slowing-plan-task-workers");
+});
+
+test("equal drain, improving review wait, or a changed producer prevents a recommendation", () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01", reviewP50: HOUR,
+    pressure: true, streak: 1, producer: "plan-task-workers" };
+  const equalDrain = census(now);
+  equalDrain.window.push({ ...equalDrain.window[2]!, number: 18004, mergedAtMs: undefined, closedAtMs: now - HOUR });
+  const drained = openQueueShadow(equalDrain, rows(now), previous, now);
+  assert.equal(drained.cohort.merged_or_closed, 2, "closed PRs contribute to drain");
+  assert.equal(drained.nextState.streak, 0);
+  assert.equal(drained.recommendation, undefined);
+  const improving = openQueueShadow(census(now), rows(now, HOUR / 2), previous, now);
+  assert.equal(improving.nextState.streak, 0);
+  assert.equal(improving.recommendation, undefined);
+  const changed = openQueueShadow(census(now), rows(now), { ...previous, producer: "codex" }, now);
+  assert.equal(changed.nextState.streak, 0);
+  assert.equal(changed.recommendation, undefined);
+});
+
 test("incomplete or stale census is UNKNOWN and never recommends", () => {
   const now = Date.parse("2026-11-02T12:00:00.000Z");
   const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01", reviewP50: HOUR, pressure: true, streak: 1 };
@@ -99,7 +184,7 @@ test("the daily flow pass emits a reason-bearing shadow row from one batched cen
       openWorkspace: () => ({ root, branch: "test", land: () => "", dispose: () => {} }),
       log: (step, extra = {}) => events.push({ step, extra }) }, {
       mintTaskId: () => "W1-T11111",
-      readLedger: () => ({ ok: true, rows: [], unread: [] }),
+      readLedger: () => ({ ok: true, rows: refusalRows(now), unread: [] }),
       readOpenQueue: async () => { censusReads++; return census(now); },
       readCi: async () => { perPrCiReads++; return undefined; },
       planTasks: () => [],
@@ -110,6 +195,19 @@ test("the daily flow pass emits a reason-bearing shadow row from one batched cen
     assert.equal(row.extra.permission, "not-granted");
     assert.equal(row.extra.action, "none");
     assert.equal(typeof row.extra.reason, "string");
+    assert.deepEqual(row.extra.window, { fromMs: now - DAY, toMs: now });
+    assert.equal(row.extra.producer, "plan-task-workers");
+    const cohort = row.extra.cohort as Record<string, number>;
+    assert.equal(cohort.open, 3);
+    assert.equal(cohort.arrivals, 2);
+    assert.equal(cohort.merged_or_closed, 1);
+    assert.equal(cohort.review_waiting, 1);
+    assert.equal(cohort.review_wait_p50_ms, 2 * HOUR);
+    assert.equal(cohort.merge_preflight_refused, 1);
+    assert.equal(cohort.merge_preflight_refusal_age_p50_ms, 3 * HOUR);
+    assert.equal(cohort.ready_to_direct_merge, 1);
+    assert.equal(cohort.ready_to_direct_merge_age_p50_ms, 2 * HOUR);
+    assert.equal(cohort.open_age_p50_ms, 6 * HOUR);
     assert.equal(censusReads, 1);
     assert.equal(perPrCiReads, 0, "open queue evidence adds no per-PR GitHub reads");
   } finally {

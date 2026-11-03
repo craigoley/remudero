@@ -610,7 +610,9 @@ export function openQueueShadow(
   const drain = census.window.filter((pr) => (pr.mergedAtMs !== undefined && pr.mergedAtMs > fromMs && pr.mergedAtMs <= nowMs) ||
     (pr.closedAtMs !== undefined && pr.closedAtMs > fromMs && pr.closedAtMs <= nowMs)).length;
   const details = census.open.map((pr) => {
-    const matching = rows.filter((r) => prNumberOf(r) === pr.number && r.head_sha === pr.headSha).sort((a, b) => tsOf(a) - tsOf(b));
+    const matching = rows.filter((r) => prNumberOf(r) === pr.number &&
+      (r.step === "automerge.direct_merge_preflight_refused" ? r.prior_head_sha ?? r.head_sha : r.head_sha) === pr.headSha)
+      .sort((a, b) => tsOf(a) - tsOf(b));
     const eligible = matching.filter((r) => r.step === "sweep.review_eligible").at(-1);
     const admitted = matching.filter((r) => r.step === "sweep.review_admitted").at(-1);
     const reviewed = matching.filter((r) => r.step === "review.posted" && r.state === "success").at(-1);
@@ -632,8 +634,8 @@ export function openQueueShadow(
     producers.set(producer, (producers.get(producer) ?? 0) + 1);
   }
   const producer = [...producers].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
-  const previousWindowConsecutive = previous !== undefined && previous.windowDay !== windowDay &&
-    nowMs - previous.observedAtMs <= 2 * DAY_MS;
+  const previousWindowConsecutive = previous !== undefined && previous.windowDay === fixedClock(nowMs - DAY_MS).iso().slice(0, 10) &&
+    previous.observedAtMs < nowMs && nowMs - previous.observedAtMs <= 2 * DAY_MS;
   const pressure = arrivals > drain && reviewP50 !== null && previousWindowConsecutive && previous!.reviewP50 !== null &&
     reviewP50 > previous!.reviewP50 && producer !== undefined && producer === previous!.producer;
   const streak = pressure ? (previous!.pressure ? previous!.streak + 1 : 1) : 0;
