@@ -1533,6 +1533,8 @@ export const PRECHECK_PARITY = {
   "test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
   "test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts": { modeled: evaluateAdmittedCensusSuites },
   "test/census-reader-runtime-calibration.test.ts": { modeled: runCensusSuitesViaChild },
+  // W1-T11100: the history budget is a path inside the same reader child runner.
+  "test/ci/gates/a-census-reader-with-history-runs-once-under-its-learned-budget.test.ts": { modeled: runCensusSuitesViaChild },
   "test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts": { modeled: runCausedCensusSuites },
   // W1-T5692: the literal-triggered suites join the same evaluateAdmittedCensusSuites child.
   "test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
