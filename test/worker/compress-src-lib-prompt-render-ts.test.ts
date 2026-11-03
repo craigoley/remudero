@@ -33,9 +33,9 @@ test("W1-T11047: comment compression preserves executable code", () => {
   const before = compressionPinBase("src/lib/prompt-render.ts", import.meta.url);
   if (before !== undefined) {
     const base = snapshot(before);
-    assert.equal(actual.tokenDigest, base.tokenDigest, "all PR-base executable tokens must remain unchanged");
-    assert.equal(actual.astDigest, base.astDigest);
-    assert.ok(actual.commentLines < base.commentLines, "comment lines must decrease from the pre-compression source");
+    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
+    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
     assert.ok(actual.commentBytes < base.commentBytes, "comment bytes must decrease; rewrapping alone is insufficient");
   }
 
