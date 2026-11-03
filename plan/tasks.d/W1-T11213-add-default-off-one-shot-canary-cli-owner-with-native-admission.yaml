@@ -44,9 +44,14 @@
     checks pass; prepare, prepare-coding, project and replay must remain provider-inert and must not
     load worker defaults. Do not add a daemon timer or recurring job. The approval
     action is separate from execution and cannot be minted from arbitrary JSON, a manifest field or
-    task budget. It records a human operator's explicit future funding/approval only after that
-    boundary, bound to exact committed source/runtime, private corpus/scorer, fixed model pin, the
-    $10 lifetime/$2 smoke ceilings and a unique one-shot ID. Validate owner-private XDG state outside
+    task budget. Before that approval, deterministically select one qualified ordinary nonpremium cash
+    pin from the actual configured native effective census using existing route, endpoint, price,
+    tool-free-context and exact-effort-codec policy. Record the selected provider/model/effort/endpoint/
+    price pin and source/config digests, plus every rejected candidate and its reason, in owner-private
+    approval state. If no candidate qualifies, report unavailable before approval, claim or request.
+    The approval records a human operator's explicit future funding/approval only after that boundary,
+    and binds the exact selected pin, committed source/runtime and private corpus/scorer to the $10
+    lifetime/$2 smoke ceilings and a unique one-shot ID. Validate owner-private XDG state outside
     every Git ancestor, no symlinks, expected UID/mode, exact committed source ancestry, and the
     required normal CI/source qualification receipts before
     issuing process-local run and budget capabilities. Persist one unique run claim in the shared
@@ -58,15 +63,17 @@
     case and same-configuration A/A pair, at most two requests and one turn. Disable tools through a
     native provider-specific control and verify the effective request; an empty Codex tools array is
     not proof that ambient tools are unavailable, so Codex is excluded from this slice. Permit the
-    fixed `gpt-oss-120b` pin only when the normal resolved route and cash endpoint prove it eligible;
-    do not fall back to a different model. Add a narrow optional `beforeProviderInvocation` hook to
+    selected pin only when the existing native effective census and ordinary cash policy prove its
+    route, endpoint, configured price, tool-free context and exact effort codec eligible. At execution,
+    revalidate that exact approved pin and source/config digests; never reselect or fall back to another
+    model after approval. Add a narrow optional `beforeProviderInvocation` hook to
     `worker.ts`, absent by default, and invoke it at every provider-selection/fallback boundary before
     adapter launch and outside telemetry catches. The hook validates provider, model, effort, billing and
     expected AsyncLocalStorage budget context; it returns a synchronous structured allow/refuse verdict.
     Reject promises/thenables, malformed verdicts, throws and refusals as fatal before any fallback can
     run. Capture the opaque budget capability lexically in reserve/settle callbacks. Resolve the
-    normal native cash route and verify its endpoint, configured price and exact effort codec for the
-    fixed model pin; do not use subscription-capacity eligibility. Read fresh `activeWorkerCount`
+    normal native cash route and verify the approved endpoint, configured price and exact effort
+    codec for the selected pin; do not use subscription-capacity eligibility. Read fresh `activeWorkerCount`
     immediately before launch; if the exact cash route is unavailable or another worker is active,
     defer without transport. This is a point-in-time policy snapshot, not
     a production exclusivity lease. Use normal cash caps and never set `cashSqueezed` or emergency
@@ -74,8 +81,9 @@
     value. Keep subscription out of this cash-only
     slice until genuine shared capacity ownership exists. For each of the two A/A workers, set
     `maxTurns: 1`; the existing cash loop counts each HTTP send, including retries, against this bound.
-    The request body uses the fixed selected model/effort, so fake-transport tests capture and verify
-    the actual body. If the exact effort codec is unsupported or omitted, refuse before launch. Do not
+    The request body uses the exact approved model/effort, so fake-transport tests capture and verify
+    the actual body. If the approved effort codec is unsupported, omitted or no longer matches, refuse
+    before launch. Do not
     add a new HTTP fallback mechanism. If
     source/runtime/CI binding, spend identity, served identity, invocation count or settlement is
     unavailable, defer and retain the owner hold. Join the real `WorkerExecutionEvidenceV1` attempt ID;
