@@ -91,7 +91,8 @@ test("deploy revival applies the current build resource policy to the actual Doc
   assertPolicyApplied(f.args(), expected);
   assert.ok(f.args().includes("--restart=on-failure:5"));
   assert.match(result.stdout, /resource policy from .*daemon-install\/deploy\/resource-policy\.sh/);
-  assert.match(result.stdout, /memory ceiling 8820 MiB/);
+  // W1-T11130: the 15988 MiB host less the 2048 MiB reserve less the others' floors (5632 + 2048 + 2304).
+  assert.match(result.stdout, /memory ceiling 3956 MiB/);
 });
 
 test("deploy revival uses the installed policy when the checkout is absent", (t) => {

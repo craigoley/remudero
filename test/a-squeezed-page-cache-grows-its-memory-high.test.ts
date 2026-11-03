@@ -23,7 +23,20 @@ const TUNER = join(REPO_ROOT, "deploy", "memory-high-tuner.sh");
 const MIB = 1024 * 1024;
 const HOST_KB = 16371996; // the fleet host's MemTotal, read 2026-10-09 (15988 MiB)
 const CONSOLE = "remudero-console-daemon";
-const CONSOLE_MAX_MIB = 15988 - 5120 - 2048; // the build memory.max the policy already sets (8820)
+const CONSOLE_MAX_MIB = 15988 - 5120 - 2048; // the live memory.max the fixture cgroups report (8820)
+const FLEET = ["remudero-daemon", "remudero-serve", CONSOLE, "remudero-site-daemon"];
+
+/**
+ * W1-T11130: each container's memory.max is the host less the reserve less the OTHER containers' learned
+ * peaks, and a container with no record counts its working-set floor. On this 15988 MiB host the floors
+ * alone exceed the budget, so these fixtures record the measured peaks (MiB per container) a running fleet
+ * would have, and the policy under test sizes memory.high from a memory.max it can actually hold.
+ */
+function seedPeaks(stateRoot: string, peaks: Record<string, number>): void {
+  for (const [name, mib] of Object.entries(peaks)) {
+    writeFileSync(join(stateRoot, "state", `memory-peak-${name}.json`), `{"container":"${name}","peak_mib":${mib}}\n`);
+  }
+}
 
 /** One decision through the shipped shell: MH_* inputs in, "<action> <target>" out. */
 function decide(inputs: Record<string, string | number>): { action: string; target: number; reason: string } {
@@ -114,6 +127,7 @@ function host(container = CONSOLE): { root: string; env: NodeJS.ProcessEnv; cg: 
   mkdirSync(cg, { recursive: true });
   mkdirSync(join(root, "bin"));
   mkdirSync(join(root, "cfg", "state"), { recursive: true });
+  seedPeaks(join(root, "cfg"), Object.fromEntries(FLEET.map((name) => [name, 1024])));
   writeFileSync(join(cg, "memory.high"), `${2048 * MIB}\n`);
   writeFileSync(join(cg, "memory.max"), `${CONSOLE_MAX_MIB * MIB}\n`);
   writeFileSync(join(cg, "memory.events"), "low 0\nhigh 1124\nmax 0\noom 0\n");
@@ -147,6 +161,7 @@ function host(container = CONSOLE): { root: string; env: NodeJS.ProcessEnv; cg: 
       RMD_VMSTAT_PATH: join(root, "vmstat"),
       RMD_HOST_PSI_MEMORY_PATH: join(root, "psi"),
       RMD_MEMORY_HIGH_SUDO: "env",
+      RMD_INSTANCE_REGISTRY: "", // set but empty: the policy reads peers' records from this fixture's one state root only
     },
   };
 }
@@ -235,6 +250,8 @@ test("the drift check treats a learned memory.high as current, and a recycle sta
     copyFileSync(join(REPO_ROOT, "deploy", "resource-policy.sh"), join(root, "deploy", "resource-policy.sh"));
     writeFileSync(join(root, "meminfo"), `MemTotal:       ${HOST_KB} kB\n`);
     const env = { PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "meminfo") };
+    // Console's limit is the host less the reserve less the others' peaks: 13940 - (2048 + 2048 + 1024) = 8820.
+    seedPeaks(join(root, "cfg"), { "remudero-daemon": 2048, "remudero-serve": 2048, "remudero-site-daemon": 1024 });
     const limits = { Memory: CONSOLE_MAX_MIB * MIB, MemorySwap: (CONSOLE_MAX_MIB + 4096) * MIB, CpuShares: 512, MemoryReservation: 0 };
     const driftAt = (annotation: number | null): ResourcePolicyDrift[] | undefined =>
       readResourcePolicyDrift(

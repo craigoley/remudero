@@ -59,7 +59,22 @@ function fixture(): { root: string; env: NodeJS.ProcessEnv } {
   mkdirSync(join(root, "deploy"), { recursive: true });
   copyFileSync(join(REPO_ROOT, "deploy", "resource-policy.sh"), join(root, "deploy", "resource-policy.sh"));
   writeFileSync(join(root, "meminfo"), "MemTotal:       16000000 kB\nMemFree:         1000000 kB\n");
-  return { root, env: { PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "meminfo") } };
+  // W1-T11130: core's memory.max is the host less the 2048 MiB reserve less the OTHER containers' learned
+  // peaks. These recorded memory.peak values (serve 2048 + console 2048 + site 1024 = 5120 MiB) keep core's
+  // limit at the 8457 MiB this incident reading was taken at; with none, the floors would leave 3593 MiB.
+  mkdirSync(join(root, "state"), { recursive: true });
+  for (const [name, mib] of [["remudero-serve", 2048], ["remudero-console-daemon", 2048], ["remudero-site-daemon", 1024]] as const) {
+    writeFileSync(join(root, "state", `memory-peak-${name}.json`), `{"container":"${name}","peak_mib":${mib}}\n`);
+  }
+  return {
+    root,
+    env: {
+      PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "meminfo"),
+      // Serve's hard limit is pinned by the operator override: unset, the shared budget sizes it too.
+      RMD_SERVE_MEMORY_LIMIT_MIB: "7680",
+      RMD_INSTANCE_REGISTRY: "", // set but empty: records come from this one state root only
+    },
+  };
 }
 
 function shippedReader(root: string, execFile: (cmd: string, args: string[]) => string) {
@@ -168,7 +183,7 @@ test("the recycle reason names each drifted limit as expected and actual", () =>
   };
   try {
     // THE SHIPPED READER, on the incident's HostConfig: the build policy's real output (15625 MiB
-    // host - 5120 serve reserve - 2048 overhead = 8457 MiB, +4096 MiB swap, 512 shares).
+    // host - 2048 reserve - the others' recorded peaks 5120 = 8457 MiB, +4096 MiB swap, 512 shares).
     const drift = withEnv({ RMD_RESOURCE_POLICY_CONTAINER: undefined, RMD_RESOURCE_POLICY_ROLE: undefined }, () =>
       shippedReader(root, execFile)(),
     );

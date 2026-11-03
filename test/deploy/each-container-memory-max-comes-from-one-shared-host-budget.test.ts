@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -62,6 +62,8 @@ function policy(dir: string, script: string, env: Record<string, string> = {}) {
     encoding: "utf8",
     env: {
       PATH: `${join(dir, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`, STATE_DIR: dir,
+      // Set but empty: no instance registry, so the repo's own registry (host paths) is never read.
+      RMD_INSTANCE_REGISTRY: "",
       RMD_MEMINFO_PATH: join(dir, "meminfo"), RMD_CGROUP_ROOT: join(dir, "cgroup"), ...env,
     },
   });
@@ -93,15 +95,28 @@ test("each container's memory.max is the host less the reserve less the OTHER co
   learn(dir, SITE, { high: peaks[SITE] }); // the learned memory.high alone, and not running
   assert.equal(policy(dir, 'resource_policy_recorded_peak remudero-daemon || echo none'), "none\n", "nothing is recorded before the policy runs");
   const budget = HOST_MIB - RESERVE_MIB;
+  const limits: Record<string, number> = {};
   for (const container of FLEET) {
     const others = FLEET.filter((c) => c !== container).reduce((sum, c) => sum + peaks[c]!, 0);
     const got = memoryMax(dir, container);
+    limits[container] = got.mib!;
     assert.equal(got.mib, budget - others, `${container}: host ${HOST_MIB} - reserve ${RESERVE_MIB} - others ${others}\n${got.out}`);
-    // Any ONE container at its limit while the other three sit at their peaks still fits the host.
-    assert.equal(got.mib! + others + RESERVE_MIB, HOST_MIB, `${container} at its memory.max beside the others' peaks fills the host exactly`);
     assert.match(got.note, new RegExp(`memory\\.max ${budget - others} MiB = shared budget: host ${HOST_MIB} - reserve ${RESERVE_MIB}`));
     for (const other of FLEET.filter((c) => c !== container)) assert.match(got.note, new RegExp(`- ${other} ${peaks[other]} \\(`), `the note names ${other}'s term`);
   }
+  // THE INVARIANT the formula gives (not "the four limits sum to the host", which it never claimed): for EVERY
+  // container, that container at its memory.max beside the other three at their learned peaks fills the host
+  // less the reserve exactly. So no state the fleet can reach by one container growing exceeds the host.
+  const sumPeaks = FLEET.reduce((sum, c) => sum + peaks[c]!, 0);
+  for (const container of FLEET) {
+    const usage = FLEET.reduce((sum, c) => sum + (c === container ? limits[c]! : peaks[c]!), 0);
+    assert.equal(usage + RESERVE_MIB, HOST_MIB, `${container} at its limit, the rest at their peaks: ${usage} MiB used`);
+    for (const grown of FLEET.filter((c) => c !== container)) {
+      assert.ok(limits[container]! + peaks[grown]! + RESERVE_MIB <= HOST_MIB, `${container} at its limit and ${grown} at its peak fit the host`);
+    }
+  }
+  // The limits themselves are overlapping ceilings: together they exceed the budget by 3 x the measured peaks.
+  assert.equal(FLEET.reduce((sum, c) => sum + limits[c]!, 0), 4 * budget - 3 * sumPeaks);
   // Serve is no longer the fixed 7,680 MiB, and no build daemon is the old total - 5120 - 2048.
   assert.notEqual(memoryMax(dir, SERVE).mib, 7680);
   assert.notEqual(memoryMax(dir, CORE).mib, HOST_MIB - 5120 - 2048);
@@ -141,7 +156,11 @@ test("W1-T11130 criterion 2: a container with no learned peak yet counts its pol
     for (const other of FLEET.filter((c) => c !== container)) {
       assert.match(got.note, new RegExp(`- ${other} ${FLOORS[other]} \\(floor, nothing learned\\)`));
     }
+    // Each limit beside the others' floors (their peaks, nothing learned) fills the host less the reserve.
+    assert.equal(got.mib! + others + RESERVE_MIB, HOST_MIB, `${container} at its limit beside the others' floors`);
   }
+  // The old per-container arithmetic gave 24.3 GiB to each of three build daemons; no limit is that now.
+  for (const container of [CORE, CONSOLE, SITE]) assert.ok(memoryMax(dir, container).mib! < HOST_MIB - 5120 - 2048);
 });
 
 test("W1-T11130 criterion 2: a learned peak is re-read at every recycle, so the budget follows measured use", (t) => {
@@ -157,16 +176,38 @@ test("W1-T11130 criterion 2: a learned peak is re-read at every recycle, so the 
   assert.match(out, new RegExp(`^first=.*--memory=${base - 6144}m`, "m"));
   assert.match(out, new RegExp(`^second=.*--memory=${base - 9216}m`, "m"), "serve grew by 3 GiB, so core's limit gave back 3 GiB");
   assert.match(out, new RegExp(`- ${SERVE} 9216 \\(memory\\.peak\\)`));
-  // When the peaks alone overcommit the host, the share cannot hold console's own learned peak under its
-  // 95% memory.high cap. Console then keeps today's arithmetic (total - 5120 - 2048), never a value from
-  // its own learned peak, which would move every time the tuner gives memory back.
-  learn(dir, CORE, { high: 20480 });
-  learn(dir, CONSOLE, { peak: 4608 });
-  const crowded = memoryMax(dir, CONSOLE);
-  assert.equal(crowded.mib, HOST_MIB - 5120 - 2048, crowded.out);
-  assert.match(crowded.note, new RegExp(`memory\\.max ${HOST_MIB - 5120 - 2048} MiB = today's arithmetic, OVERCOMMITTED: .* leaves -2048 MiB, under the 4851 MiB that holds its own learned peak 4608 MiB \\(memory\\.peak\\)`));
-  learn(dir, CONSOLE, { peak: 4096 }); // a smaller own peak does not lower an overcommitted limit
-  assert.equal(memoryMax(dir, CONSOLE).mib, HOST_MIB - 5120 - 2048);
+});
+
+test("W1-T11130: an overcommitted host still follows the shared-budget formula; no other arithmetic stands in", (t) => {
+  // The reviewer's case: a readable MemTotal of 15988 MiB (the 15.6 GiB host). With nothing learned the
+  // others' floors are the peaks, so core gets 15988 - 2048 - 5632 - 2048 - 2304, NOT total - 5120 - 2048.
+  const small = host(t, `MemTotal:       ${15988 * 1024} kB\n`);
+  const core = memoryMax(small, CORE);
+  assert.equal(core.mib, 15988 - RESERVE_MIB - FLOORS[SERVE]! - FLOORS[CONSOLE]! - FLOORS[SITE]!, core.out);
+  assert.equal(core.mib, 3956);
+  assert.notEqual(core.mib, 15988 - 5120 - 2048, "today's 8820 is gone");
+  assert.doesNotMatch(core.note, /today's arithmetic|OVERCOMMITTED/);
+  assert.match(core.note, /memory\.max 3956 MiB = shared budget: host 15988 - reserve 2048 - remudero-serve 5632 \(floor, nothing learned\)/);
+
+  // Peaks that together exceed the host leave a negative limit, and that is the number the note names.
+  // A container's OWN learned peak, however large, is not a term of its own limit.
+  const crowded = host(t);
+  learn(crowded, CORE, { high: 30000 });
+  learn(crowded, CONSOLE, { peak: 4608 });
+  const noCeiling = memoryMax(crowded, CONSOLE);
+  assert.equal(noCeiling.mib, undefined, `a negative limit is no ceiling, not today's arithmetic: ${noCeiling.out}`);
+  assert.match(noCeiling.note, /NO memory ceiling — memory\.max -7984 MiB = shared budget: host 32000 - reserve 2048 - remudero-daemon 30000 \(learned memory\.high\) - remudero-serve 5632 \(floor, nothing learned\) - remudero-site-daemon 2304 \(floor, nothing learned\), under the 2048 MiB floor/);
+  assert.match(noCeiling.out, /--annotation=org\.systemd\.property\.MemoryHigh=uint64 \d+/, "memory.high is still sized with no memory.max to stay under");
+  const coreBefore = memoryMax(crowded, CORE);
+  assert.equal(coreBefore.mib, 29952 - 4608 - FLOORS[SERVE]! - FLOORS[SITE]!, coreBefore.out);
+  learn(crowded, CORE, { high: 31000, peak: 31000 });
+  assert.equal(memoryMax(crowded, CORE).mib, coreBefore.mib, "core's own learned peak is not a term of core's limit");
+  learn(crowded, CONSOLE, { peak: 4096 }); // console's own peak never moves console's limit
+  assert.equal(memoryMax(crowded, CONSOLE).mib, undefined);
+  // Serve is sized the same way: under its reserve, the formula's number means no ceiling.
+  const serve = memoryMax(crowded, SERVE);
+  assert.equal(serve.mib, undefined, serve.out);
+  assert.match(serve.note, /NO memory ceiling — -\d+ MiB \(memory\.max -\d+ MiB = shared budget: host 32000 - reserve 2048 - remudero-daemon 31000 \(/);
 });
 
 test("W1-T11130 criterion 2: an unreadable host total keeps today's arithmetic and is never fatal", (t) => {
@@ -194,4 +235,68 @@ test("W1-T11130 criterion 2: an explicit RMD_SERVE_MEMORY_LIMIT_MIB stays an ope
   const shared = memoryMax(dir, SERVE);
   assert.equal(shared.mib, HOST_MIB - RESERVE_MIB - FLOORS[CORE]! - FLOORS[CONSOLE]! - FLOORS[SITE]!);
   assert.doesNotMatch(shared.note, /operator override/);
+});
+
+/**
+ * Production layout: every instance's tuner records under ITS OWN state root (the registry's state_dir),
+ * never beside a peer's. Three roots, one registry; serve is no registry instance, so its records live in
+ * the root of whoever launches it (here core's).
+ */
+function instances(dir: string) {
+  const roots = { core: join(dir, "core-root"), site: join(dir, "site-root"), console: join(dir, "console-root") };
+  for (const root of Object.values(roots)) mkdirSync(join(root, "state"), { recursive: true });
+  const registry = join(dir, "daemon-instances.yaml");
+  writeFileSync(registry, [
+    "instances:",
+    `  core:\n    repo: remudero\n    container_name: ${CORE}\n    state_dir: ${roots.core}`,
+    `  site:\n    repo: remudero-site  # the site\n    container_name: ${SITE}\n    state_dir: ${roots.site}`,
+    `  console:\n    repo: remudero-console\n    container_name: ${CONSOLE}\n    state_dir: ${roots.console}`,
+  ].join("\n") + "\n");
+  return { roots, registry, env: (root: string) => ({ RMD_INSTANCE_REGISTRY: registry, STATE_DIR: root }) };
+}
+
+test("W1-T11130 criterion 2: a learned peak is read from the peer's own state root, not only the caller's", (t) => {
+  const dir = host(t);
+  const fleet = instances(dir);
+  // Each peer's tuner wrote its record under its own root; the caller (core's recycle) has none of them.
+  learn(fleet.roots.console, CONSOLE, { high: 4096 });
+  learn(fleet.roots.site, SITE, { peak: 3072 });
+  learn(fleet.roots.core, SERVE, { peak: 6144 }); // serve: no registry row, so the launching root
+  const budget = HOST_MIB - RESERVE_MIB;
+  const split = memoryMax(dir, CORE, fleet.env(fleet.roots.core));
+  assert.equal(split.mib, budget - 4096 - 3072 - 6144, split.out);
+  assert.match(split.note, new RegExp(`- ${CONSOLE} 4096 \\(learned memory\\.high\\)`));
+  assert.match(split.note, new RegExp(`- ${SITE} 3072 \\(memory\\.peak\\)`));
+  assert.match(split.note, new RegExp(`- ${SERVE} 6144 \\(memory\\.peak\\)`));
+  // Discriminating: with no registry the same records are invisible and the peers count their floors.
+  const blind = memoryMax(dir, CORE, { STATE_DIR: fleet.roots.core });
+  assert.equal(blind.mib, budget - FLOORS[CONSOLE]! - FLOORS[SITE]! - 6144, blind.out);
+  assert.notEqual(blind.mib, split.mib);
+  // Site's recycle reads console's record from console's root. Serve is no registry row and its record is in
+  // core's root, which is not site's caller root, so site counts serve's floor.
+  const site = memoryMax(dir, SITE, fleet.env(fleet.roots.site));
+  assert.equal(site.mib, budget - FLOORS[CORE]! - 4096 - FLOORS[SERVE]!, site.out);
+  assert.match(site.note, new RegExp(`- ${CONSOLE} 4096 \\(learned memory\\.high\\)`));
+  // The drift check evaluates the same policy, so it follows the same roots and finds the same limit.
+  const drift = policy(dir, `resource_policy_build_args ${CORE}; printf "%s\\n" "\${RESOURCE_POLICY_BUILD_ARGS[@]}"`, fleet.env(fleet.roots.core));
+  assert.match(drift, new RegExp(`^--memory=${budget - 4096 - 3072 - 6144}m$`, "m"));
+  // A registry row whose state_dir is not on this host is skipped, never fatal: the floor stands.
+  const away = join(dir, "away.yaml");
+  writeFileSync(away, `instances:\n  console:\n    container_name: ${CONSOLE}\n    state_dir: ${join(dir, "no-such-root")}\n`);
+  assert.equal(memoryMax(dir, CORE, { RMD_INSTANCE_REGISTRY: away, STATE_DIR: fleet.roots.core }).mib, blind.mib);
+});
+
+test("W1-T11130 criterion 2: the recorded memory.peak lands in the peer's own root, where every recycle reads it", (t) => {
+  const dir = host(t);
+  const fleet = instances(dir);
+  running(dir, CONSOLE, 3072);
+  // Core's recycle probes every fleet container: console's peak is recorded beside console's tuner record.
+  memoryMax(dir, CORE, fleet.env(fleet.roots.core));
+  assert.match(readFileSync(join(fleet.roots.console, "state", `memory-peak-${CONSOLE}.json`), "utf8"), new RegExp(`"container":"${CONSOLE}","peak_mib":3072`));
+  assert.equal(existsSync(join(fleet.roots.core, "state", `memory-peak-${CONSOLE}.json`)), false, "not duplicated into the caller's root");
+  // Site's recycle, from its own root and with console no longer running, still reads console's peak.
+  rmSync(join(dir, "ids", CONSOLE));
+  const site = memoryMax(dir, SITE, fleet.env(fleet.roots.site));
+  assert.match(site.note, new RegExp(`- ${CONSOLE} 3072 \\(memory\\.peak\\)`), site.note);
+  assert.equal(site.mib, HOST_MIB - RESERVE_MIB - FLOORS[CORE]! - 3072 - FLOORS[SERVE]!);
 });

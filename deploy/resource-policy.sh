@@ -166,17 +166,45 @@ resource_policy_memory_high() {
 # records the value in <state>/memory-high-tuned-<container>.json, so a recycle starts from the
 # learned value instead of throwing it away. The value only ever RAISES the policy's: a learned value
 # below the policy (a policy that grew since) is ignored here.
+#
+# Where it lives: $2 (a <state root>/state directory) when given, else RMD_MEMORY_HIGH_TUNED_DIR, else
+# the caller's STATE_DIR/state. Every instance's tuner records under ITS OWN state root, so a peer's
+# record is found through resource_policy_instance_state_dir, not through the caller's root.
 resource_policy_tuned_file() {
-  local dir="${RMD_MEMORY_HIGH_TUNED_DIR:-}"
+  local dir="${2:-${RMD_MEMORY_HIGH_TUNED_DIR:-}}"
   [ -n "${dir}" ] || { [ -n "${STATE_DIR:-}" ] && dir="${STATE_DIR}/state"; }
   [ -n "${dir}" ] || return 1
   printf '%s/memory-high-tuned-%s.json' "${dir}" "$1"
 }
 
-# The learned memory.high of container $1 in MiB; status 1 when none is recorded or it is unreadable.
+# <state_dir>/state of the instance whose container_name is $1, as the instance registry declares it
+# (RMD_INSTANCE_REGISTRY, else this checkout's .remudero/daemon-instances.yaml; the same grammar as
+# recycle-container.sh). Status 1 when there is no registry, no such instance, a relative state_dir, or
+# no <state_dir>/state directory here. RMD_MEMORY_HIGH_TUNED_DIR pins one shared directory instead, so
+# it also turns this lookup off.
+resource_policy_instance_state_dir() {
+  local registry root
+  [ -z "${RMD_MEMORY_HIGH_TUNED_DIR:-}" ] || return 1
+  if [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
+    registry="${RMD_INSTANCE_REGISTRY}" # set but empty: no registry
+  else
+    registry="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)/.remudero/daemon-instances.yaml"
+  fi
+  [ -n "${registry}" ] && [ -r "${registry}" ] || return 1
+  root="$(awk -v want="$1" '{ sub(/[[:space:]]+#.*/, "") }
+    /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { if (c == want && d != "") { print d; found = 1; exit } c = d = ""; next }
+    /^    container_name:/ { c = $2; gsub(/"/, "", c) } /^    state_dir:/ { d = $2; gsub(/"/, "", d) }
+    END { if (!found && c == want && d != "") print d }' "${registry}" 2>/dev/null)" || return 1
+  case "${root}" in /*) : ;; *) return 1 ;; esac
+  [ -d "${root}/state" ] || return 1
+  printf '%s/state' "${root}"
+}
+
+# The learned memory.high of container $1 in MiB (read from directory $2 when given); status 1 when
+# none is recorded or it is unreadable.
 resource_policy_tuned_high() {
   local file value
-  file="$(resource_policy_tuned_file "$1")" || return 1
+  file="$(resource_policy_tuned_file "$1" "${2:-}")" || return 1
   [ -r "${file}" ] || return 1
   grep -q "\"container\":\"$1\"" "${file}" 2>/dev/null || return 1
   value="$(sed -n 's/.*"high_mib":\([0-9][0-9]*\).*/\1/p' "${file}" 2>/dev/null | head -n 1)"
@@ -196,18 +224,24 @@ resource_policy_tuned_high() {
 # memory.high in <state>/memory-high-tuned-<container>.json. A container with neither counts its
 # RMD_MEMORY_HIGH_FLOORS entry. Both files are read again at every call, so every recycle and every
 # W1-T4267 drift check sees the current split: a container that grows takes only measured slack.
-# OVERCOMMITTED: the share can be too small to hold the container's OWN learned peak under its
-# RMD_MEMORY_HIGH_MAX_PCT memory.high cap. Then the peaks alone exceed the host, and no split both
-# fits the host and holds every measured peak. Such a container keeps today's arithmetic, which the
-# caller passes in, and the note says OVERCOMMITTED: usage has to fall (R1). The fallback is never
-# the container's own learned value. That value moves whenever the tuner gives memory back under
-# pressure, and each move would read as drift: a recycle, and a lower cap the tuner can never grow
-# back past.
+# WHERE THE PEERS' RECORDS ARE: each instance's tuner writes under its OWN state root (the registry's
+# state_dir: core rmd-state2, site rmd-site-state, console /mnt/rmd/...), so a recycle in one instance
+# reads every peer's two files from that peer's root (resource_policy_instance_state_dir), and the
+# caller's own STATE_DIR/state too (serve is no registry instance); the larger value wins.
+# THE FORMULA IS ALWAYS THE FORMULA. A host whose floors and peaks together exceed the budget leaves a
+# small or negative limit, and that is what a container gets: no second arithmetic stands in for it.
+# The only exception is an unreadable MemTotal, where there is no budget to share and the caller keeps
+# today's arithmetic. A limit under the build floor (RMD_MIN_BUILD_CEILING_MIB) or serve's reserve
+# means NO memory ceiling for that container and the note names the number. The invariant is per
+# container: its limit plus the other containers' peaks equals the budget, so any one container at its
+# limit beside the rest at their peaks fits the host. The four limits are NOT disjoint shares and are
+# not meant to sum to the host: each is the most that container can take from measured slack.
 
-# Where container $1's recorded cgroup memory.peak lives: beside memory-high-tuned-<container>.json.
+# Where container $1's recorded cgroup memory.peak lives: beside memory-high-tuned-<container>.json
+# (in directory $2 when given).
 resource_policy_peak_file() {
   local file
-  file="$(resource_policy_tuned_file "$1")" || return 1
+  file="$(resource_policy_tuned_file "$1" "${2:-}")" || return 1
   printf '%s/memory-peak-%s.json' "${file%/*}" "$1"
 }
 
@@ -221,9 +255,12 @@ resource_policy_peak_file() {
 # a container that is not running, a cgroup without memory.peak or a state dir that cannot be
 # written leaves the record as it was.
 resource_policy_record_peak() {
-  local container="$1" file id cg raw live old tmp
+  local container="$1" file id cg raw live old tmp dir=""
   command -v docker >/dev/null 2>&1 || return 0
-  file="$(resource_policy_peak_file "${container}")" || return 0
+  # The record goes beside the container's OWN tuner record when the registry names its state root and
+  # that root is writable here; otherwise beside the caller's.
+  if dir="$(resource_policy_instance_state_dir "${container}")" && [ -w "${dir}" ]; then : ; else dir=""; fi
+  file="$(resource_policy_peak_file "${container}" "${dir}")" || return 0
   [ -d "${file%/*}" ] || return 0
   id="$(docker inspect --format '{{.Id}}' "${container}" 2>/dev/null)" || return 0
   case "${id}" in '' | *[!0-9a-f]*) return 0 ;; esac
@@ -236,17 +273,18 @@ resource_policy_record_peak() {
   case "${raw}" in '' | *[!0-9]*) return 0 ;; esac
   live=$((raw / 1048576))
   [ "${live}" -gt 0 ] || return 0
-  old="$(resource_policy_recorded_peak "${container}")" || old=""
+  old="$(resource_policy_recorded_peak "${container}" "${dir}")" || old=""
   [ -z "${old}" ] || [ "${live}" -gt "${old}" ] || return 0
   tmp="${file}.tmp.$$"
   printf '{"container":"%s","peak_mib":%s}\n' "${container}" "${live}" > "${tmp}" 2>/dev/null && mv -f "${tmp}" "${file}" 2>/dev/null || rm -f "${tmp}" 2>/dev/null
   return 0
 }
 
-# The recorded cgroup memory.peak of container $1 in MiB; status 1 when none is readable.
+# The recorded cgroup memory.peak of container $1 in MiB (read from directory $2 when given); status 1
+# when none is readable.
 resource_policy_recorded_peak() {
   local file value
-  file="$(resource_policy_peak_file "$1")" || return 1
+  file="$(resource_policy_peak_file "$1" "${2:-}")" || return 1
   [ -r "${file}" ] || return 1
   grep -q "\"container\":\"$1\"" "${file}" 2>/dev/null || return 1
   value="$(sed -n 's/.*"peak_mib":\([0-9][0-9]*\).*/\1/p' "${file}" 2>/dev/null | head -n 1)"
@@ -254,13 +292,27 @@ resource_policy_recorded_peak() {
   printf '%s' "${value}"
 }
 
+# The larger of reader $1 (resource_policy_recorded_peak or resource_policy_tuned_high) for container
+# $2 over the caller's own state dir and the container's registry state root. Status 1 when neither
+# holds a record.
+resource_policy_largest_record() {
+  local reader="$1" name="$2" best="" value dir peerdir dirs=("")
+  if peerdir="$(resource_policy_instance_state_dir "${name}")"; then dirs+=("${peerdir}"); fi
+  for dir in "${dirs[@]}"; do
+    value="$("${reader}" "${name}" "${dir}")" || continue
+    if [ -z "${best}" ] || [ "${value}" -gt "${best}" ]; then best="${value}"; fi
+  done
+  [ -n "${best}" ] || return 1
+  printf '%s' "${best}"
+}
+
 # Container $1's learned peak in MiB. Sets RP_PEAK (empty when it has no record and no floor) and
 # RP_PEAK_FROM, which names where the value came from.
 resource_policy_learned_peak() {
   local peak high
   RP_PEAK="" RP_PEAK_FROM=""
-  peak="$(resource_policy_recorded_peak "$1")" || peak=""
-  high="$(resource_policy_tuned_high "$1")" || high=""
+  peak="$(resource_policy_largest_record resource_policy_recorded_peak "$1")" || peak=""
+  high="$(resource_policy_largest_record resource_policy_tuned_high "$1")" || high=""
   if [ -n "${peak}" ] && { [ -z "${high}" ] || [ "${peak}" -ge "${high}" ]; }; then
     RP_PEAK="${peak}" RP_PEAK_FROM="memory.peak"
   elif [ -n "${high}" ]; then
@@ -272,11 +324,12 @@ resource_policy_learned_peak() {
   fi
 }
 
-# Container $1's memory.max in MiB from the shared budget; $2 is its pre-R1 limit (today's).
-# Sets RP_MAX and RP_MAX_NOTE, which names every term. Status 1 (RP_MAX empty) when MemTotal is
-# unreadable: the caller keeps today's arithmetic.
+# Container $1's memory.max in MiB from the shared budget: host MemTotal - RMD_HOST_RESERVE_MIB - the
+# sum of every OTHER fleet container's learned peak. Sets RP_MAX (possibly small or negative on an
+# overcommitted host: it is never replaced) and RP_MAX_NOTE, which names every term. Status 1 (RP_MAX
+# empty) only when MemTotal is unreadable: the caller keeps today's arithmetic.
 resource_policy_shared_memory_max() {
-  local container="$1" today="$2" total budget others=0 entry name terms="" own
+  local container="$1" total budget others=0 entry name terms=""
   RP_MAX="" RP_MAX_NOTE=""
   if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
     RP_MAX_NOTE="host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
@@ -295,14 +348,6 @@ resource_policy_shared_memory_max() {
   done
   RP_MAX=$((budget - others))
   RP_MAX_NOTE="memory.max ${RP_MAX} MiB = shared budget: host ${total} - reserve ${RMD_HOST_RESERVE_MIB}${terms}"
-  resource_policy_learned_peak "${container}"
-  [ -n "${RP_PEAK}" ] || return 0
-  # The lowest limit that holds its own learned peak under the RMD_MEMORY_HIGH_MAX_PCT high cap.
-  own=$(((RP_PEAK * 100 + RMD_MEMORY_HIGH_MAX_PCT - 1) / RMD_MEMORY_HIGH_MAX_PCT))
-  if [ "${RP_MAX}" -lt "${own}" ]; then
-    RP_MAX_NOTE="memory.max ${today} MiB = today's arithmetic, OVERCOMMITTED: the shared budget (host ${total} - reserve ${RMD_HOST_RESERVE_MIB}${terms}) leaves ${RP_MAX} MiB, under the ${own} MiB that holds its own learned peak ${RP_PEAK} MiB (${RP_PEAK_FROM}) under the ${RMD_MEMORY_HIGH_MAX_PCT}% memory.high cap"
-    RP_MAX="${today}"
-  fi
   return 0
 }
 
@@ -351,12 +396,12 @@ resource_policy_serve_args() {
   RESOURCE_POLICY_SERVE_ARGS+=("${RP_GLIBC_ARGS[@]+"${RP_GLIBC_ARGS[@]}"}")
   RESOURCE_POLICY_NOTE="serve: cpu-shares ${RMD_SERVE_CPU_SHARES}, no memory.low, NODE_OPTIONS ${serve_node_options:-none}, GLIBC_TUNABLES ${RESOURCE_POLICY_GLIBC_TUNABLES:-none}"
   # W1-T11130: serve's memory.max is its share of the shared budget, like every build daemon's. An
-  # explicit RMD_SERVE_MEMORY_LIMIT_MIB is an operator override and the note names it. A host whose
-  # MemTotal is unreadable, or an OVERCOMMITTED one, keeps today's fixed ceiling (#8569, 10-02).
+  # explicit RMD_SERVE_MEMORY_LIMIT_MIB is an operator override and the note names it. Only a host
+  # whose MemTotal is unreadable keeps today's fixed ceiling (#8569, 10-02).
   local serve_container="${RMD_SERVE_CONTAINER_NAME:-remudero-serve}" today=7680 limit from
   if [ -n "${RMD_SERVE_MEMORY_LIMIT_MIB}" ]; then
     limit="${RMD_SERVE_MEMORY_LIMIT_MIB}" from="operator override RMD_SERVE_MEMORY_LIMIT_MIB=${RMD_SERVE_MEMORY_LIMIT_MIB}"
-  elif resource_policy_shared_memory_max "${serve_container}" "${today}"; then
+  elif resource_policy_shared_memory_max "${serve_container}"; then
     limit="${RP_MAX}" from="${RP_MAX_NOTE}"
   else
     limit="${today}" from="today's fixed ${today} MiB, ${RP_MAX_NOTE}"
@@ -393,12 +438,16 @@ resource_policy_build_args() {
     RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; NO memory ceiling — host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
     return 0
   fi
-  # W1-T11130: this container's share of the shared budget (resource_policy_shared_memory_max). An
-  # OVERCOMMITTED host keeps today's total - serve reserve - overhead.
-  resource_policy_shared_memory_max "${container}" $((total - RMD_SERVE_MEMORY_RESERVE_MIB - RMD_HOST_OVERHEAD_MIB))
+  # W1-T11130: this container's share of the shared budget (resource_policy_shared_memory_max), always
+  # by the formula. A limit under the build floor means no ceiling at all, and memory.high is still
+  # sized (it has no memory.max to stay under then).
+  resource_policy_shared_memory_max "${container}"
   ceiling="${RP_MAX}"
   if [ "${ceiling}" -lt "${RMD_MIN_BUILD_CEILING_MIB}" ]; then
     RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; NO memory ceiling — ${RP_MAX_NOTE}, under the ${RMD_MIN_BUILD_CEILING_MIB} MiB floor"
+    resource_policy_memory_high "${container}" ""
+    [ -n "${RP_HIGH}" ] && RESOURCE_POLICY_BUILD_ARGS+=("$(resource_policy_memory_high_arg "${RP_HIGH}")")
+    RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}; ${container} ${RP_HIGH_NOTE}"
     return 0
   fi
   RESOURCE_POLICY_BUILD_ARGS+=("--memory=${ceiling}m" "--memory-swap=$((ceiling + RMD_BUILD_SWAP_MIB))m")
