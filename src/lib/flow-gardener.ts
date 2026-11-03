@@ -606,7 +606,7 @@ export function openQueueShadow(
     status: "UNKNOWN" as const, reason, window, cohort: { open: null, arrivals: null, merged_or_closed: null, review_waiting: null,
       merge_preflight_refused: null, ready_to_direct_merge: null, review_wait_p50_ms: null,
       merge_preflight_refusal_age_p50_ms: null, ready_to_direct_merge_age_p50_ms: null, open_age_p50_ms: null, arrivals_exceed_drain: null },
-    nextState: { observedAtMs: census.observedAtMs, windowDay, reviewP50: null, pressure: false, streak: 0 } });
+    nextState: { observedAtMs: census.observedAtMs, windowDay, window, reviewP50: null, pressure: false, streak: 0 } });
   if (!census.ok || !census.complete) return unknown(census.reason ?? "incomplete-census");
   if (!Number.isFinite(census.observedAtMs) || census.observedAtMs > nowMs || nowMs - census.observedAtMs > OPEN_QUEUE_MAX_AGE_MS) return unknown("stale-census");
   const recent = census.window.filter((pr) => pr.createdAtMs > fromMs && pr.createdAtMs <= nowMs);
@@ -638,12 +638,12 @@ export function openQueueShadow(
     producers.set(producer, (producers.get(producer) ?? 0) + 1);
   }
   const producer = [...producers].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
-  const previousWindowConsecutive = previous !== undefined && previous.windowDay === fixedClock(nowMs - DAY_MS).iso().slice(0, 10) &&
+  const previousWindowConsecutive = previous !== undefined && previous.window?.fromMs === fromMs - DAY_MS && previous.window.toMs === fromMs &&
     previous.observedAtMs < nowMs && nowMs - previous.observedAtMs <= 2 * DAY_MS;
   const pressure = arrivals > drain && reviewP50 !== null && previousWindowConsecutive && previous!.reviewP50 !== null &&
     reviewP50 > previous!.reviewP50 && producer !== undefined && producer === previous!.producer;
   const streak = pressure ? (previous!.pressure ? previous!.streak + 1 : 1) : 0;
-  const nextState = { observedAtMs: census.observedAtMs, windowDay, reviewP50, pressure, streak, ...(producer ? { producer } : {}) };
+  const nextState = { observedAtMs: census.observedAtMs, windowDay, window, reviewP50, pressure, streak, ...(producer ? { producer } : {}) };
   return { mode: "shadow", permission: "not-granted", action: "none", status: "OBSERVED", reason: pressure
     ? `complete-window-inflow-exceeds-drain-review-p50-worsened-streak-${streak}` : "complete-window-no-confirmed-pressure",
     window, cohort: { open: details.length, arrivals, merged_or_closed: drain,
@@ -666,7 +666,7 @@ interface FlowState {
   ci?: Record<string, { headSha: string; mergedMs: number; reading: FlowCiReading | null }>;
   filed?: Record<string, { taskId: string; atMs: number }>;
   filings?: Array<{ day: string; key: string }>;
-  openQueue?: { observedAtMs: number; windowDay?: string; reviewP50: number | null; pressure: boolean; streak: number; producer?: string };
+  openQueue?: { observedAtMs: number; windowDay?: string; window?: { fromMs: number; toMs: number }; reviewP50: number | null; pressure: boolean; streak: number; producer?: string };
 }
 
 function readState(stateDir: string): FlowState {

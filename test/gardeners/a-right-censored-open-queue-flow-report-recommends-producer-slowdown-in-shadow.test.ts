@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 
 import { fixedClock } from "#src/lib/clock.js";
 import { logArmAttribution } from "#src/lib/arm-auto-merge.js";
 import { flowGardenPass } from "#src/lib/garden-registry.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { flowOpenQueueReader, openQueueShadow, runFlowGardener, type FlowOpenQueuePr, type FlowOpenQueueRead } from "#src/lib/flow-gardener.js";
+import { FLOW_STATE_FILE, flowOpenQueueReader, openQueueShadow, runFlowGardener, type FlowOpenQueuePr, type FlowOpenQueueRead } from "#src/lib/flow-gardener.js";
 
 const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
@@ -109,7 +109,8 @@ test("#16147 and #16186 remain in review wait until their current heads are revi
 test("right-censors the full open cohort, separates review, preflight refusal and ready waits, then recommends only after repeated pressure", () => {
   const now = Date.parse("2026-11-02T12:00:00.000Z");
   const result = openQueueShadow(census(now), rows(now), {
-    observedAtMs: now - DAY, windowDay: "2026-11-01", reviewP50: HOUR, pressure: true, streak: 1, producer: "plan-task-workers",
+    observedAtMs: now - DAY, windowDay: "2026-11-01", window: { fromMs: now - 2 * DAY, toMs: now - DAY },
+    reviewP50: HOUR, pressure: true, streak: 1, producer: "plan-task-workers",
   }, now);
   assert.equal(result.status, "OBSERVED");
   assert.equal(result.mode, "shadow");
@@ -126,39 +127,85 @@ test("right-censors the full open cohort, separates review, preflight refusal an
   assert.equal(result.recommendation, "consider-slowing-plan-task-workers");
 });
 
-test("recommendation requires two distinct complete UTC windows with the same producer", () => {
+test("recommendation requires consecutive complete rolling 24-hour windows with the same producer", () => {
   const day1 = Date.parse("2026-11-02T12:00:00.000Z");
   const first = openQueueShadow(census(day1), rows(day1), {
-    observedAtMs: day1 - DAY, windowDay: "2026-11-01", reviewP50: HOUR, pressure: false, streak: 0, producer: "plan-task-workers",
+    observedAtMs: day1 - DAY, windowDay: "2026-11-01", window: { fromMs: day1 - 2 * DAY, toMs: day1 - DAY },
+    reviewP50: HOUR, pressure: false, streak: 0, producer: "plan-task-workers",
   }, day1);
   assert.equal(first.nextState.streak, 1);
   assert.equal(first.recommendation, undefined);
+  assert.deepEqual(first.nextState.window, first.window);
   const day2 = day1 + DAY;
   const second = openQueueShadow(census(day2), rows(day2, 3 * HOUR), first.nextState, day2);
   assert.equal(second.nextState.streak, 2);
   assert.equal(second.recommendation, "consider-slowing-plan-task-workers");
+  assert.deepEqual(second.nextState.window, second.window);
+  assert.equal(first.window.toMs, second.window.fromMs);
 });
 
-test("a skipped UTC day breaks the pressure streak even within 48 hours", () => {
+test("adjacent calendar dates with 22 hours of overlap cannot count the same arrivals twice", () => {
   const firstDay = Date.parse("2026-10-31T23:00:00.000Z");
-  const first = openQueueShadow(census(firstDay), rows(firstDay), {
-    observedAtMs: firstDay - DAY, windowDay: "2026-10-30", reviewP50: HOUR,
+  const cohort = census(firstDay);
+  const first = openQueueShadow(cohort, rows(firstDay), {
+    observedAtMs: firstDay - DAY, windowDay: "2026-10-30",
+    window: { fromMs: firstDay - 2 * DAY, toMs: firstDay - DAY }, reviewP50: HOUR,
     pressure: false, streak: 0, producer: "plan-task-workers",
   }, firstDay);
   assert.equal(first.nextState.streak, 1);
-  const skipped = firstDay + 26 * HOUR;
-  const result = openQueueShadow(census(skipped), rows(skipped, 3 * HOUR), first.nextState, skipped);
-  assert.equal(result.nextState.streak, 0);
-  assert.equal(result.recommendation, undefined);
   const adjacent = firstDay + 2 * HOUR;
-  const control = openQueueShadow(census(adjacent), rows(adjacent, 3 * HOUR), first.nextState, adjacent);
-  assert.equal(control.nextState.streak, 2, "adjacent UTC dates still count across a month boundary");
+  const overlap = openQueueShadow({ ...cohort, observedAtMs: adjacent }, rows(firstDay), first.nextState, adjacent);
+  assert.equal(overlap.status, "OBSERVED");
+  assert.equal(overlap.cohort.arrivals, 2, "both duplicate arrivals remain in the overlapping window");
+  assert.equal(overlap.cohort.merged_or_closed, 1);
+  assert.equal(overlap.cohort.review_wait_p50_ms, 4 * HOUR, "review wait worsens without new arrivals");
+  assert.equal(overlap.nextState.streak, 0);
+  assert.equal(overlap.recommendation, undefined);
+  const fullDay = firstDay + DAY;
+  const control = openQueueShadow(census(fullDay), rows(fullDay, 3 * HOUR), first.nextState, fullDay);
+  assert.equal(control.nextState.streak, 2, "touching rolling windows count across a month boundary");
+  assert.equal(control.recommendation, "consider-slowing-plan-task-workers");
+});
+
+test("overlap or gaps break the streak even when report dates are adjacent", () => {
+  const firstDay = Date.parse("2026-11-02T01:00:00.000Z");
+  const first = openQueueShadow(census(firstDay), rows(firstDay), {
+    observedAtMs: firstDay - DAY, windowDay: "2026-11-01", window: { fromMs: firstDay - 2 * DAY, toMs: firstDay - DAY },
+    reviewP50: HOUR, pressure: false, streak: 0, producer: "plan-task-workers",
+  }, firstDay);
+  assert.equal(first.nextState.streak, 1);
+  for (const elapsed of [HOUR, DAY - 1, DAY + 1, 26 * HOUR, 2 * DAY]) {
+    const now = firstDay + elapsed;
+    const result = openQueueShadow(census(now), rows(now, 3 * HOUR), first.nextState, now);
+    assert.equal(result.nextState.streak, 0, `elapsed ${elapsed} ms does not join consecutive windows`);
+    assert.equal(result.recommendation, undefined);
+  }
+  const now = firstDay + DAY;
+  const control = openQueueShadow(census(now), rows(now, 3 * HOUR), first.nextState, now);
+  assert.equal(control.nextState.streak, 2);
+  assert.equal(control.recommendation, "consider-slowing-plan-task-workers");
+});
+
+test("legacy dates or incomplete prior window boundaries cannot supply pressure evidence", () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01", reviewP50: HOUR,
+    pressure: true, streak: 1, producer: "plan-task-workers" };
+  for (const window of [undefined, { fromMs: now - 2 * DAY + HOUR, toMs: now - DAY },
+    { fromMs: now - 2 * DAY, toMs: now - DAY - 1 }]) {
+    const result = openQueueShadow(census(now), rows(now), { ...previous, window }, now);
+    assert.equal(result.nextState.streak, 0);
+    assert.equal(result.recommendation, undefined);
+  }
+  const control = openQueueShadow(census(now), rows(now), { ...previous, observedAtMs: now - DAY - 60_000,
+    window: { fromMs: now - 2 * DAY, toMs: now - DAY } }, now);
+  assert.equal(control.nextState.streak, 2, "window boundaries control continuity, not census timestamps");
   assert.equal(control.recommendation, "consider-slowing-plan-task-workers");
 });
 
 test("equal drain, improving review wait, or a changed producer prevents a recommendation", () => {
   const now = Date.parse("2026-11-02T12:00:00.000Z");
-  const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01", reviewP50: HOUR,
+  const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01",
+    window: { fromMs: now - 2 * DAY, toMs: now - DAY }, reviewP50: HOUR,
     pressure: true, streak: 1, producer: "plan-task-workers" };
   const equalDrain = census(now);
   equalDrain.window.push({ ...equalDrain.window[2]!, number: 18004, mergedAtMs: undefined, closedAtMs: now - HOUR });
@@ -176,17 +223,27 @@ test("equal drain, improving review wait, or a changed producer prevents a recom
 
 test("incomplete or stale census is UNKNOWN and never recommends", () => {
   const now = Date.parse("2026-11-02T12:00:00.000Z");
-  const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01", reviewP50: HOUR, pressure: true, streak: 1 };
+  const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01", window: { fromMs: now - 2 * DAY, toMs: now - DAY },
+    reviewP50: HOUR, pressure: true, streak: 1, producer: "plan-task-workers" };
   const incomplete = openQueueShadow({ ...census(now), complete: false }, rows(now), previous, now);
   assert.equal(incomplete.status, "UNKNOWN");
+  assert.equal(incomplete.nextState.streak, 0);
+  assert.equal(incomplete.nextState.pressure, false);
   assert.equal(incomplete.recommendation, undefined);
   const stale = openQueueShadow({ ...census(now), observedAtMs: now - 7 * HOUR }, rows(now), previous, now);
   assert.equal(stale.status, "UNKNOWN");
+  assert.equal(stale.nextState.streak, 0);
+  assert.equal(stale.nextState.pressure, false);
   assert.equal(stale.recommendation, undefined);
   const responseObservedAfterPassStart = openQueueShadow({ ...census(now), observedAtMs: now + 1_000 }, rows(now), previous, now + 1_000);
   assert.equal(responseObservedAfterPassStart.status, "OBSERVED", "freshness is measured at analysis time after the API response");
-  const sameWindow = openQueueShadow(census(now), rows(now), { ...previous, observedAtMs: now - HOUR, windowDay: "2026-11-02" }, now);
-  assert.equal(sameWindow.recommendation, undefined, "retries in one UTC day do not count as consecutive windows");
+  const afterUnknown = now + DAY;
+  const recovered = openQueueShadow(census(afterUnknown), rows(afterUnknown, 3 * HOUR), incomplete.nextState, afterUnknown);
+  assert.equal(recovered.nextState.streak, 0);
+  assert.equal(recovered.recommendation, undefined, "incomplete evidence cannot join the next complete window");
+  const sameWindow = openQueueShadow(census(now), rows(now), { ...previous,
+    observedAtMs: now - HOUR, window: { fromMs: now - DAY, toMs: now } }, now);
+  assert.equal(sameWindow.recommendation, undefined, "retries of a rolling window cannot advance the streak");
 });
 
 
@@ -220,6 +277,8 @@ test("the daily flow pass emits a reason-bearing shadow row from one batched cen
     assert.equal(row.extra.status, "OBSERVED");
     assert.equal(row.extra.reason, "complete-window-no-confirmed-pressure");
     assert.deepEqual(row.extra.window, { fromMs: now - DAY, toMs: now });
+    const saved = JSON.parse(readFileSync(join(stateDir, FLOW_STATE_FILE), "utf8"));
+    assert.deepEqual(saved.openQueue.window, row.extra.window, "actual evidence boundaries survive the daily pass");
     assert.equal(row.extra.producer, "plan-task-workers");
     const cohort = row.extra.cohort as Record<string, number>;
     assert.equal(cohort.open, 3);
