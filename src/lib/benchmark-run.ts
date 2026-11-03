@@ -17,6 +17,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "./worker.js";
+import { OPENWEIGHT_TEMPERATURE } from "./worker-provider.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
 
@@ -453,6 +454,9 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
     ...(fields.execution_evidence === undefined ? {} : { execution_evidence: fields.execution_evidence }),
     served_model: fields.served_model,
     ...(outputRetention === undefined ? {} : { output_retention: outputRetention }),
+    // W1-T10877: the sampling pin the cash request carried, from the table openWeightTemperatureField reads.
+    ...(result.provider === "cash" && Object.hasOwn(OPENWEIGHT_TEMPERATURE, fields.model)
+      ? { sampling_pin: { deployment: fields.model, temperature: OPENWEIGHT_TEMPERATURE[fields.model] ?? null } } : {}),
     // W1-T4650: the reason rides beside the null it explains; dropping it left every row generic.
     ...(fields.served_model_reason !== undefined ? { served_model_reason: fields.served_model_reason } : {}),
     worker_duration_ms: fields.worker_duration_ms,

@@ -182,6 +182,9 @@ function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<st
   const guardrailAttempt = retry && (retry.signal === "relint-used" || retry.signal === "judge-retry")
     && Number.isSafeInteger(retry.attempt) && Number(retry.attempt) >= 1
     ? { signal: retry.signal, attempt: retry.attempt as number } : undefined;
+  const pin = record(row.sampling_pin);
+  const samplingPin = pin && text(pin.deployment) && (pin.temperature === null || Number.isFinite(pin.temperature))
+    ? { deployment: pin.deployment as string, temperature: pin.temperature as number | null } : undefined;
   const signals: Record<string, unknown> = {
     ...(text(row.worker_failure) ? { worker_failure: row.worker_failure } : {}),
     ...(text(row.error_class) ? { error_class: row.error_class } : {}),
@@ -193,6 +196,7 @@ function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<st
     ...(counted && Object.keys(counted).length > 0 ? { tokens: counted } : {}),
     ...(retained && Object.keys(retained).length > 0 ? { output_retention: retained } : {}),
     ...(guardrailAttempt ? { guardrail_attempt: guardrailAttempt } : {}),
+    ...(samplingPin ? { sampling_pin: samplingPin } : {}),
   };
   return Object.keys(signals).length > 0 ? signals : undefined;
 }
@@ -853,6 +857,9 @@ function guardrailUnits(rows: FlowRow[]): GuardrailUnit[] {
       const modelId = named ?? "unknown";
       const retry = record(row.outcomeSignals?.guardrail_attempt);
       if (retry) add(row, modelId, lane, { [retry.signal as GuardrailSignal]: Number(retry.attempt) > 1 });
+      // A pinned deployment is an opportunity; the pin fires when the request carried a deterministic temperature.
+      const pin = record(row.outcomeSignals?.sampling_pin);
+      if (pin) add(row, modelId, lane, { "temperature-pin": pin.temperature !== null });
       const truncation = {
         "truncated-reply": signal === `reply-${OpenWeightTruncatedReplyError.name}`,
         "output-retention": Object.values(record(row.outcomeSignals?.output_retention) ?? {})

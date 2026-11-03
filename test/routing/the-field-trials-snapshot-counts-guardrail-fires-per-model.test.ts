@@ -188,7 +188,41 @@ test("W1-T10877: guardrail fires are counted per model, category and class", asy
     assert.equal(text.includes(internal), false, internal);
   }
   await productionJudgeGuardrails(t);
+  await productionSamplingPins(t);
 });
+
+/** The deterministic-sampling cell from production receipts: a cash request to a pinned deployment fires, one to a
+ *  default-only deployment is an unfired opportunity, and a non-cash request is no opportunity at all. */
+async function productionSamplingPins(t: TestContext) {
+  const root = ownedFixtureDir(t, "sampling-pin-receipts").dir;
+  const served: Array<{ provider: "cash" | "codex"; model: string }> = [
+    { provider: "cash", model: "gpt-oss-120b" }, { provider: "cash", model: "gpt-5-nano" }, { provider: "codex", model: "gpt-6.1-sol" }];
+  let calls = 0;
+  const spawn = benchmarkNonDispatchSpawn("risk-judge", async args => {
+    const { provider, model } = served[calls++]!;
+    const id = `pin-${calls}`;
+    args.onSelectionAssignment?.({ version: 1, id, phase: "pre-execution", requested: { model, effort: "medium", maxTurns: 1 },
+      selected: { provider, model, effort: "medium" },
+      routing: { mode: "mount-affinity", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } }, candidates: [] });
+    return { sessionId: id, selectionAssignmentId: id, provider, model, servedModel: model, effort: "medium", costUsd: 0,
+      numTurns: 1, text: LOW_RISK, blocks: [], stderr: "", subtype: "success", isError: false, apiError: false,
+      permissionDenials: [], childEnvKeys: [], tokens: { ...TOKENS, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
+      compactionEvents: [], qualitySuspect: false } as WorkerResult;
+  });
+  for (const _ of served) await spawn({ ...MOUNT, prompt: "judge", cwd: root, config: { root } as Config } as SpawnWorkerArgs);
+  const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+    .map(line => ({ ...JSON.parse(line), ts: T(10) }) as Record<string, unknown>);
+  assert.deepEqual(rows.filter(row => row.step === "worker.attempt").map(row => row.sampling_pin), [
+    { deployment: "gpt-oss-120b", temperature: 0 }, { deployment: "gpt-5-nano", temperature: null }, undefined],
+    "the producer records the pin each cash request carried");
+  const guardrails = snapshotOf(rows).families.guardrails;
+  const sampling = (modelId: string) => guardrails[`${modelId}|short-judgment|deterministic-sampling`]?.cells;
+  assert.deepEqual(sampling("gpt-oss-120b"), { modelId: "gpt-oss-120b", category: "short-judgment",
+    guardrailClass: "deterministic-sampling", opportunities: 1, fires: 1 }, "a pinned request fires");
+  assert.deepEqual(sampling("gpt-5-nano"), { modelId: "gpt-5-nano", category: "short-judgment",
+    guardrailClass: "deterministic-sampling", opportunities: 1, fires: 0 }, "a default-only deployment is an unfired opportunity");
+  assert.equal(sampling("gpt-6.1-sol"), undefined, "a non-cash request is no sampling opportunity");
+}
 
 const MOUNT = { model: "haiku", effort: "medium" as const, maxTurns: 1, contextBudget: 1000 };
 const LOW_RISK = "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.9\nRISK_REASON: routine change";
