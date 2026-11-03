@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-10 retro, finding 1"
   plan_refs: [W1-T3275, W1-T3297, W1-T4085]
-  files: [hooks/deny-floor.sh, scripts/gh-when-eligible.mjs, test/a-cadence-refusal-names-when-the-read-is-allowed.test.ts]
+  files: [hooks/deny-floor.sh, scripts/gh-when-eligible.mjs, test/ci/a-cadence-refusal-names-when-the-read-is-allowed.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -42,7 +42,7 @@
     3. Document both in the rule-9 comment block.
   acceptance:
     - claim: "a cadence refusal names the instant the next read is allowed, and the bounded waiter makes exactly one read after waiting at most one window"
-      proof: 'grep: test("W1-T7740: a cadence refusal names when the read is allowed" in test/a-cadence-refusal-names-when-the-read-is-allowed.test.ts'
+      proof: 'grep: test("W1-T7740: a cadence refusal names when the read is allowed" in test/ci/a-cadence-refusal-names-when-the-read-is-allowed.test.ts'
   falsifier: |
     Remove the `next eligible at` printf: the refusal test fails. Let the waiter wait across two windows: its bounded-wait
     case (a fake clock, with the stamp refreshed mid-wait) fails.
