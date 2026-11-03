@@ -1875,6 +1875,13 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
     ],
   },
   {
+    job: "test-slow-plan",
+    mirrored: false,
+    reason:
+      "W1-T11206 — GitHub-only planner that picks how many test-slow-shard slots run; the local " +
+      "ci entry runs the complete test/**/*.test.ts surface, so there is nothing to split",
+  },
+  {
     job: "test-slow-shard",
     mirrored: false,
     reason:

@@ -185,6 +185,7 @@ function slowShard(files: string[]) {
     step("test-slow-shard", (s) => (s.name ?? "").startsWith("Run the slow tier")).run!,
     {
       "${{ matrix.shard }}": "1",
+      "${{ needs.test-slow-plan.outputs.count }}": "2",
       "${{ steps.plan-reading.outputs.established }}": plan.outputs.established ?? "",
       "${{ steps.plan-reading.outputs.class }}": plan.outputs.class ?? "",
     },

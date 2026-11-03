@@ -156,7 +156,7 @@ test("W1-T4406: the merge group runs the full instrumented suite", () => {
   );
   assert.deepEqual(outputs, { class: "PUSH", established: "false" }, "merge_group falls into the same full-suite lane a push already takes");
 
-  const runSlow = findStep("test-slow-shard", "Run the slow tier").run!.replaceAll("${{ matrix.shard }}", "1").replaceAll("${{ steps.plan-reading.outputs.established }}", "false").replaceAll("${{ steps.plan-reading.outputs.class }}", "PUSH");
+  const runSlow = findStep("test-slow-shard", "Run the slow tier").run!.replaceAll("${{ matrix.shard }}", "1").replaceAll("${{ needs.test-slow-plan.outputs.count }}", "2").replaceAll("${{ steps.plan-reading.outputs.established }}", "false").replaceAll("${{ steps.plan-reading.outputs.class }}", "PUSH");
   const slow = runStep(runSlow, { GITHUB_EVENT_NAME: "merge_group" });
   assert.equal(slow.status, 0, slow.out);
   assert.equal(

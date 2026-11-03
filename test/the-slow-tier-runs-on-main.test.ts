@@ -68,6 +68,7 @@ function runJob(event: "push" | "pull_request", diffClass = "SOURCE"): { calls: 
   }
   bash(
     RUN_SLOW.replaceAll("${{ matrix.shard }}", "1")
+      .replaceAll("${{ needs.test-slow-plan.outputs.count }}", "2")
       .replaceAll("${{ steps.plan-reading.outputs.established }}", outputs.established ?? "")
       .replaceAll("${{ steps.plan-reading.outputs.class }}", outputs.class ?? ""),
   );

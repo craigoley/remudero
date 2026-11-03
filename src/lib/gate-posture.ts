@@ -539,6 +539,7 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "ci:squash-trailer-gate": repair(true, "branch-local task trailers are removed or rewritten before squash credit"),
   "ci:task-id-existence": repair(true, "task id drift names the duplicate or missing shard"),
   "ci:test-slow": repair(true, "slow-tier failures are ordinary computable test/source repairs"),
+  "ci:test-slow-plan": repair(true, "a slow-tier plan failure names the shard count that no longer fits the slot list"),
   "ci:test-slow-shard": repair(true, "slow-tier shard failures name computable test/source repairs"),
 
   "state:correction:actual-pr-url": route(false, "wrong-PR correction exists, but false credit with no true PR still needs judgement"),
