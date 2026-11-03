@@ -60,9 +60,15 @@ export interface ReviewSettlementObservation {
    *  reviews on both sides carry a size; it can only EXCUSE a raw expansion, never create one. */
   baselineLatencyPerUnitMs?: number;
   recentLatencyPerUnitMs?: number;
-  /** W1-T11150 — the median setup-plus-proofs time of recent reviews (the part of a review that
-   *  loads the CPU). Absent without history; the shed then settles in one telemetry cadence. */
+  /** W1-T11150 — the median time of recent reviews' CPU phase (setup plus proofs). Taken from
+   *  `setup_ms` + `proofs_ms` when a `review.posted` row carries both; otherwise from the fields the
+   *  producer DOES write today — the `sweep.post_review.attempt` row's timestamp to the same head's
+   *  `review.posted` (or `.done`) timestamp, an upper bound on the phase. Absent without history; the
+   *  shed then settles in one telemetry cadence. */
   cpuPhaseMs?: number;
+  /** W1-T11150 — reviews attempted and not yet settled whose age is within the CPU phase: the review
+   *  lane's own CPU share, counted from the same `sweep.post_review.attempt` rows. */
+  cpuPhaseChildren?: number;
 }
 
 export interface ReviewCapacityObservation {
@@ -743,6 +749,11 @@ export function summarizeReviewSettlements(
   const attempts = new Map<string, number>();
   const unitsBySha = new Map<string, number>();
   const cpuPhases: number[] = [];
+  /** W1-T11150 — attempts not yet settled, by head: `sweep.post_review.attempt` is the one start mark
+   *  production writes for hosted and in-process reviews alike. A `reuse` review runs no setup or
+   *  proofs, so it is neither timed nor counted as a CPU child. */
+  const startedByHead = new Map<string, { tsMs: number; cheap: boolean }>();
+  const wallPhases: number[] = [];
   const completed: Array<CompletedReview & { tsMs: number }> = [];
   let successes = 0;
   let failures = 0;
@@ -756,14 +767,21 @@ export function summarizeReviewSettlements(
     const inWindow = tsMs >= cutoff;
     if (line.step === "sweep.post_review.attempt") {
       attempts.set(key, tsMs);
+      if (typeof line.head_sha === "string") startedByHead.set(line.head_sha, { tsMs, cheap: line.review_mode === "reuse" });
     } else if (line.step === "review.posted") {
       const units = reviewSizeUnits(line);
       if (units !== undefined && typeof line.head_sha === "string") unitsBySha.set(line.head_sha, units);
-      // W1-T11150: setup-plus-proofs, when the row carries both phases (absent rows are skipped).
+      // W1-T11150: setup-plus-proofs, when the row carries both phases; otherwise the wall time from
+      // this head's attempt row to this row, which production always writes.
+      const started = typeof line.head_sha === "string" ? startedByHead.get(line.head_sha) : undefined;
       if (finite(line.setup_ms as number | undefined) && finite(line.proofs_ms as number | undefined)) {
         cpuPhases.push((line.setup_ms as number) + (line.proofs_ms as number));
+      } else if (started && !started.cheap && tsMs >= started.tsMs) {
+        wallPhases.push(tsMs - started.tsMs);
       }
+      if (typeof line.head_sha === "string") startedByHead.delete(line.head_sha);
     } else if (line.step === "sweep.post_review.done") {
+      if (typeof line.head_sha === "string") startedByHead.delete(line.head_sha);
       if (inWindow) successes += 1;
       const startedAt = attempts.get(key);
       if (startedAt !== undefined && tsMs >= startedAt) {
@@ -772,6 +790,7 @@ export function summarizeReviewSettlements(
       }
       attempts.delete(key);
     } else if (line.step === "sweep.post_review.failed") {
+      if (typeof line.head_sha === "string") startedByHead.delete(line.head_sha);
       if (inWindow) {
         failures += 1;
         if (/timeout|timed out|abandon/i.test(String(line.error ?? ""))) timeouts += 1;
@@ -786,11 +805,20 @@ export function summarizeReviewSettlements(
   const verdict = recentSet.length >= REVIEW_LATENCY_MIN_SAMPLES && baselineSet.length >= REVIEW_LATENCY_MIN_SAMPLES;
   const baselinePerUnit = verdict ? medianPerUnit(baselineSet) : undefined;
   const recentPerUnit = verdict ? medianPerUnit(recentSet) : undefined;
+  const cpuPhaseMs = cpuPhases.length > 0 ? median(cpuPhases) : median(wallPhases.slice(-REVIEW_LATENCY_RECENT_SAMPLES));
+  // A review still unsettled after its usual CPU phase (or the settlement window, with no history)
+  // is waiting on the reviewer, not loading the CPU — and a crashed one never settles.
+  const phaseBoundMs = cpuPhaseMs !== undefined && cpuPhaseMs > 0 ? cpuPhaseMs : windowMs;
+  let cpuPhaseChildren = 0;
+  for (const started of startedByHead.values()) {
+    if (!started.cheap && nowMs - started.tsMs <= phaseBoundMs) cpuPhaseChildren += 1;
+  }
   return {
     successes,
     failures,
     timeouts,
-    ...(cpuPhases.length > 0 ? { cpuPhaseMs: median(cpuPhases) } : {}),
+    ...(cpuPhaseChildren > 0 ? { cpuPhaseChildren } : {}),
+    ...(cpuPhaseMs !== undefined ? { cpuPhaseMs } : {}),
     ...(verdict
       ? {
           baselineLatencyMs: median(baselineSet.map((review) => review.latencyMs)),
@@ -822,13 +850,17 @@ export interface RuntimeReviewCapacityInput extends ReviewCapacityBounds {
 export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): number {
   const prior = runtimeStates.get(input.root) ?? initialReviewCapacityState(input.baseWidth);
   const providerStatus = readProviderRoutingStatus(input.root, { now: () => input.nowMs });
+  const settlements = summarizeReviewSettlements(input.ledgerLines, input.nowMs, input.policy.settlementWindowMs);
   const observation: ReviewCapacityObservation = {
     nowMs: input.nowMs,
     queueDepth: input.queueDepth,
     activeWorkers: input.activeWorkers,
     ...readReviewHostObservation(),
+    // W1-T11150 — the review lane's own CPU share: reviews attempted and still inside their CPU phase.
+    // Absent from the fold means none were counted: always supplied, so a later rise is visible.
+    reviewCpuChildren: settlements.cpuPhaseChildren ?? 0,
     provider: reviewProviderObservation(providerStatus, input.nowMs),
-    settlements: summarizeReviewSettlements(input.ledgerLines, input.nowMs, input.policy.settlementWindowMs),
+    settlements,
   };
   const result = selectAdaptiveReviewWidth(prior, input.policy, observation, input);
   runtimeStates.set(input.root, result.state);

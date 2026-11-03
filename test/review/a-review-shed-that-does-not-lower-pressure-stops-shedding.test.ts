@@ -251,3 +251,79 @@ test("the setup-plus-proofs phase of recent reviews is the median the shed settl
   assert.equal(summary.cpuPhaseMs, 45_000, "median of 30 s and 60 s; the row without phases is skipped");
   assert.equal(summarizeReviewSettlements([], 1_000_000, 1_800_000).cpuPhaseMs, undefined);
 });
+
+// ---- Production row shapes. Nothing in production writes `setup_ms`/`proofs_ms` on `review.posted`; ----
+// ---- what it DOES write is `sweep.post_review.attempt` (start) and `review.posted` (settled), the   ----
+// ---- latter by the hosted review child, so a hosted review has no `.done` row at all.                ----
+
+const NOW = 1_000_000;
+const iso = (ms: number): string => new Date(ms).toISOString();
+
+/** In-memory review rows, never a ledger file (summarizeReviewSettlements takes rows, not a path, so
+ *  test/helpers/ledger-fixture.ts's on-disk writeLedger does not apply): two settled hosted reviews
+ *  (30 s and 90 s from attempt to posted: median 60 s) and `inFlight` heads attempted just now. */
+function productionReviewRows(at: number, inFlight: ReadonlyArray<string>, extra: Array<Record<string, unknown>> = []): Array<Record<string, unknown>> {
+  const settled = (head: string, startMs: number, durationMs: number): Array<Record<string, unknown>> => [
+    { ts: iso(startMs), step: "sweep.post_review.attempt", pr_number: 1, head_sha: head, review_mode: "full-review" },
+    { ts: iso(startMs + 1), step: "sweep.post_review.child", pr_number: 1, head_sha: head },
+    { ts: iso(startMs + durationMs), step: "review.posted", head_sha: head, proof_exec: ["executed_pass"] },
+  ];
+  return [
+    ...settled("h1", NOW - 400_000, 30_000),
+    ...settled("h2", NOW - 300_000, 90_000),
+    ...inFlight.map((head) => ({ ts: iso(NOW + at - 10_000), step: "sweep.post_review.attempt", pr_number: 2, head_sha: head, review_mode: "full-review" })),
+    ...extra,
+  ];
+}
+
+test("the settle time comes from the attempt and review.posted rows production writes", () => {
+  const summary = summarizeReviewSettlements(productionReviewRows(0, []), NOW, 1_800_000);
+  assert.equal(summary.cpuPhaseMs, 60_000, "median of the 30 s and 90 s attempt-to-posted times, with no setup_ms or proofs_ms anywhere");
+  assert.equal(summary.cpuPhaseChildren, undefined, "nothing in flight");
+  const reuse = summarizeReviewSettlements(
+    [
+      { ts: iso(NOW - 100_000), step: "sweep.post_review.attempt", pr_number: 3, head_sha: "r", review_mode: "reuse" },
+      { ts: iso(NOW - 99_000), step: "review.posted", head_sha: "r", proof_exec: [] },
+    ],
+    NOW,
+    1_800_000,
+  );
+  assert.equal(reuse.cpuPhaseMs, undefined, "a verdict reuse runs no setup or proofs, so it is not a CPU phase");
+});
+
+test("reviews attempted and unsettled inside their CPU phase are the review lane's children", () => {
+  const ledger = productionReviewRows(0, ["x", "y"], [
+    { ts: iso(NOW - 5_000), step: "sweep.post_review.attempt", pr_number: 4, head_sha: "cheap", review_mode: "reuse" },
+    { ts: iso(NOW - 200_000), step: "sweep.post_review.attempt", pr_number: 5, head_sha: "stale", review_mode: "full-review" },
+    { ts: iso(NOW - 20_000), step: "sweep.post_review.attempt", pr_number: 6, head_sha: "done", review_mode: "full-review" },
+    { ts: iso(NOW - 15_000), step: "review.posted", head_sha: "done", proof_exec: [] },
+  ]);
+  assert.equal(
+    summarizeReviewSettlements(ledger, NOW, 1_800_000).cpuPhaseChildren,
+    2,
+    "x and y only: not the reuse, not the one past its 60 s phase, not the one already posted",
+  );
+});
+
+test("production-shaped ledger rows drive the shed's settle time and the suspension lift end to end", () => {
+  const observe = (at: number, cpu: number, inFlight: ReadonlyArray<string>): Partial<ReviewCapacityObservation> => {
+    const settlements = summarizeReviewSettlements(productionReviewRows(at, inFlight), NOW + at, 1_800_000);
+    return { settlements, reviewCpuChildren: settlements.cpuPhaseChildren ?? 0 };
+  };
+  const flat = run([
+    [0, 40, observe(0, 40, ["a"])],
+    [30_000, 40, observe(30_000, 40, ["a"])],
+    [59_000, 40, observe(59_000, 40, ["a"])],
+    [60_000, 40, observe(60_000, 40, ["a"])],
+    [70_000, 40, observe(70_000, 40, ["a"])],
+  ]);
+  assert.equal(flat.decisions[2]!.evidence.shedEffect, "pending", "59 s: the measured 60 s phase has not elapsed, so no verdict yet");
+  assert.equal(flat.decisions[3]!.evidence.shedEffect, "ineffective", "60 s: the median attempt-to-posted time has elapsed");
+  assert.equal(flat.decisions[3]!.effectiveWidth, 4);
+  assert.equal(flat.decisions[4]!.evidence.shedSuspended, true);
+  const same = run([[80_000, 40, observe(80_000, 40, ["a"])]], flat.state);
+  assert.equal(same.decisions[0]!.evidence.shedSuspended, true, "the same one review in its CPU phase: still suspended");
+  const grew = run([[80_000, 40, observe(80_000, 40, ["a", "b", "c"])]], flat.state);
+  assert.equal(grew.decisions[0]!.reason, "cpu-pressure", "three reviews now in their CPU phase lifts the suspension");
+  assert.equal(grew.decisions[0]!.evidence.shedSuspended, false);
+});
