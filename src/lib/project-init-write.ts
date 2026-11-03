@@ -23,13 +23,16 @@ export const realProjectInitWriteFs: ProjectInitWriteFs = {
   writeFile: (path, content) => writeFileSync(path, content, { flag: "wx" }),
 };
 
+/** Configs GitHub reads only from `.github/`: a repo-root dependabot.yml is ignored, so it would land inert. */
+const GITHUB_DIR_CONFIGS = new Set(["dependabot.yml"]);
+
 /** Repository-relative path to content, in the order the files are written. The principles file and
  *  the protection payload go where the target's layout puts them, never at a re-spelled literal. */
 export function projectInitFiles(payload: ProjectInitPayload, layout: RepoLayout): Array<[string, string]> {
   const rel = (path: string) => relative(layout.root, path).split(sep).join("/");
   return [
     ...Object.entries(payload.workflows).map(([name, content]): [string, string] => [`.github/workflows/${name}`, content]),
-    ...Object.entries(payload.configs).map(([name, content]): [string, string] => [name, content]),
+    ...Object.entries(payload.configs).map(([name, content]): [string, string] => [GITHUB_DIR_CONFIGS.has(name) ? `.github/${name}` : name, content]),
     [rel(layout.principlesFile), payload.principlesYaml],
     [rel(join(layout.stateDir, "branch-protection.json")), JSON.stringify(payload.branchProtection, null, 2) + "\n"],
   ];

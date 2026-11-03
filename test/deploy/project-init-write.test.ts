@@ -32,6 +32,16 @@ test("project init --write: every generated file lands on disk with the generato
   });
 });
 
+test("project init --write: dependabot.yml lands under .github where GitHub reads it, never at the repo root", () => {
+  withDir((dir) => {
+    const generated = payload();
+    const written = writeProjectInit(generated, dir);
+    assert.ok(written.includes(".github/dependabot.yml"));
+    assert.ok(!written.includes("dependabot.yml"));
+    assert.equal(readFileSync(join(dir, ".github/dependabot.yml"), "utf8"), generated.configs["dependabot.yml"]);
+  });
+});
+
 test("project init --write: an existing file refuses the whole write and leaves the checkout untouched", () => {
   withDir((dir) => {
     mkdirSync(join(dir, ".github/workflows"), { recursive: true });

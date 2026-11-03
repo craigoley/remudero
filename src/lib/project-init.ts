@@ -849,8 +849,9 @@ export interface ProjectInitInput {
 export interface ProjectInitPayload {
   /** `.github/workflows/<filename>` → file content. */
   workflows: Record<string, string>;
-  /** Repo-root `<filename>` → file content (includes dependabot.yml, SECURITY.md, the profile's
-   *  architecture-fitness config, and its strict tsconfig/lint config). */
+  /** `<filename>` → file content (includes dependabot.yml, SECURITY.md, the profile's
+   *  architecture-fitness config, and its strict tsconfig/lint config). Each lands at the repo root,
+   *  except dependabot.yml, which `--write` puts under `.github/` where GitHub reads it. */
   configs: Record<string, string>;
   /** `.remudero/principles.yaml` content. */
   principlesYaml: string;
