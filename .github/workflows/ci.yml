@@ -2312,7 +2312,7 @@ jobs:
             --out coverage-merged-artifact/provenance.json --matrix-result "$MATRIX_RESULT"
       - name: Emit bounded source SF evidence for the native coverage consumer
         run: |
-          node scripts/coverage-floor.mjs owning-sf --lcov coverage/lcov.info \
+          node scripts/coverage-floor.mjs owning-sf --include-changed-source --lcov coverage/lcov.info \
             --file src/lib/model-canary-command.ts \
             --file src/lib/model-canary-owner.ts \
             --file src/lib/model-canary-pilot-approval.ts \

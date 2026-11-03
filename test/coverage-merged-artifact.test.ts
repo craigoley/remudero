@@ -45,6 +45,15 @@ function createOwnerGitFixture() {
   writeFileSync(testFile, "export {};\n");
   fixture.git("add", "--all");
   fixture.git("commit", "-qm", "fixture");
+  const changedSourcePaths = ["src/lib/added-source.ts", "scripts/added-source.mjs"];
+  writeFileSync(join(root, OWNER_SF_PATHS[0]!), "export const ownerFixture0 = 0;\n// changed in the candidate commit\n");
+  for (const [index, file] of changedSourcePaths.entries()) {
+    const absolute = join(root, file);
+    mkdirSync(dirname(absolute), { recursive: true });
+    writeFileSync(absolute, `export const changedSource${index} = ${index};\n`);
+  }
+  fixture.git("add", "--all");
+  fixture.git("commit", "-qm", "change source files");
   return fixture;
 }
 
@@ -61,9 +70,9 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
-function parseOwnerReceipt(stdout: string): { header: Record<string, unknown>; rows: Record<string, unknown>[]; end: Record<string, unknown> } {
+function parseOwnerReceipt(stdout: string, ownerPaths: string[] = OWNER_SF_PATHS): { header: Record<string, unknown>; rows: Record<string, unknown>[]; end: Record<string, unknown> } {
   const lines = stdout.trimEnd().split("\n");
-  assert.equal(lines.length, OWNER_SF_PATHS.length + 2, "receipt has one begin, one row per owner path, and one end marker");
+  assert.equal(lines.length, ownerPaths.length + 2, "receipt has one begin, one row per owner path, and one end marker");
   assert.ok(lines[0].startsWith("RMD_COV_SF_V1_BEGIN "));
   assert.ok(lines.at(-1)?.startsWith("RMD_COV_SF_V1_END "));
   const fileLines = lines.slice(1, -1);
@@ -83,11 +92,12 @@ function parseOwnerReceipt(stdout: string): { header: Record<string, unknown>; r
   return { header, rows, end };
 }
 
-function runOwnerReceipt(root: string, lcov: string) {
+function runOwnerReceipt(root: string, lcov: string, includeChangedSource = false) {
   const lcovPath = join(root, "coverage", "lcov.info");
   mkdirSync(dirname(lcovPath), { recursive: true });
   writeFileSync(lcovPath, lcov);
-  const result = spawnSync(process.execPath, [OWNER_SF_SCRIPT, "owning-sf", "--lcov", "coverage/lcov.info", ...OWNER_SF_PATHS.flatMap((file) => ["--file", file])], {
+  const result = spawnSync(process.execPath, [OWNER_SF_SCRIPT, "owning-sf", ...(includeChangedSource ? ["--include-changed-source"] : []),
+    "--lcov", "coverage/lcov.info", ...OWNER_SF_PATHS.flatMap((file) => ["--file", file])], {
     cwd: root,
     env: {
       ...process.env,
@@ -182,6 +192,17 @@ test("coverage-merged-artifact CI wiring: the new steps carry no step-level `if:
     /\n\s*if:/,
     "no step in coverage-ratchet-required may carry a step-level `if:` (test/fast-lane-classifier.test.ts's acceptance 6)",
   );
+});
+
+test("coverage-merged-artifact CI wiring: the existing coverage-floor tool emits changed-source evidence before upload", async () => {
+  const jobBody = await aggregatorJobBody();
+  const receiptIdx = jobBody.indexOf("Emit bounded source SF evidence for the native coverage consumer");
+  const uploadIdx = jobBody.indexOf("name: Upload merged coverage artifact");
+  assert.notEqual(receiptIdx, -1, "coverage job includes the owning-SF receipt step");
+  assert.ok(uploadIdx > receiptIdx, "receipt output is available in the artifact-producing job log");
+  const receiptStep = jobBody.slice(receiptIdx, uploadIdx);
+  assert.match(receiptStep, /node scripts\/coverage-floor\.mjs owning-sf --include-changed-source --lcov coverage\/lcov\.info/);
+  for (const file of OWNER_SF_PATHS) assert.ok(receiptStep.includes(`--file ${file}`), `receipt includes critical owner path ${file}`);
 });
 
 test("coverage-owning-SF receipt: binds exact repo source records to the checked-out tree", () => {
@@ -281,6 +302,37 @@ test("coverage-owning-SF receipt: only exact repo-relative SF paths qualify as o
       { state: owner?.state, sf_record_count: owner?.sf_record_count, lf_sum: owner?.lf_sum, lh_sum: owner?.lh_sum },
       { state: "missing-sf", sf_record_count: 0, lf_sum: null, lh_sum: null },
     );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("coverage-owning-SF receipt: optional changed-source collection unions exact executable paths and deduplicates owners", () => {
+  const fixture = createOwnerGitFixture();
+  const root = fixture.dir;
+  try {
+    const changedPaths = ["scripts/added-source.mjs", "src/lib/added-source.ts"];
+    const lcov = [
+      ...OWNER_SF_PATHS.map((file) => lcovRecord(file, 12, 7)),
+      ...changedPaths.map((file) => lcovRecord(file, 3, 2)),
+    ].join("");
+    const expectedPaths = [...OWNER_SF_PATHS, ...changedPaths].sort();
+    const { header, rows } = parseOwnerReceipt(runOwnerReceipt(root, lcov, true), expectedPaths);
+
+    assert.equal(header.state, "complete");
+    assert.equal(header.owner_record_count, expectedPaths.length);
+    assert.deepEqual(rows.map((row) => row.path), expectedPaths);
+    assert.equal(rows.filter((row) => row.path === OWNER_SF_PATHS[0]).length, 1, "the explicitly requested path is deduplicated with the diff path");
+    const tree = fixture.git("ls-tree", "-r", "--full-tree", "HEAD");
+    for (const path of changedPaths) {
+      const row = rows.find((candidate) => candidate.path === path);
+      const treeRow = tree.split("\n").find((line) => line.endsWith(`\t${path}`));
+      assert.ok(row, `changed executable source is included: ${path}`);
+      assert.ok(treeRow, `fixture tree contains ${path}`);
+      assert.equal(row!.blob_oid, treeRow!.split("\t", 1)[0]!.split(" ")[2]);
+      assert.equal(row!.sf_record_count, 1);
+      assert.equal(row!.state, "observed");
+    }
   } finally {
     fixture.cleanup();
   }

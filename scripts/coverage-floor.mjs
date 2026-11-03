@@ -366,6 +366,16 @@ function owningSfParseTreeBlobOids(treeBytes, wanted) {
   return blobs;
 }
 
+function owningSfChangedExecutablePaths(root) {
+  const result = spawnSync("git", ["diff", "--name-only", "-z", "HEAD^1...HEAD", "--", "src", "scripts"],
+    { cwd: root, timeout: 30_000, maxBuffer: 1024 * 1024, windowsHide: true });
+  if (result.error || result.status !== 0 || !Buffer.isBuffer(result.stdout)) throw new Error("git_changed_paths_unavailable");
+  if (result.stdout.length === 0) return [];
+  if (result.stdout[result.stdout.length - 1] !== 0) throw new Error("git_changed_paths_truncated");
+  const paths = new TextDecoder("utf-8", { fatal: true }).decode(result.stdout).split("\0").filter(Boolean);
+  return paths.filter((path) => /^(?:src|scripts)\//.test(path) && /\.(?:ts|tsx|js|mjs|cjs)$/.test(path));
+}
+
 function owningSfValidateOwnerFiles(values) {
   const files = (values ?? []).slice().sort();
   if (files.length === 0 || files.length > OWNING_SF_MAX_FILES || new Set(files).size !== files.length) {
@@ -375,7 +385,7 @@ function owningSfValidateOwnerFiles(values) {
     if (typeof file !== "string" || file.length === 0 || file.length > 256 || file.includes("\\") || isAbsolute(file)) {
       throw new Error("owner_file_path_invalid");
     }
-    if (!file.startsWith("src/") || file.split("/").some((part) => part === "" || part === "." || part === "..")) {
+    if (!/^(?:src|scripts)\//.test(file) || file.split("/").some((part) => part === "" || part === "." || part === "..")) {
       throw new Error("owner_file_path_invalid");
     }
   }
@@ -531,9 +541,13 @@ function owningSfEvidence(argv, env) {
       args: argv,
       strict: true,
       allowPositionals: false,
-      options: { lcov: { type: "string", default: "coverage/lcov.info" }, file: { type: "string", multiple: true } },
+      options: {
+        lcov: { type: "string", default: "coverage/lcov.info" },
+        file: { type: "string", multiple: true },
+        "include-changed-source": { type: "boolean", default: false },
+      },
     });
-    const ownerFiles = owningSfValidateOwnerFiles(parsed.values.file ?? []);
+    const requestedFiles = owningSfValidateOwnerFiles(parsed.values.file ?? []);
     context.repository = env.GITHUB_REPOSITORY;
     context.run_id = env.GITHUB_RUN_ID;
     context.run_attempt = env.GITHUB_RUN_ATTEMPT;
@@ -544,6 +558,8 @@ function owningSfEvidence(argv, env) {
     const root = owningSfGitText(process.cwd(), ["rev-parse", "--show-toplevel"]);
     context.integration_head = owningSfGitText(root, ["rev-parse", "--verify", "HEAD^{commit}"]);
     if (!/^[a-f0-9]{40,64}$/.test(context.integration_head)) throw new Error("integration_head_unavailable");
+    const changedFiles = parsed.values["include-changed-source"] ? owningSfChangedExecutablePaths(root) : [];
+    const ownerFiles = owningSfValidateOwnerFiles([...new Set([...requestedFiles, ...changedFiles])]);
     const blobs = owningSfParseTreeBlobOids(owningSfGitTree(root), ownerFiles);
     const lcov = owningSfReadBoundedLcov(root, parsed.values.lcov);
     const text = new TextDecoder("utf-8", { fatal: true }).decode(lcov.bytes);
