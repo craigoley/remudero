@@ -19,6 +19,7 @@ import {
   applyVerdictStability,
   judgeCriterion,
   parseReviewerVerdictClauses,
+  REVIEWER_CLAUSE_MAX_CHARS,
   parseReviewerVerdicts,
   type PriorReviewVerdict,
 } from "#src/lib/review.js";
@@ -173,13 +174,14 @@ test("acceptance 7 — the suppression condition keeps every one of its conjunct
 // ── Acceptance 8: an overlong or multi-line clause is bounded, never carried whole ──────────────
 
 test("acceptance 8 — an overlong or multi-line clause is bounded before it reaches the reason rather than carried whole", () => {
-  const longClause = "x".repeat(500);
+  // W1-T11209: the budget is REVIEWER_CLAUSE_MAX_CHARS (the finding channel's 500); a runaway line is still bounded.
+  const longClause = "x".repeat(5000);
   const overlong = parseReviewerVerdictClauses(`REVIEW_VERDICT 1: FAIL (${longClause})`, 1)[0];
-  assert.ok(overlong !== undefined && overlong.length < 500, "an overlong clause must be bounded, not carried whole");
-  assert.ok(overlong!.length <= 165, `bounded clause unexpectedly long: ${overlong!.length} chars`);
+  assert.ok(overlong !== undefined && overlong.length < 5000, "an overlong clause must be bounded, not carried whole");
+  assert.ok(overlong!.length <= REVIEWER_CLAUSE_MAX_CHARS + 48, `bounded clause unexpectedly long: ${overlong!.length} chars`);
 
   const overlongReason = judgeCriterion(CRITERION, REPORT_TOKENS, false, undefined, undefined, overlong).reason;
-  assert.ok(!overlongReason.includes(longClause), "the raw 500-char clause must never reach the reason whole");
+  assert.ok(!overlongReason.includes(longClause), "the raw 5000-char clause must never reach the reason whole");
 
   // A "multi-line clause" attempt: text after a literal newline is a DIFFERENT line, so it can
   // never be captured as part of this criterion's clause at all — bounded by construction.
