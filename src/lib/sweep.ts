@@ -9503,8 +9503,8 @@ function conflictFilesFromRow(value: unknown): ConflictFileDiff[] | undefined {
  * this head `dirty`. Scoped pr_number+head_sha, deliberately NOT pr_number alone: a NEW push earns a
  * NEW head with no history of its own, so mergeability must never carry across a head change. Reads
  * `merge_state` alone, never `disposition`/`reason` prose — that field is written only when a pass's
- * OWN effective mergeState (observed or itself inherited) was known, so hysteresis composes across
- * any number of consecutive `unknown` reads on the SAME head rather than resetting after one.
+ * OWN effective mergeState (observed or inherited) was known, so hysteresis composes across `unknown` reads on ONE head.
+ * W1-T11173: a rung.strike conflict hand-off (`fix.stood_down`) is this head's dirty read, with its last conflict files.
  */
 export function lastKnownMergeStateFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -9512,7 +9512,13 @@ export function lastKnownMergeStateFromLedger(
   headSha: string,
 ): KnownMergeState | undefined {
   let out: KnownMergeState | undefined;
+  let dirtyFiles: ConflictFileDiff[] | undefined;
   for (const line of lines) {
+    if (line.step === "fix.stood_down" && line.site === "rung.strike" && line.reason === CONFLICT_REPAIR_HANDOFF_REASON &&
+        (line.read_head_sha ?? line.head_sha) === headSha) {
+      out = { state: "dirty", ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}), ...(dirtyFiles ? { conflictFiles: dirtyFiles } : {}) };
+      continue;
+    }
     if (line.step !== "sweep.disposed") continue;
     if (line.pr_number !== prNumber) continue;
     if (line.head_sha !== headSha) continue;
@@ -9520,6 +9526,7 @@ export function lastKnownMergeStateFromLedger(
     if (state !== "clean" && state !== "dirty" && state !== "behind") continue;
     // Ledger lines are append-ordered — the LAST match for this exact head is its most recent.
     const conflictFiles = state === "dirty" ? conflictFilesFromRow(line.conflict_files) : undefined;
+    if (conflictFiles) dirtyFiles = conflictFiles;
     out = { state, ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}), ...(conflictFiles ? { conflictFiles } : {}),
       ...(typeof line.merge_main_sha === "string" ? { mainSha: line.merge_main_sha } : {}) };
   }
@@ -20744,9 +20751,16 @@ export async function runSweep(
       catch (error) { readable = false; deps.log?.("sweep.stand_down_hold.unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) }); }
       const held = readable ? fixSeedRead(ledgerLines, pr, deps.runId,
         { headSha: pr.headSha, contractRevision, bodySha256: standDownBodySha }) : undefined;
-      const conflictHandoff = disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) &&
-        held?.hold?.site === "rung.strike" && held.hold.reason === CONFLICT_REPAIR_HANDOFF_REASON;
-      if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff) {
+      const conflictHold = held?.hold?.site === "rung.strike" && held.hold.reason === CONFLICT_REPAIR_HANDOFF_REASON;
+      const conflictHandoff = disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) && conflictHold;
+      const heldUnderMain = conflictHold && held?.hold?.at !== undefined ? ledgerLines.find(row => row.step === "sweep.disposed" &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.stand_down_at === held.hold!.at)?.stand_down_main_sha : undefined;
+      const conflictHoldReleased = typeof heldUnderMain === "string" && mainTipSha !== undefined && heldUnderMain !== mainTipSha;
+      if (conflictHoldReleased) {
+        reason = `${reason} — the rung's conflict hand-off at ${held!.hold!.at} was held under main ${heldUnderMain.slice(0, 7)}, and ` +
+          `main is now ${mainTipSha!.slice(0, 7)}, so the rung re-reads this head's mergeability (W1-T11173)`;
+      }
+      if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff && !conflictHoldReleased) {
         standDownHold = held.hold;
         heldEscalationAt = held.hold.at;
         disposition = "refused-escalate";
@@ -21159,7 +21173,9 @@ export async function runSweep(
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
     if (emptyDiffSupersession) extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
     if (gardenRecordRefusal !== undefined) extraDisposedFields = { ...extraDisposedFields, garden_record_refusal: gardenRecordRefusal };
-    if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site };
+    if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site,
+      ...(standDownHold.site === "rung.strike" && standDownHold.reason === CONFLICT_REPAIR_HANDOFF_REASON && mainTipSha !== undefined
+        ? { stand_down_at: standDownHold.at, stand_down_main_sha: mainTipSha } : {}) };
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
       design_hold_main_adoption_decision: terminalDesignHold.mainAdoptionDecision,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),

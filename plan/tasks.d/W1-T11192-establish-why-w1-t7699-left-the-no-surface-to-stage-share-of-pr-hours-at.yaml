@@ -1,0 +1,30 @@
+- id: W1-T11192
+  title: Establish why W1-T7699 left the no-surface-to-stage share of PR-hours at 27.4% and whether the metric or the refusal is at fault
+  repo: remudero
+  depends_on:
+    - W1-T7699
+    - W1-T10722
+  type: recon
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - src/run-task.ts
+    - plan/tasks.d/W1-T7699-fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.yaml
+  acceptance:
+    - claim: The report names every site that emits the refusal string, with file and line. It covers commitWorkerEdits in src/run-task.ts, which is the only emitter of the exact reason, the linter message in src/lib/task-linter.ts, and the knowledge-gaps comment, and says which of them the fix lane can still reach with an empty declared-path list
+      proof: "demonstration: the operator reads the report and sees each emitter with its line and whether the fix lane reaches it with empty declared paths"
+    - claim: "The report states what W1-T7699's merged diff changed (the merged fix-lane test constructs a task with files: [] and asserts the inherited files appear) and whether that change reaches a PR whose synthetic task has no files"
+      proof: "demonstration: the operator reads the report and sees the merged diff summarised against the empty-files path"
+    - claim: "The report recomputes the cause's PR-hours share from the ledger per PR and says whether the 27.8% before and 27.4% after figures are dominated by PRs such as #6436, #6428, #6503, #6507 and #6905 that were already stuck before the fix merged and kept accruing hours, or by refusals recorded after the merge"
+      proof: "demonstration: the operator reads the report and sees hours split by blocked-before-merge versus refused-after-merge, with a count of fix.commit_refused rows with this reason after the merge"
+    - claim: "The report recommends exactly one next step: retire or amend W1-T10722 if the metric is an accrual artifact, or name the uncovered path if refusals continue"
+      proof: "demonstration: the operator reads the report and sees one recommendation naming W1-T10722 or a specific uncovered path"
+  origin: followup:W1-T10722-1793122424172:2026-10-27T17:37:19.347Z:0
+  rationale: >-
+    From the 2026-10-27 follow-up on W1-T10722-1793122424172, ratified via rmd approve:
+  
+    follow-up harvest [research]: locate the "task declares no files" refusal string in `src/` and
+    in W1-T7699's merged diff, to see why that fix didn't change the PR-hours share. — from
+    W1-T10722 (run W1-T10722-1793122424172)

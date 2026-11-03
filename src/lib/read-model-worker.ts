@@ -38,6 +38,7 @@ import { createNavBadgeReadModelView, NAV_BADGE_VIEW_NAME } from "./nav-badge-vi
 import { createNowView, NOW_VIEW_NAME } from "./now-view.js";
 import { createOperatorAgentRowsView, OPERATOR_AGENT_ROWS_VIEW } from "./operator-agent-read-model.js";
 import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } from "./task-view.js";
+import { planFilesIdentity, threadPlanPin } from "./thread-plan.js";
 import { createWorkstreamsView, WORKSTREAMS_VIEW_NAME } from "./workstreams-view.js";
 import { ACTIONS_VIEW_NAME, createActionsView } from "./actions-view.js";
 import { createDemandBook, TASK_VIEW_NAME, type DemandBook } from "./view-demand.js";
@@ -85,7 +86,7 @@ import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowPopulation, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ShadowSampleIdentity, type ViewShadow } from "./view-shadow.js";
 import { INBOX_VIEW_NAME, INBOX_QUALIFICATION_ERROR_META, INBOX_QUALIFICATION_PENDING, INBOX_QUALIFICATION_POPULATION_META, inboxQualificationPolicy, inboxShadowPopulation, inboxShadowSampleKey, parseInboxShadowPopulation, restoreInboxShadowPopulation, type InboxQualificationScope } from "./inbox-view.js";
-import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
+import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, viewKey, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeLedgerReads, judgeSource, type SourcePhase } from "./view-freshness.js";
 import { forkWorkerEntry, startWorker, type WorkerEntryFork } from "./child-entry-argv.js";
 
@@ -376,6 +377,11 @@ export function builtLedgerSource(built: ViewSource, state: ReadModelInstanceSta
 export const readModelStatusView: ReadModelView = {
   name: READ_MODEL_STATUS_VIEW,
   version: 1,
+  // Status's ledger rows are quarantined rows; generation and lease state are in inputDigest.
+  ledgerReads: db => {
+    const row = db.prepare("SELECT MAX(ts_ms) AS last_ms FROM quarantine").get();
+    return row?.last_ms == null ? null : fixedClock(Number(row.last_ms)).iso();
+  },
   materialize: ({ now, instances, shadow }) => [{
     key: "",
     data: {
@@ -877,6 +883,8 @@ interface ViewUnit {
   peakMs?: number;
   heavy?: boolean;
   lastBuiltAt?: number;
+  lastInputDigest?: string;
+  builtKeys?: string[];
 }
 
 class ReadModelViewFactoryMismatch extends RmdError {
@@ -1512,19 +1520,20 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const unswitched = new Map<string, { builds: number; ms: number }>();
-  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; ms: number; maxMs: number }>();
+  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; skipped: number; ms: number; maxMs: number }>();
   let viewBuildsFrom = clock.now();
   function reportViewBuilds(): void {
     const now = clock.now();
     if (now - viewBuildsFrom < 10 * 60_000) return;
     for (const [unit, tally] of viewBuilds) {
       if (tally.calls === 0 && tally.ms === 0) continue;
+      const { skipped, ...counts } = tally;
       log("read_model.view_builds", {
         view: unit.view.name,
         ...(unit.slot ? { instance: unit.slot.instance.name } : {}),
         thread: viewsOnly ? "views" : "projector",
         ...(opts.lane ? { lane: opts.lane } : {}),
-        ...tally, window: [viewBuildsFrom, now],
+        ...counts, ...(skipped > 0 ? { skipped } : {}), window: [viewBuildsFrom, now],
       });
     }
     viewBuilds.clear();
@@ -1549,6 +1558,49 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return finished + waitMs * unit.stretch;
   }
 
+  function inputDigest(ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined): string | undefined {
+    if (!readAsOf || readAsOf.size === 0 || !ctx.sourceStore) return undefined;
+    const stores = [...new Set([ctx.sourceStore, ...ctx.instances.flatMap(({ db }) => db ? [db] : [])])];
+    const generations = stores.map(db => [db.path, fileIno(db.path), db.meta("generation")]);
+    if (generations.some(([, ino, generation]) => ino === undefined || generation === undefined || !/^\d+$/.test(generation))) return undefined;
+    if (ctx.instances.some(({ db, state }) => !db || state.reason || state.failures > 0 || state.lease !== "held")) return undefined;
+    const plans = ctx.instances.map(({ state }) => {
+      const path = opts.instances.find(instance => instance.name === state.instance)?.planPath;
+      if (!path) return null;
+      const pin = threadPlanPin(path);
+      if (!pin) statSync(path); // An unreadable plan is not evidence of unchanged inputs.
+      return [path, pin || planFilesIdentity(path)];
+    });
+    const snapshots = ctx.sourceStore.prepare("SELECT instance, name, as_of, error, error_ms FROM source_snapshot ORDER BY instance, name").all();
+    if (snapshots.some(snapshot => snapshot.error !== null)) return undefined;
+    // Status reads these alongside generation. Quarantined diagnostics can leave generation unchanged.
+    const states = ctx.instances.map(({ state, db }) => [state.instance, state.generation, state.lease, state.heldBy,
+      Number(db!.prepare("SELECT count(*) AS n FROM quarantine").get()?.n ?? 0)]);
+    return JSON.stringify([Array.from(readAsOf), plans, generations, states, snapshots, ctx.switches, ctx.shadow]);
+  }
+
+  /** File-backed and other undeclared sources need their producer; a ledger declaration cannot verify them. */
+  function reusableSources(unit: ViewUnit, ctx: ReadModelViewContext): boolean {
+    return unit.builtKeys !== undefined && unit.builtKeys.length > 0 && unit.builtKeys.every(id => {
+      const entry = latest.get(id);
+      return entry !== undefined && entry.body.sources.every(source => source.state === "fresh" &&
+        (ctx.instances.some(({ state }) => source.name === `${LEDGER_SOURCE_PREFIX}${state.instance}`) || ctx.instances.some(({ state }) =>
+          source.name === `plan:${state.instance}` && opts.instances.some(instance => instance.name === state.instance && instance.planPath !== undefined))));
+    });
+  }
+
+  function restamp(unit: ViewUnit, ctx: ReadModelViewContext, readAsOf: Map<string, string | null>): void {
+    for (const id of unit.builtKeys!) {
+      const entry = latest.get(id)!;
+      const sources = entry.body.sources.map(source => {
+        const instance = ctx.instances.find(({ state }) => source.name === `${LEDGER_SOURCE_PREFIX}${state.instance}`);
+        return instance ? { ...ledgerSource(instance.state, ctx.now), asOf: readAsOf.get(source.name)! }
+          : { ...source, asOf: fixedClock(ctx.now).iso() };
+      });
+      publishEntry({ ...entry, body: { ...entry.body, sources, asOf: oldestAsOf(sources) } });
+    }
+  }
+
   function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number, allowanceMs: number): void {
     const { view } = unit;
     const started = clock.now();
@@ -1558,6 +1610,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     let succeeded = false;
     let yielded = 0;
     let calls = 0;
+    let skipped = false;
+    let digest: string | undefined;
+    const builtKeys: string[] = [];
     const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
     const buildStartedMs = (unit.startedAt ??= started);
     let live: ReadModelView | undefined;
@@ -1570,11 +1625,20 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         const read = live.ledgerReads;
         const readAsOf = read ? new Map(scoped.instances.map(({ state, db }) =>
           [`${LEDGER_SOURCE_PREFIX}${state.instance}`, db ? read(db) : null])) : undefined;
-        for (const { key, data, sources } of live.materialize(scoped)) {
-          yielded++;
-          const stamped = readAsOf ? sources.map((source) => readAsOf.has(source.name)
-            ? { ...source, asOf: readAsOf.get(source.name)! } : source) : sources;
-          publish(view.name, live.version, key, data, stamped, generation, buildStartedMs, live.qualificationGeneration);
+        const reusable = reusableSources(unit, scoped);
+        try { if (unit.builtKeys === undefined || reusable) digest = inputDigest(scoped, readAsOf); }
+        catch (error) { log("read_model.view_digest_unreadable", { ...named, error: (error as Error).message }); }
+        if (digest !== undefined && digest === unit.lastInputDigest && reusable) {
+          restamp(unit, scoped, readAsOf!);
+          skipped = true;
+        } else {
+          for (const { key, data, sources } of live.materialize(scoped)) {
+            yielded++;
+            const stamped = readAsOf ? sources.map((source) => readAsOf.has(source.name)
+              ? { ...source, asOf: readAsOf.get(source.name)! } : source) : sources;
+            publish(view.name, live.version, key, data, stamped, generation, buildStartedMs, live.qualificationGeneration);
+            builtKeys.push(`${view.name}\u0000${key}`);
+          }
         }
       }
       succeeded = ready && yielded > 0;
@@ -1582,13 +1646,19 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
     }
     const finished = clock.now();
-    if (succeeded) unit.lastBuiltAt = finished;
-    unit.costMs = finished - started;
-    const counts = viewBuilds.get(unit) ?? { calls: 0, builds: 0, ms: 0, maxMs: 0 };
+    if (!skipped) {
+      unit.lastInputDigest = succeeded ? digest : undefined;
+      unit.builtKeys = succeeded ? builtKeys : undefined;
+      if (succeeded) unit.lastBuiltAt = finished;
+    }
+    const elapsedMs = finished - started;
+    unit.costMs = skipped ? unit.costMs ?? elapsedMs : elapsedMs;
+    const counts = viewBuilds.get(unit) ?? { calls: 0, builds: 0, skipped: 0, ms: 0, maxMs: 0 };
     counts.calls += calls;
     counts.builds += yielded > 0 ? 1 : 0;
-    counts.ms += unit.costMs;
-    counts.maxMs = Math.max(counts.maxMs, unit.costMs);
+    counts.skipped += skipped ? 1 : 0;
+    counts.ms += elapsedMs;
+    counts.maxMs = Math.max(counts.maxMs, elapsedMs);
     viewBuilds.set(unit, counts);
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
     if (unit.cold && succeeded) {
@@ -1612,10 +1682,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     if (viewsOnly && opts.lane && ready) reportHolds(opts.lane);
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
-    const stages = unit.costMs > passMs ? live?.stages?.(scoped) : undefined;
+    const stages = elapsedMs > passMs ? live?.stages?.(scoped) : undefined;
     const tally = switches.views[view.name] === undefined ? unswitched.get(view.name) ?? { builds: 0, ms: 0 } : undefined;
-    if (tally) unswitched.set(view.name, { builds: tally.builds + 1, ms: tally.ms + unit.costMs });
-    if (unit.costMs > passMs) log("read_model.slow_view", { ...named, ms: unit.costMs, passMs, thread: viewsOnly ? "views" : "projector", ...(stages ? { stages } : {}), ...(tally ? { unswitched: unswitched.get(view.name) } : {}) });
+    if (tally) unswitched.set(view.name, { builds: tally.builds + (yielded > 0 ? 1 : 0), ms: tally.ms + elapsedMs });
+    if (elapsedMs > passMs) log("read_model.slow_view", { ...named, ms: elapsedMs, passMs, thread: viewsOnly ? "views" : "projector", ...(stages ? { stages } : {}), ...(tally ? { unswitched: unswitched.get(view.name) } : {}) });
   }
 
   const readers = opts.readers ?? READ_MODEL_VIEW_READERS;
@@ -1643,6 +1713,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   function letGo(unit: ViewUnit): void {
     if (!unit.made || owns(unit)) return;
     unit.made = undefined;
+    unit.lastInputDigest = undefined;
+    unit.builtKeys = undefined;
     unit.cold = undefined;
     unit.startedAt = undefined;
     unit.peakMs = undefined;
@@ -1865,7 +1937,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     want(view: string, key: string): boolean {
       if (!opts.demand || !demandViews.includes(view)) return false;
       const fresh = opts.demand.want(view, key);
-      if (fresh) for (const unit of units) if (unit.view.name === view) unit.dueAt = 0;
+      if (fresh) for (const unit of units) if (unit.view.name === view) {
+        unit.dueAt = 0;
+        unit.lastInputDigest = undefined;
+      }
       return fresh;
     },
     accept(built: SlowLaneBodies): void {
@@ -2549,6 +2624,54 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   if (warm.inboxQualificationReason) opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: warm.inboxQualificationReason });
   /** Keys the running worker has posted: newer than anything committed, so a reload leaves them alone. */
   const posted = new Set<string>();
+  /** A retired body leaves with all its per-key bookkeeping, so neither a reload nor a respawned producer resurrects it. */
+  const forget = (key: string): void => {
+    bodies.delete(key);
+    bodyReadings.delete(key);
+    posted.delete(key);
+  };
+  /**
+   * A complete current population retires every other cached Inbox page, including the pages an earlier
+   * producer posted and a replacement, finding them already gone from the store, has no drop for.
+   */
+  const convergeInbox = (generation: string, snapshotKey: string): boolean => {
+    const own = [...bodies].filter(([, entry]) => entry.view === INBOX_VIEW_NAME);
+    const current = own.filter(([, entry]) => entry.qualificationGeneration === generation && (entry.body.data as { snapshotKey?: unknown } | null)?.snapshotKey === snapshotKey);
+    if (!inboxScope) return false;
+    let db: ReadModelDb | undefined;
+    try {
+      db = openReadModel({ stateDir: opts.stateDir, instance: home, schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION, readOnly: true });
+      db.exec("BEGIN");
+      const failure = db.meta(INBOX_QUALIFICATION_ERROR_META), raw = db.meta(INBOX_QUALIFICATION_POPULATION_META);
+      if (failure !== undefined) throw new Error(`committed Inbox producer refusal: ${failure}`);
+      if (raw === undefined) throw new Error("committed Inbox population is unavailable");
+      // Unchanged ETags suppress body messages even when the producer commits fresh source timestamps.
+      // Bind each cached payload to its committed body before using that body's current provenance.
+      const pages = current.map(([, entry]) => {
+        const row = db!.prepare("SELECT version, etag, body FROM view_body WHERE view = ? AND key = ?").get(INBOX_VIEW_NAME, entry.key);
+        const identity = storedBodyQualification(db!.meta(bodyQualificationKey(INBOX_VIEW_NAME, entry.key)), String(row?.etag));
+        if (!row || row.etag !== entry.etag || row.version !== entry.version || identity.reason !== undefined || identity.qualificationGeneration !== generation)
+          throw new Error("cached Inbox body does not match committed provenance");
+        const body = JSON.parse(String(row.body)) as ViewBody;
+        if (body.view !== entry.body.view || body.version !== entry.body.version || body.stale !== entry.body.stale || JSON.stringify(body.data) !== JSON.stringify(entry.body.data))
+          throw new Error("cached Inbox payload does not match the committed body");
+        return { key: entry.key, data: entry.body.data, sources: body.sources };
+      });
+      const population = restoreInboxShadowPopulation(raw, pages, clock.now());
+      if (population.generation !== generation || population.snapshotKey !== snapshotKey || population.scope.instance !== inboxScope.instance ||
+        population.scope.repository !== inboxScope.repository) throw new Error("committed Inbox population does not match the current message");
+      db.exec("COMMIT");
+    } catch (error) {
+      opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: `complete page batch unavailable: ${(error as Error).message}` });
+      return false;
+    } finally {
+      db?.close();
+    }
+    const keep = new Set(current.map(([key]) => key)), retired = own.filter(([key]) => !keep.has(key));
+    for (const [key] of retired) forget(key);
+    if (retired.length > 0) opts.log?.("read_model.inbox_converged", { generation, kept: keep.size, retired: retired.length });
+    return true;
+  };
   let committedAt = committedTickTimes(opts.stateDir, opts.instances);
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   let mainSwitches = DEFAULT_READ_MODEL_SWITCHES;
@@ -2703,8 +2826,11 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     if (msg.type === "progress") phase = { instance: msg.instance, phase: msg.phase };
     else if (msg.type !== "log") phase = undefined;
     if (msg.type === "qualification") {
-      if (inboxScope && msg.scope?.instance === inboxScope.instance && msg.scope.repository === inboxScope.repository &&
-        (msg.generation === INBOX_QUALIFICATION_PENDING || (/^inbox-current-pages-v1:[a-f0-9]{64}$/.test(msg.generation) && typeof msg.snapshotKey === "string" && /^[a-f0-9]{64}$/.test(msg.snapshotKey)))) {
+      const matches = inboxScope && msg.scope?.instance === inboxScope.instance && msg.scope.repository === inboxScope.repository &&
+        (msg.generation === INBOX_QUALIFICATION_PENDING || (/^inbox-current-pages-v1:[a-f0-9]{64}$/.test(msg.generation) && typeof msg.snapshotKey === "string" && /^[a-f0-9]{64}$/.test(msg.snapshotKey)));
+      // Only a matching, complete current batch may retire pages; anything less retires nothing and stays unqualified.
+      const complete = matches && (msg.generation === INBOX_QUALIFICATION_PENDING || convergeInbox(msg.generation, msg.snapshotKey!));
+      if (complete) {
         inboxQualification = msg.generation;
         inboxQualificationSnapshot = msg.generation === INBOX_QUALIFICATION_PENDING ? undefined : msg.snapshotKey;
         noteAutoModes();
@@ -2712,17 +2838,14 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
         inboxQualification = INBOX_QUALIFICATION_PENDING;
         inboxQualificationSnapshot = undefined;
         noteAutoModes();
-        opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: "population message does not match configured scope or generation" });
+        opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: matches ? "population message arrived without its complete page batch" : "population message does not match configured scope or generation" });
       }
     } else if (msg.type === "body") {
       bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
       posted.add(readModelBodyKey(msg.entry.view, msg.entry.key));
       for (const listener of bodyListeners) listener(msg.entry);
     } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
-    else if (msg.type === "drop") {
-      bodies.delete(readModelBodyKey(msg.view, msg.key));
-      bodyReadings.delete(readModelBodyKey(msg.view, msg.key));
-    } else if (msg.type === "sources") {
+    else if (msg.type === "drop") forget(readModelBodyKey(msg.view, msg.key)); else if (msg.type === "sources") {
       for (const source of msg.sources) sourceClocks.set(source.name, source);
       for (const [view, reads] of Object.entries(msg.ledgerReads ?? {})) ledgerReads.set(view, reads);
       for (const body of msg.bodies ?? []) bodyReadings.set(readModelBodyKey(body.view, body.key), new Map(body.sources.map((source) => [source.name, source])));
@@ -2798,9 +2921,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       let removed = 0;
       if (again.reason === undefined) {
         const committed = new Set(again.bodies.map(entry => readModelBodyKey(entry.view, entry.key)));
-        for (const key of bodies.keys()) if (!posted.has(key) && !committed.has(key)) {
-          bodies.delete(key);
-          bodyReadings.delete(key);
+        // Inbox pages are posted only after their commit, so a qualified committed population bounds even posted ones.
+        const members = inboxQualification === INBOX_QUALIFICATION_PENDING ? undefined : new Set(again.inboxPopulation?.pages.map(page => readModelBodyKey(INBOX_VIEW_NAME, page.key)));
+        for (const [key, entry] of bodies) if ((!posted.has(key) && !committed.has(key)) || (members && entry.view === INBOX_VIEW_NAME && !members.has(key))) {
+          forget(key);
           removed++;
         }
       }
