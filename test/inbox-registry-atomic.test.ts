@@ -386,7 +386,8 @@ for (const [label, signature] of [
 
 test("W1-T240 claim 3: the serve slow lane's inbox heal (lib/inbox-view.ts's refreshInboxClassification) reaches updateProposalRegistry, never a bare writeFileSync(registryPath -- this is the writer that runs INSIDE the long-lived daemon, making the multi-writer race genuine rather than theoretical", () => {
   const body = extractFunctionBody(inboxViewSrc, "export async function refreshInboxClassification(");
-  assert.match(body, /updateProposalRegistry\(/, "refreshInboxClassification must route its heal write through updateProposalRegistry");
+  // W1-T11128: the serve lane awaits the async form of the same sanctioned writer, never the sync one.
+  assert.match(body, /updateProposalRegistryAsync\(/, "refreshInboxClassification must route its heal write through updateProposalRegistryAsync");
   assert.doesNotMatch(body, /writeFileSync\(registryPath/, "refreshInboxClassification must not retain a bare writeFileSync on the registry path");
 });
 
@@ -397,7 +398,7 @@ test("W1-T240 claim 3: updateProposalRegistry is imported from lib/inbox.ts by B
 
   const inboxViewImportBlock = inboxViewSrc.match(/import \{([\s\S]*?)\} from "\.\/inbox\.js";/);
   assert.ok(inboxViewImportBlock, "inbox-view.ts must import from ./inbox.js");
-  assert.match(inboxViewImportBlock![1], /\bupdateProposalRegistry\b/, "inbox-view.ts must import the SAME shared helper from ./inbox.js");
+  assert.match(inboxViewImportBlock![1], /\bupdateProposalRegistryAsync\b/, "inbox-view.ts must import the SAME shared helper's async form from ./inbox.js (W1-T11128)");
 });
 
 // ── Claim 4: the REAL dispatch path -- not just a source grep -- actually reaches the new
