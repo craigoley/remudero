@@ -1,0 +1,47 @@
+- id: W1-T11206
+  title: The slow tier's shard count is derived from recorded durations with headroom under the 35-minute job ceiling, and each slow-tier shard ends its log with the names of its failing tests
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two surfaces, one concern: how the slow tier is split and reported; the ci.yml matrix and scripts/test-tier-manifest.mjs
+  origin: operator-session#slow-tier-ceiling-2026-11-03
+  plan_refs:
+    - W1-T4756
+    - W1-T4396
+    - W1-T11051
+  files:
+    - .github/workflows/ci.yml
+    - scripts/test-tier-manifest.mjs
+    - test/ci/suites/the-slow-tier-shard-count-is-derived-from-recorded-durations.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: slowTierShardCount(manifest, { ceilingMs, workers }) returns the smallest shard count, never below 2, whose largest shard's predicted wall time (predictMakespanMs over balanceFilesByDuration's split of the slow tier) is at most 60% of the job ceiling; it rises when recorded durations grow, and on origin/main's scripts/test-tier-manifest.json with the 35-minute ceiling it returns more than 2
+      proof: "unit test: test/ci/suites/the-slow-tier-shard-count-is-derived-from-recorded-durations.test.ts"
+    - claim: ci.yml derives the test-slow-shard matrix from that count through a planning job's output, and both the push lane and the pull-request lane pass --shard <index>/<derived count>, so no hard-coded shard total remains
+      proof: "grep: fromJSON(needs\\.test-slow-plan\\.outputs\\.shards) in .github/workflows/ci.yml"
+    - claim: A slow-tier run ends its output with a FAILING TESTS block naming each failing test's file and title, or FAILING TESTS (0), as its last lines, so the last-5,000-line job-log tail always names them
+      proof: "grep: W1-T11206 criterion 3 in test/ci/suites/the-slow-tier-shard-count-is-derived-from-recorded-durations.test.ts"
+  rationale: |
+    OBSERVED 2026-11-03 (brief evidence re-verified on origin/main b724e88eb where noted):
+    - ci.yml test-slow-shard runs matrix shard [1, 2] with timeout-minutes 35. The push lane runs node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --shard k/2; the pull-request lane runs npm run --silent test:slow -- --shard k/2 with no retry. Both re-verified.
+    - Main push run 41632922598 (head 83ec47542, 2026-11-03 12:07Z): shard 1/2 succeeded in 32m52s; shard 2/2 was cancelled at 35m17s, so test-slow failed. Re-verified from the run's jobs.
+    - Main push runs 41059481182 and 41056936773 (10-30): shard 2/2 took 32 and 28 min. PR #15745 run 41066256358 (10-30): shard 2/2 cancelled at 35 min; its re-run went 4,428 pass, 1 fail against main's 4,429 pass, 0 fail. W1-T9985's run 41062790997 was cancelled at 35 min. (Brief evidence.)
+    - origin/main's scripts/test-tier-manifest.json: 600 slow-tier files (threshold 5,000 ms), 164.3 serial minutes. A 2-way LPT split puts about 82 serial minutes on each shard, which the runner's file concurrency turns into the observed 28-35 min walls (about 2.5x overlap). So shard size must be predicted with the makespan model, not the serial sum.
+    - The job-log API returns only the last ~5,000 of ~35,500 lines, so a cancelled or red shard's failing test cannot be named from the PR side. That is W1-T11051's red-with-no-failing-test symptom.
+    - Not a duplicate. W1-T4756 (merged) made the duration-balanced 2-way split and fixed the count. #15268 (217fcb162) bounds each slow-tier test at 3 min; it does not bound a shard's total. W1-T11051 (queued) is the ci-friction cause for a red shard with no named failure; this task gives it its failing names.
+    - Open PR heads swept 2026-11-03: of 24, only #16425 (W1-T11161) changes ci.yml, adding a sparse-checkout job, with no test-slow-shard, --shard or timeout lines.
+  design: |
+    1. scripts/test-tier-manifest.mjs exports slowTierShardCount(manifest, { ceilingMs, workers, headroom = 0.6 }). It is pure. Count n from 2 upward; for each n, split the slow tier with balanceFilesByDuration and take the largest predictMakespanMs; return the first n at or under headroom x ceilingMs. Calibrate workers so the 10-30 and 11-03 observed shard walls are predicted within 15%, from the test-duration-slow-* evidence the job already uploads, and state the calibration in the code. --print-slow-shards prints the JSON list [1..n] and the count.
+    2. ci.yml gains a small test-slow-plan job (sparse checkout of scripts/ and the manifest, no install) that runs --print-slow-shards. test-slow-shard uses matrix.shard: ${{ fromJSON(needs.test-slow-plan.outputs.shards) }}, and both lanes pass --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }}. The required test-slow verdict still reads needs.test-slow-shard.result; a failed plan job fails it, never skips it.
+    3. The slow-tier run collects each failing test's file and title from the reporter stream. After the run, as its final output, it prints FAILING TESTS (n) and one line per failure, or FAILING TESTS (0). A cancelled job cannot print, so item 1's headroom is what keeps a shard from being cancelled.
+    4. Raising timeout-minutes is not the remedy, and this task does not change it.
+    NOT IN SCOPE: the pull-request lane's missing retry (it runs npm run test:slow with no test-with-retry wrapper); file it separately if wanted.
+    OPERATOR-BUILD: files: names .github/workflows/ci.yml, which the fleet App cannot push (W1-T5351), so this routes to the operator-build lane.
+  note: |
+    reservation hand-off: run-unfiled-1793711340532 -> run-unfiled-1793711340532
+    Reserved with rmd next-task-id (W1-T11206 on run-unfiled-1793711340532) from a worktree on origin/main; the operator checkout is on a detached HEAD from another session.

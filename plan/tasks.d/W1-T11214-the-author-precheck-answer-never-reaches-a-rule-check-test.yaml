@@ -1,0 +1,35 @@
+- id: W1-T11214
+  title: The author preflight's census answer (RMD_AUTHOR_CENSUS_ANSWERED) reaches only the static stage's own census step, never a rule-check test child, so every author preflight's static stage stops failing the fast-gate spawn test
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one file, one concern: which children of the static stage inherit the author census answer
+  origin: operator-session#serve-status-latency-2026-11-03
+  plan_refs:
+    - W1-T11101
+  files:
+    - src/lib/ci-parity.ts
+    - test/ci/parity/the-author-precheck-answer-never-reaches-a-rule-check-test.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: With RMD_AUTHOR_CENSUS_ANSWERED set to the tree's HEAD, the fast gate's rule-checks children run without it, while the census step itself still reuses the answer
+      proof: "unit test: test/ci/parity/the-author-precheck-answer-never-reaches-a-rule-check-test.test.ts"
+    - claim: The rule-checks runner removes the author census answer from its children's environment
+      proof: "grep: delete process\\.env\\[AUTHOR_CENSUS_ANSWERED_ENV\\] in src/lib/ci-parity.ts"
+  rationale: |
+    OBSERVED 2026-11-03 on W1-T11210's author preflight (head bd85377d1):
+    - census-precheck PASS, and the static stage reused it ("census-precheck answered by the author preflight's census-precheck step at bd85377d1 (ok); not run again"). That is W1-T11101 working.
+    - static-preflight then FAILED on one rule-check: test/fast-gate-admits-the-census-class.test.ts > "runPreflightFast: mocked end-to-end over all fourteen FAST_GATE_STEPS ..." ("exactly one spawn per curated step, no extras").
+    - Reproduced at that head: the test passes with the variable unset and fails with RMD_AUTHOR_CENSUS_ANSWERED=<HEAD>:ok. The rule-check child inherits the variable, so its mocked census step reuses the answer and spawns nothing.
+    - Every author preflight sets the variable for its static stage, so this fails every author preflight's static stage whatever the branch. Hosted CI never sets it, so hosted checks are unaffected.
+  design: |
+    In ci-parity.ts, the rule-checks runner's child run (the withoutNodeTestContext block for runner rule-checks) also removes process.env[AUTHOR_CENSUS_ANSWERED_ENV] for the child and restores it after, as NODE_TEST_CONTEXT is handled now. The census step's own read is unchanged.
+    NOT IN SCOPE: any other static step. Only rule-checks spawns test children.
+  note: |
+    reservation hand-off: run-unfiled-1793716340648 -> run-unfiled-1793716340648
+    Reserved with rmd next-task-id (W1-T11214 on run-unfiled-1793716340648). A defect in W1-T11101 (merged e2ee75296), found by the operator session's own preflight.
