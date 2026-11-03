@@ -8,7 +8,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TextDecoder, parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
@@ -398,11 +398,17 @@ function owningSfReadBoundedLcov(root, inputPath) {
   if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error("lcov_path_outside_repo");
   let fd;
   try {
-    const before = lstatSync(filePath);
-    if (!before.isFile() || before.isSymbolicLink() || before.size > OWNING_SF_MAX_LCOV_BYTES) throw new Error("lcov_not_regular_or_over_limit");
-    fd = openSync(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
-    const pinned = fstatSync(fd);
-    if (!pinned.isFile() || pinned.size > OWNING_SF_MAX_LCOV_BYTES || pinned.size !== before.size) throw new Error("lcov_changed_or_over_limit");
+    if (typeof constants.O_NOFOLLOW !== "number" || constants.O_NOFOLLOW === 0 ||
+        typeof constants.O_NONBLOCK !== "number" || constants.O_NONBLOCK === 0) {
+      throw new Error("lcov_open_safety_unavailable");
+    }
+    try {
+      fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch {
+      throw new Error("lcov_open_failed");
+    }
+    const pinned = fstatSync(fd, { bigint: true });
+    if (!pinned.isFile() || pinned.size > BigInt(OWNING_SF_MAX_LCOV_BYTES)) throw new Error("lcov_not_regular_or_over_limit");
     const chunks = [];
     let total = 0;
     const chunk = Buffer.allocUnsafe(1024 * 1024);
@@ -413,8 +419,11 @@ function owningSfReadBoundedLcov(root, inputPath) {
       if (total > OWNING_SF_MAX_LCOV_BYTES) throw new Error("lcov_over_limit");
       chunks.push(Buffer.from(chunk.subarray(0, count)));
     }
-    const after = fstatSync(fd);
-    if (after.size !== total || after.size !== pinned.size) throw new Error("lcov_changed_during_read");
+    const after = fstatSync(fd, { bigint: true });
+    if (after.dev !== pinned.dev || after.ino !== pinned.ino || after.size !== BigInt(total) ||
+        after.size !== pinned.size || after.mtimeNs !== pinned.mtimeNs || after.ctimeNs !== pinned.ctimeNs) {
+      throw new Error("lcov_changed_during_read");
+    }
     const bytes = Buffer.concat(chunks, total);
     return { bytes, sha256: sha256(bytes) };
   } finally {

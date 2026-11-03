@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -92,10 +92,7 @@ function parseOwnerReceipt(stdout: string, ownerPaths: string[] = OWNER_SF_PATHS
   return { header, rows, end };
 }
 
-function runOwnerReceipt(root: string, lcov: string, includeChangedSource = false) {
-  const lcovPath = join(root, "coverage", "lcov.info");
-  mkdirSync(dirname(lcovPath), { recursive: true });
-  writeFileSync(lcovPath, lcov);
+function runOwnerReceiptCommand(root: string, timeout = 30_000, includeChangedSource = false) {
   const result = spawnSync(process.execPath, [OWNER_SF_SCRIPT, "owning-sf", ...(includeChangedSource ? ["--include-changed-source"] : []),
     "--lcov", "coverage/lcov.info", ...OWNER_SF_PATHS.flatMap((file) => ["--file", file])], {
     cwd: root,
@@ -108,12 +105,19 @@ function runOwnerReceipt(root: string, lcov: string, includeChangedSource = fals
       GITHUB_RUN_ATTEMPT: "2",
     },
     encoding: "utf8",
-    timeout: 30_000,
+    timeout,
   });
   assert.equal(result.error, undefined, `receipt helper starts and closes: ${String(result.error ?? "")}`);
   assert.equal(result.status, 0, `receipt helper is evidence-only: ${result.stderr}`);
   assert.equal(result.stderr, "", "the successful receipt path does not emit diagnostics");
   return result.stdout;
+}
+
+function runOwnerReceipt(root: string, lcov: string, includeChangedSource = false) {
+  const lcovPath = join(root, "coverage", "lcov.info");
+  mkdirSync(dirname(lcovPath), { recursive: true });
+  writeFileSync(lcovPath, lcov);
+  return runOwnerReceiptCommand(root, 30_000, includeChangedSource);
 }
 
 async function aggregatorJobBody(): Promise<string> {
@@ -302,6 +306,47 @@ test("coverage-owning-SF receipt: only exact repo-relative SF paths qualify as o
       { state: owner?.state, sf_record_count: owner?.sf_record_count, lf_sum: owner?.lf_sum, lh_sum: owner?.lh_sum },
       { state: "missing-sf", sf_record_count: 0, lf_sum: null, lh_sum: null },
     );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("coverage-owning-SF receipt: the real CLI refuses a symlink LCOV path", () => {
+  const fixture = createOwnerGitFixture();
+  const root = fixture.dir;
+  try {
+    const coverageDir = join(root, "coverage");
+    mkdirSync(coverageDir, { recursive: true });
+    writeFileSync(join(root, "outside-lcov.info"), lcovRecord(OWNER_SF_PATHS[0]!, 3, 2));
+    symlinkSync("../outside-lcov.info", join(coverageDir, "lcov.info"));
+
+    const output = runOwnerReceiptCommand(root);
+    const line = output.trimEnd();
+    assert.ok(line.startsWith("RMD_COV_SF_V1_UNAVAILABLE "));
+    const unavailable = JSON.parse(line.slice("RMD_COV_SF_V1_UNAVAILABLE ".length)) as Record<string, unknown>;
+    assert.equal(unavailable.reason, "lcov_open_failed");
+    assert.doesNotMatch(output, /outside-lcov\.info|coverage\/lcov\.info/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("coverage-owning-SF receipt: the real CLI refuses an LCOV FIFO without blocking", () => {
+  const fixture = createOwnerGitFixture();
+  const root = fixture.dir;
+  try {
+    const coverageDir = join(root, "coverage");
+    mkdirSync(coverageDir, { recursive: true });
+    const fifo = join(coverageDir, "lcov.info");
+    const created = spawnSync("mkfifo", [fifo], { encoding: "utf8", timeout: 3_000 });
+    assert.equal(created.error, undefined, `mkfifo starts and closes: ${String(created.error ?? "")}`);
+    assert.equal(created.status, 0, `mkfifo creates the test FIFO: ${created.stderr}`);
+
+    const output = runOwnerReceiptCommand(root, 3_000);
+    const line = output.trimEnd();
+    assert.ok(line.startsWith("RMD_COV_SF_V1_UNAVAILABLE "));
+    const unavailable = JSON.parse(line.slice("RMD_COV_SF_V1_UNAVAILABLE ".length)) as Record<string, unknown>;
+    assert.equal(unavailable.reason, "lcov_not_regular_or_over_limit");
   } finally {
     fixture.cleanup();
   }
