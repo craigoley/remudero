@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
+// @ts-ignore the executable .mjs module has no declaration file.
 import { main as censusMain } from "#scripts/census-precheck.mjs";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
