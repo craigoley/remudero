@@ -83,11 +83,11 @@ export interface MergeProbeSummary {
   conflictsByPr: Map<number, { headSha: string; evidence: MergeConflictEvidence }>;
 }
 
-/** Compare evidence wins; a matching probe supplies only missing evidence for a waiting head. */
+/** Captured compare evidence wins; a matching probe supplies missing or empty evidence (W1-T11174) for a waiting head. */
 export function applyMergeProbeEvidence(prs: OpenPrView[], summary: MergeProbeSummary): void {
   for (const pr of prs) {
     const conflict = summary.conflictsByPr.get(pr.prNumber);
-    if (pr.mergeConflict !== undefined || !needsConflictEvidence(pr) || conflict?.headSha !== pr.headSha) continue;
+    if (hasCapturedMergeConflictEvidence(pr.mergeConflict) || !needsConflictEvidence(pr) || conflict?.headSha !== pr.headSha) continue;
     pr.mergeConflict = conflict.evidence;
     pr.mergeConflictSource = "merge-probe";
     pr.mergeState = "dirty";
@@ -180,6 +180,10 @@ export async function probeOpenPrMerges(
       // Dirty and unknown heads take slots before PRs that merely changed since the last main.
       .sort((a, b) => dirtyFirst(a) - dirtyFirst(b) || a.lastActivityAt.localeCompare(b.lastActivityAt) || a.prNumber - b.prNumber)
       .slice(0, opts.limit ?? MERGE_PROBE_LIMIT);
+    for (const pr of eligible) {
+      const waitingOnFiles = (pr.mergeState === "dirty" || pr.mergeableState === "dirty") && !hasCapturedMergeConflictEvidence(pr.mergeConflict);
+      if (waitingOnFiles && !seen.has(`${pr.headSha}:${mainSha}`) && !targets.includes(pr)) targets.push(pr);
+    }
     for (const pr of targets) {
       await git(["fetch", "--no-tags", "--quiet", "origin", `refs/pull/${pr.prNumber}/head`]);
       const result = await probeMerge({ headSha: pr.headSha, mainSha, git });

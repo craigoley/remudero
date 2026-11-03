@@ -1484,7 +1484,7 @@ export function createGhReadWarmer(
  *
  * Invariant: only a path present in BOTH responses becomes a {@link ConflictFileDiff}, and REST's
  * "touched since merge base" is broader than "git would conflict here". The set is a superset of
- * git's, which makes {@link isPureConcurrentAddition} stricter and never looser: it cannot manufacture
+ * git's (W1-T11174: only while each list is under GitHub's 300-file cap), so {@link isPureConcurrentAddition} is never looser:
  * a false true from a genuine deletion. A later reader must not narrow it to an exact git-conflict set
  * without re-deriving that argument.
  * ──────────────────────────────────────────────────────────────────────────────────────────── */
@@ -1553,6 +1553,7 @@ function* contentBytes(owner: string, repo: string, path: string, ref: string, f
 }
 
 const REDUNDANT_REFIX_COMPARE_PATH_CAP = 25;
+export const GITHUB_COMPARE_FILE_LIST_CAP = 300;
 
 function* redundantRefixEvidence(
   owner: string,
@@ -1607,6 +1608,10 @@ function* mergeConflictEvidenceSteps(
   const mergeBaseSha = ours.merge_base_commit?.sha;
   if (!mergeBaseSha) throw new Error("conflict evidence compare carried no merge_base_commit.sha");
   const theirs = (yield* ghRead(fetch, compareRestArgs(owner, repo, mergeBaseSha, targetBranch))) as RestCompareResponse;
+  const listed = Math.max(ours.files?.length ?? 0, theirs.files?.length ?? 0);
+  if (listed >= GITHUB_COMPARE_FILE_LIST_CAP) {
+    throw new Error(`a compare listed ${listed} files, GitHub's ${GITHUB_COMPARE_FILE_LIST_CAP}-file cap, so its intersection can miss a conflicting path`);
+  }
 
   const oursDeletions = new Map((ours.files ?? []).filter((f) => f.filename).map((f) => [f.filename as string, f.deletions ?? 0]));
   const theirsDeletions = new Map((theirs.files ?? []).filter((f) => f.filename).map((f) => [f.filename as string, f.deletions ?? 0]));
