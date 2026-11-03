@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // ── W1-T2662: the coverage-ratchet aggregator merges the four shards' lcov into
 // coverage/lcov.info and then discards it with the runner. W1-T2661's tier-two reader
@@ -32,25 +32,9 @@ const OWNER_SF_PATHS = [
   "src/lib/worker.ts",
 ];
 const OWNER_SF_SCRIPT = join(REPO_ROOT, "scripts", "coverage-owning-sf-evidence.mjs");
-const GIT_FIXTURE_ENV = {
-  ...process.env,
-  GIT_CONFIG_GLOBAL: "/dev/null",
-  GIT_CONFIG_SYSTEM: "/dev/null",
-  GIT_AUTHOR_NAME: "coverage evidence fixture",
-  GIT_AUTHOR_EMAIL: "coverage-fixture@example.invalid",
-  GIT_COMMITTER_NAME: "coverage evidence fixture",
-  GIT_COMMITTER_EMAIL: "coverage-fixture@example.invalid",
-  GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
-  GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
-};
-
-function fixtureGit(cwd: string, args: string[]): string {
-  return execFileSync("git", args, { cwd, env: GIT_FIXTURE_ENV, encoding: "utf8" }).trim();
-}
-
-function createOwnerGitFixture(): string {
-  const root = mkdtempSync(join(tmpdir(), "rmd-coverage-owning-sf-"));
-  fixtureGit(root, ["init", "-q", "--initial-branch=main"]);
+function createOwnerGitFixture() {
+  const fixture = gitRepo({ kind: "coverage-owning-sf" });
+  const root = fixture.dir;
   for (const [index, file] of OWNER_SF_PATHS.entries()) {
     const absolute = join(root, file);
     mkdirSync(dirname(absolute), { recursive: true });
@@ -59,9 +43,9 @@ function createOwnerGitFixture(): string {
   const testFile = join(root, "test", "coverage-merged-artifact.test.ts");
   mkdirSync(dirname(testFile), { recursive: true });
   writeFileSync(testFile, "export {};\n");
-  fixtureGit(root, ["add", "--all"]);
-  fixtureGit(root, ["commit", "-qm", "fixture"]);
-  return root;
+  fixture.git("add", "--all");
+  fixture.git("commit", "-qm", "fixture");
+  return fixture;
 }
 
 function lcovRecord(sourceFile: string, lf: number, lh: number, closed = true): string {
@@ -106,7 +90,9 @@ function runOwnerReceipt(root: string, lcov: string) {
   const result = spawnSync(process.execPath, [OWNER_SF_SCRIPT, "--lcov", "coverage/lcov.info", ...OWNER_SF_PATHS.flatMap((file) => ["--file", file])], {
     cwd: root,
     env: {
-      ...GIT_FIXTURE_ENV,
+      ...process.env,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_SYSTEM: "/dev/null",
       GITHUB_REPOSITORY: "fixture/remudero",
       GITHUB_RUN_ID: "123456",
       GITHUB_RUN_ATTEMPT: "2",
@@ -199,7 +185,8 @@ test("coverage-merged-artifact CI wiring: the new steps carry no step-level `if:
 });
 
 test("coverage-owning-SF receipt: binds exact repo source records to the checked-out tree", () => {
-  const root = createOwnerGitFixture();
+  const fixture = createOwnerGitFixture();
+  const root = fixture.dir;
   try {
     const commandPath = OWNER_SF_PATHS[0]!;
     const testPath = "test/coverage-merged-artifact.test.ts";
@@ -216,7 +203,7 @@ test("coverage-owning-SF receipt: binds exact repo source records to the checked
     assert.equal(header.repository, "fixture/remudero");
     assert.equal(header.run_id, "123456");
     assert.equal(header.run_attempt, "2");
-    assert.equal(header.integration_head, fixtureGit(root, ["rev-parse", "HEAD"]));
+    assert.equal(header.integration_head, fixture.git("rev-parse", "HEAD"));
     assert.equal(header.lcov_state, "present");
     assert.equal(header.lcov_bytes, Buffer.byteLength(lcov));
     assert.equal(header.lcov_sha256, createHash("sha256").update(lcov).digest("hex"));
@@ -231,7 +218,7 @@ test("coverage-owning-SF receipt: binds exact repo source records to the checked
     assert.equal(end.owner_record_count, OWNER_SF_PATHS.length);
     assert.deepEqual(rows.map((row) => row.path), OWNER_SF_PATHS);
 
-    const tree = fixtureGit(root, ["ls-tree", "-r", "--full-tree", "HEAD"]);
+    const tree = fixture.git("ls-tree", "-r", "--full-tree", "HEAD");
     for (const row of rows) {
       const path = String(row.path);
       const treeRow = tree.split("\n").find((line) => line.endsWith(`\t${path}`));
@@ -243,12 +230,13 @@ test("coverage-owning-SF receipt: binds exact repo source records to the checked
       assert.equal(row.lh_sum, path === commandPath ? 9 : 7);
     }
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    fixture.cleanup();
   }
 });
 
 test("coverage-owning-SF receipt: reports missing and unterminated owner records without claiming completeness", () => {
-  const root = createOwnerGitFixture();
+  const fixture = createOwnerGitFixture();
+  const root = fixture.dir;
   try {
     const missingPath = OWNER_SF_PATHS.at(-1)!;
     const incompletePath = OWNER_SF_PATHS[0]!;
@@ -271,12 +259,13 @@ test("coverage-owning-SF receipt: reports missing and unterminated owner records
       { state: "missing-sf", sf_record_count: 0, lf_sum: null, lh_sum: null },
     );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    fixture.cleanup();
   }
 });
 
 test("coverage-owning-SF receipt: only exact repo-relative SF paths qualify as owner evidence", () => {
-  const root = createOwnerGitFixture();
+  const fixture = createOwnerGitFixture();
+  const root = fixture.dir;
   try {
     const ownerPath = OWNER_SF_PATHS[0]!;
     const normalizedAlias = "src/lib/../lib/model-canary-command.ts";
@@ -293,6 +282,6 @@ test("coverage-owning-SF receipt: only exact repo-relative SF paths qualify as o
       { state: "missing-sf", sf_record_count: 0, lf_sum: null, lh_sum: null },
     );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    fixture.cleanup();
   }
 });
