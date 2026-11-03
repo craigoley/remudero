@@ -1,10 +1,8 @@
 import { observeCiRefreshDeferrals } from "../src/lib/ci-refresh-prevention.ts";
 /** Private daily operational review. No paid model calls, GitHub reads or routing writes. */
 import { execFileSync } from "node:child_process";
-import { chmodSync, closeSync, constants, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
@@ -13,11 +11,23 @@ import { readCiLessonExposure } from "../src/lib/ci-lesson-recurrence.ts";
 import { goalObservationFromRow } from "../src/lib/goals.ts";
 import { fixedClock, systemClock } from "../src/lib/clock.ts";
 import { ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
+import { createLedgerExactDedupe, LedgerExactDedupeLimitError } from "../src/lib/ledger-exact-dedupe.ts";
 import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.ts";
 import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "../src/lib/routing-quarantine-resolution.ts";
 
 const DAY = 86_400_000;
 const since = ROUTING_EXPERIMENTS.map((item) => item.startedOn).sort()[0];
+const collectorSha256 = createHash("sha256").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex");
+function sourceRevisionAtRuntime() {
+  try { return execFileSync("git", ["rev-parse", "HEAD"], { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+  catch (error) { return { unavailable: String(error.message) }; }
+}
+const loadedRevision = sourceRevisionAtRuntime();
+
+function corpusIdentity(stateDir) {
+  return readdirSync(stateDir).filter(name => name === "ledger.ndjson" || /^ledger\..*\.ndjson(?:\.gz)?$/.test(name)).sort()
+    .map(name => { const st = statSync(join(stateDir, name)); return [name, st.ino, st.size, st.mtimeMs, st.ctimeMs]; });
+}
 
 function reportReads(row, time, windowStart) {
   const step = String(row.step);
@@ -28,7 +38,7 @@ function reportReads(row, time, windowStart) {
       || step.endsWith(".gardener_judged") || step.endsWith(".gardener_failed") || step.startsWith("goal."));
 }
 
-async function readSource(source, asOf, resolutions, openUnion) {
+async function readSource(source, asOf, resolutions, openUnion, retention) {
   let names;
   try { names = readdirSync(source.stateDir); }
   catch { return { ...source, state: "unavailable", reasons: ["ledger-source-unreadable"], rowsRead: 0, rows: [] }; }
@@ -38,45 +48,46 @@ async function readSource(source, asOf, resolutions, openUnion) {
   if (rotations.length + forms.live === 0)
     return { ...source, state: "unavailable", reasons: ["ledger-source-missing"], forms, rowsRead: 0, rows: [] };
   const rows = [];
+  let corpusBefore;
+  try { corpusBefore = JSON.stringify(corpusIdentity(source.stateDir)); }
+  catch (error) { corpusBefore = { unreadable: String(error.message) }; }
   const resolvedRows = new WeakSet();
   let routingResolvedFutureRows = 0;
   const findings = [];
   let findingsOmitted = 0;
   const finding = (value) => { if (findings.length < 200) findings.push(value); else findingsOmitted++; };
   const windowStart = Date.parse(asOf) - DAY;
-  let retainedRowsOmitted = 0;
+  let retainedRowsOmitted = 0, retainedBytes = 0, byteBound = false, rowBound = false, dedupe = null;
+  const { maxRetainedBytes = 32 * 1024 * 1024, maxRetainedRows = 100_000, ...exactOptions } = retention;
+  const exactDedupe = { ...exactOptions, createLedgerExactDedupe };
   const reportSeen = new Set();
   const reportSteps = new Set();
   let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, invalidTimestampRows = 0, newestTs = null;
-  // Audit fingerprints spill to a private disposable database, never a corpus-sized JS Set.
-  // A 2 MiB page-cache target and disabled mmap keep the fingerprint corpus out of RAM.
-  const auditDir = mkdtempSync(join(tmpdir(), "rmd-routing-quality-"));
-  let auditDb;
+  const formsRead = { gzip: 0, plain: 0, live: 0 };
+  const budgetReasons = [];
   try {
-    auditDb = new DatabaseSync(join(auditDir, "seen.sqlite"));
-    auditDb.exec(`PRAGMA cache_size = -2048; PRAGMA mmap_size = 0;
-      PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;
-      CREATE TABLE seen (fingerprint BLOB PRIMARY KEY) WITHOUT ROWID; BEGIN`);
-    const acceptQualityRow = auditDb.prepare("INSERT OR IGNORE INTO seen VALUES (?)");
-    const qualityRows = new WeakSet();
     for await (const row of openUnion(source.stateDir, {
-      since: `${since}T00:00:00Z`,
-      // Audit the corpus without keeping records; the separate report read is step-filtered.
       dedupe: false,
+      exactDedupe,
+      onExactDedupeStats: value => { dedupe = value; },
+      onSourceRead: ({ form }) => { formsRead[form]++; },
+      onUnreadDirectory: () => { unreadSources++; },
       onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
       onMalformedRow: (item) => { malformedRows++; finding({ kind: item.kind, form: item.form, path: item.path, rowOrdinal: item.rowOrdinal, timestamp: item.timestamp }); },
       onAcceptedRecord: (row, raw) => {
-        const fingerprint = createHash("sha256").update(raw).digest();
-        if (!acceptQualityRow.run(fingerprint).changes) return;
         const timestamp = Date.parse(row.ts);
-        if (reportReads(row, timestamp, windowStart) && timestamp <= Date.parse(asOf)) {
-          if (reportSeen.size < 100_000) {
-            reportSeen.add(fingerprint.toString("hex"));
+        if (timestamp >= Date.parse(`${since}T00:00:00Z`) && reportReads(row, timestamp, windowStart) && timestamp <= Date.parse(asOf)) {
+          const bytes = raw.length * 2;
+          if (reportSeen.size < maxRetainedRows && retainedBytes + bytes <= maxRetainedBytes) {
+            reportSeen.add(Buffer.from(raw, "utf16le").toString("utf16le"));
+            retainedBytes += bytes;
             reportSteps.add(row.step);
-          } else retainedRowsOmitted++;
+          } else {
+            retainedRowsOmitted++;
+            if (reportSeen.size >= maxRetainedRows) rowBound = true;
+            if (retainedBytes + bytes > maxRetainedBytes) byteBound = true;
+          }
         }
-        // Count each logical union row once, including unrelated and quarantined rows.
-        qualityRows.add(row);
         const resolution = resolveRoutingQuarantineRow(resolutions, source.label, row, raw, asOf);
         if (resolution) resolvedRows.add(row);
         if (!Number.isFinite(timestamp) || timestamp > Date.parse(asOf) + 5 * 60_000) finding({
@@ -86,44 +97,63 @@ async function readSource(source, asOf, resolutions, openUnion) {
         });
       },
     })) {
-      if (!qualityRows.has(row)) continue;
       const time = Date.parse(row.ts);
       if (!Number.isFinite(time)) { invalidTimestampRows++; continue; }
       if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
       // Normal writes arriving during the scan belong to the next snapshot, not a clock warning.
       if (time > Date.parse(asOf)) continue;
       rowsRead++;
-      if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
+      if (newestTs === null || time > Date.parse(newestTs)) newestTs = row.ts;
     }
-    auditDb.exec("COMMIT");
-  } finally {
-    try { auditDb?.close(); }
-    finally { rmSync(auditDir, { recursive: true, force: true }); }
+  } catch (error) {
+    if (!(error instanceof LedgerExactDedupeLimitError)) throw error;
+    budgetReasons.push(error.reason);
   }
   const dedupeRows = reportSeen.size;
+  let deliveredBytes = 0;
   if (reportSteps.size) {
-    // Only audited report steps reach the union parser. Consume fingerprints on delivery so
+    // Only audited report steps reach the union parser. Consume exact identities on delivery so
     // replays, concurrent appends and unrelated rows cannot enlarge the retained population.
     const admittedRows = new WeakSet();
+    try {
     for await (const row of openUnion(source.stateDir, {
-      since: `${since}T00:00:00Z`, step: [...reportSteps], dedupe: false,
+      since: `${since}T00:00:00Z`, step: [...reportSteps], exactDedupe,
+      onUnreadDirectory: () => { unreadSources++; },
       onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
       onAcceptedRecord: (row, raw) => {
-        if (reportSeen.delete(createHash("sha256").update(raw).digest("hex"))) admittedRows.add(row);
+        if (reportSeen.delete(raw)) { admittedRows.add(row); deliveredBytes += raw.length * 2; }
       },
     })) {
       if (admittedRows.delete(row)) rows.push(row);
     }
+    } catch (error) {
+      if (!(error instanceof LedgerExactDedupeLimitError)) throw error;
+      if (!budgetReasons.includes(error.reason)) budgetReasons.push(error.reason);
+    }
   }
-  const reasons = [];
-  if (reportSeen.size) reasons.push("ledger-source-changed-during-review");
-  if (retainedRowsOmitted) reasons.push("ledger-retention-row-bound");
+  const reasons = [...budgetReasons];
+  let corpusAfter;
+  try { corpusAfter = JSON.stringify(corpusIdentity(source.stateDir)); }
+  catch (error) { corpusAfter = { unreadable: String(error.message) }; }
+  if (reportSeen.size || typeof corpusBefore !== "string" || typeof corpusAfter !== "string" || corpusBefore !== corpusAfter) reasons.push("ledger-source-changed-during-review");
+  if (rowBound) reasons.push("ledger-retention-row-bound");
+  if (byteBound) reasons.push("ledger-retention-byte-bound");
   if (unreadSources) reasons.push("ledger-source-unreadable");
   if (malformedRows) reasons.push("ledger-source-malformed");
   if (invalidTimestampRows) reasons.push("ledger-source-invalid-timestamp");
   if (futureRows) reasons.push("ledger-source-future-dated");
+  if (!rowsRead) reasons.push("ledger-positive-control-missing");
+  const windowEvidencePresent = newestTs !== null && Date.parse(newestTs) >= windowStart;
+  if (rowsRead && !windowEvidencePresent) reasons.push("ledger-window-evidence-missing");
+  if (!unreadSources && !budgetReasons.length && Object.keys(forms).some(form => formsRead[form] !== forms[form])) reasons.push("ledger-corpus-form-coverage-incomplete");
+  const completeness = { scope: "enumerated-rotated-plus-live-corpus", retention: "uncertified", positiveControl: rowsRead > 0,
+    windowStart: new Date(windowStart).toISOString(), newestTs, windowEvidencePresent,
+    complete: reasons.length === 0 };
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
-    rowsRead, retainedRows: rows.length, dedupeRows, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
+    rowsRead, retainedRows: rows.length, retainedBytes: deliveredBytes, auditedRetainedBytes: retainedBytes,
+    retainedRowsMissing: reportSeen.size, maxRetainedBytes, dedupe: dedupe && { rows: dedupe.rows, state: dedupe.state, reason: dedupe.reason },
+    corpusControl: { formsExpected: forms, formsRead, index: dedupe },
+    completeness, dedupeRows, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {
@@ -132,7 +162,19 @@ function privateWrite(path, value) {
   renameSync(temp, path);
 }
 
-export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions, openUnion = openLedgerUnion }) {
+export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions, openUnion = openLedgerUnion, retention = {} }) {
+  for (const limit of [retention.maxRetainedBytes, retention.maxRetainedRows]) {
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) throw new TypeError("invalid ledger retention bound");
+  }
+  let latestOutput;
+  try {
+    const latest = JSON.parse(readFileSync(join(outDir, "latest.json"), "utf8"));
+    const ageMs = Date.parse(asOf) - Date.parse(latest.asOf);
+    if (!Number.isFinite(ageMs) || latest.version !== "routing-daily-review-v1") throw new Error("invalid latest output");
+    latestOutput = { asOf: latest.asOf, ageMs, state: ageMs < 0 ? "future-dated" : ageMs > 36 * 3600000 ? "stale" : "fresh", sourceRevision: latest.sourceRevision ?? null };
+  } catch (error) {
+    latestOutput = { state: error.code === "ENOENT" ? "missing" : "unreadable", asOf: null, ageMs: null, reason: String(error.message) };
+  }
   const resolutions = readRoutingQuarantineResolutions(quarantineResolutions, asOf, sources.map(source => source.label));
   const today = asOf.slice(0, 10);
   const yesterday = fixedClock(Date.parse(`${today}T00:00:00Z`) - DAY).iso().slice(0, 10);
@@ -153,8 +195,11 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
     previousReview = { state: "unavailable", reason: error.code === "ENOENT" ? "no-prior-day-review" : "prior-day-review-unreadable" };
   }
   const results = [];
+  const corpusControls = [];
   for (const source of sources) {
-    const { rows, ...quality } = await readSource(source, asOf, resolutions, openUnion);
+    const { rows, corpusControl, ...quality } = await readSource(source, asOf, resolutions, openUnion, retention);
+    corpusControls.push({ label: source.label, ...(corpusControl ?? { formsExpected: quality.forms ?? null,
+      formsRead: { gzip: 0, plain: 0, live: 0 }, index: null }) });
     const trialReasons = quality.reasons.filter(reason => reason !== "ledger-source-future-dated"
       || quality.futureRows !== quality.routingResolvedFutureRows);
     const trialSourceQuality = { scope: "routing-trials", rawSourceState: quality.state,
@@ -191,16 +236,24 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
         at: row.ts, outcome: row.step, baseline: row.baseline, measured: row.value, costComplete: row.costComplete })) };
     results.push({ ...quality, reports, reviewFlow, selfImprovement });
   }
-  let sourceRevision = null;
-  try { sourceRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
-  catch { /* A source archive has no Git revision; retain the unknown. */ }
+  const installedRevision = sourceRevisionAtRuntime();
+  const sourceRevision = typeof loadedRevision === "string" ? loadedRevision : null;
+  const runtime = { sourceRevision, collectorSha256, nodeVersion: process.version, pid: process.pid,
+    installedRevision: typeof installedRevision === "string" ? installedRevision : null,
+    revisionError: typeof loadedRevision === "string" ? null : loadedRevision.unavailable,
+    installedCollectorSha256: createHash("sha256").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex"),
+    sourceMerge: "not-observed", providerAdoption: "not-attested" };
   const snapshot = { version: "routing-daily-review-v1", asOf, cadence: "daily", nextScheduledReviewAt,
-    sourceRevision, previousReview, state: results.every((source) => source.state === "observed") ? "observed" : "observed-partial",
+    sourceRevision, runtime, latestOutput, corpusControls, stages: { collection: { state: results.every(source => source.state === "observed") ? "ok" : "partial",
+      sources: results.map(source => ({ label: source.label, state: source.state, reasons: source.reasons })) } },
+    previousReview, state: results.every((source) => source.state === "observed") ? "observed" : "observed-partial",
     comparativeClaims: "none", routingChanged: false, sources: results };
   const lines = [`Daily routing review ${asOf}: ${snapshot.state}`, `Next scheduled review: ${nextScheduledReviewAt}`,
+    `Collector revision: ${sourceRevision ?? "unavailable"}; runtime ${runtime.nodeVersion}; collection ${snapshot.stages.collection.state}; prior output ${latestOutput.state}, age ${latestOutput.ageMs ?? "unavailable"} ms`,
     "Operational observations; sample minimum alone does not establish a model winner."];
   for (const source of results) {
     lines.push(`${source.label}: ${source.state}; ${source.rowsRead} rows; ${source.reasons.join(", ") || "no source warnings"}`);
+    lines.push(`  retained ${source.retainedRows ?? 0} rows, ${source.retainedBytes ?? 0} UTF-16 bytes; corpus control ${source.completeness?.positiveControl ?? false}; daily window evidence present ${source.completeness?.windowEvidencePresent ?? false}; retention uncertified`);
     lines.push(`  review flow (uncertified retention): ${source.reviewFlow.counts.delivered} delivered exact inputs; ${source.reviewFlow.counts.superseded} superseded; ${source.reviewFlow.counts.unresolvedSourceGap} source gaps; completed-only p95 ${source.reviewFlow.completedOnly.p95Ms ?? "unavailable"} ms; ${source.reviewFlow.semantic.notAttempted} semantic not attempted`);
     lines.push(`  self improvement: ${source.selfImprovement.gardenerFailures} observed gardener failures; ${source.selfImprovement.gardenerCredits} credits; ${source.selfImprovement.gardenerDebits} debits; ${source.selfImprovement.ciLearning?.recurredLessons ?? "unavailable"} recurring CI lessons; no efficacy claim`);
     for (const report of source.reports) {

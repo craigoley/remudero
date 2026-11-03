@@ -16,6 +16,9 @@
     - src/lib/worker-provider.ts
     - test/routing/codex-model-experiment-epoch.test.ts
     - scripts/expiring-fixture-census.mjs
+  # refusal-amendment (W1-T10842, run DAEMON-1793643571744@e87ce4c6924ea9878f5b798fbfc5213ba9ea24b0, 2026-11-03T00:41:56.674Z): the worker refused criterion 5 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: Codex exec JSONL provides no actual served-model field, so every assignment cannot receive the required attribution through this transport.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   note: 'operator grant 2026-11-01 (session) for #15520: scripts/expiring-fixture-census.mjs'

@@ -1,7 +1,7 @@
 - id: W1-T8887
   title: "AN OPERATOR ANSWER FROM THE CONSOLE CLOSES THE ISSUE AND CHANGES NOTHING — /now posts a disposition to /v1/escalation/mark-handled, which closes the issue and ledgers panel.escalation_marked_handled with no effect on the daemon, because no producer emits an executable option (14 operator-only, 0 executable) and no route executes a chosen option: escalation options carry the action they stand for, and choosing one executes it"
   repo: remudero
-  depends_on: [W1-T8868]
+  depends_on: [W1-T8868, W1-T11096, W1-T11103]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -9,8 +9,20 @@
   risk: high  # Rule 19: one concern — a chosen escalation option executes its action through one audited route; console rendering is a CONSOLE task
   band_meaning: span
   origin: "operator ruling 2026-10-12: improve the communication mechanism and the console; it is not fully functional yet"
-  plan_refs: [W1-T2273, W1-T4677, W1-T8511, W1-T8868]
-  files: [src/lib/escalate.ts, src/lib/panel-actions.ts, src/lib/now-decisions.ts, test/choosing-an-escalation-option-executes-it.test.ts]
+  plan_refs: [W1-T2273, W1-T4677, W1-T8511, W1-T8868, W1-T100, W1-T10572]
+  files:
+    - src/lib/escalate.ts
+    - src/lib/panel-actions.ts
+    - src/lib/now-decisions.ts
+    - src/lib/escalation-conversation.ts
+    - src/lib/inbox-thread.ts
+    - src/lib/serve.ts
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/console-api/choosing-an-escalation-option-executes-it.test.ts
+    - test/an-escalation-is-triaged-before-it-reaches-the-operator.test.ts
   status: queued
   priority: 2
   attempts: 0
@@ -25,6 +37,10 @@
       sets one: 14 operator-only, 0 executable.
     - `recordRiskOverride` (panel-actions.ts) has no caller, and `riskOverrideFromLedger` has no reader outside ledger.ts.
     OWNERSHIP: W1-T8511 (queued) carries GitHub replies into the feedback record. No shard makes options executable.
+    W1-T100 shares run-task/sweep for its CI repair routing; it does not expose a human's closed
+    native choice executor. W1-T10572 shares the generated API contract for its own producer;
+    this task adds only the later native escalation choice contract. Preserve both owners and
+    reconcile current heads before implementation or publication.
   design: |
     1. Producers with an existing executor emit executable options naming it, from the same closed action set as
        W1-T8868: feedback_reply, plan_amendment_pr, rekick_once, apply_default, merge_hold_release (confirm-nonce
@@ -40,7 +56,50 @@
     4. The console renders options as buttons: a CONSOLE task filed separately against this route.
   acceptance:
     - claim: "choosing an executable escalation option runs its executor, ledgers the choice and closes the issue only after the effect is observed, HIGH-tier options require the confirm nonce, and the risk override has a route"
-      proof: 'grep: test("W1-T8887: choosing an escalation option executes it" in test/choosing-an-escalation-option-executes-it.test.ts'
+      proof: 'grep: test("W1-T8887: choosing an escalation option executes it" in test/console-api/choosing-an-escalation-option-executes-it.test.ts'
   falsifier: |
     Route /v1/escalation/choose to mark-handled's close-only path: the fixture's feedback_reply option closes the issue
     without a feedback entry, and the test fails.
+  note: |
+    2026-11-03 scope reconciliation for the operator's console inbox delivery. The four LOW
+    triage executors actually live inside buildEscalationTriageRuntime in src/run-task.ts;
+    observe returns no resolved-effect evidence for a proposed amendment or requested kick.
+    This cannot be implemented by calling mark-handled or by copying those effects into a new
+    interpreter. Reuse their native execute/observe ports and preserve existing admission,
+    ownership, spending and per-head/contract re-kick bounds. Keep TRIAGE_ACTIONS at its existing
+    four reversible actions: human-only merge-hold release and risk override must not become
+    model-selected or automatic triage actions.
+
+    W1-T11096/W1-T11103 supply the exact native discussion and causal follow-up contract. Native
+    choices must also be advertised on that conversation read, because engineering questions
+    now open in the email reading pane. Keep the existing informational/operator-only options
+    compatible. Only a validated closed native action with current source and effect evidence
+    can advertise an executable choice. Bind option identity to the exact repository, issue,
+    source version and native action payload. Accept recommendation, Decline, Reply and wording
+    feedback remain prose/capture paths; none acquires executor authority.
+
+    Mount the authenticated choose route in the real root and selected-instance serve assembly,
+    declare its request/result/option/tier contracts in OpenAPI and regenerate the client. A
+    foreign repository, stale option, unsupported action or mismatched replay is refused before
+    effects. Reconcile repeated or lost acknowledgements with durable native choice identity;
+    an unknown result cannot start a new execution. Every HIGH choice requires the existing
+    operator step-up and exact-body confirm nonce. Do not expand the older generic executable
+    route allowlist to authorize this action set.
+
+    Preserve a recorded request, a proposed PR, admitted dispatch and observed completed effect
+    as different outcomes. Reuse the existing sweep to reconcile pending effects; add no timer,
+    service or judge. Close the source issue only after the chosen effect is observed. Keep
+    correspondence input needs separate from work completion, using causal native messages:
+    explicit no-more-input may archive while work runs; a new question reopens the same thread.
+    Formal approvals, release holds and HIGH controls remain separate from prose answers.
+
+    The new protocol suite's proposed direct imports of panel-actions, escalate and now-decisions
+    compute to console-api, confidence HIGH, on tree0c88081657e9c909f658c7202fd1877640199e53.
+    Extend the existing triage runtime suite for real factory wiring rather than adding another
+    run-task importer or raising affected reach. Recompute placement for the actual test imports.
+    Prove default transport/queue ports and refusals, immutable replay, genuinely pending effects,
+    nonce-required HIGH actions, and the assembled selected-instance route. Remove each guard
+    to obtain a behavior failure, then restore exact bytes. Current committed-tree author,
+    actual stored-body proofs, native review, hosted checks and protected merge still apply.
+    Budget20 and priority2 are unchanged. No source implementation, live adoption, task claim,
+    allowance change, gate exception or permission to act on a business escalation is claimed.

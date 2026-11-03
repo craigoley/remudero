@@ -1,0 +1,55 @@
+- id: W1-T11156
+  title: "When the restart latch holds a light pass's review picks, every other review stand-down in that pass names the latch and the PRs it held, instead of a bound-only sentence that reads as if the picks ran — 313 rows in 7 days said 'restart latched' for the held PR itself, while the PRs behind it read 'not admitted this pass: semantic post-review admission bound N, in-flight N', which names a bound that was not what kept the lane empty"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one concern, the stand-down text of a pass whose picks the latch held; one module and its test
+  origin: operator-session#review-lane-findings-2026-11-02
+  plan_refs:
+    - W1-T9808
+    - W1-T8172
+    - W1-T2426
+    - W1-T9433
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-latch-held-pick-is-named-in-every-stand-down-of-its-pass.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "In a light pass where the restart latch held one or more selected reviews, each other review-lane PR that lost the pass's admission gets a stand-down reason that keeps today's bound wording and adds a suffix naming the latch and each held pick by PR number, and a pass whose picks all ran reads exactly as today"
+      proof: "unit test: test/sweep/a-latch-held-pick-is-named-in-every-stand-down-of-its-pass.test.ts"
+    - claim: fleetWithheldStageMs still counts a row with the latch suffix as admission-held fleet time, so the stage clock that reads these rows is unchanged
+      proof: "grep: W1-T11156 criterion 2 in test/sweep/a-latch-held-pick-is-named-in-every-stand-down-of-its-pass.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 over a 7-day ledger union (~/Remudero-notes/review-lane-findings-2026-11-02.md and its raw extract, read-only),
+    sweep.disposed rows with disposition post-review:
+    - 313 rows read "not admitted this pass: restart latched, and the review would outlast its drain" (161 code, 152 plan).
+    - 1,795 code rows read "not admitted this pass: semantic post-review admission bound N, in-flight N", the bound-only form.
+    - The restart latch (src/lib/daemon.ts, W1-T9808) judges every review by the median length of ALL reviews, so a 1-minute plan
+      review is held as if it were a 6-minute code review; 53 daemon boots in the 7 days.
+    READ at origin/main 1368db581, src/lib/sweep.ts runSweepLightPass:
+    - admitAfterLatch drops a selected PR into latchHeld when deps.restartAdmission refuses it; spawning excludes it, and only that
+      PR's own standDownReasonFor returns the latch sentence.
+    - Every other review-lane PR gets `not admitted this pass: semantic post-review admission bound ${semanticBound}` plus
+      inFlightNote and "admitted #… ahead" from spawning, which no longer lists the held picks. When the latch held all the picks,
+      nothing in those rows says why no review started.
+    - fleetWithheldStageMs (W1-T9433) matches these sentences with anchored regexes, so a new suffix must be added there too.
+    NOT COVERED: the per-class review length for the latch itself is part of item 1, hand-built in the operator session. W1-T2426
+    (merged) named the lost-admission mechanism; W1-T8172 (merged) gave the drain its measured length.
+  design: |
+    1. After admitAfterLatch runs, build latchHeldNumbers from latchHeld. In standDownReasonFor's bound arm, append
+       `; restart latch held ${latchHeldNumbers}` when it is non-empty (after the admitted-ahead note). The plan-filing arm gets the
+       same suffix.
+    2. Extend fleetWithheldStageMs's two bound regexes with an optional `(?:; restart latch held #\d+(?:, #\d+)*)?` suffix.
+    3. No other text changes.
+    Tests go in test/sweep/a-latch-held-pick-is-named-in-every-stand-down-of-its-pass.test.ts, titled verbatim as in the proofs,
+    over the real runSweepLightPass with an injected restartAdmission that refuses the first pick.
+  note: |
+    reservation hand-off: plan-file-1793657971812 -> plan-file-1793657971812
+    Reserved with rmd next-task-id --branch plan-file-1793657971812 from the operator checkout. Filed 2026-11-02 from the review-lane
+    findings, item 5c (p2), harness noise; 5a is W1-T11154 and 5b is W1-T11155 (Rule 19). Priority 3: it makes the stand-down
+    legible, it does not move the wait.
