@@ -14,6 +14,9 @@
     - W1-T9904
   files:
     - docs/recon/light-pass-review-admission-order-and-width.md
+  # refusal-amendment (W1-T10992, run DAEMON-1793680047510@f5ac3417fd5dec19ece48da1e823c38396fc4ba2, 2026-11-03T10:10:21.866Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The original ledger corpus is unavailable, so the uncompressed-rotation count and seven-day completeness cannot be verified.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
