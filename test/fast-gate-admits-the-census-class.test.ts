@@ -4,10 +4,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
-import { FAST_GATE_CENSUS_BOUND_MS, FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
+import { defaultPreflightSpawn, type PreflightSpawn } from "#src/lib/commit-message.js";
+import { AUTHOR_CENSUS_ANSWERED_ENV, FAST_GATE_CENSUS_BOUND_MS, FAST_GATE_STEPS, runPreflightFast } from "#src/lib/ci-parity.js";
 
 // ── W1-T2478: the fast gate admits the census class under a MEASURED bound ─────────────────────
 //
@@ -33,7 +33,6 @@ import { FAST_GATE_CENSUS_BOUND_MS, FAST_GATE_STEPS, runPreflightFast } from "..
 // until it is made cheaper or its own cost is argued separately, refused by the same predicate a
 // future entry would be, never by a written exception (task rationale, "NOT IN SCOPE").
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 const REAL_PACKAGE_JSON = JSON.stringify({
   scripts: Object.fromEntries(FAST_GATE_STEPS.map((s) => [s.script, "echo stub"])),
@@ -237,12 +236,22 @@ test("package.json: every census:* script names exactly ONE test file, never the
   }
 });
 
+function withoutAuthorCensusAnswer<T>(operation: () => T): T {
+  const inherited = process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+  delete process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+  try { return operation(); }
+  finally {
+    if (inherited === undefined) delete process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+    else process.env[AUTHOR_CENSUS_ANSWERED_ENV] = inherited;
+  }
+}
+
 test("runPreflightFast: mocked end-to-end over all fourteen FAST_GATE_STEPS, no spawn call ever names test:ci, a bare npm test, or the test/**/*.test.ts glob", (t) => {
   const root = mkdtempSync(join(tmpdir(), "rmd-fast-gate-steps-"));
   mkdirSync(join(root, "plan/tasks.d"), { recursive: true });
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const { spawn, calls } = recordingSpawn();
-  runPreflightFast(root, { spawn, packageJsonText: REAL_PACKAGE_JSON });
+  withoutAuthorCensusAnswer(() => runPreflightFast(root, { spawn, packageJsonText: REAL_PACKAGE_JSON }));
   assert.equal(calls.length, FAST_GATE_STEPS.length, "exactly one spawn per curated step, no extras");
   for (const [index, call] of calls.entries()) {
     const key = [call.file, ...call.args].join(" ");
@@ -259,6 +268,29 @@ test("runPreflightFast: mocked end-to-end over all fourteen FAST_GATE_STEPS, no 
     }
   }
 });
+
+test("mocked preflight steps isolate and restore an inherited head-bound census answer", () => {
+  const inherited = process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  const answer = `${head}:ok`;
+  try {
+    process.env[AUTHOR_CENSUS_ANSWERED_ENV] = answer;
+    const answered = recordingSpawn();
+    runPreflightFast(REPO_ROOT, { spawn: answered.spawn, packageJsonText: REAL_PACKAGE_JSON });
+    assert.equal(answered.calls.length, FAST_GATE_STEPS.length - 1, "matching author answer skips the actual census spawn");
+    const isolated = recordingSpawn();
+    withoutAuthorCensusAnswer(() => runPreflightFast(REPO_ROOT,
+      { spawn: isolated.spawn, packageJsonText: REAL_PACKAGE_JSON }));
+    assert.equal(isolated.calls.length, FAST_GATE_STEPS.length, "mocked full-step contract includes every step");
+    assert.equal(process.env[AUTHOR_CENSUS_ANSWERED_ENV], answer, "the enclosing author's answer survives the test");
+    assert.throws(() => withoutAuthorCensusAnswer(() => { throw new Error("fixture-error"); }), /fixture-error/);
+    assert.equal(process.env[AUTHOR_CENSUS_ANSWERED_ENV], answer, "errors also restore the enclosing context");
+  } finally {
+    if (inherited === undefined) delete process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+    else process.env[AUTHOR_CENSUS_ANSWERED_ENV] = inherited;
+  }
+});
+
 
 // ═══════════════════ acceptance: "the bound-kind census now fails a fast run on the ════════════
 // ═══════════════════ omission that reddened the build" ══════════════════════════════════════

@@ -57,6 +57,14 @@
     subject. This headless pass could not grep head trees, so refresh the all-open-head subject
     audit at filing review. It depends on W1-T11085, and through it on W1-T11078, because all three
     edit the product plan operation and the served product route suite.
+    Settled by lookup: is the hold release already decided or filed? -> yes, by explicit operator
+    instruction in run PLAN-clarify-1793710900267, after filing PR #16497 merged with its
+    plan-only review and hosted checks green, and prerequisite W1-T11085 merged. This release
+    clears only dispatch_hold. Scope (8 files), the USD30 cap, high risk, depends_on, acceptance,
+    tests and every normal ownership, admission, TDD, review, CI and protected-merge gate stay
+    exactly as filed. W1-T11196 and W1-T11197 stay dispatch-held. Settled by lookup: how is a hold
+    released? -> by setting dispatch_hold false on the task record alone, as done for W1-T11078
+    and W1-T11085 (plan/tasks.d).
   design: |
     (1) Name absence truthfully. In src/lib/mounts.ts, add a MountsMissingError subclass of
     MountsError that loadMounts throws only when the read fails with a confirmed ENOENT. Its
@@ -113,7 +121,8 @@
     Record real nonzero test summaries for each mutant and for the restored implementation.
     Fixture success is not a live Wreckterra plan receipt.
   note: >-
-    Held: release requires ordinary filing review, merge and explicit operator release. Release
-    this task first; W1-T11196 and W1-T11197 depend on it. It grants no live plan, retry, budget,
+    Released (dispatch_hold false) after filing PR #16497 merged and W1-T11085 merged, by explicit
+    operator instruction. It enters normal ownership and admission only. W1-T11196 and W1-T11197
+    depend on it and remain held. It grants no live plan, retry, budget,
     access, gameplay, deployment or device claim. Keep the original-IP, mobile-first and OSM
     attribution constraints and the existing-setup/USD30 Wreckterra envelope unchanged.
