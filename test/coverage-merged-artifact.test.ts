@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -18,6 +22,103 @@ import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
+const OWNER_SF_PATHS = [
+  "src/lib/model-canary-command.ts",
+  "src/lib/model-canary-owner.ts",
+  "src/lib/model-canary-pilot-approval.ts",
+  "src/lib/model-canary-pilot-budget.ts",
+  "src/lib/model-canary-pilot-execution.ts",
+  "src/lib/worker-provider.ts",
+  "src/lib/worker.ts",
+];
+const OWNER_SF_SCRIPT = join(REPO_ROOT, "scripts", "coverage-owning-sf-evidence.mjs");
+const GIT_FIXTURE_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_AUTHOR_NAME: "coverage evidence fixture",
+  GIT_AUTHOR_EMAIL: "coverage-fixture@example.invalid",
+  GIT_COMMITTER_NAME: "coverage evidence fixture",
+  GIT_COMMITTER_EMAIL: "coverage-fixture@example.invalid",
+  GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
+  GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
+};
+
+function fixtureGit(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, env: GIT_FIXTURE_ENV, encoding: "utf8" }).trim();
+}
+
+function createOwnerGitFixture(): string {
+  const root = mkdtempSync(join(tmpdir(), "rmd-coverage-owning-sf-"));
+  fixtureGit(root, ["init", "-q", "--initial-branch=main"]);
+  for (const [index, file] of OWNER_SF_PATHS.entries()) {
+    const absolute = join(root, file);
+    mkdirSync(dirname(absolute), { recursive: true });
+    writeFileSync(absolute, `export const ownerFixture${index} = ${index};\n`);
+  }
+  const testFile = join(root, "test", "coverage-merged-artifact.test.ts");
+  mkdirSync(dirname(testFile), { recursive: true });
+  writeFileSync(testFile, "export {};\n");
+  fixtureGit(root, ["add", "--all"]);
+  fixtureGit(root, ["commit", "-qm", "fixture"]);
+  return root;
+}
+
+function lcovRecord(sourceFile: string, lf: number, lh: number, closed = true): string {
+  return `SF:${sourceFile}\nDA:1,1\nLF:${lf}\nLH:${lh}\n${closed ? "end_of_record\n" : ""}`;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function parseOwnerReceipt(stdout: string): { header: Record<string, unknown>; rows: Record<string, unknown>[]; end: Record<string, unknown> } {
+  const lines = stdout.trimEnd().split("\n");
+  assert.equal(lines.length, OWNER_SF_PATHS.length + 2, "receipt has one begin, one row per owner path, and one end marker");
+  assert.ok(lines[0].startsWith("RMD_COV_SF_V1_BEGIN "));
+  assert.ok(lines.at(-1)?.startsWith("RMD_COV_SF_V1_END "));
+  const fileLines = lines.slice(1, -1);
+  for (const line of fileLines) assert.ok(line.startsWith("RMD_COV_SF_V1_FILE "));
+  const header = JSON.parse(lines[0].slice("RMD_COV_SF_V1_BEGIN ".length)) as Record<string, unknown>;
+  const rows = fileLines.map((line) => JSON.parse(line.slice("RMD_COV_SF_V1_FILE ".length)) as Record<string, unknown>);
+  const end = JSON.parse(lines.at(-1)!.slice("RMD_COV_SF_V1_END ".length)) as Record<string, unknown>;
+  assert.equal(lines[0]!.slice("RMD_COV_SF_V1_BEGIN ".length), canonicalJson(header));
+  for (const [index, line] of fileLines.entries()) {
+    assert.equal(line.slice("RMD_COV_SF_V1_FILE ".length), canonicalJson(rows[index]));
+  }
+  assert.equal(lines.at(-1)!.slice("RMD_COV_SF_V1_END ".length), canonicalJson(end));
+  const beginSha = createHash("sha256").update(`${lines[0]}\n`, "utf8").digest("hex");
+  const recordsSha = createHash("sha256").update(`${fileLines.join("\n")}\n`, "utf8").digest("hex");
+  assert.equal(end.begin_sha256, beginSha, "begin digest binds the exact marker, canonical JSON and LF");
+  assert.equal(end.records_sha256, recordsSha, "record digest binds every ordered marker, canonical JSON and LF");
+  return { header, rows, end };
+}
+
+function runOwnerReceipt(root: string, lcov: string) {
+  const lcovPath = join(root, "coverage", "lcov.info");
+  mkdirSync(dirname(lcovPath), { recursive: true });
+  writeFileSync(lcovPath, lcov);
+  const result = spawnSync(process.execPath, [OWNER_SF_SCRIPT, "--lcov", "coverage/lcov.info", ...OWNER_SF_PATHS.flatMap((file) => ["--file", file])], {
+    cwd: root,
+    env: {
+      ...GIT_FIXTURE_ENV,
+      GITHUB_REPOSITORY: "fixture/remudero",
+      GITHUB_RUN_ID: "123456",
+      GITHUB_RUN_ATTEMPT: "2",
+    },
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.equal(result.error, undefined, `receipt helper starts and closes: ${String(result.error ?? "")}`);
+  assert.equal(result.status, 0, `receipt helper is evidence-only: ${result.stderr}`);
+  assert.equal(result.stderr, "", "the successful receipt path does not emit diagnostics");
+  return result.stdout;
+}
 
 async function aggregatorJobBody(): Promise<string> {
   const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
@@ -95,4 +196,103 @@ test("coverage-merged-artifact CI wiring: the new steps carry no step-level `if:
     /\n\s*if:/,
     "no step in coverage-ratchet-required may carry a step-level `if:` (test/fast-lane-classifier.test.ts's acceptance 6)",
   );
+});
+
+test("coverage-owning-SF receipt: binds exact repo source records to the checked-out tree", () => {
+  const root = createOwnerGitFixture();
+  try {
+    const commandPath = OWNER_SF_PATHS[0]!;
+    const testPath = "test/coverage-merged-artifact.test.ts";
+    const childPath = "../temporary-child/src/lib/model-canary-command.ts";
+    const lcov = [
+      ...OWNER_SF_PATHS.map((file) => lcovRecord(file, 12, 7)),
+      lcovRecord(commandPath, 3, 2),
+      lcovRecord(testPath, 20, 15),
+      lcovRecord(childPath, 5, 4),
+    ].join("");
+
+    const { header, rows, end } = parseOwnerReceipt(runOwnerReceipt(root, lcov));
+    assert.equal(header.state, "complete");
+    assert.equal(header.repository, "fixture/remudero");
+    assert.equal(header.run_id, "123456");
+    assert.equal(header.run_attempt, "2");
+    assert.equal(header.integration_head, fixtureGit(root, ["rev-parse", "HEAD"]));
+    assert.equal(header.lcov_state, "present");
+    assert.equal(header.lcov_bytes, Buffer.byteLength(lcov));
+    assert.equal(header.lcov_sha256, createHash("sha256").update(lcov).digest("hex"));
+    assert.equal(header.sf_record_count, OWNER_SF_PATHS.length + 3);
+    assert.equal(header.unique_sf_path_count, OWNER_SF_PATHS.length + 2);
+    assert.equal(header.repo_src_sf_record_count, OWNER_SF_PATHS.length + 1);
+    assert.equal(header.repo_src_unique_path_count, OWNER_SF_PATHS.length);
+    assert.equal(header.out_of_repo_sf_record_count, 1);
+    assert.equal(header.relative_parent_child_sf_record_count, 1);
+    assert.equal(header.incomplete_sf_record_count, 0);
+    assert.equal(header.owner_record_count, OWNER_SF_PATHS.length);
+    assert.equal(end.owner_record_count, OWNER_SF_PATHS.length);
+    assert.deepEqual(rows.map((row) => row.path), OWNER_SF_PATHS);
+
+    const tree = fixtureGit(root, ["ls-tree", "-r", "--full-tree", "HEAD"]);
+    for (const row of rows) {
+      const path = String(row.path);
+      const treeRow = tree.split("\n").find((line) => line.endsWith(`\t${path}`));
+      assert.ok(treeRow, `fixture tree contains ${path}`);
+      assert.equal(row.blob_oid, treeRow!.split("\t", 1)[0]!.split(" ")[2]);
+      assert.equal(row.state, "observed");
+      assert.equal(row.sf_record_count, path === commandPath ? 2 : 1);
+      assert.equal(row.lf_sum, path === commandPath ? 15 : 12);
+      assert.equal(row.lh_sum, path === commandPath ? 9 : 7);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("coverage-owning-SF receipt: reports missing and unterminated owner records without claiming completeness", () => {
+  const root = createOwnerGitFixture();
+  try {
+    const missingPath = OWNER_SF_PATHS.at(-1)!;
+    const incompletePath = OWNER_SF_PATHS[0]!;
+    const lcov = [
+      ...OWNER_SF_PATHS.slice(1, -1).map((file) => lcovRecord(file, 4, 2)),
+      lcovRecord(incompletePath, 6, 3, false),
+    ].join("");
+    const { header, rows } = parseOwnerReceipt(runOwnerReceipt(root, lcov));
+
+    assert.equal(header.state, "partial");
+    assert.equal(header.incomplete_sf_record_count, 1);
+    const incomplete = rows.find((row) => row.path === incompletePath);
+    assert.deepEqual(
+      { state: incomplete?.state, sf_record_count: incomplete?.sf_record_count, lf_sum: incomplete?.lf_sum, lh_sum: incomplete?.lh_sum },
+      { state: "incomplete", sf_record_count: 1, lf_sum: 6, lh_sum: 3 },
+    );
+    const missing = rows.find((row) => row.path === missingPath);
+    assert.deepEqual(
+      { state: missing?.state, sf_record_count: missing?.sf_record_count, lf_sum: missing?.lf_sum, lh_sum: missing?.lh_sum },
+      { state: "missing-sf", sf_record_count: 0, lf_sum: null, lh_sum: null },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("coverage-owning-SF receipt: only exact repo-relative SF paths qualify as owner evidence", () => {
+  const root = createOwnerGitFixture();
+  try {
+    const ownerPath = OWNER_SF_PATHS[0]!;
+    const normalizedAlias = "src/lib/../lib/model-canary-command.ts";
+    const absoluteAlias = join(root, ownerPath);
+    const lcov = [normalizedAlias, absoluteAlias].map((file) => lcovRecord(file, 3, 2)).join("");
+    const { header, rows } = parseOwnerReceipt(runOwnerReceipt(root, lcov));
+    const owner = rows.find((row) => row.path === ownerPath);
+
+    assert.equal(header.state, "complete", "the LCOV records parse, while alias paths remain non-owner evidence");
+    assert.equal(header.repo_src_sf_record_count, 2);
+    assert.equal(header.repo_src_unique_path_count, 1);
+    assert.deepEqual(
+      { state: owner?.state, sf_record_count: owner?.sf_record_count, lf_sum: owner?.lf_sum, lh_sum: owner?.lh_sum },
+      { state: "missing-sf", sf_record_count: 0, lf_sum: null, lh_sum: null },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
