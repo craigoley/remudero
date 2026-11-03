@@ -1,0 +1,50 @@
+- id: W1-T11264
+  title: "Add durable campaign owner evidence and a real read-only projection caller"
+  repo: "remudero"
+  depends_on:
+    - W1-T11120
+    - W1-T11213
+  type: "implement"
+  verify: "auto"
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: "high"
+  band_meaning: "blast-radius"
+  origin: "operator-approved-followups:2026-11-03"
+  plan_refs:
+    - W1-T11120
+    - W1-T11213
+  files:
+    - src/lib/model-canary-owner.ts
+    - src/lib/model-canary-pilot-execution.ts
+    - src/lib/model-canary-benchmark-command.ts
+    - src/lib/model-canary-report.ts
+    - src/lib/model-canary-command.ts
+    - test/routing/model-canary-campaign-owner.test.ts
+    - test/routing/model-canary-campaign-projection.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: >-
+    Add a source-only native campaign capability behind the existing bounded smoke and native owners. This task does not fund, activate, or run a provider; a later explicit approval and separately authorized funding are required.
+  design: >-
+    Add campaign-specific durable owner state in the existing SQLite DB without changing the fixed smoke claim or shared active-slot index. Migrate only an exact recognized legacy schema transactionally, add a fixed version marker, and refuse marked-but-damaged or partial new schemas without recreation/reset. Bind campaign IDs and matrix slots to full census/matrix/shard/config/case/scorer/pin/arm identity. Add a real read-only project-campaign CLI in this task; it derives the owner root from the configured shared cash allowance through the shared native path resolver, accepts no owner path or run/grade rows, returns explicit unavailable when campaign state is absent, and never creates owner state. Preserve existing project-benchmark caller JSON as explicitly unverified. Persist a native smoke-completion receipt binding the unchanged two-arm smoke to its owner rows, worker identities and exact settled shared-budget evidence, so later campaign consent can be checked from durable custody rather than caller JSON. Preserve the fixed two-arm smoke behavior and singleton. A valid marked new owner database whose campaign table was removed must refuse rather than auto-recreate it.
+  acceptance:
+    - claim: "project-campaign is a real production CLI caller that uses the global owner root, does not create it, and reports an absent campaign as unavailable"
+      proof: "unit test: project-campaign CLI reads the global owner root and reports an absent campaign unavailable"
+    - claim: "only the recognized legacy owner schema migrates; marked damaged, partial, or unknown campaign schemas fail closed without reset"
+      proof: "unit test: campaign owner migrates only the recognized legacy schema and refuses marked schema damage"
+    - claim: "campaign slot claims atomically bind the complete matrix identity and preserve unknown started slots across restart"
+      proof: "unit test: campaign slot claims bind the complete matrix identity and preserve unknown starts"
+    - claim: "projection derives grades only from owner receipts and includes eligible, excluded, unknown, and missing matrix rows"
+      proof: "unit test: campaign projection derives outcomes from owner receipts and preserves all census states"
+    - claim: "field-trial and canary denominators stay separate and proposal outputs remain unmeasured with no promotion"
+      proof: "unit test: campaign projection keeps field and canary denominators separate and proposals unmeasured"
+    - claim: "The native read-only CLI invokes the owner-derived campaign projection in its real production path"
+      proof: "grep: projectOwnedCanaryCampaign( in src/lib/model-canary-command.ts"
+  falsifier: >-
+    delete the project-campaign CLI dispatch: unit test: project-campaign CLI reads the global owner root and reports an absent campaign unavailable must fail with: the real standalone CLI must return the exact unavailable JSON result; missing dispatch fails the asserted result
+    delete the new-schema version-marker validation or recreate a missing campaign table with IF NOT EXISTS: unit test: campaign owner migrates only the recognized legacy schema and refuses marked schema damage must fail with: marked-but-damaged schema must be refused; repair/recreation makes the refusal assertion fail
+    remove one field from the durable matrix-slot binding: unit test: campaign slot claims bind the complete matrix identity and preserve unknown starts must fail with: a wrong matrix/config mapping must read unavailable; acceptance of the changed mapping fails the equality assertion
+    replace owner-row reads with caller-supplied run/grade JSON: unit test: campaign projection derives outcomes from owner receipts and preserves all census states must fail with: a forged JSON result must yield zero owner-verified grades; any observed grade fails the assertion
