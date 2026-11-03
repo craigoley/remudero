@@ -24,6 +24,11 @@ import {
 const REPO_ROOT = join(import.meta.dirname, "..");
 const BASH = ["/opt/homebrew/opt/bash/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"].find(existsSync) ?? "bash";
 const HOST_MIB = 15988;
+// W1-T11130: serve's memory.max is its share of the shared host budget, so a serve launch reads a
+// pinned meminfo too. 32086 MiB is the fleet host's MemTotal after the 2026-10-27 resize. With
+// nothing learned, serve gets host - 2048 reserve - the other containers' floors (8192 + 2048 + 2304).
+const SERVE_HOST_MIB = 32086;
+const SERVE_SHARE_MIB = SERVE_HOST_MIB - 2048 - 8192 - 2048 - 2304;
 
 function meminfo(dir: string, mib: number): string {
   const path = join(dir, "meminfo");
@@ -118,6 +123,7 @@ function serveDryRun(env: Record<string, string> = {}): { status: number | null;
         RMD_SERVE_REPO_DIR: join(root, "code"),
         RMD_SERVE_DOCKER_NETWORK: "rmd-test-net",
         RMD_SERVE_DOCKERENV_PATH: join(root, "no-dockerenv"),
+        RMD_MEMINFO_PATH: meminfo(root, SERVE_HOST_MIB),
         ...env,
       },
     });
@@ -160,18 +166,18 @@ test("serve's memory ceiling fits an active generation and a booting standby dur
 
 test("serve is launched with a memory ceiling that bounds a leak and leaves room to swap", () => {
   const { args, out } = serveRunArgs();
-  assert.ok(args.includes("--memory=7680m"), `a 7.5 GiB ceiling: an active generation (5.28 GB with swap) plus a booting standby (1.55 GB) during a handoff: ${args.join(" ")}`);
+  assert.ok(args.includes(`--memory=${SERVE_SHARE_MIB}m`), `serve's share of the shared host budget (W1-T11130): ${args.join(" ")}`);
   assert.ok(args.some((a) => a.startsWith("--memory-swap=")), "room to swap before the kernel kills anything");
   assert.ok(!args.some((a) => a.startsWith("--cpus=")), "no CPU quota by default — the weight already wins contention");
-  assert.match(out, /memory ceiling 7680 MiB \(\+\d+ MiB swap\)/);
+  assert.match(out, new RegExp(`memory ceiling ${SERVE_SHARE_MIB} MiB \\(\\+\\d+ MiB swap\\) from memory\\.max ${SERVE_SHARE_MIB} MiB = shared budget`));
 });
 
 test("operator ruling 2026-10-19: serve gets 2 GiB of swap and no memory reservation", () => {
   const { args, out } = serveRunArgs();
   // swap.max 1 GiB -> 2 GiB: at 1 GiB serve's swap read 95% full.
-  assert.ok(args.includes("--memory-swap=9728m"), `2 GiB of swap over the 7.5 GiB ceiling: ${args.join(" ")}`);
+  assert.ok(args.includes(`--memory-swap=${SERVE_SHARE_MIB + 2048}m`), `2 GiB of swap over serve's ceiling: ${args.join(" ")}`);
   assert.ok(!args.some((a) => a.startsWith("--memory-reservation")), "no ineffective memory.low reservation");
-  assert.match(out, /memory ceiling 7680 MiB \(\+2048 MiB swap\)/);
+  assert.match(out, new RegExp(`memory ceiling ${SERVE_SHARE_MIB} MiB \\(\\+2048 MiB swap\\)`));
 });
 
 test("operator ruling 2026-10-19: serve runs the semi-space flag and the glibc malloc tuning, with no other NODE_OPTIONS", () => {
@@ -212,7 +218,8 @@ test("operator ruling 2026-10-19: every build daemon launch carries the glibc ma
   const { args } = recycle(HOST_MIB);
   assert.ok(args.includes("GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"), args.join(" "));
   assert.ok(args.some((a) => (a.startsWith("NODE_OPTIONS=") && a.endsWith(" --max-semi-space-size=16")) || a === "NODE_OPTIONS=--max-semi-space-size=16"), args.join(" "));
-  // Dropping serve's memory.low leaves the build ceiling's arithmetic alone: serve's share still sizes it.
+  // Dropping serve's memory.low leaves the build ceiling's arithmetic alone. On this host the others'
+  // floors overcommit the shared budget (W1-T11130), so today's arithmetic still sizes it.
   assert.ok(args.includes(`--memory=${HOST_MIB - 5120 - 2048}m`));
 });
 
@@ -229,7 +236,7 @@ test("the serve memory ceiling and a CPU quota are operator knobs without a code
 
 test("W1-T4102: every build daemon is launched with a memory ceiling that leaves the host reserve free", () => {
   const { args, output } = recycle(HOST_MIB);
-  const ceiling = HOST_MIB - 5120 - 2048;
+  const ceiling = HOST_MIB - 5120 - 2048; // an OVERCOMMITTED shared budget keeps today's arithmetic (W1-T11130)
   assert.ok(args.includes(`--memory=${ceiling}m`), `ceiling = host - serve reserve - overhead:\n${args.join(" ")}`);
   assert.ok(args.includes(`--memory-swap=${ceiling + 4096}m`), "swap is bounded, so the container pages its own memory");
   assert.ok(args.includes("--cpu-shares=512"));
@@ -238,8 +245,9 @@ test("W1-T4102: every build daemon is launched with a memory ceiling that leaves
 
 test("W1-T4102: the resource policy derives its ceiling from the host's memory and prints its inputs", () => {
   const small = recycle(32 * 1024);
-  assert.ok(small.args.includes(`--memory=${32 * 1024 - 5120 - 2048}m`), "a bigger host gets a bigger ceiling");
-  assert.match(small.output, /host 32768 MiB - serve reserve 5120 MiB - overhead 2048 MiB/);
+  const share = 32 * 1024 - 2048 - 5632 - 2048 - 2304; // W1-T11130: host - reserve - the others' floors
+  assert.ok(small.args.includes(`--memory=${share}m`), "a bigger host gets a bigger ceiling");
+  assert.match(small.output, new RegExp(`memory\\.max ${share} MiB = shared budget: host 32768 - reserve 2048 - remudero-serve 5632 \\(floor, nothing learned\\)`));
 
   const unreadable = recycle(undefined);
   assert.ok(!unreadable.args.some((a) => a.startsWith("--memory=")), "no guessed ceiling when the host's memory is unknown");

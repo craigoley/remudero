@@ -24,7 +24,7 @@ RMD_SERVE_MEMORY_RESERVE_MIB="${RMD_SERVE_MEMORY_RESERVE_MIB:-5120}" # active ge
 RMD_HOST_OVERHEAD_MIB="${RMD_HOST_OVERHEAD_MIB:-2048}"               # OS, cloudflared, the small daemons
 RMD_BUILD_SWAP_MIB="${RMD_BUILD_SWAP_MIB:-4096}"                     # a build container pages its OWN memory
 RMD_MIN_BUILD_CEILING_MIB="${RMD_MIN_BUILD_CEILING_MIB:-2048}"
-RMD_SERVE_MEMORY_LIMIT_MIB="${RMD_SERVE_MEMORY_LIMIT_MIB:-7680}"     # 0 = no hard limit; see resource_policy_serve_args
+RMD_SERVE_MEMORY_LIMIT_MIB="${RMD_SERVE_MEMORY_LIMIT_MIB:-}"         # empty = the shared budget; set = operator override (0 = none)
 RMD_SERVE_SWAP_MIB="${RMD_SERVE_SWAP_MIB:-2048}"                     # operator ruling 2026-10-19 (was 1024: 95% full)
 RMD_SERVE_CPUS="${RMD_SERVE_CPUS:-}"                                 # empty = no CPU quota, weight only
 RMD_SERVE_CPU_SHARES="${RMD_SERVE_CPU_SHARES:-4096}"
@@ -184,6 +184,87 @@ resource_policy_tuned_high() {
   printf '%s' "${value}"
 }
 
+# ── memory.max: ONE SHARED HOST BUDGET (operator ruling R1, 2026-10-27, W1-T11130) ──────────────
+# OBSERVED 2026-10-27 on the 32 GiB host: every build daemon got memory.max total - 5120 - 2048, so
+# core, console and site held 24.3 GiB EACH, and serve held a fixed 7,680 MiB. Together that is
+# far over the host. R1 supersedes 10-10's "never raise memory.max": each fleet container's
+# memory.max is the host's MemTotal less RMD_HOST_RESERVE_MIB less the sum of the OTHER fleet
+# containers' learned peaks. Any one of them can then reach its limit while the rest sit at their
+# peaks, and the host still holds. The fleet is the RMD_MEMORY_WEIGHTS list. A learned peak is the
+# larger of the cgroup memory.peak recorded in <state>/memory-peak-<container>.json and the learned
+# memory.high in <state>/memory-high-tuned-<container>.json. A container with neither counts its
+# RMD_MEMORY_HIGH_FLOORS entry. Both files are read again at every call, so every recycle and every
+# W1-T4267 drift check sees the current split: a container that grows takes only measured slack.
+# OVERCOMMITTED: the share can be too small to hold the container's OWN learned peak under its
+# RMD_MEMORY_HIGH_MAX_PCT memory.high cap. Then the peaks alone exceed the host, and no split both
+# fits the host and holds every measured peak. Such a container keeps today's arithmetic, which the
+# caller passes in, and the note says OVERCOMMITTED: usage has to fall (R1). The fallback is never
+# the container's own learned value. That value moves whenever the tuner gives memory back under
+# pressure, and each move would read as drift: a recycle, and a lower cap the tuner can never grow
+# back past.
+
+# The recorded cgroup memory.peak of container $1 in MiB; status 1 when none is readable.
+resource_policy_recorded_peak() {
+  local file value
+  file="$(resource_policy_tuned_file "$1")" || return 1
+  file="${file%/*}/memory-peak-$1.json"
+  [ -r "${file}" ] || return 1
+  grep -q "\"container\":\"$1\"" "${file}" 2>/dev/null || return 1
+  value="$(sed -n 's/.*"peak_mib":\([0-9][0-9]*\).*/\1/p' "${file}" 2>/dev/null | head -n 1)"
+  [ -n "${value}" ] && [ "${value}" -gt 0 ] || return 1
+  printf '%s' "${value}"
+}
+
+# Container $1's learned peak in MiB. Sets RP_PEAK (empty when it has no record and no floor) and
+# RP_PEAK_FROM, which names where the value came from.
+resource_policy_learned_peak() {
+  local peak high
+  RP_PEAK="" RP_PEAK_FROM=""
+  peak="$(resource_policy_recorded_peak "$1")" || peak=""
+  high="$(resource_policy_tuned_high "$1")" || high=""
+  if [ -n "${peak}" ] && { [ -z "${high}" ] || [ "${peak}" -ge "${high}" ]; }; then
+    RP_PEAK="${peak}" RP_PEAK_FROM="memory.peak"
+  elif [ -n "${high}" ]; then
+    RP_PEAK="${high}" RP_PEAK_FROM="learned memory.high"
+  elif RP_PEAK="$(resource_policy_lookup "$1" "${RMD_MEMORY_HIGH_FLOORS}")"; then
+    RP_PEAK_FROM="floor, nothing learned"
+  else
+    RP_PEAK=""
+  fi
+}
+
+# Container $1's memory.max in MiB from the shared budget; $2 is its pre-R1 limit (today's).
+# Sets RP_MAX and RP_MAX_NOTE, which names every term. Status 1 (RP_MAX empty) when MemTotal is
+# unreadable: the caller keeps today's arithmetic.
+resource_policy_shared_memory_max() {
+  local container="$1" today="$2" total budget others=0 entry name terms="" own
+  RP_MAX="" RP_MAX_NOTE=""
+  if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
+    RP_MAX_NOTE="host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
+    return 1
+  fi
+  budget=$((total - RMD_HOST_RESERVE_MIB))
+  for entry in ${RMD_MEMORY_WEIGHTS}; do
+    name="${entry%%=*}"
+    [ "${name}" != "${container}" ] || continue
+    resource_policy_learned_peak "${name}"
+    [ -n "${RP_PEAK}" ] || continue
+    others=$((others + RP_PEAK))
+    terms="${terms} - ${name} ${RP_PEAK} (${RP_PEAK_FROM})"
+  done
+  RP_MAX=$((budget - others))
+  RP_MAX_NOTE="memory.max ${RP_MAX} MiB = shared budget: host ${total} - reserve ${RMD_HOST_RESERVE_MIB}${terms}"
+  resource_policy_learned_peak "${container}"
+  [ -n "${RP_PEAK}" ] || return 0
+  # The lowest limit that holds its own learned peak under the RMD_MEMORY_HIGH_MAX_PCT high cap.
+  own=$(((RP_PEAK * 100 + RMD_MEMORY_HIGH_MAX_PCT - 1) / RMD_MEMORY_HIGH_MAX_PCT))
+  if [ "${RP_MAX}" -lt "${own}" ]; then
+    RP_MAX_NOTE="memory.max ${today} MiB = today's arithmetic, OVERCOMMITTED: the shared budget (host ${total} - reserve ${RMD_HOST_RESERVE_MIB}${terms}) leaves ${RP_MAX} MiB, under the ${own} MiB that holds its own learned peak ${RP_PEAK} MiB (${RP_PEAK_FROM}) under the ${RMD_MEMORY_HIGH_MAX_PCT}% memory.high cap"
+    RP_MAX="${today}"
+  fi
+  return 0
+}
+
 # The docker run argument that sets memory.high to $1 MiB.
 resource_policy_memory_high_arg() {
   printf -- '--annotation=org.systemd.property.MemoryHigh=uint64 %s' "$(($1 * 1024 * 1024))"
@@ -210,9 +291,9 @@ resource_policy_probe_memory_high() {
 # the working set. NO memory.low (operator ruling 2026-10-19): --memory-reservation set serve's
 # memory.low to 5 GiB, but system.slice holds memory.low=0, and the kernel limits a cgroup's
 # effective low boundary by its ancestors' (Documentation/admin-guide/cgroup-v2.rst), so it
-# protected nothing. RMD_SERVE_MEMORY_RESERVE_MIB stays as serve's share in the BUILD ceiling's
-# arithmetic below, where it still sizes every build daemon's memory.max. W1-T4102 left serve unlimited ("an
-# OOM-killed console backend is worse than a slow one"); the 2026-09-30 architecture ruling
+# protected nothing. RMD_SERVE_MEMORY_RESERVE_MIB stays only as the lowest ceiling serve may get;
+# since W1-T11130 the shared budget above sizes every memory.max. W1-T4102 left serve unlimited
+# ("an OOM-killed console backend is worse than a slow one"); the 2026-09-30 architecture ruling
 # (DECISIONS) reverses that: serve grew from 1.0-1.2 GiB to 2.2-3.6 GiB in a week with nothing
 # bounding it. 5 GiB is 1.4x the highest reading (3.64 GiB, page cache included, under a
 # 40-route probe) and 2x the highest process RSS (2.5 GB). At the ceiling the kernel first drops
@@ -228,15 +309,26 @@ resource_policy_serve_args() {
   [ -z "${serve_node_options}" ] || RESOURCE_POLICY_SERVE_ARGS+=(-e "NODE_OPTIONS=${serve_node_options}")
   RESOURCE_POLICY_SERVE_ARGS+=("${RP_GLIBC_ARGS[@]+"${RP_GLIBC_ARGS[@]}"}")
   RESOURCE_POLICY_NOTE="serve: cpu-shares ${RMD_SERVE_CPU_SHARES}, no memory.low, NODE_OPTIONS ${serve_node_options:-none}, GLIBC_TUNABLES ${RESOURCE_POLICY_GLIBC_TUNABLES:-none}"
-  if [ "${RMD_SERVE_MEMORY_LIMIT_MIB}" -gt "${RMD_SERVE_MEMORY_RESERVE_MIB}" ]; then
-    RESOURCE_POLICY_SERVE_ARGS+=("--memory=${RMD_SERVE_MEMORY_LIMIT_MIB}m" "--memory-swap=$((RMD_SERVE_MEMORY_LIMIT_MIB + RMD_SERVE_SWAP_MIB))m")
-    RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, memory ceiling ${RMD_SERVE_MEMORY_LIMIT_MIB} MiB (+${RMD_SERVE_SWAP_MIB} MiB swap)"
+  # W1-T11130: serve's memory.max is its share of the shared budget, like every build daemon's. An
+  # explicit RMD_SERVE_MEMORY_LIMIT_MIB is an operator override and the note names it. A host whose
+  # MemTotal is unreadable, or an OVERCOMMITTED one, keeps today's fixed ceiling (#8569, 10-02).
+  local serve_container="${RMD_SERVE_CONTAINER_NAME:-remudero-serve}" today=7680 limit from
+  if [ -n "${RMD_SERVE_MEMORY_LIMIT_MIB}" ]; then
+    limit="${RMD_SERVE_MEMORY_LIMIT_MIB}" from="operator override RMD_SERVE_MEMORY_LIMIT_MIB=${RMD_SERVE_MEMORY_LIMIT_MIB}"
+  elif resource_policy_shared_memory_max "${serve_container}" "${today}"; then
+    limit="${RP_MAX}" from="${RP_MAX_NOTE}"
   else
-    RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, NO memory ceiling — RMD_SERVE_MEMORY_LIMIT_MIB ${RMD_SERVE_MEMORY_LIMIT_MIB} is not above the ${RMD_SERVE_MEMORY_RESERVE_MIB} MiB reserve"
+    limit="${today}" from="today's fixed ${today} MiB, ${RP_MAX_NOTE}"
   fi
   local serve_max=""
-  [ "${RMD_SERVE_MEMORY_LIMIT_MIB}" -gt "${RMD_SERVE_MEMORY_RESERVE_MIB}" ] && serve_max="${RMD_SERVE_MEMORY_LIMIT_MIB}"
-  resource_policy_memory_high "${RMD_SERVE_CONTAINER_NAME:-remudero-serve}" "${serve_max}"
+  if [ "${limit}" -gt "${RMD_SERVE_MEMORY_RESERVE_MIB}" ]; then
+    serve_max="${limit}"
+    RESOURCE_POLICY_SERVE_ARGS+=("--memory=${limit}m" "--memory-swap=$((limit + RMD_SERVE_SWAP_MIB))m")
+    RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, memory ceiling ${limit} MiB (+${RMD_SERVE_SWAP_MIB} MiB swap) from ${from}"
+  else
+    RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, NO memory ceiling — ${limit} MiB (${from}) is not above the ${RMD_SERVE_MEMORY_RESERVE_MIB} MiB reserve"
+  fi
+  resource_policy_memory_high "${serve_container}" "${serve_max}"
   RESOURCE_POLICY_SERVE_HIGH_MIB="${RP_HIGH}"
   [ -n "${RP_HIGH}" ] && RESOURCE_POLICY_SERVE_ARGS+=("$(resource_policy_memory_high_arg "${RP_HIGH}")")
   RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, ${RP_HIGH_NOTE}"
@@ -246,9 +338,9 @@ resource_policy_serve_args() {
   fi
 }
 
-# A build daemon gets a low CPU weight and a memory ceiling that leaves serve's reserve and the
-# host's overhead free. At the ceiling it swaps its own pages, then the kernel OOM-kills inside
-# THAT container (its largest process, a test runner) — never serve.
+# A build daemon gets a low CPU weight and a memory ceiling from the shared budget, which leaves
+# room for the other containers' peaks. At the ceiling it swaps its own pages, then the kernel
+# OOM-kills inside THAT container (its largest process, a test runner) — never serve.
 # $1 names the container (default the core daemon): its memory.high is its own share, not a shared one.
 resource_policy_build_args() {
   resource_policy_glibc_args
@@ -260,13 +352,16 @@ resource_policy_build_args() {
     RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; NO memory ceiling — host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
     return 0
   fi
-  ceiling=$((total - RMD_SERVE_MEMORY_RESERVE_MIB - RMD_HOST_OVERHEAD_MIB))
+  # W1-T11130: this container's share of the shared budget (resource_policy_shared_memory_max). An
+  # OVERCOMMITTED host keeps today's total - serve reserve - overhead.
+  resource_policy_shared_memory_max "${container}" $((total - RMD_SERVE_MEMORY_RESERVE_MIB - RMD_HOST_OVERHEAD_MIB))
+  ceiling="${RP_MAX}"
   if [ "${ceiling}" -lt "${RMD_MIN_BUILD_CEILING_MIB}" ]; then
-    RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; NO memory ceiling — host ${total} MiB leaves ${ceiling} MiB after the ${RMD_SERVE_MEMORY_RESERVE_MIB} MiB serve reserve and ${RMD_HOST_OVERHEAD_MIB} MiB overhead, under the ${RMD_MIN_BUILD_CEILING_MIB} MiB floor"
+    RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; NO memory ceiling — ${RP_MAX_NOTE}, under the ${RMD_MIN_BUILD_CEILING_MIB} MiB floor"
     return 0
   fi
   RESOURCE_POLICY_BUILD_ARGS+=("--memory=${ceiling}m" "--memory-swap=$((ceiling + RMD_BUILD_SWAP_MIB))m")
-  RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; memory ceiling ${ceiling} MiB (+${RMD_BUILD_SWAP_MIB} MiB swap) = host ${total} MiB - serve reserve ${RMD_SERVE_MEMORY_RESERVE_MIB} MiB - overhead ${RMD_HOST_OVERHEAD_MIB} MiB"
+  RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; memory ceiling ${ceiling} MiB (+${RMD_BUILD_SWAP_MIB} MiB swap), ${RP_MAX_NOTE}"
   resource_policy_memory_high "${container}" "${ceiling}"
   [ -n "${RP_HIGH}" ] && RESOURCE_POLICY_BUILD_ARGS+=("$(resource_policy_memory_high_arg "${RP_HIGH}")")
   RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}; ${container} ${RP_HIGH_NOTE}"

@@ -164,8 +164,10 @@ test("serve tuning honors its canonical hard-capped policy instead of the build 
       const id = "c0ffee".padEnd(64, "0");
       writeFileSync(join(h.root, "cfg", "state", `memory-high-sample-${container}.txt`),
         `v1 ${then} ${id} 1124 25000 5000 30 0\n`);
+      // Serve's hard cap is pinned by the operator override (W1-T11130): unset, the shared budget sizes
+      // serve and a build daemon alike, and this test could no longer tell the two policies apart.
       const run = spawnSync("bash", [TUNER, "--container", container, "--state-dir", join(h.root, "cfg")],
-        { encoding: "utf8", env: h.env });
+        { encoding: "utf8", env: { ...h.env, RMD_SERVE_MEMORY_LIMIT_MIB: "7680" } });
       assert.equal(run.status, 0, run.stderr);
       assert.match(run.stdout, new RegExp(`hold at ${policyMiB} MiB \\(policy ${policyMiB}\\)`));
       assert.equal(readFileSync(join(h.cg, "memory.high"), "utf8").trim(), String(policyMiB * MIB));
