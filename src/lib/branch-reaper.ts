@@ -1,26 +1,7 @@
-/**
- * BRANCH REAPER — the declared guard list (W1-T447), the branch-citation scan and the reverse-drift
- * planner, extracted verbatim from run-task.ts. A MOVE, NOT A REDESIGN: every declaration below is
- * byte-identical to the one it replaces and no signature changed.
- *
- * WHY THIS BOUNDARY AND NOT A LARGER ONE: `reapBranchesCommand` — the CLI verb these feed — stays in
- * run-task.ts deliberately. It calls `repoRoot`, `resolveOwnerRepo`, `unknownArgError` and
- * `commandSyntax`, which are declared in run-task.ts with 223, 60, 48 and 18 uses across the file.
- * Importing those here would make run-task.ts -> branch-reaper.ts -> run-task.ts a cycle; moving them
- * would drag the whole CLI plumbing layer along. This region references all four ZERO times, which is
- * the entire reason it is separable when its own caller is not.
- *
- * `remoteBranchNames`, `branchCitationPattern`, `parseBranchCitationHits` and `declaredGuardsBlockSpan`
- * were module-private and are exported here only because the file boundary now sits between them and
- * `reapBranchesCommand`. That widening is forced by the split, not a design change; `escapeEre` and
- * `RUN_TASK_BRANCH_TOKEN_SRC` have no caller outside this file and stay private.
- *
- * THIS MODULE TAKES EFFECTS AS INPUTS. `remoteBranchNames` receives its `exec`,
- * `declaredGuardsBlockSpan` receives file TEXT rather than reading a path, and
- * `planReverseBranchDrift` is a pure function of the facts handed to it. Its one source import is
- * the landing identity predicate, so the reaper guards that family by calling the owner module
- * rather than retyping the branch pattern here.
- */
+/** Branch guards (W1-T447), citation/reverse-drift planning (W1-T2226), and injected effects.
+ * The CLI stays in run-task.ts: importing its repoRoot/resolveOwnerRepo/argument plumbing here
+ * would create a cycle. Cross-boundary helpers are exported; escapeEre and the run token stay private.
+ * Guard the landing family through its owner, isLandingRef, rather than duplicating its pattern. */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isLandingRef } from "./feedback-landing.js";
@@ -29,17 +10,9 @@ import { runStepsSync, step, type Steps } from "./git-push.js";
 
 export type BranchReapExec = (cmd: string, args: string[]) => string | Promise<string>;
 
-/**
- * The declared guard list (W1-T447) — branches the fleet must never delete, DECLARED so the
- * decision is reviewable, alongside the name grep that derives the same answer independently.
- *
- * NEITHER SIGNAL IS SUFFICIENT ALONE, which is why both run. A declared list rots: it is a
- * convention that binds only while someone maintains it. A name grep cannot see a branch
- * referenced only through a VARIABLE — `LANDING_BRANCH` recreates `feedback-landing` on the next
- * `landFeedback`, and when no such branch exists there is nothing for a grep over branch names to
- * find. So the grep is the primary signal, this list is the reviewed one, and a branch the grep
- * guards that this list omits is REPORTED as drift rather than swept in silence.
- */
+/** Declared guards (W1-T447) complement the independent name scan: neither suffices alone.
+ * Declarations can rot; a scan misses variable-derived names such as LANDING_BRANCH when absent.
+ * Report scan-guarded but undeclared branches as drift; never silently delete them. */
 export const DECLARED_BRANCH_GUARDS: readonly string[] = [
   "main",
   // ── THE HEARTBEAT TRANSPORTS — ONE BRANCH PER HOST, each a parentless root commit force-pushed
@@ -101,13 +74,8 @@ export function* remoteBranchHeadsSteps(exec: BranchReapExec): Steps<Map<string,
   return heads;
 }
 
-/**
- * The ephemeral run-task branch convention: `run-<taskId>-<epochMs>`. A citation of this shape
- * can dangle long after the branch itself is deleted (W1-T2226 rationale (2)/(3)): the branch is
- * cited by a comment or doc example, the task lands and its branch is gone, and nothing edits the
- * citation to match. (Do not use a live run branch as the doc example here — the whole point of
- * this constant is that such an example outlives the branch it names.)
- */
+/** Ephemeral run convention: run-<taskId>-<epochMs> (W1-T2226 rationale (2)/(3)).
+ * Citations outlive deleted branches; never use a live run branch as a documentation example. */
 const RUN_TASK_BRANCH_TOKEN_SRC = "run-[A-Za-z0-9]+-T[0-9]+-[0-9]{10,}";
 
 /** Escape a literal string for use inside a POSIX ERE (`git grep -E`) alternation. */
@@ -115,12 +83,8 @@ function escapeEre(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/**
- * ONE ENUMERATION (W1-T2226 design (i)): a single pattern grep for every branch-shaped token —
- * the run-task convention above, plus every `DECLARED_BRANCH_GUARDS` name literally — across the
- * same four roots `namedInSource` already reads. Both reverse comparisons below are differences
- * over this one list; there is no second enumeration.
- */
+/** One enumeration (W1-T2226 design (i)): run tokens plus literal declared guards across
+ * the same four roots as namedInSource. Both reverse comparisons consume this list. */
 export function branchCitationPattern(declaredGuards: readonly string[]): string {
   const alternation = [RUN_TASK_BRANCH_TOKEN_SRC, ...declaredGuards.map(escapeEre)].join("|");
   return `\\b(${alternation})\\b`;
@@ -147,14 +111,9 @@ export function parseBranchCitationHits(raw: string): BranchCitationHit[] {
 
 export const DECLARED_BRANCH_GUARDS_FILE = "src/lib/branch-reaper.ts";
 
-/**
- * `DECLARED_BRANCH_GUARDS`'s own [start, end] line span (1-indexed, inclusive) inside
- * {@link DECLARED_BRANCH_GUARDS_FILE}'s CURRENT text, found dynamically rather than hardcoded — W1-T2226
- * rationale (5): the declaration lives in a grepped root, so every declared name reads
- * `namedInSource: true` by virtue of its own declaration, and a reverse check that fails to
- * exclude this exact span can never report an orphan. Returns `undefined` if the marker moved or
- * the text doesn't contain it, in which case the caller excludes nothing rather than guessing.
- */
+/** Find the declaration's inclusive, 1-indexed span in its CURRENT text (W1-T2226 (5)).
+ * Exclude self-citations or every declared name hides its own orphan status. If markers moved,
+ * return undefined so the caller excludes nothing rather than guessing. */
 export function declaredGuardsBlockSpan(fileText: string): { start: number; end: number } | undefined {
   const lines = fileText.split("\n");
   const startIdx = lines.findIndex((l) => l.includes("export const DECLARED_BRANCH_GUARDS"));
@@ -173,20 +132,9 @@ export interface ReverseBranchDrift {
   orphanDeclarations: string[];
 }
 
-/**
- * PURE: given the citation hits already gathered from source (with the declaration block's own
- * span so its self-citations can be excluded), the remote branch listing, and the declared list,
- * report both directions of drift a forward-only comparison misses.
- *
- * (a) = citations − remote − declared. Declared names are subtracted too, not only remote ones
- * (design (iii)): an ephemeral declared branch like `feedback-landing` is legitimately cited and
- * absent between landings (rationale (9)), so the declared set is the correct suppression list
- * for this arm as well as the forward one.
- *
- * (b) = declared − citations, with the declaration block's own citation of its own names excluded
- * first — rationale (5), the load-bearing half of this direction: without the exclusion every
- * declared name is trivially "cited" by its own entry and no orphan can ever be reported.
- */
+/** Pure reverse drift (W1-T2226): dangling = citations − remote − declared; orphan =
+ * declared − citations after excluding the declaration block (rationale (5)). Declared names
+ * suppress dangling hits too: feedback-landing may legitimately be absent between landings (9). */
 export function planReverseBranchDrift(
   citations: readonly BranchCitationHit[],
   remoteNames: readonly string[],
@@ -223,38 +171,22 @@ export function planReverseBranchDrift(
 
 // ── the orphaned-head COUNT (W1-T2690) ────────────────────────────────────────────────────────
 
-/**
- * W1-T448's cost finding still shapes the automatic rung: a full reap is expensive, while
- * `remoteBranchNames`'s own `git ls-remote --heads origin` is the cheap one-request trigger. The
- * automatic adapter runs that cheap check every full sweep and calls the full classifier only on
- * first use, a branch-set change, or the six-hour bound. The count below remains a read-only
- * helper, kept separate from `planBranchReap` (`lib/status.ts`) and the executing adapter.
- *
- * ANCESTRY ALONE OVERCOUNTS AS "SAFE" HERE, which is why it is a conjunct and never the whole
- * test: `main` only squash-merges (measured: eight consecutive single-parent commits on it), so a
- * genuinely merged branch is never `main`'s ancestor either — `git merge-base --is-ancestor`
- * returns false for it exactly as it does for one still mid-flight. A head counts ORPHANED only
- * when BOTH hold: no open PR (an in-flight or just-closed-without-merge branch keeps its credit
- * path) AND absent from the base's history (the one thing ancestry legitimately answers: this
- * ref's commits were never folded in by a non-squash path, e.g. a fast-forward).
- */
+/** W1-T448: full classification is expensive; ls-remote is the cheap automatic trigger
+ * on first use, branch-set change, or six hours. This count stays separate from classification.
+ * Ancestry alone cannot prove safety under squash merges: merged and in-flight heads both fail
+ * is-ancestor. Count only run heads with no open PR AND absent from base history (W1-T2690). */
 export interface OrphanedHeadCounts {
   readonly kind: "counted";
   /** Every name one `git ls-remote --heads origin` returned — guards, non-run branches, all of it. */
   readonly totalHeads: number;
-  /** The subset matching the `run-<taskId>-<epochMs>` dispatch shape — the only shape this counts
-   *  as a candidate at all. `main`, the heartbeats and every other `DECLARED_BRANCH_GUARDS` entry
-   *  are excluded by the shape test itself; there is no second lookup against that list here. */
+  /** Only run-<taskId>-<epochMs> heads qualify; the shape itself excludes guards. */
   readonly runShapedHeads: number;
-  /** Run-shaped heads with no open PR AND absent from the base's history — the number this task
-   *  exists to make available; a manual verb with nothing bounding it is a decision that quietly
-   *  stops being executed. */
+  /** Run heads with no open PR AND absent from base history; a signal for bounded upkeep. */
   readonly orphanedHeads: number;
 }
 
-/** The one state a healthy-looking zero must never stand in for. An unreadable remote listing
- *  reports its own reason and stops — {@link classifyReadFailure} (`lib/doctor.ts`) draws the same
- *  line for the same reason: an absence of information is never counted as an absence of orphans. */
+/** Unreadable is not zero: report the reason and stop, as classifyReadFailure does
+ * in lib/doctor.ts. Missing information never proves an absence of orphans. */
 export interface OrphanedHeadCountUnreadable {
   readonly kind: "cannot-determine";
   readonly reason: string;
@@ -264,13 +196,8 @@ export type OrphanedHeadReading = OrphanedHeadCounts | OrphanedHeadCountUnreadab
 
 const RUN_TASK_BRANCH_TOKEN = new RegExp(`^${RUN_TASK_BRANCH_TOKEN_SRC}$`);
 
-/**
- * PURE: given a remote listing already in hand, how many of its run-shaped heads are orphaned.
- * `openPrHeads` and `isInBaseHistory` are both injected — like every export in this file, this
- * performs no `exec` of its own — so a caller supplies `buildOpenPrViews`'s open heads and a
- * `git merge-base --is-ancestor` probe (or fixtures of either) without this module importing
- * either one.
- */
+/** Pure orphan count over a supplied listing, open-head set, and ancestry predicate.
+ * The caller supplies buildOpenPrViews and is-ancestor; this function performs no exec. */
 export function countOrphanedHeads(
   remoteNames: readonly string[],
   openPrHeads: ReadonlySet<string>,
@@ -286,13 +213,8 @@ export function countOrphanedHeads(
   };
 }
 
-/**
- * The end-to-end read: one `git ls-remote --heads origin` (via {@link remoteBranchNames}) plus the
- * two injected predicates {@link countOrphanedHeads} takes. An `exec` failure — remote
- * unreachable, auth stale, whatever the cause — resolves to `cannot-determine`, NEVER to
- * `countOrphanedHeads([], ...)`'s healthy-looking zero: a manual verb with no signal is exactly
- * the failure mode this task exists to fix, and a silently-false zero would recreate it.
- */
+/** Read ls-remote once via remoteBranchNames, then apply countOrphanedHeads.
+ * Any exec failure returns cannot-determine with its reason, never a healthy-looking zero. */
 export function readOrphanedHeadCount(
   exec: (cmd: string, args: string[]) => string,
   openPrHeads: ReadonlySet<string>,
@@ -316,23 +238,18 @@ export function readOrphanedHeadCount(
 // number of git calls, whatever the branch count: one `git for-each-ref` for every tip sha and
 // committer time, one ancestry read against `origin/main`, and one `git grep` over every name.
 
-/** One remote branch's local tip, from a single `git for-each-ref` read. A name ABSENT from the
- *  map this produces was never fetched onto this checkout — `git merge-base --is-ancestor
- *  origin/<name> origin/main`'s `fatal: Not a valid object name` case (W1-T2246 rationale §6) —
- *  and every caller below must read that as unresolved, never as "no tip". */
+/** One local remote tip (W1-T2246 §6): a missing map entry means unresolved locally,
+ * never proof of absence. Its sha and committer time come from one for-each-ref read. */
 export interface RemoteBranchTip {
   readonly sha: string;
-  /** `undefined` when the committer-date field itself did not parse — an unreadable age, same as
-   *  the per-branch `git log -1 --format=%ct` read failing outright. */
+  /** Undefined means an unreadable age, as with a failed per-branch git log. */
   readonly committedAtMs: number | undefined;
 }
 
 const REMOTE_BRANCH_TIP_FORMAT = "%(refname:short)\t%(objectname)\t%(committerdate:unix)";
 
-/** Parse `git for-each-ref --format='${REMOTE_BRANCH_TIP_FORMAT}' refs/remotes/origin` output into
- *  a name -> tip map. `origin/HEAD` — the symbolic default-branch pointer, not a real branch — is
- *  dropped; every other ref's `origin/` prefix is stripped to match the plain names
- *  `remoteBranchNames`'s `git ls-remote --heads` already returns. */
+/** Parse for-each-ref with REMOTE_BRANCH_TIP_FORMAT into plain-name tips.
+ * Drop symbolic origin/HEAD; strip origin/ to match remoteBranchNames. */
 export function parseRemoteBranchTips(raw: string): Map<string, RemoteBranchTip> {
   const tips = new Map<string, RemoteBranchTip>();
   for (const line of raw.split("\n")) {
@@ -347,11 +264,8 @@ export function parseRemoteBranchTips(raw: string): Map<string, RemoteBranchTip>
   return tips;
 }
 
-/** ONE `git for-each-ref` read for the WHOLE remote branch corpus — the manifest sha
- *  (`pruneDeletableBranches`'s restore line) and the active-branch screen's tip age both come from
- *  this single map, never a `git rev-parse`/`git log -1` per branch. An unreadable local ref
- *  namespace resolves to an EMPTY map — every name reads "no local tip", the same conservative
- *  reading a single ref's own resolve failure already produced. */
+/** One for-each-ref supplies manifest SHAs and active-screen ages for all branches.
+ * An unreadable namespace returns an empty map: every tip remains unresolved. */
 export function readRemoteBranchTips(exec: (cmd: string, args: string[]) => string): Map<string, RemoteBranchTip> {
   return runStepsSync(readRemoteBranchTipsSteps(exec));
 }
@@ -366,12 +280,8 @@ export function* readRemoteBranchTipsSteps(exec: BranchReapExec): Steps<Map<stri
   return parseRemoteBranchTips(raw);
 }
 
-/** Every remote-tracking branch name `git for-each-ref --merged=origin/main` reports (i.e. an
- *  ancestor of `origin/main`) — ONE ancestry read for the whole corpus, replacing a `git merge-base
- *  --is-ancestor` PER branch. `undefined` means the read itself failed (an unresolvable
- *  `origin/main`, most often), which callers must read as "cannot determine", never as an empty —
- *  and therefore all-false — merged set: that collapse is the exact §6 defect W1-T2246 fixed for
- *  the per-branch read, and a batched read must not reintroduce it. */
+/** One for-each-ref --merged=origin/main replaces per-branch ancestry probes.
+ * Undefined means the read failed, NEVER an empty all-false set (W1-T2246 §6). */
 export function readTipInMainMembership(exec: (cmd: string, args: string[]) => string): Set<string> | undefined {
   return runStepsSync(readTipInMainMembershipSteps(exec));
 }
@@ -393,10 +303,8 @@ export function* readTipInMainMembershipSteps(exec: BranchReapExec): Steps<Set<s
   return merged;
 }
 
-/** `tipInMain` for one branch given the batched tip map and membership set — the same
- *  true/false/"unknown" trichotomy the per-branch `git merge-base --is-ancestor` read produced:
- *  unresolved locally, or the ancestry read itself failed, both read `"unknown"`; otherwise
- *  membership in `merged` decides it. */
+/** Preserve the ancestry trichotomy: absent local tip or failed membership read means
+ * unknown; otherwise membership decides true/false. */
 export function tipInMainFor(
   name: string,
   tips: ReadonlyMap<string, RemoteBranchTip>,
@@ -407,12 +315,8 @@ export function tipInMainFor(
   return merged.has(name);
 }
 
-/**
- * `namedInSource` for EVERY branch from one `git grep` over every name at once ({@link
- * namedInSourcePatterns}), keeping the per-branch `-l -F -- <name>` semantics: an unanchored
- * SUBSTRING match. The match is leftmost-LONGEST, so a hit can be a longer neighbor (`foobar` for
- * `foo`); `hit.name.includes(queriedName)` recovers the shorter name without a second read.
- */
+/** One scan preserves per-branch -l -F unanchored SUBSTRING semantics.
+ * Leftmost-longest hits may name a longer neighbor; includes recovers the shorter name. */
 export function readNamedInSource(
   exec: (cmd: string, args: string[]) => string,
   names: readonly string[],
@@ -457,11 +361,8 @@ export function* readNamedInSourceSteps(
   return new Set(names.filter((name) => hits.some((hit) => hit.name.includes(name))));
 }
 
-/**
- * `-F` with one `-e` per name costs git a pass per pattern per line (224 names: 12 s, 2026-10-12).
- * One `-P` alternation, longest name first, gives the same leftmost-longest hits in 0.2 s. A list
- * over one argv string's 128 KiB limit splits, which can only report more names, never fewer.
- */
+/** Longest-first -P alternation preserves -F substring hits; split below argv's 128 KiB
+ * string limit. Splitting can add hits, never lose them (W1-T4476). */
 export function namedInSourcePatterns(names: readonly string[]): string[] {
   const sorted = [...new Set(names)].sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0));
   const patterns: string[] = [];
@@ -481,14 +382,9 @@ export function namedInSourcePatterns(names: readonly string[]): string[] {
   return patterns;
 }
 
-/**
- * Design (iii): the persisted (branch name -> tip sha) cache after one classification pass. ONLY
- * `"merged"` is ever written — the one PR state GitHub cannot take back (`foldPrState`'s own doc).
- * `"open"`/`"closed"` are never cached (a reopen is unseen); `"none"` has {@link nextNoPrHeadCache}. A
- * branch whose tip sha this pass could not resolve (deleted mid-run, or never fetched locally) is
- * dropped rather than cached under `"unknown"` — the manifest sha is exactly what makes a later
- * cache hit's identity check (design (iv): a new tip sha misses the cache) meaningful at all.
- */
+/** Design (iii)/(iv): cache only PROVEN merged heads by resolved tip SHA.
+ * GitHub cannot undo merged (foldPrState); open/closed can reopen, none uses nextNoPrHeadCache.
+ * Drop missing/unknown SHAs; a changed tip must miss the cache. */
 export function nextMergedHeadCache(
   facts: readonly { readonly name: string; readonly prState: string }[],
   tipShaByName: ReadonlyMap<string, string>,
@@ -529,19 +425,9 @@ export interface BranchManifestEntry {
   readonly reason: string;
 }
 
-/**
- * THE TWO REASONS THAT REST ON NO PULL REQUEST AT ALL. `planBranchReap` reaches them when a branch
- * has no PR and its commits are already in main — content-wise, deleting the ref loses nothing, and
- * for the DRY RUN that is the whole question.
- *
- * FOR A DELETE IT IS NOT, because "no PR yet" and "no PR ever" are the same observation. A worker
- * that has just cut `run-<taskId>-<epochMs>` from main and pushed it to claim the id has a tip that
- * IS main's tip, no PR, and therefore lands in `deletable` — indistinguishable from a year-dead
- * probe ref. A `probe-ref-perm-*` ref sat in the live deletable set on exactly this route. The
- * distinction those two need is TIME, which is why {@link withholdActiveBranches} age-gates these
- * two reasons and leaves the PR-decisive ones alone: a merged or closed PR is proof about the work,
- * whatever the branch's age, and gating it would withhold branches that are genuinely finished.
- */
+/** No-PR reasons prove content is in main, not that the worker has finished (W1-T3020).
+ * A just-pushed run branch cut from main looks identical to an abandoned ref. withholdActiveBranches
+ * must age-gate these reasons; merged/closed PR evidence needs no age gate. */
 export const NO_PR_EVIDENCE_REASONS: readonly string[] = ["tip_in_main", "patch_id_equivalent"];
 
 /** Cheap `git ls-remote` fingerprints trigger the expensive classifier on first use, branch-set
@@ -551,9 +437,7 @@ export const AUTOMATIC_BRANCH_REAP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export interface AutomaticBranchReapState {
   lastRunAtMs?: number;
   lastBranchFingerprint?: string;
-  /** Design (iii): (branch name -> tip sha) for every head this process has itself PROVEN merged —
-   *  the one PR state GitHub cannot take back. Never "open"/"closed"/"none": see
-   *  {@link nextMergedHeadCache}'s own doc for why only this one verdict is safe to persist. */
+  /** Design (iii): proven merged heads keyed by tip SHA; see nextMergedHeadCache. */
   mergedHeadShas?: Record<string, string>;
   noPrHeadShas?: Record<string, string>;
 }
@@ -564,13 +448,8 @@ export function automaticBranchReapStateFileName(repo: string): string {
   return `branch-reap-state.${repo.replace(/[^A-Za-z0-9._-]/g, "_")}.json`;
 }
 
-/**
- * Load the persisted cadence state a restart would otherwise lose (design (i)). UNREADABLE OR
- * MALFORMED MEANS "NO STATE" — an empty object, which {@link decideAutomaticBranchReap} reads as
- * `lastRunAtMs === undefined` and therefore a first pass, EXACTLY today's cold-boot behavior. It
- * must never be read as "skip": a state file this process cannot parse carries no evidence that a
- * pass ever happened, and treating it as one would silently disarm the classifier.
- */
+/** Design (i): unreadable/malformed cadence state means NO STATE and forces a first pass.
+ * Never infer a skip from a file that supplies no evidence a pass happened. */
 export function readAutomaticBranchReapState(path: string): AutomaticBranchReapState {
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<AutomaticBranchReapState>;
@@ -607,9 +486,8 @@ export function orphanRunBranchEvidenceReader(
   };
 }
 
-/** Best-effort write: a state file this process cannot persist costs the next restart a first
- *  pass, never a wrong answer now — the same posture {@link writeRefusalStreak}'s sibling in
- *  `object-reaper.ts` takes for the same reason. */
+/** Best-effort persistence: failure costs a first pass after restart, never a wrong verdict.
+ * Same posture as writeRefusalStreak in object-reaper.ts. */
 export function writeAutomaticBranchReapState(path: string, state: AutomaticBranchReapState): void {
   try {
     mkdirSync(dirname(path), { recursive: true });
@@ -630,11 +508,8 @@ export function branchNamesFingerprint(names: readonly string[]): string {
   return [...new Set(names)].sort().join("\u0000");
 }
 
-/**
- * Decide whether the expensive automatic reaper should run. An empty listing is deliberately not
- * accepted here: callers must refuse an unreadable/empty corpus before invoking this function,
- * because an empty fingerprint would otherwise look like a legitimate branch deletion event.
- */
+/** Callers must reject unreadable/empty branch listings before cadence selection:
+ * an empty fingerprint would otherwise masquerade as a legitimate branch deletion. */
 export function decideAutomaticBranchReap(
   state: AutomaticBranchReapState,
   names: readonly string[],
@@ -660,27 +535,10 @@ export interface BranchPruneOutcome {
   readonly failed: readonly { readonly names: readonly string[]; readonly error: string }[];
 }
 
-/**
- * Delete the branches a {@link BranchManifestEntry} manifest names. THE EXECUTING HALF of
- * `reapBranchesCommand`, kept here for the same reason every other declaration in this module is:
- * it takes its one effect as an injected `exec`, so a test drives the real decision logic —
- * including a failing push — without touching a remote.
- *
- * IT DELETES ONLY WHAT IT IS GIVEN. Every guard, hold and undetermined decision was already made by
- * `planBranchReap` (`lib/status.ts`); this function re-derives none of it and cannot widen the set.
- * That split is deliberate: the classification is the reviewed part, and a deleter that also
- * classified could disagree with the dry run the operator just read.
- *
- * A `sha` OF `"unknown"` IS SKIPPED, NEVER DELETED. The manifest's whole purpose is that
- * `git push origin <sha>:refs/heads/<name>` restores what this removes; a ref whose sha would not
- * resolve has no such line, so deleting it would be the one irreversible case. The dry run already
- * prints `unknown` for a branch that vanished mid-run, and this is the same condition read as a
- * refusal rather than a cosmetic label.
- *
- * PUSHES IN CHUNKS, because one refspec git rejects fails the WHOLE push: a single 143-ref command
- * turns one stale ref into zero deletions, while a chunk confines that to its own group and the
- * outcome names the survivors. The default is deliberately modest for the same reason.
- */
+/** Execute only the supplied BranchManifestEntry manifest with injected exec (W1-T3020).
+ * planBranchReap in lib/status.ts owns every guard/hold; never reclassify or widen its set.
+ * Skip unknown/empty SHAs: deletion is reversible only with a resolvable restore refspec.
+ * Push in modest chunks: one rejected ref fails its whole push; report every surviving name. */
 export function pruneDeletableBranches(
   manifest: readonly BranchManifestEntry[],
   exec: (cmd: string, args: string[]) => string,
@@ -734,31 +592,11 @@ export interface ActiveBranchScreen {
   readonly withheld: readonly WithheldBranch[];
 }
 
-/**
- * THE LAST SCREEN BEFORE A DELETE: withhold anything that looks ACTIVE, on evidence gathered at
- * PRUNE time rather than inherited from the classification.
- *
- * IT DOES NOT RE-CLASSIFY — it only ever REMOVES from the set `planBranchReap` produced, so the
- * prune can still never delete something the dry run did not offer. Its two rules are the two ways
- * a branch in that set can nonetheless be in use:
- *
- * (1) AN OPEN PR ON THE HEAD, RE-READ NOW. `prState` was folded during the classification, and two
- *     things can go wrong with a value that old: the fold itself can be wrong (it was — a reused
- *     branch name with ten merged PRs and one open folded to `merged` until W1-T3020 put `open`
- *     first), and a PR can be opened in the seconds between the report and the delete. Re-reading
- *     the open heads is one cheap call and is INDEPENDENT of the fold, so a second defect in that
- *     path cannot also defeat this. A branch here is withheld whatever its reason says.
- *
- * (2) RECENT WORK ON NO-PR EVIDENCE. For {@link NO_PR_EVIDENCE_REASONS} the classification rests on
- *     "no PR and the commits are in main", which a just-created worker branch satisfies exactly as
- *     well as an abandoned one. Age is the only thing separating them, so a tip newer than the
- *     bound is withheld — and so is a tip whose age could not be read at all, because an unknown
- *     age is the case where being wrong deletes live work.
- *
- * A merged or closed PR is NOT age-gated: that PR is decisive evidence about the work itself, and
- * gating it would withhold branches finished hours ago for no gain. MEASURED on the live repo: of
- * 141 deletable, 7 had a tip newer than a day and every one of those carried a merged or closed PR.
- */
+/** Final screen at PRUNE time: only remove from planBranchReap's set, never reclassify.
+ * Re-read open PR heads independently of the fold: a PR may open after classification, and
+ * W1-T3020 fixed reused names where merged once outranked open. Withhold any open head.
+ * For NO_PR_EVIDENCE_REASONS, withhold recent OR unreadable ages: no PR yet is not no PR ever.
+ * Merged/closed PRs are decisive about completed work and are not age-gated. */
 export function withholdActiveBranches(
   manifest: readonly BranchManifestEntry[],
   openPrHeads: ReadonlySet<string>,
@@ -819,8 +657,7 @@ export const STALE_HOLD_ARCHIVE_PREFIX = "refs/rmd-recovery/reaped/";
 
 export type StaleHoldReason = "credited_sibling_stale" | "orphan_unshipped_stale";
 
-/** The facts this planner reads, a structural subset of status.ts's BranchFacts (no import: status.ts imports
- *  this module, and dependency-cruiser counts even a type-only edge as a cycle). */
+/** Structural subset of status.ts BranchFacts: importing it, even type-only, creates a cycle. */
 export interface StaleHoldFacts {
   name: string;
   prState: "merged" | "closed" | "open" | "none" | "unknown";
@@ -837,13 +674,9 @@ export interface StaleHoldCandidate {
   taskId: string;
 }
 
-/**
- * The held run branches stale enough to archive and reap. PURE. A branch qualifies only when every
- * fact was READ: a confirmed no-PR state, a tip confirmed not in main and equal to the live remote sha, a
- * readable commit age past its threshold, a resolved task id, and a claim list that was read without a
- * live claim for that task.
- * An unreadable claim list (`undefined`) yields no candidates at all.
- */
+/** Pure stale-hold planner: require confirmed no PR, tip not in main matching the live SHA,
+ * readable age past threshold, resolved task ID, and a readable claim list with no live claim.
+ * Undefined claims yield no candidates. */
 export function planStaleHoldArchive(input: {
   facts: readonly StaleHoldFacts[];
   reasons: Readonly<Record<string, string>>;
@@ -905,10 +738,8 @@ export function parseDispatchClaimTaskIds(raw: string): Set<string> {
 // automatic rung's prune pass or an explicit `rmd reap-branches --archive-stale`. Unarmed, the lane
 // stays the shadow above: it ledgers `branch_reap.hygiene_shadow` and pushes nothing.
 
-/** BACKSTOP: at most this many stale holds are archived per pass. The 2026-11-01 backlog was 379
- *  (296 shipped-task branches past 7 days, 83 unshipped ones past 14); 25 matches the prune's own
- *  chunk size, so a first armed pass removes a reviewable handful rather than the whole backlog, and
- *  the rest drain over later passes. The ledger row's `capped` names what this pass left. */
+/** BACKSTOP: cap each stale-hold pass at one prune-sized chunk, draining the rest later.
+ * The ledger's capped count names the remainder (operator ruling 2026-11-01). */
 export const STALE_HOLD_ARCHIVE_CAP = 25;
 
 export interface StaleHoldArchived {
@@ -931,33 +762,16 @@ export function staleHoldArchiveRef(name: string, sha: string): string {
   return `${STALE_HOLD_ARCHIVE_PREFIX}${name}/${sha}`;
 }
 
-/**
- * The documented one-line restore for an archived branch:
- * `git fetch origin <archive_ref>:<archive_ref> && git push origin <archive_ref>:refs/heads/<name>`.
- * The fetch is not optional: a push's source is resolved LOCALLY, and the archive ref exists only on
- * origin, so the bare push fails with "src refspec … does not match any" in any clone that has not
- * fetched it (measured against a real remote in this lane's test).
- */
+/** Restore via fetch THEN push (staleHoldRestoreCommand). The archive exists only on origin;
+ * omitting fetch fails with src refspec not found in a fresh clone (real-remote falsifier). */
 export function staleHoldRestoreCommand(name: string, sha: string): string {
   const ref = staleHoldArchiveRef(name, sha);
   return `git fetch origin ${ref}:${ref} && git push origin ${ref}:refs/heads/${name}`;
 }
 
-/**
- * Archive each stale hold's tip and delete its branch, ONE ATOMIC PUSH PER BRANCH:
- *
- *   git push --atomic --force-with-lease=refs/heads/<name>:<sha> origin \
- *     <sha>:refs/rmd-recovery/reaped/<name>/<sha> :refs/heads/<name>
- *
- * `--atomic` makes the archive ref and the delete land together or not at all, and the lease makes
- * the whole push refuse when the branch no longer points at the sha the planner read — so a branch
- * that gained a commit is left alone, never deleted. A refused push is reported in `failed` and its
- * branch stays. One push per branch, not a chunk, so one moved branch cannot block the others.
- *
- * RESTORE is one line ({@link staleHoldRestoreCommand}):
- *   git fetch origin refs/rmd-recovery/reaped/<name>/<sha>:refs/rmd-recovery/reaped/<name>/<sha> \\
- *     && git push origin refs/rmd-recovery/reaped/<name>/<sha>:refs/heads/<name>
- */
+/** Archive and delete in ONE atomic push per branch, leased to the planner's exact SHA.
+ * A moved head or rejected push leaves both refs unchanged and reports failed; one failed branch
+ * cannot block another. Restore via staleHoldRestoreCommand, including its required fetch. */
 export function* archiveStaleHoldsSteps(
   candidates: readonly StaleHoldCandidate[],
   exec: BranchReapExec,
