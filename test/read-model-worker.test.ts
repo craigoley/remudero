@@ -42,12 +42,13 @@ import {
   readReadModelSwitches,
   runReadModelWorker,
   readModelStatusView,
+  type ReadModelBodyEntry,
   type ReadModelView,
   type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
 import { buildServeServer, readModelInstances, resolveConsoleSha, stopServeReadModel, type ServeDeps } from "#src/lib/serve.js";
 import { makeTempDir } from "#src/lib/tmp.js";
-import { INBOX_VIEW_NAME, INBOX_VIEW_SECTIONS, INBOX_VIEW_VERSION, refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { INBOX_VIEW_NAME, INBOX_VIEW_SECTIONS, INBOX_VIEW_VERSION, INBOX_QUALIFICATION_POPULATION_META, inboxShadowPopulation, refreshInboxClassification } from "#src/lib/inbox-view.js";
 import type { PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -57,16 +58,18 @@ const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
 
 test("the live Inbox consumer holds mismatched population messages and recovers only on matching evidence", async t => {
-  const stateDir = makeTempDir("inbox-population-messages"), repository = "craigoley/remudero", snapshotKey = "b".repeat(64), generation = `inbox-current-pages-v1:${"a".repeat(64)}`;
+  const stateDir = makeTempDir("inbox-population-messages"), repository = "craigoley/remudero", snapshotKey = "b".repeat(64);
+  const population = inboxPopulation(snapshotKey, 1, "population-sibling"), generation = population.population.generation;
   let worker: ReturnType<typeof createReadModelWorker> | undefined;
   t.after(() => { worker?.stop(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
   mkdirSync(join(stateDir, "read-model")); writeFileSync(join(stateDir, LIVE), "");
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: "auto" } }));
   const file = join(stateDir, "population-worker.mjs"), scope = { instance: "core", repository };
-  const body = { view: "inbox", key: "section=needsYou", version: 1, generation: 1, etag: 'W/"population-body"', qualificationGeneration: generation,
-    body: { view: "inbox", version: 1, generatedAt: new Date().toISOString(), asOf: null, stale: false, sources: [], data: { snapshotKey, section: "needsYou", page: { index: 0, of: 1, total: 0 }, items: [] } } };
-  // The rest of a complete population: a current message converges only a whole page batch.
-  const siblings = inboxPopulation(generation, snapshotKey, 1, "population-sibling").filter(entry => entry.key !== body.key);
+  const body = population.find(entry => entry.key === "section=needsYou")!;
+  const siblings = population.filter(entry => entry !== body);
+  const db = openProjectorReadModel(stateDir, "core");
+  db.prepare("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)").run(INBOX_QUALIFICATION_POPULATION_META, JSON.stringify(population.population));
+  db.close();
   const status = { view: "read-model", key: "", version: 1, generation: 1, etag: 'W/"population-status"',
     body: { view: "read-model", version: 1, generatedAt: new Date().toISOString(), asOf: null, stale: false, sources: [], data: { shadow: [{ view: "inbox", ready: true, reason: "controlled qualified consumer input", samples: 3000, lastRealMs: null, qualificationGeneration: generation }] } } };
   writeFileSync(file, `import { parentPort } from "node:worker_threads";
@@ -1151,18 +1154,32 @@ test("a slice that cannot start is a tick failure of its instance and nothing is
   assert.equal(lastState(f.c.messages).instances[0]?.checking, undefined, "and none is left marked as running");
 });
 
-/** One complete synthetic Inbox population: every section once, `needsYou` paged `needsYouPages` times under its own snapshot cursors. */
-function inboxPopulation(generation: string, snapshotKey: string, needsYouPages: number, tag: string) {
-  return INBOX_VIEW_SECTIONS.flatMap(section => {
+/** Complete deterministic page data, qualified by the production population validator. */
+function inboxPopulation(snapshotKey: string, needsYouPages: number, tag: string, filters: Record<string, string> = {}) {
+  const generatedAt = new Date().toISOString();
+  const entries = INBOX_VIEW_SECTIONS.flatMap(section => {
     const of = section === "needsYou" ? needsYouPages : 1;
-    return Array.from({ length: of }, (_, index) => ({ view: INBOX_VIEW_NAME, key: viewKey(new URLSearchParams(index === 0 ? { section } : { section, cursor: snapshotCursor({ snapshotKey, section, offset: index }) })),
-      version: 1, generation: 1, etag: `W/"${tag}-${section}-${index}"`, qualificationGeneration: generation,
-      body: { view: INBOX_VIEW_NAME, version: 1, generatedAt: new Date().toISOString(), asOf: null, stale: false, sources: [], data: { snapshotKey, section, items: [], counts: {}, page: { index, of, total: 0 } } } }));
+    return Array.from({ length: of }, (_, index) => {
+      const cursor = (offset: number) => snapshotCursor({ snapshotKey, section, offset });
+      const key = viewKey(new URLSearchParams({ ...filters, section, ...(index > 0 ? { cursor: cursor(index) } : {}) }));
+      return { view: INBOX_VIEW_NAME, key, version: 1, generation: 1, etag: `W/"${tag}-${section}-${index}"`,
+        body: { view: INBOX_VIEW_NAME, version: 1, generatedAt, asOf: generatedAt, stale: false,
+          sources: [{ name: "inbox-store:core", asOf: generatedAt, state: "fresh" as const }],
+          data: { snapshotKey, section, items: [{ id: `${tag}-${section}-${index}` }], counts: {},
+            page: { index, of, total: of, ...(index + 1 < of ? { next: cursor(index + 1) } : {}) } } } };
+    });
   });
+  return qualifyInboxEntries(entries);
+}
+
+function qualifyInboxEntries<T extends ReadModelBodyEntry>(entries: T[]) {
+  const population = inboxShadowPopulation(entries.map(entry => ({ key: entry.key, data: entry.body.data, sources: entry.body.sources })),
+    { instance: "core", repository: "craigoley/remudero" }, Date.now());
+  return Object.assign(entries.map(entry => ({ ...entry, qualificationGeneration: population.generation })), { population });
 }
 
 /** A worker module that replays `script[spawn][step]`: the first step on boot, each next one per `shadow` request; `"exit"` ends that thread. */
-function scriptedInboxWorker(t: TestContext, script: unknown[][][]) {
+function scriptedInboxWorker(t: TestContext, script: unknown[][][], populations: Array<ReturnType<typeof inboxPopulation>>) {
   const stateDir = makeTempDir("inbox-convergence"), scope = { instance: "core", repository: "craigoley/remudero" };
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   let worker: ReturnType<typeof createReadModelWorker> | undefined;
@@ -1184,28 +1201,56 @@ parentPort.on("message", message => { if (message.type === "stop") { clearInterv
 `);
   worker = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: scope.repository }], workerUrl: pathToFileURL(file), tickMs: 5, stopWaitMs: 50,
     every: () => () => {}, log: (step, extra) => { logs.push({ step, extra }); } });
+  const commitStep = (messages: unknown[]) => {
+    const population = populations.find(entries => messages.some(message => {
+      const candidate = message as { type?: string; generation?: string };
+      return candidate.type === "qualification" && candidate.generation === entries.population.generation;
+    }));
+    if (!population) return;
+    const db = openProjectorReadModel(stateDir, scope.instance);
+    try {
+      db.exec("CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL, generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view,key)) WITHOUT ROWID");
+      db.exec("BEGIN IMMEDIATE");
+      db.prepare("DELETE FROM view_body WHERE view = ?").run(INBOX_VIEW_NAME);
+      for (const entry of population) {
+        db.prepare("INSERT INTO view_body(view,key,version,generation,etag,body) VALUES(?,?,?,?,?,?)")
+          .run(entry.view, entry.key, entry.version, entry.generation, entry.etag, JSON.stringify(entry.body));
+        db.prepare("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)").run(`view_qualification:${JSON.stringify([entry.view, entry.key])}`,
+          JSON.stringify({ etag: entry.etag, qualificationGeneration: entry.qualificationGeneration }));
+      }
+      db.prepare("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)").run(INBOX_QUALIFICATION_POPULATION_META, JSON.stringify(population.population));
+      db.exec("COMMIT");
+    } finally { db.close(); }
+  };
+  commitStep(script[0]![0]!);
+  let currentSpawn = 1, currentStep = 0;
   const reached = async (spawn: number, step: number) => {
     const deadline = Date.now() + 15000, seen = () => logs.some(log => log.step === "fixture.step" && log.extra?.spawn === spawn && log.extra?.step === step);
     while (!seen() && Date.now() < deadline) await sleep(10);
     assert.ok(seen(), `the scripted worker reached spawn ${spawn} step ${step}`);
+    currentSpawn = spawn; currentStep = step;
   };
   const inboxKeys = () => [...worker!.bodies.values()].filter(entry => entry.view === INBOX_VIEW_NAME).map(entry => entry.key).sort();
-  return { worker, scope, logs, reached, inboxKeys, advance: () => worker!.shadow({ view: INBOX_VIEW_NAME, key: "section=needsYou", requests: 0 }) };
+  return { worker, scope, logs, reached, inboxKeys, advance: () => {
+    const next = script[currentSpawn - 1]?.[currentStep + 1] ?? [];
+    commitStep(next.includes("exit") ? script[currentSpawn]?.[0] ?? [] : next);
+    worker!.shadow({ view: INBOX_VIEW_NAME, key: "section=needsYou", requests: 0 });
+  } };
 }
 
-const INBOX_G1 = `inbox-current-pages-v1:${"1".repeat(64)}`, INBOX_G2 = `inbox-current-pages-v1:${"2".repeat(64)}`;
 const INBOX_S1 = "a".repeat(64), INBOX_S2 = "b".repeat(64);
 const qualified = (generation: string, snapshotKey: string, scope: { instance: string; repository: string }) => ({ type: "qualification", view: INBOX_VIEW_NAME, generation, snapshotKey, scope });
 
 test("cached inbox pages converge after a committed population replaces the producer", async t => {
-  const first = inboxPopulation(INBOX_G1, INBOX_S1, 3, "first"), replacement = inboxPopulation(INBOX_G2, INBOX_S2, 1, "replacement");
+  const first = inboxPopulation(INBOX_S1, 3, "first"), replacement = inboxPopulation(INBOX_S2, 1, "replacement");
+  const INBOX_G1 = first.population.generation, INBOX_G2 = replacement.population.generation;
   const status = { view: "read-model", key: "", version: 1, generation: 1, etag: 'W/"status"', body: { view: "read-model", version: 1, generatedAt: new Date().toISOString(), asOf: null, stale: false, sources: [], data: {} } };
   const scope = { instance: "core", repository: "craigoley/remudero" }, pending = { type: "qualification", view: INBOX_VIEW_NAME, generation: "inbox-current-pages-v1:pending", scope };
   // The first producer publishes its whole population and dies; the replacement committed its shrink, so it has no drop to send.
   const f = scriptedInboxWorker(t, [
     [[pending, ...first.map(entry => ({ type: "body", entry })), { type: "body", entry: status }, qualified(INBOX_G1, INBOX_S1, scope)], ["exit"]],
     [[pending, ...replacement.map(entry => ({ type: "body", entry })), qualified(INBOX_G2, INBOX_S2, scope)]],
-  ]);
+  ], [first, replacement]);
   f.worker.start();
   await f.reached(1, 0);
   assert.equal(f.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G1);
@@ -1221,7 +1266,8 @@ test("cached inbox pages converge after a committed population replaces the prod
 });
 
 test("inbox population recovery preserves current pages and refuses incomplete retirement", async t => {
-  const first = inboxPopulation(INBOX_G1, INBOX_S1, 3, "first"), replacement = inboxPopulation(INBOX_G2, INBOX_S2, 1, "replacement");
+  const first = inboxPopulation(INBOX_S1, 3, "first"), replacement = inboxPopulation(INBOX_S2, 1, "replacement");
+  const INBOX_G1 = first.population.generation, INBOX_G2 = replacement.population.generation;
   const scope = { instance: "core", repository: "craigoley/remudero" }, pending = { type: "qualification", view: INBOX_VIEW_NAME, generation: "inbox-current-pages-v1:pending", scope };
   const missing = replacement.find(entry => entry.key === "section=kept")!, partial = replacement.filter(entry => entry !== missing);
   const malformed = { ...missing, etag: 'W/"malformed"', body: { ...missing.body, data: { ...missing.body.data, page: { index: 1, of: 1, total: 0 } } } };
@@ -1233,7 +1279,7 @@ test("inbox population recovery preserves current pages and refuses incomplete r
     [{ type: "body", entry: missing }, qualified(INBOX_G2, INBOX_S2, { ...scope, repository: "craigoley/remudero-site" })],
     [qualified("inbox-current-pages-v1:not-a-population", INBOX_S2, scope), qualified(INBOX_G2, "not-a-snapshot", scope)],
     [qualified(INBOX_G2, INBOX_S2, scope)],
-  ]]);
+  ]], [first, replacement]);
   const union = [...new Set([...first, ...replacement].map(entry => entry.key))].sort();
   f.worker.start();
   await f.reached(1, 0);
@@ -1262,7 +1308,25 @@ test("inbox population recovery preserves current pages and refuses incomplete r
   const scoped = replacement.map(entry => withParams(entry, params => {
     params.set("repo", scope.repository); params.set("repository", scope.repository); params.set("instance", scope.instance);
   }));
+  const scopedFirst = first.map(entry => withParams(entry, params => {
+    params.set("repo", scope.repository); params.set("repository", scope.repository); params.set("instance", scope.instance);
+  }));
+  const wholeFirst = qualifyInboxEntries([...first, ...scopedFirst]);
+  const wholeReplacement = qualifyInboxEntries([...replacement, ...scoped]);
+  assert.equal(wholeFirst.length, 22, "positive control: both original filter groups include continuation pages");
+  assert.equal(wholeReplacement.length, 18, "the committed replacement contains every section of both filter groups");
   const invalidBatches = [
+    { label: "null items", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, items: null } } })) },
+    { label: "negative page total", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, page: { ...entry.body.data.page, total: -1 } } } })) },
+    { label: "whole filter group omitted", entries: replacement },
+    { label: "null counts", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, counts: null } } })) },
+    { label: "total disagrees with items", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, page: { ...entry.body.data.page, total: 2 } } } })) },
+    { label: "unexpected continuation", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, page: { ...entry.body.data.page, next: "unexpected" } } } })) },
+    { label: "missing source", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, sources: [] } })) },
+    { label: "stale source", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, sources: entry.body.sources.map(source => ({ ...source, state: "stale" })) } })) },
+    { label: "mismatched source census", entries: wholeReplacement.map((entry, index) => ({ ...entry, body: { ...entry.body, sources: entry.body.sources.map(source => ({ ...source, asOf: index === 0 ? new Date(Date.parse(source.asOf!) - 1).toISOString() : source.asOf })) } })) },
+    { label: "mismatched attention census", entries: wholeReplacement.map((entry, index) => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, counts: { needsYou: index } } } })) },
+    { label: "oversized page", entries: wholeReplacement.map(entry => ({ ...entry, body: { ...entry.body, data: { ...entry.body.data, items: [{ id: "x".repeat(61 * 1024) }] } } })) },
     ...["repo", "repository", "instance"].flatMap(filter => {
       const foreign = filter === "instance" ? "other" : "other/repository";
       return [
@@ -1278,30 +1342,31 @@ test("inbox population recovery preserves current pages and refuses incomplete r
     { label: "foreign snapshot cursor", entries: replacement.map(entry => withParams(entry, params => params.set("cursor", snapshotCursor({ snapshotKey: INBOX_S1, section: entry.body.data.section, offset: 1 })))) },
     { label: "continuation cursor on first page", entries: replacement.map(entry => withParams(entry, params => params.set("cursor", snapshotCursor({ snapshotKey: INBOX_S2, section: entry.body.data.section, offset: 1 })))) },
   ];
-  for (const { label, entries } of invalidBatches) await t.test(label, async sub => {
+  for (const { label, entries: invalid } of invalidBatches) await t.test(label, async sub => {
+    const entries = invalid.map(entry => ({ ...entry, qualificationGeneration: wholeReplacement.population.generation }));
     const control = scriptedInboxWorker(sub, [[
-      [pending, ...first.map(entry => ({ type: "body", entry })), qualified(INBOX_G1, INBOX_S1, scope)],
-      [pending, ...entries.map(entry => ({ type: "body", entry })), qualified(INBOX_G2, INBOX_S2, scope)],
+      [pending, ...wholeFirst.map(entry => ({ type: "body", entry })), qualified(wholeFirst.population.generation, INBOX_S1, scope)],
+      [pending, ...entries.map(entry => ({ type: "body", entry })), qualified(wholeReplacement.population.generation, INBOX_S2, scope)],
       [...entries.map(entry => ({ type: "drop", view: INBOX_VIEW_NAME, key: entry.key })),
-        ...[...replacement, ...scoped].map(entry => ({ type: "body", entry })), qualified(INBOX_G2, INBOX_S2, scope)],
-    ]]);
+        ...wholeReplacement.map(entry => ({ type: "body", entry })), qualified(wholeReplacement.population.generation, INBOX_S2, scope)],
+    ]], [wholeFirst, wholeReplacement]);
     control.worker.start();
     await control.reached(1, 0);
-    assert.deepEqual(control.inboxKeys(), first.map(entry => entry.key).sort(), "positive control: initial pages are cached");
-    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G1);
+    assert.deepEqual(control.inboxKeys(), wholeFirst.map(entry => entry.key).sort(), "positive control: initial pages in both filter groups are cached");
+    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), wholeFirst.population.generation);
     control.advance();
     await control.reached(1, 1);
-    const expected = [...new Set([...first, ...entries].map(entry => entry.key))].sort();
+    const expected = [...new Set([...wholeFirst, ...entries].map(entry => entry.key))].sort();
     assert.deepEqual(control.inboxKeys(), expected, `${label} with a matching envelope preserves every cached page`);
     assert.equal(control.worker.bodies.size, expected.length, "the exact cache count includes all retained pages");
     assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), "inbox-current-pages-v1:pending", "invalid pages cannot qualify a matching envelope");
     for (const entry of entries) assert.equal(control.worker.shadowIdentity?.(INBOX_VIEW_NAME, entry.key)?.key, undefined, "invalid evidence provides no qualified sample identity");
     control.advance();
     await control.reached(1, 2);
-    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G2, "a complete in-scope replacement still qualifies");
-    assert.deepEqual(control.inboxKeys(), [...replacement, ...scoped].map(entry => entry.key).sort(), "all current qualified filter groups survive convergence");
-    assert.equal(control.worker.bodies.size, replacement.length + scoped.length);
-    for (const entry of [...replacement, ...scoped]) assert.equal(control.worker.body(INBOX_VIEW_NAME, entry.key)?.etag, entry.etag);
+    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), wholeReplacement.population.generation, "a complete in-scope replacement still qualifies");
+    assert.deepEqual(control.inboxKeys(), wholeReplacement.map(entry => entry.key).sort(), "all current qualified filter groups survive convergence");
+    assert.equal(control.worker.bodies.size, wholeReplacement.length);
+    for (const entry of wholeReplacement) assert.equal(control.worker.body(INBOX_VIEW_NAME, entry.key)?.etag, entry.etag);
   });
 });
 

@@ -84,7 +84,7 @@ import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowPopulation, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ShadowSampleIdentity, type ViewShadow } from "./view-shadow.js";
-import { INBOX_VIEW_NAME, INBOX_VIEW_SECTIONS, INBOX_QUALIFICATION_ERROR_META, INBOX_QUALIFICATION_PENDING, INBOX_QUALIFICATION_POPULATION_META, inboxQualificationPolicy, inboxShadowPopulation, inboxShadowSampleKey, parseInboxShadowPopulation, restoreInboxShadowPopulation, type InboxQualificationScope } from "./inbox-view.js";
+import { INBOX_VIEW_NAME, INBOX_QUALIFICATION_ERROR_META, INBOX_QUALIFICATION_PENDING, INBOX_QUALIFICATION_POPULATION_META, inboxQualificationPolicy, inboxShadowPopulation, inboxShadowSampleKey, parseInboxShadowPopulation, restoreInboxShadowPopulation, type InboxQualificationScope } from "./inbox-view.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, viewKey, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeLedgerReads, judgeSource, type SourcePhase } from "./view-freshness.js";
 import { forkWorkerEntry, startWorker, type WorkerEntryFork } from "./child-entry-argv.js";
@@ -2511,31 +2511,6 @@ export function readModelBodyKey(view: string, key = ""): string {
   return `${view}\u0000${key}`;
 }
 
-/**
- * The shape every committed producer population has: per filter group, every section, each paged
- * 0..of-1 exactly once. A batch missing a page, or carrying a malformed one, is not yet a population.
- */
-function completeInboxPages(entries: readonly ReadModelBodyEntry[], scope: InboxQualificationScope): boolean {
-  const groups = new Map<string, Map<string, { of: number; seen: Set<number> }>>();
-  for (const entry of entries) {
-    const data = entry.body.data as { section?: unknown; page?: { index?: unknown; of?: unknown } } | null;
-    const section = data?.section, index = data?.page?.index, of = data?.page?.of;
-    if (typeof section !== "string" || typeof index !== "number" || typeof of !== "number" || !Number.isSafeInteger(index) || !Number.isSafeInteger(of) || index < 0 || index >= of) return false;
-    const filters = new URLSearchParams(entry.key);
-    if (viewKey(filters) !== entry.key || inboxShadowSampleKey(data, filters, scope) === undefined ||
-      (index === 0 ? filters.has("cursor") : !filters.has("cursor"))) return false;
-    filters.delete("section"); filters.delete("cursor"); filters.sort();
-    const sections = groups.get(filters.toString()) ?? new Map<string, { of: number; seen: Set<number> }>();
-    groups.set(filters.toString(), sections);
-    const pages = sections.get(section) ?? { of, seen: new Set<number>() };
-    sections.set(section, pages);
-    if (pages.of !== of || pages.seen.has(index)) return false;
-    pages.seen.add(index);
-  }
-  return groups.size > 0 && [...groups.values()].every(sections => sections.size === INBOX_VIEW_SECTIONS.length &&
-    INBOX_VIEW_SECTIONS.every(section => sections.get(section)?.seen.size === sections.get(section)?.of));
-}
-
 /** Serve's side: warm bodies now, one worker on `start()`, respawned with back-off if it dies. */
 export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWorkerHandle {
   const clock = opts.clock ?? systemClock;
@@ -2574,7 +2549,25 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const convergeInbox = (generation: string, snapshotKey: string): boolean => {
     const own = [...bodies].filter(([, entry]) => entry.view === INBOX_VIEW_NAME);
     const current = own.filter(([, entry]) => entry.qualificationGeneration === generation && (entry.body.data as { snapshotKey?: unknown } | null)?.snapshotKey === snapshotKey);
-    if (!inboxScope || !completeInboxPages(current.map(([, entry]) => entry), inboxScope)) return false;
+    if (!inboxScope) return false;
+    let db: ReadModelDb | undefined;
+    try {
+      db = openReadModel({ stateDir: opts.stateDir, instance: home, schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION, readOnly: true });
+      db.exec("BEGIN");
+      const failure = db.meta(INBOX_QUALIFICATION_ERROR_META), raw = db.meta(INBOX_QUALIFICATION_POPULATION_META);
+      if (failure !== undefined) throw new Error(`committed Inbox producer refusal: ${failure}`);
+      if (raw === undefined) throw new Error("committed Inbox population is unavailable");
+      // Reuse the producer's validator and committed incarnations: a whole missing filter group must fail too.
+      const population = restoreInboxShadowPopulation(raw, current.map(([, entry]) => ({ key: entry.key, data: entry.body.data, sources: entry.body.sources })), clock.now());
+      if (population.generation !== generation || population.snapshotKey !== snapshotKey || population.scope.instance !== inboxScope.instance ||
+        population.scope.repository !== inboxScope.repository) throw new Error("committed Inbox population does not match the current message");
+      db.exec("COMMIT");
+    } catch (error) {
+      opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: `complete page batch unavailable: ${(error as Error).message}` });
+      return false;
+    } finally {
+      db?.close();
+    }
     const keep = new Set(current.map(([key]) => key)), retired = own.filter(([key]) => !keep.has(key));
     for (const [key] of retired) forget(key);
     if (retired.length > 0) opts.log?.("read_model.inbox_converged", { generation, kept: keep.size, retired: retired.length });

@@ -221,8 +221,8 @@ test("a converged population meets the original standby warm-body floor", async 
   const serving = createReadModelWorker({ stateDir: active, instances, workerUrl: pathToFileURL(file), tickMs: 5, stopWaitMs: 50, every: () => () => {}, log: (step, extra) => { logs.push({ step, extra }); } });
   workers.push(serving);
   assert.equal(serving.bodies.size, 0, "the active generation boots before its producer commits anything");
-  const [published] = publish([first, shrunk]), [republished] = publish([shrunk]);
-  writeFileSync(script, JSON.stringify([published, republished]));
+  const [published] = publish([first]);
+  writeFileSync(script, JSON.stringify([published]));
   writeFileSync(file, `import { parentPort } from "node:worker_threads";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 const spawn = existsSync(${JSON.stringify(counter)}) ? Number(readFileSync(${JSON.stringify(counter)}, "utf8")) + 1 : 1;
@@ -237,6 +237,11 @@ parentPort.on("message", message => { if (message.type === "stop") { clearInterv
   await until("the active generation's first producer published", () => logs.some(log => log.step === "fixture.published" && log.extra?.spawn === 1));
   const before = serving.bodies.size;
   assert.equal(before, first.length + 1, "positive control: the active generation served the larger first population and its status body");
+  assert.equal(serving.qualificationGeneration?.(INBOX_VIEW_NAME), loadCommittedViewBodies(active, "core").inboxPopulation?.generation,
+    "the larger active population qualifies before the shrink is committed");
+  publish([shrunk]); // commit the replacement while losing every body/drop/current message
+  const [republished] = publish([shrunk]);
+  writeFileSync(script, JSON.stringify([published, republished]));
   serving.shadow({ view: INBOX_VIEW_NAME, key: "section=needsYou", requests: 0 });
   await until("the replacement producer republished", () => logs.some(log => log.step === "fixture.published" && log.extra?.spawn === 2));
   const committed = loadCommittedViewBodies(active, "core");
