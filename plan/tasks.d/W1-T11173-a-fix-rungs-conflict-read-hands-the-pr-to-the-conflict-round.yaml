@@ -1,0 +1,42 @@
+- id: W1-T11173
+  title: A fix rung that reads a head CONFLICTING hands the PR to the conflict round, instead of a refused-escalate that waits for an input main never changes
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one module, one concern: the sweep's reading of the rung's conflict hand-off
+  origin: operator-session#conflict-findings-2026-11-03
+  plan_refs:
+    - W1-T10339
+    - W1-T4470
+    - W1-T1278
+    - W1-T9723
+    - W1-T11062
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-fix-rungs-conflict-read-hands-the-pr-to-the-conflict-round.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Replaying #15638 (W1-T9795, head 35fa075): a fix.stood_down at rung.strike with CONFLICT_REPAIR_HANDOFF_REASON that follows the sweep's last clean row is read by lastKnownMergeStateFromLedger as this head's dirty observation, carrying the head's last recorded conflict files; a later sweep observation still supersedes it; an unread pass then disposes conflicted and dispatches the merge-conflict round with those files, where today it disposes refused-escalate; and a held conflict hand-off on a pass GitHub reads clean records the main it was held under and is released once main moves past it"
+      proof: "unit test: test/sweep/a-fix-rungs-conflict-read-hands-the-pr-to-the-conflict-round.test.ts"
+    - claim: A conflict hand-off hold row names the main it was held under as stand_down_main_sha
+      proof: "grep: stand_down_main_sha in src/lib/sweep.ts"
+  rationale: |
+    OBSERVED in ~/Remudero-notes/conflict-evidence-1103 (7-day conflict rows, origin/main 7338c1fd) and re-read on origin/main c0a6f1c74.
+    - The fix rung (src/cli/commands/fix.ts, W1-T1278 condition B, about lines 990-1000) reads GitHub's mergeable before a strike. On CONFLICTING it stands down at rung.strike with CONFLICT_REPAIR_HANDOFF_REASON, "standing down for the sweep's own conflicted disposition".
+    - The sweep (src/lib/sweep.ts, the W1-T10339 block beside the conflicted disposition) holds any stand-down whose head and contract are unchanged as refused-escalate: "no worker is dispatched until one does". #14515 (2026-10-26) exempts only a pass the sweep itself disposed conflicted with captured files.
+    - When the sweep does not read the head dirty (an unread light pass, an inherited clean, or a GitHub read that still says clean), each side waits on the other. Main moving is not an input the hold reads, so moving main cannot release it.
+    - 33 rung.strike dirty stand-downs over 21 tasks in 7 days. 19 refused-escalates carry the hand-off reason; 13 of them on 6 PRs come after #14515 (#14326 x2, #14587 x2, #14729, #14817 x2, #15532 x5, #15638). The sweep's merge_state on those 13 rows: 7 clean, 6 unread.
+    - #15638 (W1-T9795, head 35fa075): the rung read REST dirty at 2026-11-03T00:02:16Z. At 00:20:25Z the sweep, still on an inherited clean, disposed refused-escalate. Locally the head conflicts on src/run-task.ts with every main since b95cd21 (23:12:24Z).
+    - fix.stood_down rows carry read_head_sha and task_id but no pr_number. lastKnownMergeStateFromLedger reads only sweep.disposed, so the rung's fresher read never reaches the hysteresis.
+  design: |
+    1. lastKnownMergeStateFromLedger also folds a fix.stood_down at site rung.strike whose reason is CONFLICT_REPAIR_HANDOFF_REASON and whose read_head_sha (or head_sha) is this head, as a dirty observation at its ts, carrying the last conflict_files a sweep row recorded for this head. Append order still decides, so a later sweep observation supersedes it. An unread pass then inherits dirty; with files it disposes conflicted, and #14515's exemption dispatches the merge-conflict round.
+    2. The W1-T10339 hold row for a rung.strike conflict hand-off also writes stand_down_at (the hold's ts) and stand_down_main_sha (this pass's mainTipSha). On a later pass for the same hold, when main differs from the first recorded stand_down_main_sha, the hold is released: the PR keeps its disposition, the rung is dispatched to re-read mergeability, and the reason names both mains. If it reads CONFLICTING again, that is a new hold, released only after main moves again. So a lasting disagreement between GitHub's list and single-PR reads costs at most one rung read per main move, never a worker.
+    3. Tests replay the #15638 rows through lastKnownMergeStateFromLedger and runSweep (readLedger, appendLine and readMainTip injected). Show delete-the-fix: every test goes red with src/lib/sweep.ts restored from base. #14515's existing cases in test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts must stay green unchanged.
+    Comment-neutral in src. Out of scope: a dirty head with no conflict files anywhere, which the merge probe answers (W1-T11166 lets a probe conflict reach an unread pass); fix.ts itself; and GitHub-dirty but locally-clean merges (#15602, findings item 7).
+  note: |
+    Reserved with rmd next-task-id for plan-file-1793667683039. Operator ruling 2026-11-02: rmd must resolve merge conflicts automatically, with a gardener as the backstop. Findings item 2 (handoff deadlock) of ~/Remudero-notes/conflict-findings-2026-11-03.md, built as the brief's item 3. Hand-built on a run-W1-T11173 branch.

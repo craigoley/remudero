@@ -485,6 +485,8 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_AUTOMATED_RETRO_DECISION", "Carries an automated retro decision into retro subprocess handling.", ["src/lib/retro-subprocess.ts", "src/run-task.ts"]),
   envEntry("RMD_CASH_EASTUS_API_KEY", "Daemon-only key for cash deployments on the EastUS Azure account.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),
+  envEntry("RMD_CREDENTIAL_CONSUMER", "Non-secret label a harness push gives the git credential socket helper, so the socket's mint row names its consumer.", ["src/lib/git-push.ts", "scripts/git-credential-socket-helper.mjs"]),
+  envEntry("RMD_CREDENTIAL_RECEIPT", "Private file where the git credential socket helper records a harness push's credential metadata (scope, mint time, expiry); never the token.", ["src/lib/git-push.ts", "scripts/git-credential-socket-helper.mjs"]),
   envEntry("RMD_CENSUS_SNAPSHOT", "Names the harness git snapshot a fix round's census precheck reads instead of running git (W1-T7182).", ["src/run-task.ts", "src/lib/prompt-render.ts"]),
   envEntry("RMD_FOUNDRY_CLAUDE_API_KEY", "Daemon-only key for the bounded Foundry Opus cash adapter.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_FOUNDRY_CLAUDE_ENDPOINT", "HTTPS Foundry /anthropic base URL for the bounded Opus cash adapter.", ["src/lib/worker-provider.ts"]),
