@@ -19,7 +19,7 @@ raw: >-
     (none found)
 attachments: []
 origin: incident#951bdf04873c3e9d0e6a5df275fb5a6ac398cb14dfdd75e9b7e792d802adae9a
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/16401
 summary:
