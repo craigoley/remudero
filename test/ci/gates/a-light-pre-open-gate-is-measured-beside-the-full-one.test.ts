@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 // @ts-ignore the executable .mjs module has no declaration file.
-import { main as censusMain } from "#scripts/census-precheck.mjs";
+import { CENSUS_SNAPSHOT_ENV, main as censusMain } from "#scripts/census-precheck.mjs";
 import {
   CENSUS_COUNTS_LOG_ENV, CENSUS_COUNTS_STEP_JOB, FAST_GATE_STEPS, createPreflightStepLog, preflightStepLogPlan, runPreflightFast,
 } from "#src/lib/ci-parity.js";
@@ -154,6 +154,47 @@ test("W1-T11105 criterion 1: census-precheck logs its counts verdict before any 
   const countsOnlyLog = join(scratch(t, "counts"), "steps.ndjson");
   assert.equal(withCountsLog(countsOnlyLog, () => censusMain(["--counts-only", "--root", clean.repo.dir, "--base", clean.base])), 0);
   assert.equal(records(countsOnlyLog)[0]?.ok, true, "--counts-only logs the same verdict");
+});
+
+test("W1-T11105 criterion 1: a failed counts-log write reports its cause once and preserves the census verdict", (t) => {
+  const root = scratch(t, "counts-write-failure");
+  const leaf = "src/lib/leaf.ts";
+  mkdirSync(join(root, "src/lib"), { recursive: true });
+  const snapshot = join(root, "snapshot.json");
+  writeFileSync(snapshot, JSON.stringify({
+    version: 1, root, mergeBase: "fixture-base", headPaths: [leaf], basePaths: [leaf],
+    baseBlobs: { [leaf]: "export const leaf = 1;\n" }, mainBlobs: {},
+  }));
+  const priorSnapshot = process.env[CENSUS_SNAPSHOT_ENV];
+  const priorLog = process.env[CENSUS_COUNTS_LOG_ENV];
+  t.after(() => {
+    if (priorSnapshot === undefined) delete process.env[CENSUS_SNAPSHOT_ENV];
+    else process.env[CENSUS_SNAPSHOT_ENV] = priorSnapshot;
+    if (priorLog === undefined) delete process.env[CENSUS_COUNTS_LOG_ENV];
+    else process.env[CENSUS_COUNTS_LOG_ENV] = priorLog;
+  });
+  process.env[CENSUS_SNAPSHOT_ENV] = snapshot;
+  const errors: string[] = [];
+  t.mock.method(console, "error", (line: string) => { errors.push(line); });
+  t.mock.method(console, "log", () => {});
+  const unwritable = join(root, "missing-parent", "steps.ndjson");
+  for (const expected of [0, 1]) {
+    writeFileSync(join(root, leaf), expected === 0 ? "export const leaf = 2;\n" : "export const leaf = Date.now();\n");
+    const writable = join(root, `counts-${expected}.ndjson`);
+    const args = ["--counts-only", "--root", root];
+    process.env[CENSUS_COUNTS_LOG_ENV] = writable;
+    const control = censusMain(args);
+    assert.equal(control, expected, `the writable-log control returns the census verdict: ${errors.join("\n")}`);
+    assert.equal(records(writable)[0]?.ok, expected === 0);
+    process.env[CENSUS_COUNTS_LOG_ENV] = unwritable;
+    errors.length = 0;
+    assert.equal(censusMain(args), expected, "a logging error preserves both pass and refusal");
+    const diagnostics = errors.filter((line) => line.startsWith("census-precheck: counts verdict NOT logged"));
+    assert.equal(diagnostics.length, 1, "one diagnostic per failed append");
+    assert.ok(diagnostics[0]?.includes(unwritable), "the diagnostic names the failed log destination");
+    assert.match(diagnostics[0]!, /ENOENT/, "the diagnostic preserves the filesystem failure reason");
+    assert.equal(existsSync(unwritable), false);
+  }
 });
 
 /** A step log as `rmd preflight --step-log` would leave it: two phases, three fast jobs, the census counts. */
