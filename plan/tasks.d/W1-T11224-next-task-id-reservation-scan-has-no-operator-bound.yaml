@@ -1,5 +1,5 @@
 - id: W1-T11224
-  title: "THE TASK-ID RESERVER SCANS ONLY FIFTY CANDIDATES, SO IT CAN REFUSE WHILE A LATER ID IS FREE AND THE OPERATOR CANNOT REQUEST A LARGER BOUND"
+  title: "Let operators choose a larger bounded task ID scan"
   repo: remudero
   depends_on: []
   type: implement
