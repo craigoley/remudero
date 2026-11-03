@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.27
   status: queued
@@ -26,10 +26,13 @@
     Previous remedy W1-T7091: src/lib/sweep.ts, test/flow-review-failed-n-unmet-criterion.test.ts, src/lib/read-model-worker.ts; did not fall: share of PR-hours 1.3% (13.641401666666654/1086.0243058333326) before, 1.8% (61.39990749999996/3345.4502200000006) after, over 14 day(s) each side. Take a structurally different remedy.
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.94
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
     reasons:
-      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The largest cited episode explicitly awaits an already-open human escalation, while acceptance requires clearing the blocker without manual intervention. The record supplies no remedy explaining how that human decision boundary will be preserved.; on the change's description/files alone, no diff was read — The record requests a structurally different remedy after a prior unsuccessful change but identifies no specific mechanism; the supplied evidence therefore cannot verify that the proposed repair avoids changing review or escalation policy."
-    judged_at: "2026-10-25T22:31:22.254Z"
-    pin: "ccd4e80fbadde342e63d35f3826c981ff12a5e155fb01acc0b32d308eb3e94e4"
+      - "The declared files are src/lib/sweep.ts and a new test file under test/sweep/. Nothing in the description or files list touches secrets, credentials, auth, deploy, merge policy, or data deletion."
+      - "The acceptance criterion is a grep proof on a test name, which can be verified automatically. The one absent file is the new test the task is meant to create, so that is expected."
+      - "The family track record is 11 merged against 4 declined (Beta mean 0.91), which is a reasonably clean history. The previous remedy W1-T7091 did not reduce the share, and this task is asked to take a structurally different approach. That is a effectiveness concern, not a danger concern."
+      - "The description mentions a needs-human escalation on PR #14195, but it only describes the standing-down behaviour. The change does not ask the operator for a decision. No ACTUAL CHANGE view was supplied, so this verdict rests on the description and files only."
+    judged_at: "2026-11-03T12:25:59.349Z"
+    pin: "a51a3a4b49d7f7e4944cd7f07ca6dd3d4caedfa4ad494bec906799ab7fdd9c1f"

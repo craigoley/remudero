@@ -19,6 +19,8 @@
     - src/lib/inbox-view.ts
     - src/lib/status-board.ts
     - test/inbox/serve-spawns-nothing-synchronous-for-inbox-anchors-and-registry-locks.test.ts
+    - "src/lib/panel-graph.ts"
+    - "src/lib/report-commands.ts"
   status: queued
   attempts: 0
   acceptance:

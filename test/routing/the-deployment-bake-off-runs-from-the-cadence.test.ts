@@ -9,7 +9,7 @@ import { runDeploymentBakeoff, readBakeoffTrialState, type DeployedModel } from 
 import { scoreCandidate } from "#src/lib/inbox-bakeoff.js";
 import { loadProposalRegistry } from "#src/lib/inbox.js";
 import { loadMounts, mountsPath } from "#src/lib/mounts.js";
-import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OpenWeightAllowanceExhaustedError, OpenWeightRequestTooLargeError, openWeightDeploymentReady, selectOpenWeightModel, markOpenWeightDeploymentAbsent, clearOpenWeightAbsence } from "#src/lib/worker-provider.js";
+import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_REASONING_EFFORTS, isFoundryClaudeDeployment, OpenWeightAllowanceExhaustedError, OpenWeightRequestTooLargeError, openWeightDeploymentReady, selectOpenWeightModel, markOpenWeightDeploymentAbsent, clearOpenWeightAbsence } from "#src/lib/worker-provider.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "#src/lib/cash-responses.js";
 import type { Config } from "#src/lib/config.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
@@ -84,7 +84,7 @@ test("W1-T10840: the measurement cadence runs the deployment bake-off once for a
     const first = f.calls.length;
     assert.ok(first > 0);
     const trials = f.calls.filter((call) => call.routingTrial?.models?.includes("gpt-6.1-terra"));
-    assert.deepEqual([...new Set(trials.map((call) => call.effort))], ["low", "medium", "high"]);
+    assert.deepEqual([...new Set(trials.map((call) => call.effort))], ["default", "low", "medium", "high"]);
     assert.ok(trials.every((call) => call.onSelectionAssignment === undefined && call.mountProvider === "cash"));
     assert.ok(readBakeoffTrialState(f.stateDir).readinessDigests?.["cash:gpt-6.1-terra"]);
     const firstSelections = f.selected.length;
@@ -96,9 +96,17 @@ test("W1-T10840: the measurement cadence runs the deployment bake-off once for a
     assert.equal(f.calls[0].effort, mounts.synthesis.inbox_draft.effort);
     const models = measurementBakeoffDeployments(mounts);
     for (const model of models.filter((model) => model.billing === "cash")) {
-      for (const effort of model.efforts!) {
+      const admitted = OPENWEIGHT_REASONING_EFFORTS[model.model];
+      // Only a native-effort transport (Responses, Foundry Claude) sends an effort a deployment has no row for.
+      const native = CASH_RESPONSES_DEPLOYMENTS[model.model] !== undefined || isFoundryClaudeDeployment(model.model);
+      for (const effort of admitted ?? (native ? model.efforts! : [])) {
         assert.ok(f.selected.some((selection) => selection.trial && selection.model === model.model && selection.effort === effort),
           `${model.model}/${effort} must reach the real worker's provider boundary`);
+      }
+      if (admitted !== undefined) {
+        assert.ok(f.selected.some((selection) => selection.trial && selection.model === model.model &&
+          selection.effort === "default" && selection.requestedEffort === "default"),
+          `${model.model}/thinking off must reach the real worker's provider boundary`);
       }
     }
     assert.ok(f.selected.filter((selection) => selection.trial)
@@ -185,7 +193,7 @@ test("W1-T10840: first wiring seeds measured models and trials only the rest", a
     await runDeploymentBakeoff({ stateDir: f.stateDir, incumbent, deployed: [old, terra,
       { model: "claude-sonnet-5-5", billing: "subscription", efforts: ["low"] }],
       replay: async (candidates) => { measured = candidates.slice(1).map((c) => c.model); return candidates.map(rowFor); } });
-    assert.deepEqual(measured, [terra.model, terra.model, terra.model]);
+    assert.deepEqual(measured, [terra.model, terra.model, terra.model, terra.model]);
     const state = readBakeoffTrialState(f.stateDir);
     assert.ok(state.trialed.includes("cash:gpt-5-nano"));
     assert.equal(state.readinessDigests?.["cash:gpt-5-nano"], old.readinessDigest);
