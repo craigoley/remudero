@@ -61,13 +61,44 @@ rmd_commit_published() {
     known=$(printf '%s\n' "$RMD_PUB_REFS" | awk '$2 ~ /^refs\/(heads|tags)\// { print $1 "^{commit}" }' |
       rmd_retirement_git "$repo" cat-file --batch-check='%(objectname) %(objecttype)' 2>/dev/null |
       awk '$2 == "commit" { print $1 }' | sort -u) || return 1
-    [ -n "$known" ] || return 1
-    graph=$(printf '%s\n' "$known" | rmd_retirement_git "$repo" rev-list --stdin 2>/dev/null) || return 1
-    RMD_PUB_GRAPH_KEY="$key"; RMD_PUB_GRAPH="$graph"
+    # No locally readable advertised tip (or a failed walk) means local ancestry
+    # cannot prove anything; it must not stop GitHub from proving publication.
+    RMD_PUB_GRAPH_KEY=""; RMD_PUB_GRAPH=""
+    if [ -n "$known" ] && graph=$(printf '%s\n' "$known" | rmd_retirement_git "$repo" rev-list --stdin 2>/dev/null); then
+      RMD_PUB_GRAPH_KEY="$key"; RMD_PUB_GRAPH="$graph"
+    fi
   fi
-  if printf '%s\n' "$RMD_PUB_GRAPH" | awk -v c="$commit" '$0 == c { yes=1 } END { exit !yes }'; then return 0; fi
+  if [ -n "$RMD_PUB_GRAPH_KEY" ] && printf '%s\n' "$RMD_PUB_GRAPH" | awk -v c="$commit" '$0 == c { yes=1 } END { exit !yes }'; then return 0; fi
+  if rmd_commit_in_github_pull "$repo" "$commit"; then return 0; fi
   RMD_PUB_REASON="not-proven-published"
   return 1
+}
+# A commit pushed to a pull request stays on GitHub through refs/pull/<n>/head
+# even after the PR is squash-merged and later commits replace the head. The
+# advertised refs only show the final head, so ask GitHub which pull requests
+# contain this exact commit. Any failure (no gh, no auth, not GitHub) is "no".
+RMD_GH_KNOWN=" "
+rmd_commit_in_github_pull() {
+  local repo="$1" commit="$2" url slug gh count
+  case "$RMD_GH_KNOWN" in *" $commit "*) return 0 ;; esac
+  # The configured URL names the GitHub repository; `remote get-url` would
+  # apply insteadOf rewrites (mirrors, local caches) that hide it.
+  url=$(rmd_retirement_git "$repo" config --get remote.origin.url 2>/dev/null) || return 1
+  case "$url" in
+    https://github.com/*|git@github.com:*|ssh://git@github.com/*) slug=${url#*github.com}; slug=${slug#[:/]}; slug=${slug%.git} ;;
+    *) return 1 ;;
+  esac
+  case "$slug" in */*/*|/*|*/|'') return 1 ;; esac
+  case "$slug" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  case "$commit" in *[!0-9a-f]*|'') return 1 ;; esac
+  gh=$(command -v gh 2>/dev/null) || { [ -x /opt/homebrew/bin/gh ] && gh=/opt/homebrew/bin/gh; } || { [ -x /usr/local/bin/gh ] && gh=/usr/local/bin/gh; } || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    count=$(GH_PROMPT_DISABLED=1 timeout 20 "$gh" api "repos/$slug/commits/$commit/pulls" --jq length 2>/dev/null) || return 1
+  else
+    count=$(GH_PROMPT_DISABLED=1 perl -e 'alarm 20; exec @ARGV' "$gh" api "repos/$slug/commits/$commit/pulls" --jq length 2>/dev/null) || return 1
+  fi
+  case "$count" in ''|*[!0-9]*|0) return 1 ;; esac
+  RMD_GH_KNOWN="$RMD_GH_KNOWN$commit "
 }
 rmd_workspace_published() {
   local repo="$1" scope="${2:-head}" refresh="${3:-0}" head refs oid ref

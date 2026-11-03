@@ -1179,6 +1179,13 @@ export function buildSweepLightHook(
           ...(!distanceKnown ? { standDownReasonFor: (d: Disposition) => d === "mergeable"
             ? "ready PR distance is unreadable — held until its compare succeeds" : undefined } : {}),
           readLiveStateAtAct: effects.readLiveState,
+          // W1-T11153: a refill re-reads the open PRs. One tick's snapshot is split into batches, each with its
+          // own light pass, so a batch refills only from its own PRs and PRs the tick's snapshot did not hold.
+          readOpenPrsForRefill: async () => {
+            const owned = new Set(restPrs.map((pr) => pr.prNumber));
+            const snapshot = new Set(openPrs.map((pr) => pr.prNumber));
+            return (await readViews()).filter((pr) => owned.has(pr.prNumber) || !snapshot.has(pr.prNumber));
+          },
           rereadPrAtAct: effects.rereadPrAtAct ?? buildRereadPrAtAct(owner, repo, ledgerPath, {
             views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
               readMainPlan: resolvedReadMainPlan },

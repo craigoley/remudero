@@ -2859,6 +2859,7 @@ import {
   gitPushEmptyCommit,
   isNonFastForwardRejection,
   LanePushForeignHeadError,
+  PushAuthRefusedError,
   runStepsAsync,
   runStepsSync,
   step,
@@ -10504,6 +10505,7 @@ export function runErrorCause(err: unknown): RunErrorCause {
   if (err instanceof SubscriptionOnlyRefusedError) return "subscription-only-refused";
   const text = String((err as Error)?.message ?? err);
   if (/^census-precheck:/m.test(text)) return "census-refused-push";
+  if (err instanceof PushAuthRefusedError) return "push-auth-refused";
   if (/^Command failed: git (?:-C \S+ )?push /m.test(text)) return "git-push-failed";
   if (/^Command failed: git (?:-C \S+ )?commit /m.test(text)) return "git-commit-failed";
   if (/^Command failed: gh (?:api --method POST \S+\/pulls |pr create)/m.test(text)) return "pr-create-failed";
