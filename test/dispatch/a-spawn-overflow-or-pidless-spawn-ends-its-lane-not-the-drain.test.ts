@@ -14,7 +14,7 @@ import {
 } from "#src/lib/run-child-contract.js";
 
 // Read off the namespace so the file still loads at the merge base, where the new classes do not exist.
-const { laneDeliveryFailure } = drainModule;
+const { SPAWN_NO_PID_RE, laneDeliveryFailure } = drainModule;
 
 type Row = { step: string; extra: Record<string, unknown> };
 
@@ -63,6 +63,9 @@ test("W1-T11136 criterion 1: the classifier names a spawn output overflow and a 
     assert.equal(delivery?.failureClass, "spawn_output_overflow", overflow.message);
   }
   assert.equal(laneDeliveryFailure(noPid())?.failureClass, "spawn_no_pid");
+  assert.equal(SPAWN_NO_PID_RE.test(noPid().message), true);
+  assert.equal(SPAWN_NO_PID_RE.test("TypeError: spawnDetachedGroup: child process has no pid "), false, "anchored at the start");
+  assert.equal(SPAWN_NO_PID_RE.test("the run child has no pid (spawn failed)"), false, "run-child.ts's own no-pid throw is a different site");
   for (const stopping of [
     Object.assign(new Error("ENOBUFS in prose is not the structure"), {}),
     Object.assign(new Error("spawnSync git ENOBUFS"), { code: "ENOBUFS", syscall: "write" }),

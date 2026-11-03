@@ -113,7 +113,7 @@ export interface RunChildFailure {
   spawnArg?: string;
 }
 
-/** W1-T11136: the bound on the one spawn argument a failure carries; it names the call, it is not the argv. */
+/** BACKSTOP (W1-T11136): the bound on the one spawn argument a failure carries; it names the call, it is not the argv. */
 export const RUN_CHILD_SPAWN_ARG_BOUND = 120;
 
 export interface RunChildStatus {
