@@ -29,7 +29,7 @@ const reviewHost: ReviewCommandHost = {
   materializeReviewWorktree: unexpected,
   readHeadShaRest: () => "a".repeat(40),
   readMainPlanTreeSha: unexpected,
-  realDeps: () => ({ reviewWorktree: { fetch: unexpected } }) as ReturnType<ReviewCommandHost["realDeps"]>,
+  realDeps: () => ({ reviewWorktree: { fetch: unexpected } }) as unknown as ReturnType<ReviewCommandHost["realDeps"]>,
   reviewPostedDescription: (verdict) => verdict.summary,
   reviewWorkerLockId: (runId) => runId,
   reviewerClockBoundMs: unexpected,
