@@ -23,15 +23,16 @@ const workflow = parse(readFileSync(join(root, ".github/workflows/ci.yml"), "utf
     name?: string;
     needs?: string[];
     if?: string;
-    strategy?: { "fail-fast"?: boolean; matrix?: { shard?: number[] } };
+    strategy?: { "fail-fast"?: boolean; matrix?: { shard?: number[] | string } };
     steps?: Array<{ name?: string; run?: string }>;
   }>;
 };
 
 test("W1-T4756 criterion 1: the derived balanced slow shards cover the slow tier exactly once", () => {
   const shard = workflow.jobs["test-slow-shard"];
-  // W1-T11206: six fixed slots; test-slow-plan derives how many of them run.
-  assert.deepEqual(shard.strategy?.matrix?.shard, [1, 2, 3, 4, 5, 6]);
+  // W1-T11206: the matrix and its total come from test-slow-plan's derived count.
+  assert.equal(shard.strategy?.matrix?.shard, "${{ fromJSON(needs.test-slow-plan.outputs.shards) }}");
+  assert.equal(shard.name, "test-slow-shard (${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }})");
   assert.deepEqual(shard.needs, ["test-slow-plan"]);
   assert.equal(shard.strategy?.["fail-fast"], false);
   assert.equal(shard.if, undefined, "push and merge_group must enter the shard job");
@@ -43,7 +44,7 @@ test("W1-T4756 criterion 1: the derived balanced slow shards cover the slow tier
   const testFiles = tier.listTestFiles(root);
   const slow = tier.tierFiles(testFiles, manifest).slow;
   const count = tier.slowTierShardCount(manifest, { testFiles });
-  assert.ok(count >= 2 && count <= (shard.strategy?.matrix?.shard ?? []).length, `derived ${count} must fit the slots`);
+  assert.ok(count >= 2, `derived ${count}`);
   assert.ok(slow.length >= count, "the control population must fill every derived shard");
   const selected: string[][] = [];
   for (let index = 1; index <= count; index += 1) {

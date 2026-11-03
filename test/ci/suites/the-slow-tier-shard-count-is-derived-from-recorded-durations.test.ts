@@ -133,3 +133,37 @@ test("W1-T11206 criterion 3: the fast tier's runs carry no failing-tests reporte
   assert.ok(seen.length > 0);
   assert.ok(seen.every((args) => !args.includes(reporter)));
 });
+
+test("W1-T11206: the check census names a run-time slow-tier matrix with one `*/*` entry, and refuses an unneeded producer", async () => {
+  const { derivePrCheckCandidates } = await import("#src/lib/ci-control-plane.js");
+  const job = (needs: string[]) => ({
+    on: { pull_request: {} },
+    jobs: {
+      plan: { name: "plan" },
+      shard: {
+        name: "shard (${{ matrix.shard }}/${{ needs.plan.outputs.count }})",
+        needs,
+        strategy: { matrix: { shard: "${{ fromJSON(needs.plan.outputs.shards) }}" } },
+      },
+    },
+  });
+  assert.deepEqual(derivePrCheckCandidates("ci.yml", job(["plan"])), ["plan", "shard (*/*)"]);
+  assert.throws(() => derivePrCheckCandidates("ci.yml", job([])), /reads needs\.plan, which this job does not need/);
+  const workflow = parseYaml(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as Parameters<typeof derivePrCheckCandidates>[1];
+  assert.ok(derivePrCheckCandidates("ci.yml", workflow).includes("test-slow-shard (*/*)"));
+  assert.equal(
+    (workflow.jobs as Record<string, { strategy?: { matrix?: { shard?: unknown } } }>)["test-slow-shard"]?.strategy?.matrix?.shard,
+    "${{ fromJSON(needs.test-slow-plan.outputs.shards) }}",
+  );
+});
+
+test("W1-T11206: ci-friction finds ci.yml as the owner family of every run-time slow-tier shard check", async () => {
+  const { workflowJobCheckNames, ciCheckFamily } = await import("#src/lib/ci-friction-gardener.js");
+  const workflow = parseYaml(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as {
+    jobs: Record<string, { name?: string; strategy?: { matrix?: unknown } }>;
+  };
+  const job = workflow.jobs["test-slow-shard"]!;
+  const declared = workflowJobCheckNames(job.name!, job.strategy?.matrix);
+  assert.deepEqual(declared, ["test-slow-shard (*/*)"]);
+  for (const check of ["test-slow-shard (1/3)", "test-slow-shard (4/4)"]) assert.equal(ciCheckFamily(check), ciCheckFamily((declared as string[])[0]!));
+});

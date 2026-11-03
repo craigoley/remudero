@@ -787,11 +787,10 @@ jobs:
           esac
 
   test-slow-plan:
-    # W1-T11206: derives how many of test-slow-shard's slots run, from the recorded per-file
-    # durations in scripts/test-tier-manifest.json — the smallest count whose slowest shard is
-    # predicted to finish within 60% of test-slow-shard's 35-minute ceiling. No install: the
-    # planner imports only node: built-ins. A count above the slot list fails here, and
-    # test-slow then fails closed rather than running too few shards.
+    # W1-T11206: derives test-slow-shard's matrix from the recorded per-file durations in
+    # scripts/test-tier-manifest.json — the smallest shard count whose slowest shard is predicted to
+    # finish within 60% of test-slow-shard's 35-minute ceiling. No install: the planner imports
+    # only node: built-ins. If it fails, test-slow-shard is skipped and test-slow fails closed.
     name: test-slow-plan
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -810,14 +809,11 @@ jobs:
           cache: npm
       - name: Derive the slow-tier shard count from recorded durations (W1-T11206)
         id: plan
-        env:
-          SLOTS: "6"
         run: |
           node scripts/test-tier-manifest.mjs --print-slow-shards > slow-plan.txt
           cat slow-plan.txt
-          COUNT="$(sed -n 's/^count=//p' slow-plan.txt)"
-          if [ -z "$COUNT" ] || [ "$COUNT" -gt "$SLOTS" ]; then
-            echo "::error::W1-T11206: the slow tier needs ${COUNT:-an unknown number of} shards but test-slow-shard has ${SLOTS} slots. Raise the slot list in ci.yml."
+          if ! grep -q '^count=[1-9][0-9]*$' slow-plan.txt || ! grep -q '^shards=\[' slow-plan.txt; then
+            echo "::error::W1-T11206: --print-slow-shards printed no shard list and count."
             exit 1
           fi
           cat slow-plan.txt >> "$GITHUB_OUTPUT"
@@ -831,17 +827,16 @@ jobs:
     # ci-gate before the fast shards may exclude those files. It registers on every pull_request
     # event (W1-T1033), so the required context is never silently absent.
     #
-    # W1-T11206: six fixed slots, so the check names are stable for ci-gate; test-slow-plan decides
-    # how many of them run. A slot outside the derived list skips every heavy step and passes.
-    name: test-slow-shard (${{ matrix.shard }}/6)
+    # W1-T11206: the matrix and its total come from test-slow-plan, so the shard count grows with
+    # the recorded durations and no total is written here. ci-gate.yml's ADVISORY list names these
+    # checks as `test-slow-shard (*/*)`; the required verdict stays the stable `test-slow`.
+    name: test-slow-shard (${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }})
     needs: [test-slow-plan]
     runs-on: ubuntu-latest
-    env:
-      SLOW_SHARD_ACTIVE: ${{ contains(fromJSON(needs.test-slow-plan.outputs.shards), matrix.shard) }}
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: ${{ fromJSON(needs.test-slow-plan.outputs.shards) }}
     # W1-T4396: no job-level if — the push lane runs the slow tier too. W1-T3207 skips it on a
     # SOURCE pull request, so without this the 107 slowest files ran on main nowhere at all. It is
     # its own job, so it never lengthens the fast shards' critical path.
@@ -863,17 +858,12 @@ jobs:
       - name: Check every test file is tiered (W1-T2904 unwired-gate wiring — `test:tier:check` refuses an untiered file so the fast/slow split can trust scripts/test-tier-manifest.json before either tier runs)
         run: |
           # A push has no base branch; the tier check is a per-PR admission gate that main already passed.
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${SLOW_SHARD_ACTIVE:-true}" != "false" ]; then
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
             npm run --silent test:tier:check -- --base "origin/${GITHUB_BASE_REF}"
           fi
       - name: Establish whether the exact plan-reading matrix owns this diff (W1-T3191)
         id: plan-reading
         run: |
-          if [ "${SLOW_SHARD_ACTIVE:-true}" = "false" ]; then
-            echo "W1-T11206: this slot is outside test-slow-plan's derived shard list; it installs and runs nothing."
-            echo "slot=idle" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
             echo "class=PUSH" >> "$GITHUB_OUTPUT"
             echo "established=false" >> "$GITHUB_OUTPUT"
@@ -914,7 +904,7 @@ jobs:
             echo "established=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Install (clean, from lockfile)
-        if: ${{ steps.plan-reading.outputs.slot != 'idle' && steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
         run: npm ci
       - name: Determine Playwright's pinned browser version (cache key input)
         id: playwright-version
@@ -922,13 +912,13 @@ jobs:
           VERSION="$(node -e "console.log(require('./package-lock.json').packages['node_modules/playwright'].version)")"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
       - name: Cache Playwright's Chromium download
-        if: ${{ steps.plan-reading.outputs.slot != 'idle' && steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
       - name: Install Playwright's Chromium (the slow tier includes browser-backed console suites)
-        if: ${{ steps.plan-reading.outputs.slot != 'idle' && steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
         run: npx playwright install chromium
       - name: Select the merge group's suites (W1-T5940 — the same selection ci-shard makes)
         env:
@@ -941,10 +931,6 @@ jobs:
             "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
         run: |
-          if [ "${SLOW_SHARD_ACTIVE:-true}" = "false" ]; then
-            echo "W1-T11206: this slot is outside test-slow-plan's derived shard list."
-            exit 0
-          fi
           MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
           if [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ] \
             && node scripts/test-tier-manifest.mjs --select-candidates merge-group-suites.txt --shard 1/8 --base HEAD > /dev/null; then

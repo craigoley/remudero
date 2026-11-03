@@ -169,6 +169,9 @@ jobs:
       # Runtime compatibility is enforced for lock changes by the trusted exact-head security
       # consumer, not the generic aggregator. Scan findings remain advisory.
       GATE_RATIONALE: "W1-T4116 gate gardener: scan-pr / osv-scan refused 0 of 115 runs on 75 pull requests (measured 2026-11-01T13:17:28.924Z, 74.6 min)."
+      # W1-T11206: `test-slow-shard (*/*)` is ONE entry for every slow-tier shard. Its matrix and
+      # total come from ci.yml's test-slow-plan at run time, so the census
+      # (src/lib/ci-control-plane.ts runtimeMatrixName) names each run-time part `*`.
       ADVISORY: >-
         [
         "squash-trailer-gate",
@@ -177,12 +180,7 @@ jobs:
         "flake-retry-aggregate",
         "coverage-ledger",
         "test-slow-plan",
-        "test-slow-shard (1/6)",
-        "test-slow-shard (2/6)",
-        "test-slow-shard (3/6)",
-        "test-slow-shard (4/6)",
-        "test-slow-shard (5/6)",
-        "test-slow-shard (6/6)",
+        "test-slow-shard (*/*)",
         "ci-shard (1/8)",
         "ci-shard (2/8)",
         "ci-shard (3/8)",
