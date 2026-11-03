@@ -171,7 +171,8 @@ test("matrix readiness stays incomplete with no eligible slots and preserves den
 
 test("matrix census rejects duplicate and conflicting configuration identities", () => {
   const cases = commonCanarySuite().slice(0, 1);
-  const row = configRow({ model: "duplicate-check", cases });
+  const row = configRow({ model: "duplicate-check", provider: "cash", deployment: "dep-duplicate",
+    route: "azure", billing: "api", cases });
   const base = census(cases, [row]);
   const input = { cases, day: "2026-11-02", seed: "duplicate-check", replicates: 1 };
 
