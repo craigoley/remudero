@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "@babel/parser";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function snapshot(source: string) {
@@ -30,9 +31,14 @@ test("W1-T11066: comment compression preserves executable code", () => {
   // Pre-compression source: 69ba8151bb8f69458ace15c1dfd7e71e78396722.
   // These measurements document this edit, rather than establish a new comment ceiling.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/main-health-rung.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 26316);
-  assert.equal(actual.tokenDigest, "f34cc863fa31a4504fd7e21b8416a4c44139fcdf7bea8d3baa31a2686eaa3f51");
-  assert.equal(actual.astDigest, "e15381a5e1a45cd31ce59dee2cb26ec9510585c72accc2d3b039d4285a0f407e");
+  const before = compressionPinBase("src/lib/main-health-rung.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free (#16082).
+    const base = snapshot(before);
+    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
+    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+  }
   assert.ok(actual.commentLines > 0 && actual.commentLines < 361,
     `comment lines must decrease from 361, found ${actual.commentLines}`);
   assert.ok(actual.commentBytes > 0 && actual.commentBytes < 31698,
