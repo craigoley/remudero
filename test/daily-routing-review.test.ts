@@ -9,6 +9,7 @@ import test from "node:test";
 import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS, routingAbCommand } from "#src/lib/routing-experiments.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { openLedgerUnion } from "#src/lib/ledger-union.js";
+import { LedgerExactDedupeLimitError } from "#src/lib/ledger-exact-dedupe.js";
 
 const root = REPO_ROOT;
 const script = join(root, "scripts/private-routing-daily-review.mjs");
@@ -459,5 +460,50 @@ test("daily completeness controls name unread rotations and changes between the 
     const appended = (await dailyRoutingReview({ ...f, asOf, openUnion: appendUnrelated })).snapshot.sources[0];
     assert.equal(appended.retainedRows, 3);
     assert.ok(appended.reasons.includes("ledger-source-changed-during-review"), "corpus identity covers unretained rows too");
+  } finally { f.close(); }
+});
+
+test("daily delivery index limits retain partial counts and one reason while other sources complete", async () => {
+  for (const failAudit of [false, true]) {
+    const f = fixture();
+    try {
+      const stateDir = f.sources[0]!.stateDir;
+      writeFileSync(join(stateDir, "ledger.ndjson"), ndjson([assignment("1"), assignment("2")]));
+      const reason = "ledger-dedupe-disk-bound";
+      const openUnion: typeof openLedgerUnion = async function* (dir, options) {
+        for await (const row of openLedgerUnion(dir, options)) {
+          yield row;
+          if (dir === stateDir && options?.since) throw new LedgerExactDedupeLimitError(reason);
+        }
+        if (dir === stateDir && failAudit) throw new LedgerExactDedupeLimitError(reason);
+      };
+      const { snapshot } = await dailyRoutingReview({ ...f, asOf, openUnion });
+      const partial = snapshot.sources[0];
+      assert.equal(partial.rowsRead, 2);
+      assert.equal(partial.retainedRows, 1);
+      assert.equal(partial.retainedRowsMissing, 1);
+      assert.equal(partial.retainedBytes, JSON.stringify(assignment("1")).length * 2);
+      assert.equal(partial.state, "observed-partial");
+      assert.equal(partial.completeness.complete, false);
+      assert.deepEqual(partial.reasons.filter((value: string) => value === reason), [reason]);
+      assert.equal(partial.reports[0].nextAction, "repair-source-evidence");
+      assert.equal(snapshot.stages.collection.state, "partial");
+      assert.deepEqual(snapshot.sources.slice(1).map((source: { state: string; retainedRows: number }) =>
+        [source.state, source.retainedRows]), [["observed", 1], ["observed", 1]]);
+      const persisted = JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8"));
+      assert.deepEqual(persisted.sources[0].reasons, partial.reasons);
+    } finally { f.close(); }
+  }
+});
+
+test("daily delivery propagates unexpected reader errors", async () => {
+  const f = fixture();
+  try {
+    const failure = new Error("delivery reader failed unexpectedly");
+    const openUnion: typeof openLedgerUnion = async function* (dir, options) {
+      if (dir === f.sources[0]!.stateDir && options?.since) throw failure;
+      yield* openLedgerUnion(dir, options);
+    };
+    await assert.rejects(dailyRoutingReview({ ...f, asOf, openUnion }), (error: unknown) => error === failure);
   } finally { f.close(); }
 });
