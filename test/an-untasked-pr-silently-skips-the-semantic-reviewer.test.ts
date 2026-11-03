@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { reviewCommand, UNTASKED_REVIEW_BUDGET_USD } from "../src/run-task.js";
-import { requiredSemanticDecisionDigest, requiredSemanticRefusal } from "../src/lib/required-semantic-review.js";
-import { loadPlanAtRef } from "../src/lib/plan.js";
-import { usesUntaskedReviewMetadata } from "../src/lib/tick-read-worker.js";
+import type { Config } from "#src/lib/config.js";
+import { reviewCommand, UNTASKED_REVIEW_BUDGET_USD } from "#src/run-task.js";
+import { requiredSemanticDecisionDigest, requiredSemanticRefusal } from "#src/lib/required-semantic-review.js";
+import { loadPlanAtRef } from "#src/lib/plan.js";
+import { usesUntaskedReviewMetadata } from "#src/lib/tick-read-worker.js";
 
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();

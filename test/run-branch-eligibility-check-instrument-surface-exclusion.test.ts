@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { INSTRUMENT_SURFACE, INSTRUMENT_SURFACE_EXCLUSIONS } from "../src/lib/review.js";
+import { INSTRUMENT_SURFACE, INSTRUMENT_SURFACE_EXCLUSIONS } from "#src/lib/review.js";
 
 // ── W1-T3600 (prereq split, #5700) ──────────────────────────────────────────────────────────────
 //

@@ -3,17 +3,17 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
-import { systemClock } from "../src/lib/clock.js";
-import { typecheckStep } from "../src/lib/commit-message.js";
-import { mergedHeadTypechecks } from "../src/lib/merge-probe.js";
-import { runRetroPrepublishPreflight } from "../src/lib/retro-preflight.js";
-import { runBoundedTest } from "../src/lib/test-run.js";
-import { acquireTestSlot } from "../src/lib/test-slot.js";
-import { runTypecheck } from "../src/lib/typecheck-run.js";
-import { spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
-import type { Config } from "../src/lib/config.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { makeRuntimeFixture } from "./helpers/native-runtime-fixture.js";
+import { systemClock } from "#src/lib/clock.js";
+import { typecheckStep } from "#src/lib/commit-message.js";
+import { mergedHeadTypechecks } from "#src/lib/merge-probe.js";
+import { runRetroPrepublishPreflight } from "#src/lib/retro-preflight.js";
+import { runBoundedTest } from "#src/lib/test-run.js";
+import { acquireTestSlot } from "#src/lib/test-slot.js";
+import { runTypecheck } from "#src/lib/typecheck-run.js";
+import { spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import type { Config } from "#src/lib/config.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { makeRuntimeFixture } from "#test/helpers/native-runtime-fixture.js";
 
 const modules = resolve("node_modules");
 function occupied(t: TestContext) {

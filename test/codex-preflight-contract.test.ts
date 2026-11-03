@@ -3,11 +3,11 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { defaultExecutor, probeTurnBudget } from "../src/lib/containment.js";
-import type { Config } from "../src/lib/config.js";
-import { parseIsolationReport } from "../src/lib/isolation.js";
-import { parseCodexJsonl } from "../src/lib/worker-provider.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { defaultExecutor, probeTurnBudget } from "#src/lib/containment.js";
+import type { Config } from "#src/lib/config.js";
+import { parseIsolationReport } from "#src/lib/isolation.js";
+import { parseCodexJsonl } from "#src/lib/worker-provider.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 const CAPTURE = readFileSync(
   new URL("./fixtures/codex-0.152.0-isolation-probe.jsonl", import.meta.url),

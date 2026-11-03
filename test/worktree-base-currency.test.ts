@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { WorktreeBaseStaleError, worktreeAdd } from "../src/lib/worker.js";
+import { WorktreeBaseStaleError, worktreeAdd } from "#src/lib/worker.js";
 
 // W1-T405: a run-task dispatch on a stale worktree base used to be detected only AFTER
 // recon, implement, and commit had all run, by the out-of-scope scope guard -- which then

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { recognizeChangesetClaims } from "../src/lib/review.js";
+import { recognizeChangesetClaims } from "#src/lib/review.js";
 
 const CODE_DIFF = ["src/lib/review.ts", "test/foo.test.ts", ".remudero/mounts.yaml"];
 const BT = String.fromCharCode(96);

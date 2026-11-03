@@ -30,11 +30,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { worktreeAdd } from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import * as runTask from "../src/run-task.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
-import { functionBody, widenedGitSites, WIDENED_SITE_EXCEPTIONS } from "./every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js";
+import { worktreeAdd } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import * as runTask from "#src/run-task.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
+import { functionBody, widenedGitSites, WIDENED_SITE_EXCEPTIONS } from "#test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js";
 
 const FILE = "src/run-task.ts";
 const EXTRACTED_FILE = "src/cli/commands/run-task-verb.ts";

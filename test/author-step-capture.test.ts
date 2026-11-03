@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { gitRepo } from './helpers/git-repo.js';
+import { gitRepo } from '#test/helpers/git-repo.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(ROOT, 'scripts/lib/author-step-capture.mjs');
@@ -85,6 +85,25 @@ test('author step capture transports a large file list without packing it into o
   assert.equal(result.status, 7, 'real child verdict, not the transport exit, must survive');
   assert.match(result.stdout, /large argv native witness/);
   assert.equal(JSON.parse(readFileSync(f.resultPath, 'utf8')).status, 7);
+  // Ordinary completion records the child group as proven closed before the owner may free its slot.
+  const native = JSON.parse(readFileSync(f.resultPath, 'utf8'));
+  assert.equal(native.processGroup.closed, true);
+  assert.ok(Number.isSafeInteger(native.processGroup.pid) && native.processGroup.pid > 0);
+  assert.equal((result as { groupClosed?: boolean }).groupClosed, true);
+});
+
+test('author step capture treats a receipt without closure proof as an unclosed group', () => {
+  const f = fixture();
+  const result = mod.captureStepSync(process.execPath, ['-e', ''], {
+    ...f, cwd: ROOT,
+    spawnCapture() {
+      writeFileSync(f.stdoutPath, ''); writeFileSync(f.stderrPath, '');
+      writeFileSync(f.resultPath, JSON.stringify({ version: 1, status: 0, signal: null, outputComplete: true }));
+      return { status: 0, signal: null, stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(result.status, 0);
+  assert.equal((result as { groupClosed?: boolean }).groupClosed, false, 'missing proof must keep the slot held');
 });
 
 test('author step capture bounds total stored output without certifying a truncated success', () => {

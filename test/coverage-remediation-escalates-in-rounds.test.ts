@@ -22,7 +22,7 @@ import {
   DEFAULT_TIER_BLOCK_PCT,
   DEFAULT_TIER_PASS_PCT,
   type FileDebt,
-} from "../src/lib/coverage-improvement.js";
+} from "#src/lib/coverage-improvement.js";
 
 const BLOCK = DEFAULT_TIER_BLOCK_PCT;
 const PASS = DEFAULT_TIER_PASS_PCT;

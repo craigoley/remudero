@@ -289,7 +289,7 @@ export {
 };
 // W1-T4678: the cheap-lane read BEFORE `escalateCircuitBreak` above — see stall-verifier.ts's
 // own doc for why this reads the evidence rather than paging straight from a tripped breaker.
-import { judgeDispatchBreak, stallShardFingerprint, verifyStalledTask, type DispatchBreakJudge } from "./lib/stall-verifier.js";
+import { judgeDispatchBreak, stallShardFingerprint, verifyStalledTask, type DispatchBreakJudge, type MainEvidenceReader } from "./lib/stall-verifier.js";
 // Compatibility re-export target: lib/arm-auto-merge" (W1-T2887) — the auto-merge arm cluster
 // (armAutoMerge/armAutoMergeDetailed/attemptArm/armAutoMergeAtOpen/disarmAutoMerge/
 // armIfVerdictPermits/realArmDeps and their classifiers) moved to src/lib/arm-auto-merge.ts;
@@ -1318,7 +1318,8 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
-import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, selectedRegistryLifecycleExec, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, observeSelectedRegistrySync,
+  selectedRegistryLifecycleExec, selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -2859,6 +2860,7 @@ import {
   gitPushEmptyCommit,
   isNonFastForwardRejection,
   LanePushForeignHeadError,
+  PushAuthRefusedError,
   runStepsAsync,
   runStepsSync,
   step,
@@ -10504,6 +10506,7 @@ export function runErrorCause(err: unknown): RunErrorCause {
   if (err instanceof SubscriptionOnlyRefusedError) return "subscription-only-refused";
   const text = String((err as Error)?.message ?? err);
   if (/^census-precheck:/m.test(text)) return "census-refused-push";
+  if (err instanceof PushAuthRefusedError) return "push-auth-refused";
   if (/^Command failed: git (?:-C \S+ )?push /m.test(text)) return "git-push-failed";
   if (/^Command failed: git (?:-C \S+ )?commit /m.test(text)) return "git-commit-failed";
   if (/^Command failed: gh (?:api --method POST \S+\/pulls |pr create)/m.test(text)) return "pr-create-failed";
@@ -12032,6 +12035,10 @@ function depReviewProposalCapture(landingStateRoot: string | undefined): NonNull
   };
 }
 
+export function depReviewNodePinCheckout(configRoot: string, repo: string): string {
+  return join(configRoot, "repos", repo);
+}
+
 export function defaultNodePinSyncIo(
   root: string,
   options: { git?: (args: string[], cwd: string) => string } = {},
@@ -12195,7 +12202,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     const sync = syncNodePinForImageBump(
       diff,
       { sha: view.headRefOid, ref: view.headRefName },
-      deps.nodePin ?? defaultNodePinSyncIo(config.root),
+      deps.nodePin ?? defaultNodePinSyncIo(depReviewNodePinCheckout(config.root, repo)),
     );
     if (sync.kind === "synced") {
       log("dep-review.node_pin_synced", { pr_url: view.url, from: sync.from, to: sync.to, head_sha: view.headRefOid, pushed_sha: sync.pushedSha });
@@ -24678,7 +24685,7 @@ export function breakerDetailDep(
 export function onCircuitBreakWithVerifier(
   gate: Pick<ReturnType<typeof breakerGateFor>, "detailFor">,
   projFor: (taskId: string) => { prState?: string; merged?: boolean } | undefined,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; judge?: DispatchBreakJudge },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; judge?: DispatchBreakJudge; mainEvidence?: MainEvidenceReader },
 ): (task: Task) => Promise<void> | void {
   return (task) => {
     const detail = gate.detailFor(task.id);
@@ -24703,7 +24710,7 @@ export function onCircuitBreakWithVerifier(
     const page = () => escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, issues: ctx.issues });
     if (!ctx.judge) return page();
     // Settles off the selection pass; a throw anywhere still pages (the judge route never throws on its own).
-    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge: ctx.judge })
+    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge: ctx.judge, mainEvidence: ctx.mainEvidence })
       .then((decision) => { if (decision === "escalate") page(); }, page);
   };
 }
@@ -28447,6 +28454,10 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
+      selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
+        settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+        record: (step, fields) => appendLedger(ledgerPathFor(effectiveConfig), { run_id: "DEPLOY", task_id: "DEPLOY", step, ...fields }),
+      } : undefined,
       ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig), { stateDir: join(effectiveConfig.root, "state"), host: hostname() }),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
@@ -28470,7 +28481,12 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
-  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root }, lifecycleExec) }, {
+  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root,
+    selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
+      settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+      record: (step, fields) => deps.log(step, fields),
+    } : undefined,
+  }, lifecycleExec) }, {
     dryRun: rest.includes("--dry-run"),
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
@@ -30839,7 +30855,7 @@ export function commitWorkerEdits(
   // `checkpoint` (W1-T8008): a restart checkpoint keeps EVERY worker change, declared or not -- the undeclared paths are
   // staged too and returned in `undeclared` (named, never dropped); scope is judged later, on the ordinary push path.
   options: { admitTests?: boolean; priorHeadSha?: string; branch?: string; checkpoint?: boolean; aliasRewriter?: TestAliasRewriter } = {},
-): WorkerEditCommit {
+): WorkerEditCommit & { readonly ignored_declared?: readonly string[] } {
   const runGit = deps.runGit ?? ((args: string[]) => hostWorktreeGit(
     repoDir,
     args,
@@ -30874,7 +30890,23 @@ export function commitWorkerEdits(
 
   const status = runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]);
   const changed = workerChangedPaths(status);
-  if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+  if (changed.length === 0) {
+    const existing = declaredPaths.filter((path) => existsSync(join(repoDir, path)));
+    const ignored = existing.length === 0 ? [] : runGit([
+      "status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL, "--ignored=matching", "--", ...existing,
+    ]).split("\0").filter((entry) => entry.startsWith("!! ")).map((entry) => entry.slice(3));
+    // Git may report an ignored parent directory even when scoped to a declared file inside it.
+    const ignored_declared = existing.filter((path) => pathIsUnderDeclaredSurface(path, ignored));
+    if (ignored_declared.length > 0) {
+      const details = ignored_declared.map((path) => {
+        const rule = runGit(["check-ignore", "-v", "--", path]).split("\t")[0];
+        return `${path} (rule ${rule})`;
+      });
+      return { committed: false, undeclared: [], ignored_declared,
+        reason: `declared path ignored by .gitignore: ${details.join(", ")}` };
+    }
+    return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+  }
 
   // W1-T4450: a REGISTERED REGENERABLE ARTIFACT (a gate's own baseline, whose failure message names
   // it as the remedy) is staged although undeclared. The fix prompt and the scope guard already grant
@@ -33532,7 +33564,9 @@ async function pauseCommand(rest: string[]): Promise<number> {
   }
   const target = pauseTargetOrRefuse("pause", rest, config);
   if (!target) return 2;
-  const info = requestPause(target.root, reason, undefined, { instance: target.instance });
+  const info = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "pause", {
+    instanceName: target.instance, stateRoot: target.root, namespace: "host",
+  }, () => requestPause(target.root, reason, undefined, { instance: target.instance }));
   appendLedger(ledgerPathFor({ ...config, root: target.root }), {
     run_id: runId,
     task_id: "FLEET",
@@ -33584,7 +33618,9 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
   }
   const target = pauseTargetOrRefuse("resume", rest, config);
   if (!target) return 2;
-  const result = resumeFleet(target.root);
+  const result = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "resume", {
+    instanceName: target.instance, stateRoot: target.root, namespace: "host",
+  }, () => resumeFleet(target.root));
   appendLedger(ledgerPathFor({ ...config, root: target.root }), {
     run_id: runId,
     task_id: "FLEET",

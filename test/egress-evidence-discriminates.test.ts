@@ -40,9 +40,9 @@ import {
   probeTurnBudget,
   type ContainmentEvidence,
   type ProbeExecResult,
-} from "../src/lib/containment.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/containment.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 function settingsFile(contents: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-egress-evidence-test-"));

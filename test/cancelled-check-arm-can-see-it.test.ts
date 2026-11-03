@@ -16,16 +16,16 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 import {
   buildOpenPrViews,
   buildSweepEffects,
   cancelledRequiredChecks,
   fetchCiFailures,
   type CiFailureFetchOptions,
-} from "../src/run-task.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { REVIEW_CONTEXT } from "../src/lib/review.js";
+} from "#src/run-task.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { REVIEW_CONTEXT } from "#src/lib/review.js";
 
 /**
  * W1-T2283 — THE RE-QUEUE ARM NAMES ONLY A CHECK THAT NEVER GETS CANCELLED.

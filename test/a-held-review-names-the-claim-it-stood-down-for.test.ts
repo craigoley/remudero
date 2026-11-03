@@ -3,13 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ghStubPath } from "./helpers/gh-stub.js";
-import { claimReviewDecision, reviewDecisionDigest } from "../src/lib/review.js";
+import { ghStubPath } from "#test/helpers/gh-stub.js";
+import { claimReviewDecision, reviewDecisionDigest } from "#src/lib/review.js";
 import {
   reviewLedgerReasonFields,
   reviewVerdictAnnotation,
   runReview,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const HEAD_SHA = "abc1234def5678";
 const PR_URL = "https://github.com/acme/remudero/pull/1";

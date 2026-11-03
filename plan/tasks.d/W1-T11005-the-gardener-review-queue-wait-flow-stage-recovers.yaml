@@ -5,8 +5,9 @@
   type: implement
   verify: human
   risk: low
-  priority: 2.5
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  superseded_by: W1-T11149
   attempts: 0
   author_class: machine
   origin: "flow-regression:gardener:review_queue_wait:light"
@@ -22,6 +23,17 @@
     Last 24 h: n 39, p50 10, p90 99.9 min.
     Slowest PRs: #15487 (139.9 min), #15460 (111.2 min), #15333 (111 min).
     Find what these PRs share at this stage before changing a bound.
+  amendment: |
+    2026-11-02, operator ruling Q3 (file all the review-lane improvements; replace these gardener tasks with the root-cause tasks):
+    withdrawn before any dispatch (no refs/rmd-dispatch/W1-T11005 claim, no run-W1-T11005-* branch and no plan/claims.yaml row at withdrawal).
+    The acceptance greps only a test title and names no cause, so a build could satisfy it without moving the wait. The review-lane
+    findings (2026-11-02, 7-day ledger union) attribute the review_queue_wait regression to the review lane's own admission:
+    review width sat at 1 for 64% of the week (75% of the last 24 h) because the CPU shed counts the LLM judge phase, which does
+    not slow under CPU pressure (W1-T11149, superseding, with the self-checking shed W1-T11150); about 50 slot-hours a week are held
+    outside the review itself (W1-T11151, W1-T11152); and admission is oldest-first with no cost class (W1-T11153). Cheap plan-only
+    reviews waiting behind the CPU bound are the operator session's hand-built item 1. superseded_by names W1-T11149 so this
+    retirement holds the gardener's origin until the root cause lands (W1-T9729). verify is set to human because this edit stales
+    the ruling pin, which is left untouched (never recomputed by hand); the machine-filing judge re-rules a stale pin.
   risk_ruling:
     verdict: "high"
     action: escalate

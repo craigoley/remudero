@@ -1,0 +1,41 @@
+- id: W1-T11134
+  title: "Core's memory growth since 10-24 is named by the deploy that brought it, and its OOM kills are counted where the census can see them — core's OOM and abrupt deaths ran 0, 2, 5, 2, 12, 19, 13 a day over 10-20..10-26 (MainThread anon-rss up to 5.4 GB) and stopped only because the resize lifted memory.max from 8.8 to 24.3 GiB, so the growth is still there and nothing says which change made it"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: daemon-memory-census.ts compares its own rows across boot generations
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs:
+    - W1-T9647
+    - W1-T9106
+    - W1-T9765
+    - W1-T9767
+  files:
+    - src/lib/daemon-memory-census.ts
+    - test/memory/core-live-heap-growth-is-named-by-the-boot-that-brought-it.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: From the census's own memory rows (DAEMON_MEMORY_STEP) grouped by boot_head_sha, the census names the first generation whose live set after GC, or one named holder, rose beyond the spread of the generations before it, with the two shas that bracket the rise; a generation with too few samples is unmeasured, never "no growth", and no fixed growth threshold is used
+      proof: "unit test: test/memory/core-live-heap-growth-is-named-by-the-boot-that-brought-it.test.ts"
+    - claim: A named rise feeds the census's existing filing rule as a proposed task naming the holder (or unattributed_live_bytes) and the bracketing shas, and each census memory row carries the container's cgroup memory.events oom_kill count, so whether post-resize OOMs stay at 0 is read from the ledger
+      proof: "grep: W1-T11134 criterion 2 in test/memory/core-live-heap-growth-is-named-by-the-boot-that-brought-it.test.ts"
+  rationale: |
+    MEASURED, restart census 2026-10-20 → 10-27 over all rotated ledgers plus live (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - Core booted 111 times. 39 were cgroup OOM kills then a docker restart, 8 abrupt deaths with no row (likely OOM), and 6 more OOM runs that exhausted `on-failure:5`.
+    - OOM and abrupt deaths per day on core, 10-20 → 10-26: 0, 2, 5, 2, 12, 19, 13. Since the resize: 0 as of 10-27.
+    - OOM victims: MainThread (anon-rss up to 5.4 GB) and tsc (2–3 GB). On 10-27 core sat at 12.0 GB now and 21.2 GB peak.
+    - Cost of the week's restarts: about 981 dark minutes, about 2,940 lane-minutes (upper bound) and 101 killed run children.
+    Operator ruling R1 (2026-10-27): the shared memory budget does not remove the need to reduce usage.
+    READ at origin/main d04469fa2: src/lib/daemon-memory-census.ts (W1-T9647) writes `daemon.memory` with holders, `unattributed_live_bytes` and `boot_head_sha` (:579-591), and files any holder above censusFilingThreshold (:741). It judges a fix's saving one generation before and after. It never compares generations to find where growth began, and the row carries no OOM count: the OOM kill is visible only to docker and dmesg.
+    NOT COVERED: W1-T9106 (#14673, merged 2026-10-27) applies a learned heap ceiling at boot; it bounds the heap and does not find growth. W1-T9765 (queued, p3) bounds named grow-only books. Neither names the 10-24 rise.
+  design: |
+    1. A pure function over daemon.memory rows: group by boot_head_sha in boot order. For each generation take the median live_after_gc_bytes and each holder's median bytes, and the spread (interquartile range) of the earlier generations. The first generation whose median sits above the earlier generations' upper quartile plus their spread is the rise, with the previous and current shas. A generation with fewer samples than the earlier generations' own median count is `unmeasured`. No fixed byte or percent threshold.
+    2. The rise becomes a proposed_task through the existing census filing path (W1-T9767, queued, carries proposals to a filing), naming the holder or unattributed_live_bytes and the commit range, so the fleet files the removal. The task that removes the growth is that filing, not this one.
+    3. The daemon.memory row (built in daemon-memory-census.ts beside readProcMemory) reads /sys/fs/cgroup/memory.events (oom, oom_kill) from inside the container and carries both counts; absent when unreadable, never zero.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 4 (p1). DEVIATION, named: the findings say "find and remove". The cause is not yet known, so this task finds it (by generation) and hands the removal to the census's own filing rule, rather than guessing a fix. PR #14673 (W1-T9106), named as adjacent in the findings, merged on 2026-10-27.

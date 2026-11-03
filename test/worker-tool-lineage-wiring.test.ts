@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { CLAUDE_BIN_ENV_OVERRIDE, collectWorkerResult, createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
-import { spawnCodexWorker, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
-import { createWorkerToolLineage, observeWorkerToolLineage } from "../src/lib/worker-tool-lineage.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, collectWorkerResult, createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
+import { spawnCodexWorker, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { createWorkerToolLineage, observeWorkerToolLineage } from "#src/lib/worker-tool-lineage.js";
 
 async function* stream() {
   yield { type: "assistant", message: { id: "turn", content: [

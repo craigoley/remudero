@@ -5,10 +5,10 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { Config } from "../src/lib/config.js";
-import { ADHOC_LANE_REAP_GRACE_MS, adhocLaneRoot, unmanagedWorktreeLanes, worktreesDir } from "../src/lib/worker.js";
-import { DEFAULT_WORKTREE_REAP_GRACE_MS } from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import { ADHOC_LANE_REAP_GRACE_MS, adhocLaneRoot, unmanagedWorktreeLanes, worktreesDir } from "#src/lib/worker.js";
+import { DEFAULT_WORKTREE_REAP_GRACE_MS } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /**
  * test/adhoc-lane-root.test.ts — W1-T2847, the ROOT half.

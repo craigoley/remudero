@@ -16,19 +16,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { BENCHMARK_RECEIPT_IDENTITY, benchmarkNonDispatchSpawn, receiptIdentity } from "../src/lib/benchmark-run.js";
-import type { Config } from "../src/lib/config.js";
-import { buildEscalationJudgeSpawnArgs, escalationJudgeRunId, spawnEscalationJudgeWorker, type Escalation } from "../src/lib/escalate.js";
-import type { Mount, Mounts } from "../src/lib/mounts.js";
-import { selectWorkerProviderForPolicy, type EffectiveProviderRoutingPolicy } from "../src/lib/provider-routing-policy.js";
-import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";
+import { BENCHMARK_RECEIPT_IDENTITY, benchmarkNonDispatchSpawn, receiptIdentity } from "#src/lib/benchmark-run.js";
+import type { Config } from "#src/lib/config.js";
+import { buildEscalationJudgeSpawnArgs, escalationJudgeRunId, spawnEscalationJudgeWorker, type Escalation } from "#src/lib/escalate.js";
+import type { Mount, Mounts } from "#src/lib/mounts.js";
+import { selectWorkerProviderForPolicy, type EffectiveProviderRoutingPolicy } from "#src/lib/provider-routing-policy.js";
+import { shadowJudgeSampled } from "#src/lib/shadow-judge.js";
 import {
   buildVerifyHumanJudgeSpawnArgs,
   spawnVerifyHumanJudgeWorker,
   verifyHumanJudgeRunId,
   type ShardUnderJudgement,
-} from "../src/lib/verify-human-judge.js";
-import type { ProviderCapacity } from "../src/lib/worker-provider.js";
+} from "#src/lib/verify-human-judge.js";
+import type { ProviderCapacity } from "#src/lib/worker-provider.js";
 import {
   auctionDrawSeed,
   workerSelectionAssignment,
@@ -36,8 +36,8 @@ import {
   type SpawnWorkerArgs,
   type WorkerResult,
   type WorkerSelectionAssignment,
-} from "../src/lib/worker.js";
-import { shadowedVerifyHumanJudge } from "../src/run-task.js";
+} from "#src/lib/worker.js";
+import { shadowedVerifyHumanJudge } from "#src/run-task.js";
 
 type Row = { step: string } & Record<string, unknown>;
 

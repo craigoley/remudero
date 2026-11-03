@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ensureDeps, pinnedVitestCli, PROOF_INSTALL_ARGS, registerReviewerCheckout } from "../src/lib/review.js";
+import { ensureDeps, pinnedVitestCli, PROOF_INSTALL_ARGS, registerReviewerCheckout } from "#src/lib/review.js";
 
 function checkout(withNodeModules: boolean): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w1t4587-"));

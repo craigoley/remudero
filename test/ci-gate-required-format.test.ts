@@ -35,6 +35,9 @@ const CI_GATE_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 // protection lives inside that shared script. It blocked twice on one predicate (4 of 4
 // observed PRs red on one were red on both). A name leaves this fixture only when it stops
 // blocking, never to quiet a red.
+// A SECOND REMOVAL: "scan-pr / osv-scan" was demoted to ADVISORY by the W1-T4116 gate gardener —
+// it refused 0 of 115 runs on 75 pull requests — with the reviewed GATE_RATIONALE ci-gate.yml now
+// carries (scanner-gate-config.test.ts asserts that rationale names it).
 const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "ci",
   "lint-plan",
@@ -50,7 +53,6 @@ const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "api-client-drift",
   "no-hand-rolled-fetch",
   "prompt-surface-gate",
-  "scan-pr / osv-scan",
   "License Review",
   "leak-grep",
   "assertion-discrimination",

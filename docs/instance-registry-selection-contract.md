@@ -125,6 +125,29 @@ drain/stop approvals below. Admission remains opt-in SHADOW ONLY, with owner/adm
 override and the complete Apache public implementation preserved. No schedule,
 live policy/configuration, deployment or private-value move is included.
 
+### Lifecycle control observations
+
+Lifecycle control consumers carry the invocation's opt-in SHADOW observer through
+deployment restart/recycle/rollback, instance pause/resume, serve-policy replacement
+and SRE target adoption. Their independent legacy readers and operations still
+decide the actual result. Deployment and serve composition copy their original
+options before retaining target closures, so recovery does not adopt a caller's
+later state root or instance. No selected observation clears an owner hold, consumes
+a pending effect, changes an SRE detector, or activates a lane.
+
+These production effect seams are synchronous. They emit unknown evidence with
+`synchronous_seam` (or a target refusal reason) without selected filesystem reads
+or fresh authority. The asynchronous adapter pins lifecycle evidence separately
+from discovery retries, snapshots the actual target, and rechecks its original
+registry digest after the legacy operation. A later readable registry cannot
+promote an invocation's original unknown lifecycle binding. Host target comparisons
+use only state/container fields captured in the bounded reader's existing schema
+pass; a container namespace remains unknown because a name does not establish its
+mount binding. Operational paths stay out of receipts and public projections.
+Absent opt-in adds no selected reads or receipts; sink failures remain diagnostic,
+never an effect gate. Publication permission remains `not-granted` and WORKERS
+CONTINUE; this source qualification grants no live replacement or drain authority.
+
 ### Lifecycle mode grammar
 
 W1-T9571 extends the existing installer and recycler case blocks to validate one

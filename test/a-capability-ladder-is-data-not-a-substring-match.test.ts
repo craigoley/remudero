@@ -8,14 +8,14 @@ import {
   TierInvariantError,
   validateMounts,
   type CapabilityLadder,
-} from "../src/lib/mounts.js";
+} from "#src/lib/mounts.js";
 import {
   codexCandidatesForCapability,
   codexCapabilityForRequestedModel,
   selectCodexModel,
   type ProviderCapacity,
-} from "../src/lib/worker-provider.js";
-import type { CodexModelInfo } from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
+import type { CodexModelInfo } from "#src/lib/worker-provider.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 

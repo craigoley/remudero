@@ -1,0 +1,62 @@
+- id: W1-T11155
+  title: "A bundled review loads the modules it defers — review.ts reaches status.ts and escalate.ts through `await import(variable)`, which esbuild cannot bundle, so the run-task bundle resolves './status.js' beside itself and every bundled review that verifies a live remudero-review status throws ERR_MODULE_NOT_FOUND for dist/child-entries/status.js and withholds its verdict (36 post_refused rows from 2026-10-24 to 2026-11-01, still recurring)"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, review's deferred imports resolve in its bundle; it spans review.ts and the two modules it defers to (status.ts, escalate.ts)
+  band_meaning: span
+  origin: operator-session#review-lane-findings-2026-11-02
+  plan_refs:
+    - W1-T8775
+    - W1-T8777
+    - W1-T8959
+    - W1-T9854
+  files:
+    - src/lib/review.ts
+    - src/lib/status.ts
+    - src/lib/escalate.ts
+    - test/worker/a-bundled-review-loads-the-modules-it-defers.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The run-task child-entry bundle built by scripts/build-child-entries.mjs from the tree resolves the module review.ts defers for replayPublisher's required-status read (today `./status.js`) and for the cannot-evaluate escalation (today `./escalate.js`), so a bundled run of each path loads it instead of throwing ERR_MODULE_NOT_FOUND, and neither deferral closes a dependency cycle that depcruise refuses
+      proof: "unit test: test/worker/a-bundled-review-loads-the-modules-it-defers.test.ts"
+    - claim: No module in a CHILD_ENTRIES or WORKER_ENTRIES bundle graph passes a relative specifier held in a variable to import(); the test lists every such site so a new one fails it by name
+      proof: "grep: W1-T11155 criterion 2 in test/worker/a-bundled-review-loads-the-modules-it-defers.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 from the review-lane findings' 7-day ledger extract (read-only, ~/Remudero-notes/review-lane-findings-2026-11-02.md):
+    - review.post_refused rows reading "could not verify the live remudero-review status: Error [ERR_MODULE_NOT_FOUND]: Cannot find
+      module '/home/node/Remudero/remudero/dist/child-entries/status.js' imported from
+      /home/node/Remudero/remudero/dist/child-entries/run-task.mjs": 36 rows between 2026-10-24T20Z and 2026-11-01T02Z, in bursts
+      (5 in the 2026-11-01T02 hour). The findings count 26 in their window. fix.dispatch and fix.progress_judged rows carry the same
+      error 13 more times, so the withheld verdict also feeds fix rounds.
+    READ at origin/main 1368db581, src/lib/review.ts:
+    - replayPublisher: `const statusModule = "./status.js"; const { readRequiredStatusCheckContextsAsync } = await import(statusModule);`
+      with the comment "status.ts's graph reaches review; load its existing reader only after both modules initialized".
+    - postReviewStatusGuarded's cannot-evaluate path: `const escalationModule = "./escalate.js"; ... await import(escalationModule)`,
+      "a top-level import closes a cycle and fails the dependency gate".
+    - scripts/build-child-entries.mjs bundles with esbuild (bundle: true, format esm, packages external). esbuild leaves an import()
+      of a non-literal specifier unbundled, so it resolves relative to the bundle file at run time, where no status.js exists.
+    - The other variable import() sites in src (run-task.ts buildMountHeadroomSweep, run-task-verb.ts) pass absolute URLs and resolve.
+    ATTRIBUTED: the brief described this class as "dist/child-entries exists before the image or reviewer switch". The error names a
+    module that is never emitted into dist/child-entries, whatever the switch order, so the cause is the unbundled deferred import.
+    NOT COVERED: W1-T9854 (queued) classes a harness module that cannot load as an environment failure; it would relabel this row, not
+    stop it. W1-T8959 (merged, #12719) added the required-publisher read. W1-T8777 (merged) built the worker bundles.
+  design: |
+    1. Break the cycle instead of hiding it: move readRequiredStatusCheckContextsAsync's dependency for replayPublisher (and the
+       escalation calls) behind a seam the composition root passes in, or into a leaf module both graphs can import statically, so
+       review.ts needs no deferred relative import. If a deferral must stay, its specifier is a string literal esbuild bundles.
+    2. Never rename or wrap the import to dodge depcruise: if the cycle cannot be broken without a gate change, STOP and report it to
+       the operator (house rule).
+    3. The test builds the run-task bundle into a temp tree with the real buildChildEntries, imports it, and drives both paths with
+       injected readers; criterion 2 scans the bundle graphs' sources for import() of a non-literal relative specifier.
+    Tests go in test/worker/a-bundled-review-loads-the-modules-it-defers.test.ts, titled verbatim as in the proofs.
+  note: |
+    reservation hand-off: plan-file-1793657970812 -> plan-file-1793657970812
+    Reserved with rmd next-task-id --branch plan-file-1793657970812 from the operator checkout. Filed 2026-11-02 from the review-lane
+    findings, item 5b (p2), harness noise; 5a is W1-T11154 and 5c is W1-T11156 (Rule 19). If the builder finds the leaf move needs
+    a new leaf module in files:, it amends this record first.

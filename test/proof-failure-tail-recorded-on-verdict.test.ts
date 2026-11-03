@@ -16,7 +16,7 @@ import {
   proofFailureTail,
   recordFailureTail,
   type ProofSpawner,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PROOF = "unit test: test/proof-failure-tail-recorded-on-verdict.test.ts";

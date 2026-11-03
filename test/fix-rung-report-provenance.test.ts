@@ -33,13 +33,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { resolveFixRungTaskContractAtHead, runFixRung } from "./helpers/run-task-test.js";
-import { judgeReview } from "../src/lib/review.js";
-import type { CriterionVerdict, PlanCriteriaAtHeadResult, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { resolveFixRungTaskContractAtHead, runFixRung } from "#test/helpers/run-task-test.js";
+import { judgeReview } from "#src/lib/review.js";
+import type { CriterionVerdict, PlanCriteriaAtHeadResult, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 /** A worker narrative that DOES contradict the two-file diff below — the #2569 shape verbatim in
  *  kind: ordinary prose describing the job, which `bodyContradictsDiff` reads as a changeset claim. */

@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { acceptanceAuthorTimeCheck, wrappedGrepPattern } from "../src/lib/review.js";
+import { acceptanceAuthorTimeCheck, wrappedGrepPattern } from "#src/lib/review.js";
 
 /**
  * W1-T2544 — two consecutive retro cycles, six hours apart, failed with entirely correct CONTENT

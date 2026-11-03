@@ -35,6 +35,7 @@ import {
   githubSlugOf,
   imageShaContainerFor,
   isPrimaryDeployment,
+  instanceForStateRoot,
   readMountPlanDrift,
   playwrightCoreVersionCommitsBehind,
   readResourcePolicyDrift,
@@ -49,6 +50,7 @@ import { isPaused } from "./fleet-control.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { loadHostMemoryBudgetPolicy, type HostMemoryBudgetPolicy } from "./host-memory-shadow.js";
 import { ledgerLivePath, readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
+import { createSelectedRegistryObserver, observeSelectedRegistrySync, selectedRegistryObserverInContext } from "./selected-registry-consumers.js";
 
 export const SERVE_POLICY_CONTAINER = "remudero-serve";
 export const SERVE_POLICY_FAILED_FILE = "SERVE_POLICY_FAILED";
@@ -328,11 +330,14 @@ export function runServePolicyCycle(
 
 /** The real serve seams, or none when this state root is not the registry's primary instance. */
 export function realServePolicyDeps(
-  o: Pick<RealDeployOpts, "installPath" | "stateRoot">,
+  o: Pick<RealDeployOpts, "installPath" | "stateRoot" | "selectedRegistryObservation">,
   exec: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" }),
   issuesFor: (owner: string, repo: string) => IssueGateway = ghIssueGateway,
   budget: () => HostMemoryBudgetPolicy = () => loadHostMemoryBudgetPolicy(),
 ): Partial<Parameters<typeof runServePolicyCycle>[0]> {
+  o = { ...o };
+  const observer = o.selectedRegistryObservation === undefined ? selectedRegistryObserverInContext()
+    : createSelectedRegistryObserver(o.selectedRegistryObservation);
   let registryText: string;
   try {
     registryText = readFileSync(daemonInstanceRegistryPath(o.installPath), "utf8");
@@ -340,6 +345,7 @@ export function realServePolicyDeps(
     return {}; // no registry, no primary to name — serve is left to the operator, as before
   }
   if (isPrimaryDeployment(registryText, o.stateRoot) !== true) return {};
+  const instanceName = instanceForStateRoot(registryText, o.stateRoot);
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const failedPath = join(o.stateRoot, "state", SERVE_POLICY_FAILED_FILE);
   const git = (args: readonly string[]): string => exec("git", ["-C", o.installPath, ...args]);
@@ -381,7 +387,9 @@ export function realServePolicyDeps(
         return undefined; // no such container or no docker — not observed healthy
       }
     },
-    replaceServe: () => {
+    replaceServe: () => observeSelectedRegistrySync(observer, "serve-policy-replace", {
+      instanceName, stateRoot: o.stateRoot, containerName: SERVE_POLICY_CONTAINER, namespace: "host",
+    }, () => {
       let admission: string[];
       try {
         admission = serveReplaceAdmissionEnv(budget());
@@ -399,7 +407,7 @@ export function realServePolicyDeps(
         return { held: held?.[1] ?? "held", detail: held?.[2] ?? (err instanceof Error ? err.message : String(err)) };
       }
       return undefined;
-    },
+    }),
     servePolicyLastFailedAtMs: () => {
       try {
         const at = Date.parse((JSON.parse(readFileSync(failedPath, "utf8")) as { at?: string }).at ?? "");

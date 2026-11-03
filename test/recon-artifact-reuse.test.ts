@@ -13,12 +13,12 @@ import {
   runTask,
   writeReconArtifact,
   type ReconArtifact,
-} from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
+} from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
 
 // ── W1-T2241: a recon that dies with its dispatch is paid for again — this fixture drives the
 // REAL runTask() dispatch path, more than once against the SAME `config.root`/repo clone (state/
@@ -186,7 +186,7 @@ async function dispatchOnce(
   process.env.PATH = `${fakeBinDir}:${savedPath}`;
   const dateNowSpy = t.mock.method(Date, "now", () => ts);
 
-  const { withLiveWritesAllowed } = await import("../src/lib/live-write-guard.js");
+  const { withLiveWritesAllowed } = await import("#src/lib/live-write-guard.js");
   try {
     const res = await withLiveWritesAllowed(() =>
       runTask(TASK_ID, {

@@ -55,7 +55,8 @@ type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx): string {
   const dir = makeTempDir("now-view");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // A late writer (a producer still flushing) can repopulate the tree mid-removal: retry ENOTEMPTY.
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   return dir;
 }
 

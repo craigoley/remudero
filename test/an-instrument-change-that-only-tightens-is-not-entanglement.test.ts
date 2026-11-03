@@ -23,7 +23,7 @@ import {
   ENTANGLEMENT_EXEMPT_INSTRUMENTS,
   classifyInstrumentChange,
   detectInstrumentEntanglement,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 const SRC = "src/lib/some-product.ts";
 /** A `-baseline.json` NOT in ENTANGLEMENT_EXEMPT_INSTRUMENTS, so the path axis cannot decide. */

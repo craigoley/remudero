@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import {
   applyVerdictStability,
   detectInstrumentEntanglement,
@@ -15,13 +15,13 @@ import {
   type CriterionVerdict,
   type PriorReviewVerdict,
   type ReviewVerdict,
-} from "../src/lib/review.js";
-import { reviewLedgerLegibilityFields } from "../src/lib/review.js";
-import { runFixRung } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/review.js";
+import { reviewLedgerLegibilityFields } from "#src/lib/review.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 /** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
 const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };

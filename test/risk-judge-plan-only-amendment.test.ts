@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { FILING_SUBJECT_RE } from "../src/lib/sweep.js";
+import { FILING_SUBJECT_RE } from "#src/lib/sweep.js";
 
 import {
   PLAN_DECLARING_SUBJECT_RE,
@@ -20,7 +20,7 @@ import {
   isPlanOnlyAmendment,
   type RiskJudgeChangedFile,
   type RiskJudgeInput,
-} from "../src/lib/risk-judge.js";
+} from "#src/lib/risk-judge.js";
 
 const f = (path: string): RiskJudgedFileShim => ({ path, additions: 1, deletions: 1 });
 type RiskJudgedFileShim = RiskJudgeChangedFile;

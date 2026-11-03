@@ -5,10 +5,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   awaitPromotion,
   boardComputedProbe,
@@ -26,7 +28,13 @@ import {
   supervisedRole,
   type GenerationMessage,
 } from "#src/lib/serve-generation.js";
-import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { makeTempDir, RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { systemClock } from "#src/lib/clock.js";
+import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "#src/lib/needs-you-view.js";
+import type { PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createReadModelTicker, createReadModelWorker, loadCommittedViewBodies, readModelStatusView, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 function overSocket(socketPath: string, path: string): Promise<{ status?: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -177,4 +185,88 @@ test("a restore request re-warms the generation after an abandoned handoff", () 
   for (const l of listeners) l({ type: GENERATION_MESSAGES.restore, reason: "handoff_abandoned" });
   for (const l of listeners) l({ type: GENERATION_MESSAGES.restore });
   assert.deepEqual(restored, ["handoff_abandoned", "restore"]);
+});
+
+test("a converged population meets the original standby warm-body floor", async (t) => {
+  const root = makeTempDir("converged-standby-floor"), active = join(root, "state"), thin = join(root, "thin"), repository = "craigoley/remudero";
+  const workers: Array<ReturnType<typeof createReadModelWorker>> = [];
+  t.after(() => { for (const worker of workers) worker.stop(); rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  for (const stateDir of [active, thin]) {
+    mkdirSync(join(stateDir, "read-model"), { recursive: true }); writeFileSync(join(stateDir, "ledger.ndjson"), "");
+    writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: "auto" } }));
+  }
+  mkdirSync(join(root, "plan")); writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  const registry = join(active, "inbox-proposals.json"), proposals = Array.from({ length: 180 }, (_, i) => ({ id: `ruling:floor-${i}`, summary: `${i} ${"operator context ".repeat(70)}`, evidenceAnchors: [] }));
+  const deps: PanelGraphDeps = { root, inboxRoot: root, planPath: join(root, "plan", "tasks.yaml"), ledgerPath: join(active, "ledger.ndjson"), inboxFromSlowLane: true,
+    github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: { approve: () => undefined, reframe: () => undefined },
+    inboxMainSha: () => "a".repeat(40), inboxGrepAnchor: () => true };
+  writeFileSync(registry, JSON.stringify({ proposals }));
+  const first = (await refreshInboxClassification(deps, {}, systemClock)).bodies;
+  writeFileSync(registry, JSON.stringify({ proposals: proposals.slice(0, 2) }));
+  const shrunk = (await refreshInboxClassification(deps, {}, systemClock)).bodies;
+  const instances = [{ name: "core", ledgerDir: active, repo: repository }];
+  // The real producer over the real store: it publishes the first population, commits a legitimate shrink whose messages never
+  // reach serve, and a replacement producer then republishes the committed population with nothing left to retire.
+  const publish = (bodies: Array<typeof first>, stateDir = active) => {
+    const messages: ReadModelWorkerMessage[][] = [];
+    let into = 0;
+    const ticker = createReadModelTicker({ stateDir, instances: [{ ...instances[0]!, ledgerDir: stateDir }], holder: "active-generation", oracle: "off", views: [readModelStatusView], post: message => { (messages[into] ??= []).push(message); } });
+    ticker.start(); ticker.tick();
+    for (const population of bodies) { ticker.accept({ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: population }); into++; }
+    ticker.release();
+    return messages;
+  };
+  const script = join(active, "relay.json"), counter = join(active, "spawns"), file = join(active, "relay.mjs");
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const serving = createReadModelWorker({ stateDir: active, instances, workerUrl: pathToFileURL(file), tickMs: 5, stopWaitMs: 50, every: () => () => {}, log: (step, extra) => { logs.push({ step, extra }); } });
+  workers.push(serving);
+  assert.equal(serving.bodies.size, 0, "the active generation boots before its producer commits anything");
+  const [published] = publish([first]);
+  writeFileSync(script, JSON.stringify([published]));
+  writeFileSync(file, `import { parentPort } from "node:worker_threads";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const spawn = existsSync(${JSON.stringify(counter)}) ? Number(readFileSync(${JSON.stringify(counter)}, "utf8")) + 1 : 1;
+writeFileSync(${JSON.stringify(counter)}, String(spawn));
+for (const message of JSON.parse(readFileSync(${JSON.stringify(script)}, "utf8"))[spawn - 1] ?? []) parentPort.postMessage(message);
+parentPort.postMessage({ type: "log", step: "fixture.published", extra: { spawn } });
+const timer = setInterval(() => {}, 1000);
+parentPort.on("message", message => { if (message.type === "stop") { clearInterval(timer); parentPort.close(); } else if (message.type === "shadow") process.exit(1); });
+`);
+  const until = async (what: string, done: () => boolean) => { const deadline = Date.now() + 30000; while (!done() && Date.now() < deadline) await sleep(20); assert.ok(done(), what); };
+  serving.start();
+  await until("the active generation's first producer published", () => logs.some(log => log.step === "fixture.published" && log.extra?.spawn === 1));
+  const before = serving.bodies.size;
+  assert.equal(before, first.length + 1, "positive control: the active generation served the larger first population and its status body");
+  assert.equal(serving.qualificationGeneration?.(INBOX_VIEW_NAME), loadCommittedViewBodies(active, "core").inboxPopulation?.generation,
+    "the larger active population qualifies before the shrink is committed");
+  publish([shrunk]); // commit the replacement while losing every body/drop/current message
+  const [republished] = publish([shrunk]);
+  writeFileSync(script, JSON.stringify([published, republished]));
+  serving.shadow({ view: INBOX_VIEW_NAME, key: "section=needsYou", requests: 0 });
+  await until("the replacement producer republished", () => logs.some(log => log.step === "fixture.published" && log.extra?.spawn === 2));
+  const committed = loadCommittedViewBodies(active, "core");
+  assert.equal(serving.qualificationGeneration?.(INBOX_VIEW_NAME), committed.inboxPopulation?.generation, "the active generation qualifies the committed population");
+  const q = (bodies: number) => new URLSearchParams(`bodies=${bodies}`), wanted = serving.bodies.size;
+  assert.equal(wanted, committed.bodies.length, "the active generation's legitimate shrink converged to its committed body count");
+  const standby = createReadModelWorker({ stateDir: active, instances, every: () => () => {} });
+  workers.push(standby);
+  const report = readModelWarmProbe(standby)(q(wanted));
+  assert.deepEqual([report.ok, report.detail], [true, { bodies: wanted, wanted }], "a standby on the same committed population meets the unchanged floor");
+  assert.equal(readModelWarmProbe(standby)(q(before)).ok, false, "the unchanged floor still refuses the unconverged count");
+  const activeView = withNeedsYouView(serving), standbyView = withNeedsYouView(standby);
+  assert.equal(committed.bodies.some(entry => entry.view === NEEDS_YOU_VIEW_NAME), false, "the composed needs-you body is absent from SQLite");
+  assert.equal(activeView.bodies.size, wanted + 1, "the production needs-you overlay independently explains one additional cached body");
+  assert.equal(standbyView.bodies.size, activeView.bodies.size, "both serving generations compose the same additional body");
+  const currentPage = serving.body(INBOX_VIEW_NAME, "section=needsYou")!.body.data as { items: unknown; counts: unknown; page: unknown };
+  assert.deepEqual((activeView.body(NEEDS_YOU_VIEW_NAME)!.body.data as NeedsYouData).inbox,
+    { items: currentPage.items, counts: currentPage.counts, page: currentPage.page }, "the transient composition preserves the actual current Inbox page");
+  assert.equal(readModelWarmProbe(standbyView)(q(activeView.bodies.size)).ok, true, "the unchanged floor admits matching production compositions");
+  publish([], thin); // a store whose producer committed no Inbox population: only its status body
+  const thinner = createReadModelWorker({ stateDir: thin, instances: [{ ...instances[0]!, ledgerDir: thin }], every: () => () => {} });
+  workers.push(thinner);
+  assert.ok(thinner.bodies.size > 0 && thinner.bodies.size < wanted, "positive control: the thinner standby really warmed some committed bodies");
+  assert.equal(readModelWarmProbe(thinner)(q(wanted)).ok, false, "a genuinely thinner standby still refuses");
+  t.diagnostic(JSON.stringify({ inboxPopulationReadiness: { beforeShrink: before, committed: committed.bodies.length,
+    afterShrink: serving.bodies.size, activeComposed: activeView.bodies.size, standbyComposed: standbyView.bodies.size,
+    thinner: thinner.bodies.size, matchingStandby: report } }));
 });

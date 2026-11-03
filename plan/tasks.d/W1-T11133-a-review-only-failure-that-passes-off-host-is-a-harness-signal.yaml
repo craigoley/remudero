@@ -1,0 +1,37 @@
+- id: W1-T11133
+  title: "The fix lane's progress judge treats a review-only proof failure that passes off-host as a harness signal and escalates instead of looping — #15532 (W1-T10573) reached 12 fix rounds (fix.progress_judged 2026-11-02T20:50:03Z, change-approach) on one review-sandbox failure that every round's worker reproduced as passing and hosted CI passes"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high  # Rule 19 span: widened to fix, fix-progress-judge, sweep by a scope amendment for #16412
+  band_meaning: span
+  origin: operator-session#review-sandbox-load-2026-11-02
+  plan_refs:
+    - W1-T7096
+    - W1-T9297
+  files:
+    - src/lib/fix-progress-judge.ts
+    - test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-signal.test.ts
+    - "src/cli/commands/fix.ts"
+    - "src/lib/sweep.ts"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the same reviewer proof failure persists after rounds whose worker reported FIXED, and the evidence shows that proof passing off-host (the worker's own run of it passed, and hosted CI passed it at the head), the judge input carries an off-host-pass signal and the decision is a harness escalation naming the proof and both results, never another fix round
+      proof: "unit test: test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-signal.test.ts"
+    - claim: A persisting failure that the worker or hosted CI also reproduces keeps today's judged verdicts, and a round with no off-host result keeps today's signals
+      proof: "grep: W1-T11133 criterion 2 in test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-signal.test.ts"
+  rationale: |
+    OBSERVED 2026-11-02 (coordinator brief) on #15532 (W1-T10573):
+    - The review failed at the head on a proof that times out only under the host's CPU load ("real owner CLI": 92 s on the host against 7 s on the Mac). Hosted CI is green.
+    - The fix lane ran 12 rounds, each worker marking FIXED. fix.progress_judged at 20:50:03Z ruled change-approach at round_count 12.
+    READ at origin/main 12783785a: buildFixProgressInput (src/lib/fix-progress-judge.ts) already counts `reviewerOnlyFailurePersists`, rounds whose worker reported FIXED and after which the reviewer failed the same proof with the same normalised output. Its doc says another identical round cannot help, but it is one signal among many to an LLM judge, and nothing records whether the proof passes off-host. The judge therefore cannot tell a harness-shaped failure from a defect the worker missed, and rules change-approach again.
+    NOT COVERED: W1-T7096 and W1-T9297 (merged) built the judge and its failure evidence. The review-side classification of a load-shaped failure is filed beside this as its own shard.
+  design: |
+    Each round's fix.done row already reports FIXED. Add the worker's own result for the persisted proof (pass or fail, from the proof run the worker's acceptance step makes), and read the head's hosted CI result for the test file the proof names. When reviewerOnlyFailurePersists > 0 and both off-host results pass, set `signals.offHostPass` and offer the judge a `harness` verdict whose route is an escalation carrying the reviewer's excerpt, the worker's pass, the CI check and the review's recorded load. The stand-in judge picks `harness` on that signal. A wired judge sees it as a fact and its reasons; the deterministic part is only that a `harness` verdict never dispatches a round.
+  note: |
+    Filed 2026-11-02 on the coordinator's request (item 17 part b, p1). It touches the same module as the stale-head judge task filed later in this batch. They are different functions, but they should not be built in parallel on one file.

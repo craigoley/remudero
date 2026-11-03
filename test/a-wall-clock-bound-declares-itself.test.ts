@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HELPER = "test/helpers/wall-clock-bound.js";
@@ -26,8 +26,9 @@ const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // The janitor's bounded lock wait declares its give-up and no-queue bounds: one file, two sites.
 // Preserve-retire's home-wide discovery declares its synthetic-home timing bound: one file, one site.
 // W1-T9954 declares the stuck named-pipe discovery child's kill bound: one file, one site.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 41;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 62;
+// W1-T11071 declares the daemon review stop bound: one declaring file and one site.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 42;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 63;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 

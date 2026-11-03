@@ -7,8 +7,8 @@ import {
   modelClassWeeklyBurnTable,
   parseLedger,
   renderGather,
-} from "../src/lib/retro.js";
-import { validateMounts, type Mounts } from "../src/lib/mounts.js";
+} from "#src/lib/retro.js";
+import { validateMounts, type Mounts } from "#src/lib/mounts.js";
 
 /**
  * P34 clause (d), W1-T250: "per-class weekly-limit burn is accounted as a

@@ -7,7 +7,7 @@
 // test kills every leader pgid it spawned as a cleanup backstop, independent
 // of whatever the test body itself already tore down.
 import assert from "node:assert/strict";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { test } from "node:test";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
@@ -30,9 +30,9 @@ import {
   workerInstallationScope,
   workerMarkerEnv,
   type ContainedProcess,
-} from "../src/lib/worker-containment.js";
-import { daemonCommand, ledgerPathFor } from "../src/run-task.js";
-import type { DaemonSummary } from "../src/lib/daemon.js";
+} from "#src/lib/worker-containment.js";
+import { daemonCommand, ledgerPathFor } from "#src/run-task.js";
+import type { DaemonSummary } from "#src/lib/daemon.js";
 
 /**
  * Cleanup-backstop kill for a test's `finally` block, swallowing EVERY error

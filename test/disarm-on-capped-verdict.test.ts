@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { withdrawArmIfVerdictRefuses } from "../src/run-task.js";
+import { withdrawArmIfVerdictRefuses } from "#src/run-task.js";
 
 // ── THE GAP ──────────────────────────────────────────────────────────────────────────
 // A worker PR is armed AT OPEN (~16s after it exists) before any verdict is computed.

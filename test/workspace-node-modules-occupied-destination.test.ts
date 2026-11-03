@@ -9,7 +9,7 @@ import {
   linkWorkspaceNodeModules,
   workspaceNodeModulesIncomplete,
   worktreeAdd,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 // W1-T4003 falsifier: "Seed an occupied destination and an unsafe ../outside workspace value:
 // both must leave their paths untouched and report incomplete, proving the repair neither

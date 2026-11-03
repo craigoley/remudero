@@ -7,9 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { WorkerSettingsError } from "../src/lib/settings.js";
-import { WorkerKeychainError } from "../src/lib/worker-home.js";
-import { isPidAlive, killProcessGroup, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "../src/lib/worker-containment.js";
+import { WorkerSettingsError } from "#src/lib/settings.js";
+import { WorkerKeychainError } from "#src/lib/worker-home.js";
+import { isPidAlive, killProcessGroup, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "#src/lib/worker-containment.js";
 import {
   BILLING_MODE,
   CLAUDE_BIN_ENV_OVERRIDE,
@@ -33,8 +33,8 @@ import {
   workerKeychainGrantApps,
   workerLedgerFields,
   workerTranscript,
-} from "../src/lib/worker.js";
-import { ledgeredNonDispatchSpawn, runReview } from "../src/run-task.js";
+} from "#src/lib/worker.js";
+import { ledgeredNonDispatchSpawn, runReview } from "#src/run-task.js";
 import { BoundedOutput } from "#src/lib/bounded-file-tail.js";
 import { WORKER_OUTPUT_BYTES } from "#src/lib/worker.js";
 import fs from "node:fs";
@@ -1002,6 +1002,8 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
     served_model_reason: "no assistant message in the stream reported a real model before the call ended",
     effort: "high",
     tokens: { input: 1000, output: 200, cacheRead: 500, cacheCreation: 50 },
+    // All four usage counters came off the result envelope, so the state is named "observed".
+    token_usage_state: "observed",
     cache_read_input_tokens: 500,
     cache_creation_input_tokens: 50,
     total_cost_usd: 1.23,

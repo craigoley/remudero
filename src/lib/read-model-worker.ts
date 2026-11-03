@@ -85,7 +85,7 @@ import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowPopulation, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ShadowSampleIdentity, type ViewShadow } from "./view-shadow.js";
 import { INBOX_VIEW_NAME, INBOX_QUALIFICATION_ERROR_META, INBOX_QUALIFICATION_PENDING, INBOX_QUALIFICATION_POPULATION_META, inboxQualificationPolicy, inboxShadowPopulation, inboxShadowSampleKey, parseInboxShadowPopulation, restoreInboxShadowPopulation, type InboxQualificationScope } from "./inbox-view.js";
-import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
+import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, viewKey, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeLedgerReads, judgeSource, type SourcePhase } from "./view-freshness.js";
 import { forkWorkerEntry, startWorker, type WorkerEntryFork } from "./child-entry-argv.js";
 
@@ -677,9 +677,14 @@ interface ReadModelOracleData {
   escalationRepository?: string;
 }
 
-/** C5: the parent's execArgv with the oracle's own heap ceiling in place of any the parent carries. */
-export function oracleChildExecArgv(inherited: readonly string[]): string[] {
-  return [...inherited.filter((flag) => !/^--max[-_]old[-_]space[-_]size=/.test(flag)), `--max-old-space-size=${READ_MODEL_ORACLE_HEAP_MB}`];
+/**
+ * C5: the parent's execArgv with the oracle's own heap ceiling in place of any the parent carries, then `heapArgs`
+ * (W1-T10290: the children's growth flag, which serve hands the worker thread in its data) in place of any growth
+ * flag the parent carries. NODE_OPTIONS refuses `--heap-growing-percent`, so it goes on the child's own command line.
+ */
+export function oracleChildExecArgv(inherited: readonly string[], heapArgs: readonly string[] = []): string[] {
+  const kept = inherited.filter((flag) => !/^--max[-_]old[-_]space[-_]size=/.test(flag) && (heapArgs.length === 0 || !/^--heap[-_]growing[-_]percent=/.test(flag)));
+  return [...kept, `--max-old-space-size=${READ_MODEL_ORACLE_HEAP_MB}`, ...heapArgs];
 }
 
 type OracleChildMessage = { type?: string; id?: number; result?: OracleSliceResult; maxRssBytes?: number };
@@ -696,6 +701,8 @@ export function childOracle(opts: {
   log: (step: string, extra: Record<string, unknown>) => void;
   clock?: Clock;
   fork?: typeof forkWorkerEntry;
+  /** W1-T10290: the node flags each child starts with beside its heap ceiling; absent, V8's default growth factor. */
+  heapArgs?: readonly string[];
 }): ReadModelOracle {
   const clock = opts.clock ?? systemClock;
   let seq = 0;
@@ -706,9 +713,10 @@ export function childOracle(opts: {
       const id = ++seq;
       const started = clock.now();
       let launched: WorkerEntryFork;
+      const execArgv = oracleChildExecArgv(process.execArgv, opts.heapArgs);
       try {
         launched = (opts.fork ?? forkWorkerEntry)(import.meta.url, [READ_MODEL_ORACLE_CHILD_ARG, opts.escalationRepository ?? ""],
-          { execArgv: oracleChildExecArgv(process.execArgv), serialization: "advanced", stdio: ["ignore", "inherit", "inherit", "ipc"] },
+          { execArgv, serialization: "advanced", stdio: ["ignore", "inherit", "inherit", "ipc"] },
           { override: opts.workerUrl });
       } catch (error) {
         const message = String((error as Error)?.message ?? error);
@@ -730,7 +738,7 @@ export function childOracle(opts: {
         opts.log(READ_MODEL_ORACLE_CHILD_STEP, {
           instance: request.instance, outcome: !answer ? "died" : answer.result?.ok ? "ok" : "failed", code, signal, entry: launched.kind,
           spawn_sync_ms: Math.round(launched.spawnSyncMs * 10) / 10, ready_ms: readyMs ?? null, wall_ms: clock.now() - started,
-          child_max_rss_bytes: answer?.maxRssBytes ?? null,
+          child_max_rss_bytes: answer?.maxRssBytes ?? null, node_args: execArgv,
         });
       };
       child.on("message", (msg: OracleChildMessage) => {
@@ -2226,6 +2234,9 @@ export interface ReadModelWorkerData {
   signal: SharedArrayBuffer;
   /** `owner/name` the oracle's escalations are filed on; the worker builds its own issue gateway. */
   escalationRepository?: string;
+  /** W1-T10290: the node flags the oracle child starts with (the growth percent), computed on serve's main thread
+   *  because the policy lives in a module variable that this isolate's copy never set. */
+  childHeapArgs?: string[];
   /** The slow lane's units (read-model-slow-lane.ts); absent, no slow lane runs. */
   slowLane?: SlowLaneConfig;
   viewsModule?: string;
@@ -2298,7 +2309,7 @@ export function runReadModelWorker(
     catch (error) { log("read_model.daily_publication_refused", { reason: String((error as Error).message).slice(0, 2048) }); }
   } });
   // C5: one short-lived child per slice, so a slice's memory leaves serve when it is done.
-  const oracleRunner = childOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
+  const oracleRunner = childOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), ...(data.childHeapArgs ? { heapArgs: data.childHeapArgs } : {}), log });
   const ticker = createReadModelTicker({
     stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder, stopRequested, post, views: [], oracleRunner,
     integrityCheck: threadIntegrityCheck(), ...(escalation ? { escalation } : {}),
@@ -2480,6 +2491,8 @@ export interface ReadModelWorkerOptions {
   workerUrl?: URL;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   escalationRepository?: string;
+  /** W1-T10290: handed to the worker thread in its data for the oracle child's command line. */
+  childHeapArgs?: readonly string[];
   /** Opens or closes a recycle loop's issue off serve's event loop; absent, one thread per request on `escalationRepository`. */
   issueRequest?: (request: ReadModelIssueRequest) => Promise<ReadModelIssueAnswer>;
   every?: (run: () => void, ms: number) => () => void;
@@ -2536,6 +2549,54 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   if (warm.inboxQualificationReason) opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: warm.inboxQualificationReason });
   /** Keys the running worker has posted: newer than anything committed, so a reload leaves them alone. */
   const posted = new Set<string>();
+  /** A retired body leaves with all its per-key bookkeeping, so neither a reload nor a respawned producer resurrects it. */
+  const forget = (key: string): void => {
+    bodies.delete(key);
+    bodyReadings.delete(key);
+    posted.delete(key);
+  };
+  /**
+   * A complete current population retires every other cached Inbox page, including the pages an earlier
+   * producer posted and a replacement, finding them already gone from the store, has no drop for.
+   */
+  const convergeInbox = (generation: string, snapshotKey: string): boolean => {
+    const own = [...bodies].filter(([, entry]) => entry.view === INBOX_VIEW_NAME);
+    const current = own.filter(([, entry]) => entry.qualificationGeneration === generation && (entry.body.data as { snapshotKey?: unknown } | null)?.snapshotKey === snapshotKey);
+    if (!inboxScope) return false;
+    let db: ReadModelDb | undefined;
+    try {
+      db = openReadModel({ stateDir: opts.stateDir, instance: home, schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION, readOnly: true });
+      db.exec("BEGIN");
+      const failure = db.meta(INBOX_QUALIFICATION_ERROR_META), raw = db.meta(INBOX_QUALIFICATION_POPULATION_META);
+      if (failure !== undefined) throw new Error(`committed Inbox producer refusal: ${failure}`);
+      if (raw === undefined) throw new Error("committed Inbox population is unavailable");
+      // Unchanged ETags suppress body messages even when the producer commits fresh source timestamps.
+      // Bind each cached payload to its committed body before using that body's current provenance.
+      const pages = current.map(([, entry]) => {
+        const row = db!.prepare("SELECT version, etag, body FROM view_body WHERE view = ? AND key = ?").get(INBOX_VIEW_NAME, entry.key);
+        const identity = storedBodyQualification(db!.meta(bodyQualificationKey(INBOX_VIEW_NAME, entry.key)), String(row?.etag));
+        if (!row || row.etag !== entry.etag || row.version !== entry.version || identity.reason !== undefined || identity.qualificationGeneration !== generation)
+          throw new Error("cached Inbox body does not match committed provenance");
+        const body = JSON.parse(String(row.body)) as ViewBody;
+        if (body.view !== entry.body.view || body.version !== entry.body.version || body.stale !== entry.body.stale || JSON.stringify(body.data) !== JSON.stringify(entry.body.data))
+          throw new Error("cached Inbox payload does not match the committed body");
+        return { key: entry.key, data: entry.body.data, sources: body.sources };
+      });
+      const population = restoreInboxShadowPopulation(raw, pages, clock.now());
+      if (population.generation !== generation || population.snapshotKey !== snapshotKey || population.scope.instance !== inboxScope.instance ||
+        population.scope.repository !== inboxScope.repository) throw new Error("committed Inbox population does not match the current message");
+      db.exec("COMMIT");
+    } catch (error) {
+      opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: `complete page batch unavailable: ${(error as Error).message}` });
+      return false;
+    } finally {
+      db?.close();
+    }
+    const keep = new Set(current.map(([key]) => key)), retired = own.filter(([key]) => !keep.has(key));
+    for (const [key] of retired) forget(key);
+    if (retired.length > 0) opts.log?.("read_model.inbox_converged", { generation, kept: keep.size, retired: retired.length });
+    return true;
+  };
   let committedAt = committedTickTimes(opts.stateDir, opts.instances);
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   let mainSwitches = DEFAULT_READ_MODEL_SWITCHES;
@@ -2690,8 +2751,11 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     if (msg.type === "progress") phase = { instance: msg.instance, phase: msg.phase };
     else if (msg.type !== "log") phase = undefined;
     if (msg.type === "qualification") {
-      if (inboxScope && msg.scope?.instance === inboxScope.instance && msg.scope.repository === inboxScope.repository &&
-        (msg.generation === INBOX_QUALIFICATION_PENDING || (/^inbox-current-pages-v1:[a-f0-9]{64}$/.test(msg.generation) && typeof msg.snapshotKey === "string" && /^[a-f0-9]{64}$/.test(msg.snapshotKey)))) {
+      const matches = inboxScope && msg.scope?.instance === inboxScope.instance && msg.scope.repository === inboxScope.repository &&
+        (msg.generation === INBOX_QUALIFICATION_PENDING || (/^inbox-current-pages-v1:[a-f0-9]{64}$/.test(msg.generation) && typeof msg.snapshotKey === "string" && /^[a-f0-9]{64}$/.test(msg.snapshotKey)));
+      // Only a matching, complete current batch may retire pages; anything less retires nothing and stays unqualified.
+      const complete = matches && (msg.generation === INBOX_QUALIFICATION_PENDING || convergeInbox(msg.generation, msg.snapshotKey!));
+      if (complete) {
         inboxQualification = msg.generation;
         inboxQualificationSnapshot = msg.generation === INBOX_QUALIFICATION_PENDING ? undefined : msg.snapshotKey;
         noteAutoModes();
@@ -2699,17 +2763,14 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
         inboxQualification = INBOX_QUALIFICATION_PENDING;
         inboxQualificationSnapshot = undefined;
         noteAutoModes();
-        opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: "population message does not match configured scope or generation" });
+        opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: matches ? "population message arrived without its complete page batch" : "population message does not match configured scope or generation" });
       }
     } else if (msg.type === "body") {
       bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
       posted.add(readModelBodyKey(msg.entry.view, msg.entry.key));
       for (const listener of bodyListeners) listener(msg.entry);
     } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
-    else if (msg.type === "drop") {
-      bodies.delete(readModelBodyKey(msg.view, msg.key));
-      bodyReadings.delete(readModelBodyKey(msg.view, msg.key));
-    } else if (msg.type === "sources") {
+    else if (msg.type === "drop") forget(readModelBodyKey(msg.view, msg.key)); else if (msg.type === "sources") {
       for (const source of msg.sources) sourceClocks.set(source.name, source);
       for (const [view, reads] of Object.entries(msg.ledgerReads ?? {})) ledgerReads.set(view, reads);
       for (const body of msg.bodies ?? []) bodyReadings.set(readModelBodyKey(body.view, body.key), new Map(body.sources.map((source) => [source.name, source])));
@@ -2731,6 +2792,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared, ...(opts.registry ? { registry: opts.registry } : {}),
       ...(selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent }),
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
+      ...(opts.childHeapArgs?.length ? { childHeapArgs: [...opts.childHeapArgs] } : {}),
       ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
       ...(opts.viewsModule ? { viewsModule: opts.viewsModule } : {}),
       ...(opts.modelApprovalConfig ? { modelApprovalConfig: opts.modelApprovalConfig } : {}),
@@ -2784,9 +2846,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       let removed = 0;
       if (again.reason === undefined) {
         const committed = new Set(again.bodies.map(entry => readModelBodyKey(entry.view, entry.key)));
-        for (const key of bodies.keys()) if (!posted.has(key) && !committed.has(key)) {
-          bodies.delete(key);
-          bodyReadings.delete(key);
+        // Inbox pages are posted only after their commit, so a qualified committed population bounds even posted ones.
+        const members = inboxQualification === INBOX_QUALIFICATION_PENDING ? undefined : new Set(again.inboxPopulation?.pages.map(page => readModelBodyKey(INBOX_VIEW_NAME, page.key)));
+        for (const [key, entry] of bodies) if ((!posted.has(key) && !committed.has(key)) || (members && entry.view === INBOX_VIEW_NAME && !members.has(key))) {
+          forget(key);
           removed++;
         }
       }

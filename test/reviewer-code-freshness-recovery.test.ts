@@ -46,7 +46,7 @@ function appendWithheldReview(path: string, pr: OpenPrView, freshness: "stale" |
   });
 }
 
-test("the light sweep admits completed exact-input review refusals within its existing filing bound", async (t) => {
+test("the light sweep admits completed exact-input review refusals through the plan lane", async (t) => {
   const path = ledgerPath();
   t.after(() => rmSync(dirname(path), { recursive: true, force: true }));
   const filings = [3581, 3582].map(prNumber => ({
@@ -58,10 +58,8 @@ test("the light sweep admits completed exact-input review refusals within its ex
   const posted: number[] = [];
   await runSweepLightPass(filings, sweepDeps(path, posted, {
     reviewerCodeRecovery: { loadedCodeSha: "older-code", isLoadedCodeAtOrAfter: () => false, freshTreeReviewAvailable: true },
-  }), { ...DEFAULT_SWEEP_POLICY, planFilingAdmissionBound: 1 });
-  assert.deepEqual(posted, [3581], "the completed oldest input reaches ordinary review, without increasing the filing bound");
-  const held = readLedgerLines(path).findLast(row => row.step === "sweep.disposed" && row.pr_number === 3582);
-  assert.match(String(held?.stand_down_reason), /not admitted this pass/);
+  }), DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(posted.sort(), [3581, 3582], "each completed input reaches ordinary review in the plan lane (W1-T11148: no count)");
 });
 
 test("light refusal recovery preserves newer pending, exact input, backoff and delivered guards", async (t) => {

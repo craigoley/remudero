@@ -16,6 +16,8 @@ import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
 import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
+import { AUTHOR_CONTEXT_FORMAT, observeAuthorContext, requireAuthorContext } from './lib/author-context-compatibility.mjs';
+import { tmpdir } from 'node:os';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
@@ -338,7 +340,17 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     // W1-T9928: a slotted step's spooler beats the slot while this loop is blocked in spawnSync.
     const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment }, trackParent: true,
       ...logs, resultPath, runtimeMs: runtimeLimitMs, ...(heartbeat ? { heartbeat } : {}) });
+    // A group that is not proven closed keeps its owner's slot: the finalizers below consult this list.
+    if (!result.groupClosed) (receipt.unclosedGroups ??= []).push(name);
     return { ...result, capturedLogs: true, nativeResult: relative(root, resultPath) };
+  };
+  /** Free a slot or admission only once every native group run under this author is proven closed. */
+  const releaseWhenClosed = (holder, what) => {
+    if (receipt.unclosedGroups?.length) {
+      receipt.slotRetained = { holder: what, unclosedGroups: [...receipt.unclosedGroups] };
+      return;
+    }
+    holder?.release();
   };
   const git = (args) => {
     const result = run('git', args);
@@ -485,6 +497,32 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       const dependencyBefore=authorDependencyProvenance(root);
       receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
       if(dependencyBefore.state!=='present')throw new Error(`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
+      // Production phases only: an injected spawn is a diagnostic seam with no native slot to bind.
+      const nativeBoundary = spawn === spawnSync;
+      const sourceBefore = nativeBoundary ? observeAuthorContext({ root, git, dependency: () => dependencyBefore }).source : undefined;
+      let boundContext;
+      // The acquired test slot; assigned at admission, read when the native context is observed.
+      let slot;
+      const observeContext = () => observeAuthorContext({ root, git, slot,
+        allocations: { diagnostics: diagnosticsRoot, scratch: tmpdir(), workspace: root } });
+      /** The exact head/tree, dependencies, slot owner and allocation filesystems the phase is bound to. */
+      const requireNativeContext = (intent) => {
+        if (!nativeBoundary) return;
+        try {
+          if (!boundContext) {
+            const first = observeContext();
+            boundContext = { format: AUTHOR_CONTEXT_FORMAT, source: sourceBefore, dependency: dependencyBefore,
+              owner: first.owner, allocations: first.allocations };
+            requireAuthorContext(boundContext, first, intent);
+          } else requireAuthorContext(boundContext, observeContext(), intent);
+        } catch (error) {
+          receipt.affectedTestsNotRunReason = `${error.message}; no native phase was started or reused`;
+          throw error;
+        }
+        receipt.nativeContext = { format: AUTHOR_CONTEXT_FORMAT, intent, compatible: true, head: boundContext.source.head,
+          tree: boundContext.source.tree, ownerNonce: boundContext.owner.ownerNonce,
+          allocations: Object.keys(boundContext.allocations) };
+      };
       const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
       const censusTimeBound = censusTimeBoundOnly(census);
       const censusOk = (census.status === 0 || censusTimeBound) && !census.signal && !census.error;
@@ -539,7 +577,6 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         // line while the static stage runs on its own memory admission; suites are admitted after it.
         const queue = enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: AUTHOR_SLOT_CEILING });
         receipt.suiteQueue = { ticketed: queue.ticketed, positionAtEnqueue: queue.position ?? null, note: queue.note };
-        let slot;
         let staticEndedAt;
         const admitSuites = () => {
           const waitStartedAt = Date.now();
@@ -547,6 +584,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
           receipt.suiteQueue = { ...receipt.suiteQueue, outcome: 'admitted', waitedMs: Date.now() - (staticEndedAt ?? waitStartedAt) };
           if (!testSlotExecutionAllowed(slot)) throw new Error(`author preflight NOT_RUN (${slot.note})`);
+          // Bind head/tree, dependencies, the slot's owner nonce and every allocation before work starts.
+          requireNativeContext('start');
         };
         const cancelSuites = (reason) => {
           if (receipt.suiteQueue.outcome) return;
@@ -584,7 +623,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
               join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
               '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
-            const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, staticAdmission.childEnvironment ?? {}, AUTHOR_STEP_RUNTIME_MS);
+            const censusAnswer = { RMD_AUTHOR_CENSUS_ANSWERED: `${receipt.headSha}:${censusTimeBound ? 'time-bound' : 'ok'}` };
+            const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, { ...(staticAdmission.childEnvironment ?? {}), ...censusAnswer }, AUTHOR_STEP_RUNTIME_MS);
             staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
             report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
             // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
@@ -597,7 +637,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
               report('lint-plan-fast', lint, lintOk);
             }
           } finally {
-            staticAdmission.release();
+            releaseWhenClosed(staticAdmission, 'static-admission');
             staticEndedAt = Date.now();
           }
           if (staticOk && lintOk) {
@@ -674,6 +714,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
             // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
             slot.refresh();
+            // The suites start only under the very context the slot was bound to; anything else is NOT_RUN.
+            requireNativeContext('start');
             const hasDurationReporter = existsSync(join(root, 'scripts/test-duration-reporter.mjs'));
             const durationArgs = !hasDurationReporter ? [] : ['--test-reporter-destination=stdout',
               `--test-reporter=${join(root, 'scripts/test-duration-reporter.mjs')}`,
@@ -717,7 +759,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           }
         } finally {
           cancelSuites('the author stage ended before suite admission');
-          slot?.release();
+          releaseWhenClosed(slot, 'test-slot');
         }
       }
       if (git(['rev-parse', 'HEAD']).trim() !== receipt.headSha || git(['status', '--porcelain', '--untracked-files=normal']).trim()) {

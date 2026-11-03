@@ -1,0 +1,58 @@
+- id: W1-T11125
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:ci-shard:timed-out-with-no-test-result cost 12.8 PR minute(s) across 2 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.18
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:ci-shard:timed-out-with-no-test-result"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/check-ci-log-ci-shard-timed-out-with-no-test-result.test.ts
+  acceptance:
+    - claim: "a recorded check:ci-log:ci-shard:timed-out-with-no-test-result round, replayed through the real code path in .github/workflows/ci.yml, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11125: check:ci-log:ci-shard:timed-out-with-no-test-result is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:ci-shard:timed-out-with-no-test-result's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:ci-shard:timed-out-with-no-test-result cost 12.8 PR minute(s) (seven-day half-life) across 2 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job ci for ci-shard
+
+    RECENT ROUNDS (newest first):
+    - PR #16094 (https://github.com/craigoley/remudero/pull/16094) at 2026-11-02T02:57:43.075Z: ci-log round — ci-shard (7/8): timed out with no test result
+        log excerpt:
+          | The operation was canceled.
+          |   grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-7.log" || : > "$FLAKE_RETRY_DIR/shard-7.log"
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-7.log" || : > "$FLAKE_RETRY_DIR/shard-7.log"
+          | RMD-TEST-FILE-DIAGNOSTIC {"diagnosticVersion":1,"attemptId":"96d63b1d-8d9c-4bad-b5fd-f2d6bae27d59","sequence":112,"phase":"completed","elapsedMs":133443.344638,"file":"test/source-size-baseline-is-enforced.test.ts"}
+          | RMD-TEST-FILE-DIAGNOSTIC {"diagnosticVersion":1,"attemptId":"96d63b1d-8d9c-4bad-b5fd-f2d6bae27d59"
+    - PR #13505 (https://github.com/craigoley/remudero/pull/13505) at 2026-10-22T06:54:47.346Z: ci-log round — ci-shard (1/8): timed out with no test result
+        log excerpt:
+          | The job has exceeded the maximum execution time of 35m0s
+          | The operation was canceled.
+          |   grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-1.log" || : > "$FLAKE_RETRY_DIR/shard-1.log"
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-1.log" || : > "$FLAKE_RETRY_DIR/shard-1.log"
+          | tier: 0 files matched by basename
+          | flake-screen: 1 added test file(s), 8 at a time, for 1614s (the predicted coverage makespan of 1644s, less 30s this job already ran).
+          | ##[error]The operation was canceled.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-03T03:42:26.508Z"
+    pin: "1189d8702d0c6874bc4c096bbc81af3ccbe711fbeb33a5b577bb06c6d2ecc0cf"

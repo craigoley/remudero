@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ContainmentError, probeContainment, type ProbeExecResult } from "../src/lib/containment.js";
+import { ContainmentError, probeContainment, type ProbeExecResult } from "#src/lib/containment.js";
 
 function settingsFile(): string {
   const path = join(mkdtempSync(join(tmpdir(), "rmd-containment-retry-")), "worker.json");
