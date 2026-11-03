@@ -72,5 +72,5 @@
     confidence: 1
     reasons:
       - "deterministic backstop: it declares .github/workflows/proof-discrimination-gate.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-11-03T03:42:37.584Z"
-    pin: "d245f52a52e19f3285d7d8717452ee0798dd96768256cde2b22d30ad8a5af30d"
+    judged_at: "2026-11-03T16:54:12.857Z"
+    pin: "4c413bc6669cabd7ff77e0dba654843efb3f611b68206152abe0fc25586b8be6"

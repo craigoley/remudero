@@ -31,3 +31,15 @@
     follow-up harvest [research]: locate the "task declares no files" refusal string in `src/` and
     in W1-T7699's merged diff, to see why that fix didn't change the PR-hours share. — from
     W1-T10722 (run W1-T10722-1793122424172)
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.85
+    reasons:
+      - "The task type is recon with auto verification, and its output is a report; the description shows no touching of secrets, auth, deletion, or merge/deploy/review policy."
+      - "The acceptance criteria are concrete and verifiable from the ledger and code (named emitters with file and line, named PRs, a hours split, a count of refusal rows)."
+      - "The family track record is clean (22 merged, Beta mean 0.87), the author is the operator, and the gates state shows filingTime true with no concerning flags."
+      - "The declared src/run-task.ts is likely the subject of the investigation, but the description does not say a change to it is intended, so any edit there would be a small drift to watch in review."
+      - "the judge said proceed, but W1-T11192: at verify: auto it fails lint (proof-dialect, rule15-filing)"
+    judged_at: "2026-11-03T16:54:21.395Z"
+    pin: "2cc3ea3601211aaf2ef3bd75e8eee5c72c87c018379d435854d1a50b9e105618"

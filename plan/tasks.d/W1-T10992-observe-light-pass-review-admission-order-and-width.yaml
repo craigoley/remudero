@@ -42,11 +42,12 @@
   risk_ruling:
     verdict: "low"
     action: escalate
-    confidence: 0.96
+    confidence: 0.9
     reasons:
-      - "The filed scope authorizes only one recon report and explicitly excludes changes to code, configuration, ledger or review admission policy; any implementation requires a separate filing."
-      - "Acceptance requires a seven-day replay, a named positive control, corpus coverage counts, newest ledger timestamp and disclosure of unavailable measures, providing a concrete verification contract."
-      - "The operator explicitly authorized this bounded observation proposal; its recommendation is evidence gathering before any policy change, consistent with the stated measure-before-repair practice."
+      - "The declared files list is a single new docs/recon report, and the plan record states the task changes no code, configuration or ledger."
+      - "The description shows no contact with secrets, auth, deletion, merge/deploy/review policy or irreversible actions; the review-admission policy is measured, not altered, and any change is a separate filing."
+      - "Verifiability is defined by the operator ruling (manifest plus positive control on #15538), so the finding can be checked from what the report shows."
+      - "The author family is the operator, with a strong track record (22 merged, Beta mean 0.87)."
       - "the judge said proceed, but W1-T10992: at verify: auto it fails lint (proof-dialect)"
-    judged_at: "2026-10-30T01:16:06.662Z"
-    pin: "793686f48e7ad241fe0e0777348082b81bf9ca32a403a12c870e023a55b55fce"
+    judged_at: "2026-11-03T16:54:12.857Z"
+    pin: "d1e03a17fa7c296bf4ef6c057dde805711f9aa3265c6283947053afa71b602bf"
