@@ -728,21 +728,6 @@ export async function runFlowGardener(
         ready_to_direct_merge_age_p50_ms: null, open_age_p50_ms: null, arrivals_exceed_drain: null } });
     return { ran: false, stats: [], filed: [] };
   }
-  if (sources.readOpenQueue === undefined) {
-    deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN", reason: "census-reader-unavailable" });
-    state.openQueue = { observedAtMs: nowMs, windowDay: day, reviewP50: null, pressure: false, streak: 0 };
-  } else {
-    try {
-      const census = await sources.readOpenQueue(fixedClock(nowMs - DAY_MS).iso());
-      const shadow = openQueueShadow(census, ledger.rows, state.openQueue, clock.now());
-      deps.log("flow.open_queue_shadow", shadow);
-      state.openQueue = shadow.nextState;
-    } catch (e) {
-      deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN",
-        reason: "census-read-failed", error: String((e as Error)?.message ?? e) });
-      state.openQueue = { observedAtMs: nowMs, windowDay: day, reviewP50: null, pressure: false, streak: 0 };
-    }
-  }
   const prs = flowPrs(ledger.rows).filter((pr) => pr.mergedMs > nowMs - (FLOW_BASELINE_DAYS + 1) * DAY_MS && pr.mergedMs <= nowMs);
 
   // CI wall clock from GitHub: newest merges first, each PR read once and cached by its merged head.
@@ -763,6 +748,21 @@ export async function runFlowGardener(
       cache[pr.number] = { headSha: pr.headSha, mergedMs: pr.mergedMs, reading: (await readCi(pr.headSha)) ?? null };
     } catch (e) {
       errors.push({ pr: pr.number, error: String((e as Error)?.message ?? e) });
+    }
+  }
+  if (sources.readOpenQueue === undefined) {
+    deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN", reason: "census-reader-unavailable" });
+    state.openQueue = { observedAtMs: nowMs, windowDay: day, reviewP50: null, pressure: false, streak: 0 };
+  } else {
+    try {
+      const census = await sources.readOpenQueue(fixedClock(nowMs - DAY_MS).iso());
+      const shadow = openQueueShadow(census, ledger.rows, state.openQueue, clock.now());
+      deps.log("flow.open_queue_shadow", shadow);
+      state.openQueue = shadow.nextState;
+    } catch (e) {
+      deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN",
+        reason: "census-read-failed", error: String((e as Error)?.message ?? e) });
+      state.openQueue = { observedAtMs: nowMs, windowDay: day, reviewP50: null, pressure: false, streak: 0 };
     }
   }
   if (errors.length > 0) unreadable("github", { count: errors.length, first_error: errors[0]!.error, prs: errors.slice(0, 10).map((e) => e.pr) });

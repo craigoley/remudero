@@ -26,7 +26,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { runFlakeIncidentGardener } from "./flake-incident-gardener.js";
-import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener, type AdmissionFlowInput } from "./flow-gardener.js";
+import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowOpenQueueReader, flowPassDue, runFlowGardener, type AdmissionFlowInput } from "./flow-gardener.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "./gardener-overseer.js";
 import {
@@ -831,7 +831,9 @@ export function flowGardenPass(
 ): (() => Promise<void>) & { due: () => boolean | Promise<boolean> } {
   const pass = async (): Promise<void> => {
     try {
-      await runFlowGardener(d, { mintTaskId, readCi: flowCiReader(owner, repo, io.readJson), admission: io.admission });
+      const queueReaderEnabled = io.readJson !== undefined || (io.admission !== undefined && io.admission.readCorpus === undefined);
+      await runFlowGardener(d, { mintTaskId, readCi: flowCiReader(owner, repo, io.readJson),
+        ...(queueReaderEnabled ? { readOpenQueue: flowOpenQueueReader(owner, repo, io.readJson, d.clock) } : {}), admission: io.admission });
     } catch (e) {
       d.log(FLOW_GARDENER_FAILED_STEP, { error: String((e as Error)?.message ?? e) });
     }

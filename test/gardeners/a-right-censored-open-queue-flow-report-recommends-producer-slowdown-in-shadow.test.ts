@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 
 import { fixedClock } from "#src/lib/clock.js";
+import { flowGardenPass } from "#src/lib/garden-registry.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { flowOpenQueueReader, openQueueShadow, runFlowGardener, type FlowOpenQueuePr, type FlowOpenQueueRead } from "#src/lib/flow-gardener.js";
 
@@ -138,4 +139,35 @@ test("the production reader batches open and recent-terminal census data in one 
   const truncated = await flowOpenQueueReader("acme", "remudero", readJson, fixedClock(observedAtMs))("2026-11-01T12:00:00.000Z");
   assert.equal(truncated.complete, false);
   assert.equal(truncated.reason, "census-page-cap-exceeded");
+});
+
+
+test("the registered production flow pass wires one batched queue read in shadow mode", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}flow-open-registry-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const events: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const reads: string[][] = [];
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const body = { data: {
+    repository: { pullRequests: { totalCount: 0, pageInfo: { hasNextPage: false }, nodes: [] } },
+    search: { issueCount: 0, pageInfo: { hasNextPage: false }, nodes: [] },
+  } };
+  const pass = flowGardenPass({ stateDir, repoRoot: root, clock: fixedClock(now),
+    openWorkspace: () => ({ root, branch: "test", land: () => "", dispose: () => {} }),
+    log: (step, extra = {}) => events.push({ step, extra }),
+  }, "acme", "remudero", () => "W1-T11111", {
+    readJson: async (args) => { reads.push(args); return args[1] === "graphql" ? body : { workflow_runs: [] }; },
+    admission: { owner: "acme", repo: "remudero", settings: { mode: "shadow", disposition: "shadow", repositoryId: 1, organizations: [],
+      policy: { version: "test-v1", ownerIds: [], organizationIds: [], services: [], maxEvidenceAgeMs: 5_000 } } },
+  });
+  await pass();
+  assert.equal(reads.filter((args) => args[1] === "graphql").length, 1);
+  const row = events.find((event) => event.step === "flow.open_queue_shadow");
+  assert.ok(row);
+  assert.equal(row.extra.status, "OBSERVED");
+  assert.equal(row.extra.mode, "shadow");
+  assert.equal(row.extra.permission, "not-granted");
+  assert.equal(row.extra.action, "none");
 });
