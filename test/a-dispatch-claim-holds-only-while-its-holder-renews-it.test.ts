@@ -238,7 +238,9 @@ test("W1-T9432: a renewed claim or a moving run branch keeps the claim", async (
 
     const branchTask = "W1-T94320";
     const branchClaim = await pushForeignClaim(f, branchTask, mintedAtMs);
-    f.git(f.work, "commit", "--quiet", "--allow-empty", "-m", "a live hand-build's checkpoint");
+    const checkpointAt = new Date(Date.now()).toISOString();
+    execFileSync("git", ["-C", f.work, "commit", "--quiet", "--allow-empty", "-m", "a live hand-build's checkpoint"],
+      { encoding: "utf8", env: { ...process.env, GIT_COMMITTER_DATE: checkpointAt, GIT_AUTHOR_DATE: checkpointAt } });
     f.git(f.work, "push", "--quiet", "origin", `HEAD:refs/heads/run-${branchTask}-1792372622906`);
     const moving = await reclaimSilentDispatchClaim(branchTask, asyncReserver(f.work), judgeDeps(f, rows, nowMs, logged));
     assert.equal(moving.verdict, "alive", moving.reason);

@@ -266,7 +266,10 @@ a successful retention or certified removal.
 
 Fresh `git ls-remote` advertisements establish recoverability. Current heads/tags
 can prove ancestry when their commit objects are available locally; PR head refs
-can prove the exact pushed tip even after its branch was deleted. Cached
+can prove the exact pushed tip even after its branch was deleted. A commit that
+GitHub lists in any pull request (`gh api repos/<o>/<r>/commits/<sha>/pulls`) is
+also published: `refs/pull/<n>/head` keeps it after the PR head moves on or the
+PR is squash-merged. A missing, unauthenticated or failing `gh` proves nothing. Cached
 remote-tracking refs, a task trailer, missing metadata, and a rescue archive are
 not permission to delete. An unavailable remote fails closed. Publication is
 cached only within a pass and refreshed before deletion.
@@ -275,9 +278,21 @@ older Git without that control holds promisor repositories before reading their
 objects. The janitor does not fetch objects or update remote-tracking refs.
 
 Protected operator clones, seed stores, dirty/unpublished work, unknown ignored
-data, broken Git pointers and unreadable safety probes stay put.
-Patch/diff files, rejected hunks and original-file backups are retained evidence,
-not generic data-only scratch, even when they are outside a Git checkout.
+data, broken Git pointers and unreadable safety probes stay put. Their ignored
+`node_modules` and `coverage` do not: generated output never holds a checkout's
+work, so it is removed from a dirty, unpublished, locked or orphaned checkout
+(one whose repository was deleted) once every file in the checkout, apart from
+Git metadata and those trees, has been idle for six hours. Linked worktrees that
+operator tools park inside a repository's `.git` directory are found through
+`git worktree list`, not only by searching for `.git` markers.
+
+A non-Git run folder is kept for a bounded time, not forever. Reports, scripts
+and manifests protect it until it has been idle for 7 days
+(`REMUDERO_JANITOR_REPORT_RETENTION_DAYS`). Saved work — bundles, archives,
+patch/diff files, rejected hunks, original-file backups and secret-named files —
+protects it for 30 idle days (`REMUDERO_JANITOR_EVIDENCE_RETENTION_DAYS`).
+Repositories, ledgers and other state, locks, keys, `.env` files and anything
+holding a `.rmd-janitor-keep` marker are kept regardless of age.
 Mac standalone object stores remain conservatively held because borrowers can live in another
 account. Azure also checks configured-root alternates and linked registrations;
 all local refs and reflog-only commits must be published before clone removal.

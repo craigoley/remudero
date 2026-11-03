@@ -4,6 +4,7 @@
   depends_on:
     - W1-T10956
     - W1-T11117
+    - W1-T11118
   type: implement
   verify: auto
   principles:
@@ -24,10 +25,16 @@
     - src/lib/model-canary-schedule.ts
     - src/lib/model-canary-metrics.ts
     - src/lib/model-canary-config-census.ts
+    - src/lib/model-canary-owner.ts
+    - src/lib/model-canary-private-corpus.ts
+    - src/lib/model-canary-trace-grader.ts
     - test/model-canary-command.test.ts
     - test/model-canary-suite.test.ts
     - test/model-canary-schedule.test.ts
     - test/model-canary-metrics.test.ts
+    - test/model-canary-owner.test.ts
+    - test/routing/model-canary-private-corpus.test.ts
+    - test/routing/model-canary-trace-grader.test.ts
     - test/routing/model-canary-coding-isolation.test.ts
     - test/routing/model-canary-native-session.test.ts
     - test/routing/model-canary-config-inventory.test.ts
@@ -57,7 +64,12 @@
     a separately scoped versioned metrics receipt; configured caps are not measured peaks and
     unsupported isolation or missing resource evidence remains refused or unavailable. Extend the
     completed census case validator with the native coding contract so first-class coding cases
-    survive full matrix preparation; do not bypass validation or relabel their family."
+    survive full matrix preparation; do not bypass validation or relabel their family. Integrate
+    the first-class coding case into the validated private corpus and app-owned trace/scorer
+    contracts after W1-T11118. Preserve distinct canary-attempt, worker-spawn and host-execution
+    identities with an explicit native join. Consume each coding attempt and its source digest
+    durably through the existing slot owner before host execution; a duplicate or lost reply
+    remains owned until native cancellation and descendant closure are proved."
   note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
     this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
     grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
@@ -75,6 +87,10 @@
     Keep runtime-version provenance explicit; a Node24 result is not a Node22 test result.
     The 2026-11-02 integration reconciliation adds the census prerequisite and validator/test
     paths required by the native coding case contract; this grants no execution or release.
+    The 2026-11-03 source reconciliation adds W1-T11118 as a real prerequisite and declares its
+    private-corpus, trace and owner integration paths. The native selector must not start coding
+    integration before those source contracts merge. This orders existing work; it creates no
+    additional full Linux qualification, allowance, schedule, host executor or release authority.
   acceptance:
     - claim: the existing private coding executor contains filesystem and credential effects and closes
         its real descendants

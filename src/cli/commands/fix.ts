@@ -3981,13 +3981,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           ...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...reachableRemedyFiles.map((file) => file.path),
           ...(unfiledGrant?.paths ?? []),
         ])];
-    // A proof-repair round with no test path to stage still runs: it may end in a PROOF_AMENDMENT instead of an edit.
-    if (fixHarnessOwnsGit && fixDeclaredPaths.length === 0 && !proofRepairRound) {
-      const reason = "the fix has no surface to stage — declare task files or restore the PR diff before dispatch";
-      deps.log("fix.stood_down", { site: "rung.empty_commit_surface", strike: attempt, reason });
-      deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
-      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
-    }
+    // An empty filed scope can still admit a new test or a registered regenerable artifact.
+    // Let the worker try; the harness commit stages only those admitted paths and reports
+    // unrelated edits as undeclared. A proof-repair round can also end in a PROOF_AMENDMENT.
     // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
     if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
     fixSkillSelectionLogged = true;

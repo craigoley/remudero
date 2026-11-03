@@ -27,7 +27,7 @@ import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { ghIssueGateway, ghIssueGatewayAsync, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
-import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, type PlanFilingFileCache, type PlanFilingFileObservation } from "./open-prs-rest.js";
+import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, hydrateReviewQueueHoldsSteps, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation } from "./open-prs-rest.js";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
 import { planFilesIdentity } from "./thread-plan.js";
 import { isInPlanScope } from "./plan-architect.js";
@@ -38,7 +38,7 @@ import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, PlanBlobCache, mergePlanBlobsQuarantiningDuplicates, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
-import { DEFAULT_SWEEP_POLICY, RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
+import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { ghJson } from "./worker.js";
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
@@ -2132,7 +2132,7 @@ export function* openPrViewSteps(
       })),
     fetch,
     planFilingFileCache,
-    { missCap: deps.planFilingFileMissCap ?? DEFAULT_SWEEP_POLICY.planFilingAdmissionBound },
+    { missCap: deps.planFilingFileMissCap ?? PLAN_FILING_FILE_MISS_CAP },
   );
   const dependencyMainIdentities = yield* hydrateDependencyMainIdentitiesSteps(
     owner, repo, raw, planFilingFiles, io.dependencyIdentityRead ?? fetch, planFilingFileCache,
@@ -2272,6 +2272,18 @@ export function* openPrViewSteps(
         number: pr.number, headSha: pr.headRefOid, merge: mergeStateObservations.get(pr.number),
         ...(isScannerBlockerCandidate(holdCandidateFacts(pr)) ? {} : { holdOnly: true as const }),
       })),
+    fetch,
+  );
+
+  // W1-T11153: review admission puts a PR a person must clear last, so the review queue's own human
+  // CHANGES_REQUESTED holds are read here; the scanner read above covers only already-reviewed PRs.
+  const reviewQueueHolds = yield* hydrateReviewQueueHoldsSteps(
+    owner,
+    repo,
+    raw
+      .filter((pr) => isReviewQueueHoldCandidate(holdCandidateFacts(pr)) && !isHumanHoldCandidate(holdCandidateFacts(pr)))
+      .sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.number - b.number)
+      .map((pr) => ({ number: pr.number, headSha: pr.headRefOid })),
     fetch,
   );
 
@@ -2579,6 +2591,7 @@ export function* openPrViewSteps(
       mergeable: mergeStateObservations.get(pr.number)?.mergeable,
       mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
       scannerBlocker: scannerBlockers.get(pr.number),
+      reviewQueueHold: reviewQueueHolds.get(pr.number),
       codeqlHeadAlerts: codeqlHeadAlerts.get(pr.number),
       securityMergePolicy: securityMergePolicyRefusal(pr.statusCheckRollup),
       workflowRuns: workflowRuns.get(pr.number),
