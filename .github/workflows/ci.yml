@@ -2061,19 +2061,27 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 2
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            scripts/
+            src/lib/plan-scope.ts
+            src/lib/rule-suites.ts
+            package.json
+            .nvmrc
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
-          cache: npm
       # W1-T11161: the gate below reads this diff's class from the same predicate the shards use, so a
       # PLAN_ONLY diff whose matrix was skipped upstream is judged on evidence, not on the skip.
       - name: Classify this pull request's diff for the coverage gate (W1-T11161)
         id: coverage-plan-class
+        env:
+          SHARD_RESULT: ${{ needs.coverage-ratchet.result }}
         run: |
           CLASS=SOURCE
           COUNT=0
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && { [ "${SHARD_RESULT:-}" = "skipped" ] || [ "${SHARD_RESULT:-}" = "success" ]; }; then
             git diff --name-only HEAD^1...HEAD > coverage-class-files.txt 2>/dev/null || : > coverage-class-files.txt
             COUNT="$(grep -c . coverage-class-files.txt || true)"
             CLASS="$(node scripts/diff-class.mjs --coverage-class --changed-files coverage-class-files.txt 2>coverage-class.log)" || CLASS=SOURCE
@@ -2199,6 +2207,17 @@ jobs:
               exit 1
               ;;
           esac
+      - name: Restore the full checkout for coverage artifact consumption
+        id: coverage-full-checkout
+        env:
+          NOT_APPLICABLE: ${{ steps.coverage-gate.outputs.not_applicable }}
+        run: |
+          if [ "${NOT_APPLICABLE:-}" = "true" ]; then
+            echo "coverage-ratchet: PLAN_ONLY — no full checkout or history is needed."
+            exit 0
+          fi
+          git sparse-checkout disable
+          git fetch --unshallow
       - name: Download coverage shards
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
