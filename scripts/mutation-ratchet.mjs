@@ -27,8 +27,8 @@ import { spawnSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import { parseArgs } from 'node:util';
 import { dirname, join, posix } from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { parseSync } from '@swc/core';
 import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from './lib/repo-root.mjs';
 
@@ -312,6 +312,8 @@ export function importSpecifiers(source) {
       else if (value && typeof value === 'object') visit(value);
     }
   };
+  // Loaded here, not at the top: the --changed-files trigger runs before npm ci on a non-SOURCE diff.
+  const { parseSync } = createRequire(import.meta.url)('@swc/core');
   visit(parseSync(source, { syntax: 'typescript', decorators: true }));
   return { literals, nonLiteral };
 }
