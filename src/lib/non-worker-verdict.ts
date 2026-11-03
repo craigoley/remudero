@@ -51,7 +51,17 @@ export function streakRefusal(line: Record<string, unknown>): string | undefined
   return lifetimeInfrastructureRefusal(line) ??
     (line.verdict === "no_pr" && typeof line.reason === "string" && HARNESS_CHECKPOINT_NO_PR_REASONS.has(line.reason) ? line.reason : undefined) ??
     (inconclusiveProofRefusal(line) ? PROOF_INCONCLUSIVE : undefined) ??
-    (collectedNothingRefusal(line) ? PROOF_COLLECTED_NOTHING : undefined);
+    (collectedNothingRefusal(line) ? PROOF_COLLECTED_NOTHING : undefined) ??
+    (pushAuthRefusal(line) ? PUSH_AUTH_REFUSED : undefined);
+}
+
+export const PUSH_AUTH_REFUSED = "push_auth_refused";
+export const PUSH_AUTH_REFUSAL_RE = /Repository not found|Authentication failed|HTTP 403|returned error: 403|could not read Username|Invalid username or token/;
+
+function pushAuthRefusal(line: Record<string, unknown>): boolean {
+  if (line.verdict !== "failed" || line.stage !== "run.error") return false;
+  return line.cause === "push-auth-refused" ||
+    (line.cause === "git-push-failed" && typeof line.reason === "string" && PUSH_AUTH_REFUSAL_RE.test(line.reason));
 }
 
 /** W1-T10919: the class of a PR-open refusal whose test runner loaded no file although head files held the proof's

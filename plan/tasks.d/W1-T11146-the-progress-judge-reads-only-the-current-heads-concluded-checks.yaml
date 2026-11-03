@@ -1,0 +1,43 @@
+- id: W1-T11146
+  title: "The fix lane's progress judge reads only the current head's concluded checks — on 2026-11-02 both fix.progress_judged rows (about 20:24:58Z for #16201 and 20:27:15Z for #16212) named red_class security-merge-policy with 'no readable log (no-job-id)', #16201's against the old head 177f1cbaf two minutes after fix commit 578c6f428 was pushed, while that check reads SUCCESS on both current heads"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, the judge's input is the live head's settled red; it spans the input builder and the fix command that supplies the live head
+  band_meaning: span
+  origin: operator-session#fix-progress-judge-stale-head-2026-11-02
+  plan_refs:
+    - W1-T7096
+    - W1-T10067
+    - W1-T10818
+    - W1-T9297
+  files:
+    - src/lib/fix-progress-judge.ts
+    - src/cli/commands/fix.ts
+    - test/fix-lane/the-progress-judge-reads-only-the-current-heads-concluded-checks.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the PR's live head differs from the head the judge's facts were read at, no fix.progress_judged verdict is asked for; the round records `not_yet` with both shas and is judged on its next pass against the live head
+      proof: "unit test: test/fix-lane/the-progress-judge-reads-only-the-current-heads-concluded-checks.test.ts"
+    - claim: A check that has not concluded at the current head, or that has no job id and no conclusion, joins pendingChecks and never sets red_class or a currentRed entry; a concluded failure keeps today's red class, and its unreadable log is still named as evidence
+      proof: "grep: W1-T11146 criterion 2 in test/fix-lane/the-progress-judge-reads-only-the-current-heads-concluded-checks.test.ts"
+  rationale: |
+    OBSERVED 2026-11-02 (coordinator brief, from the core ledger):
+    - Two fix.progress_judged rows, about 20:24:58Z for #16201 (W1-T11094) and 20:27:15Z for #16212 (W1-T10749), both named `red_class: "security-merge-policy"` with "no readable log (no-job-id)".
+    - On #16201 the judge read the OLD head 177f1cbaf, two minutes after the fix commit 578c6f428 was pushed.
+    - `security-merge-policy` reads SUCCESS on both PRs' current heads.
+    - The verdicts were `continue`, so there was no harm this time. But the judge treated a superseded head, or a check with no job yet, as a new red class, and that can mis-steer a round (redClass feeds otherClassRounds and change-approach).
+    READ at origin/main 12783785a:
+    - buildFixProgressInput (src/lib/fix-progress-judge.ts:316) takes headSha and currentRed as given, and sets redClass from fixRedClass(redClassNames ?? currentRed) (:437). pendingChecks (W1-T10067) only marks redAfter partial (:392); it does not remove a pending name from currentRed.
+    - The fix-strike site (src/cli/commands/fix.ts:1950) passes the sweep snapshot's pr.headSha and ciFailures names as currentRed. A failure whose log is unavailable is marked `no-job-id` upstream (src/lib/sweep.ts:6314, tick-read-worker.ts:1382) and still counts as red.
+    NOT COVERED: W1-T10818 (queued) makes a skipped stub gate read as pending; it does not handle a superseded head or a no-job-id check. W1-T7096, W1-T10067 and W1-T9297 (merged) built the judge, its pending signal and its failure evidence.
+  design: |
+    1. buildFixProgressInput takes the live head (`liveHeadSha`) beside the facts' headSha. resolveFixProgress returns `{ verdict: "not_yet", reason: "facts read at <old>, head is <live>" }` without asking the judge when they differ, and logs it as fix.progress_deferred. Each fix.ts call site passes the remote head it already reads (remoteHead in the round path; one ls-remote of the branch at the fix-strike site).
+    2. A ciFailure with no conclusion, or with logUnavailable.kind `no-job-id` and no concluded state, is moved into pendingChecks before currentRed and redClass are built. Only concluded failures form a red class. A concluded failure whose log is unreadable keeps its class, and its failureEvidence says why.
+  note: |
+    Filed 2026-11-02 on the coordinator's request (finding 14, p2), queued after the 13 efficiency findings. Duplicate check: plan/tasks.d, open PRs and run- branches carry no task on the judge's head freshness or no-job-id checks.

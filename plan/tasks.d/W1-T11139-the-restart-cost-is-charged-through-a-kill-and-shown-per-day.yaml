@@ -1,0 +1,44 @@
+- id: W1-T11139
+  title: "The restart cost is charged through a kill and shown per day — an OOM or SIGKILL exit writes no partial lane.idle_summary, freshness_drain reads 0 despite about 850 minutes of drain in a week, daemon.boot_first_dispatch has no reader, and rmd status shows no boots-per-day figure, so 111 core boots in a week (about 981 dark minutes) were visible only by hand (beyond W1-T9360's exit flush and gap start)"
+  repo: remudero
+  depends_on:
+    - W1-T9360
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, the restart's cost is counted and shown; it spans the idle account that counts it and the status board that shows it
+  band_meaning: span
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs:
+    - W1-T9360
+    - W1-T8235
+  files:
+    - src/lib/idle-lane-accounting.ts
+    - src/lib/status-board.ts
+    - test/memory/the-restart-cost-is-charged-through-a-kill-and-shown-per-day.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A process killed without an exit flush (OOM, SIGKILL) has its open interval charged from its last checkpoint to the next boot, and lane time held by a freshness drain (daemon.freshness_drain.started to the exit) is charged to freshness_drain, so a fixture with an 850-minute drain reads more than 0
+      proof: "unit test: test/memory/the-restart-cost-is-charged-through-a-kill-and-shown-per-day.test.ts"
+    - claim: rmd status shows each instance's boots per day with their causes and boot to first dispatch p50, read from daemon.boot and daemon.boot_first_dispatch rows; an unread ledger says unknown, never 0
+      proof: "grep: W1-T11139 criterion 2 in test/memory/the-restart-cost-is-charged-through-a-kill-and-shown-per-day.test.ts"
+  rationale: |
+    MEASURED, restart census 2026-10-20 → 10-27 (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - Core booted 111 times (39 OOM kills, 37 freshness exits, 9 error stops, 8 abrupt deaths and more), costing about 981 dark minutes and about 2,940 lane-minutes (upper bound). Console booted 110 times.
+    - The restart metric (`lane.idle_summary`, src/lib/idle-lane-accounting.ts, shown by status-board.ts) misses most of it:
+      - OOM and SIGKILL exits write no partial row.
+      - `freshness_drain` reads 0 despite about 850 minutes of drain.
+      - chargeRestartGap charges from the newest `lane.idle_changed` row and overcharges a quiet console (8,645 slot-min).
+      - `daemon.boot_first_dispatch` has no reader.
+      - Neither `rmd status` nor the console shows boots per day.
+    READ at origin/main d04469fa2: chargeRestartGap is at idle-lane-accounting.ts:239 and is called at boot (daemon.ts:4028). The freshness_drain cause is set only from a refill reason starting `stale code` (:334). daemon.boot_first_dispatch is written at daemon.ts:4376, and nothing in src/ reads it.
+    COVERED ELSEWHERE, so left out: W1-T9360 (queued) charges a clean exit's open interval and starts the gap at the exit flush, which fixes the chargeRestartGap anchor. This task depends on it and covers what it cannot: a kill leaves no exit flush, the drain cause, and visibility.
+  design: |
+    1. The idle account writes a checkpoint of its open interval on the cadence it already samples (each lane.idle_changed, or the next sample), so the boot after a kill charges from the last checkpoint. No new timer.
+    2. While a daemon.freshness_drain is open (its started row to the exit), every idle lane slot is charged to freshness_drain, whatever reason the refill path gave.
+    3. status-board.ts adds one line per instance: boots per day over the board's window, split by cause (the daemon.boot prior-exit reason), and boot to first dispatch p50 from daemon.boot_first_dispatch. An unread ledger renders unknown.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 8 (p2). The console half of "visibility" belongs in remudero-console (UI work goes there only) and is not filed here; it can read the same status fields once they exist.
