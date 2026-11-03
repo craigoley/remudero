@@ -8,6 +8,7 @@ Recon only. This report changes no code, configuration or ledger. Any change it 
 - **Ledger forms read** (core instance, `/mnt/rmd/state2/state` on the Azure host; read-only, niced, streamed to the Mac):
   - rotated `ledger.<ts>.ndjson.gz`: 279 files (`ledger.2026-10-26*` to `ledger.2026-11-02T22-04-34-982Z`)
   - live `ledger.ndjson`: 1 file
+  - rotated plain `ledger.<ts>.ndjson`: 0 files. This form is written only when a rotation's gzip step fails (`src/lib/ledger.ts:1573`); see the manifest below.
   - Rows were deduplicated on step, ts, PR and head, because rotation can carry a row into the live file.
 - **Steps read:** `sweep.review_refilled` (301 in the window), `sweep.review_eligible`, `sweep.review_admitted` (light and full surfaces), `sweep.disposed` (post-review dispositions, and every row naming a CHANGES_REQUESTED review), `review.capacity`, `review.posted`, `review.post_refused`, `escalation.issue_opened`, `escalation.superseded`, `escalation.demoted`, `pr.terminal`.
 - **GitHub reads**, all through the read broker and all read-only:
@@ -23,12 +24,24 @@ W1-T10992 criterion 1 (amended in #16494) asks for a manifest instead of the ori
 - **Newest ledger ts read inside the window:** 2026-11-02T22:10:43.010Z, identical to the original run's.
 - **Files opened per form:**
 
-  | Form | Opened | Holding window rows | Original run |
+  Every form the union reader classifies (`ledgerRotationEntries` and `listedLedgerFiles`, `src/lib/ledger-union.ts:195`) has a row, including the empty ones:
+
+  | Form | Opened | Holding window rows of the steps read | Original run |
   |---|---|---|---|
   | rotated `ledger.<ts>.ndjson.gz` (`ledger.2026-10-26T01-17-12-319Z` to `ledger.2026-11-03T17-53-57-551Z`) | 343 | 248 | 279 |
+  | rotated plain `ledger.<ts>.ndjson` (compression-failure fallback) | 0 | 0 | 0 |
   | live `ledger.ndjson` | 1 | 0 | 1 |
+  | producer metadata `ledger.ndjson.carried.json`, `ledger.ndjson.retained-steps.json` | not read: they hold no rows | 0 | not read |
+  | unclassified `ledger.*` | 0 | 0 | 0 |
 
-  The difference is expected. The original run read the window's tail from the then-live file, which has since rotated into archives named after the window ended. So this re-read opens later archives too, and the live file now holds no window rows.
+  The gzip and live differences are expected. The original run read the window's tail from the then-live file, which has since rotated into archives named after the window ended. So this re-read opens later archives too, and the live file now holds no window rows.
+
+  How the forms were checked (re-read 2026-11-03T22:40Z):
+  - **Plain rotations.** Every `ledger.*` name on the host was classified. There were 615 gzip rotations from `ledger.2026-08-08T23-38-25-814Z` on, one live file, the two metadata files, and no plain `ledger.<ts>.ndjson`.
+  - **The original run's plain count is zero too.** A plain archive leaves the corpus only through compaction, which moves its source into the cold store `ledger-superseded/` (`src/lib/ledger-compact.ts:66`). That store holds 723 archives, every one gzip, none plain. Its newest source is `ledger.2026-10-23T07-36-21-267Z`, so no archive of any form has been moved out since before the window opened.
+  - **Archives outside the span.** Compaction names an archive after its newest row, so no archive named before 2026-10-26T01-17Z can hold a window row. The 9 gzip archives cut after this re-read's span (to `ledger.2026-11-03T22-14-15-928Z`) were opened as well, and hold 0 window rows.
+  - **The 248.** It counts archives holding a window row of the steps read; 257 hold a window row of any step.
+  - **Result.** Over all forms together (352 gzip, 0 plain, 1 live), every per-step count below, the newest ts and the #15538 control reproduce exactly. Adding the plain form changes no count, row or finding, because the form is empty.
 
 - **Rows per step read, in the window:**
 
