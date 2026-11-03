@@ -23,6 +23,7 @@
     - src/lib/model-canary-runner.ts
     - src/lib/model-canary-command.ts
     - src/lib/model-canary-ledger.ts
+    - src/lib/producer-identity.ts
     - src/lib/model-canary-suite.ts
     - src/lib/model-canary-schedule.ts
     - src/lib/model-canary-metrics.ts
@@ -91,7 +92,7 @@
     contracts after W1-T11118. Preserve distinct canary-attempt, worker-spawn and host-execution
     identities with an explicit native join. Consume each coding attempt and its source digest
     durably through the existing slot owner before host execution; a duplicate or lost reply
-    remains owned until native cancellation and descendant closure are proved."
+    remains owned until native cancellation and descendant closure are proved. Register the actual `MODEL-CANARY-CODING` ledger sender in the existing `producer-identity.ts` registry; do not rename or suppress the observed producer."
   note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
     this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
     grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
@@ -138,6 +139,8 @@
       proof: "grep: codingLedgerSave( in src/lib/model-canary-command.ts"
     - claim: First-class coding cases retain their identity through full census validation
       proof: 'unit test: coding cases retain first class identity through matrix census validation'
+    - claim: The raw coding ledger sender resolves through the declared producer identity registry
+      proof: 'unit test: coding ledger producer resolves to its declared identity'
     - claim: Native private replay reaches the app-owned control runner without asserting model execution
       proof: 'grep: replayPrivateControl( in src/lib/model-canary-command.ts'
   falsifier: "Add the exact named real-path controls in the computed test folders using package

@@ -649,6 +649,13 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(refusalAmendment) && files.some((f) => refusalAmendmentEdges.includes(f))) {
     pathReaders.push(refusalAmendment);
   }
+  // A coverage shard failed on this suite (run 41111628169, PR #15805) and the narrow selector missed it. The
+  // suite drives scripts/openweight-probe.mjs, which reaches worker-provider's tool boundary, not a symbol it names.
+  const openWeightProbe = suitePath("test/openweight-probe.test.ts");
+  const openWeightProbeEdges = ["src/lib/worker-provider.ts", "scripts/openweight-probe.mjs"];
+  if (input.files.has(openWeightProbe) && files.some((f) => openWeightProbeEdges.includes(f))) {
+    pathReaders.push(openWeightProbe);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still

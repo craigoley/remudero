@@ -7,7 +7,10 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=401d30afbcce281c
+  # backlog gardener: placed=2026-11-03T16:21:27.926Z
   attempts: 0
   files:
     - test/routing/the-deployment-bake-off-runs-from-the-cadence.test.ts
