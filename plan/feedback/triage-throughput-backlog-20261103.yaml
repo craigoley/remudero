@@ -29,8 +29,30 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/16562
+summary:
+  headline: Auto-triage is processing about a third of its allowed rate; 157
+    entries are stuck new.
+  what_happened: The feedback backlog holds 157 new entries, the oldest from
+    2026-10-22, and an operator-directed entry waits behind about 12 days of it.
+    Actual triage runs about 5–12 status changes per day against a cap of 24,
+    and one day had none; the cause is not yet known.
+  decision: Approve the diagnostic count of autoTriage refusal reasons over 10-27
+    to 11-03 before any code change is made.
+  options:
+    - label: Approve diagnostic only
+      consequence: Count refusal reasons from the host ledger and report which class
+        dominates, with no code changes.
+      intent: approve
+    - label: Approve diagnostic and fix
+      consequence: Count refusal reasons, then fix the dominant class in this worktree
+        for review before merge.
+      intent: approve
+    - label: Decline for now
+      consequence: Leave the backlog as is; the operator-directed entry keeps waiting
+        about 12 days.
+      intent: decline
+  if_nothing_happens: The new backlog keeps growing and the oldest entries stay unprocessed.
 expansion: null
 submission_key: operator-direction:triage-throughput-backlog:20261103
 thread_id: null
