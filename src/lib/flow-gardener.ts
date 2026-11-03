@@ -21,6 +21,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { loadPlan, newTestPath, retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { automergeHoldFromLedger, cappedOverrideFromLedger, decideArmFromLedgerVerdict, priorReviewVerdictFromLedger } from "./review.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 const MIN_MS = 60_000;
@@ -81,7 +82,7 @@ const STAGE_OWNER: Readonly<Record<FlowStage, string>> = {
 
 const READ_STEPS = [
   "pr.opened", "pr.terminal", "sweep.review_eligible", "sweep.review_admitted", "review.posted",
-  "automerge.armed", "automerge.direct_merge_preflight_refused", "sweep.update_branch.updated", "fix.dispatch", "fix.done", "branch.update_requested", "review.plan_only_reviewed",
+  "automerge.armed", "automerge.direct_merge_preflight_refused", "automerge.capped_override_granted", "automerge.hold_engaged", "automerge.hold_released", "sweep.update_branch.updated", "fix.dispatch", "fix.done", "branch.update_requested", "review.plan_only_reviewed",
 ];
 export const ADMISSION_FLOW_STEP = "admission_flow.shadow";
 /** PRIMARY CONTROL: selected terminal evidence is normally limited to eight reads per off-loop pass. */
@@ -638,6 +639,8 @@ const medianNumber = (values: number[]): number | null => {
 /** Right-censored open work and one complete arrival/drain window; it can only recommend in shadow. */
 export function openQueueShadow(
   census: FlowOpenQueueRead, rows: readonly Row[], previous: FlowState["openQueue"], nowMs: number,
+  /** Where the ledger read began: an open PR older than it whose stage rows are not in the read has an unread stage. */
+  ledgerFromMs?: number,
 ): { mode: "shadow"; permission: "not-granted"; action: "none"; status: "UNKNOWN" | "OBSERVED";
   reason: string; window: { fromMs: number; toMs: number }; cohort: Record<string, number | null>;
   producer?: string; recommendation?: string; nextState: NonNullable<FlowState["openQueue"]> } {
@@ -656,6 +659,7 @@ export function openQueueShadow(
   const recent = census.window.filter((pr) => inWindow(pr.createdAtMs));
   const arrivals = recent.length;
   const drain = census.window.filter((pr) => inWindow(pr.mergedAtMs) || inWindow(pr.closedAtMs)).length;
+  const holdRows = rows.filter((r) => r.step === "automerge.hold_engaged" || r.step === "automerge.hold_released");
   const details = census.open.map((pr) => {
     const matching = rows.filter((r) => prNumberOf(r) === pr.number &&
       (r.step === "automerge.direct_merge_preflight_refused" ? r.prior_head_sha ?? r.head_sha : r.head_sha) === pr.headSha)
@@ -667,9 +671,19 @@ export function openQueueShadow(
     const reviewWaiting = eligible !== undefined && (admitted === undefined || tsOf(admitted) < tsOf(eligible)) &&
       (reviewed === undefined || tsOf(reviewed) < tsOf(eligible));
     const preflightRefused = refused !== undefined && (reviewed === undefined || tsOf(refused) >= tsOf(reviewed));
-    const ready = reviewed !== undefined && pr.checksState === "SUCCESS" && !preflightRefused;
+    // Ready means the production arm would merge on this head's posted verdict: its own predicates, so a CAPPED success
+    // (zero proofs executed) is never ready unless plan-only or under a head-bound operator override.
+    const ownRows = rows.filter((r) => prNumberOf(r) === pr.number);
+    const prUrl = ownRows.map((r) => r.pr_url).find((u): u is string => typeof u === "string");
+    const taskId = ownRows.filter((r) => r.step === "review.posted").map((r) => r.task_id).findLast((t): t is string => typeof t === "string") ?? "";
+    const prior = priorReviewVerdictFromLedger(ownRows, taskId, prUrl);
+    const override = prior?.capped ? cappedOverrideFromLedger(ownRows, taskId, pr.headSha, prUrl) : undefined;
+    const armable = decideArmFromLedgerVerdict(prior, pr.headSha, override).arm && automergeHoldFromLedger(holdRows, pr.number) === undefined;
+    const ready = reviewed !== undefined && armable && pr.checksState === "SUCCESS" && !preflightRefused;
     const reviewAge = reviewWaiting ? Math.max(0, nowMs - tsOf(eligible!)) : null;
-    const stage = reviewWaiting ? "review_waiting" : preflightRefused ? "merge_preflight_refused" : ready ? "ready_to_direct_merge" : "other_open";
+    const unread = ledgerFromMs !== undefined && pr.createdAtMs < ledgerFromMs && matching.length === 0;
+    const stage = reviewWaiting ? "review_waiting" : preflightRefused ? "merge_preflight_refused" : ready ? "ready_to_direct_merge"
+      : unread ? "stage_unread" : "other_open";
     const stageStart = reviewWaiting ? tsOf(eligible!) : preflightRefused ? tsOf(refused!) : ready ? tsOf(reviewed!) : NaN;
     return { pr, stage, reviewAge, age: Number.isFinite(stageStart) ? Math.max(0, nowMs - stageStart) : null };
   });
@@ -683,20 +697,27 @@ export function openQueueShadow(
   const producer = [...producers].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
   const previousWindowConsecutive = previous !== undefined && previous.window?.fromMs === fromMs - DAY_MS && previous.window.toMs === fromMs &&
     previous.observedAtMs < nowMs && nowMs - previous.observedAtMs <= 2 * DAY_MS;
-  // A second pass on the same UTC date re-reads the same window: it neither advances nor resets the streak.
+  // A second pass on the same UTC date re-reads the same window: it never advances the streak, and its pressure is
+  // re-judged on what it reads now against the predecessor window's p50 the first pass compared with.
   const sameWindow = previous !== undefined && previous.window?.fromMs === fromMs && previous.window.toMs === toMs;
-  const advanced = arrivals > drain && reviewP50 !== null && previousWindowConsecutive && previous!.reviewP50 !== null &&
-    reviewP50 > previous!.reviewP50 && producer !== undefined && producer === previous!.producer;
-  const pressure = sameWindow ? previous!.pressure : advanced;
-  const streak = sameWindow ? previous!.streak : advanced ? (previous!.pressure ? previous!.streak + 1 : 1) : 0;
-  const nextState = { observedAtMs: census.observedAtMs, windowDay, window, reviewP50, pressure, streak, ...(producer ? { producer } : {}) };
+  const baselineP50 = sameWindow ? previous!.baselineP50 ?? null : previousWindowConsecutive ? previous!.reviewP50 : null;
+  const stageUnread = details.filter((d) => d.stage === "stage_unread").length;
+  const holds = arrivals > drain && reviewP50 !== null && baselineP50 !== null && reviewP50 > baselineP50 && producer !== undefined &&
+    stageUnread === 0;
+  const pressure = sameWindow
+    ? previous!.pressure && holds && producer === previous!.producer
+    : holds && previousWindowConsecutive && producer === previous!.producer;
+  const streak = !pressure ? 0 : sameWindow ? previous!.streak : previous!.pressure ? previous!.streak + 1 : 1;
+  const nextState = { observedAtMs: census.observedAtMs, windowDay, window, reviewP50, baselineP50, pressure, streak, ...(producer ? { producer } : {}) };
   return { mode: "shadow", permission: "not-granted", action: "none", status: "OBSERVED", reason: pressure
-    ? `complete-window-inflow-exceeds-drain-review-p50-worsened-streak-${streak}` : "complete-window-no-confirmed-pressure",
+    ? `complete-window-inflow-exceeds-drain-review-p50-worsened-streak-${streak}`
+    : stageUnread > 0 ? "stage-evidence-unread-before-ledger-read" : "complete-window-no-confirmed-pressure",
     window, cohort: { open: details.length, arrivals, merged_or_closed: drain,
       review_waiting: details.filter((d) => d.stage === "review_waiting").length,
       merge_preflight_refused: details.filter((d) => d.stage === "merge_preflight_refused").length,
       ready_to_direct_merge: details.filter((d) => d.stage === "ready_to_direct_merge").length,
       other_open: details.filter((d) => d.stage === "other_open").length,
+      stage_unread: stageUnread,
       review_wait_p50_ms: reviewP50,
       merge_preflight_refusal_age_p50_ms: medianNumber(details.filter((d) => d.stage === "merge_preflight_refused").map((d) => d.age!).filter(Number.isFinite)),
       ready_to_direct_merge_age_p50_ms: medianNumber(details.filter((d) => d.stage === "ready_to_direct_merge").map((d) => d.age!).filter(Number.isFinite)),
@@ -712,7 +733,9 @@ interface FlowState {
   ci?: Record<string, { headSha: string; mergedMs: number; reading: FlowCiReading | null }>;
   filed?: Record<string, { taskId: string; atMs: number }>;
   filings?: Array<{ day: string; key: string }>;
-  openQueue?: { observedAtMs: number; windowDay?: string; window?: { fromMs: number; toMs: number }; reviewP50: number | null; pressure: boolean; streak: number; producer?: string };
+  openQueue?: { observedAtMs: number; windowDay?: string; window?: { fromMs: number; toMs: number }; reviewP50: number | null;
+    /** The predecessor window's p50 this window's pressure was judged against, so a same-date re-read re-judges it. */
+    baselineP50?: number | null; pressure: boolean; streak: number; producer?: string };
 }
 
 function readState(stateDir: string): FlowState {
@@ -808,7 +831,7 @@ export async function runFlowGardener(
   } else {
     try {
       const census = await sources.readOpenQueue(openQueueWindow(nowMs));
-      const shadow = openQueueShadow(census, ledger.rows, state.openQueue, clock.now());
+      const shadow = openQueueShadow(census, ledger.rows, state.openQueue, clock.now(), Date.parse(sinceIso));
       deps.log("flow.open_queue_shadow", shadow);
       state.openQueue = shadow.nextState;
     } catch (e) {

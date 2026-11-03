@@ -69,8 +69,8 @@ function rows(now: number, reviewAge = 2 * HOUR) {
   return [
     { ts: at(now - reviewAge), step: "sweep.review_eligible", pr_number: 16147, head_sha: "head-16147", review_key: "k16147" },
     // A previous-head PASS cannot make #16147 merge-ready at its current head.
-    { ts: at(now - HOUR), step: "review.posted", pr_number: 16147, head_sha: "old-head", state: "success" },
-    { ts: at(now - 2 * HOUR), step: "review.posted", pr_number: 16186, head_sha: "head-16186", state: "success" },
+    { ts: at(now - HOUR), step: "review.posted", pr_number: 16147, pr_url: `https://github.com/craigoley/remudero/pull/16147`, head_sha: "old-head", state: "success" },
+    { ts: at(now - 2 * HOUR), step: "review.posted", pr_number: 16186, pr_url: `https://github.com/craigoley/remudero/pull/16186`, head_sha: "head-16186", state: "success" },
     { ts: at(now - 3 * HOUR), step: "automerge.direct_merge_preflight_refused", pr_number: 17000, head_sha: "head-17000" },
   ];
 }
@@ -82,7 +82,7 @@ function refusalRows(now: number, head = "head-17000") {
     { priorHeadSha: head, remedy: "retry-later", reason: "plan_merge_unread" });
   return [
     ...rows(now).filter((row) => row.pr_number !== 17000),
-    { ts: at(now - 4 * HOUR), step: "review.posted", pr_number: 17000, head_sha: "head-17000", state: "success" },
+    { ts: at(now - 4 * HOUR), step: "review.posted", pr_number: 17000, pr_url: `https://github.com/craigoley/remudero/pull/17000`, head_sha: "head-17000", state: "success" },
     ...events,
   ];
 }
@@ -98,7 +98,7 @@ test("production preflight refusals retain their exact head identity and observe
   assert.equal(stale.cohort.merge_preflight_refused, 0, "a prior head's refusal cannot block the current head");
   assert.equal(stale.cohort.ready_to_direct_merge, 2);
   const noCurrentReview = refusalRows(now).filter((row) => row.pr_number !== 17000 || row.step !== "review.posted");
-  noCurrentReview.push({ ts: at(now - HOUR), step: "review.posted", pr_number: 17000,
+  noCurrentReview.push({ ts: at(now - HOUR), step: "review.posted", pr_number: 17000, pr_url: `https://github.com/craigoley/remudero/pull/17000`,
     head_sha: "old-head", prior_head_sha: "head-17000", state: "success" });
   const unreviewed = openQueueShadow(census(now), noCurrentReview, undefined, now);
   assert.equal(unreviewed.cohort.merge_preflight_refused, 1);
@@ -112,13 +112,13 @@ test("#16147 and #16186 remain in review wait until their current heads are revi
   const replay = [
     { ts: "2026-11-02T06:13:00.000Z", step: "sweep.review_eligible", pr_number: 16147, head_sha: "head-16147" },
     { ts: "2026-11-02T13:08:00.000Z", step: "sweep.review_eligible", pr_number: 16186, head_sha: "head-16186" },
-    ...[16147, 16186].map((pr_number) => ({ ts: at(now - HOUR), step: "review.posted", pr_number, head_sha: "old-head", state: "success" })),
+    ...[16147, 16186].map((pr_number) => ({ ts: at(now - HOUR), step: "review.posted", pr_number, pr_url: `https://github.com/craigoley/remudero/pull/${pr_number}`, head_sha: "old-head", state: "success" })),
   ];
   const waiting = openQueueShadow(cohort, replay, undefined, now);
   assert.equal(waiting.cohort.open, 2);
   assert.equal(waiting.cohort.review_waiting, 2);
   assert.equal(waiting.cohort.ready_to_direct_merge, 0);
-  for (const pr_number of [16147, 16186]) replay.push({ ts: at(now), step: "review.posted", pr_number, head_sha: `head-${pr_number}`, state: "success" });
+  for (const pr_number of [16147, 16186]) replay.push({ ts: at(now), step: "review.posted", pr_number, pr_url: `https://github.com/craigoley/remudero/pull/${pr_number}`, head_sha: `head-${pr_number}`, state: "success" });
   const reviewed = openQueueShadow(cohort, replay, undefined, now);
   assert.equal(reviewed.cohort.review_waiting, 0);
   assert.equal(reviewed.cohort.ready_to_direct_merge, 2);
@@ -464,4 +464,74 @@ test("the registered production flow pass wires one batched queue read in shadow
   assert.equal(row.extra.mode, "shadow");
   assert.equal(row.extra.permission, "not-granted");
   assert.equal(row.extra.action, "none");
+});
+
+test("W1-T11111 criterion 1: ready to direct merge is the production arm's own verdict, so a capped success is never ready", () => {
+  const now = Date.parse("2026-11-02T17:42:00.000Z");
+  const cohort = census(now);
+  cohort.open = cohort.open.filter((pr) => pr.number === 16186).map((pr) => ({ ...pr, checksState: "SUCCESS" }));
+  const url = "https://github.com/craigoley/remudero/pull/16186";
+  const posted = (extra: Record<string, unknown>) => ({ ts: at(now - HOUR), step: "review.posted", pr_number: 16186, pr_url: url,
+    task_id: "W1-T16186", head_sha: "head-16186", state: "success", ...extra });
+  const ready = (extraRows: Record<string, unknown>[]) => openQueueShadow(cohort, extraRows, undefined, now).cohort.ready_to_direct_merge;
+  assert.equal(ready([posted({ capped: false })]), 1, "an uncapped current-head PASS with green checks is ready");
+  assert.equal(ready([posted({ capped: true, plan_only: false })]), 0, "#16186's capped PASS: production decideAutoMergeArm refuses it");
+  assert.equal(ready([posted({ capped: true, plan_only: true })]), 1, "a plan-only capped PASS arms, so it is ready");
+  const override = (head: string) => ({ ts: at(now - HOUR / 2), step: "automerge.capped_override_granted", pr_url: url,
+    task_id: "W1-T16186", head_sha: head, by: "operator", reason: "reviewed by hand" });
+  assert.equal(ready([posted({ capped: true }), override("head-16186")]), 1, "a head-bound operator override arms a capped PASS");
+  assert.equal(ready([posted({ capped: true }), override("old-head")]), 0, "an override for another head never does");
+  assert.equal(ready([posted({ capped: false }), { ...posted({ capped: false }), ts: at(now - HOUR / 4), state: "failure" }]), 0,
+    "the newest posted verdict at the head decides, as production reads it");
+  const hold = { ts: at(now - HOUR / 2), step: "automerge.hold_engaged", pr_number: 16186, by: "operator", reason: "wait", authority: "interactive-cli" };
+  assert.equal(ready([posted({ capped: false }), hold]), 0, "an operator merge hold is never ready to direct merge");
+  assert.equal(ready([posted({ capped: false }), hold, { ...hold, ts: at(now - HOUR / 4), step: "automerge.hold_released" }]), 1,
+    "a released hold no longer blocks");
+});
+
+test("W1-T11111 criterion 1: a same-date retry re-judges pressure on what it reads now, never advancing the streak", () => {
+  const firstDay = Date.parse("2026-11-02T01:00:00.000Z");
+  const first = openQueueShadow(census(firstDay), rows(firstDay), {
+    observedAtMs: firstDay - DAY, windowDay: "2026-11-01", window: previousWindow(firstDay),
+    reviewP50: HOUR, pressure: true, streak: 1, producer: "plan-task-workers",
+  }, firstDay);
+  assert.equal(first.nextState.streak, 2);
+  assert.equal(first.recommendation, "consider-slowing-plan-task-workers");
+  const retry = firstDay + 3 * HOUR;
+  const cleared = rows(retry).filter((row) => row.step !== "sweep.review_eligible");
+  const after = openQueueShadow({ ...census(firstDay), observedAtMs: retry }, cleared, first.nextState, retry);
+  assert.equal(after.cohort.review_waiting, 0, "review admission cleared every queued wait");
+  assert.equal(after.cohort.review_wait_p50_ms, null);
+  assert.equal(after.nextState.pressure, false, "pressure no longer holds once nothing waits for review");
+  assert.equal(after.nextState.streak, 0);
+  assert.equal(after.recommendation, undefined, "a cleared queue never keeps a recommendation");
+  const stillPressured = openQueueShadow({ ...census(firstDay), observedAtMs: retry }, rows(retry, 4 * HOUR), first.nextState, retry);
+  assert.equal(stillPressured.nextState.streak, 2, "a retry that still shows pressure keeps, and never advances, the streak");
+  assert.equal(stillPressured.recommendation, "consider-slowing-plan-task-workers");
+  const nextDate = Date.parse("2026-11-03T02:00:00.000Z");
+  const resumed = openQueueShadow(census(nextDate), rows(nextDate, 5 * HOUR), after.nextState, nextDate);
+  assert.equal(resumed.nextState.streak, 0, "a cleared window has no review p50, so the next date has no baseline to worsen from");
+  assert.equal(resumed.recommendation, undefined);
+});
+
+test("W1-T11111 criterion 1: an open PR older than the ledger read with no stage rows in it is unread evidence and blocks a recommendation", () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const ledgerFromMs = now - 9 * DAY;
+  const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01", window: previousWindow(now),
+    reviewP50: HOUR, pressure: true, streak: 1, producer: "plan-task-workers" };
+  const control = openQueueShadow(census(now), rows(now), previous, now, ledgerFromMs);
+  assert.equal(control.cohort.stage_unread, 0);
+  assert.equal(control.recommendation, "consider-slowing-plan-task-workers", "every open PR's stage is in the read");
+  const old = census(now);
+  old.open.push({ number: 15000, createdAtMs: now - 14 * DAY, updatedAtMs: now, headSha: "head-15000", headRefName: "run-W1-T15000-1", checksState: "SUCCESS" });
+  const blocked = openQueueShadow(old, rows(now), previous, now, ledgerFromMs);
+  assert.equal(blocked.cohort.stage_unread, 1, "a 14-day-old PR with no rows in a 9-day read has an unread stage");
+  assert.equal(blocked.cohort.other_open, 0, "it is never counted as plain other-open work");
+  assert.equal(blocked.cohort.open, 4, "it stays in the right-censored open cohort");
+  assert.equal(blocked.nextState.streak, 0);
+  assert.equal(blocked.recommendation, undefined);
+  assert.equal(blocked.reason, "stage-evidence-unread-before-ledger-read");
+  const seen = openQueueShadow(old, [...rows(now), { ts: at(now - HOUR), step: "sweep.review_eligible", pr_number: 15000, head_sha: "head-15000" }],
+    previous, now, ledgerFromMs);
+  assert.equal(seen.cohort.stage_unread, 0, "a row at its current head inside the read makes its stage known");
 });
