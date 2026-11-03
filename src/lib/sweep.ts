@@ -15817,8 +15817,33 @@ export type TerminalFixDesignHandoff =
   | { kind: "unavailable"; reason: string }
   | { kind: "handoff"; reason: string; roundId: string; producer: Readonly<Record<string, unknown>> };
 
-/** Bind the rung's first cached handoff to a completed round for this exact PR and head. */
+/**
+ * W1-T11013 — rotation keeps `fix.needs_design` rows longer than the round's `fix.dispatch`/`fix.done`, so a live-only
+ * read of an old round says "unavailable" and the PR holds forever. `archive` supplies the archive∪live rows (or
+ * undefined when that corpus is incomplete); it is consulted only after the live read came up unavailable.
+ */
 export function terminalFixDesignHandoff(
+  pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  archive?: () => ReadonlyArray<Record<string, unknown>> | undefined,
+): TerminalFixDesignHandoff {
+  const live = terminalFixDesignHandoffFromLines(pr, lines);
+  if (live.kind !== "unavailable" || archive === undefined) return live;
+  const union = archive();
+  if (union === undefined) return live;
+  const resolved = terminalFixDesignHandoffFromLines(pr, [...union, ...lines]);
+  return resolved.kind === "handoff" ? resolved : live;
+}
+
+/** The production `archive` reader: the fix-round rows across rotations and the live file, or undefined if incomplete. */
+function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<string, unknown>> | undefined {
+  const read = readLedgerUnionRecordsSync(dirname(ledgerPath), {
+    step: ["fix.dispatch", "fix.done", "fix.needs_design"], refuseIncomplete: true });
+  return read.ok ? read.rows : undefined;
+}
+
+/** Bind the rung's first cached handoff to a completed round for this exact PR and head. */
+function terminalFixDesignHandoffFromLines(
   pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
   lines: ReadonlyArray<Record<string, unknown>>,
 ): TerminalFixDesignHandoff {
@@ -20721,7 +20746,7 @@ export async function runSweep(
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
-      const handoff = terminalFixDesignHandoff(pr, ledgerLines);
+      const handoff = terminalFixDesignHandoff(pr, ledgerLines, () => readFixRoundArchiveRows(deps.ledgerPath));
       if (handoff.kind === "handoff") {
         const held = handoff.producer;
         const recorded = ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
