@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.27
+  # refusal-amendment (W1-T10667, run W1-T10667-1793723377515, 2026-11-03T17:19:39.474Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: Clearing the `verify:human` admission failure without a person needs a new plan-repair remedy in `src/lib/sweep.ts`. The only in-scope change, owner `operator`, removes the immediate escalation and breaks the `W1-T8267` stall tests plus existing owner assertions.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
