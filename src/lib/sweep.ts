@@ -169,6 +169,7 @@ import {
   TASK_ID_TRAILER_RE,
 } from "./status.js";
 import type { CreditBackfillReceipt, CreditStore } from "./status.js";
+import { createLiveLedgerTail, type LiveLedgerTail } from "./live-ledger-tail.js";
 import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
 import {
   costAnomalyIncidentEvent,
@@ -14536,7 +14537,7 @@ export interface SweepDeps {
   /** The sweep's run id (e.g. SWEEP-<epochMs> / DAEMON-<epochMs>). */
   runId: string;
   /** Ledger reader (dedup); defaults to readLedgerLines. Injectable for tests. */
-  readLedger?: (path: string) => Array<Record<string, unknown>>;
+  readLedger?: (path: string) => Array<Readonly<Record<string, unknown>>>;
   /** W1-T3471 — bounded archive∪live reader for the arm predicate, consulted only after the
    *  live-file verdict miss. An incomplete result preserves the historical fail-open. */
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined;
@@ -18106,7 +18107,7 @@ export async function runSweep(
   // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex cannot match a name-bound
   // call, so this marker is documentary only — the enforced corpus and the regex are unchanged.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
-  const readLedger = deps.readLedger ?? readLedgerLines;
+  const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const appendLine = deps.appendLine ?? appendLedger;
   const now = deps.now ? deps.now() : Date.now();
   const repairDemandMark = repairMemoryDemandMark(); // W1-T9706: what this pass did not refuse again, it clears at its end.
@@ -23763,7 +23764,7 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   try {
     const appendLine = deps.appendLine ?? appendLedger;
     const now = clockFromMillisFn(deps.now).now();
-    const readLedger = () => (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const readLedger = () => (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
     const ledgerLines = timing ? timing.sync("ready_ledger", readLedger) : readLedger();
     const spentHeads = new Set<string>();
     for (const l of ledgerLines) {
@@ -23873,7 +23874,7 @@ export async function runArmedRatchetRejudge(
   const mainTip = await deps.readMainTip();
   if (!mainTip) return [];
   const appendLine = deps.appendLine ?? appendLedger;
-  const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+  const ledgerLines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
   const refreshed: number[] = [];
   let incidentHold: boolean | undefined;
   for (const pr of armedRatchetRejudgeTargets(openPrs, ledgerLines, mainTip)) {
@@ -23927,7 +23928,7 @@ export async function runLightPassRefreshAdmission(
   lightPassRefreshAdmissionInFlight = true;
   try {
     const appendLine = deps.appendLine ?? appendLedger;
-    const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const ledgerLines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
     const last = ledgerLines.findLast((row) => row.step === BASE_RED_REFRESH_ADMISSION_STEP);
     const reading = refreshAdmissionReading(openPrs, ledgerLines);
     const waiting = last !== undefined && Array.isArray(last.waiting) ? last.waiting as Array<Record<string, unknown>> : [];
@@ -24019,6 +24020,21 @@ function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: n
     actions: [{ prNumber: pr.prNumber, prUrl: pr.prUrl, taskId: pr.taskId, disposition: "wait", reason, acted: false }] };
 }
 
+/** W1-T11260: one incremental tail per live ledger path, so a pass parses only bytes appended since the last read. */
+const liveLedgerTails = new Map<string, LiveLedgerTail>();
+
+/**
+ * W1-T11260: the live file's rows, as {@link readLedgerLines} returns them, without re-reading and re-parsing
+ * the whole 15 MB file on the daemon's thread for each pass and each PR. A rotation renames the file, which
+ * resets its tail, so every row is kept. The rows are shared between calls; the array is a fresh copy, because
+ * runSweep appends its own receipts to it.
+ */
+export function readLiveLedgerRows(path: string): Array<Readonly<Record<string, unknown>>> {
+  let tail = liveLedgerTails.get(path);
+  if (!tail) liveLedgerTails.set(path, tail = createLiveLedgerTail(path, Number.POSITIVE_INFINITY));
+  return [...tail(0)];
+}
+
 /** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
   // W1-T9114: a review child holds its slot while it runs, adopted or not.
@@ -24032,7 +24048,7 @@ export function observeLightPassReviewEligibility(
 ): ReadonlyArray<Record<string, unknown>> {
   if (openPrs.length === 0 || deps.dryRun) return [];
   const now = deps.now ? deps.now() : systemClock.now();
-  const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+  const lines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
   const retryViews = openPrs.map(pr => promiseHarvestRetryView(pr, lines));
   const prior = priorActionsFromLedger(lines, retryViews);
   const views = retryViews.map(pr => completedRefusalRetryView(pr, prior));
@@ -24083,7 +24099,7 @@ export async function runSweepLightPass(
   // width, and the non-spawning plan-filing one at its own smaller derived bound. W1-T2583: READ THE
   // LEDGER ONCE FOR SELECTION, BEFORE RANKING; this pass-level fold is only the liveness filter.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
-  const readLedger = deps.readLedger ?? readLedgerLines;
+  const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs);
@@ -26768,7 +26784,7 @@ export interface PostFixReverificationDeps {
   fixInHead?: (pr: OpenPrView, fixClass: FixClass) => boolean | undefined | Promise<boolean | undefined>;
   ledgerPath: string;
   runId: string;
-  readLedger?: (path: string) => Array<Record<string, unknown>>;
+  readLedger?: (path: string) => Array<Readonly<Record<string, unknown>>>;
   appendLine?: typeof appendLedger;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Preview only: derive matches, take no effects, write no ledger lines. */
