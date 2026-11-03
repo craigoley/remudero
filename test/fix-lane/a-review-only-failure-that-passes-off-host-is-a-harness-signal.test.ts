@@ -9,7 +9,7 @@ import { prepareJudgedRun } from "#scripts/pure-test-pool.mjs";
 import { runWorkerAcceptanceProofs, workerAcceptanceProofSpawner } from "#src/cli/commands/fix.js";
 import { type CriterionVerdict } from "#src/lib/review.js";
 import { runFixRung, routeFix, type ReviewRunResult } from "#test/helpers/run-task-test.js";
-import { readHostedFixProofResults, buildFixProgressInputWithHostedProofs, runSweep,
+import { HOSTED_TEST_FILE_RE, hostedTestFileEvidence, readHostedFixProofResults, buildFixProgressInputWithHostedProofs, runSweep,
   type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { buildFixProgressInput, judgeFixProgress, parseFixProgressVerdict, resolveFixProgress,
   reviewerProofFailures, reviewLoadFromCapacity, type FixProgressHostedProofResult } from "#src/lib/fix-progress-judge.js";
@@ -44,6 +44,7 @@ function realHostedLog(fails: boolean): string {
     try {
       const env: NodeJS.ProcessEnv = { ...process.env, ...judged.env };
       delete env.NODE_TEST_CONTEXT;
+      env.NODE_V8_COVERAGE = "";
       const run = spawnSync(process.execPath, ["--test", ...judged.args, "--test-reporter=tap", "--test-reporter-destination=stdout",
         "--test-reporter=spec", "--test-reporter-destination=stdout", FILE], { cwd: root, env, encoding: "utf8" });
       const log = `${run.stdout}\n${run.stderr}`;
@@ -153,6 +154,11 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
     const [failed] = await readHostedFixProofResults(target,
       hostedFixture({ conclusion: "failure", runs: [{ ...hostedFixture().run, conclusion: "failure" }], log: realHostedLog(true) }).io);
     assert.equal(failed?.result, "fail", "a real failing run names its file through the failing test's location");
+    assert.equal(HOSTED_TEST_FILE_RE.test(`test at ${FILE}:5:1`), true, "a located test file is recognised");
+    assert.equal(HOSTED_TEST_FILE_RE.test(`node --test ${FILE}`), false, "a bare path with no line and column is not a location");
+    const torn = hostedTestFileEvidence(['RMD-TEST-FILE-DIAGNOSTIC {"phase":"completed","file":']);
+    assert.equal(torn.completed.size, 0, "an unreadable receipt certifies nothing");
+    assert.equal(torn.failing.size, 1, "and is kept as a failure, never dropped");
   });
 
   test("W1-T11133 the escalation's review load is the sweep's measured review.capacity reading, not an injected field", () => {

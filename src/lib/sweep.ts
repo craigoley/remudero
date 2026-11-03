@@ -16099,7 +16099,7 @@ export async function readHostedFixProofResults(
   return results;
 }
 
-const HOSTED_TEST_FILE_RE = /(test\/[\w./-]+\.test\.[mc]?[jt]s):\d+:\d+/;
+export const HOSTED_TEST_FILE_RE = /(test\/[\w./-]+\.test\.[mc]?[jt]s):\d+:\d+/;
 
 /**
  * W1-T11133: the physical test files a CI job's log proves ran, and the ones it proves failed. A file completed only
@@ -16113,14 +16113,14 @@ export function hostedTestFileEvidence(lines: readonly string[]): { completed: M
   const failing = new Map<string, string>();
   let inFailures = false;
   for (const line of lines) {
-    const receipt = /^RMD-TEST-FILE-DIAGNOSTIC (\{.*\})$/.exec(line);
+    const receipt = /^RMD-TEST-FILE-DIAGNOSTIC (\{.*)$/.exec(line);
     if (receipt) {
-      try {
-        const event = JSON.parse(receipt[1]!) as { phase?: unknown; file?: unknown };
-        if (event.phase === "completed" && typeof event.file === "string") completed.set(event.file, line);
-      } catch (error) {
-        failing.set(`(unreadable receipt) ${String(error).slice(0, 80)}`, line);
-      }
+      let event: { phase?: unknown; file?: unknown } | { error: string };
+      try { event = JSON.parse(receipt[1]!) as { phase?: unknown; file?: unknown }; }
+      catch (error) { event = { error: String(error).slice(0, 80) }; }
+      // An unreadable receipt certifies no file: it is kept as a failure, never dropped as an absence.
+      if ("error" in event) failing.set(`(unreadable receipt) ${event.error}`, line);
+      else if (event.phase === "completed" && typeof event.file === "string") completed.set(event.file, line);
       continue;
     }
     if (/^✖ failing tests:$/.test(line)) inFailures = true;
