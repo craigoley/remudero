@@ -1,0 +1,62 @@
+- id: W1-T11163
+  title: A plan PR whose review just posted success merges in that same arm call when its head's required checks read green, instead of being held for a later pass on GitHub's not-yet-recomputed mergeable_state blocked
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, the review arm's plan-PR merge decision; it spans the plan-PR path that holds on blocked and the review command that wires its arm
+  band_meaning: span
+  origin: "operator instruction 2026-11-02 (in chat): plan only PRs get a super fast lane that doesn't require all this overhead"
+  plan_refs:
+    - W1-T5615
+    - W1-T6595
+    - W1-T9212
+    - W1-T11148
+  files:
+    - src/lib/arm-auto-merge.ts
+    - src/cli/commands/review.ts
+    - test/review/a-plan-pr-its-review-passes-merges-in-the-same-pass.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A mergeable plan PR GitHub reads blocked, with no checksGreenReviewed, asks the optional readChecksGreenReviewed seam about the head the verdict judged; true takes the existing direct-merge path in the same arm call, and false, a throw or an absent seam holds it as plan-pr-held exactly as today, a throw naming why on the hold
+      proof: "unit test: test/review/a-plan-pr-its-review-passes-merges-in-the-same-pass.test.ts"
+    - claim: readChecksGreenReviewedAtHead is true only when branch protection's required contexts read, every one of them is green at that head by checksStateFromRollup, and remudero-review reads success there; a pending required check, a pending review or an unreadable required list is false, so no green is ever manufactured
+      proof: "grep: W1-T11163 criterion 2 in test/review/a-plan-pr-its-review-passes-merges-in-the-same-pass.test.ts"
+    - claim: runReview's arm context carries readChecksGreenReviewed bound to readChecksGreenReviewedAtHead for its own owner and repo, and armIfVerdictPermitsAsync's default arm (verdictArmDeps over realArmDepsAsync) hands it to the plan-PR path, so a review that posts success reads its own head when GitHub still says blocked; an injected arm and a context without the read are unchanged
+      proof: "grep: W1-T11163 criterion 3 in test/review/a-plan-pr-its-review-passes-merges-in-the-same-pass.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 (Mac ledger ~/Remudero/state, and the core host ledger's live window read-only):
+    - #16199, #16210 and #16191 (plan-only) each logged automerge.plan_pr_held mergeable=MERGEABLE mergeable_state=blocked
+      0.4-1.2 s after their own review.posted success. Required contexts are remudero-review, ci-gate and security-merge-policy
+      (branch protection, read 2026-11-02); the review runs only once CI is green, so blocked was GitHub's state lagging the
+      status the review had just posted.
+    - Core host, 2026-11-01..02 live window: 22 review-lane plan-pr-held rows on blocked; hold to merge median 23 min (n=18, range
+      5.7-441 min). #16233 held at 19:57:28 and was merged by the sweep at 20:07:40. #16199 waited 23 min after its hold.
+    READ at origin/main 1368db581:
+    - attemptPlanPrMergeSteps (src/lib/arm-auto-merge.ts) takes a blocked head only when checksGreenReviewed is set (W1-T6595).
+      Only the sweep's mergeable disposition sets it (sweepArmImpl, src/lib/sweep.ts). The review arm (armIfVerdictPermitsAsync
+      from runReview, src/cli/commands/review.ts) never does, so the review that just made the head green holds it.
+    - W1-T9212 re-evaluates a held plan PR on a later light pass, but only when the hold row is in that daemon's own ledger and the
+      PR is classified plan-filing; a local review's hold is not.
+    NOT THIS TASK: 15 of today's 19 Mac holds read mergeable_state unknown after the three 2 s re-reads (behind_by 6-12). That is
+    GitHub computing mergeability for a behind branch, a different cause; it is reported, not filed here.
+  design: |
+    1. ArmDeps gains an optional readChecksGreenReviewed(prUrl, headSha). attemptPlanPrMergeSteps calls it only on a MERGEABLE,
+       blocked read with no checksGreenReviewed and a known head; true sets greenBlocked, which reaches the unchanged
+       directMergePreflightSteps (so a behind head is still refreshed or ruled by W1-T5748). A throw becomes the hold's error.
+    2. readChecksGreenReviewedAtHead (src/cli/commands/review.ts) reads readRequiredStatusCheckContextsAsync and rollupForAsync,
+       and judges with the sweep's own checksStateFromRollup and tick-read-worker's reviewStateFromRollup. No new predicate.
+    3. VerdictArmCtx gains an optional readChecksGreenReviewed; runReview's armCtx sets it. armIfVerdictPermitsAsync's default arm
+       builds verdictArmDeps(ctx) (realArmDepsAsync plus that seam). runReview's call stays `{ arm: args.arm }`, which
+       test/operator-gated-default-reachability.test.ts locks. The REST merge is unchanged: protection still refuses a non-green head.
+  falsifier: |
+    At origin/main a plan PR whose review has just posted success, with GitHub reading mergeable=MERGEABLE mergeable_state=blocked,
+    ends that review with automerge.plan_pr_held retry-later and no merge, even when its required checks read green at the head.
+  note: |
+    Reserved with rmd next-task-id --branch plan-file-1793659489539. Coordinates with W1-T11148 (plan-review admission, hand-built by
+    another session): this task changes only what the review's arm does after it posts, not when the review is admitted.
+    The test path is rmd test-place's answer for a suite importing arm-auto-merge.ts and review.ts.
