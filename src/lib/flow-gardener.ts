@@ -286,20 +286,53 @@ export interface FlowCiReading {
   doneMs: number;
 }
 
-/** One batched GitHub query for the complete open cohort and PR arrivals or terminal events in a recent window. */
+/** The last complete UTC day before `nowMs`: consecutive daily passes read adjacent windows at any wall-clock time. */
+export function openQueueWindow(nowMs: number): { fromMs: number; toMs: number } {
+  const toMs = Math.floor(nowMs / DAY_MS) * DAY_MS;
+  return { fromMs: toMs - DAY_MS, toMs };
+}
+
+/** BACKSTOP: GitHub search answers at most this many results, so a larger window cannot be read whole. */
+const GITHUB_SEARCH_RESULT_LIMIT = 1000;
+
+/** The open cohort and the window's arrivals and terminals, paged in batched GraphQL rounds, never one read per PR. */
 export function flowOpenQueueReader(
   owner: string, repo: string, readJson: (args: string[]) => Promise<unknown> = ghJsonAsync, clock: Clock = systemClock,
-): (sinceIso: string) => Promise<FlowOpenQueueRead> {
-  return async (sinceIso) => {
+): (window: { fromMs: number; toMs: number }) => Promise<FlowOpenQueueRead> {
+  return async (window) => {
     const fields = "number createdAt updatedAt headRefOid headRefName reviewDecision commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}";
-    const query = `query($q:String!){repository(owner:"${owner}",name:"${repo}"){pullRequests(states:OPEN,first:100,orderBy:{field:UPDATED_AT,direction:DESC}){totalCount pageInfo{hasNextPage} nodes{${fields}}}} search(query:$q,type:ISSUE,first:100){issueCount pageInfo{hasNextPage} nodes{... on PullRequest{${fields} mergedAt closedAt}}}}`;
-    const q = `repo:${owner}/${repo} is:pr updated:>=${sinceIso.slice(0, 10)}`;
-    const body = await readJson(["api", "graphql", "-f", `query=${query}`, "-F", `q=${q}`]) as Record<string, unknown> | null;
-    const data = object(body?.data);
-    if (Array.isArray(body?.errors) && body!.errors.length > 0) throw new Error("flow: GitHub open-queue GraphQL query failed");
-    const repository = object(data.repository), openConnection = object(repository.pullRequests), windowConnection = object(data.search);
-    const openNodes = Array.isArray(openConnection.nodes) ? openConnection.nodes : [];
-    const windowNodes = Array.isArray(windowConnection.nodes) ? windowConnection.nodes : [];
+    const span = `${fixedClock(window.fromMs).iso().slice(0, 19)}Z..${fixedClock(window.toMs - 1000).iso().slice(0, 19)}Z`;
+    const conns = [
+      { key: "open", q: "", after: "", done: false, total: NaN, nodes: [] as unknown[] },
+      { key: "created", q: `repo:${owner}/${repo} is:pr created:${span}`, after: "", done: false, total: NaN, nodes: [] as unknown[] },
+      { key: "closed", q: `repo:${owner}/${repo} is:pr closed:${span}`, after: "", done: false, total: NaN, nodes: [] as unknown[] },
+    ];
+    let reason: string | undefined;
+    let ok = true;
+    while (conns.some((c) => !c.done)) {
+      const parts = conns.filter((c) => !c.done).map((c) => {
+        const after = c.after ? `,after:${JSON.stringify(c.after)}` : "";
+        return c.key === "open"
+          ? `repository(owner:"${owner}",name:"${repo}"){pullRequests(states:OPEN,first:100${after},orderBy:{field:UPDATED_AT,direction:DESC}){totalCount pageInfo{hasNextPage endCursor} nodes{${fields}}}}`
+          : `${c.key}: search(query:${JSON.stringify(c.q)},type:ISSUE,first:100${after}){issueCount pageInfo{hasNextPage endCursor} nodes{... on PullRequest{${fields} mergedAt closedAt}}}`;
+      });
+      const body = await readJson(["api", "graphql", "-f", `query=query{${parts.join(" ")}}`]) as Record<string, unknown> | null;
+      if (Array.isArray(body?.errors) && body!.errors.length > 0) throw new Error("flow: GitHub open-queue GraphQL query failed");
+      if (body === null || typeof body !== "object") { ok = false; break; }
+      const data = object(body.data);
+      for (const c of conns.filter((x) => !x.done)) {
+        const connection = c.key === "open" ? object(object(data.repository).pullRequests) : object(data[c.key]);
+        const page = Array.isArray(connection.nodes) ? connection.nodes : [];
+        const info = object(connection.pageInfo);
+        c.total = Number(c.key === "open" ? connection.totalCount : connection.issueCount);
+        c.nodes.push(...page);
+        if (c.key !== "open" && c.total > GITHUB_SEARCH_RESULT_LIMIT) { reason = "github-search-result-limit"; c.done = true; continue; }
+        if (info.hasNextPage !== true) { c.done = true; continue; }
+        const cursor = typeof info.endCursor === "string" ? info.endCursor : "";
+        if (!cursor || cursor === c.after || page.length === 0) { reason = "census-pagination-stalled"; c.done = true; continue; }
+        c.after = cursor;
+      }
+    }
     const parse = (value: unknown): FlowOpenQueuePr | undefined => {
       const pr = object(value), createdAtMs = Date.parse(String(pr.createdAt ?? "")), updatedAtMs = Date.parse(String(pr.updatedAt ?? ""));
       const number = Number(pr.number), headSha = typeof pr.headRefOid === "string" ? pr.headRefOid : "";
@@ -314,12 +347,19 @@ export function flowOpenQueueReader(
         ...(mergedAtMs !== undefined && Number.isFinite(mergedAtMs) ? { mergedAtMs } : {}),
         ...(closedAtMs !== undefined && Number.isFinite(closedAtMs) ? { closedAtMs } : {}) };
     };
-    const open = openNodes.map(parse).filter((pr): pr is FlowOpenQueuePr => pr !== undefined);
-    const window = windowNodes.map(parse).filter((pr): pr is FlowOpenQueuePr => pr !== undefined);
-    const openComplete = Number(openConnection.totalCount) === openNodes.length && object(openConnection.pageInfo).hasNextPage === false;
-    const windowComplete = Number(windowConnection.issueCount) === windowNodes.length && object(windowConnection.pageInfo).hasNextPage === false;
-    return { ok: body !== null && typeof body === "object", complete: openComplete && windowComplete && open.length === openNodes.length && window.length === windowNodes.length,
-      observedAtMs: clock.now(), open, window, ...(!(openComplete && windowComplete) ? { reason: "census-page-cap-exceeded" } : {}) };
+    const [openConn, ...searches] = conns;
+    const open = openConn!.nodes.map(parse).filter((pr): pr is FlowOpenQueuePr => pr !== undefined);
+    const byNumber = new Map<number, FlowOpenQueuePr>();
+    let parsedAll = open.length === openConn!.nodes.length;
+    for (const c of searches) {
+      const parsed = c.nodes.map(parse).filter((pr): pr is FlowOpenQueuePr => pr !== undefined);
+      parsedAll &&= parsed.length === c.nodes.length;
+      for (const pr of parsed) byNumber.set(pr.number, { ...byNumber.get(pr.number), ...pr });
+    }
+    const counted = conns.every((c) => c.total === c.nodes.length);
+    if (!counted && reason === undefined) reason = "census-page-cap-exceeded";
+    return { ok, complete: ok && counted && parsedAll, observedAtMs: clock.now(), windowMs: window, open, window: [...byNumber.values()],
+      ...(reason !== undefined && !(ok && counted && parsedAll) ? { reason } : {}) };
   };
 }
 
@@ -350,11 +390,13 @@ export interface FlowOpenQueuePr {
 }
 export interface FlowOpenQueueRead {
   ok: boolean; complete: boolean; observedAtMs: number; open: FlowOpenQueuePr[]; window: FlowOpenQueuePr[]; reason?: string;
+  /** The UTC-day window the census was read for; a census read for another window is never analysed as this one. */
+  windowMs?: { fromMs: number; toMs: number };
 }
 export interface FlowGardenSources {
   readLedger?: (sinceIso: string) => FlowLedgerRead;
   /** One batched repository census; never one GitHub read per PR. */
-  readOpenQueue?: (sinceIso: string) => Promise<FlowOpenQueueRead>;
+  readOpenQueue?: (window: { fromMs: number; toMs: number }) => Promise<FlowOpenQueueRead>;
   readCi?: (headSha: string) => Promise<FlowCiReading | undefined>;
   planTasks?: () => FlowPlanTask[];
   /** Whether a superseding task has landed (W1-T9729). Absent: its `Remudero-Task:` trailer on the checkout's origin/main. */
@@ -599,8 +641,8 @@ export function openQueueShadow(
 ): { mode: "shadow"; permission: "not-granted"; action: "none"; status: "UNKNOWN" | "OBSERVED";
   reason: string; window: { fromMs: number; toMs: number }; cohort: Record<string, number | null>;
   producer?: string; recommendation?: string; nextState: NonNullable<FlowState["openQueue"]> } {
-  const fromMs = nowMs - DAY_MS;
-  const window = { fromMs, toMs: nowMs };
+  const window = openQueueWindow(nowMs);
+  const { fromMs, toMs } = window;
   const windowDay = fixedClock(nowMs).iso().slice(0, 10);
   const unknown = (reason: string) => ({ mode: "shadow" as const, permission: "not-granted" as const, action: "none" as const,
     status: "UNKNOWN" as const, reason, window, cohort: { open: null, arrivals: null, merged_or_closed: null, review_waiting: null,
@@ -608,11 +650,12 @@ export function openQueueShadow(
       merge_preflight_refusal_age_p50_ms: null, ready_to_direct_merge_age_p50_ms: null, open_age_p50_ms: null, arrivals_exceed_drain: null },
     nextState: { observedAtMs: census.observedAtMs, windowDay, window, reviewP50: null, pressure: false, streak: 0 } });
   if (!census.ok || !census.complete) return unknown(census.reason ?? "incomplete-census");
+  if (census.windowMs !== undefined && (census.windowMs.fromMs !== fromMs || census.windowMs.toMs !== toMs)) return unknown("census-window-mismatch");
   if (!Number.isFinite(census.observedAtMs) || census.observedAtMs > nowMs || nowMs - census.observedAtMs > OPEN_QUEUE_MAX_AGE_MS) return unknown("stale-census");
-  const recent = census.window.filter((pr) => pr.createdAtMs > fromMs && pr.createdAtMs <= nowMs);
+  const inWindow = (ms: number | undefined) => ms !== undefined && ms >= fromMs && ms < toMs;
+  const recent = census.window.filter((pr) => inWindow(pr.createdAtMs));
   const arrivals = recent.length;
-  const drain = census.window.filter((pr) => (pr.mergedAtMs !== undefined && pr.mergedAtMs > fromMs && pr.mergedAtMs <= nowMs) ||
-    (pr.closedAtMs !== undefined && pr.closedAtMs > fromMs && pr.closedAtMs <= nowMs)).length;
+  const drain = census.window.filter((pr) => inWindow(pr.mergedAtMs) || inWindow(pr.closedAtMs)).length;
   const details = census.open.map((pr) => {
     const matching = rows.filter((r) => prNumberOf(r) === pr.number &&
       (r.step === "automerge.direct_merge_preflight_refused" ? r.prior_head_sha ?? r.head_sha : r.head_sha) === pr.headSha)
@@ -640,9 +683,12 @@ export function openQueueShadow(
   const producer = [...producers].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
   const previousWindowConsecutive = previous !== undefined && previous.window?.fromMs === fromMs - DAY_MS && previous.window.toMs === fromMs &&
     previous.observedAtMs < nowMs && nowMs - previous.observedAtMs <= 2 * DAY_MS;
-  const pressure = arrivals > drain && reviewP50 !== null && previousWindowConsecutive && previous!.reviewP50 !== null &&
+  // A second pass on the same UTC date re-reads the same window: it neither advances nor resets the streak.
+  const sameWindow = previous !== undefined && previous.window?.fromMs === fromMs && previous.window.toMs === toMs;
+  const advanced = arrivals > drain && reviewP50 !== null && previousWindowConsecutive && previous!.reviewP50 !== null &&
     reviewP50 > previous!.reviewP50 && producer !== undefined && producer === previous!.producer;
-  const streak = pressure ? (previous!.pressure ? previous!.streak + 1 : 1) : 0;
+  const pressure = sameWindow ? previous!.pressure : advanced;
+  const streak = sameWindow ? previous!.streak : advanced ? (previous!.pressure ? previous!.streak + 1 : 1) : 0;
   const nextState = { observedAtMs: census.observedAtMs, windowDay, window, reviewP50, pressure, streak, ...(producer ? { producer } : {}) };
   return { mode: "shadow", permission: "not-granted", action: "none", status: "OBSERVED", reason: pressure
     ? `complete-window-inflow-exceeds-drain-review-p50-worsened-streak-${streak}` : "complete-window-no-confirmed-pressure",
@@ -728,7 +774,7 @@ export async function runFlowGardener(
   if (!ledger.ok) {
     unreadable("ledger", { unread: ledger.unread });
     deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN",
-      reason: "ledger-incomplete", window: { from: fixedClock(nowMs - DAY_MS).iso(), to: fixedClock(nowMs).iso() },
+      reason: "ledger-incomplete", window: openQueueWindow(nowMs),
       cohort: { open: null, arrivals: null, merged_or_closed: null, review_waiting: null, merge_preflight_refused: null,
         ready_to_direct_merge: null, review_wait_p50_ms: null, merge_preflight_refusal_age_p50_ms: null,
         ready_to_direct_merge_age_p50_ms: null, open_age_p50_ms: null, arrivals_exceed_drain: null } });
@@ -761,7 +807,7 @@ export async function runFlowGardener(
     state.openQueue = { observedAtMs: nowMs, windowDay: day, reviewP50: null, pressure: false, streak: 0 };
   } else {
     try {
-      const census = await sources.readOpenQueue(fixedClock(nowMs - DAY_MS).iso());
+      const census = await sources.readOpenQueue(openQueueWindow(nowMs));
       const shadow = openQueueShadow(census, ledger.rows, state.openQueue, clock.now());
       deps.log("flow.open_queue_shadow", shadow);
       state.openQueue = shadow.nextState;
