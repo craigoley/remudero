@@ -60,3 +60,11 @@
     reservation hand-off: plan-file-1793657972812 -> plan-file-1793657972812
     Reserved with rmd next-task-id --branch plan-file-1793657972812 from the operator checkout. Filed 2026-11-02 from the review-lane
     findings, item 6 (p2). Needs operator trust decision before build, per operator ruling Q3.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/proof-discrimination-gate.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-03T03:42:37.584Z"
+    pin: "d245f52a52e19f3285d7d8717452ee0798dd96768256cde2b22d30ad8a5af30d"
