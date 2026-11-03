@@ -13,7 +13,7 @@ import test from "node:test";
 import { buildPrivateCanaryRequest, gradeStoredPrivateCase, privateCorpusCaseMatches, privateCorpusMetadata, validatePrivateCorpus,
   canonicalPrivateCanaryJson, snapshotPrivateCanaryJson, type PrivateCanaryBundleV1, type PrivateCanaryCaseV1,
   type PrivateCanaryPayloadV1 } from "#src/lib/model-canary-private-corpus.js";
-import { commonCanarySuite } from "#src/lib/model-canary-suite.js";
+import { commonCanarySuite, weeklyCanarySuite, canaryTools } from "#src/lib/model-canary-suite.js";
 
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 function canonical(value: unknown): string {
@@ -166,6 +166,43 @@ test("private corpus scorer keeps malformed trace inputs unavailable", () => {
     [{ name: "unlisted-tool", args, result: null, denied: true }]),
   { state: "unavailable", reason: "private-corpus-scorer-error" });
   assert.deepEqual(gradeStoredPrivateCase(result.corpus, source.item.id, answer, []), control);
+});
+
+test("private corpus strictly validates expected output keys and types for every family", () => {
+  const retention = item("retention-schema", "development", "retention-family", "retention-root").item;
+  const anchors = [...commonCanarySuite(), ...weeklyCanarySuite(),
+    { ...retention, family: "retention" as const, expected: { turn: 1, key: "price", answer: 7, source: "D1" } },
+    { ...retention, family: "retention" as const, expected: { turn: 2, key: "absent", answer: null, source: null } }];
+  for (const anchor of anchors) {
+    const source = item(anchor.id, "development", "strict-output-family", "strict-output-root");
+    source.item = anchor;
+    const dispatch = canaryTools(anchor);
+    source.expectedToolTrace = anchor.tools === "none" ? [] : anchor.tools === "inventory"
+      ? [dispatch("inventory", { item: anchor.id === "tools-A" ? "A" : "B" })]
+      : anchor.tools === "retry" ? [dispatch("lookup", {}), dispatch("lookup", {})] : [dispatch("lookup", {})];
+    const control = validatePrivateCorpus(bundle([source]));
+    assert.equal(control.state, "available", `${anchor.id}: supported oracle`);
+    if (control.state !== "available") return;
+    const grade = gradeStoredPrivateCase(control.corpus, anchor.id, JSON.stringify(anchor.expected), source.expectedToolTrace);
+    assert.equal(grade.state, "scored");
+    if (grade.state === "scored") assert.equal(grade.passed, true);
+    const malformed: Record<string, unknown>[] = [{ ...anchor.expected, extra: true }];
+    for (const [key, value] of Object.entries(anchor.expected)) {
+      const missing = { ...anchor.expected };
+      delete missing[key];
+      malformed.push(missing);
+      for (const wrongType of [[value], {}, true]) malformed.push({ ...anchor.expected, [key]: wrongType });
+    }
+    if (anchor.family === "schema") malformed.push({ ...anchor.expected, category: "unsupported" },
+      { ...anchor.expected, severity: "medium" }, { ...anchor.expected, ticket: 1.5 });
+    if (anchor.family === "recovery") malformed.push({ ...anchor.expected, status: "unsupported" });
+    if (anchor.family === "tools") malformed.push({ quantity: 1.5 });
+    if (anchor.family === "retention") malformed.push({ ...anchor.expected, turn: 1.5 });
+    for (const expected of malformed) assert.deepEqual(validatePrivateCorpus(bundle([
+      { ...source, item: { ...anchor, expected } },
+    ])), { state: "unavailable", reason: "private-corpus-scorer-invalid" },
+    `${anchor.id}: malformed oracle ${JSON.stringify(expected)}`);
+  }
 });
 
 test("private corpus rejects enum arrays instead of coercing them into supported values", () => {

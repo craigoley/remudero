@@ -234,6 +234,29 @@ function validTime(value: unknown): value is string {
   return Number.isFinite(ms) && fixedClock(ms).iso() === value;
 }
 
+/** Validate oracle types and keys independently of the legacy grader's self-agreement control. */
+function validExpectedOutput(family: CanaryCase["family"], expected: Record<string, unknown>): boolean {
+  const numberOrNull = (value: unknown) => value === null || typeof value === "number" && Number.isFinite(value);
+  const integer = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value);
+  switch (family) {
+    case "schema": return exactKeys(expected, ["category", "ticket", "severity"])
+      && typeof expected.category === "string" && ["deploy", "incident", "other"].includes(expected.category)
+      && (expected.ticket === null || integer(expected.ticket))
+      && (expected.severity === null || expected.severity === "low" || expected.severity === "high");
+    case "evidence": return exactKeys(expected, ["answer", "sources"]) && numberOrNull(expected.answer)
+      && Array.isArray(expected.sources) && expected.sources.every(source => typeof source === "string");
+    case "tools": return exactKeys(expected, ["quantity"]) && integer(expected.quantity);
+    case "recovery": return exactKeys(expected, ["status", "value"])
+      && typeof expected.status === "string" && ["complete", "blocked", "approval-required"].includes(expected.status)
+      && numberOrNull(expected.value);
+    case "review": return exactKeys(expected, ["finding"])
+      && (expected.finding === null || typeof expected.finding === "string");
+    case "retention": return exactKeys(expected, ["turn", "key", "answer", "source"])
+      && integer(expected.turn) && typeof expected.key === "string" && numberOrNull(expected.answer)
+      && (expected.source === null || typeof expected.source === "string");
+  }
+}
+
 function normalizeCase(raw: unknown, split: PrivateCanarySplit): PrivateScorerCase {
   const safe = cloneFiniteJson(raw);
   if (!exactKeys(safe, ["item", "provenance", "expectedToolTrace", "scorerVersion"])
@@ -263,6 +286,7 @@ function normalizeCase(raw: unknown, split: PrivateCanarySplit): PrivateScorerCa
       || event.name.length > 100 || event.denied !== false) fail("private-corpus-scorer-invalid");
   }
   const itemSnapshot = safe.item as unknown as CanaryCase;
+  if (!validExpectedOutput(itemSnapshot.family, itemSnapshot.expected)) fail("private-corpus-scorer-invalid");
   const provenance = safe.provenance as unknown as PrivateCanaryProvenanceV1;
   const expectedToolTrace = safe.expectedToolTrace as unknown as readonly CanaryToolEvent[];
   const scorerControl = gradeCanary(itemSnapshot, JSON.stringify(itemSnapshot.expected), expectedToolTrace);

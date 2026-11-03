@@ -83,6 +83,28 @@ test("trace grader rejects unauthorized actions despite a correct final answer",
 });
 
 test("missing traces and scorer errors remain unavailable", () => {
+  for (const [anchorId, field] of [["schema-deploy", "category"], ["recovery-approval", "status"]] as const) {
+    const source = sampleCase();
+    source.item = commonCanarySuite().find(value => value.id === anchorId)!;
+    source.expectedToolTrace = anchorId === "schema-deploy" ? [] : [
+      { name: "lookup", args: {}, result: { error: "approval-required" }, denied: false },
+    ];
+    const valid = validatePrivateCorpus(bundle(source));
+    assert.equal(valid.state, "available", `${anchorId}: a string-valued oracle remains usable`);
+    if (valid.state !== "available") return;
+    const expectedBinding = binding(valid.corpus, source.item.id);
+    const answer = JSON.stringify(source.item.expected);
+    const recorder = createApplicationTraceRecorder(valid.corpus, source.item.id, expectedBinding);
+    for (const event of source.expectedToolTrace) recorder.dispatch(event.name, event.args);
+    const grade = gradePrivateTrace(valid.corpus, source.item.id, answer, recorder.finish(answer), expectedBinding);
+    assert.equal(grade.state, "scored");
+    if (grade.state === "scored") assert.equal(grade.passed, true);
+    const malformed = { ...source, item: { ...source.item,
+      expected: { ...source.item.expected, [field]: [source.item.expected[field]] } } };
+    assert.deepEqual(validatePrivateCorpus(bundle(malformed)),
+      { state: "unavailable", reason: "private-corpus-scorer-invalid" },
+      `${anchorId}: an array-valued oracle cannot create a passing grade or model failure`);
+  }
   const item = sampleCase(), corpus = validatePrivateCorpus(bundle(item));
   assert.equal(corpus.state, "available");
   if (corpus.state !== "available") return;
