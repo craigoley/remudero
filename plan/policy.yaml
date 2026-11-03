@@ -662,6 +662,8 @@ sweep:
     sampleCadenceMs: { value: 60000, origin: "net-new", min: 10000, max: 600000 }
     telemetryCadenceMs: { value: 300000, origin: "net-new", min: 60000, max: 3600000 }
     cpuPsiLowPct: { value: 5, origin: "net-new", min: 0, max: 50 }
+    # W1-T11129: RETIRED, nothing reads this. The CPU shed judges PSI full against the container's cpu.weight
+    # share and the lane governor's learned CPU verdict. The row stays only while sweep.ts's validator needs it.
     cpuPsiHighPct: { value: 20, origin: "net-new", min: 1, max: 100 }
     memoryPsiLowPct: { value: 5, origin: "net-new", min: 0, max: 50 }
     memoryPsiHighPct: { value: 15, origin: "net-new", min: 1, max: 100 }

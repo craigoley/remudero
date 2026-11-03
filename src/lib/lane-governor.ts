@@ -68,6 +68,27 @@ export interface LaneTargetInputs {
   /** The adaptive WIP bound (adaptive-wip.ts) when one was read. */
   wipBound?: number;
   cpuCount: number;
+  /** What the CPU arm has learned (W1-T11129); absent or unlearned keeps the cap at {@link cpuCount}. */
+  cpu?: LaneCpuReading;
+}
+
+/** W1-T11129 — the CPU arm's learned figures, in CPUs (CPU-seconds per second). Null is "not learned yet". */
+export interface LaneCpuReading {
+  /** CPU the host's non-lane work uses while no lane runs (daemon, serve, the box itself). */
+  baselineCpus: number | null;
+  /** CPU one lane of the class being admitted uses, as a running median over lanes that ran. */
+  perLaneCpus: number | null;
+}
+
+/**
+ * The CPU arm's lane bound: the host's CPUs less the measured non-lane baseline, over what one lane of the class has
+ * been measured to use. Null while either figure is unread or unlearned, so the caller keeps today's cap at the CPU
+ * count. No constant: both figures come from the cgroup counter.
+ */
+export function cpuLaneBound(cpuCount: number, cpu: LaneCpuReading | undefined): number | null {
+  if (cpu === undefined || cpu.baselineCpus === null || cpu.perLaneCpus === null) return null;
+  if (!Number.isFinite(cpu.baselineCpus) || !Number.isFinite(cpu.perLaneCpus) || cpu.perLaneCpus <= 0) return null;
+  return Math.floor(Math.max(0, cpuCount - Math.max(0, cpu.baselineCpus)) / cpu.perLaneCpus);
 }
 
 export type LaneBinding = "pressure" | "container" | "host" | "growth" | "unread" | "wip" | "cpu";
@@ -116,7 +137,7 @@ export function laneTarget(inputs: LaneTargetInputs): LaneTarget {
     if (!pressed && prior !== undefined) bounds.push([prior + 1, "growth"]);
   }
   if (inputs.wipBound !== undefined && Number.isFinite(inputs.wipBound)) bounds.push([Math.floor(inputs.wipBound), "wip"]);
-  bounds.push([Math.floor(inputs.cpuCount), "cpu"]);
+  bounds.push([cpuLaneBound(inputs.cpuCount, inputs.cpu) ?? Math.floor(inputs.cpuCount), "cpu"]);
   let [target, binding] = bounds[0]!;
   for (const [n, name] of bounds) if (n < target) [target, binding] = [n, name];
   target = Math.max(1, target);
@@ -129,6 +150,72 @@ export function laneTarget(inputs: LaneTargetInputs): LaneTarget {
     ...(unread !== undefined ? { unread } : {}),
     next: { target, ...(highEvents !== undefined ? { highEvents } : {}) },
   };
+}
+
+/** `usage_usec` from a cgroup v2 `cpu.stat`, or null when the line is absent. */
+export function parseCpuUsageUsec(text: string): number | null {
+  const raw = /^usage_usec (\d+)$/m.exec(text)?.[1];
+  return raw === undefined ? null : Number(raw);
+}
+
+/** One reading of the cgroup CPU counter and the lane classes that were running across the interval ending at it. */
+export interface LaneCpuSample {
+  atMs: number;
+  usageUsec: number;
+  /** Class of each lane running through the interval since the previous sample (one entry per lane). */
+  runningClasses: readonly string[];
+}
+
+/** What the CPU arm keeps between samples: the last counter reading and bounded rate histories. */
+export interface LaneCpuLearnerState {
+  last?: { atMs: number; usageUsec: number };
+  /** CPU use (CPUs) over intervals in which no lane ran. */
+  idle: number[];
+  /** CPU use per lane (CPUs), per class, from intervals in which lanes of that one class ran. */
+  perClass: Record<string, number[]>;
+}
+
+/** A history this long is a running window, not a threshold: the oldest samples fall out. */
+const CPU_HISTORY = 64;
+
+export function initialLaneCpuLearner(): LaneCpuLearnerState {
+  return { idle: [], perClass: {} };
+}
+
+function median(values: readonly number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+function pushBounded(history: readonly number[], value: number): number[] {
+  return [...history, value].slice(-CPU_HISTORY);
+}
+
+/**
+ * Folds one `usage_usec` sample in. The delta over the interval is CPUs used; with no lane running it is the non-lane
+ * baseline, and with lanes of one class running it is that class's per-lane figure after the baseline is taken off.
+ * An interval with mixed classes, a counter that went backwards, or a baseline not yet learned teaches nothing.
+ * Pure: the clock is the sample's own.
+ */
+export function learnLaneCpu(state: LaneCpuLearnerState, sample: LaneCpuSample): LaneCpuLearnerState {
+  const last = state.last;
+  const next: LaneCpuLearnerState = { ...state, last: { atMs: sample.atMs, usageUsec: sample.usageUsec } };
+  if (last === undefined || sample.atMs <= last.atMs || sample.usageUsec < last.usageUsec) return next;
+  const cpus = (sample.usageUsec - last.usageUsec) / 1000 / (sample.atMs - last.atMs);
+  if (sample.runningClasses.length === 0) return { ...next, idle: pushBounded(state.idle, cpus) };
+  const classes = new Set(sample.runningClasses);
+  const baseline = median(state.idle);
+  if (classes.size !== 1 || baseline === null) return next;
+  const cls = [...classes][0]!;
+  const perLane = Math.max(0, cpus - baseline) / sample.runningClasses.length;
+  return { ...next, perClass: { ...state.perClass, [cls]: pushBounded(state.perClass[cls] ?? [], perLane) } };
+}
+
+/** The learned figures for admitting a lane of class `laneClass`. */
+export function laneCpuReading(state: LaneCpuLearnerState, laneClass: string): LaneCpuReading {
+  return { baselineCpus: median(state.idle), perLaneCpus: median(state.perClass[laneClass] ?? []) };
 }
 
 /** The `dispatch.lane_target` row: the target beside the fixed number it would replace. */
