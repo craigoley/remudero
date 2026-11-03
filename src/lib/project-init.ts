@@ -849,8 +849,9 @@ export interface ProjectInitInput {
 export interface ProjectInitPayload {
   /** `.github/workflows/<filename>` → file content. */
   workflows: Record<string, string>;
-  /** Repo-root `<filename>` → file content (includes dependabot.yml, SECURITY.md, the profile's
-   *  architecture-fitness config, and its strict tsconfig/lint config). */
+  /** `<filename>` → file content (includes dependabot.yml, SECURITY.md, the profile's
+   *  architecture-fitness config, and its strict tsconfig/lint config). Each lands at the repo root,
+   *  except dependabot.yml, which `--write` puts under `.github/` where GitHub reads it. */
   configs: Record<string, string>;
   /** `.remudero/principles.yaml` content. */
   principlesYaml: string;
@@ -899,6 +900,8 @@ export interface ParsedProjectInitArgs {
   repo: string;
   profile: Profile;
   baselines: CaptureBaselinesInput;
+  /** `--write <dir>`: write the generated files into this absolute directory (project-init-write.ts). */
+  writeDir?: string;
 }
 
 export type ParseProjectInitArgsResult = { ok: true; args: ParsedProjectInitArgs } | { ok: false; error: string };
@@ -912,7 +915,7 @@ function flagValue(rest: string[], flag: string): string | undefined {
   return i >= 0 ? rest[i + 1] : undefined;
 }
 
-const PROJECT_INIT_VALUE_FLAGS = ["--profile", "--coverage-pct", "--branches-pct", "--mutation-pct", "--dup-pct"];
+const PROJECT_INIT_VALUE_FLAGS = ["--profile", "--coverage-pct", "--branches-pct", "--mutation-pct", "--dup-pct", "--write"];
 
 /**
  * Parse+validate `rmd project init <repo> [--profile <p>] --coverage-pct <n> --branches-pct <n>
@@ -984,8 +987,13 @@ export function parseProjectInitArgs(rest: string[]): ParseProjectInitArgsResult
   const dupPct = readPct("--dup-pct", "duplication");
   if (typeof dupPct !== "number") return { ok: false, error: dupPct.error };
 
+  const writeDir = flagValue(tail, "--write");
+  if (tail.includes("--write") && (writeDir === undefined || writeDir.startsWith("--"))) {
+    return { ok: false, error: "rmd project init: --write needs a target directory" };
+  }
+
   return {
     ok: true,
-    args: { owner, repo, profile, baselines: { coveragePct, branchesPct, mutationScorePct, dupPct } },
+    args: { owner, repo, profile, baselines: { coveragePct, branchesPct, mutationScorePct, dupPct }, ...(writeDir === undefined ? {} : { writeDir }) },
   };
 }

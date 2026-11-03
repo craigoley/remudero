@@ -1,0 +1,27 @@
+- id: W1-T11208
+  title: Update the legacy effort assertions in the two existing bake-off tests to the arm set that includes thinking off
+  repo: remudero
+  depends_on:
+    - W1-T10857
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - test/routing/the-deployment-bake-off-runs-from-the-cadence.test.ts
+    - test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts
+  acceptance:
+    - claim: The cadence bake-off test asserts the trial efforts as the arm set that includes the no-field thinking-off arm, not the previous efforts-only set
+      proof: "grep: arm-set-includes-thinking-off in test/routing/the-deployment-bake-off-runs-from-the-cadence.test.ts"
+    - claim: The newly-deployed-model bake-off test asserts the candidate (model, effort) list as the arm set that includes the no-field thinking-off arm, not the previous efforts-only set
+      proof: "grep: arm-set-includes-thinking-off in test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts"
+  origin: followup:W1-T10857-1793632539938:2026-11-02T16:32:19.141Z:0
+  rationale: >-
+    From the 2026-11-02 follow-up on https://github.com/craigoley/remudero/pull/16213, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: Update legacy effort assertions in the two existing bake-off test
+    files; four assertions require the previous arm set, and both files are outside scope. — from
+    W1-T10857 (run W1-T10857-1793632539938, https://github.com/craigoley/remudero/pull/16213)
