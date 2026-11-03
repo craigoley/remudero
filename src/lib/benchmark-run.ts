@@ -457,6 +457,8 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
     // W1-T10877: the sampling pin the cash request carried, from the table openWeightTemperatureField reads.
     ...(result.provider === "cash" && Object.hasOwn(OPENWEIGHT_TEMPERATURE, fields.model)
       ? { sampling_pin: { deployment: fields.model, temperature: OPENWEIGHT_TEMPERATURE[fields.model] ?? null } } : {}),
+    ...(result.openWeightCapacityShortfall ? { capacity_shortfall: true } : {}),
+    
     // W1-T4650: the reason rides beside the null it explains; dropping it left every row generic.
     ...(fields.served_model_reason !== undefined ? { served_model_reason: fields.served_model_reason } : {}),
     worker_duration_ms: fields.worker_duration_ms,

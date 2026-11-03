@@ -197,6 +197,7 @@ function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<st
     ...(retained && Object.keys(retained).length > 0 ? { output_retention: retained } : {}),
     ...(guardrailAttempt ? { guardrail_attempt: guardrailAttempt } : {}),
     ...(samplingPin ? { sampling_pin: samplingPin } : {}),
+    ...(row.capacity_shortfall === true ? { capacity_shortfall: true } : {}),
   };
   return Object.keys(signals).length > 0 ? signals : undefined;
 }
@@ -864,11 +865,17 @@ function guardrailUnits(rows: FlowRow[]): GuardrailUnit[] {
         "truncated-reply": signal === `reply-${OpenWeightTruncatedReplyError.name}`,
         "output-retention": Object.values(record(row.outcomeSignals?.output_retention) ?? {})
           .some((evidence) => record(evidence)?.state !== "complete") };
+      // A cash call is metered: it passed the budget cap and the per-minute fit check, and fires either when refused.
+      const allowance = record(record(row.outcomeSignals?.terminal_evidence)?.allowanceRefused);
+      const metered = allowance?.state === "observed" && typeof allowance.value === "boolean" ? {
+        "budget-refusal": allowance.value === true,
+        "per-minute-shortfall": row.outcomeSignals?.capacity_shortfall === true || row.outcomeSignals?.worker_failure === "capacity_shortfall",
+      } : {};
       if (DRAFT_UNIT_LANES.has(lane)) {
-        if (named !== null && named !== undefined) add(row, modelId, lane, truncation);
+        if (named !== null && named !== undefined) add(row, modelId, lane, { ...truncation, ...metered });
         continue;
       }
-      add(row, modelId, lane, { "draft-contract-dirty": signal === "draft-contract", ...truncation,
+      add(row, modelId, lane, { "draft-contract-dirty": signal === "draft-contract", ...truncation, ...metered,
         "served-model-unnamed": row.servedModel === null });
     } else if (row.step === "inbox.drafted") {
       const modelId = row.servedModel ?? row.requestedModel;

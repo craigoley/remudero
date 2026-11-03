@@ -189,7 +189,60 @@ test("W1-T10877: guardrail fires are counted per model, category and class", asy
   }
   await productionJudgeGuardrails(t);
   await productionSamplingPins(t);
+  await productionMeteredGuardrails(t);
 });
+
+/** A cash result as the provider returns it; `paid` is the turns' spend before any refusal. */
+function cashResult(id: string, model: string, fields: Partial<WorkerResult> & { paid?: number } = {}): WorkerResult {
+  const { paid = 0.02, ...rest } = fields;
+  const spent = paid > 0;
+  return { sessionId: id, selectionAssignmentId: id, provider: "cash", model, servedModel: spent ? model : null, effort: "medium",
+    costUsd: paid, numTurns: spent ? 2 : 0, text: spent ? LOW_RISK : "", blocks: [], stderr: "", subtype: "success",
+    isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], modelUsage: {}, compactionEvents: [],
+    qualitySuspect: false, tokens: spent ? { ...TOKENS, cacheRead: 0, cacheCreation: 0 } : { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    budgetRefused: false, budgetReservedUsd: paid, budgetSettledUsd: paid, ...rest } as WorkerResult;
+}
+
+/** The per-lane-budget-cap and context-and-rate-fit cells from production receipts: every metered (cash) call is an
+ *  opportunity for both, a refusal after paid turns is the model's and fires, and one before any turn is neither. */
+async function productionMeteredGuardrails(t: TestContext) {
+  const root = ownedFixtureDir(t, "metered-receipts").dir;
+  const model = "DeepSeek-V4-Flash";
+  const shortfall = { reason: "capacity_shortfall" as const, deployment: model, estimatedTokens: 90_000, limitTokens: 60_000 };
+  const results: WorkerResult[] = [
+    cashResult("m1", model),
+    cashResult("m2", model, { budgetRefused: true, isError: true, subtype: "cash_allowance_exhausted" }),
+    cashResult("m3", model, { isError: true, subtype: "openweight_error", openWeightCapacityShortfall: shortfall }),
+    cashResult("m4", model, { paid: 0, budgetRefused: true, isError: true, subtype: "cash_allowance_exhausted" }),
+    { ...cashResult("m5", "gpt-6.1-sol"), provider: "codex", budgetRefused: undefined } as WorkerResult,
+  ];
+  let calls = 0;
+  const spawn = benchmarkNonDispatchSpawn("risk-judge", async args => {
+    const result = results[calls++]!;
+    args.onSelectionAssignment?.({ version: 1, id: result.sessionId, phase: "pre-execution",
+      requested: { model: result.model, effort: "medium", maxTurns: 2 }, selected: { provider: result.provider ?? "cash", model: result.model, effort: "medium" },
+      routing: { mode: "mount-affinity", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } }, candidates: [] });
+    return result;
+  });
+  for (const _ of results) {
+    await spawn({ cwd: root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "judge",
+      model: MOUNT.model, effort: MOUNT.effort, maxTurns: 2, config: { root } as Config });
+  }
+  const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+    .map(line => ({ ...JSON.parse(line), ts: T(10) }) as Record<string, unknown>);
+  assert.equal(rows.filter(row => row.step === "worker.attempt" && row.capacity_shortfall === true).length, 1,
+    "the producer records the capacity shortfall the cash result carried");
+  const guardrails = snapshotOf(rows).families.guardrails;
+  const at = (modelId: string, guardrailClass: string) => guardrails[`${modelId}|short-judgment|${guardrailClass}`]?.cells;
+  // m1 clean, m2 budget-refused after paid turns, m3 short of its per-minute allowance after paid turns; m4 refused before
+  // any turn is a pre-request refusal (W1-T10875), so it is neither a fire nor an opportunity.
+  assert.deepEqual(at(model, "per-lane-budget-cap"), { modelId: model, category: "short-judgment",
+    guardrailClass: "per-lane-budget-cap", opportunities: 3, fires: 1 }, "a budget refusal after paid turns fires");
+  assert.deepEqual(at(model, "context-and-rate-fit"), { modelId: model, category: "short-judgment",
+    guardrailClass: "context-and-rate-fit", opportunities: 3, fires: 1 }, "a per-minute shortfall after paid turns fires");
+  assert.equal(at("gpt-6.1-sol", "per-lane-budget-cap"), undefined, "an unmetered call is no budget opportunity");
+  assert.equal(at("gpt-6.1-sol", "context-and-rate-fit"), undefined, "an unmetered call is no fit opportunity");
+}
 
 /** The deterministic-sampling cell from production receipts: a cash request to a pinned deployment fires, one to a
  *  default-only deployment is an unfired opportunity, and a non-cash request is no opportunity at all. */
