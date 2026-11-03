@@ -134,6 +134,8 @@
       proof: "grep: codingLedgerSave( in src/lib/model-canary-command.ts"
     - claim: First-class coding cases retain their identity through full census validation
       proof: 'unit test: coding cases retain first class identity through matrix census validation'
+    - claim: Native private replay reaches the app-owned control runner without asserting model execution
+      proof: 'grep: replayPrivateControl( in src/lib/model-canary-command.ts'
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
