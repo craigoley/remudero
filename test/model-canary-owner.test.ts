@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import type { CanarySlotOwner } from "../src/lib/model-canary-owner.js";
-import { buildCanarySchedule, type CanarySlot, type CanarySchedulePorts } from "../src/lib/model-canary-schedule.js";
-import { commonCanarySuite, canarySuiteDigest } from "../src/lib/model-canary-suite.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { CanarySlotOwner } from "#src/lib/model-canary-owner.js";
+import { buildCanarySchedule, type CanarySlot, type CanarySchedulePorts } from "#src/lib/model-canary-schedule.js";
+import { commonCanarySuite, canarySuiteDigest } from "#src/lib/model-canary-suite.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { readOwnedPrivateTraceReceipt } from "#src/lib/model-canary-owner.js";
+import type { PrivateTraceReceiptV1 } from "#src/lib/model-canary-private-corpus.js";
 
 type Outcome = Parameters<CanarySchedulePorts["terminal"]>[1];
 // A genuinely absent new feature must fail its criterion on base, not become a loader refusal.
@@ -30,6 +33,27 @@ function outcome(slot: CanarySlot): Outcome {
       id: "test-run", caseId: slot.caseId, suiteHash: slot.pin.suiteHash, model: slot.pin.model,
       route: slot.pin.route, effort: slot.pin.effort, family: "structured", verified: null,
       totalDurationMs: 1, attempts: [], outcomeReason: "transport-error" } };
+}
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
+}
+function privateTrace(slot: CanarySlot, runId: string): PrivateTraceReceiptV1 {
+  const withoutDigest = { version: "private-canary-trace-receipt-v1" as const,
+    binding: { version: "private-canary-trace-binding-v1" as const, runId, slotId: slot.id,
+      caseId: slot.caseId, suiteHash: slot.pin.suiteHash, corpusDigest: "c".repeat(64), scorerDigest: "d".repeat(64) },
+    finalText: "{\"answer\":7}", events: [], complete: true, reason: null };
+  return { ...withoutDigest, digest: createHash("sha256").update(canonicalJson(withoutDigest)).digest("hex") };
+}
+function privateOutcome(slot: CanarySlot): Outcome & { privateTrace: PrivateTraceReceiptV1; privateGrade: Record<string, unknown> } {
+  const base = outcome(slot), runId = "94eb1b00-2e11-4b84-8a12-008720fae197";
+  return { ...base, state: "scored", reason: "verified", grade: { passed: true, reason: "verified", schemaValid: true },
+    run: { ...base.run, id: runId, verified: true, outcomeReason: "verified" }, privateTrace: privateTrace(slot, runId),
+    privateGrade: { state: "scored", passed: true, finalPassed: true, tracePassed: true,
+      schemaValid: true, reason: "verified" } } as Outcome & { privateTrace: PrivateTraceReceiptV1; privateGrade: Record<string, unknown> };
 }
 function fixture(action: (dir: string) => void) {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-owner-`));
@@ -144,4 +168,149 @@ test("canary durable owner refuses a full real store without pretending the next
   const owner = openOwner(dir);
   try { assert.throws(() => owner.claim(slots()[0]), /busy-or-capacity/); }
   finally { owner.close(); }
+}));
+
+test("canary owner reads a private trace only from the matching existing terminal receipt", () => fixture(dir => {
+  const [slot] = slots(), owner = openOwner(dir), outcomeWithTrace = privateOutcome(slot);
+  try {
+    assert.equal(owner.claim(slot), "claimed");
+    owner.terminal(slot, outcomeWithTrace);
+  } finally { owner.close(); }
+  const expected = outcomeWithTrace.privateTrace.binding;
+  const loaded = readOwnedPrivateTraceReceipt(dir, slot, expected);
+  assert.equal(loaded.state, "available");
+  if (loaded.state === "available") {
+    assert.equal(loaded.receipt.binding.runId, outcomeWithTrace.run.id);
+    assert.equal(loaded.receipt.binding.slotId, slot.id);
+    assert.ok(Object.isFrozen(loaded.receipt));
+    assert.ok(Object.isFrozen(loaded.receipt.events));
+  }
+  assert.equal(readOwnedPrivateTraceReceipt(dir, slot, { ...expected, corpusDigest: "e".repeat(64) }).state, "unavailable");
+}));
+
+test("canary owner retains an incomplete trace only when its denied action is a scored failure", () => fixture(dir => {
+  const [slot] = slots(), base = outcome(slot), runId = "c0044072-86e2-4b85-b871-3735362cb490";
+  const body = { version: "private-canary-trace-receipt-v1" as const,
+    binding: { version: "private-canary-trace-binding-v1" as const, runId, slotId: slot.id,
+      caseId: slot.caseId, suiteHash: slot.pin.suiteHash, corpusDigest: "c".repeat(64), scorerDigest: "d".repeat(64) },
+    finalText: null, events: [{ name: "forbidden", args: {}, result: { denied: true }, denied: true }],
+    complete: false, reason: "private-trace-dispatch-unavailable" };
+  const trace: PrivateTraceReceiptV1 = { ...body,
+    digest: createHash("sha256").update(canonicalJson(body)).digest("hex") };
+  const failed = { ...base, state: "scored" as const, reason: "unauthorized-action",
+    grade: { passed: false, reason: "unauthorized-action", schemaValid: false },
+    run: { ...base.run, id: runId, verified: false, outcomeReason: "unauthorized-action" }, privateTrace: trace,
+    privateGrade: { state: "scored", passed: false, finalPassed: null, tracePassed: false,
+      schemaValid: false, reason: "unauthorized-action" } } as Outcome & { privateTrace: PrivateTraceReceiptV1; privateGrade: Record<string, unknown> };
+  const owner = openOwner(dir);
+  try { assert.equal(owner.claim(slot), "claimed"); owner.terminal(slot, failed); }
+  finally { owner.close(); }
+  const loaded = readOwnedPrivateTraceReceipt(dir, slot, trace.binding);
+  assert.equal(loaded.state, "available");
+  if (loaded.state === "available") assert.equal(loaded.receipt.complete, false);
+}));
+
+test("canary owner readback rejects stored private-grade disagreement", () => fixture(dir => {
+  const [slot] = slots(), owner = openOwner(dir), valid = privateOutcome(slot);
+  try { assert.equal(owner.claim(slot), "claimed"); owner.terminal(slot, valid); }
+  finally { owner.close(); }
+  const db = new DatabaseSync(join(dir, "model-canary-slots.sqlite"));
+  try {
+    const row = db.prepare("SELECT receipt FROM canary_slots_v1 WHERE id=?").get(slot.id) as { receipt: string };
+    const stored = JSON.parse(row.receipt) as { grade: { reason: string } };
+    stored.grade.reason = "different-reason";
+    db.prepare("UPDATE canary_slots_v1 SET receipt=? WHERE id=?").run(JSON.stringify(stored), slot.id);
+  } finally { db.close(); }
+  assert.equal(readOwnedPrivateTraceReceipt(dir, slot, valid.privateTrace.binding).state, "unavailable");
+}));
+
+test("canary owner preserves legacy receipt shape and refuses tampered private traces", () => fixture(dir => {
+  const [legacySlot, tracedSlot] = slots(), owner = openOwner(dir);
+  try {
+    assert.equal(owner.claim(legacySlot), "claimed"); owner.terminal(legacySlot, outcome(legacySlot));
+    assert.equal(owner.claim(tracedSlot), "claimed");
+    owner.terminal(tracedSlot, privateOutcome(tracedSlot));
+  } finally { owner.close(); }
+  const db = new DatabaseSync(join(dir, "model-canary-slots.sqlite"));
+  try {
+    const rows = db.prepare("SELECT id,receipt FROM canary_slots_v1 ORDER BY id").all() as { id: string; receipt: string }[];
+    const legacy = JSON.parse(rows.find(row => row.id === legacySlot.id)!.receipt) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(legacy), ["slot", "run", "grade", "state", "reason"]);
+    const row = rows.find(value => value.id === tracedSlot.id)!;
+    const parsed = JSON.parse(row.receipt) as { privateTrace: { finalText: string } };
+    parsed.privateTrace.finalText = "tampered";
+    db.prepare("UPDATE canary_slots_v1 SET receipt=? WHERE id=?").run(JSON.stringify(parsed), tracedSlot.id);
+  } finally { db.close(); }
+  const runId = "94eb1b00-2e11-4b84-8a12-008720fae197";
+  assert.equal(readOwnedPrivateTraceReceipt(dir, tracedSlot, privateTrace(tracedSlot, runId).binding).state, "unavailable");
+}));
+
+test("canary owner requires private, legacy, and run grades to agree", () => {
+  const mutations: Array<(value: ReturnType<typeof privateOutcome>) => void> = [
+    value => { value.state = "unknown" as typeof value.state; },
+    value => { value.reason = "different-reason"; },
+    value => { value.run.outcomeReason = "different-reason"; },
+    value => { value.grade!.reason = "different-reason"; },
+    value => { value.grade!.schemaValid = false; },
+    value => { value.privateGrade.passed = false; },
+    value => { value.privateGrade.finalPassed = false; },
+    value => { value.privateGrade.tracePassed = false; },
+    value => { value.privateGrade.reason = "different-reason"; },
+    value => { value.privateGrade.schemaValid = false; },
+  ];
+  for (const mutate of mutations) fixture(dir => {
+    const [slot] = slots(), owner = openOwner(dir), valid = privateOutcome(slot);
+    try {
+      assert.equal(owner.claim(slot), "claimed");
+      const invalid = structuredClone(valid);
+      mutate(invalid);
+      assert.throws(() => owner.terminal(slot, invalid), /canary-owner-(terminal-identity|private-trace-grade)-invalid/);
+      owner.terminal(slot, valid);
+    } finally { owner.close(); }
+  });
+});
+
+test("canary owner readback refuses a passed grade with a denied event or contradictory state", () => fixture(dir => {
+  const [deniedSlot, stateSlot] = slots(), owner = openOwner(dir);
+  try {
+    for (const slot of [deniedSlot, stateSlot]) {
+      assert.equal(owner.claim(slot), "claimed"); owner.terminal(slot, privateOutcome(slot));
+    }
+  } finally { owner.close(); }
+  const db = new DatabaseSync(join(dir, "model-canary-slots.sqlite"));
+  try {
+    for (const slot of [deniedSlot, stateSlot]) {
+      const row = db.prepare("SELECT receipt FROM canary_slots_v1 WHERE id=?").get(slot.id) as { receipt: string };
+      const stored = JSON.parse(row.receipt) as { state: string; privateTrace: Record<string, unknown> & { digest: string } };
+      if (slot.id === deniedSlot.id) {
+        stored.privateTrace.events = [{ name: "forbidden", args: {}, result: { denied: true }, denied: true }];
+        const body = Object.fromEntries(Object.entries(stored.privateTrace).filter(([key]) => key !== "digest"));
+        stored.privateTrace.digest = createHash("sha256").update(canonicalJson(body)).digest("hex");
+      } else stored.state = "unavailable";
+      db.prepare("UPDATE canary_slots_v1 SET receipt=? WHERE id=?").run(JSON.stringify(stored), slot.id);
+    }
+  } finally { db.close(); }
+  const deniedRun = "94eb1b00-2e11-4b84-8a12-008720fae197";
+  const stateRun = "94eb1b00-2e11-4b84-8a12-008720fae197";
+  assert.equal(readOwnedPrivateTraceReceipt(dir, deniedSlot, privateTrace(deniedSlot, deniedRun).binding).state, "unavailable");
+  assert.equal(readOwnedPrivateTraceReceipt(dir, stateSlot, privateTrace(stateSlot, stateRun).binding).state, "unavailable");
+}));
+
+test("canary owner readonly trace reads never create or repair an owner database", () => fixture(dir => {
+  const absentDir = join(dir, "not-created");
+  assert.equal(readOwnedPrivateTraceReceipt(absentDir, slots()[0], {
+    version: "private-canary-trace-binding-v1", runId: "run", slotId: slots()[0].id,
+    caseId: slots()[0].caseId, suiteHash: slots()[0].pin.suiteHash,
+    corpusDigest: "c".repeat(64), scorerDigest: "d".repeat(64),
+  }).state, "unavailable");
+  assert.equal(existsSync(absentDir), false);
+
+  mkdirSync(absentDir, { mode: 0o700 });
+  const slot = slots()[0];
+  assert.equal(readOwnedPrivateTraceReceipt(absentDir, slot, {
+    version: "private-canary-trace-binding-v1", runId: "run", slotId: slot.id,
+    caseId: slot.caseId, suiteHash: slot.pin.suiteHash,
+    corpusDigest: "c".repeat(64), scorerDigest: "d".repeat(64),
+  }).state, "unavailable");
+  assert.equal(existsSync(join(absentDir, "model-canary-slots.sqlite")), false);
 }));

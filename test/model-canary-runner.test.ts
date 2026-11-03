@@ -1,11 +1,27 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { executeCanary, type CanaryExecutionPorts, type CanaryResponse } from "../src/lib/model-canary-runner.js";
-import { canarySuiteDigest, commonCanarySuite } from "../src/lib/model-canary-suite.js";
+import { executeCanary, type CanaryExecutionPorts, type CanaryResponse } from "#src/lib/model-canary-runner.js";
+import { canarySuiteDigest, commonCanarySuite, type CanaryCase } from "#src/lib/model-canary-suite.js";
+import { validatePrivateCorpus, type PrivateCanaryBundleV1, type PrivateCanaryCaseV1 } from "#src/lib/model-canary-private-corpus.js";
 const cases = commonCanarySuite(), pin = { model: "model", route: "subscription", effort: "low", suiteHash: canarySuiteDigest(cases), billing: "subscription" as const };
 const resources = { durationMs: 1, firstTextMs: null, generationMs: null, inputTokens: 1, outputTokens: 1,
   cacheReadTokens: null, cacheWriteTokens: null, reasoningTokens: null, usageRatedUsd: null,
   billing: "subscription" as const, servedModel: "model", terminal: "complete" as const };
+function privateExecutionCase(source: CanaryCase, suffix: string) {
+  const item = { ...source, id: `private-runner-${suffix}` };
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+  const privateCase: PrivateCanaryCaseV1 = { item, provenance: {
+    sourceFamilyId: `family-${suffix}`, incidentRootId: `root-${suffix}`, sourceDigest: hash(`source:${suffix}`),
+    observedAt: "2026-11-03T00:00:00.000Z", splitId: "dev-runner-test", split: "development", role: "worker",
+  }, expectedToolTrace: [], scorerVersion: "exact-json-and-application-trace-v1" };
+  const bundle: PrivateCanaryBundleV1 = { version: "model-canary-private-bundle-v1", development: {
+    version: "model-canary-private-payload-v1", split: "development", cases: [privateCase],
+  } };
+  const validated = validatePrivateCorpus(bundle);
+  if (validated.state !== "available") throw new Error(`private-runner-fixture:${validated.reason}`);
+  return { item, context: { corpus: validated.corpus, slotId: `native-slot-${suffix}` } };
+}
 test("canary runner gates every request and owns real scripted tool failures", async () => {
   const item = cases.find(c => c.tools === "retry")!; let calls = 0, admits = 0, saves = 0;
   const ports: CanaryExecutionPorts = { monotonicMs: () => 0, admit: async () => { admits++; return { state: "admitted" }; },
@@ -56,4 +72,107 @@ test("canary runner observes missing duration and preserves bounded and incomple
   response.resources = { ...response.resources, terminal: "error" };
   const incomplete = await executeCanary(cases[0]!, pin, ports);
   assert.equal(incomplete.run.verified, null); assert.equal(incomplete.reason, "error"); assert.equal(saved, 3);
+});
+
+test("runner grades app-owned traces and rejects imported trust claims", async () => {
+  const { item, context } = privateExecutionCase(cases[0]!, "app-owned");
+  let savedGrade: { passed: boolean; reason: string; schemaValid: boolean } | null = null;
+  let requestPin: Record<string, unknown> | undefined;
+  const ports: CanaryExecutionPorts = { monotonicMs: () => 0, admit: async () => ({ state: "admitted" }),
+    request: async input => { requestPin = input.pin; assert.equal(input.prompt, item.prompt); assert.deepEqual(input.allowedTools, []);
+      return { text: JSON.stringify(item.expected), toolCalls: [{ name: "unlisted-tool",
+        args: { importedTrace: [{ origin: "app", denied: false }] } }], resources }; },
+    save: async (_run, grade) => { savedGrade = grade; } };
+  const result = await executeCanary(item, pin, ports, undefined, context);
+  assert.equal("suiteHash" in requestPin!, false, "provider request does not expose the native suite digest");
+  assert.equal(result.privateGrade?.state, "scored");
+  if (result.privateGrade?.state !== "scored") return;
+  assert.equal(result.privateGrade.finalPassed, true);
+  assert.equal(result.privateGrade.tracePassed, false);
+  assert.equal(result.privateGrade.passed, false);
+  assert.equal(result.run.verified, false);
+  assert.deepEqual(savedGrade, { passed: false, reason: "unauthorized-action", schemaValid: true });
+  assert.equal(result.privateTrace?.binding.runId, result.run.id);
+  assert.equal(result.privateTrace?.binding.slotId, context.slotId);
+  assert.equal(result.privateTrace?.binding.caseId, item.id);
+});
+
+test("private grading preserves refusal, transport, and terminal causes when evidence is unavailable", async () => {
+  const refusal = privateExecutionCase(cases[0]!, "capacity"), refusalRun: { verified: boolean | null }[] = [];
+  let refusalGrade: { passed: boolean; reason: string; schemaValid: boolean } | null | undefined;
+  let refusalRequests = 0;
+  const refusalPorts: CanaryExecutionPorts = { monotonicMs: () => 0,
+    admit: async () => ({ state: "refused", reason: "capacity" }),
+    request: async () => { refusalRequests++; throw new Error("refusal must precede transport"); },
+    save: async (run, grade) => { refusalRun.push(run); refusalGrade = grade; } };
+  const refused = await executeCanary(refusal.item, pin, refusalPorts, undefined, refusal.context);
+  assert.equal(refused.reason, "capacity");
+  assert.equal(refused.run.outcomeReason, "capacity");
+  assert.equal(refused.run.attempts.length, 0);
+  assert.equal(refused.run.verified, null);
+  assert.equal(refused.privateGrade?.state, "unavailable");
+  assert.equal(refusalGrade, null);
+  assert.equal(refusalRequests, 0);
+  assert.equal(refusalRun.length, 1);
+
+  const transport = privateExecutionCase(cases[0]!, "transport");
+  const transportError = new Error("ambiguous provider failure");
+  const transportPorts: CanaryExecutionPorts = { monotonicMs: () => 0,
+    admit: async () => ({ state: "admitted" }), request: async () => { throw transportError; },
+    save: async (_run, grade) => { assert.equal(grade, null); } };
+  const failed = await executeCanary(transport.item, pin, transportPorts, undefined, transport.context);
+  assert.equal(failed.reason, "transport-error");
+  assert.equal(failed.run.outcomeReason, "transport-error");
+  assert.equal(failed.run.attempts.length, 1);
+  assert.equal(failed.run.verified, null);
+  assert.equal(failed.privateGrade?.state, "unavailable");
+  assert.equal(failed.error, transportError);
+
+  const terminal = privateExecutionCase(cases[0]!, "terminal");
+  const terminalPorts: CanaryExecutionPorts = { monotonicMs: () => 0,
+    admit: async () => ({ state: "admitted" }),
+    request: async () => ({ text: "", toolCalls: [], resources: { ...resources, terminal: "timeout" } }),
+    save: async (_run, grade) => { assert.equal(grade, null); } };
+  const timedOut = await executeCanary(terminal.item, pin, terminalPorts, undefined, terminal.context);
+  assert.equal(timedOut.reason, "timeout");
+  assert.equal(timedOut.run.outcomeReason, "timeout");
+  assert.equal(timedOut.run.verified, null);
+  assert.equal(timedOut.privateGrade?.state, "unavailable");
+});
+
+test("private trace capture failure is unavailable and is not mislabeled as provider transport", async () => {
+  const fixture = privateExecutionCase(cases[0]!, "malformed-trace");
+  const malformedArgs = Object.defineProperty({}, "claim", {
+    enumerable: true, get() { throw new Error("must not invoke provider-object getter"); },
+  });
+  let savedGrade: { passed: boolean; reason: string; schemaValid: boolean } | null | undefined;
+  const ports: CanaryExecutionPorts = { monotonicMs: () => 0,
+    admit: async () => ({ state: "admitted" }),
+    request: async () => ({ text: "", toolCalls: [{ name: "unlisted-tool", args: malformedArgs }], resources }),
+    save: async (_run, grade) => { savedGrade = grade; } };
+  const result = await executeCanary(fixture.item, pin, ports, undefined, fixture.context);
+  assert.equal(result.reason, "private-trace-json-invalid");
+  assert.equal(result.run.outcomeReason, "private-trace-json-invalid");
+  assert.equal(result.run.verified, null);
+  assert.equal(result.privateGrade?.state, "unavailable");
+  assert.equal(result.error, undefined);
+  assert.equal(savedGrade, null);
+});
+
+
+test("private runner rejects malformed binding before admission or provider transport", async () => {
+  const fixture = privateExecutionCase(cases[0]!, "invalid-binding");
+  let admits = 0, requests = 0, saves = 0;
+  const ports: CanaryExecutionPorts = { monotonicMs: () => 0,
+    admit: async () => { admits++; return { state: "admitted" }; },
+    request: async () => { requests++; return { text: "", toolCalls: [], resources }; },
+    save: async () => { saves++; } };
+  for (const slotId of [[], ["slot"], "", "x".repeat(161)]) {
+    await assert.rejects(executeCanary(fixture.item, pin, ports, undefined,
+      { ...fixture.context, slotId } as typeof fixture.context), /private-canary-binding-invalid/);
+  }
+  await assert.rejects(executeCanary(fixture.item,
+    { ...pin, suiteHash: [pin.suiteHash] } as unknown as typeof pin, ports, undefined, fixture.context),
+    /private-canary-binding-invalid/);
+  assert.equal(admits, 0); assert.equal(requests, 0); assert.equal(saves, 0);
 });

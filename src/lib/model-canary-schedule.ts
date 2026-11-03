@@ -6,6 +6,7 @@ import { executeCanary, type CanaryPin, type CanaryExecutionPorts } from "./mode
 import { canaryTrialBlockId, type CanaryTrialBlock } from "./model-canary-metrics.js";
 import type { CanaryRetentionContract } from "./model-canary-retention.js";
 import type { CanaryContextContract } from "./model-canary-context.js";
+import { privateCorpusCaseMatches, type ValidatedPrivateCorpus } from "./model-canary-private-corpus.js";
 
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 export interface CanarySlot { id: string; caseId: string; pin: CanaryPin; aaLabel: "A" | "B" | null;
@@ -45,9 +46,12 @@ export interface CanarySchedulePorts {
   terminal(slot: CanarySlot, outcome: Awaited<ReturnType<typeof executeCanary>>): Promise<void>;
 }
 
-export async function executeCanarySchedule(plan: ReturnType<typeof buildCanarySchedule>, cases: readonly CanaryCase[], ports: CanarySchedulePorts) {
+export async function executeCanarySchedule(plan: ReturnType<typeof buildCanarySchedule>, cases: readonly CanaryCase[],
+  ports: CanarySchedulePorts, options?: { privateCorpus: ValidatedPrivateCorpus }) {
   if (plan.suiteHash !== canarySuiteDigest(cases) || plan.digest !== digest(JSON.stringify(plan.slots)))
     throw new Error("canary-schedule-changed");
+  if (options?.privateCorpus && cases.some(item => !privateCorpusCaseMatches(options.privateCorpus, item)))
+    throw new Error("canary-schedule-private-case-mismatch");
   let completed = 0, skipped = 0;
   for (const slot of plan.slots) {
     const plannedSlotIds = plan.slots.filter(s => s.caseId === slot.caseId).map(s => s.id);
@@ -67,7 +71,7 @@ export async function executeCanarySchedule(plan: ReturnType<typeof buildCanaryS
     const outcome = await executeCanary(item, slot.pin, { ...execution, save: async (run, grade) => {
       run.trial = structuredClone(trial);
       await execution.save(run, grade);
-    } });
+    } }, undefined, options?.privateCorpus ? { corpus: options.privateCorpus, slotId: slot.id } : undefined);
     await ports.terminal(slot, outcome); completed++;
     if (outcome.state === "unavailable") return { state: "deferred" as const, completed, skipped, nextSlot: null };
   }
