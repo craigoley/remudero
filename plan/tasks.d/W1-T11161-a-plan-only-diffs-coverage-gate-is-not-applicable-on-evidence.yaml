@@ -19,6 +19,8 @@
   files:
     - .github/workflows/ci.yml
     - test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts
+    - test/workflow-single-suite-run.test.ts
+    - test/fast-lane-classifier.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -56,8 +58,11 @@
     2. The skipped arm passes with "coverage-ratchet: not applicable — class=PLAN_ONLY over N changed file(s) per
        scripts/diff-class.mjs; coverage-ledger=<result>; no source line can move coverage" only when class is PLAN_ONLY. Every other
        path keeps its message and exit 1. The success arm prints the same line when that class is PLAN_ONLY.
-    3. coverage-ratchet's matrix job keeps no `if:` (test/diff-coverage.test.ts); the new step-level `if:` sits on the aggregator.
-       test/workflow-job-timeouts.test.ts's margin is re-derived if the classify step moves the aggregator's bound.
+    3. No `if:` is added anywhere (test/diff-coverage.test.ts forbids step `if:` in both coverage jobs): every guard is shell. The
+       aggregator's existing checkout and setup-node move above the gate so the classify step can read the diff. On a not-applicable
+       skip the gate writes not_applicable=true and the artifact step stands down as PLAN_ONLY, so every later fast-lane guard skips
+       (download-artifact at the pinned sha succeeds on zero pattern matches). Two existing tests learn the new consumer:
+       workflow-single-suite-run (one plain-node classification, never --import tsx) and fast-lane-classifier (seven jobs read it).
   falsifier: |
     At origin/main, the aggregator's bash with SHARD_RESULT=skipped exits 1 for a PR whose only change is a plan/tasks.d shard,
     which is what #16297 attempt 1 and #16322 recorded.
