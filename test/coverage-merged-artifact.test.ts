@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { constants, fstatSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { gitRepo } from "#test/helpers/git-repo.js";
+
+const { owningSfReadBoundedLcov, owningSfValidateOwnerFiles } = await import("#scripts/coverage-floor.mjs");
 
 // ── W1-T2662: the coverage-ratchet aggregator merges the four shards' lcov into
 // coverage/lcov.info and then discards it with the runner. W1-T2661's tier-two reader
@@ -119,6 +121,69 @@ function runOwnerReceipt(root: string, lcov: string, includeChangedSource = fals
   writeFileSync(lcovPath, lcov);
   return runOwnerReceiptCommand(root, 30_000, includeChangedSource);
 }
+
+test("coverage-owning-SF owner validation rejects invalid lists and path aliases", () => {
+  assert.throws(() => owningSfValidateOwnerFiles([]), { message: "owner_file_list_invalid" });
+  assert.throws(() => owningSfValidateOwnerFiles(["/tmp/model-canary.ts"]), { message: "owner_file_path_invalid" });
+  assert.throws(() => owningSfValidateOwnerFiles(["src/lib/../model-canary.ts"]), { message: "owner_file_path_invalid" });
+});
+
+test("coverage-owning-SF reader uses the real bounded descriptor path for a regular file", () => {
+  const fixture = gitRepo({ kind: "coverage-owning-sf-reader" });
+  const root = fixture.dir;
+  try {
+    const lcov = lcovRecord("src/lib/model-canary-command.ts", 3, 2);
+    const lcovPath = join(root, "coverage", "lcov.info");
+    mkdirSync(dirname(lcovPath), { recursive: true });
+    writeFileSync(lcovPath, lcov);
+
+    const result = owningSfReadBoundedLcov(root, "coverage/lcov.info");
+    assert.deepEqual(result.bytes, Buffer.from(lcov));
+    assert.equal(result.sha256, createHash("sha256").update(lcov).digest("hex"));
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("coverage-owning-SF reader fails closed when required open flags are unavailable", () => {
+  const fixture = gitRepo({ kind: "coverage-owning-sf-reader-flags" });
+  const root = fixture.dir;
+  try {
+    const lcovPath = join(root, "coverage", "lcov.info");
+    mkdirSync(dirname(lcovPath), { recursive: true });
+    writeFileSync(lcovPath, "end_of_record\n");
+
+    assert.throws(() => owningSfReadBoundedLcov(root, "coverage/lcov.info", {
+      flagConstants: { O_RDONLY: constants.O_RDONLY, O_NOFOLLOW: 0, O_NONBLOCK: constants.O_NONBLOCK },
+    }), { message: "lcov_open_safety_unavailable" });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("coverage-owning-SF reader rejects descriptor metadata changes during a bounded read", () => {
+  const fixture = gitRepo({ kind: "coverage-owning-sf-reader-metadata" });
+  const root = fixture.dir;
+  try {
+    const lcovPath = join(root, "coverage", "lcov.info");
+    mkdirSync(dirname(lcovPath), { recursive: true });
+    writeFileSync(lcovPath, "end_of_record\n");
+    let statCalls = 0;
+    const statDescriptor = (fd: number, options: { bigint: true }) => {
+      const actual = fstatSync(fd, options);
+      statCalls += 1;
+      if (statCalls !== 2) return actual;
+      return { ...actual, isFile: () => actual.isFile(), mtimeNs: actual.mtimeNs + 1n };
+    };
+
+    assert.throws(() => owningSfReadBoundedLcov(root, "coverage/lcov.info", { statDescriptor }), {
+      message: "lcov_changed_during_read",
+    });
+    assert.equal(statCalls, 2, "the opened descriptor is checked before and after its bounded read");
+  } finally {
+    fixture.cleanup();
+  }
+});
 
 async function aggregatorJobBody(): Promise<string> {
   const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");

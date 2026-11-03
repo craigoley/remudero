@@ -376,7 +376,7 @@ function owningSfChangedExecutablePaths(root) {
   return paths.filter((path) => /^(?:src|scripts)\//.test(path) && /\.(?:ts|tsx|js|mjs|cjs)$/.test(path));
 }
 
-function owningSfValidateOwnerFiles(values) {
+export function owningSfValidateOwnerFiles(values) {
   const files = (values ?? []).slice().sort();
   if (files.length === 0 || files.length > OWNING_SF_MAX_FILES || new Set(files).size !== files.length) {
     throw new Error("owner_file_list_invalid");
@@ -392,22 +392,22 @@ function owningSfValidateOwnerFiles(values) {
   return files;
 }
 
-function owningSfReadBoundedLcov(root, inputPath) {
+export function owningSfReadBoundedLcov(root, inputPath, { flagConstants = constants, statDescriptor = fstatSync } = {}) {
   const filePath = resolve(root, inputPath);
   const rel = relative(root, filePath);
   if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error("lcov_path_outside_repo");
   let fd;
   try {
-    if (typeof constants.O_NOFOLLOW !== "number" || constants.O_NOFOLLOW === 0 ||
-        typeof constants.O_NONBLOCK !== "number" || constants.O_NONBLOCK === 0) {
+    if (typeof flagConstants.O_NOFOLLOW !== "number" || flagConstants.O_NOFOLLOW === 0 ||
+        typeof flagConstants.O_NONBLOCK !== "number" || flagConstants.O_NONBLOCK === 0) {
       throw new Error("lcov_open_safety_unavailable");
     }
     try {
-      fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      fd = openSync(filePath, flagConstants.O_RDONLY | flagConstants.O_NOFOLLOW | flagConstants.O_NONBLOCK);
     } catch {
       throw new Error("lcov_open_failed");
     }
-    const pinned = fstatSync(fd, { bigint: true });
+    const pinned = statDescriptor(fd, { bigint: true });
     if (!pinned.isFile() || pinned.size > BigInt(OWNING_SF_MAX_LCOV_BYTES)) throw new Error("lcov_not_regular_or_over_limit");
     const chunks = [];
     let total = 0;
@@ -419,7 +419,7 @@ function owningSfReadBoundedLcov(root, inputPath) {
       if (total > OWNING_SF_MAX_LCOV_BYTES) throw new Error("lcov_over_limit");
       chunks.push(Buffer.from(chunk.subarray(0, count)));
     }
-    const after = fstatSync(fd, { bigint: true });
+    const after = statDescriptor(fd, { bigint: true });
     if (after.dev !== pinned.dev || after.ino !== pinned.ino || after.size !== BigInt(total) ||
         after.size !== pinned.size || after.mtimeNs !== pinned.mtimeNs || after.ctimeNs !== pinned.ctimeNs) {
       throw new Error("lcov_changed_during_read");
