@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { ghFailing } from "#test/helpers/gh-stub.js";
 import { age, fixture, git, type Fixture } from "#test/helpers/host-cleanup-fixture.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -26,7 +27,9 @@ exec '${stat}' "$@"
   // No test may reach the real GitHub API through an installed gh.
   // The shared stub (test/helpers/gh-stub.ts) is copied in, not re-hand-written: the fixture-copy
   // census counts a hand-rolled gh PATH shim per file, and its ceiling is not ours to raise.
-  cpSync(ghFailing(), bin, { recursive: true });
+  const failing = ghFailing();
+  cpSync(failing, bin, { recursive: true });
+  rmSync(dirname(failing), { recursive: true, force: true });
   mkdirSync(join(fx.home, "Remudero"), { recursive: true });
   return fx;
 }
@@ -138,8 +141,44 @@ test("a run folder's reports retire after seven idle days and its saved work aft
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
+/**
+ * A publication probe over `work`, answered by the shared gh shim (test/helpers/gh-shim.ts): only
+ * the exact `repos/craigoley/remudero/commits/<head>/pulls` query prints a pull-request count, and
+ * that count is the probe's argument. Any other query gets empty output, which the guard reads as "no".
+ */
+function publicationProbe(fx: Fixture, work: string, shim: GhShim) {
+  const head = git(work, "rev-parse", "HEAD").trim();
+  shim.addRoute({ when: `api repos/craigoley/remudero/commits/${head}/pulls`, stdoutEnv: "GH_PULLS" });
+  return (pulls: string) => spawnSync("bash", ["-c", `source '${guard}'; rmd_workspace_published "$1" && echo published || echo "held $RMD_PUB_REASON"`, "_", work],
+    { encoding: "utf8", env: { ...process.env, PATH: `${shim.dir}:${join(fx.root, "bin")}:${process.env.PATH}`, GH_PULLS: pulls } }).stdout.trim();
+}
+
+test("GitHub proves publication when the remote advanced and none of its advertised tips are readable locally", () => {
+  const fx = setup();
+  const shim = ghShim();
+  try {
+    const bare = origin(fx);
+    const work = join(fx.root, "work");
+    git(fx.root, "clone", "-q", bare, work);
+    git(work, "remote", "set-url", "origin", "https://github.com/craigoley/remudero.git");
+    git(work, "config", `url.file://${bare}.insteadOf`, "https://github.com/craigoley/remudero.git");
+    git(work, "commit", "-q", "--allow-empty", "-m", "pushed to a PR, then squash-merged");
+    // Another clone advances main; this checkout never fetches it, so the only advertised tip is absent locally.
+    const other = join(fx.root, "other");
+    git(fx.root, "clone", "-q", bare, other);
+    git(other, "commit", "-q", "--allow-empty", "-m", "squash of the pull request");
+    git(other, "push", "-q", "origin", "HEAD:main");
+    const advanced = git(other, "rev-parse", "HEAD").trim();
+    assert.notEqual(spawnSync("git", ["-C", work, "cat-file", "-e", `${advanced}^{commit}`]).status, 0, "advanced tip must be absent locally");
+    const probe = publicationProbe(fx, work, shim);
+    assert.equal(probe("1"), "published");
+    assert.equal(probe("0"), "held not-proven-published");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); rmSync(shim.dir, { recursive: true, force: true }); }
+});
+
 test("a commit GitHub lists in a pull request counts as published even after the PR head moved on", () => {
   const fx = setup();
+  const shim = ghShim();
   try {
     const bare = origin(fx);
     const work = join(fx.root, "work");
@@ -148,19 +187,13 @@ test("a commit GitHub lists in a pull request counts as published even after the
     git(work, "remote", "set-url", "origin", "https://github.com/craigoley/remudero.git");
     git(work, "config", `url.file://${bare}.insteadOf`, "https://github.com/craigoley/remudero.git");
     git(work, "commit", "-q", "--allow-empty", "-m", "pushed to a PR, then superseded");
-    const head = git(work, "rev-parse", "HEAD").trim();
-    const calls = join(fx.root, "gh-calls");
-    writeFileSync(join(fx.root, "bin/gh"), `#!/bin/bash
-printf '%s\\n' "$*" >> '${calls}'
-case "$2" in "repos/craigoley/remudero/commits/\${GH_KNOWN:-none}/pulls") echo 1 ;; *) echo 0 ;; esac
-`, { mode: 0o755 });
-    const probe = (known: string) => spawnSync("bash", ["-c", `source '${guard}'; rmd_workspace_published "$1" && echo published || echo "held $RMD_PUB_REASON"`, "_", work],
-      { encoding: "utf8", env: { ...process.env, PATH: `${join(fx.root, "bin")}:${process.env.PATH}`, GH_KNOWN: known } }).stdout.trim();
-    assert.equal(probe(head), "published");
-    assert.equal(probe("0000000000000000000000000000000000000000"), "held not-proven-published");
+    const probe = publicationProbe(fx, work, shim);
+    assert.equal(probe("1"), "published");
+    assert.equal(probe("0"), "held not-proven-published");
     git(work, "remote", "set-url", "origin", bare);
-    rmSync(calls, { force: true });
-    assert.equal(probe(head), "held not-proven-published");
-    assert.equal(existsSync(calls), false, "a non-GitHub origin never asks gh");
-  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+    const asked = shim.calls().length;
+    assert.ok(asked > 0, "the GitHub-origin probes asked gh");
+    assert.equal(probe("1"), "held not-proven-published");
+    assert.equal(shim.calls().length, asked, "a non-GitHub origin never asks gh");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); rmSync(shim.dir, { recursive: true, force: true }); }
 });

@@ -61,11 +61,14 @@ rmd_commit_published() {
     known=$(printf '%s\n' "$RMD_PUB_REFS" | awk '$2 ~ /^refs\/(heads|tags)\// { print $1 "^{commit}" }' |
       rmd_retirement_git "$repo" cat-file --batch-check='%(objectname) %(objecttype)' 2>/dev/null |
       awk '$2 == "commit" { print $1 }' | sort -u) || return 1
-    [ -n "$known" ] || return 1
-    graph=$(printf '%s\n' "$known" | rmd_retirement_git "$repo" rev-list --stdin 2>/dev/null) || return 1
-    RMD_PUB_GRAPH_KEY="$key"; RMD_PUB_GRAPH="$graph"
+    # No locally readable advertised tip (or a failed walk) means local ancestry
+    # cannot prove anything; it must not stop GitHub from proving publication.
+    RMD_PUB_GRAPH_KEY=""; RMD_PUB_GRAPH=""
+    if [ -n "$known" ] && graph=$(printf '%s\n' "$known" | rmd_retirement_git "$repo" rev-list --stdin 2>/dev/null); then
+      RMD_PUB_GRAPH_KEY="$key"; RMD_PUB_GRAPH="$graph"
+    fi
   fi
-  if printf '%s\n' "$RMD_PUB_GRAPH" | awk -v c="$commit" '$0 == c { yes=1 } END { exit !yes }'; then return 0; fi
+  if [ -n "$RMD_PUB_GRAPH_KEY" ] && printf '%s\n' "$RMD_PUB_GRAPH" | awk -v c="$commit" '$0 == c { yes=1 } END { exit !yes }'; then return 0; fi
   if rmd_commit_in_github_pull "$repo" "$commit"; then return 0; fi
   RMD_PUB_REASON="not-proven-published"
   return 1
