@@ -12,12 +12,9 @@
   plan_refs: [W1-T9604, W1-T9436, W1-T6016, W1-T6014]
   files:
     - src/lib/board-projection.ts
-    - test/a-re-derived-task-extends-its-cached-history.test.ts
-  # refusal-amendment (W1-T9716, run DAEMON-1793328098219@749846f3719f93014d1f4c3713d3c00c72af2739, 2026-10-30T05:29:45.248Z): the worker refused criterion 3 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
-  #   worker evidence: Design item 3 requires a measured bound proposal and operator decision; neither is supplied.
-  #   this task is held from dispatch until its record changes; an Architect must make the change above
+    - test/console-api/read-model/a-re-derived-task-extends-its-cached-history.test.ts
   status: queued
-  priority: 2
+  priority: 0.5 # operator 2026-11-03: efficiency and throughput first; serve GC is its top stall frame
   attempts: 0
   rationale: |
     READ at origin/main 6bdb26420 (symbols in src/lib/board-projection.ts):
@@ -46,25 +43,27 @@
     2. Extend, never re-read: a later index reads only `seq > cached AND seq <= upTo` for that task (and its alias
        rows) and merges them by (ts_ms, seq), since a late row can sort before rows held. Run stand-ins are rebuilt
        per index as today unless the builder shows they extend the same way.
-    3. Bounded to hot tasks. The cache keeps the tasks re-derived most recently and evicts by recency. The bound
-       (entries or bytes) is an OPERATOR DECISION; the PR proposes a value from the measured re-derive set and the
-       bytes held, and names it.
+    3. Bounded to hot tasks. The cache keeps the tasks re-derived most recently and evicts by recency. The bound is
+       64 MiB of cached row-body bytes, evicting the least recently re-derived task first (operator ruling 2026-11-03:
+       "64 MiB, LRU"; measured 2026-11-03: about 217 KB of history per task, 986 tasks / 214 MB of bodies, and
+       67 MB re-read per now-view build, so 64 MiB holds about 300 hot tasks). The task_cache counter below lets the
+       fleet resize it from data.
     4. Safety, as W1-T9604: a store whose max seq or digest reads behind the cache drops it; rows stay
        withoutUnreadFields and interned; a reader that mutates a handed-out row gets copies. The board oracle is
        unchanged and audits cache vs uncached (A/A).
     5. Measure: the board stage's step_cache (W1-T9604) gains `task_cache: {hits, extended_rows, full_reads,
        evictions, bytes}` so the fleet reads the saving per build.
-    Tests go in test/a-re-derived-task-extends-its-cached-history.test.ts, titled verbatim as in the proofs, over
+    Tests go in test/console-api/read-model/a-re-derived-task-extends-its-cached-history.test.ts, titled verbatim as in the proofs, over
     createBoardProjection with a real in-memory fact store.
   acceptance:
     - claim: "an extended task bucket equals a fresh full read at the same seq, including alias rows and a late row that sorts before rows held"
-      proof: 'grep: test("W1-T9716: an extended task bucket equals a fresh full read" in test/a-re-derived-task-extends-its-cached-history.test.ts'
+      proof: 'grep: test("W1-T9716: an extended task bucket equals a fresh full read" in test/console-api/read-model/a-re-derived-task-extends-its-cached-history.test.ts'
     - claim: "a task re-derived again reads only its rows past the cached seq"
-      proof: 'grep: test("W1-T9716: a re-derived task reads only its new rows" in test/a-re-derived-task-extends-its-cached-history.test.ts'
+      proof: 'grep: test("W1-T9716: a re-derived task reads only its new rows" in test/console-api/read-model/a-re-derived-task-extends-its-cached-history.test.ts'
     - claim: "the cache holds at most its bound and evicts the least recently re-derived task"
-      proof: 'grep: test("W1-T9716: the task cache evicts the least recently re-derived task at its bound" in test/a-re-derived-task-extends-its-cached-history.test.ts'
+      proof: 'grep: test("W1-T9716: the task cache evicts the least recently re-derived task at its bound" in test/console-api/read-model/a-re-derived-task-extends-its-cached-history.test.ts'
     - claim: "every now-view body over a run of appends is byte-identical with the cache on and off"
-      proof: 'grep: test("W1-T9716: now-view bodies are identical with the task cache on and off" in test/a-re-derived-task-extends-its-cached-history.test.ts'
+      proof: 'grep: test("W1-T9716: now-view bodies are identical with the task cache on and off" in test/console-api/read-model/a-re-derived-task-extends-its-cached-history.test.ts'
   falsifier: |
     On origin/main, count taskFacts rows across two indexes that re-derive the same task, built at seq 1,000 and
     1,010 with 3 new rows for it: the second index reads all of the task's rows again and the second test fails.

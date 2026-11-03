@@ -1,0 +1,39 @@
+- id: W1-T11268
+  title: A synchronous spawn on the daemon's main loop is attributed to the code that made it even when the daemon runs from its single-file bundle, instead of every spawn being charged to read-plane's own callerFrame
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # which stack frame a diagnostic row names; no decision reads it
+  origin: operator-session#review-throughput-2026-11-03
+  plan_refs:
+    - W1-T9577
+  files:
+    - src/lib/read-plane.ts
+    - test/console-api/read-model/a-bundled-sync-spawn-names-its-real-caller.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: callerFrame skips its own frames and read-plane's wrappers by function name as well as by file, so a call stack where every frame's file is one bundle (dist/child-entries/run-task.mjs) names the first frame outside read-plane and the leaf frames, never callerFrame or rawCallSites
+      proof: "unit test: test/console-api/read-model/a-bundled-sync-spawn-names-its-real-caller.test.ts"
+    - claim: read-plane's frame filter names this task
+      proof: "grep: W1-T11268 in src/lib/read-plane.ts"
+  rationale: |
+    OBSERVED 2026-11-03, daemon.loop_stall_profile rows in remudero-daemon, which runs from dist/child-entries/run-task.mjs:
+    - Every sync_spawn_by_caller and sync_spawn_top row names one caller, "at callerFrame (/home/node/Remudero/remudero/dist/child-entries/run-task.mjs:212155:15)" (with 211225 / 211365 / 211359 in other bundles).
+    - The 18:36:32Z stall spent 77,412 ms in 12 synchronous spawns. Its top was execFileSync git -C for 37,899 ms.
+    - The 18:53:18Z stall spent 15,288 ms in 121 synchronous git calls. All were charged to callerFrame.
+    - callerFrame (src/lib/read-plane.ts) skips frames whose text matches /read-plane\.[cm]?[jt]s/ or node:. In the bundle every frame's file is run-task.mjs, so callerFrame's own frame is the first one kept.
+    - The code doing synchronous git work on the daemon's main loop therefore cannot be found from the ledger. The daemon's main loop stalled 2,040 s in 6 h, and the stalls hold reviews and dispositions.
+  design: |
+    - In callerFrame (src/lib/read-plane.ts), also skip a frame whose function name is one of read-plane's own (callerFrame, rawCallSites, siteText, frameName, callerChain, and the spawn wrappers that call callerFrame), whatever its file.
+    - Keep the file test for the unbundled case.
+    - The test builds call sites with a bundle file name for every frame (an injected rawCallSites seam, or a real esbuild bundle of a small fixture).
+    - Mark the filter with a comment naming W1-T11268.
+    NOT IN SCOPE: removing any synchronous spawn; that follows once the rows name their callers.
+  note: |
+    reservation hand-off: run-unfiled-1793737328695 -> run-unfiled-1793737328695
+    Reserved with rmd next-task-id (W1-T11268 on run-unfiled-1793737328695). From the operator session's box CPU/memory diagnosis.

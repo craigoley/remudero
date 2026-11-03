@@ -2,7 +2,7 @@
   title: "A conflict's no-worker resolution runs on the light pass, and conflict rounds are admitted in order of measured blocked cost (conflict age times dependents) — 80 conflict-disposed passes over 18 PRs in 7 days read \"deferred to full sweep (light pass)\", and nothing in the walk or the fix admission ever raises a conflict's priority as it ages or as tasks pile up behind it"
   repo: remudero
   depends_on: []
-  priority: 2
+  priority: 0.7 # operator 2026-11-03: efficiency and throughput first
   type: implement
   verify: auto
   principles:

@@ -1,0 +1,37 @@
+- id: W1-T11267
+  title: The full sweep's fleet-state read takes its reconciliation history through the digest-cached ledger slice reader and reuses a main commit's immutable changed-files read across passes, instead of decompressing every rotation and re-fetching the same commits each full pass
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # how one prelude stage reads ledger history and immutable commit bodies; the rows it reconciles are unchanged
+  origin: operator-session#review-throughput-2026-11-03
+  plan_refs:
+    - W1-T4817
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-fleet-state-read-reuses-its-history-and-commits.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: readFleetState returns the same history rows and the same fleet-state rows as today's whole-union read, a second call over unchanged rotations reads no archive bytes, an unreadable or unclassified rotation still throws "fleet reconciliation history unreadable", and a commit's changed-files body is fetched once per sha per process while run counts are still read every pass
+      proof: "unit test: test/sweep/a-fleet-state-read-reuses-its-history-and-commits.test.ts"
+    - claim: readFleetState's history read is this task's cached slice
+      proof: "grep: W1-T11267 in src/lib/sweep.ts"
+  rationale: |
+    OBSERVED 2026-11-03, 12:45-18:45Z, Azure host, sweep.full_prelude rows:
+    - The fleet_state stage took 3,758, 345, 962, 359 and 888 s across the 5 full passes.
+    - In its fleet_state_parts: union_ms 222,468 / 620,059 / 250,567 over union_rotations 754 / 738 / 717, and commit_read_ms 118,120 / 338,707 / 105,818 for commit_reads 86 each.
+    - readFleetState (src/lib/sweep.ts) calls readLedgerUnionRawLinesAsync over the whole union for five steps (reconcile.repaired, reconcile.repair_failed, reconcile.escalated, main.run_gap.dispatched, deploy.ok) and parses the raw lines. It then walks 15 main commits with GitHub reads, including commits/{sha} for changed files, which never change for a sha.
+    - Green PRs wait on the full pass: 17 sat at awaiting-review for up to 222 min, and each full pass started after a 23-72 min prelude.
+  design: |
+    - Declare a ledger slice for the five steps and read it through a module-level createEscalationTriageHistoryReader held across passes. Keep refuseIncomplete semantics: an unread or unclassified rotation throws the existing error.
+    - Keep a process-wide Map<sha, changed-files> for the commits/{sha} body; run counts (actions/runs, workflow runs) stay uncached.
+    - Mark the change with a comment naming W1-T11267.
+    NOT IN SCOPE: escalation_answers (W1-T11262), other prelude stages, and the workflow-state rules.
+  note: |
+    reservation hand-off: run-unfiled-1793737328695 -> run-unfiled-1793737328695
+    Reserved with rmd next-task-id (W1-T11267 on run-unfiled-1793737328695). From the operator session's review-throughput diagnosis.

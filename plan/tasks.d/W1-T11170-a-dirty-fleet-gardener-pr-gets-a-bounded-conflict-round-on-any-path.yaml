@@ -2,7 +2,7 @@
   title: "A dirty fleet gardener or landing PR, and an operator-session hand branch nobody is holding, gets a bounded conflict round on any path it conflicts on, with take-main or a generator before any worker and only a merge commit on a session branch — #15551 (review-replay-garden, the fleet App) sat blocked-ambiguous for 36.5 h on one recorded fixture because only a PR task's own run- branch is admitted, and W1-T9289's plan round covers plan-scope paths only; #16044 (backlog-garden) sat 22 h on one plan shard with two worker rounds and no deterministic tier; #16236 and #14277 (run-unfiled-*, cao825) were never admitted at all"
   repo: remudero
   depends_on: []
-  priority: 2
+  priority: 0.7 # operator 2026-11-03: efficiency and throughput first
   type: implement
   verify: auto
   principles:
