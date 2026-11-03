@@ -14,14 +14,11 @@
     - W1-T9904
   files:
     - docs/recon/light-pass-review-admission-order-and-width.md
-  # refusal-amendment (W1-T10992, run DAEMON-1793680047510@f5ac3417fd5dec19ece48da1e823c38396fc4ba2, 2026-11-03T10:10:21.866Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
-  #   worker evidence: The original ledger corpus is unavailable, so the uncompressed-rotation count and seven-day completeness cannot be verified.
-  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
     - claim: "The report replays the 7 days of ledger before this task is built. It lists every light-pass review admission made by refillFreedLanes (sweep.review_refilled) whose refillTail was taken from a snapshot older than the moment some other PR became review-eligible, while that PR was older by reviewAdmissionKey and still waiting. Each row gives the admitted PR, its snapshot age, the jumped PR, when the jumped PR became eligible, and the added wait until the jumped PR was admitted (or that it never was)"
-      proof: "demonstration: the operator reads the report and sees one row per jump with those fields, the total count and the added-wait distribution, the newest ledger ts read and the file count per ledger form"
+      proof: "demonstration: the operator reads the report and sees one row per jump with those fields, the total count and the added-wait distribution, and a corpus manifest: the newest ledger ts read, the file count per ledger form, the row count per step read, and the positive control of criterion 3"
     - claim: "The report gives the distribution of the semantic review width per light pass (effectiveReviewWidth, the policySemanticBound before reviewAdmissionBound subtracts reviews in flight), and how often the oldest-first head of the review queue was a PR that cannot merge without a person: a CHANGES_REQUESTED review from a human, or a needs-human escalation already open at that head"
       proof: "demonstration: the operator reads the report and sees the width distribution, the count of passes whose queue head could not merge, and which PRs those were"
     - claim: "The report runs a positive control on the 2026-10-29 case, finding #15538's jump by the refills of #15543, #15551 and #15553, and says where a measure cannot be read from the ledger as written"
@@ -35,6 +32,7 @@
     - 20:44:23Z, 20:53:44Z and 20:54:30Z: "not admitted this pass: semantic post-review admission bound 1". The oldest-first pick was #14793 and then #15133. #14793 is held by a CHANGES_REQUESTED review from a person, and #15133 has a needs-human escalation open at its head (issue 15529). No sweep.review_admitted or sweep.review_refilled row was written fleet-wide from 20:40Z to 21:01:37Z.
     - Positive control: #15547 (created 19:00:40Z) was refilled at 19:43:10.401Z, admitted at 19:43:12.516Z, and its review posted at 19:46:49.518Z.
     INFERRED, not established: refillTail is fixed when its pass starts, so a long-running pass can refill younger PRs past an older PR that became eligible later. A width of 0 to 1, with an unmergeable PR at the head of the queue, can leave every other PR waiting. Three passes on one evening are a small sample (doctrine: recurrence is a class signal), so this task measures before any change.
+    OPERATOR RULING 2026-11-03 (in chat, "agree"): corpus completeness is shown by the report's own manifest, which records the newest ts read, the file count per ledger form, the row count per step read and the positive control. It is never shown by re-reading the original ledger files. Compaction prunes the live file and rotates archives, so no later reader can reopen the exact corpus. A reviewer judges whether the manifest and control are consistent and sufficient, not whether the files can be fetched again.
     Out of scope by operator decision 2026-10-29: the restart latch refusing a pick is not measured here. restartAdmission in src/lib/daemon.ts decides per kind, not per PR, so falling through to the next candidate would be refused too.
   falsifier: |
     If, over the 7 days, refill jumps are rare and add little wait, and the queue head is almost never an unmergeable PR, the 2026-10-29 case was a one-off and the report recommends no change. If the width per pass is not recorded and cannot be reconstructed from stand-down reasons and sweep.review_refilled rows, the report says so and recommends the missing record rather than a behavior change.

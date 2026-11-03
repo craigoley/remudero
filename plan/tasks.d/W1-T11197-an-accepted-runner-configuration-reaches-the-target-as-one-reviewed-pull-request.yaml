@@ -1,0 +1,111 @@
+- id: W1-T11197
+  title: An operator-accepted runner configuration reaches the target only as one add-only pull request that a human reviews and merges
+  repo: remudero
+  depends_on: [W1-T11196]
+  dispatch_hold: true
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30
+  risk: high
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: ["§7B", "§9", W1-T11195, W1-T11196, W1-T10613, W1-T10823]
+  files:
+    - src/lib/product-target-config.ts
+    - src/lib/product-routes.ts
+    - src/lib/serve.ts
+    - src/lib/authority.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/infra/product-runner-config-proposal.test.ts
+    - test/console-api/serve/product-routes.test.ts
+    - test/route-wiring.test.ts
+    - test/console-token-refresh.test.ts
+  status: queued
+  attempts: 0
+  rationale: >-
+    After W1-T11196 the operator can inspect the exact bytes. The supported first-run bootstrap
+    still needs one action that turns that acceptance into a reviewable target change without
+    silent mutation, a hand-push or overwriting existing configuration. Once a human merges it,
+    the existing plan operation passes W1-T11195's preflight with no other change.
+    Settled by lookup: is this already filed or already decided? -> not filed (plan/tasks.d,
+    MASTER-PLAN.md, DECISIONS.md, LEARNINGS.md). Settled by lookup: is there a maintained REST
+    PR-create path to reuse? -> yes. src/lib/plan-pr-emitter.ts builds the
+    `gh api --method POST repos/{owner}/{repo}/pulls` argv and gate-clean bodies.
+    src/lib/main-health-rung.ts shows the git/refs create pattern. No new launcher, credential or
+    service is needed. Settled by lookup: how does the product flow already judge a reviewed
+    target-repository change? -> product-build.ts's bootstrap read. That takes a merged PR into the
+    default branch, the latest per-reviewer verdict with APPROVED and no CHANGES_REQUESTED, and
+    checks the exact head. Reuse that rule rather than inventing a second one. Settled by lookup:
+    must a new served high-tier product mutation register its authority row, contract,
+    route-wiring and token-refresh inventory? -> yes. W1-T10613's hosted PR14383/PR14208 refusals
+    required all four. Settled by lookup: is there open-head overlap? -> none by title among the
+    19 open PRs on 2026-11-03. Refresh the head-tree audit at filing review.
+  design: |
+    Add proposeRunnerConfigBootstrap to src/lib/product-target-config.ts and route it from the
+    existing product route builder. It is a high-tier, action-bound, verified-owner served
+    operation using the same authentication, nonce and admission gate as W1-T10613's repository
+    operation.
+    The command is: version, requestId, productId, expectedRevision, expectedObjectiveRevision,
+    targetHead and configDigest. configDigest is the digest the operator accepted from the
+    preview. The command never carries bytes or paths.
+    Immediately before acting, recompute the preview. Refuse with a distinct code in each case:
+    - stale_preview: the digest or head no longer matches.
+    - runner_config_present: the path now exists. Never overwrite or modify an existing file.
+    - repository_conflict: the identity does not match.
+    - source_unavailable: the source table is missing or invalid.
+    Persist a private journal record keyed by product, head and digest before the first GitHub
+    write.
+    Then use the existing gh transport:
+    (a) Create branch remudero/runner-config-<head12>-<digest12> at exactly targetHead.
+    (b) Create only `.remudero/mounts.yaml` on that branch with a contents PUT that carries no
+        blob sha. GitHub then refuses an existing path, so the add-only guarantee is enforced
+        server-side too.
+    (c) Open one PR to the default branch. Its body names the provenance, source commit, digest
+        and the fact that it needs human review.
+    Never push to the default branch, merge, approve, change protection, touch any other path or
+    delete anything as compensation. A lost response reconciles by reading the exact branch ref,
+    its single-file diff against targetHead and the PR for that head before any retry. An
+    unreadable outcome stays outcome_unknown, and a foreign branch with the same name refuses.
+    Repeated or reloaded commands return the same proposal. Record one product stageEvidence item
+    with the PR URL as `proposed`. On read or replay, report open, merged (APPROVED, merged into
+    the default branch, identical bytes at the merge head, via the reused product-build rule) or
+    closed-unmerged. A closed-unmerged proposal lets the operator re-preview and propose again
+    under a new requestId.
+    Declare the operation, command, states and failures in openapi/daemon.yaml. Regenerate
+    packages/api-client/src/schema.d.ts. Name the operation and its exact target-PR boundary in
+    src/lib/authority.ts. Register the route in test/route-wiring.test.ts and the high-tier
+    inventory in test/console-token-refresh.test.ts. Preserve the zero-missing authority
+    baseline.
+    Tests run a controlled gh executable over the real default transport. Cover: a lost create
+    response, concurrent duplicates and restart, an existing path, a stale digest, a moved head,
+    a foreign branch, a closed-unmerged PR, an unapproved merge, and a byte-drifted merge.
+    Assert that no default-branch write or merge call ever occurs. Confirm test placement with
+    rmd test-place.
+    Out of scope: Console UI source (filed in the Console plan after this contract merges),
+    other target files, workflows, protection, the live Wreckterra proposal and plan run, hold
+    releases, budgets and access.
+  acceptance:
+    - claim: an accepted digest opens exactly one single-file add-only pull request at the exact head, reconciles lost responses and restarts without a second branch or PR, and refuses present, stale, moved and foreign states
+      proof: "unit test: test/infra/product-runner-config-proposal.test.ts"
+    - claim: the production product route invokes the proposal operation
+      proof: "grep: proposeRunnerConfigBootstrap( in src/lib/product-routes.ts"
+    - claim: the served proposal matches its authenticated high-tier public contract
+      proof: "unit test: test/console-api/serve/product-routes.test.ts"
+    - claim: the proposal operation and its target pull-request boundary are named in the authority census
+      proof: "grep: proposeRunnerConfigBootstrap in src/lib/authority.ts"
+  falsifier: |
+    Remove the journal-before-write. The lost-response fixture must then observe a second branch
+    or PR, and fail. Drop the existing-path refusal. The preserve-existing fixture must fail. Accept
+    a merge without APPROVED, or with drifted bytes, as accepted. Those fixtures must fail. Record
+    real nonzero summaries per mutant and for the restored code. No fixture is a live Wreckterra
+    PR, plan, build, deployment or device receipt.
+  note: >-
+    Held until W1-T11196 merges, then ordinary filing review, hosted checks, protected merge and
+    explicit operator release. After release, the operator still previews, accepts, reviews and
+    merges the Wreckterra configuration PR by hand. Only then is the saved signed-in Console plan
+    command retried. A retry is a separate operator act with its own receipt, and this task
+    grants none. Keep original IP, mobile-first, OSM attribution and the existing-setup/USD30
+    envelope. There is no source hand-push, gate bypass or new paid service.
