@@ -160,8 +160,9 @@ test("W1-T2591: the enforced list is threaded to the SDK, not merely passed at t
   // hands it to the SDK changed NO test. That is the #339/W1-T281 class: a proof that reads one
   // end of a wire passes on an entirely unbuilt one.
   const worker = readFileSync(join(REPO_ROOT, "src", "lib", "worker.ts"), "utf8");
-  const decl = /\n(?:export )?(?:async )?function spawnWorker/.exec(worker);
-  assert.ok(decl, "control: a declaration of spawnWorker must exist");
+  // `spawnWorker` is a thin attempt-evidence wrapper; the SDK options are built in `spawnWorkerImpl`.
+  const decl = /\n(?:export )?(?:async )?function spawnWorkerImpl\b/.exec(worker);
+  assert.ok(decl, "control: a declaration of spawnWorkerImpl (the SDK-options builder behind spawnWorker) must exist");
   const start = decl!.index + 1;
   const nextFn = [...worker.slice(start + 1).matchAll(/\n(?:export )?(?:async )?function /g)].map((m) => start + 1 + m.index);
   const body = worker.slice(start, nextFn.length ? Math.min(...nextFn) : worker.length);

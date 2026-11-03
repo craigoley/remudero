@@ -6,7 +6,12 @@
   verify: auto
   risk: low
   priority: 3.36
-  status: queued
+  status: blocked
+  retirement: retired
+  # coordinator 2026-11-03 (operator session brief: "cite W1-T10233 and supersede it if it fits"): retired as superseded.
+  # Its 40 measurement_cadence.run_failed rows since 2026-10-25 have three causes: 31 child heap aborts (W1-T11178), 8
+  # plan-reconcile landing refusals (W1-T11175) and 1 proposal-registry lock timeout (W1-T9240).
+  superseded_by: W1-T11178
   attempts: 0
   author_class: machine
   origin: "scout:measurement_cadence.run_failed"

@@ -1,0 +1,79 @@
+- id: W1-T11149
+  title: "The review lane's CPU bound counts only reviews in their CPU phases (setup and proofs); a review waiting on its LLM judge holds a provider slot instead — 57% of code-review lane time (53.6 of 94.6 h a week) is the LLM judge, which does not slow under CPU pressure, yet it holds one of the CPU-shed width's lanes, so at width 1 a 3-minute judge call blocks every other review's proofs"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, which phase of a review the CPU bound counts; it spans the review that reports its phase, the child host that relays it, and the bound that reads it
+  band_meaning: span
+  origin: operator-session#review-lane-findings-2026-11-02
+  plan_refs:
+    - W1-T5931
+    - W1-T9114
+    - W1-T2853
+    - W1-T2987
+  files:
+    - src/cli/commands/review.ts
+    - src/run-task.ts
+    - src/lib/run-child.ts
+    - src/lib/sweep.ts
+    - src/lib/review-capacity.ts
+    - test/review/the-cpu-bound-counts-only-reviews-running-their-proofs.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A review reports its phase as it runs (setup, proofs, judge, posting), in process and as a run child (the child writes it to its owned status.json through the existing onPhase seam, and the daemon's child registry reads it back), and reviewAdmissionBound counts against the CPU-shed width only the reviews in setup or proofs; a review whose phase is unread counts there, as every review does today
+      proof: "unit test: test/review/the-cpu-bound-counts-only-reviews-running-their-proofs.test.ts"
+    - claim: Reviews in their judge or posting phase count against a provider-capacity bound instead, which starts at the judge concurrency the provider has sustained without a refusal in the ledger's review.reviewer rows, grows by one per refusal-free settlement, halves on a fresh provider refusal or 429, and holds its last value while provider telemetry is unreadable; a new review is admitted while the CPU bound has room and all reviews in flight are under the provider bound, so a review reaching its judge phase always holds a provider slot and never waits there
+      proof: "grep: W1-T11149 criterion 2 in test/review/the-cpu-bound-counts-only-reviews-running-their-proofs.test.ts"
+    - claim: Each review.capacity row records the CPU-phase and judge-phase in-flight counts and the provider bound beside the effective width, so the gate's split is measurable from the ledger
+      proof: "grep: W1-T11149 criterion 3 in test/review/the-cpu-bound-counts-only-reviews-running-their-proofs.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 over a 7-day ledger union of review runs (~/Remudero-notes/review-lane-findings-2026-11-02.md, read-only):
+    - Code reviews (n=732): median 379 s, 94.6 lane-hours. Proofs took 22.3 h (24%) and ran 44% slower under CPU PSI full >= 20.
+      The LLM judge took 53.6 h (57%), median 190 s, max 62 min, and did NOT slow under CPU pressure.
+    - Review width was 1 for 64% of the week and 75% of the last 24 h (mean 1.49). Core CPU PSI full median was 29% in the last 24 h;
+      all 78 cpu-pressure rows were attributed to host-load.
+    - For 51% of code-PR waiting time no code review was running at all; today's code wait was median 189 min, p90 375 min.
+    READ at origin/main 1368db581:
+    - reviewAdmissionBound (src/lib/sweep.ts, `bound = max(0, width - inFlight)`) counts lightPassSpawningReservations +
+      fullPassReviewsInFlight + childWorkCount("review"). A child's slot is held from registerChildWork to settleChildWork,
+      whatever the child is doing.
+    - runReview (src/cli/commands/review.ts) runs the proofs (`preparedDecision.judge(proofEvidence)`) and then the reviewer spawn,
+      in that order, so the CPU-heavy part ends before the LLM call starts.
+    - run-child-main.ts already gives detached work an `onPhase` that writes the phase to the owned status.json; fix dispatch uses it
+      (admission, worker, ci-wait), a review does not.
+    - review-capacity.ts already reads the provider's routing status (reviewProviderObservation: headroom, reserve, fresh refusal).
+    Operator ruling Q2 (2026-11-02, in chat): do NOT raise sweep.reviewLanes.min 1 -> 2 (a fixed floor); do the durable fix, a
+    proof-only CPU gate plus a self-checking shed. This task is the proof-only gate. The self-checking shed is W1-T11150.
+    NOT COVERED: W1-T11129 (#16251, open) replaces the fixed cpuPsiHighPct line with a CPU arm learned from cgroup cpu.stat; it
+    changes how wide the CPU bound is, not which reviews it counts, and this task reads whatever width it yields.
+    W1-T9114 (merged) moved reviews into run children. Item 1 of the findings (cheap plan reviews never wait behind the CPU bound)
+    is being hand-built in the operator session and covers plan-only reviews; this task covers the judge phase of code reviews.
+  design: |
+    1. Phase reporting. runReview takes an optional onPhase and calls it at setup start, proofs start, judge start (just before the
+       reviewer spawn) and posting start. runDetachedWork's review arm (src/run-task.ts) passes its ctx.onPhase through. The
+       in-process paths (light-pass reservation, full-pass in-flight) pass a callback that updates their own record.
+    2. Phase relay. The child registry (ChildWorkRegistration in src/lib/sweep.ts) gains the review's last read phase, refreshed from
+       status.json by the watch spawnRunChild already keeps (src/lib/run-child.ts). An unread or unknown phase is "setup".
+    3. Two bounds. reviewAdmissionBound(width) returns the CPU bound over setup+proofs reviews only. A second bound, the provider
+       bound, covers judge+posting reviews: additive increase on each refusal-free settlement, multiplicative decrease on a fresh
+       refusal or 429 (reviewProviderObservation), seeded from the highest judge concurrency the ledger shows sustained without a
+       refusal. No constant: with no history it starts at the CPU width it replaces. A new review is admitted while the CPU bound
+       has room AND the reviews in flight in every phase are under the provider bound, so one that reaches its judge phase already
+       holds a provider slot; nothing in the child waits on the parent.
+    4. Memory is unchanged: a review child still passes memory admission (reserveRunChild) before it spawns, and holds its
+       reservation for its whole life.
+    5. The review.capacity row gains cpu_phase_in_flight, judge_phase_in_flight and provider_bound.
+    Tests go in test/review/the-cpu-bound-counts-only-reviews-running-their-proofs.test.ts, titled verbatim as in the proofs, over
+    the real registry and bound with an injected phase reader and provider observation.
+  note: |
+    reservation hand-off: plan-file-1793657964812 -> plan-file-1793657964812
+    Reserved with rmd next-task-id --branch plan-file-1793657964812 from the operator checkout. Filed 2026-11-02 from the review-lane
+    findings, item 2 (p1), under operator ruling Q2. Ordering: build after W1-T11129 (#16251) merges if it is still open, since both
+    edit src/lib/review-capacity.ts; it is not named in depends_on because it is not on main at filing. W1-T11150 edits the same
+    module and should not be built in parallel with this one. This filing also withdraws the flow gardener's review_queue_wait
+    regression tasks W1-T10316, W1-T10536 and W1-T11005, superseded by this root-cause task.

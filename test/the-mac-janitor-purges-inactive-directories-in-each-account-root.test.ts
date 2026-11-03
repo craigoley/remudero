@@ -114,7 +114,7 @@ test("each Mac account's default operator-worktrees root retains young, active a
   }
 });
 
-test("unversioned source, reports, history, credentials and dependency seeds survive regardless of age", () => {
+test("unversioned source, reports, history, credentials and dependency seeds survive a recent idle period", () => {
   const fx = setup();
   try {
     const base = roots(fx)[3]!;

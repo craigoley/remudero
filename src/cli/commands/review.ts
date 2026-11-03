@@ -3,7 +3,7 @@ import type { GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure, type CensusChildResult } from "./run-task-verb.js";
 import { buildBaseProofDir, hostWorktreeGitAtTopLevel } from "../../lib/check-proof.js";
 import { execFileSync, spawn } from "node:child_process";
-import { currentReviewSignal, withheldReviewRefusalRow } from "../../lib/sweep.js";
+import { checksStateFromRollup, currentReviewSignal, withheldReviewRefusalRow } from "../../lib/sweep.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -14,10 +14,12 @@ import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/compo
 import { SPECIALIST_TOOLS } from "../../lib/specialist-panel.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, reviewerHealthRowFields, reviewerShadowStep } from "../../lib/reviewer-health.js";
 import { withTempDir } from "../../lib/tmp.js";
+import { systemClock } from "../../lib/clock.js";
 import { reapWorkerScratch } from "../../lib/worker-scratch.js";
 import { resolveInstallRoot } from "../../lib/install-root.js";
 import { escalate, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
-import { combinedStatusRestArgs, mapRestPr, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
+import { combinedStatusRestArgs, mapRestPr, rollupForAsync, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
+import { ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger } from "../../lib/ledger.js";
 import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
 import { classifyReviewOutcome, recordedReviewVerdictLines, reviewReplayLedgerFields, type ReviewReplayInput, type ReviewOutcomeDecision } from "../../lib/review-outcome-class.js";
@@ -32,7 +34,7 @@ import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-ju
 import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
-import { readLedgerLines } from "../../lib/status.js";
+import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
 import { isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
@@ -49,7 +51,7 @@ import { asOwnerRepoUnresolvable } from "../../lib/owner-repo.js";
 import { flagValue } from "../../lib/cli-args.js";
 import { resolveReviewTarget, reviewTaskIdFromBody, reviewPrNumber, reviewViewArgs } from "../../lib/report-commands.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "../../lib/staged-install.js";
-import { UNTASKED_REVIEW_BUDGET_USD, isPlanOnlyFilingPr, resolveReviewTaskId, usesUntaskedReviewMetadata } from "../../lib/tick-read-worker.js";
+import { UNTASKED_REVIEW_BUDGET_USD, isPlanOnlyFilingPr, resolveReviewTaskId, reviewStateFromRollup, usesUntaskedReviewMetadata } from "../../lib/tick-read-worker.js";
 
 export interface ReviewCommandHost {
   readonly GIT_UNTRACKED_FILES_ALL: string;
@@ -385,6 +387,20 @@ export function reappendLostReviewPosted(
  * floor still posts, fail-closed.
  */
 
+/** W1-T11163 — this head's required checks green (branch protection's own list) and its review success, read fresh. */
+export async function readChecksGreenReviewedAtHead(
+  owner: string,
+  repo: string,
+  headSha: string,
+  readJson: (args: string[]) => unknown = ghJsonAsync,
+  readText: (args: string[]) => Promise<string> = ghTextAsync,
+): Promise<boolean> {
+  const required = await readRequiredStatusCheckContextsAsync(owner, repo, "main", readText);
+  if (required.kind !== "contexts") return false;
+  const rollup = await rollupForAsync(owner, repo, headSha, readJson);
+  return checksStateFromRollup(rollup, required.contexts) === "green" && reviewStateFromRollup(rollup) === "success";
+}
+
 export async function runReview(host: ReviewCommandHost, args: {
   owner: string;
   repo: string;
@@ -489,6 +505,8 @@ export async function runReview(host: ReviewCommandHost, args: {
    * to tell why. Absent when materialization was never attempted at all.
    */
   materializationFailure?: MaterializationFailure;
+  /** W1-T11162: how long the caller's head and base trees took, for a plan-only review's phase row. */
+  materializeMs?: number;
   /**
    * Injectable auto-merge withdrawal (impl-BF). Default: the real
    * {@link disarmAutoMerge}. Exists so a unit test can assert the withdrawal is
@@ -543,6 +561,7 @@ export async function runReview(host: ReviewCommandHost, args: {
    * isolated status-poster contract. */
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
 }): Promise<ReviewRunResult> {
+  const phases: Record<string, number> = { started: systemClock.now() };
   const { attributeWorkerStreamEvent, ledgeredNonDispatchSpawn, lintPlanForReview, readHeadShaRest, reviewPostedDescription } = host;
   const { owner, repo, prUrl, task, report, log, say } = args;
   const laneSignal = currentReviewSignal();
@@ -624,7 +643,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   // W1-T3093: `gh pr diff` is refused above 300 files; only that size case falls back to a local comparison.
   // Both reads awaited and bounded (MEASURED 2026-10-06: the sync read held the daemon loop); a read killed at its
   // bound is a named refusal below, never a hang.
+  phases.diffStart = systemClock.now();
   const diffOutcome = await fetchPrDiff(prUrl, headSha, prDiffSourceAsync(repoRoot));
+  phases.diff = systemClock.now();
   if (diffOutcome.kind === "refused") {
     replayInput = { ...replayInput, publication_refusal: "diff-unreadable" };
     recordReplay(classifyReviewOutcome(replayInput));
@@ -661,6 +682,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
   });
+  phases.decision = systemClock.now();
   if (decisionClaim.kind === "replay") {
     return {
       ...decisionClaim.terminal.verdict, headSha,
@@ -969,8 +991,10 @@ export async function runReview(host: ReviewCommandHost, args: {
   // gate observes repo state whether or not the advisory reviewer above ever
   // completed.
   // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
+  phases.lintStart = systemClock.now();
   const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir,
     undefined, undefined, { signal, log }) : undefined;
+  phases.lint = systemClock.now();
   const computed = await preparedDecision.judge({
     ...proofEvidence, planLint, semantic, semanticClauses,
     diff, report,
@@ -980,6 +1004,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     taskDeclaredFiles: task.files,
     openTaskIds: args.openTaskIds,
   });
+  phases.judge = systemClock.now();
 
   // W1-T359: ADVISORY rubric layer — invoked AFTER `computed` above, over the
   // SAME `diff`/`report` the binding verdict just judged, and consulted by
@@ -1128,6 +1153,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   if (reviewerCodeFreshness !== undefined && reviewerCodeFreshness.status !== "unreadable") {
     replayReviewerCodeSha = reviewerCodeFreshness.codeSha;
   }
+  phases.postStart = systemClock.now();
   const posted = await postReviewStatusGuarded({
     owner,
     repo,
@@ -1147,6 +1173,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     reviewerCodeFreshness,
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
   });
+  phases.post = systemClock.now();
   if (posted.conflict) {
     decisionDisposition = "conflict";
     verdict = {
@@ -1322,13 +1349,16 @@ export async function runReview(host: ReviewCommandHost, args: {
   //
   // The gate still does real work: `armAutoMerge` re-reads the PR's CURRENT head and refuses a push
   // that landed after this verdict. No `posted.posted` guard is needed: that branch already returned.
+  phases.armStart = systemClock.now();
   reappendLostReviewPosted({ ledgerPath: args.ledgerPath, runId: args.runId, headSha, decisionDigest, prUrl,
     row: reviewPostedRow, log, say });
-  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
+  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log,
+    readChecksGreenReviewed: (_url: string, head: string) => readChecksGreenReviewedAtHead(owner, repo, head) };
   // W1-T9549: AWAITED. The daemon runs this review (`trackInFlightReview`), so the arm's gh and git leave its loop free.
   await armIfVerdictPermitsAsync(verdict, armCtx, { arm: args.arm });
   // Record after both authoritative posting and auto-merge eligibility. The recorder
   // swallows telemetry write failures; replay returns above before reaching this call.
+  if (planOnlySkip) log("review.plan_only_phases", { head_sha: headSha, ...planOnlyPhaseFields(phases, systemClock.now(), args.materializeMs) });
   recordReviewFindings(findingCapture, { taskId: task.id, prUrl, headSha, decisionDigest,
     provenance: evaluatorProvenance, log });
   if (verdict.capped) {
@@ -2103,6 +2133,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
   // never silently, and (W1-T233) the console line below now NAMES why,
   // instead of a bare "unavailable" with the real reason thrown away.
+  const materializeStartedMs = systemClock.now();
   const materialized = materialize(config, subjectRepoDir, view.number, view.headRefOid);
   if (materialized.worktreePath === undefined) {
     console.log(
@@ -2120,6 +2151,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // stays inert, exactly as it was for its first 1,180 verdicts). W1-T460's `baseUnreadablePaths`
   // rides along: a per-proof fact the dir alone cannot carry.
   const baseProof = worktreePath ? buildBaseProof(criteria, worktreePath) : undefined;
+  const materializeMs = systemClock.now() - materializeStartedMs;
 
   // W1-T185 (Gap 2, criterion 6): withMaterializedWorktree guarantees teardown
   // on EVERY exit path, including a throw from runReview itself — never just
@@ -2176,6 +2208,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           // never attempted at all) — carried onto the posted CAPPED description
           // and the review.posted ledger line's degraded_reason fields.
           materializationFailure: materialized.failure,
+          materializeMs,
           ledgerPath,
           runId,
           openTaskIds,
@@ -2303,4 +2336,15 @@ export async function whileWorkerRunLive<T>(host: ReviewCommandHost, runId: stri
     liveWorkerRunIds.delete(runId);
     held?.release();
   }
+}
+
+/** W1-T11162 — a plan-only review's own phases, in milliseconds, from the marks {@link runReview} takes. */
+export function planOnlyPhaseFields(marks: Record<string, number>, armedAt: number, materializeMs?: number): Record<string, number> {
+  const span = (from: string, to: string): number => Math.max(0, (marks[to] ?? marks[from] ?? 0) - (marks[from] ?? 0));
+  return {
+    ...(materializeMs === undefined ? {} : { materialize_ms: materializeMs }),
+    diff_ms: span("diffStart", "diff"), decision_ms: span("diff", "decision"), lint_ms: span("lintStart", "lint"),
+    judge_ms: span("lint", "judge"), post_ms: span("postStart", "post"),
+    arm_ms: Math.max(0, armedAt - (marks.armStart ?? armedAt)), total_ms: Math.max(0, armedAt - (marks.started ?? armedAt)),
+  };
 }
