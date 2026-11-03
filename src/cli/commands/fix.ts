@@ -19,7 +19,7 @@ import { isPrMergedNow, mergeTargetFromPrUrl } from "../../lib/arm-auto-merge.js
 import { ciFailureLedgerEntry } from "../../lib/ci-friction-gardener.js";
 import { conflictedFilePaths } from "../../lib/hot-file-gardener.js";
 import { billingMode } from "../../lib/env.js";
-import { FIX_MODE_RULES, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
+import { FIX_MODE_RULES, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, sameHeadReviewUnmet, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
 import { bakedClosureCatalogDetails } from "../../lib/baked-closure-catalog.js";
 import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalation, taskContractRevision, taskSemanticRevision, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
 import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, type GhApiFetcher } from "../../lib/open-prs-rest.js";
@@ -3914,6 +3914,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // construction, never a special case. Read again after the push below (`currentCiFailures`,
     // refreshed by `deps.fetchCiFailures`) to see whether the strike that just ran moved anything.
     const priorCiFailures = currentMergeConflict === undefined && noReviewYet ? currentCiFailures ?? [] : undefined;
+    const sameHeadUnmet = currentMergeConflict === undefined && noReviewYet
+      ? sameHeadReviewUnmet(roundLedger, opts.prUrl, priorHeadSha, opts.task.acceptance) : [];
     const evidenceBase: FixEvidence =
       currentMergeConflict !== undefined
         ? { mergeConflict: currentMergeConflict, constraint: progressConstraint() }
@@ -3928,7 +3930,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           // through to a review-shaped mode despite `noReviewYet` being true, the
           // exact regression `runFixRung`'s own "fetchCiFailures is optional" test
           // (below) locks against.
-          { ciFailures: ciFailurePromptEvidence(currentCiFailures ?? []), constraint: progressConstraint() }
+          { ciFailures: ciFailurePromptEvidence(currentCiFailures ?? []), constraint: progressConstraint(),
+            ...(sameHeadUnmet.length > 0 ? { review: { unmetCriteria: sameHeadUnmet,
+              summary: reviewSummaryFromLedger(roundLedger, opts.taskId, opts.prUrl, priorHeadSha) ?? "",
+              findings: verifiedReviewFindingsForFix(roundLedger, opts.taskId, opts.prUrl, priorHeadSha) } } : {}) }
         : // W1-T2236: `gateFailuresNow` — computed above, alongside the guard this evidence
           // shape already passed — is this round's structured gate-failure remedy (undefined for
           // a ci-log/merge-conflict round, which never reaches this branch anyway). Carried
@@ -4477,6 +4482,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
         unmet_claims: unmet.map((criterion) => criterion.claim),
+        ...(sameHeadUnmet.length > 0 ? { same_head_review_unmet: sameHeadUnmet.length } : {}),
         // The progress judge compares these across rounds: a FIXED round followed by the same
         // reviewer-side output is a reviewer-only failure, not a worker that needs another try.
         ...(reviewerProofFailures(unmet).length > 0 ? { reviewer_proof_failures: reviewerProofFailures(unmet) } : {}),
