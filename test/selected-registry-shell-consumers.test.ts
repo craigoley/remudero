@@ -773,7 +773,63 @@ test("selected shell qualification does not disclose private inputs", async t =>
   assert.ok(!publicBytes.includes("binding_digest="), "a digest grants no public publication field");
 });
 
+function qualifyPackageTransports(t: { after(fn: () => void): void }, shell: string,
+  shellEnv: NodeJS.ProcessEnv, failure: string, existing?: ReturnType<typeof registryShellFixture>) {
+  const pin = readFileSync(join(REPO_ROOT, ".nvmrc"), "utf8").trim().replace(/^v/, "");
+  const f = existing ?? registryShellFixture(t);
+  const source = join(f.root, "nodesource.sources"), node = join(f.root, "transports/node");
+  assert.equal(f.env.RMD_NODESOURCE_PATH, source, "NodeSource must be bound before any installer runs");
+  assert.equal(existsSync(source), true, "the bound NodeSource input is disposable fixture data");
+  for (const bin of ["apt-get", "apt-cache"]) {
+    assert.equal(existsSync(join(f.root, "transports", bin)), true, `${bin} must never fall through to the host`);
+    const guard = f.run("-c", [`${bin} --fixture-guard`]);
+    assert.equal(guard.status, 97, guard.stderr);
+    assert.ok(f.receipts().some(c => c.bin === bin && c.args[0] === "--fixture-guard"));
+  }
+  // Only version discovery is simulated; all observer/CLI calls still execute real Node.
+  writeFileSync(node, `#!/bin/sh
+if [ "\${1:-}" = --version ]; then printf '%s\\n' v0.0.0; exit 0; fi
+exec '${process.execPath.replaceAll("'", "'\\''")}' "$@"
+`, { mode: 0o700 });
+  Object.assign(f.env, shellEnv, { RMD_HOST_NODE_PATH: node,
+    FIXTURE_APT_RECORD: "1", FIXTURE_APT_FAIL: failure, FIXTURE_NODE_PIN: pin });
+  f.capture();
+  const outcomes = [];
+  for (const shadow of existing ? [true] : [false, true]) {
+    writeFileSync(source, "URIs: https://deb.nodesource.com/node_0.x\n");
+    const offset = f.receipts().length;
+    const installed = f.run(join(REPO_ROOT, "deploy/install-host-units.sh"),
+      ["--install", ...(shadow ? ["--selected-registry-shadow", f.session] : [])], {}, shell);
+    assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+    assert.equal(readFileSync(source, "utf8"), `URIs: https://deb.nodesource.com/node_${pin.split(".")[0]}.x\n`,
+      "managed source rewrites stay inside the fixture");
+    const apt = f.receipts().slice(offset).filter(c => ["apt-get", "apt-cache"].includes(c.bin))
+      .map(({ bin, args }) => ({ bin, args }));
+    const expected = [{ bin: "apt-get", args: ["update"] }];
+    if (failure !== "update") expected.push({ bin: "apt-cache", args: ["madison", "nodejs"] });
+    if (!["update", "madison"].includes(failure)) {
+      expected.push({ bin: "apt-get", args: ["install", "-y", `nodejs=${pin}-1nodesource1`] });
+    }
+    assert.deepEqual(apt, expected, `${shell}: ${failure} has exact recording package receipts`);
+    if (failure === "none") assert.match(installed.stdout, /install returned success but node is still 0\.0\.0/);
+    else assert.match(installed.stdout, new RegExp(`apt-${failure === "madison" ? "cache madison" : `get ${failure}`} failed`));
+    outcomes.push(installed.stdout.split("\n").filter(line => line.startsWith("host-node:")));
+  }
+  if (!existing) assert.deepEqual(outcomes[1], outcomes[0], "shadow qualification preserves the actual legacy apt outcome");
+  assert.ok(f.rows().some(row => row.action === "install"), "the default observer really executed");
+}
+
+test("selected shell installer package failures use disposable recording transports", t => {
+  const historical = bash32(t);
+  for (const shell of ["bash", historical.shell]) {
+    for (const failure of ["none", "update", "madison", "install"]) {
+      qualifyPackageTransports(t, shell, historical.env, failure);
+    }
+  }
+});
+
 test("selected shell defaults and failures remain shadow only without live effects", async t => {
+  const historical = bash32(t);
   const absent = fixture(t);
   const absentPin = await capture(absent.session);
   assert.equal(await observe(absent.session, absentPin, "install"), 0);
@@ -793,8 +849,13 @@ test("selected shell defaults and failures remain shadow only without live effec
   assert.doesNotMatch(errors[0]!, /selected-private\.yaml|session\.json|relative-invalid-path/);
   for (const failure of ["sink", "session", "observer"] as const) {
     const f = registryShellFixture(t);
-    f.capture();
-    assert.equal(f.install().status, 0);
+    if (failure !== "sink") {
+      f.capture();
+      assert.equal(f.install().status, 0);
+    } else {
+      qualifyPackageTransports(t, historical.shell, historical.env, "none", f);
+      rmSync(join(f.root, "transports/node"));
+    }
     if (failure === "sink") {
       rmSync(f.session + ".observations");
       symlinkSync(join(f.root, "never-written"), f.session + ".observations");
