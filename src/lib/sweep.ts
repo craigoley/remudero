@@ -9458,6 +9458,7 @@ export interface KnownMergeState {
    *  flapping read is legible rather than a silent override (W1-T4470 design (iv)). */
   observedAt?: string;
   conflictFiles?: ConflictFileDiff[];
+  mainSha?: string;
 }
 
 export function conflictEvidenceRowFields(
@@ -9503,16 +9504,21 @@ export function lastKnownMergeStateFromLedger(
     if (state !== "clean" && state !== "dirty" && state !== "behind") continue;
     // Ledger lines are append-ordered — the LAST match for this exact head is its most recent.
     const conflictFiles = state === "dirty" ? conflictFilesFromRow(line.conflict_files) : undefined;
-    out = { state, ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}), ...(conflictFiles ? { conflictFiles } : {}) };
+    out = { state, ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}), ...(conflictFiles ? { conflictFiles } : {}),
+      ...(typeof line.merge_main_sha === "string" ? { mainSha: line.merge_main_sha } : {}) };
   }
   return out;
+}
+
+export function mergeInheritanceRefused(known: KnownMergeState | undefined, mainTipSha: string | undefined): boolean {
+  return known !== undefined && known.state !== "dirty" && mainTipSha !== undefined && known.mainSha !== mainTipSha;
 }
 
 /**
  * W1-T4470 — APPLY THE HYSTERESIS ABOVE TO ONE PR VIEW. A `mergeState` this pass ACTUALLY OBSERVED
  * is NEVER overridden — a fresh `dirty`/`clean`/`behind` read is always the truth, however it
  * disagrees with history. Only a genuinely `undefined` read (GitHub had not computed mergeability
- * this pass) may inherit, and only when a prior pass proved a state for this EXACT head. Returns the
+ * this pass) may inherit, only from this EXACT head, and a clean/behind only from this pass's main (W1-T11166). Returns the
  * SAME `pr` object when nothing changes, so an unaffected PR costs nothing downstream. The returned
  * `pr` is used for EVERYTHING the rest of this PR's reconciliation reads — disposition, the
  * zero-check-run remedies, and the ledgered `sweep.disposed` row itself — so the inheritance is not
@@ -9521,11 +9527,13 @@ export function lastKnownMergeStateFromLedger(
 export function withInheritedMergeState(
   pr: OpenPrView,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
-): { pr: OpenPrView; inherited?: KnownMergeState } {
+  mainTipSha?: string,
+): { pr: OpenPrView; inherited?: KnownMergeState; refused?: KnownMergeState } {
   const captured = hasCapturedMergeConflictEvidence(pr.mergeConflict);
   if (pr.mergeState !== undefined && (pr.mergeState !== "dirty" || captured)) return { pr };
   const known = lastKnownMergeStateFromLedger(ledgerLines, pr.prNumber, pr.headSha);
-  const inherited = pr.mergeState === undefined ? known : undefined;
+  const refused = pr.mergeState === undefined && mergeInheritanceRefused(known, mainTipSha) ? known : undefined;
+  const inherited = pr.mergeState === undefined && !refused ? known : undefined;
   let next = inherited ? { ...pr, mergeState: inherited.state } : pr;
   if (next.mergeState === "dirty" && !captured) {
     const files = known?.state === "dirty" ? known.conflictFiles : undefined;
@@ -9535,7 +9543,7 @@ export function withInheritedMergeState(
     if (files) next = { ...next, mergeConflict: { files, oursLog: "", theirsLog: "" }, mergeConflictSource: "inherited" };
     else if (gap !== undefined && gap !== next.mergeConflictGap) next = { ...next, mergeConflictGap: gap };
   }
-  return inherited ? { pr: next, inherited } : { pr: next };
+  return { pr: next, ...(inherited ? { inherited } : {}), ...(refused ? { refused } : {}) };
 }
 
 /** W1-T2620 — AT MOST ONE base-caused PR released per pass, oldest activity first. THE RELEASE
@@ -19679,7 +19687,7 @@ export async function runSweep(
         // `lastKnownMergeStateFromLedger`, keyed pr_number+head_sha, so hysteresis persists
         // across any number of consecutive `unknown` reads on the SAME head rather than
         // resetting the moment GitHub goes quiet again.
-        ...(pr.mergeState !== undefined ? { merge_state: pr.mergeState } : {}),
+        ...(pr.mergeState !== undefined ? { merge_state: pr.mergeState, ...(mainTipSha !== undefined ? { merge_main_sha: mainTipSha } : {}) } : {}),
         ...conflictEvidenceRowFields(pr),
         ...(deduped ? { deduped: true } : {}),
         // W1-T7734: how old the view was when this PR was ACTED on — now minus the generation's publish
@@ -19751,7 +19759,7 @@ export async function runSweep(
     // zero-check-run remedies, and the ledgered row itself. Without this, `pr.mergeState` stayed
     // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
-    let { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
+    let { pr, inherited: inheritedMergeState, refused: refusedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines, mainTipSha);
     noteHeadObservation(pr.prNumber, pr.headSha, passClockMs());
     const loopDecision = loopDecisions.has(pr.prNumber) ? undefined : decideLoopOutcome({
       taskId: pr.taskId, prNumber: pr.prNumber, prUrl: pr.prUrl, headSha: pr.headSha,
@@ -20064,6 +20072,9 @@ export async function runSweep(
         `${reason} — mergeability unread this pass; inherited last known "${inheritedMergeState.state}" ` +
         `observed ${inheritedMergeState.observedAt ?? "at an undated prior pass"} for this exact head ` +
         `${pr.headSha.slice(0, 7)} (W1-T4470)`;
+    } else if (refusedMergeState && mainTipSha !== undefined) {
+      reason = `${reason} — mergeability unread this pass; last known "${refusedMergeState.state}" for head ${pr.headSha.slice(0, 7)} ` +
+        `was read against main ${refusedMergeState.mainSha?.slice(0, 7) ?? "(unrecorded)"}, and main is now ${mainTipSha.slice(0, 7)}, so it is not inherited (W1-T11166)`;
     }
     // W1-T9932: a plan-only red that is EVERY failure a classified infrastructure step takes W1-T3194's re-run,
     // admitted as that re-run is, and never the plan route: no plan repair is due (#12415).
