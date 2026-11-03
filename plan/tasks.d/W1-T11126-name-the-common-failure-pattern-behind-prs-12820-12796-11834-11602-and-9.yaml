@@ -5,7 +5,10 @@
   type: recon
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=6bc34917c9ab839c
+  # backlog gardener: placed=2026-11-03T04:16:36.005Z
   attempts: 0
   design: |
     Read the diffs of PRs #12820, #12796, #11834, #11602 and #9855 as they touch scripts/coverage-merge-ratchet.mjs, and write down what they have in common. The deliverable is a findings page that cites each PR and its hunk. It must state the single recurring failure pattern a remedy for W1-T10186 has to prevent, and it must say plainly if the five PRs do not share one pattern. Read-only research: change no source.

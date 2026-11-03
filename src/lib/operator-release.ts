@@ -79,8 +79,11 @@ export function qualifyReleaseEvidence(
   return { authors, reapproval, unknownHistory };
 }
 
-/** A newly pinned operator ruling must keep the same approval contract after landing. */
-export function operatorReleaseContractChanged(task: ReleaseContract): boolean {
+export const RELEASE_LIFECYCLE_STATUSES = ["queued", "recon", "prompted", "running", "review", "fixing", "diagnosing", "blocked", "merged", "done"] as const;
+
+/** A pinned operator ruling keeps its contract after landing; a status flip (plan.ts's TASK_STATUSES, mirrored) is bookkeeping. */
+export function operatorReleaseContractChanged(task: ReleaseContract & { status?: unknown }): boolean {
   const pin = task.risk_ruling?.operator_release_pin;
-  return pin !== undefined && pin !== operatorReleasePin(task);
+  if (pin === undefined || pin === operatorReleasePin(task)) return false;
+  return !RELEASE_LIFECYCLE_STATUSES.some((status) => status !== task.status && pin === operatorReleasePin({ ...task, status } as ReleaseContract));
 }

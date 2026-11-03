@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {chmodSync,existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,rmSync,symlinkSync,writeFileSync} from 'node:fs';
+import {chmodSync,existsSync,lstatSync,mkdirSync,readFileSync,readdirSync,rmSync,symlinkSync,writeFileSync} from 'node:fs';
 import {homedir,hostname} from 'node:os';import{join,resolve}from'node:path';import test,{type TestContext}from'node:test';
 import {readSharedGitPolicy,readSharedWorkspaceCapacity,borrowedWorkspaceWorker,createSharedWorkspace} from '#scripts/lib/shared-workspace.mjs';
 import {pathToFileURL} from 'node:url';
 import {main} from '#scripts/shared-workspace.mjs';
 import {resolveTestSlotDir,testSlotProcessFacts} from '#src/lib/test-slot.js';
+import {accountOwnedFixtureRoot} from '#test/helpers/account-owned-fixture-root.js';
 function fixture(t:TestContext){
-  const home=realpathSync(mkdtempSync(join(homedir(),'.rmd-shared-git-fixture-'))),parent=join(home,'workspaces'),seed=join(home,'origin'),pool=join(home,'pool'),root=join(home,'dependencies'),configDir=join(home,'.config/remudero'),config=join(configDir,'git-storage.json');
+  const home=accountOwnedFixtureRoot(t,'.rmd-shared-git-fixture-'),parent=join(home,'workspaces'),seed=join(home,'origin'),pool=join(home,'pool'),root=join(home,'dependencies'),configDir=join(home,'.config/remudero'),config=join(configDir,'git-storage.json');
   for(const p of[parent,seed,root,configDir])mkdirSync(p,{recursive:true,mode:0o700});
   t.after(()=>{const writable=(p:string):void=>{const s=lstatSync(p);if(s.isSymbolicLink())return;chmodSync(p,s.mode|0o700);if(s.isDirectory())for(const n of readdirSync(p))writable(join(p,n));};writable(home);rmSync(home,{recursive:true,force:true});});
   const git=(cwd:string,...args:string[])=>{const p=spawnSync('/usr/bin/git',['-c','user.name=fixture','-c','user.email=fixture@example.invalid',...args],{cwd,encoding:'utf8',timeout:10000,maxBuffer:65536,env:{...process.env,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null'}});assert.equal(p.status,0,p.stderr);return p.stdout.trim();};

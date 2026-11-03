@@ -1645,6 +1645,8 @@ interface RestPrFile {
 export const PLAN_FILING_FILE_RESPONSE_CAP = 100;
 /** BACKSTOP: retained complete observations stay far above the measured open-PR population. */
 export const PLAN_FILING_FILE_CACHE_MAX_ENTRIES = 256;
+/** BACKSTOP: uncached file reads a pass may spend, the value W1-T2439 derived; W1-T9824 learns it (W1-T11148 moved it). */
+export const PLAN_FILING_FILE_MISS_CAP = 3;
 
 export interface PlanFilingFileCandidate {
   number: number;
@@ -1708,11 +1710,9 @@ function rememberPlanFilingMissCursor(
   }
 }
 
-/**
- * Read a bounded set of actual PR file lists. Complete positive and negative observations are
- * cached by repository, PR and head SHA; failures and capped misses remain unknown and are never
- * promoted to a plan-filing fact. A cache hit costs none of this pass's miss budget.
- */
+/** Read a bounded set of actual PR file lists. Complete positive and negative observations are
+ *  cached by repository, PR and head SHA; failures and capped misses remain unknown and are never
+ *  promoted to a plan-filing fact. A cache hit costs none of this pass's miss budget. */
 export function hydratePlanFilingFiles(
   owner: string,
   repo: string,

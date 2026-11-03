@@ -72,7 +72,8 @@
   origin: "feedback#fb-1790086853999-c6a250"
   plan_refs: ["W1-T41", "W1-T2212", "W1-T286"]
   files: [src/lib/relint.ts, src/run-task.ts, test/triage-relint-retry-preserves-verdict.test.ts]
-  priority: 4
+  priority: 2
   status: queued
-  # backlog gardener: band=4 evidence=524ae8f52434634f
+  # backlog gardener: band=2 evidence=77750e5ff7b931f9
+  # backlog gardener: placed=2026-11-03T04:16:36.005Z
   attempts: 0
