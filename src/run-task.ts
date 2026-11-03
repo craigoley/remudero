@@ -42182,7 +42182,7 @@ import { buildIntoStore, childEntryStoreRoot, materializeMainEntryFromStore } fr
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
-import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
 import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
 import { classEstimate, classTypical } from "./lib/host-memory-learning.js";
 import { type RunChildMode } from "./lib/policy.js";
@@ -43249,18 +43249,7 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
   if (work.kind !== "review" || work.prNumber === undefined) {
     throw new Error(`the run child hosts no detached work of kind ${work.kind}${work.kind === "review" ? " without a PR number" : ""}`);
   }
-  const inputs = work.inputs ?? {};
-  const code = await (ports.reviewCommand ?? reviewCommand)(String(work.prNumber), typeof inputs.repo === "string" ? ["--repo", inputs.repo] : [], {
-    executionMode: "semantic",
-    ...(typeof inputs.planOnlyFiling === "boolean" ? { planOnlyFiling: inputs.planOnlyFiling } : {}),
-    ...(typeof inputs.reviewAttemptId === "string" ? { reviewAttemptId: inputs.reviewAttemptId } : {}),
-  });
-  if (code !== 0) {
-    throw Object.assign(new Error(`detached review of PR #${work.prNumber} exited with code ${code}`), {
-      code: String(code), reasonClass: code === 2 ? "review_withheld" : "review_failed",
-    });
-  }
-  return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
+  return runDetachedReview(work, ctx, ports.reviewCommand ?? reviewCommand);
 }
 
 /**

@@ -1192,6 +1192,29 @@ export interface DetachedWorkChildHost {
 /** `off`: everything in process. `shadow`: a probe round-trips the contract, the work stays in process. `on`: moved kinds are children. */
 export type DetachedWorkMode = "off" | "shadow" | "on";
 
+/** The review a detached child runs: `rmd review`'s options, `onPhase` included so its posted phase reaches status.json. */
+export type DetachedReviewCommand = (prArg: string, rest: string[], opts: {
+  executionMode: "semantic"; planOnlyFiling?: boolean; reviewAttemptId?: string; onPhase?: (phase: string) => void;
+}) => Promise<number>;
+
+/** W1-T11151: a review as a run child's work. In a child, `reportReviewPhase` has no observer, so the phase writer is passed down. */
+export async function runDetachedReview(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void },
+  review: DetachedReviewCommand): Promise<RunResult> {
+  const inputs = work.inputs ?? {};
+  const code = await review(String(work.prNumber), typeof inputs.repo === "string" ? ["--repo", inputs.repo] : [], {
+    executionMode: "semantic",
+    ...(typeof inputs.planOnlyFiling === "boolean" ? { planOnlyFiling: inputs.planOnlyFiling } : {}),
+    ...(typeof inputs.reviewAttemptId === "string" ? { reviewAttemptId: inputs.reviewAttemptId } : {}),
+    ...(ctx.onPhase === undefined ? {} : { onPhase: ctx.onPhase }),
+  });
+  if (code !== 0) {
+    throw Object.assign(new Error(`detached review of PR #${work.prNumber} exited with code ${code}`), {
+      code: String(code), reasonClass: code === 2 ? "review_withheld" : "review_failed",
+    });
+  }
+  return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
+}
+
 export function readOwnedChildPhase(dir: string, runId: string): string | undefined {
   const status = readStatus(dir);
   return status.ok && status.value.runId === runId ? status.value.phase : undefined;

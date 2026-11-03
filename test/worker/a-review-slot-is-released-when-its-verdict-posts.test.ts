@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { readOwnedChildPhase } from "#src/lib/run-child.js";
-import { RUN_CHILD_SCHEMA, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
+import { readOwnedChildPhase, runDetachedReview, type DetachedReviewCommand, type DetachedWorkSpec } from "#src/lib/run-child.js";
+import { childIdentity, readStatus, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
+import { runChildMain } from "#src/run-child-main.js";
 import {
   reviewCommand as reviewCommandImpl, runReview as runReviewCommand, type ReviewCommandHost,
 } from "#src/cli/commands/review.js";
@@ -330,4 +331,32 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
       assert.deepEqual(reviewAdmissionBound(1), { bound: 1, inFlight: 0 });
     });
   }
+});
+
+test("W1-T11151 criterion 1: a detached review child writes its posted phase to the owned status.json the registry reads", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-detached-review-phase-"));
+  try {
+    const dir = join(root, "runs", "child-review-1");
+    writeSpec(dir, { schema: RUN_CHILD_SCHEMA, runId: "child-review-1", taskId: "W1-T11151", instance: "fixture",
+      engine: { sha: "abc", sourceHash: "hash" }, planSnapshotPath: join(root, "plan.json"), reservationId: "", options: {} });
+    const work: DetachedWorkSpec = { kind: "review", prNumber: 7, headSha: "h".repeat(40), reviewKey: "review-key-7" };
+    const specPath = join(dir, "spec.json");
+    writeFileSync(specPath, `${JSON.stringify({ ...JSON.parse(readFileSync(specPath, "utf8")) as object, work })}\n`);
+    writeStatus(dir, { schema: RUN_CHILD_SCHEMA, runId: "child-review-1", identity: childIdentity(process.pid)!, engineSha: "abc",
+      entryKind: "bundle", phase: "review", heartbeatAt: Date.now(), state: "running" });
+    const seen: Array<string | undefined> = [];
+    // The real review's own post-time call: `(args.onPhase ?? reportReviewPhase)("posted")` (src/cli/commands/review.ts).
+    const review: DetachedReviewCommand = async (_pr, _rest, opts) => {
+      (opts.onPhase ?? reportReviewPhase)("posted");
+      seen.push(readOwnedChildPhase(dir, "child-review-1"));
+      return 0;
+    };
+    const code = await runChildMain(["--run-dir", dir], { env: {}, stderr: () => {}, heartbeatMs: 60_000, loadRunPath: async () => ({}),
+      signals: { on: () => undefined, off: () => undefined },
+      runDetachedWork: (detached, ctx) => runDetachedReview(detached, ctx, review) });
+    assert.equal(code, 0);
+    assert.deepEqual(seen, ["review:posted"], "the child's own status.json says posted while the review is still settling");
+    const settled = readStatus(dir);
+    assert.ok(settled.ok && settled.value.state === "done");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
