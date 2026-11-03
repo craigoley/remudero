@@ -3260,8 +3260,10 @@ function parseRegistryLockInfo(raw: string): RegistryLockInfo | null {
   }
 }
 
+/** W1-T11128: the poll waits on a SharedArrayBuffer, never a forked `sleep` child — a fork per 20 ms poll is what
+ *  stalled serve's main thread on a host already forking ~190 processes a second. Same bound, same interval. */
 function defaultRegistryLockSleep(ms: number): void {
-  execFileSync("sleep", [String(ms / 1000)]);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
 }
 
 const ownedAsyncRegistryLocks = new Set<string>();

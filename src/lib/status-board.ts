@@ -73,11 +73,15 @@ import { classifyGlobalArtifactRefusal } from "./learnings.js";
 import { DEFAULT_SUPERVISOR_INTERVAL_S } from "./launchd.js";
 import {
   classifyProposal,
+  createAnchorGrepCache,
   gitGrepAnchorTrue,
+  gitGrepAnchorTrueAsync,
   isRatifiedInLedger,
   parseDraftCache,
   parseProposalRegistry,
   refusalReason,
+  warmAnchorGrepCache,
+  warmedAnchorGrep,
   type DraftCache,
   type EvidenceAnchor,
   type InboxClassification,
@@ -2315,6 +2319,29 @@ const HEADROOM_NEXT_ACTIONS: readonly NextActionRule<HeadroomSection>[] = [
 ];
 
 // ── buildStatusBoard — the ONE read model ───────────────────────────────────────────────────────
+
+/**
+ * W1-T11128: {@link buildStatusBoard} with INBOX's evidence anchors answered OFF the event loop. Every anchor the
+ * registry carries is warmed through {@link gitGrepAnchorTrueAsync} first (a failed or timed-out grep is carried and
+ * rethrown where the sync grep would have thrown), then the unchanged sync board reads those answers, so a caller
+ * that must not block its loop (serve) forks no `git grep` synchronously. An injected `grepAnchorTrue` still wins;
+ * `buildStatusBoard` itself keeps its synchronous contract for the CLI.
+ */
+export async function buildStatusBoardAsync(root: string, ledgerPath: string, deps: StatusBoardDeps): Promise<StatusBoardModel> {
+  if (deps.grepAnchorTrue) return buildStatusBoard(root, ledgerPath, deps);
+  const readRegistry = deps.readProposalRegistry ?? (() => parseProposalRegistry(readTextFileIfExists(join(root, "state", "inbox-proposals.json"))));
+  const ref = "origin/main";
+  const cache = createAnchorGrepCache();
+  const failures = await warmAnchorGrepCache(cache, ref, readRegistry().flatMap((p) => p.evidenceAnchors),
+    (r, anchor) => gitGrepAnchorTrueAsync(deps.repoDir, r, anchor));
+  const unwarmed = (anchor: EvidenceAnchor): boolean => {
+    throw new Error(`evidence anchor "${anchor.description}" was not warmed before the board read it`);
+  };
+  return buildStatusBoard(root, ledgerPath, {
+    ...deps,
+    grepAnchorTrue: (anchor) => warmedAnchorGrep(cache, ref, failures, anchor, (_ref, a) => unwarmed(a)),
+  });
+}
 
 export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusBoardDeps): StatusBoardModel {
   const now = deps.now ?? Date.now;

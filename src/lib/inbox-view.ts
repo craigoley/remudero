@@ -15,7 +15,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { persistedInboxIdentity, readPersistedInbox, writeClassificationSnapshot, writePersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
-import { deriveTaskReferent, parseProposalRegistryResult, pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
+import { deriveTaskReferent, parseProposalRegistryResult, pruneRatifiedProposals, updateProposalRegistryAsync } from "./inbox.js";
 import { buildInboxDismissalAudit, inboxDismissalReceipts } from "./inbox-dismissal-audit.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, lapseInboxKeeps, materializeInboxAttentionCensus, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
@@ -141,10 +141,11 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   const prunedIds = deps.inboxSourceIdentity ? [] : pruneRatifiedProposals(proposals, classifications).prunedIds;
   if (prunedIds.length > 0) {
     const pruned = new Set(prunedIds);
-    updateProposalRegistry(registryPath, (current) => {
+    // W1-T11128: awaited, so a contended registry lock never stalls serve's loop; the sync form's 2000 ms deadline stands.
+    await updateProposalRegistryAsync(registryPath, (current) => {
       const fresh = current.filter((p) => !pruned.has(p.id));
       return fresh.length === current.length ? null : fresh;
-    });
+    }, { maxWaitMs: 2000 });
   }
   // The stores are read once, with the pass, and persisted with it: the bodies and every legacy read page the same.
   const now = clock.now();
