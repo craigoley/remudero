@@ -31,6 +31,7 @@ import {
 import { makeTempDir, RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { systemClock } from "#src/lib/clock.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "#src/lib/needs-you-view.js";
 import type { PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { createReadModelTicker, createReadModelWorker, loadCommittedViewBodies, readModelStatusView, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
@@ -247,9 +248,20 @@ parentPort.on("message", message => { if (message.type === "stop") { clearInterv
   const report = readModelWarmProbe(standby)(q(wanted));
   assert.deepEqual([report.ok, report.detail], [true, { bodies: wanted, wanted }], "a standby on the same committed population meets the unchanged floor");
   assert.equal(readModelWarmProbe(standby)(q(before)).ok, false, "the unchanged floor still refuses the unconverged count");
+  const activeView = withNeedsYouView(serving), standbyView = withNeedsYouView(standby);
+  assert.equal(committed.bodies.some(entry => entry.view === NEEDS_YOU_VIEW_NAME), false, "the composed needs-you body is absent from SQLite");
+  assert.equal(activeView.bodies.size, wanted + 1, "the production needs-you overlay independently explains one additional cached body");
+  assert.equal(standbyView.bodies.size, activeView.bodies.size, "both serving generations compose the same additional body");
+  const currentPage = serving.body(INBOX_VIEW_NAME, "section=needsYou")!.body.data as { items: unknown; counts: unknown; page: unknown };
+  assert.deepEqual((activeView.body(NEEDS_YOU_VIEW_NAME)!.body.data as NeedsYouData).inbox,
+    { items: currentPage.items, counts: currentPage.counts, page: currentPage.page }, "the transient composition preserves the actual current Inbox page");
+  assert.equal(readModelWarmProbe(standbyView)(q(activeView.bodies.size)).ok, true, "the unchanged floor admits matching production compositions");
   publish([], thin); // a store whose producer committed no Inbox population: only its status body
   const thinner = createReadModelWorker({ stateDir: thin, instances: [{ ...instances[0]!, ledgerDir: thin }], every: () => () => {} });
   workers.push(thinner);
   assert.ok(thinner.bodies.size > 0 && thinner.bodies.size < wanted, "positive control: the thinner standby really warmed some committed bodies");
   assert.equal(readModelWarmProbe(thinner)(q(wanted)).ok, false, "a genuinely thinner standby still refuses");
+  t.diagnostic(JSON.stringify({ inboxPopulationReadiness: { beforeShrink: before, committed: committed.bodies.length,
+    afterShrink: serving.bodies.size, activeComposed: activeView.bodies.size, standbyComposed: standbyView.bodies.size,
+    thinner: thinner.bodies.size, matchingStandby: report } }));
 });

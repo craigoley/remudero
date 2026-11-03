@@ -85,7 +85,7 @@ import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowPopulation, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ShadowSampleIdentity, type ViewShadow } from "./view-shadow.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_SECTIONS, INBOX_QUALIFICATION_ERROR_META, INBOX_QUALIFICATION_PENDING, INBOX_QUALIFICATION_POPULATION_META, inboxQualificationPolicy, inboxShadowPopulation, inboxShadowSampleKey, parseInboxShadowPopulation, restoreInboxShadowPopulation, type InboxQualificationScope } from "./inbox-view.js";
-import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
+import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, viewKey, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeLedgerReads, judgeSource, type SourcePhase } from "./view-freshness.js";
 import { forkWorkerEntry, startWorker, type WorkerEntryFork } from "./child-entry-argv.js";
 
@@ -2515,13 +2515,15 @@ export function readModelBodyKey(view: string, key = ""): string {
  * The shape every committed producer population has: per filter group, every section, each paged
  * 0..of-1 exactly once. A batch missing a page, or carrying a malformed one, is not yet a population.
  */
-function completeInboxPages(entries: readonly ReadModelBodyEntry[]): boolean {
+function completeInboxPages(entries: readonly ReadModelBodyEntry[], scope: InboxQualificationScope): boolean {
   const groups = new Map<string, Map<string, { of: number; seen: Set<number> }>>();
   for (const entry of entries) {
     const data = entry.body.data as { section?: unknown; page?: { index?: unknown; of?: unknown } } | null;
     const section = data?.section, index = data?.page?.index, of = data?.page?.of;
     if (typeof section !== "string" || typeof index !== "number" || typeof of !== "number" || !Number.isSafeInteger(index) || !Number.isSafeInteger(of) || index < 0 || index >= of) return false;
     const filters = new URLSearchParams(entry.key);
+    if (viewKey(filters) !== entry.key || inboxShadowSampleKey(data, filters, scope) === undefined ||
+      (index === 0 ? filters.has("cursor") : !filters.has("cursor"))) return false;
     filters.delete("section"); filters.delete("cursor"); filters.sort();
     const sections = groups.get(filters.toString()) ?? new Map<string, { of: number; seen: Set<number> }>();
     groups.set(filters.toString(), sections);
@@ -2572,7 +2574,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const convergeInbox = (generation: string, snapshotKey: string): boolean => {
     const own = [...bodies].filter(([, entry]) => entry.view === INBOX_VIEW_NAME);
     const current = own.filter(([, entry]) => entry.qualificationGeneration === generation && (entry.body.data as { snapshotKey?: unknown } | null)?.snapshotKey === snapshotKey);
-    if (!completeInboxPages(current.map(([, entry]) => entry))) return false;
+    if (!inboxScope || !completeInboxPages(current.map(([, entry]) => entry), inboxScope)) return false;
     const keep = new Set(current.map(([key]) => key)), retired = own.filter(([key]) => !keep.has(key));
     for (const [key] of retired) forget(key);
     if (retired.length > 0) opts.log?.("read_model.inbox_converged", { generation, kept: keep.size, retired: retired.length });

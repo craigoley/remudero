@@ -24,7 +24,8 @@ import { acquireLease, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } 
 import { coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 import { analyticsSourceBodies } from "#src/lib/analytics-view.js";
 import { AGENT_QUALIFICATION_GENERATION, agentViewKey, type AgentProposalsBody, type AgentViewData } from "#src/lib/agent-view.js";
-import { buildReadModelViewRoutes, shownReadiness, viewMode, type ViewBody } from "#src/lib/views.js";
+import { buildReadModelViewRoutes, shownReadiness, viewKey, viewMode, type ViewBody } from "#src/lib/views.js";
+import { snapshotCursor } from "#src/lib/read-page.js";
 import { shadowReadiness, viewShadowPath, type ViewShadowState } from "#src/lib/view-shadow.js";
 import { readShadowCounters } from "#src/lib/view-shadow-store.js";
 import { createService } from "#src/lib/service.js";
@@ -1154,7 +1155,7 @@ test("a slice that cannot start is a tick failure of its instance and nothing is
 function inboxPopulation(generation: string, snapshotKey: string, needsYouPages: number, tag: string) {
   return INBOX_VIEW_SECTIONS.flatMap(section => {
     const of = section === "needsYou" ? needsYouPages : 1;
-    return Array.from({ length: of }, (_, index) => ({ view: INBOX_VIEW_NAME, key: index === 0 ? `section=${section}` : `section=${section}&cursor=${snapshotKey.slice(0, 12)}-${index}`,
+    return Array.from({ length: of }, (_, index) => ({ view: INBOX_VIEW_NAME, key: viewKey(new URLSearchParams(index === 0 ? { section } : { section, cursor: snapshotCursor({ snapshotKey, section, offset: index }) })),
       version: 1, generation: 1, etag: `W/"${tag}-${section}-${index}"`, qualificationGeneration: generation,
       body: { view: INBOX_VIEW_NAME, version: 1, generatedAt: new Date().toISOString(), asOf: null, stale: false, sources: [], data: { snapshotKey, section, items: [], counts: {}, page: { index, of, total: 0 } } } }));
   });
@@ -1252,6 +1253,56 @@ test("inbox population recovery preserves current pages and refuses incomplete r
   assert.equal(f.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G2, "the completed matching batch qualifies");
   assert.deepEqual(f.inboxKeys(), replacement.map(entry => entry.key).sort(), "only the completed current population remains");
   for (const entry of replacement) assert.equal(f.worker.body(INBOX_VIEW_NAME, entry.key)?.etag, entry.etag, `current page ${entry.key} is preserved`);
+
+  const withParams = (entry: typeof replacement[number], edit: (params: URLSearchParams) => void) => {
+    const params = new URLSearchParams(entry.key);
+    edit(params);
+    return { ...entry, key: viewKey(params) };
+  };
+  const scoped = replacement.map(entry => withParams(entry, params => {
+    params.set("repo", scope.repository); params.set("repository", scope.repository); params.set("instance", scope.instance);
+  }));
+  const invalidBatches = [
+    ...["repo", "repository", "instance"].flatMap(filter => {
+      const foreign = filter === "instance" ? "other" : "other/repository";
+      return [
+        { label: `foreign ${filter} filters`, entries: replacement.map(entry => withParams(entry, params => params.set(filter, foreign))) },
+        { label: `duplicate ${filter} hides foreign scope`, entries: scoped.map(entry => withParams(entry, params => params.append(filter, foreign))) },
+      ];
+    }),
+    { label: "mixed valid and foreign filter groups", entries: [...replacement, ...replacement.map(entry => withParams(entry, params => params.set("repo", "other/repository")))] },
+    { label: "section route disagrees with body", entries: replacement.map((entry, index) => withParams(entry, params => params.set("section", INBOX_VIEW_SECTIONS[(index + 1) % INBOX_VIEW_SECTIONS.length]!))) },
+    { label: "missing section route", entries: replacement.map(entry => withParams(entry, params => params.delete("section"))) },
+    { label: "duplicate section route", entries: replacement.map(entry => withParams(entry, params => params.append("section", entry.body.data.section))) },
+    { label: "malformed cursor", entries: replacement.map(entry => withParams(entry, params => params.set("cursor", "not-a-cursor"))) },
+    { label: "foreign snapshot cursor", entries: replacement.map(entry => withParams(entry, params => params.set("cursor", snapshotCursor({ snapshotKey: INBOX_S1, section: entry.body.data.section, offset: 1 })))) },
+    { label: "continuation cursor on first page", entries: replacement.map(entry => withParams(entry, params => params.set("cursor", snapshotCursor({ snapshotKey: INBOX_S2, section: entry.body.data.section, offset: 1 })))) },
+  ];
+  for (const { label, entries } of invalidBatches) await t.test(label, async sub => {
+    const control = scriptedInboxWorker(sub, [[
+      [pending, ...first.map(entry => ({ type: "body", entry })), qualified(INBOX_G1, INBOX_S1, scope)],
+      [pending, ...entries.map(entry => ({ type: "body", entry })), qualified(INBOX_G2, INBOX_S2, scope)],
+      [...entries.map(entry => ({ type: "drop", view: INBOX_VIEW_NAME, key: entry.key })),
+        ...[...replacement, ...scoped].map(entry => ({ type: "body", entry })), qualified(INBOX_G2, INBOX_S2, scope)],
+    ]]);
+    control.worker.start();
+    await control.reached(1, 0);
+    assert.deepEqual(control.inboxKeys(), first.map(entry => entry.key).sort(), "positive control: initial pages are cached");
+    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G1);
+    control.advance();
+    await control.reached(1, 1);
+    const expected = [...new Set([...first, ...entries].map(entry => entry.key))].sort();
+    assert.deepEqual(control.inboxKeys(), expected, `${label} with a matching envelope preserves every cached page`);
+    assert.equal(control.worker.bodies.size, expected.length, "the exact cache count includes all retained pages");
+    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), "inbox-current-pages-v1:pending", "invalid pages cannot qualify a matching envelope");
+    for (const entry of entries) assert.equal(control.worker.shadowIdentity?.(INBOX_VIEW_NAME, entry.key)?.key, undefined, "invalid evidence provides no qualified sample identity");
+    control.advance();
+    await control.reached(1, 2);
+    assert.equal(control.worker.qualificationGeneration?.(INBOX_VIEW_NAME), INBOX_G2, "a complete in-scope replacement still qualifies");
+    assert.deepEqual(control.inboxKeys(), [...replacement, ...scoped].map(entry => entry.key).sort(), "all current qualified filter groups survive convergence");
+    assert.equal(control.worker.bodies.size, replacement.length + scoped.length);
+    for (const entry of [...replacement, ...scoped]) assert.equal(control.worker.body(INBOX_VIEW_NAME, entry.key)?.etag, entry.etag);
+  });
 });
 
 /** A real classified Inbox: `count` proposals page `needsYou`, and two of them fit one page. */
