@@ -44,6 +44,7 @@ import { classifyRollupSupersession, type RollupCheckEntry } from "./sweep.js";
 import { resolveInstallRoot } from "./install-root.js";
 import {
   buildStatusBoard,
+  buildStatusBoardAsync,
   deriveDispatchCadence,
   deriveQueueHead,
   renderStatusBoardText,
@@ -897,7 +898,10 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
         return undefined; // not installed / unreadable — the board falls back to the default pace
       }
     });
-  const buildBoard = deps.buildStatusBoard ?? buildStatusBoard;
+  // W1-T11128: the default board answers INBOX's evidence anchors through the async grep (no sync `git grep` per
+  // anchor); an injected `buildStatusBoard` keeps its synchronous contract and is awaited all the same.
+  const buildBoard: (...args: Parameters<typeof buildStatusBoard>) => ReturnType<typeof buildStatusBoard> | ReturnType<typeof buildStatusBoardAsync> =
+    deps.buildStatusBoard ?? buildStatusBoardAsync;
   const render = deps.renderStatusBoardText ?? renderStatusBoardText;
   const ledgerPath = (deps.ledgerPathFor ?? ledgerPathFor)(config);
   const repoDir = reportRepoRoot(deps);
@@ -971,7 +975,7 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   } else {
     github = deps.github ?? undefined;
   }
-  const model = buildBoard(config.root, ledgerPath, {
+  const model = await buildBoard(config.root, ledgerPath, {
     queryService,
     repoDir,
     github,
