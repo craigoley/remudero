@@ -377,6 +377,11 @@ export function builtLedgerSource(built: ViewSource, state: ReadModelInstanceSta
 export const readModelStatusView: ReadModelView = {
   name: READ_MODEL_STATUS_VIEW,
   version: 1,
+  // Status's ledger rows are quarantined rows; generation and lease state are in inputDigest.
+  ledgerReads: db => {
+    const row = db.prepare("SELECT MAX(ts_ms) AS last_ms FROM quarantine").get();
+    return row?.last_ms == null ? null : fixedClock(Number(row.last_ms)).iso();
+  },
   materialize: ({ now, instances, shadow }) => [{
     key: "",
     data: {
@@ -1560,7 +1565,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     });
     const snapshots = ctx.sourceStore.prepare("SELECT instance, name, as_of, error, error_ms FROM source_snapshot ORDER BY instance, name").all();
     if (snapshots.some(snapshot => snapshot.error !== null)) return undefined;
-    return JSON.stringify([Array.from(readAsOf), plans, generations, snapshots, ctx.switches, ctx.shadow]);
+    // Status reads these alongside generation. Quarantined diagnostics can leave generation unchanged.
+    const states = ctx.instances.map(({ state, db }) => [state.instance, state.generation, state.lease, state.heldBy,
+      Number(db!.prepare("SELECT count(*) AS n FROM quarantine").get()?.n ?? 0)]);
+    return JSON.stringify([Array.from(readAsOf), plans, generations, states, snapshots, ctx.switches, ctx.shadow]);
   }
 
   /** File-backed and other undeclared sources need their producer; a ledger declaration cannot verify them. */
