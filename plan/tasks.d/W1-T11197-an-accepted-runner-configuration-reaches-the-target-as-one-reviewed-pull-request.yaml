@@ -2,7 +2,7 @@
   title: An operator-accepted runner configuration reaches the target only as one add-only pull request that a human reviews and merges
   repo: remudero
   depends_on: [W1-T11196]
-  dispatch_hold: true
+  dispatch_hold: false
   priority: 1.1
   type: implement
   verify: auto

@@ -407,7 +407,9 @@ Remudero holds itself to (MASTER-PLAN §5A: the fleet bar is inherited, not
 optional) — workflows, configs, `SECURITY.md`, principles, and the
 branch-protection payload, with your measured baseline numbers written in as
 ratchet floors so the new repo never onboards at zero. It prints the file list
-and the manual steps (arming branch protection is a human, admin-run act, same
+and the manual steps. Add `--write <abs-dir>` to write every generated file, plus
+`.remudero/branch-protection.json`, into a local checkout of the target; it refuses
+before writing anything if one of those files already exists (arming branch protection is a human, admin-run act, same
 reasoning as the branch-protection flip described in
 [review-gate.md](review-gate.md)'s "CI-gate aggregator" section).
 

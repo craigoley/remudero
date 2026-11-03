@@ -544,7 +544,8 @@ import { dropTierRowsBeforePush, prePushGateRefusal } from "./lib/pre-push-refus
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
-import { buildProjectInit, parseProjectInitArgs } from "./lib/project-init.js";
+import { buildProjectInit, parseProjectInitArgs, ProjectInitError } from "./lib/project-init.js";
+import { writeProjectInit } from "./lib/project-init-write.js";
 import {
   OnboardError,
   parseOnboardArgs,
@@ -39963,7 +39964,9 @@ async function initCommand(rest: string[]): Promise<number> {
  * external repo (auth, default-branch detection, PR conflicts, etc.) is out of this task's
  * scope — the note on W1-T27 calls the live end-to-end provisioning a separate
  * operator-attested confirmation (Rule 18), not part of auto-verify. Keeping the live-mutation
- * path manual also keeps this command trivially safe to run against any repo name.
+ * path manual also keeps this command trivially safe to run against any repo name. `--write`
+ * only puts the generated files into a local checkout (lib/project-init-write.ts), refusing
+ * before any write when one already exists; it still pushes nothing.
  */
 async function projectCommand(rest: string[]): Promise<number> {
   const sub = rest[0];
@@ -39996,12 +39999,21 @@ async function projectCommand(rest: string[]): Promise<number> {
     `baselines captured: coverage=${payload.baselines.coveragePct}% branches=${payload.baselines.branchesPct}% ` +
       `mutation=${payload.baselines.mutationScorePct}% dup=${payload.baselines.dupPct}% (at ${payload.baselines.capturedAt})`,
   );
+  let written: string[] | undefined;
+  try {
+    written = parsed.args.writeDir === undefined ? undefined : writeProjectInit(payload, parsed.args.writeDir);
+  } catch (e) {
+    if (!(e instanceof ProjectInitError)) throw e;
+    console.error(e.message);
+    return 2;
+  }
+  if (written) console.log(`wrote ${written.length} file(s) under ${parsed.args.writeDir}: ${written.join(", ")}`);
   console.log(
     "\nThis command GENERATES the stack; it does not push/open a PR or arm branch protection " +
       "itself (manual next steps):",
   );
   console.log(
-    `  1. Write the files listed above into a branch of ${owner}/${parsed.args.repo} and open a PR gated by ci-gate + remudero-review.`,
+    `  1. ${written ? "Commit the written files to" : "Write the files listed above into"} a branch of ${owner}/${parsed.args.repo} and open a PR gated by ci-gate + remudero-review.`,
   );
   console.log(`  2. Once that PR is merged, arm branch protection:`);
   console.log(
@@ -41891,9 +41903,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "project",
-    syntax: "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>",
+    syntax: "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n> [--write <abs-dir>]",
     summary: "Fleet-inheritance onboarding: generate the whole gate stack for a target repo.",
-    detail: "fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself",
+    detail: "fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps; --write <abs-dir> also writes every file (and .remudero/branch-protection.json) into that checkout, refusing before any write if one already exists; does not push/PR/arm protection itself",
   },
   {
     name: "onboard",

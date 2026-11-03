@@ -28,6 +28,13 @@
     - src/lib/model-canary-owner.ts
     - src/lib/model-canary-private-corpus.ts
     - src/lib/model-canary-trace-grader.ts
+    - src/lib/model-canary-coding-adapter.ts
+    - src/lib/model-canary-coding-capabilities.ts
+    - src/lib/model-canary-coding-port-capability.ts
+    - src/lib/model-canary-host-bridge.ts
+    - src/lib/model-canary-linux-profile-preflight-capabilities.ts
+    - src/lib/model-canary-native-profile-probe.ts
+    - src/lib/model-canary-systemd-bwrap-backend.ts
     - test/model-canary-command.test.ts
     - test/model-canary-suite.test.ts
     - test/model-canary-schedule.test.ts
@@ -37,6 +44,11 @@
     - test/routing/model-canary-trace-grader.test.ts
     - test/routing/model-canary-coding-isolation.test.ts
     - test/routing/model-canary-native-session.test.ts
+    - test/routing/model-canary-linux-profile-preflight-capability.test.ts
+    - test/routing/model-canary-host-bridge.test.ts
+    - test/routing/model-canary-systemd-runtime-readback.test.ts
+    - test/routing/model-canary-service-wrapper-protocol.test.ts
+    - test/routing/model-canary-profile-observation.test.ts
     - test/routing/model-canary-config-inventory.test.ts
   status: queued
   priority: 2
@@ -94,8 +106,7 @@
   acceptance:
     - claim: the existing private coding executor contains filesystem and credential effects and closes
         its real descendants
-      proof: 'grep: test("W1-T10957: the existing private coding executor contains filesystem and
-        credential effects and closes its real descendants" in test/model-canary-command.test.ts'
+      proof: 'grep: test("W1-T10957: the existing private coding executor contains filesystem and credential effects and closes its real descendants" in test/routing/model-canary-native-session.test.ts'
     - claim: paired trial results retain correctness, native resource and missing-identity evidence
         without changing schedules
       proof: 'grep: test("W1-T10957: paired trial results retain correctness, native resource and
