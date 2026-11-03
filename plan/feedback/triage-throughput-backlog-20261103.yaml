@@ -9,11 +9,11 @@ raw: >-
   new entry is dated 2026-10-22. Of the 60 entries dated 10-27 or later, 53 are
   still new.
 
-  OBSERVED in git, status changes to a non-new value per day (feedback diffs on main;
-  a change from grilling to accepted also counts):
-  10-27 about 8, 10-28 12, 10-29 9, 10-30 11, 10-31 0, 11-01 6, 11-02 8, 11-03 5.
-  plan/policy.yaml autoTriage allows minIntervalMinutes 15 and maxPerDay 24, so
-  the measured rate is roughly a third of the cap, and one day had none.
+  OBSERVED in git, status changes to a non-new value per day (feedback diffs on
+  main; a change from grilling to accepted also counts): 10-27 about 8, 10-28
+  12, 10-29 9, 10-30 11, 10-31 0, 11-01 6, 11-02 8, 11-03 5. plan/policy.yaml
+  autoTriage allows minIntervalMinutes 15 and maxPerDay 24, so the measured rate
+  is roughly a third of the cap, and one day had none.
 
   INFERRED, not measured: the cap is not what binds. Candidates are lock-held
   refusals, triage.error rows, a lane budget the governor withholds, or fires
@@ -21,17 +21,17 @@ raw: >-
 
   ASK: (1) count autoTriage decisions by reason over 10-27..11-03 from the
   ledger union (decideAutoTriage reasons are already named strings), with a
-  positive control that the window's newest ts is current. (2) Fix the
-  dominant refusal class. (3) Reconsider strict oldest-first once the backlog
-  exceeds a bound: an operator-directed entry currently waits behind about 12
-  days of backlog. Do not raise maxPerDay without the operator; it is a spend
-  bound.
+  positive control that the window's newest ts is current. (2) Fix the dominant
+  refusal class. (3) Reconsider strict oldest-first once the backlog exceeds a
+  bound: an operator-directed entry currently waits behind about 12 days of
+  backlog. Do not raise maxPerDay without the operator; it is a spend bound.
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: operator-direction:triage-throughput-backlog:20261103
 thread_id: null
+answered_by: null
