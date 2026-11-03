@@ -2068,20 +2068,22 @@ jobs:
             src/lib/plan-scope.ts
             src/lib/rule-suites.ts
             package.json
+            package-lock.json
             .nvmrc
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       # W1-T11161: the gate below reads this diff's class from the same predicate the shards use, so a
       # PLAN_ONLY diff whose matrix was skipped upstream is judged on evidence, not on the skip.
       - name: Classify this pull request's diff for the coverage gate (W1-T11161)
         id: coverage-plan-class
         env:
-          SHARD_RESULT: ${{ needs.coverage-ratchet.result }}
+          MATRIX_RESULT: ${{ needs.coverage-ratchet.result }}
         run: |
           CLASS=SOURCE
           COUNT=0
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && { [ "${SHARD_RESULT:-}" = "skipped" ] || [ "${SHARD_RESULT:-}" = "success" ]; }; then
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && { [ "${MATRIX_RESULT:-}" = "skipped" ] || [ "${MATRIX_RESULT:-}" = "success" ]; }; then
             git diff --name-only HEAD^1...HEAD > coverage-class-files.txt 2>/dev/null || : > coverage-class-files.txt
             COUNT="$(grep -c . coverage-class-files.txt || true)"
             CLASS="$(node scripts/diff-class.mjs --coverage-class --changed-files coverage-class-files.txt 2>coverage-class.log)" || CLASS=SOURCE

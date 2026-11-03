@@ -75,7 +75,7 @@ test("W1-T11161 criterion 1: a skipped matrix on an evidenced PLAN_ONLY pull req
 
 test("W1-T11161 criterion 1: the classify step clamps its predicate's answer and fails closed to SOURCE", () => {
   const classify = `git() { return 1; }\n${step("coverage-plan-class").run!}`;
-  const pr = { GITHUB_EVENT_NAME: "pull_request", SHARD_RESULT: "skipped" };
+  const pr = { GITHUB_EVENT_NAME: "pull_request", MATRIX_RESULT: "skipped" };
   const withPredicate = (body: string) => {
     const dir = makeTempDir("w1-t11161-class-");
     mkdirSync(join(dir, "scripts"));
@@ -100,7 +100,7 @@ function sparseWorkspace(): string {
   assert.equal(checkout?.with?.["fetch-depth"], 2);
   assert.equal(checkout?.with?.["sparse-checkout-cone-mode"], false);
   const paths = String(checkout?.with?.["sparse-checkout"] ?? "").split("\n").map((p) => p.trim()).filter(Boolean);
-  for (const required of ["scripts/", "src/lib/plan-scope.ts", "src/lib/rule-suites.ts", "package.json", ".nvmrc"]) {
+  for (const required of ["scripts/", "src/lib/plan-scope.ts", "src/lib/rule-suites.ts", "package.json", "package-lock.json", ".nvmrc"]) {
     assert.ok(paths.includes(required), `sparse checkout must include ${required}`);
   }
   const dir = makeTempDir("w1-t11161-sparse-");
@@ -114,7 +114,7 @@ function sparseWorkspace(): string {
 
 test("W1-T11161 criterion 1: only skipped or successful pull request matrices classify the diff", () => {
   const classify = step("coverage-plan-class");
-  assert.equal(classify.env?.SHARD_RESULT, "${{ needs.coverage-ratchet.result }}");
+  assert.equal(classify.env?.MATRIX_RESULT, "${{ needs.coverage-ratchet.result }}");
   const steps = aggregatorSteps();
   const classifyAt = steps.findIndex((s) => s.id === classify.id);
   assert.ok(steps.findIndex((s) => s.uses?.startsWith("actions/checkout@")) < classifyAt);
@@ -129,7 +129,7 @@ test("W1-T11161 criterion 1: only skipped or successful pull request matrices cl
       mkdirSync(join(dir, "scripts"));
       writeFileSync(join(dir, "scripts/diff-class.mjs"),
         'import { writeFileSync } from "node:fs"; writeFileSync("predicate-called", "yes"); console.log("PLAN_ONLY");\n');
-      const r = runStep(script, { GITHUB_EVENT_NAME: event, SHARD_RESULT: result }, dir);
+      const r = runStep(script, { GITHUB_EVENT_NAME: event, MATRIX_RESULT: result }, dir);
       const eligible = event === "pull_request" && ["skipped", "success"].includes(result);
       assert.equal(r.code, 0, r.out);
       assert.equal(existsSync(join(dir, "git-calls")), eligible, `${event}/${result}: diff invocation`);
@@ -148,7 +148,7 @@ test("W1-T11161 criterion 1: the declared sparse checkout runs the real coverage
     ["test/example.test.ts", "TEST_ONLY"], ["scripts/example.mjs", "NO_SRC"], ["src/example.ts", "SOURCE"],
   ]) {
     const r = runStep(`git() { printf '%s\\n' '${path}'; }\n${step("coverage-plan-class").run!}`,
-      { GITHUB_EVENT_NAME: "pull_request", SHARD_RESULT: "skipped" }, dir);
+      { GITHUB_EVENT_NAME: "pull_request", MATRIX_RESULT: "skipped" }, dir);
     assert.equal(r.code, 0, r.out);
     assert.match(r.outputs, new RegExp(`^class=${expected}$`, "m"), r.out);
     assert.match(r.outputs, /^count=1$/m);
