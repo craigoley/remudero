@@ -159,8 +159,7 @@ test("the registered production flow pass wires one batched queue read in shadow
     log: (step, extra = {}) => events.push({ step, extra }),
   }, "acme", "remudero", () => "W1-T11111", {
     readJson: async (args) => { reads.push(args); return args[1] === "graphql" ? body : { workflow_runs: [] }; },
-    admission: { owner: "acme", repo: "remudero", settings: { mode: "shadow", disposition: "shadow", repositoryId: 1, organizations: [],
-      policy: { version: "test-v1", ownerIds: [], organizationIds: [], services: [], maxEvidenceAgeMs: 5_000 } } },
+    admission: { owner: "acme", repo: "remudero" },
   });
   await pass();
   assert.equal(reads.filter((args) => args[1] === "graphql").length, 1);
