@@ -9,10 +9,15 @@ registry_shadow_args=()
 registry_shadow_deadline_s="${RMD_REGISTRY_SHADOW_DEADLINE_S:-20}"
 case "$registry_shadow_deadline_s" in ''|*[!0-9]*|0) registry_shadow_deadline_s=20 ;; esac
 
-# A known child without this argv grammar keeps its original arguments. This probes one
-# trusted script's bounded header, never executes an old reader as a capability probe.
+# A known child without this argv grammar keeps its original arguments. This reads one trusted
+# script, never executes an old reader as a capability probe. The whole file is read, not a fixed
+# head: W1-T10573's shared guards pushed recycle-container.sh's case from line 104 to 387, past the
+# old 256-line window, so the maintained recycler read as an old child and lost its observations.
+# BACKSTOP, not a window: an unexpectedly huge file is refused rather than read.
 registry_shadow_supports() {
-  [ -r "$1" ] && head -n 256 "$1" | grep -F -- '--selected-registry-shadow)' >/dev/null
+  [ -f "$1" ] && [ -r "$1" ] || return 1
+  [ "$(wc -c < "$1")" -le 4194304 ] || return 1
+  grep -F -- '--selected-registry-shadow)' "$1" >/dev/null
 }
 
 registry_shadow_call() (

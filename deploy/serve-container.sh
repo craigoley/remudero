@@ -296,6 +296,7 @@ if [ -n "${INSTANCE_NAME}" ]; then
     exit 1
   fi
   INSTANCE_REPO="$(registry_field repo)"
+  INSTANCE_GITHUB_REPO="$(registry_field github_repo)"
   INSTANCE_STATE_DIR="$(registry_field state_dir)"
   DAEMON_CONTAINER="$(registry_field container_name)"
   INSTANCE_IMAGE="$(registry_field image)"
@@ -842,7 +843,7 @@ SELECTED_REGISTRY_BROAD_MOUNT_ARGS=("${RUN_ARGS[@]}")
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_mounts "${RUN_ARGS[@]}"; fi
 
 if [ "${DRY_RUN}" -eq 1 ]; then
-  registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
+  registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
   echo "serve-container: --dry-run, nothing changed. The launch would be:"
   echo "  docker ${RUN_ARGS[*]}"
   echo "  (-e NAME passes the NAME only; each value is read from this script's own environment —"
@@ -910,7 +911,7 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
     SERVE_OUTGOING_READS="$(scratch_outgoing_reads "${CONTAINER_NAME}" 2>/dev/null || true)"
   fi
   echo "serve-container: docker stop ${CONTAINER_NAME}"
-  registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
+  registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
   docker stop "${CONTAINER_NAME}" >/dev/null
   echo "serve-container: docker rm ${CONTAINER_NAME}"
   docker rm "${CONTAINER_NAME}" >/dev/null
@@ -919,7 +920,7 @@ fi
 if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then scratch_fresh_tmp; fi
 echo "serve-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_recheck; fi
-registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
+registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
 docker "${RUN_ARGS[@]}" >/dev/null
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
   "${SCRIPT_ROOT}/deploy/container-runtime-contract.sh" --container "${CONTAINER_NAME}" \

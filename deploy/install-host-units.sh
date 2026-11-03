@@ -237,12 +237,14 @@ if [ -n "$INSTANCE_NAME" ]; then
     echo "install-host-units: FATAL -- instance '${INSTANCE_NAME}' is not declared in ${REGISTRY_FILE}." >&2
     exit 2
   fi
-  repo=""; state_dir=""; container_name=""; service_user=""; image=""; max_old_space_mb=""
+  repo=""; github_repo=""; state_dir=""; container_name=""; service_user=""; image=""; max_old_space_mb=""
   service_name=""; watchdog_service_name=""; watchdog_timer_name=""; launcher_path=""; revival_log=""
   gh_app_id=""; gh_app_installation_id=""; gh_app_private_key_path=""
   claude_dir=""; codex_dir=""; container_config_dir=""
   instance_mode_seen=0
   while IFS='=' read -r key value; do
+    # The shell shadow names its target by owner/name, the identity the selected binding matches.
+    [ "$key" = github_repo ] && github_repo="$value"
     case "$key" in
       mode)
         [ "$instance_mode_seen" = 0 ] || { echo "install-host-units: FATAL -- instance '${INSTANCE_NAME}' declares duplicate mode." >&2; exit 2; }
@@ -1166,7 +1168,7 @@ render_registry_shadow() {
 
 render_registry_shadow_boundary() {
   [ -n "$registry_shadow_session" ] || return 0
-  printf 'registry_shadow_observe launcher "$INSTANCE_NAME" %q host "$STATE_DIR|%s"; ' "${repo:-}" "$CONTAINER_NAME"
+  printf 'registry_shadow_observe launcher "$INSTANCE_NAME" %q host "$STATE_DIR|%s"; ' "${github_repo:-}" "$CONTAINER_NAME"
 }
 
 render_launcher() {
@@ -2025,7 +2027,7 @@ unit_file_changes() { # $1 = installed path, $2 = rendered text
 }
 
 drift=0
-registry_shadow_observe install "$INSTANCE_NAME" "${repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
+registry_shadow_observe install "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
 converge_host_node
 for row in $UNITS; do
   [ -n "$row" ] || continue
@@ -2045,7 +2047,7 @@ for row in $UNITS; do
     echo "install-host-units: ok      $path"
   else
     if unit_file_changes "$path" "$want"; then UNIT_CHANGED=1; fi
-    registry_shadow_observe install "$INSTANCE_NAME" "${repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
+    registry_shadow_observe install "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
     mkdir -p "$(dirname "$path")"
     tmp="${path}.tmp.$$"
     printf '%s\n' "$want" > "$tmp"

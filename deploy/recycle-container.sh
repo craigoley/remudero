@@ -652,10 +652,12 @@ if [ -n "$INSTANCE_NAME" ]; then
     echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' is not declared in ${INSTANCE_REGISTRY}." >&2
     exit 2
   fi
-  repo=""; state_dir=""; container_name=""; image_ref=""; claude_dir=""; codex_dir=""; container_config_dir=""
+  repo=""; github_repo=""; state_dir=""; container_name=""; image_ref=""; claude_dir=""; codex_dir=""; container_config_dir=""
   max_old_space_mb=""; gh_app_id=""; gh_app_installation_id=""; gh_app_private_key_path=""
   instance_mode_seen=0
   while IFS='=' read -r key value; do
+    # The shell shadow names its target by owner/name, the identity the selected binding matches.
+    [ "$key" = github_repo ] && github_repo="$value"
     case "$key" in
       mode)
         [ "$instance_mode_seen" = 0 ] || { echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' declares duplicate mode." >&2; exit 2; }
@@ -1907,7 +1909,7 @@ else
   # W1-T5804 key on it. The start time is C-locale UTC, the exact form the release check re-reads.
   RECYCLE_PAUSE_CONTAINER_ID="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 | tr -d '"\\' || true)"
   RECYCLE_PAUSE_BODY="{\"reason\":\"${RECYCLE_PAUSE_REASON}\",\"requestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"pid\":$$,\"host\":\"$(hostname)\",\"container\":\"${RECYCLE_PAUSE_CONTAINER_ID}\",\"containerName\":\"${CONTAINER_NAME}\",\"writerStart\":\"${RECYCLE_WRITER_START}\",\"caller\":$(recycle_json_string "$RECYCLE_CALLER"),\"actor_evidence\":${RECYCLE_ACTOR_EVIDENCE},\"phase\":\"waiting\"}"
-  registry_shadow_observe recycle "$INSTANCE_NAME" "${repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
+  registry_shadow_observe recycle "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
   printf '%s\n' "${RECYCLE_PAUSE_BODY}" > "${PAUSE_FILE}"
   echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
 fi
@@ -2779,7 +2781,7 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
     RECYCLE_OUTGOING_READS="$(scratch_outgoing_reads "${CONTAINER_NAME}" 2>/dev/null || true)"
   fi
   echo "recycle-container: docker stop ${CONTAINER_NAME}"
-  registry_shadow_observe recycle "$INSTANCE_NAME" "${repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
+  registry_shadow_observe recycle "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
   record_recycled_cadence_child
   run_docker_control stop docker stop "${CONTAINER_NAME}"
   echo "recycle-container: docker rm ${CONTAINER_NAME}"
@@ -2869,7 +2871,7 @@ if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then LAUNCH_IMAGE="${PULLED_IMAGE_ID}"
 DOCKER_RUN_ARGS+=("${LAUNCH_IMAGE}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
 selected_registry_recheck
 selected_registry_mounts "${DOCKER_RUN_ARGS[@]}"
-registry_shadow_observe recycle "$INSTANCE_NAME" "${repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
+registry_shadow_observe recycle "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
 
 # ── 7. PROVE IT — THE STARTED CONTAINER'S IMAGE MUST BE THE DIGEST JUST PULLED ──────────────────

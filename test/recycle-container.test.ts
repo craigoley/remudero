@@ -317,8 +317,9 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers: recy
   const { registryShellFixture } = await import("#test/helpers/registry-shell-fixture.js");
   const f = registryShellFixture(t), pin = f.capture();
   const legacy = runRecycle("good");
-  const selected = runRecycle("good", { args: ["--selected-registry-shadow", f.session],
-    extraEnv: { RMD_INSTANCE_REGISTRY: f.legacy, HOME: f.env.HOME!, RMD_SCRATCH: "off" } });
+  // W1-T10573 (#15532) made RMD_INSTANCE_REGISTRY the ACTIVE selection; the legacy control is its genuine absence.
+  const selected = runRecycle("good", { args: ["--selected-registry-shadow", f.session], unselectedRegistry: true,
+    extraEnv: { HOME: f.env.HOME!, RMD_SCRATCH: "off" } });
   assert.equal(legacy.status, 0, legacy.stderr);
   assert.equal(selected.status, legacy.status, selected.stderr);
   const launched = (run: Run) => run.calls.filter(c => c.bin === "docker" && c.argv[0] === "run")
@@ -334,18 +335,22 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers: recy
 test("selected shell shadow reaches real lifecycle and heartbeat consumers: generated watchdog invokes the real recycler", async t => {
   const { registryShellFixture } = await import("#test/helpers/registry-shell-fixture.js");
   const f = registryShellFixture(t), pin = f.capture();
-  assert.equal(f.install().status, 0);
+  // W1-T10573 (#15532) makes RMD_INSTANCE_REGISTRY the ACTIVE selection, and the generated launcher forwards whatever
+  // it was installed with. An unselected host installs with it genuinely absent; the shadow session is the candidate.
+  const installed = f.run(join(REPO_ROOT, "deploy/install-host-units.sh"), ["--install", "--selected-registry-shadow", f.session],
+    { RMD_INSTANCE_REGISTRY: undefined });
+  assert.equal(installed.status, 0, installed.stderr);
   mkdirSync(join(f.state, "remudero/bin"));
   writeFileSync(join(f.state, "remudero/bin/rmd"), '#!/bin/sh\nprintf \'%s\\n\' \'{"state":"FROZEN","action":"recycle","progressAgeMs":900000}\'\n', { mode: 0o700 });
   const run = runRecycle("good", { scriptPath: join(f.output, "launcher"), stateDir: f.state,
-    pathTail: f.env.PATH, extraEnv: {
+    pathTail: f.env.PATH, unselectedRegistry: true, extraEnv: {
       HOME: f.env.HOME!, TMPDIR: f.root, FIXTURE_LAUNCHER_RUNNING: "1",
       FIXTURE_CALLS: f.env.FIXTURE_CALLS!, FIXTURE_UID: f.env.FIXTURE_UID!,
       FIXTURE_PAYLOAD: f.payload, FIXTURE_SELECTED: f.selected,
       RMD_UNIT_DIR: f.env.RMD_UNIT_DIR!, RMD_BIN_DIR: f.env.RMD_BIN_DIR!,
       RMD_LAUNCHER_PATH: f.env.RMD_LAUNCHER_PATH!, RMD_SYSTEMCTL_CMD: f.env.RMD_SYSTEMCTL_CMD!,
       RMD_MEMINFO_PATH: f.env.RMD_MEMINFO_PATH!, RMD_MEMINFO: f.env.RMD_MEMINFO!,
-      RMD_INSTANCE_REGISTRY: f.legacy, RMD_SCRATCH: "off", RMD_SCRATCH_CHECKOUTS: "off",
+      RMD_SCRATCH: "off", RMD_SCRATCH_CHECKOUTS: "off",
     } });
   assert.equal(run.status, 0, run.stdout + run.stderr);
   assert.match(run.stdout, /progress-watchdog -- FROZEN/);
@@ -524,6 +529,32 @@ function privateRecyclerFixture(extra: string[] = []) {
   } };
 }
 
+
+test("selected shell shadow coexists with the active selection: the recycler's launch is unchanged and still observed", () => {
+  const fixture = privateRecyclerFixture();
+  const session = join(fixture.root, "session.json");
+  try {
+    const captured = spawnSync(process.execPath, ["--import", join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"),
+      join(REPO_ROOT, "src/lib/child-entry-argv.ts"), "--selected-registry-shadow", REPO_ROOT, "--shadow", "--capture",
+      "--session", session, "--registry", fixture.selected], { env: { ...process.env, RMD_INSTANCE_REGISTRY: undefined }, encoding: "utf8" });
+    assert.equal(captured.status, 0, captured.stderr);
+    const opts = (shadow: boolean): RunOpts => ({ args: ["--instance", "fixture", ...(shadow ? ["--selected-registry-shadow", session] : [])],
+      stateDir: join(fixture.root, "state"), unsetDockerHost: true, forbidHostEffects: true,
+      extraEnv: { RMD_INSTANCE_REGISTRY: fixture.selected, RMD_RECYCLE_HOST_LOCK: join(fixture.root, "own-recycle.lock") } });
+    const active = runRecycle("private-good", opts(false));
+    const shadowed = runRecycle("private-good", opts(true));
+    for (const run of [active, shadowed]) for (const dir of [run.fixtureRecordingDir, run.fixtureStubDir]) rmSync(dir, { recursive: true, force: true });
+    assert.equal(active.status, 0, active.stderr);
+    assert.equal(shadowed.status, active.status, shadowed.stderr);
+    const launches = (run: Run) => run.calls.filter(c => isRun(c) && c.argv.includes("-d")).map(c => c.argv.join(" "));
+    assert.ok(launches(active).length > 0, "the active selection reaches its real final launch");
+    assert.deepEqual(launches(shadowed), launches(active), "the shadow never changes the active selection's launch");
+    const rows = readFileSync(session + ".observations", "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.ok(rows.some(row => row.action === "recycle" && row.target_instance === "fixture"), "the recycler under an active selection still observes");
+    assert.ok(rows.every(row => row.publication_permission === "not-granted"));
+    assert.ok(!JSON.stringify(shadowed.calls).includes(session), "no private session reaches a container transport");
+  } finally { fixture.cleanup(); }
+});
 
 test("private registry selection reaches real host and daemon readers: recorded readonly mount and image reader", async () => {
   const fixture = privateRecyclerFixture();
@@ -972,8 +1003,13 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers throu
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const selected = join(root, "private.yaml"), session = join(root, "session.json");
   writeFileSync(selected, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
-  const run = runRecycle("good", { stateDir: root, args: ["--selected-registry-shadow", session],
-    extraEnv: { HOME: root, RMD_INSTANCE_REGISTRY: selected, RMD_RECYCLE_HOST_LOCK: join(root, "host.lock") } });
+  // The shadow candidate is captured explicitly; RMD_INSTANCE_REGISTRY is W1-T10573's active selection, left absent.
+  const captured = spawnSync(process.execPath, ["--import", join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"),
+    join(REPO_ROOT, "src/lib/child-entry-argv.ts"), "--selected-registry-shadow", REPO_ROOT, "--shadow", "--capture",
+    "--session", session, "--registry", selected], { env: { ...process.env, RMD_INSTANCE_REGISTRY: undefined }, encoding: "utf8" });
+  assert.equal(captured.status, 0, captured.stderr);
+  const run = runRecycle("good", { stateDir: root, args: ["--selected-registry-shadow", session], unselectedRegistry: true,
+    extraEnv: { HOME: root, RMD_RECYCLE_HOST_LOCK: join(root, "host.lock") } });
   t.after(() => {
     rmSync(run.fixtureRecordingDir, { recursive: true, force: true });
     rmSync(run.fixtureStubDir, { recursive: true, force: true });
