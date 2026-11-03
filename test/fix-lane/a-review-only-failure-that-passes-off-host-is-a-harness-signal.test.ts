@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { buildFixProgressInput, judgeFixProgress, parseFixProgressVerdict, resolveFixProgress,
-  reviewerProofFailures } from "#src/lib/fix-progress-judge.js";
+  reviewerProofFailures, type FixProgressHostedProofResult } from "#src/lib/fix-progress-judge.js";
 
 const CLAIM = "the real owner cli completes";
 const FILE = "test/fix-lane/real-owner.test.ts";
@@ -11,8 +11,8 @@ const HEAD = "current-head";
 const criterion = { claim: CLAIM, proof: PROOF, met: false, reason: "review sandbox timeout",
   proof_exec: "executed_fail", proofFailureOutput: OUTPUT, reviewLoad: "load1=18, cores=4" };
 const worker = { proof: PROOF, headSha: HEAD, result: "pass" as const, output: "# tests 1\n# pass 1\n# fail 0" };
-const ci = { headSha: HEAD, testFile: FILE, check: "test-fast-shard (2/8)",
-  result: "pass" as const, output: "real owner cli: passed" };
+const ci: FixProgressHostedProofResult = { headSha: HEAD, testFile: FILE, check: "test-fast-shard (2/8)",
+  result: "pass", output: "real owner cli: passed" };
 
 function facts() {
   const ledger: Record<string, unknown>[] = [
@@ -66,7 +66,7 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
     for (const source of ["worker-fail", "ci-fail", "worker-missing", "ci-missing"] as const) {
       const f = facts();
       if (source === "worker-fail") f.ledger[1]!.worker_proof_results = [{ ...worker, result: "fail" }];
-      if (source === "ci-fail") f.hostedProofResults = [{ ...ci, result: "fail" }] as typeof f.hostedProofResults;
+      if (source === "ci-fail") f.hostedProofResults = [{ ...ci, result: "fail" }];
       if (source === "worker-missing") delete f.ledger[1]!.worker_proof_results;
       if (source === "ci-missing") f.hostedProofResults = [];
       const input = buildFixProgressInput(f);
@@ -105,13 +105,47 @@ describe("test/fix-lane/a-review-only-failure-that-passes-off-host-is-a-harness-
       f => { f.reviewFailures = []; },
       f => { f.ledger[1]!.worker_proof_results = [null, {}, { ...worker, result: "unknown" }]; },
       f => { f.ledger[1]!.worker_proof_results = [worker, { ...worker, result: "fail" }]; },
-      f => { f.hostedProofResults = [ci, { ...ci, result: "fail" }] as typeof f.hostedProofResults; },
+      f => { f.hostedProofResults = [ci, { ...ci, result: "fail" }]; },
+      f => { f.hostedProofResults = [{ ...ci, check: "" }]; },
+      f => { f.ledger[0]!.reviewer_proof_failures = [{ claim: CLAIM, digest: "wrong-output" }]; },
+      f => { f.ledger[0]!.reviewer_proof_failures = reviewerProofFailures([{ ...criterion, proof: "unit test: old proof" }]); },
+      f => { f.ledger[2]!.decision_verdict = { criteria: [{ ...criterion, proof: "unit test: old proof" }] }; },
     ];
     for (const change of changes) {
       const f = facts();
       change(f);
       assert.equal(buildFixProgressInput(f).signals.offHostPass, undefined, change.toString());
     }
+  });
+
+  test("pending checks and later rounds cannot borrow an earlier pass", () => {
+    const f = facts();
+    assert.equal(buildFixProgressInput({ ...f, pendingChecks: [ci.check] }).signals.offHostPass, undefined);
+    f.ledger.push(
+      { ...f.ledger[0], round_id: "r2", head_sha: HEAD },
+      { ...f.ledger[1], round_id: "r2", fix_outcome: "NO_CHANGE" },
+      { ...f.ledger[2] },
+    );
+    assert.equal(buildFixProgressInput(f).signals.offHostPass, undefined);
+    delete f.ledger[4]!.pushed_head_sha;
+    f.ledger[4]!.fix_outcome = "FIXED";
+    f.ledger[4]!.worker_proof_results = [{ ...worker, result: "fail" }];
+    assert.equal(buildFixProgressInput(f).signals.offHostPass, undefined, "an unpushed failure supersedes the old pass");
+    f.ledger.splice(3);
+    f.ledger.push({ ...f.ledger[0], round_id: "r2", head_sha: HEAD });
+    assert.equal(buildFixProgressInput(f).signals.offHostPass, undefined, "an ongoing round has no new result yet");
+  });
+
+  test("a wired judge chooses its verdict from the signal without a forced harness override", async () => {
+    const input = buildFixProgressInput(facts());
+    for (const decision of [
+      { verdict: "continue" as const, reason: "investigate additional evidence" },
+      { verdict: "change-approach" as const, approach: "inspect another cause", reason: "new facts" },
+    ]) assert.deepEqual(await judgeFixProgress(input, async () => decision), decision);
+    const decision = await judgeFixProgress(input, async () =>
+      parseFixProgressVerdict('{"verdict":"harness","reason":"review environment"}'));
+    assert.equal(decision.verdict, "escalate");
+    assert.ok(decision.reason.includes(worker.output));
   });
 
   test("a harness verdict without corroborating results holds rather than dispatches", async () => {
