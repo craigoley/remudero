@@ -391,7 +391,6 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/digest.ts": 1,
   "src/lib/doctor.ts": 2,
   "src/lib/drain-lock.ts": 2,
-  "src/lib/drain.ts": 1,
   "src/lib/escalate.ts": 2,
   "src/lib/feedback-docket.ts": 1,
   "src/lib/feedback-landing.ts": 2,
