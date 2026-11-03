@@ -1,0 +1,39 @@
+- id: W1-T11258
+  title: A review lane a light pass frees refills from every green, unreserved PR in its tick's open-PR snapshot, not only from its own one-PR batch, so a green backlog drains at lane width between full passes
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which PRs a freed light-pass lane may refill from; the shared reservation set still prevents a double admission
+  origin: operator-session#review-throughput-2026-11-03
+  plan_refs:
+    - W1-T11153
+    - W1-T4732
+  files:
+    - src/cli/commands/sweep.ts
+    - test/sweep/a-freed-review-lane-refills-from-the-whole-tick-snapshot.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When a light-pass batch's review settles and frees a lane, the refill admits the oldest green PR from the tick's whole open-PR snapshot that no light pass has reserved, even when that PR belongs to another batch, and never a PR another pass already reserved
+      proof: "unit test: test/sweep/a-freed-review-lane-refills-from-the-whole-tick-snapshot.test.ts"
+    - claim: The light pass's refill reader no longer limits a refill to the batch's own PRs
+      proof: "grep: W1-T11258 in src/cli/commands/sweep.ts"
+  rationale: |
+    OBSERVED 2026-11-03, 12:45-18:45Z, ledger union on the Azure host:
+    - All 619 light passes enumerated exactly one PR (sweep.pass surface light, enumerated 1). Full passes ran 5 times (12:47, 14:52, 15:59, 17:25, 18:36Z), after preludes of 23-72 min (sweep.full_prelude elapsed_ms 1,432,300-4,356,472).
+    - The 17:25Z full pass disposed 16 PRs post-review ("checks green, review never posted — running the review lane"). One review started, at 17:32Z, and the next starts came at 18:15Z, after a daemon restart.
+    - At 18:43:47Z, review.capacity read queue_depth 1, effective_width 4 and active_workers 2, while 17 open PRs sat at blocker awaiting-review / review-lane, waiting up to 222 min.
+    - Reviews posted per hour, 12Z-18Z: 6, 6, 15, 15, 10, 8, 22. A review ran from pending to posted in p50 2.6 min / p90 8.1 min (78 reviews), so the lane was idle, not saturated.
+    - The cause is stated in src/cli/commands/sweep.ts at readOpenPrsForRefill (W1-T11153): "One tick's snapshot is split into batches, each with its own light pass, so a batch refills only from its own PRs and PRs the tick's snapshot did not hold." With one-PR batches, a freed lane has nothing to refill from.
+  design: |
+    In the light pass's readOpenPrsForRefill (src/cli/commands/sweep.ts), return every PR of the fresh open-PR read. Today it returns only the batch's own PRs plus PRs the tick's snapshot did not hold.
+    runSweepLightPass already drops PRs whose head is in the shared synchronous reservation set (lightPassReservedHeads, W1-T4732) before selecting admissions, so two batches cannot admit the same head. The test must prove that with two concurrent one-PR batches.
+    Mark the change with a comment naming W1-T11258.
+    NOT IN SCOPE: the full pass, review width, the plan lane's own pool, and admission order (W1-T11153's selector is reused unchanged).
+  note: |
+    reservation hand-off: run-unfiled-1793732872741 -> run-unfiled-1793732872741
+    Reserved with rmd next-task-id (W1-T11258 on run-unfiled-1793732872741). From the operator session's review-throughput diagnosis.

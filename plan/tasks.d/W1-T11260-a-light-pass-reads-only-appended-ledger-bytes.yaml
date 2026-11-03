@@ -1,0 +1,40 @@
+- id: W1-T11260
+  title: The daemon's light passes read the live ledger through one incremental tail per process instead of re-reading and re-parsing the whole 15 MB file several times per pass on the daemon's main thread
+  repo: remudero
+  depends_on:
+    - W1-T11210
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the default reader behind the light pass's ledger reads; the rows each caller sees are unchanged
+  origin: operator-session#review-throughput-2026-11-03
+  plan_refs:
+    - W1-T11210
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-light-pass-reads-only-appended-ledger-bytes.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: With no readLedger injected, observeLightPassReviewEligibility and runSweepLightPass read the live ledger through one process-wide createLiveLedgerTail, return the same rows readLedgerLines returns for that file, and a second light pass over a file with no new bytes parses no line
+      proof: "unit test: test/sweep/a-light-pass-reads-only-appended-ledger-bytes.test.ts"
+    - claim: sweep.ts's default light-pass ledger reader is the incremental tail
+      proof: "grep: createLiveLedgerTail( in src/lib/sweep.ts"
+  rationale: |
+    OBSERVED 2026-11-03, 12:45-18:45Z, Azure host:
+    - daemon.loop_stall_profile rows record 2,040 s of daemon main-loop stall in 15 profiled stalls: 94, 89, 122, 118, 65, 479, 77, 88, 91, 179, 100, 103, 93, 81 and 253 s.
+    - Their top frames are "(garbage collector)", writeSync, scanLedgerBuffer and parseObject (run-task.mjs) and createUnsafeBuffer. The 14:30:23Z stall (479 s) spent 146 s in GC, 85 s in writeSync, 58 s in createUnsafeBuffer and 36 s in scanLedgerBuffer.
+    - The live ledger is 15,451,347 bytes. The daemon ran 619 light passes in the window, up to 184 in one hour.
+    - Each light pass parses it whole at least twice: observeLightPassReviewEligibility calls (deps.readLedger ?? readLedgerLines)(deps.ledgerPath), and runSweepLightPass reads selectionLedgerLines the same way and re-reads it inside its disposition loop. sweep.ts holds 5 such default call sites.
+    - While stalled, every in-process step waits: dispositions, admissions, and plan-only reviews, which run in the daemon process.
+  design: |
+    - Hold one LiveLedgerTail per ledger path per process (createLiveLedgerTail from src/lib/live-ledger-tail.ts, W1-T11210).
+    - Make it the default for the light pass's reads in place of readLedgerLines. Retain every row the live file holds: a rotation renames the file, which resets the tail, so no age cutoff is needed.
+    - Callers receive a ReadonlyArray. A caller that mutated the returned array copies it first.
+    - An injected deps.readLedger is still used as before.
+    NOT IN SCOPE: the full pass's ledger-union reads (fleet_state), and serve.
+  note: |
+    reservation hand-off: run-unfiled-1793732872741 -> run-unfiled-1793732872741
+    Reserved with rmd next-task-id (W1-T11260 on run-unfiled-1793732872741). From the operator session's review-throughput diagnosis.
