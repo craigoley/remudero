@@ -25,7 +25,7 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: For a task whose risk_ruling.operator_release_pin was computed while it read status queued, setting status to merged (or any other lifecycle status the control plane writes) leaves operatorReleaseContractChanged false, both for a pin written before this change and for one written after it, while any edit to its title, files, acceptance, design or verify still reads changed; the fixtures are W1-T10431's and W1-T10970's real shards on main
+    - claim: For a task whose risk_ruling.operator_release_pin was computed while it read status queued, setting status to merged (or any other lifecycle status the control plane writes) leaves operatorReleaseContractChanged false, both for a pin written before this change and for one written after it, while any edit to its title, files, acceptance or design still reads changed (verify stays normalized to auto in the pin, as #13992 made it, so a verify edit reads unchanged as before); the fixtures are W1-T10431's and W1-T10970's real shards on main
       proof: "unit test: test/plan/a-reconciled-status-flip-keeps-an-operator-release-pin-valid.test.ts"
     - claim: Running reconcilePlan over every shard on main with a credit set that includes W1-T10431, W1-T10787, W1-T10829, W1-T10874, W1-T10898, W1-T10917, W1-T10942 and W1-T10970 yields a plan whose lintPlan adds no blocking operator-release-contract violation, so the landing's shard-census (W1-T3086's violating-shard baseline) stays at its baseline
       proof: "grep: W1-T11175 criterion 2 in test/plan/a-reconciled-status-flip-keeps-an-operator-release-pin-valid.test.ts"
