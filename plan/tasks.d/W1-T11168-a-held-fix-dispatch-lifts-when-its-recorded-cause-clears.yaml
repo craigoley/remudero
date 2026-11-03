@@ -1,0 +1,83 @@
+- id: W1-T11168
+  title: "A held fix dispatch lifts when its recorded cause clears, not after a count of three at one head — FIX_DISPATCH_FAILED_BACKSTOP 3 held #15679 for 126 passes (about 38 h) on a transient \"PAUSE: cannot reach origin\" and FIX_CLAIM_DECLINE_BACKSTOP 3 held #14176 for about 10.7 h on one dirty owner worktree; each count latches until a new head, and only a dispatch makes a new head"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, when a held fix dispatch at one head is retried; it spans the two backstop holds and the progress judge that replaces their count
+  band_meaning: span
+  origin: operator-session#conflict-findings-2026-11-03
+  plan_refs:
+    - W1-T5919
+    - W1-T5932
+    - W1-T7998
+    - W1-T10709
+    - W1-T9578
+  files:
+    - src/lib/sweep.ts
+    - test/fix-lane/a-held-fix-dispatch-lifts-when-its-recorded-cause-clears.test.ts
+    - test/a-declined-fix-claim-is-not-a-dispatched-fix.test.ts
+    - test/a-detached-fix-dispatch-that-throws-before-fix-dispatch-is-not-dispatched.test.ts
+    - test/a-held-fix-dispatch-never-claims-it-is-dispatching.test.ts
+    - test/the-codeql-blocker-repair-records-a-detached-dispatch-that-fails.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A detached-dispatch failure or an owner-claim decline at a head holds that PR's next dispatch only while the cause its row recorded is still observed (the named owner worktree exists and its owner is live, the fleet PAUSE is held, origin is unreadable), and the first pass that reads the cause cleared dispatches again at the same head with no new push; fixDispatchHoldAtHead no longer reads FIX_DISPATCH_FAILED_BACKSTOP or FIX_CLAIM_DECLINE_BACKSTOP, and both constants are gone
+      proof: "unit test: test/fix-lane/a-held-fix-dispatch-lifts-when-its-recorded-cause-clears.test.ts"
+    - claim: A failure whose cause has no probe is retried on a backoff learned from the ledger, the measured time from a failure of that cause class to the next successful dispatch, doubling with each consecutive same-cause failure at the head and resetting on a success; with no history the first retry waits one sweep pass, and no number of failures alone stops a retry
+      proof: "grep: W1-T11168 criterion 2 in test/fix-lane/a-held-fix-dispatch-lifts-when-its-recorded-cause-clears.test.ts"
+    - claim: After each retry that fails on the same cause, the fix progress judge (resolveFixProgress) reads that head's cause history, and the sweep escalates once per PR, head and cause only on the judge's escalate verdict; an unavailable judge keeps the backoff and never escalates by count, and every hold row names its cause, its next retry time and the judge's last verdict
+      proof: "grep: W1-T11168 criterion 3 in test/fix-lane/a-held-fix-dispatch-lifts-when-its-recorded-cause-clears.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 ~00:30Z over the 7-day conflict rows of the core ledger union (~/Remudero-notes/conflict-findings-2026-11-03.md,
+    evidence in ~/Remudero-notes/conflict-evidence-1103/, read-only). Code read at origin/main c0a6f1c74.
+    - #15679 (W1-T9796): 205 conflict-disposed rows from 2026-10-30T14:43Z to 2026-11-02T06:26Z. 126 stand-downs read "detached
+      fix dispatch failed before fix.dispatch <n> times ... (fix dispatch refused: worker admission is held: PAUSE: cannot reach
+      origin ...)", FIX_DISPATCH_FAILED_BACKSTOP 3 reached. That is about 38 h on a cause that had cleared.
+    - #14176 (W1-T10559): 81 rows carried dispatch_held fix_claim_decline from 2026-10-26T04:10Z to 14:50Z. Six
+      sweep.fix.checkout_claim_declined rows named owner_dirty_recovery_preserve_failed on
+      worktrees/sweep-W1-T10559-1792983204646. FIX_CLAIM_DECLINE_BACKSTOP 3 held the head while that worktree existed.
+    THE COUNT HAS BEEN PATCHED ONE CAUSE AT A TIME. Each patch was the symptom:
+    - #14423 (2026-10-26) re-validates a failed owner preservation before lifting the decline hold.
+    - #16032 (2026-11-01) stops counting a fleet PAUSE refusal toward the dispatch-failure backstop (FLEET_PAUSE_REFUSAL regex).
+    The count stays. Any other transient cause (a fetch that timed out, a GitHub 5xx, a host restart mid-claim) still latches the
+    head after three, and only a new head lifts it. A held PR makes no new head.
+    READ: fixDispatchHoldAtHead and dispatchFailureHoldAtHead (src/lib/sweep.ts) count rows per (PR, head) against the two
+    constants. The decline hold already stands down "while that worktree exists", a cause probe for one cause. The dispatch-failure
+    hold has none. Both escalate once on the count, with no judge.
+    Operator rulings: no fixed thresholds, so derive from measurement with tiered, self-healing responses; repair loops get an LLM
+    progress judge.
+    NOT COVERED ELSEWHERE: W1-T10709 (blocked) re-checks a stopped owner recovery once after an accepted answer. That is an answer
+    path, not the hold's own retry. The sibling item 5b, W1-T11169 (stale fix seeds), is a different hold, the dedup on a dead daemon's seed.
+  design: |
+    1. CAUSE. Classify each failure and decline row's recorded reason into a cause with a probe where one exists: owner-held
+       (worktree_path present, and its owner pid or claim live; the claim path's existing owner census), fleet-held (PAUSE held,
+       origin unreadable; the existing workerAdmissionHoldReason and FLEET_PAUSE_REFUSAL reads), or unprobed (anything else,
+       keyed by a normalized reason class, as reasonClass does for the fix-lane gardener).
+    2. LIFT. A probed cause holds only while its probe reads it present, re-read each pass. An unprobed cause retries at
+       last_failure + backoff. The base is the ledger's measured time from a failure of that cause class to the next
+       fix.dispatch for the same PR, the median over the readable window; with no sample it is one sweep pass. It doubles per
+       consecutive same-cause failure at the head and resets on a dispatch. No count stops a retry.
+    3. JUDGE. After each failed retry, call resolveFixProgress with the head's cause history as remedyHistory, as the plan
+       round's refused-twice arm does. Escalate once per (PR, head, cause) only on verdict escalate. On change-approach, carry
+       the constraint into the next dispatch. On unavailable, keep the backoff.
+    4. RECORD. The hold's sweep.disposed fields name cause, probe result, next_retry_at, backoff_ms and judge_verdict, so
+       fleetWithheldStageMs and ownEscalationAtHead keep reading them.
+    5. Remove FIX_DISPATCH_FAILED_BACKSTOP and FIX_CLAIM_DECLINE_BACKSTOP. The four existing tests that import them move to the
+       cause-aware hold.
+    Tests go in the new file, titled verbatim as in the proofs, over the real fixDispatchHoldAtHead with an injected owner probe,
+    PAUSE read and judge, and ledger fixtures shaped like #15679's and #14176's rows.
+  falsifier: |
+    At origin/main, three unprobed failures at one head hold the fourth pass even after the cause has cleared, because
+    dispatchFailureHoldAtHead returns a hold on failures.length >= 3. The first test's "dispatches again at the same head" fails,
+    and the constants still exist. If the doubling is dropped, a fixed-interval retry fails the second test's backoff assertion.
+    If the hold escalates on a count with the judge unavailable, the third test fails.
+  note: |
+    reservation hand-off: plan-file-1793666132000 -> plan-file-1793666132000
+    Reserved with rmd next-task-id --branch plan-file-1793666132000. Filed 2026-11-03 from the conflict findings, item 5a (p1),
+    under the operator ruling of 2026-11-02 that rmd must resolve merge conflicts automatically. Item 5b, W1-T11169 (the stale fix-seed
+    read) edits nearby code in src/lib/sweep.ts and should not be built in parallel with this one.

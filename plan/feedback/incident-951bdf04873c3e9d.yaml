@@ -19,10 +19,24 @@ raw: >-
     (none found)
 attachments: []
 origin: incident#951bdf04873c3e9d0e6a5df275fb5a6ac398cb14dfdd75e9b7e792d802adae9a
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/16401
+summary:
+  headline: CI repair left the main-run gap unresolved
+  what_happened: A CI run covering main commit 7527e5c reported that its gap
+    persisted after a repair attempt. The incident occurred once; no suspect
+    merged pull request was identified.
+  decision: Assign the CI gap for investigation and require the repaired run to be
+    verified or the failure clearly explained.
+  options:
+    - label: Investigate
+      consequence: Find why the repair did not close the gap and report the result.
+      intent: approve
+    - label: Defer
+      consequence: Leave the one-time incident unresolved for a later review.
+      intent: keep
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

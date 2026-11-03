@@ -1,0 +1,59 @@
+- id: W1-T11151
+  title: "A review's admission slot is released when its verdict posts, not when its process settles — code reviews held their slot 24.6 h a week between review.posted and the run's settlement, about a quarter of the 94.6 lane-hours the reviews themselves took, while the CPU-shed width sat at 1"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, when a review's slot is freed; it spans the review that reports its post, the child host that relays it, and the registry that frees the slot
+  band_meaning: span
+  origin: operator-session#review-lane-findings-2026-11-02
+  plan_refs:
+    - W1-T9114
+    - W1-T5931
+    - W1-T11071
+  files:
+    - src/cli/commands/review.ts
+    - src/lib/run-child.ts
+    - src/lib/sweep.ts
+    - test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Once a review has written its terminal outcome (review.posted or review.post_refused), it reports a posted phase, in process and as a run child (through the owned status.json the daemon's child registry reads), and reviewAdmissionBound stops counting it from that moment, while the review's mutex key stays held until the run settles so the same head is not re-admitted
+      proof: "unit test: test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts"
+    - claim: A review whose posted phase is unread, or that ends without posting, holds its slot until it settles exactly as today, and a slot released at post is never released a second time at settlement
+      proof: "grep: W1-T11151 criterion 2 in test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts"
+    - claim: Settlement of a review released at post ledgers post_to_settle_ms on its sweep.post_review.done or child settlement row, so the time a review spends after its verdict stays measurable
+      proof: "grep: W1-T11151 criterion 3 in test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 over a 7-day ledger union (~/Remudero-notes/review-lane-findings-2026-11-02.md, read-only):
+    - Code reviews (n=732): median 379 s, 94.6 lane-hours. Posted -> post_review.done held the slot for 24.6 h; admission -> process
+      start held it another 25.0 h (W1-T11152). About 50 slot-hours a week were held outside the review itself.
+    - Review width was 1 for 75% of the last 24 h, so each held slot was the whole lane.
+    READ at origin/main 1368db581:
+    - reviewAdmissionBound (src/lib/sweep.ts) counts childWorkCount("review"). registerChildWork claims the slot and the review key;
+      only settleChildWork releases them (releaseReviewSlot), when the child's settled promise resolves after its process exits.
+    - The in-process path holds fullPassReviewsInFlight until reviewRunner returns and sweep.post_review.done is logged.
+    - run-child-main.ts already gives detached work an onPhase that writes the owned status.json (fix dispatch uses it).
+    NOT COVERED: W1-T11071 (merged, #16192) bounds the interphase review clock's shutdown wait; W1-T9114 (merged) made reviews run
+    children; W1-T11149 (filed beside this) adds the review's setup/proofs/judge phases. Neither frees a slot before settlement.
+  design: |
+    1. runReview reports onPhase("posted") right after the terminal status write returns (posted, refused or withheld), before
+       cleanup. runDetachedWork's review arm passes its ctx.onPhase through.
+    2. The child registry entry gains releasedAtPost. When its relayed phase reads "posted", the registry releases the slot
+       (releaseReviewSlot) and stops counting the entry in childWorkCount("review"), but keeps the entry and its review key until
+       settleChildWork. settleChildWork skips the slot release for an entry already released at post.
+    3. The in-process paths do the same with their own counters.
+    4. post_to_settle_ms goes on the settlement row, so the tail after the verdict (cleanup, ledger flush) is measured, not assumed.
+    Shares the phase relay W1-T11149 adds; whichever builds second reuses the first's relay.
+    Tests go in test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts, titled verbatim as in the proofs, over the
+    real child registry with an injected phase reader.
+  note: |
+    reservation hand-off: plan-file-1793657966812 -> plan-file-1793657966812
+    Reserved with rmd next-task-id --branch plan-file-1793657966812 from the operator checkout. Filed 2026-11-02 from the review-lane
+    findings, item 3 (p1), first half: release at post. The second half, cheap child start, is W1-T11152. Ordering: do not build in
+    parallel with W1-T11149 (both edit the child registry in src/lib/sweep.ts and runReview); not in depends_on because it is not
+    on main at filing.

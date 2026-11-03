@@ -176,6 +176,17 @@ export function childHeapPolicyArgs(): string[] {
   return childHeapGrowingPercent === undefined ? [] : [heapGrowingFlag(childHeapGrowingPercent)];
 }
 
+/**
+ * W1-T10290: record the growth percent this process's children start with, WITHOUT setting it on this process.
+ * Serve's own heap keeps V8's default; its read-model oracle children start under the policy's percent. The record is
+ * a module variable, so it reaches only this isolate: a caller hands {@link childHeapPolicyArgs} to a worker thread in
+ * that thread's data.
+ */
+export function recordChildHeapGrowingPercent(policy: Pick<DaemonMemoryPolicy, "heapGrowingPercent">): string[] {
+  childHeapGrowingPercent = policy.heapGrowingPercent;
+  return childHeapPolicyArgs();
+}
+
 /** Daemon entry: set the growth factor and take the heap ceiling out of the inherited NODE_OPTIONS. This
  *  process's own ceiling is fixed at startup and is unchanged. */
 export function applyDaemonMemoryPolicy(policy: DaemonMemoryPolicy, io: DaemonMemoryEntryIo = {}): DaemonMemoryEntryResult {
@@ -185,7 +196,7 @@ export function applyDaemonMemoryPolicy(policy: DaemonMemoryPolicy, io: DaemonMe
   const after = withoutHeapCeiling(before);
   if (after === undefined) delete env.NODE_OPTIONS;
   else env.NODE_OPTIONS = after;
-  childHeapGrowingPercent = policy.heapGrowingPercent;
+  recordChildHeapGrowingPercent(policy);
   // An injected env is not this process's own launch, so it names no ceiling source unless a file is injected with it.
   const location = io.heapCeiling ?? (io.env === undefined ? defaultHeapCeilingLocation() : undefined);
   return {

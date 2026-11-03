@@ -1,0 +1,83 @@
+- id: W1-T11169
+  title: "A dead daemon's fix seed is settled once for its head and stays settled across later boots — fixSeedRead reads a dead run's continuation as ended only when the NEWEST boot's adoption pass adopted no child fleet-wide, so #15532 waited 169 passes (about 39 h) on DAEMON-1793398033232's seed, and #15602's seed from the same run read orphaned 94 times and then live again after the next boot adopted another task's child"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, how fixSeedRead decides that an earlier run's continuation has ended; high because a wrong "ended" re-dispatches beside a live worker
+  band_meaning: blast-radius
+  origin: operator-session#conflict-findings-2026-11-03
+  plan_refs:
+    - W1-T9999
+    - W1-T10991
+    - W1-T10339
+    - W1-T9955
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-dead-daemons-fix-seed-stays-settled-across-later-boots.test.ts
+    - test/sweep/a-started-fix-seed-is-reconciled-after-a-clean-boot.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A seed whose rung was written by an earlier daemon run reads orphaned once a boot after it has a readable adoption pass that adopted no child for THIS task, whatever that pass adopted for other tasks; the rows are #15532's shape (an acted conflicted seed, then only a fix.scope_amendment resumed row from the same dead run) and #15602's (an earlier run's seed, then a boot that adopted two other tasks' children), and both now dedup as orphaned rather than "fix already dispatched ... awaiting its outcome"
+      proof: "unit test: test/sweep/a-dead-daemons-fix-seed-stays-settled-across-later-boots.test.ts"
+    - claim: The sweep.fix.seed_orphaned row it writes is read back, so a seed settled at a head stays settled for that head on every later pass and boot, and a later boot that adopts a child of other tasks never turns it live again; the row is written once per seed, not once per pass
+      proof: "grep: W1-T11169 criterion 2 in test/sweep/a-dead-daemons-fix-seed-stays-settled-across-later-boots.test.ts"
+    - claim: An adoption pass that adopted a child for this task, one whose census is unreadable or misidentified for this task, or a seed written by the current run still reads live, so a surviving worker is never re-dispatched beside
+      proof: "grep: W1-T11169 criterion 3 in test/sweep/a-dead-daemons-fix-seed-stays-settled-across-later-boots.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 ~00:30Z over the core ledger union (~/Remudero-notes/conflict-findings-2026-11-03.md, evidence in
+    ~/Remudero-notes/conflict-evidence-1103/, read-only). Code read at origin/main c0a6f1c74.
+    The stale-seed dedup held 182 of 1,096 conflict-disposed passes (16.6%) across 6 PRs in 7 days.
+    #15532 (W1-T10573, head 25fec8e):
+    - The seed was an acted conflicted sweep.disposed at 2026-10-30T23:03:38Z by DAEMON-1793398033232.
+    - Its only later rung row is fix.scope_amendment outcome resumed at 23:07:05Z, from the same run.
+    - 169 stand-downs read "fix already dispatched for this head (25fec8e) at 2026-10-30T23:03:38.473Z by DAEMON-1793398033232 —
+      awaiting its outcome" until 2026-11-01T14:52Z, under several later daemon runs. Then pr.stuck, issue #16028, and the
+      operator's thread.
+    #15602 (W1-T10722, head ee01645), with a seed at 2026-10-31T00:39:06Z by the same DAEMON-1793398033232:
+    - 94 sweep.fix.seed_orphaned rows (reason owner-run-ended) from 2026-11-01T01:33Z to 2026-11-02T18:05Z.
+    - Under DAEMON-1793601275855 (06:55Z) and again under DAEMON-1793643571744 (18:38Z-21:02Z) the same seed read live: "fix
+      already dispatched for this head (ee01645) at 2026-10-31T00:39:06.809Z by DAEMON-1793398033232".
+    ROOT CAUSE, READ:
+    - For an earlier run's seed with a rung row, fixSeedRead returns orphaned only through continuationEndedAtEmptyBoot.
+    - That predicate takes the NEWEST daemon.boot and needs its run_child.adoption_pass to read live, adopted, unreadable and
+      misidentified all 0. That is fleet-wide: one adopted child of any task anywhere keeps every dead seed live.
+    - The verdict is re-derived on each pass from whichever boot is newest, so it flips with each boot.
+    - The sweep.fix.seed_orphaned row it writes (FIX_SEED_ORPHANED_STEP) has no reader in src/. A settlement is never read
+      back, and the row repeats on every pass.
+    - W1-T10991's own recon (#15108, 2026-10-29) observed this predicate false because boots adopted 1-2 other tasks'
+      children, and fixed only the push_failed rung end. Its shard says the other four PRs "need their own reading before a
+      class claim". #15532 and #15602 are that reading.
+    NOT COVERED ELSEWHERE: W1-T10991 (merged, #15606) ends a seed whose push failed. W1-T10339 (merged, #14284) is a stood-down
+    hold with unchanged inputs. W1-T9999 introduced the read. The sibling item 5a, W1-T11168, is the count backstop, a different
+    hold. #15532 is being hand-fixed in the operator's thread, and this task does not touch that PR.
+  design: |
+    1. PER-TASK ADOPTION. Replace continuationEndedAtEmptyBoot's fleet-wide zero test with a per-task one. For each daemon.boot
+       after the seed by a run other than the seed's, read that boot's run_child.adoption_pass and the run_child.adopted,
+       adoption_unreadable and adoption_misidentified rows naming this task. The continuation ended when some such boot's pass
+       was readable and adopted nothing for this task. An unreadable census for this task, or any adoption of it, keeps it live.
+       Look for an existing per-task field on the adoption row first. If the pass lists no task ids, add them to the row in the
+       same change.
+    2. STICKY SETTLEMENT. Before deriving, fixSeedRead reads the newest FIX_SEED_ORPHANED_STEP row for (PR, head, seed_ts). When
+       one exists and no fix.dispatch for this task at this head follows it, return orphaned with no further derivation. A later
+       dispatch starts a new seed and a new read.
+    3. WRITE ONCE. The dedup arm appends sweep.fix.seed_orphaned only when no row for that (PR, head, seed_ts) exists.
+    4. Nothing else changes: the ordinary owner and checkout claims still gate the redispatch that follows an orphaned read.
+    Tests go in the new file, titled verbatim as in the proofs, over fixSeedRead from #test/helpers/sweep-test.js and the real
+    dedup arm, with ledger fixtures cut from #15532's and #15602's rows (ids and shas kept, other fields minimal).
+  falsifier: |
+    At origin/main, #15532's fixture with a later boot that adopted another task's child reads live, because
+    continuationEndedAtEmptyBoot needs every adoption count to be 0, and the first test fails. #15602's fixture read orphaned
+    under one boot flips to live when a newer boot with an adopted child is appended, so the second test fails. If the
+    per-task census is replaced by "any later boot", a fixture whose boot adopted THIS task's child reads orphaned and the third
+    test fails.
+  note: |
+    reservation hand-off: plan-file-1793666133000 -> plan-file-1793666133000
+    Reserved with rmd next-task-id --branch plan-file-1793666133000. Filed 2026-11-03 from the conflict findings, item 5b (p1),
+    under the operator ruling of 2026-11-02 that rmd must resolve merge conflicts automatically. Do not build it in parallel with
+    W1-T11168, which edits the neighbouring hold code in src/lib/sweep.ts. PR #15532 is being hand-fixed in the operator's
+    thread. A build must not push to it.

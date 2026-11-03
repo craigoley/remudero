@@ -1,0 +1,70 @@
+- id: W1-T11157
+  title: "A review reuses CI's proof-discrimination result for a head when the PR leaves the proof executor and its workflow untouched, instead of running every proof at head and base again on the loaded host — needs operator trust decision before build: the proof-discrimination check already runs each proof at the head and its merge base on a hosted runner, and the review spends 22.3 lane-hours a week on proofs, 44% slower under CPU pressure"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: human
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, where the review's proof outcomes come from; it spans the CI gate that publishes them and the review that consumes them, and it moves trust from the host executor to a hosted run
+  band_meaning: blast-radius
+  origin: operator-session#review-lane-findings-2026-11-02
+  plan_refs:
+    - W1-T273
+    - W1-T1071
+    - W1-T10355
+  files:
+    - scripts/proof-discrimination-gate.mjs
+    - .github/workflows/proof-discrimination-gate.yml
+    - src/cli/commands/review.ts
+    - test/review/a-review-reuses-cis-proof-discrimination-result.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The proof-discrimination workflow publishes, per head sha, a result record naming each proof's head and base outcome, the body digest and criteria source it judged, and a digest of the proof executor's source files and its own workflow file at that head
+      proof: "unit test: test/review/a-review-reuses-cis-proof-discrimination-result.test.ts"
+    - claim: A review whose head's diff touches none of the executor files or the workflow, whose body digest and criteria match the record's, and whose record comes from a successful run of that check at that head, takes each proof's outcome from the record instead of executing it, and ledgers review.proof_reused per proof; any mismatch, missing record or failed fetch executes the proofs exactly as today
+      proof: "grep: W1-T11157 criterion 2 in test/review/a-review-reuses-cis-proof-discrimination-result.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 over a 7-day ledger union (~/Remudero-notes/review-lane-findings-2026-11-02.md, read-only):
+    - Code reviews (n=732), 94.6 lane-hours: proofs took 22.3 h (24%) and ran 44% slower under CPU PSI full >= 20; exec_error reviews
+      were rare but cost 10 reviews x about 36 min = 6.0 lane-hours.
+    - Re-runs on the same head: 107 extra runs (8%), 6.7 lane-hours.
+    READ at origin/main 1368db581:
+    - .github/workflows/proof-discrimination-gate.yml runs on pull_request (opened, synchronize, reopened, edited), checks out the head
+      sha with full history and runs `node --import tsx scripts/proof-discrimination-gate.mjs`, which resolves the merge base and runs
+      the reviewer's own parser and executor (`rmd check-proof --base`, checkProofChildArgv) at the head and the base.
+    - The review then executes the same proofs again on the host (runReview's preparedDecision.judge in src/cli/commands/review.ts).
+      Nothing passes CI's per-proof outcomes to the review; the check publishes only pass or fail.
+    OPERATOR RULING Q3 (2026-11-02, in chat): file it, flagged as needing the operator's trust decision. Reusing a hosted result means
+    the review's proof evidence comes from a GitHub-hosted run rather than the reviewer's own sandbox. The decision covers: which
+    files make up "the executor" (at least scripts/proof-discrimination-gate.mjs, src/lib/check-proof.ts and the review's proof
+    execution in src/lib/review.ts), how the record is authenticated (a check run of the required workflow at that exact head, read
+    through the App), and whether a reused proof may count toward a PASS or only skip re-running a proof CI already failed.
+    NOT COVERED: W1-T11132 (#16266, open) treats a review proof that fails only under host load as inconclusive, and W1-T11133
+    (#16269, open) gives the progress judge an off-host-pass signal; both read hosted CI to classify a host result, neither replaces
+    the host run. W1-T273 and W1-T1071 built proof discrimination itself.
+  design: |
+    1. The gate script writes proof-discrimination-result.json {head_sha, base_sha, body_digest, criteria_source, executor_digest,
+       workflow_digest, proofs: [{proof, head, base, verdict}]} and the workflow uploads it as an artifact (or as check-run output;
+       the operator's trust decision picks which).
+    2. runReview, before executing proofs, reads the record for its head through the App gateway, recomputes executor_digest and
+       workflow_digest from its own head checkout, and checks the head's diff against the executor and workflow paths. All must match.
+    3. On a match each proof's outcome is the record's, labelled reused; on any mismatch the proofs run as today. The executor path
+       list lives in one exported constant both sides read.
+    NEEDS OPERATOR TRUST DECISION BEFORE BUILD (verify: human). The builder does not start until the operator has answered the three
+    questions in the rationale; the answers are recorded in this shard by amendment first.
+    Tests go in test/review/a-review-reuses-cis-proof-discrimination-result.test.ts, titled verbatim as in the proofs.
+  note: |
+    reservation hand-off: plan-file-1793657972812 -> plan-file-1793657972812
+    Reserved with rmd next-task-id --branch plan-file-1793657972812 from the operator checkout. Filed 2026-11-02 from the review-lane
+    findings, item 6 (p2). Needs operator trust decision before build, per operator ruling Q3.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/proof-discrimination-gate.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-03T03:42:37.584Z"
+    pin: "d245f52a52e19f3285d7d8717452ee0798dd96768256cde2b22d30ad8a5af30d"

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -22,6 +22,7 @@ import { shortPathWhenTooLong } from "./short-path-root.js";
 import { acquireTestSlot, lowPriorityCommand, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 const require = createRequire(import.meta.url);
 
@@ -3393,7 +3394,66 @@ function isConsumerRepo(repoRoot: string, packageJsonText?: string): boolean {
   return !existsSync(join(repoRoot, FAST_GATE_RUNNER_FILES["rule-checks"]));
 }
 
+/** W1-T11105 — the census-precheck counts unit a step log records, and the variable carrying the log to that script. */
+export const CENSUS_COUNTS_STEP_JOB = "census-precheck:counts";
+/** An environment variable, not a flag: the gate runs the worktree's own script, and an older tree rejects an unknown flag. */
+export const CENSUS_COUNTS_LOG_ENV = "RMD_CENSUS_COUNTS_LOG";
+/** The fast-gate jobs a light gate leaves out; its census counts come from {@link CENSUS_COUNTS_STEP_JOB} instead. */
+export const LIGHT_GATE_SKIPPED_JOBS: readonly string[] = ["rule-checks", "census-precheck"];
+
+/**
+ * W1-T11105 — `rmd preflight --step-log <path>`: one JSON line per finished phase and fast-gate job, appended as each
+ * finishes, so a gate killed at its backstop still leaves a record of what finished. A write failure is reported once
+ * and stops the log; it never changes a verdict.
+ */
+export interface PreflightStepLog {
+  path: string;
+  plan(phases: readonly string[], fastJobs: readonly string[]): void;
+  phase(name: string, value: unknown, ms: number): void;
+  job(job: string, ok: boolean, ms: number): void;
+}
+
+export function createPreflightStepLog(path: string): PreflightStepLog {
+  let broken = false;
+  const write = (record: Record<string, unknown>) => {
+    if (broken) return;
+    try {
+      appendFileSync(path, JSON.stringify(record) + "\n");
+    } catch (e) {
+      broken = true;
+      console.error(`### step log NOT written to ${path}: ${String((e as Error)?.message ?? e)}`);
+    }
+  };
+  return {
+    path,
+    plan: (phases, fastJobs) => write({ plan: { phases: [...phases], fast_jobs: [...fastJobs] } }),
+    phase: (name, value, ms) => {
+      const result = value as { ok?: unknown; steps?: unknown } | undefined;
+      const steps = Array.isArray(result?.steps) ? (result.steps as Array<{ name?: unknown; ok?: unknown }>) : [];
+      write({
+        phase: name,
+        ok: typeof result?.ok === "boolean" ? result.ok : null,
+        ms: Math.round(ms),
+        failed: steps.filter((step) => step?.ok === false).map((step) => String(step.name)),
+      });
+    },
+    job: (job, ok, ms) => write({ job, ok, ms: Math.round(ms) }),
+  };
+}
+
+/** W1-T11105: the phases and fast-gate jobs one `rmd preflight` invocation runs, as its step log's first line names them. */
+export function preflightStepLogPlan(rest: readonly string[], core: boolean): { phases: string[]; fastJobs: string[] } {
+  const fastTier = core && !rest.includes("--no-fast");
+  const fullTiers = core ? ["--ci-parity", "--coverage", "--proofs"].filter((flag) => rest.includes(flag)).map((flag) => flag.slice(2)) : [];
+  return {
+    phases: ["default", ...(fastTier ? ["fast", "ci-checks", "fast-coverage"] : []), ...fullTiers],
+    fastJobs: fastTier ? FAST_GATE_STEPS.map(({ job }) => job) : [],
+  };
+}
+
 export interface PreflightFastDeps {
+  /** W1-T11105: each job's result is appended as it finishes; the census-precheck leaf hands the script the same log. */
+  stepLog?: PreflightStepLog;
   spawn?: PreflightSpawn;
   /** Test seam — production reads the repo's real package.json. */
   packageJsonText?: string;
@@ -3440,10 +3500,34 @@ function withoutNodeTestContext<T>(fn: () => T): T {
  * tree, with the SAME exit reading (0 pass, 2 "could not measure" not blocking, anything else
  * refuses). Exit 2 is reported as UNMEASURED by name so it never reads as a measured pass.
  */
-function censusPrecheckLeaf(repoRoot: string, spawn: PreflightSpawn): CiParityLeafResult {
+export const AUTHOR_CENSUS_ANSWERED_ENV = "RMD_AUTHOR_CENSUS_ANSWERED";
+
+export function authorCensusAnswer(value: string | undefined, head: string | undefined): { sha: string; outcome: string } | undefined {
+  const answer = /^([0-9a-f]{40}):(ok|time-bound)$/.exec(value ?? "");
+  return answer && answer[1] === head ? { sha: answer[1], outcome: answer[2]! } : undefined;
+}
+
+function censusAnswerHead(repoRoot: string): { head: string } | { unreadable: string } {
+  try {
+    return { head: hostWorktreeGit(repoRoot, ["rev-parse", "HEAD"]).trim() };
+  } catch (error) {
+    return { unreadable: String((error as Error)?.message ?? error) };
+  }
+}
+
+function censusPrecheckLeaf(repoRoot: string, spawn: PreflightSpawn, stepLog?: PreflightStepLog): CiParityLeafResult {
+  const recorded = process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+  const head = recorded ? censusAnswerHead(repoRoot) : undefined;
+  const answered = authorCensusAnswer(recorded, head && "head" in head ? head.head : undefined);
+  if (answered) {
+    // The author's census-precheck passed on this head, so its counts did too; nothing re-measures them.
+    stepLog?.job(CENSUS_COUNTS_STEP_JOB, true, 0);
+    return { ok: true, detail: `PASS — census-precheck answered by the author preflight's census-precheck step at ${answered.sha} (${answered.outcome}); not run again` };
+  }
   const label = "node scripts/census-precheck.mjs --base origin/main";
   const args = ["scripts/census-precheck.mjs", "--base", "origin/main"];
-  const res = withoutNodeTestContext(() => spawn(process.execPath, args, { cwd: repoRoot }));
+  const res = withoutNodeTestContext(() =>
+    spawn(process.execPath, args, { cwd: repoRoot, ...(stepLog ? { env: { [CENSUS_COUNTS_LOG_ENV]: stepLog.path } } : {}) }));
   const spawnFailed = spawnFailureDetail(label, res);
   if (spawnFailed) return { ok: false, detail: spawnFailed };
   if (res.status === 2) {
@@ -3481,9 +3565,13 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // refused on cost here: the threshold is derived from the population, which is not complete
   // until the last entry has run.
   const censusCosts = new Map<number, number>();
+  const logged = (i: number, step: CiParityStepResult) => {
+    deps.stepLog?.job(gateSteps[i].job, step.ok, timings[i].snapshot().durationMs ?? 0);
+    return step;
+  };
   const steps = gateSteps.map(({ job, script, runner, boundMs, retainSuccessOutput, skipWhenAbsent }, i) => {
     const spawn = timings[i].wrap("initial");
-    return runStep(job, () => {
+    return logged(i, runStep(job, () => {
       if (skipWhenAbsent !== undefined && !existsSync(join(repoRoot, skipWhenAbsent))) {
         return { ok: true, detail: `SKIPPED — no ${skipWhenAbsent}/ directory in this checkout; nothing for ${job} to check here` };
       }
@@ -3504,7 +3592,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
           ),
         );
       }
-      if (runner === "census-precheck") return censusPrecheckLeaf(repoRoot, spawn);
+      if (runner === "census-precheck") return censusPrecheckLeaf(repoRoot, spawn, deps.stepLog);
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
       }
@@ -3518,7 +3606,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         return { ok: true, detail: `${result.detail} — COST ${elapsedMs}ms, over the ${boundMs}ms soft bound (reported, not refused)` };
       }
       return result;
-    });
+    }));
   });
 
   // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway is
@@ -3545,7 +3633,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         return r.result;
       });
       if (!again.ok) {
-        steps[i] = { ...again, detail: `${again.detail} (on the re-measure after ${firstMs}ms crossed ${threshold}ms)` };
+        steps[i] = logged(i, { ...again, detail: `${again.detail} (on the re-measure after ${firstMs}ms crossed ${threshold}ms)` });
         continue;
       }
       const reference = gateSteps[referenceIndex];
@@ -3562,7 +3650,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         continue;
       }
       const measured = `${firstMs}ms then ${againMs}ms on one re-measure`;
-      steps[i] = {
+      steps[i] = logged(i, {
         ...steps[i],
         ok: false,
         detail:
@@ -3570,7 +3658,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
           `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x the median-cost entry ${refAgain}, floored at ` +
           `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms, plus the margin); its own result would have PASSed. Refused by a bound ` +
           `derived from this run's own measurements, never by a written constant a growing corpus outgrows`,
-      };
+      });
     }
   }
   return {

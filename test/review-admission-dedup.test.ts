@@ -153,8 +153,8 @@ test("W1-T2583: dedup filtering preserves both bounds and immutable oldest-first
 
   assert.deepEqual(selected.spawning.map((pr) => pr.prNumber), [2, 3],
     "both spawning slots go to the oldest non-deduped builds");
-  assert.deepEqual(selected.planFilings.map((pr) => pr.prNumber), [4, 5, 6],
-    "the plan-filing bound remains three and ordering remains immutable oldest-first");
+  assert.deepEqual(selected.planFilings.map((pr) => pr.prNumber), [4, 5, 6, 7],
+    "every eligible plan filing is admitted (W1-T11148) and ordering remains immutable oldest-first");
 });
 
 /*

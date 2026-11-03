@@ -1,0 +1,22 @@
+id: incident-e6b742ff7c9f0fda
+ts: 2026-11-03T08:22:57.172Z
+raw: |-
+  Incident e6b742ff7c9f: flow pr-stage-stall:awaiting-arm:unknown signature
+  First seen: 2026-11-03T07:56:37.188Z
+  Last seen: 2026-11-03T07:56:37.188Z
+  Count: 1, burn: 1.00/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=16384 awaiting-arm: unknown signature
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#e6b742ff7c9f0fda750b25591822d9d04591736eb8b2289b118bf0d863ba8340
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

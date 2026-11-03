@@ -1,0 +1,66 @@
+- id: W1-T11152
+  title: "A review's time from admission to running is attributed per launch segment, and the fresh-tree reviewer starts from the store's bundle instead of a cold tsx `bin/rmd review` — code reviews held their slot 25.0 h a week between admission and process start, plus 11.2 h from start to the pending post, and the 89 reviews a week that re-run from a fresh tree start `bin/rmd` in a tree with no dist/, which falls back to tsx on src/run-task.ts"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, what a review's start costs; it spans the run-child launch that times it and the fresh-tree spawn that runs under tsx
+  band_meaning: span
+  origin: operator-session#review-lane-findings-2026-11-02
+  plan_refs:
+    - W1-T9114
+    - W1-T8776
+    - W1-T9601
+    - W1-T9709
+    - W1-T5724
+  files:
+    - src/lib/run-child.ts
+    - src/run-task.ts
+    - src/lib/child-entry-store.ts
+    - test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A review run child's launch ledgers each segment between admission and its first status heartbeat (engine resolution, entry decision with kind and reason, memory-admission wait, spawn to first heartbeat) with its milliseconds on one row, so the admission-to-start time is attributable from the ledger
+      proof: "unit test: test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts"
+    - claim: Before spawnRmdReviewForFreshTree runs `bin/rmd review` in a fresh tree, it asks the shared child-entry store for that tree's run-task bundle at the tree's source hash and materializes a hit into the tree, so bin/rmd starts the bundle; a miss or an unreadable store starts tsx exactly as today, and the review.ran_from_fresh_tree row records which entry ran and why
+      proof: "grep: W1-T11152 criterion 2 in test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 over a 7-day ledger union (~/Remudero-notes/review-lane-findings-2026-11-02.md, read-only):
+    - Code reviews (n=732): admission -> process start held the slot for 25.0 h; start -> pending posted took 11.2 h; the review
+      itself (proofs, snapshot, judge, post) about 83 h. Plan reviews took a median of 82 s against about 30 s locally.
+    - 89 review.ran_from_fresh_tree rows in the extract (a review re-run from a fresh tree when the reviewer's code is stale);
+      19 post_refused rows named stale reviewer code.
+    - 53 daemon boots in 7 days, and the first review starts 7.9 min after a boot.
+    READ at origin/main 1368db581:
+    - spawnRunChild (src/lib/run-child.ts) resolves main's sha, newestCurrentEngine, the entry argv (engineChildEntryArgv), the plan,
+      then reserveWhilePending (memory admission) before it spawns; only child_entry.spawned (name, kind, reason, hash) is ledgered,
+      with no time per segment. Which segment holds the 25 h is therefore NOT measured.
+    - newestCurrentEngine (src/lib/engine-tree.ts) only returns an engine whose child-entry bundle is current, so the run child itself
+      already starts from a bundle; cold tsx is NOT confirmed for it.
+    - spawnRmdReviewForFreshTree (src/run-task.ts) spawns `<worktree>/bin/rmd review`. bin/rmd asks build-child-entries.mjs
+      --main-entry for a current bundle and otherwise execs tsx on src/run-task.ts. A freshly cut tree has no dist/, so this child
+      always starts under tsx. W1-T9601 fills the store only for the daemon's own tree; nothing materializes it into a fresh tree.
+    NOT COVERED: W1-T9709 (merged, #15649) hashes a launch's tree once. W1-T5724 (queued) trims the daemon's boot path, not a
+    review child's start. W1-T9114 (merged) made reviews run children. W1-T11151 (filed beside this) frees the slot at post.
+  design: |
+    1. spawnRunChild times each segment with the injected clock and ledgers run_child.launch_segments {task_id, run_id, lane,
+       engine_ms, entry_ms, entry_kind, entry_reason, admission_wait_ms, spawn_to_heartbeat_ms}. The heartbeat is the child's first
+       status.json write the existing watch already sees.
+    2. spawnRmdReviewForFreshTree gains a store seam: before the spawn it calls materializeFromStore for the fresh tree's root
+       (the same call childEntryArgv makes) and lets bin/rmd's own --main-entry judgement decide. The tree hash it computes is
+       passed through so nothing hashes twice (W1-T9709's rule).
+    3. review.ran_from_fresh_tree gains entry_kind and entry_reason.
+    4. With the segments measured, the builder reports in the PR which segment carries the admission-to-start time over the rows
+       its tests cannot see; a dominant segment other than these two is a follow-up task, not scope growth here.
+    Tests go in test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts, titled verbatim as in the proofs,
+    over the real spawnRunChild with injected ports and a real temp store.
+  note: |
+    reservation hand-off: plan-file-1793657967812 -> plan-file-1793657967812
+    Reserved with rmd next-task-id --branch plan-file-1793657967812 from the operator checkout. Filed 2026-11-02 from the review-lane
+    findings, item 3 (p1), second half: cheap child start. The brief proposed a precompiled child entry in place of cold tsx; the run
+    child already starts from a bundle (engine trees are bundle-current by construction), so the cold-tsx start this task removes is
+    the fresh-tree reviewer's, and the 25 h is attributed first because its split is not measured.

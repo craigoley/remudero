@@ -6,9 +6,12 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import test from "node:test";
-import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS, routingAbCommand } from "../src/lib/routing-experiments.js";
+import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS, routingAbCommand } from "#src/lib/routing-experiments.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { openLedgerUnion } from "#src/lib/ledger-union.js";
+import { LedgerExactDedupeLimitError } from "#src/lib/ledger-exact-dedupe.js";
 
-const root = join(import.meta.dirname, "..");
+const root = REPO_ROOT;
 const script = join(root, "scripts/private-routing-daily-review.mjs");
 const { dailyRoutingReview } = await import(pathToFileURL(script).href);
 const epoch = ROUTING_EXPERIMENTS.find((item) => item.id === "sol61-vs-sonnet55")!;
@@ -332,7 +335,7 @@ test("a daily row-budget breach remains partial evidence rather than a healthy z
 
 
 test("the installed daily collector preserves lesson exposure identities from one latest firing over all ledger forms", async () => {
-  const { judgeCiLessonEfficacy, summarizeCiLessonRecurrences } = await import("../src/lib/ci-lesson-recurrence.js");
+  const { judgeCiLessonEfficacy, summarizeCiLessonRecurrences } = await import("#src/lib/ci-lesson-recurrence.js");
   const f = fixture();
   try {
     const summary = summarizeCiLessonRecurrences(judgeCiLessonEfficacy({
@@ -360,5 +363,147 @@ test("the installed daily collector preserves lesson exposure identities from on
     const partial = (await dailyRoutingReview({ ...f, asOf })).snapshot.sources[0].selfImprovement.ciLearning.lessonExposure;
     assert.equal(partial.status, "partial"); assert.equal(partial.observedRecurrenceRate, null);
     assert.equal(partial.exposureCount, 2);
+  } finally { f.close(); }
+});
+
+test("W1-T10953: a stale or partial adopted collector reports its actual source revision, stage state and missing evidence", async () => {
+  const f = fixture();
+  try {
+    const first = (await dailyRoutingReview({ ...f, asOf })).snapshot;
+    assert.match(first.runtime.collectorSha256, /^[a-f0-9]{64}$/);
+    assert.equal(first.runtime.nodeVersion, process.version);
+    assert.equal(first.runtime.sourceRevision, first.sourceRevision);
+    assert.equal(first.runtime.sourceMerge, "not-observed");
+    assert.equal(first.runtime.providerAdoption, "not-attested");
+    assert.equal(first.latestOutput.state, "missing");
+    assert.equal(first.stages.collection.state, "ok");
+    assert.equal(first.corpusControls[0].formsRead.live, 1);
+    assert.equal(first.sources[0].completeness.positiveControl, true);
+    assert.equal(first.sources[0].completeness.complete, true);
+    assert.ok(first.sources[0].retainedBytes > 0);
+    assert.equal(first.sources[0].dedupe.rows, 1);
+    const partial = (await dailyRoutingReview({ ...f, asOf: "2026-10-05T14:00:00Z", retention: { maxRetainedBytes: 2 } })).snapshot;
+    assert.equal(partial.latestOutput.state, "stale");
+    assert.equal(partial.latestOutput.ageMs, 3 * 86400000);
+    assert.equal(partial.stages.collection.state, "partial");
+    assert.equal(partial.sources[0].retainedRows, 0);
+    assert.equal(partial.sources[0].retainedRowsOmitted, 1);
+    assert.ok(partial.sources[0].reasons.includes("ledger-retention-byte-bound"));
+    assert.equal(partial.sources[0].completeness.complete, false);
+    assert.equal(partial.sources[0].completeness.windowEvidencePresent, false);
+    assert.equal(partial.sources[0].completeness.retention, "uncertified");
+    assert.ok(partial.sources[0].reasons.includes("ledger-window-evidence-missing"));
+    assert.equal(partial.sources[0].reports[0].nextAction, "repair-source-evidence");
+    assert.equal(partial.comparativeClaims, "none");
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), "");
+    const empty = (await dailyRoutingReview({ ...f, asOf })).snapshot.sources[0];
+    assert.equal(empty.completeness.positiveControl, false);
+    assert.ok(empty.reasons.includes("ledger-positive-control-missing"));
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson([assignment("1")]));
+    const bounded = (await dailyRoutingReview({ ...f, asOf, retention: { maxRowBytes: 2 } })).snapshot;
+    assert.ok(bounded.sources[0].reasons.includes("ledger-row-byte-bound"));
+    assert.equal(bounded.stages.collection.state, "partial");
+    assert.equal(bounded.sources.length, 3, "a source failure preserves later independent reads");
+    const unavailable = (await dailyRoutingReview({ ...f, asOf, retention: { scratchDir: join(f.dir, "absent") } })).snapshot;
+    assert.ok(unavailable.sources[0].reasons.includes("ledger-dedupe-index-unavailable"));
+    assert.equal(unavailable.sources.length, 3);
+    await assert.rejects(dailyRoutingReview({ ...f, asOf, retention: { maxRetainedBytes: 0 } }), /invalid ledger retention bound/);
+  } finally { f.close(); }
+});
+
+test("daily completeness controls name unread rotations and changes between the audit and delivery", async () => {
+  const f = fixture();
+  try {
+    const stateDir = f.sources[0]!.stateDir;
+    const gzip = join(stateDir, "ledger.2026-10-02T11-00-00-000Z.ndjson.gz");
+    writeFileSync(gzip, gzipSync(ndjson([assignment("2")])));
+    writeFileSync(join(stateDir, "ledger.2026-10-02T12-00-00-000Z.ndjson"), ndjson([assignment("3")]));
+    const healthySnapshot = (await dailyRoutingReview({ ...f, asOf })).snapshot;
+    const healthy = healthySnapshot.sources[0];
+    assert.deepEqual(healthySnapshot.corpusControls[0].formsRead, { gzip: 1, plain: 1, live: 1 });
+    assert.equal(healthy.dedupe.rows, 3);
+    assert.equal(healthy.retainedRows, 3);
+    assert.equal(healthy.completeness.complete, true);
+    const historic = join(stateDir, "ledger.2000-01-01T00-00-00-000Z.ndjson");
+    writeFileSync(historic, ndjson([{ ts: "2000-01-01T00:00:00Z", step: "unrelated" }]));
+    const corpusSnapshot = (await dailyRoutingReview({ ...f, asOf })).snapshot;
+    const corpus = corpusSnapshot.sources[0];
+    assert.equal(corpus.rowsRead, 4, "the quality audit includes rotations older than the trial window");
+    assert.deepEqual(corpusSnapshot.corpusControls[0].formsRead, { gzip: 1, plain: 2, live: 1 });
+    assert.equal(corpus.retainedRows, 3);
+    assert.equal(corpus.completeness.complete, true);
+    rmSync(historic);
+    writeFileSync(gzip, "broken gzip");
+    const unreadSnapshot = (await dailyRoutingReview({ ...f, asOf })).snapshot;
+    const unread = unreadSnapshot.sources[0];
+    assert.deepEqual(unreadSnapshot.corpusControls[0].formsExpected, { gzip: 1, plain: 1, live: 1 });
+    assert.equal(unreadSnapshot.corpusControls[0].formsRead.gzip, 0);
+    assert.equal(unread.completeness.complete, false);
+    assert.ok(unread.reasons.includes("ledger-source-unreadable"));
+    let reads = 0;
+    const openUnion: typeof openLedgerUnion = async function* (dir, options) {
+      if (dir === stateDir && ++reads === 2) writeFileSync(join(stateDir, "ledger.ndjson"), ndjson([assignment("changed")]));
+      yield* openLedgerUnion(dir, options);
+    };
+    const changed = (await dailyRoutingReview({ ...f, asOf, openUnion })).snapshot.sources[0];
+    assert.ok(changed.reasons.includes("ledger-source-changed-during-review"));
+    assert.equal(changed.retainedRows, 1, "the changed live row was never audited and cannot be admitted");
+    assert.equal(changed.completeness.complete, false);
+    writeFileSync(gzip, gzipSync(ndjson([assignment("2")])));
+    reads = 0;
+    const appendUnrelated: typeof openLedgerUnion = async function* (dir, options) {
+      if (dir === stateDir && ++reads === 2) writeFileSync(join(stateDir, "ledger.ndjson"), ndjson([
+        assignment("changed"), { ts: "2026-10-02T13:00:00Z", step: "unrelated", value: 1 },
+      ]));
+      yield* openLedgerUnion(dir, options);
+    };
+    const appended = (await dailyRoutingReview({ ...f, asOf, openUnion: appendUnrelated })).snapshot.sources[0];
+    assert.equal(appended.retainedRows, 3);
+    assert.ok(appended.reasons.includes("ledger-source-changed-during-review"), "corpus identity covers unretained rows too");
+  } finally { f.close(); }
+});
+
+test("daily delivery index limits retain partial counts and one reason while other sources complete", async () => {
+  for (const failAudit of [false, true]) {
+    const f = fixture();
+    try {
+      const stateDir = f.sources[0]!.stateDir;
+      writeFileSync(join(stateDir, "ledger.ndjson"), ndjson([assignment("1"), assignment("2")]));
+      const reason = "ledger-dedupe-disk-bound";
+      const openUnion: typeof openLedgerUnion = async function* (dir, options) {
+        for await (const row of openLedgerUnion(dir, options)) {
+          yield row;
+          if (dir === stateDir && options?.since) throw new LedgerExactDedupeLimitError(reason);
+        }
+        if (dir === stateDir && failAudit) throw new LedgerExactDedupeLimitError(reason);
+      };
+      const { snapshot } = await dailyRoutingReview({ ...f, asOf, openUnion });
+      const partial = snapshot.sources[0];
+      assert.equal(partial.rowsRead, 2);
+      assert.equal(partial.retainedRows, 1);
+      assert.equal(partial.retainedRowsMissing, 1);
+      assert.equal(partial.retainedBytes, JSON.stringify(assignment("1")).length * 2);
+      assert.equal(partial.state, "observed-partial");
+      assert.equal(partial.completeness.complete, false);
+      assert.deepEqual(partial.reasons.filter((value: string) => value === reason), [reason]);
+      assert.equal(partial.reports[0].nextAction, "repair-source-evidence");
+      assert.equal(snapshot.stages.collection.state, "partial");
+      assert.deepEqual(snapshot.sources.slice(1).map((source: { state: string; retainedRows: number }) =>
+        [source.state, source.retainedRows]), [["observed", 1], ["observed", 1]]);
+      const persisted = JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8"));
+      assert.deepEqual(persisted.sources[0].reasons, partial.reasons);
+    } finally { f.close(); }
+  }
+});
+
+test("daily delivery propagates unexpected reader errors", async () => {
+  const f = fixture();
+  try {
+    const failure = new Error("delivery reader failed unexpectedly");
+    const openUnion: typeof openLedgerUnion = async function* (dir, options) {
+      if (dir === f.sources[0]!.stateDir && options?.since) throw failure;
+      yield* openLedgerUnion(dir, options);
+    };
+    await assert.rejects(dailyRoutingReview({ ...f, asOf, openUnion }), (error: unknown) => error === failure);
   } finally { f.close(); }
 });

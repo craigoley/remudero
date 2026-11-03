@@ -1,0 +1,38 @@
+- id: W1-T11127
+  title: "A read-model view whose inputs have not changed is not rebuilt — serve rebuilt every view on every pass (builds == calls, 10 views at 1,426 each per 10 min, `now core` 11 s mean and 40.7 s max, about 516 s of build per 600 s) on a host whose CPU is the bottleneck, because nothing compares a unit's inputs before it materializes"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: read-model-worker.ts skips a build whose inputs match its last good build
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs:
+    - W1-T7394
+    - W1-T10292
+    - W1-T4568
+    - W1-T10076
+  files:
+    - src/lib/read-model-worker.ts
+    - test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A due view unit whose input digest (each ledger source's read-as-of row, the plan sha, each store's generation and the switches) equals the digest of its last successful build is not materialized again; its body is kept, its sources' asOf advances, and read_model.view_builds counts it as skipped, not built
+      proof: "unit test: test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts"
+    - claim: A changed input, a failed or unready last build, a cold unit or an unreadable digest builds exactly as today, and read pacing still stretches an unread unit
+      proof: "grep: W1-T11127 criterion 2 in test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts"
+  rationale: |
+    MEASURED 2026-10-27 02:31–02:46Z on the Azure host (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - The box is CPU-bound: load 24–30, sar idle 2.9%, CPU PSI some 65–83 against memory 0.3–0.8. By 11-02 load was 34–47 and review width had dropped from 4 to 1.
+    - serve used 222% CPU (60 s delta). Its read-model views rebuild on every call: `read_model.view_builds` showed builds == calls for 10 views, 1,426 each per 10 minutes. `now core` builds averaged 11 s (max 40.7 s), and view builds totalled about 516 s per 600 s. About 52.8k minor faults/s across 14 worker isolates.
+    READ at origin/main d04469fa2: build() in src/lib/read-model-worker.ts calls `live.materialize(scoped)` whenever prepare() is ready, and its tally adds calls and builds together (~:1579-1581). No input comparison precedes materialize; pacing (paced(), ~:1534) only spaces builds by cost / share.
+    NOT COVERED: W1-T7394 (queued) paces rarely read views by their readers; it does not skip an unchanged build of a hot view. W1-T10292 (queued) ledgers slow-lane unit cost. W1-T4568 (blocked) is the materialized store. W1-T10076 (merged) judges a body behind only by the rows it reads, which is the input this digest reuses.
+  design: |
+    Compute the digest from what the unit already reads, before materialize: the `ledgerReads` as-of values build() already collects (readAsOf), the plan sha and store generations in the context, and the switches. Keep the last successful build's digest on the unit (in memory; persisted beside the unit cost when that is cheap). Equal digest: keep the body, restamp its sources' asOf, count `skipped` on the existing read_model.view_builds row, and set the next due time by the same paced() rule. No new interval, no threshold. A unit that cannot name its inputs (no ledgerReads, an unreadable store) builds as today, so the change can only remove work.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 1 (p1, CPU first). The findings item also named the inbox sync spawns; that is a separate mechanism in a separate module, so it is filed as its own shard (one concern per shard).
+    reservation hand-off: origin/main -> plan-file-1793652966848
+    The id was reserved while this worktree's branch was briefly misnamed origin/main (an empty branch variable); the branch was renamed before any commit.
