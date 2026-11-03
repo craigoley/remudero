@@ -197,3 +197,53 @@ test("trace grader cannot establish binding equality when canonical serializatio
   } finally { serializer.mock.restore(); }
   assert.deepEqual(gradePrivateTrace(corpus.corpus, item.item.id, answer, trace, expectedBinding), control);
 });
+
+test("trace custody rejects malformed receipt bytes after a verified owner read", () => {
+  const item = sampleCase(), corpus = validatePrivateCorpus(bundle(item));
+  assert.equal(corpus.state, "available");
+  if (corpus.state !== "available") return;
+  const expectedBinding = binding(corpus.corpus, item.item.id), answer = JSON.stringify(item.item.expected);
+  const receipt = capturedPrivateTraceReceipt(
+    createApplicationTraceRecorder(corpus.corpus, item.item.id, expectedBinding).finish(answer));
+  assert.ok(receipt);
+  let reads = 0;
+  const read = (value: unknown) => loadPrivateTraceFromCustody(corpus.corpus, item.item.id, expectedBinding,
+    () => { reads++; return { state: "available", receipt: value }; });
+  assert.equal(read(receipt).state, "available");
+  const cyclic = { ...receipt, events: [] as unknown[] };
+  cyclic.events.push(cyclic);
+  assert.deepEqual(read(cyclic), { state: "unavailable", reason: "private-trace-json-cycle" });
+  assert.deepEqual(read({ ...receipt, finalText: "x".repeat(128 * 1024) }),
+    { state: "unavailable", reason: "private-trace-size-bound" });
+  const restored = read(receipt);
+  assert.equal(restored.state, "available");
+  if (restored.state === "available") {
+    const grade = gradePrivateTrace(corpus.corpus, item.item.id, answer, restored.trace, expectedBinding);
+    assert.equal(grade.state, "scored");
+    if (grade.state === "scored") assert.equal(grade.passed, true);
+  }
+  assert.equal(reads, 4);
+});
+
+test("trace recorder clears oversized or non-string final answers and keeps their grade unavailable", () => {
+  const item = sampleCase(), corpus = validatePrivateCorpus(bundle(item));
+  assert.equal(corpus.state, "available");
+  if (corpus.state !== "available") return;
+  const expectedBinding = binding(corpus.corpus, item.item.id);
+  for (const answer of ["x".repeat(65_537), "😀".repeat(16_385), 17 as unknown as string]) {
+    const trace = createApplicationTraceRecorder(corpus.corpus, item.item.id, expectedBinding).finish(answer);
+    const receipt = capturedPrivateTraceReceipt(trace);
+    assert.ok(receipt);
+    assert.equal(receipt.finalText, null);
+    assert.equal(receipt.complete, false);
+    assert.equal(receipt.reason, "private-trace-final-text-bound");
+    assert.deepEqual(gradePrivateTrace(corpus.corpus, item.item.id, null, trace, expectedBinding),
+      { state: "unavailable", reason: "private-trace-final-text-bound" });
+  }
+  const answer = JSON.stringify(item.item.expected);
+  const trace = createApplicationTraceRecorder(corpus.corpus, item.item.id, expectedBinding).finish(answer);
+  assert.equal(capturedPrivateTraceReceipt(trace)?.finalText, answer);
+  const grade = gradePrivateTrace(corpus.corpus, item.item.id, answer, trace, expectedBinding);
+  assert.equal(grade.state, "scored");
+  if (grade.state === "scored") assert.equal(grade.passed, true);
+});

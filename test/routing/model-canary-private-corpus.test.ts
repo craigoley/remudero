@@ -10,7 +10,7 @@ import { canarySuiteDigest } from "#src/lib/model-canary-suite.js";
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import test from "node:test";
-import { buildPrivateCanaryRequest, privateCorpusCaseMatches, privateCorpusMetadata, validatePrivateCorpus,
+import { buildPrivateCanaryRequest, gradeStoredPrivateCase, privateCorpusCaseMatches, privateCorpusMetadata, validatePrivateCorpus,
   canonicalPrivateCanaryJson, snapshotPrivateCanaryJson, type PrivateCanaryBundleV1, type PrivateCanaryCaseV1,
   type PrivateCanaryPayloadV1 } from "#src/lib/model-canary-private-corpus.js";
 import { commonCanarySuite } from "#src/lib/model-canary-suite.js";
@@ -148,6 +148,24 @@ test("private corpus case matching refuses cyclic and accessor inputs without re
   });
   assert.equal(privateCorpusCaseMatches(result.corpus, accessor), false);
   assert.equal(getterCalls, 0);
+});
+
+test("private corpus scorer keeps malformed trace inputs unavailable", () => {
+  const source = item("scorer-error", "development", "scorer-family", "scorer-root");
+  const result = validatePrivateCorpus(bundle([source]));
+  assert.equal(result.state, "available");
+  if (result.state !== "available") return;
+  const answer = JSON.stringify(source.item.expected);
+  const control = gradeStoredPrivateCase(result.corpus, source.item.id, answer, []);
+  assert.equal(control.state, "scored");
+  if (control.state === "scored") assert.equal(control.passed, true);
+
+  const args: Record<string, unknown> = {};
+  args.self = args;
+  assert.deepEqual(gradeStoredPrivateCase(result.corpus, source.item.id, answer,
+    [{ name: "unlisted-tool", args, result: null, denied: true }]),
+  { state: "unavailable", reason: "private-corpus-scorer-error" });
+  assert.deepEqual(gradeStoredPrivateCase(result.corpus, source.item.id, answer, []), control);
 });
 
 test("private corpus rejects enum arrays instead of coercing them into supported values", () => {

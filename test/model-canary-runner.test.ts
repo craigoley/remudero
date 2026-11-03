@@ -176,3 +176,44 @@ test("private runner rejects malformed binding before admission or provider tran
     /private-canary-binding-invalid/);
   assert.equal(admits, 0); assert.equal(requests, 0); assert.equal(saves, 0);
 });
+
+test("private runner persists unknown verification when final trace capture throws", async t => {
+  const fixture = privateExecutionCase(cases[0]!, "finalize-failure");
+  const answer = JSON.stringify(fixture.item.expected);
+  const saved: { verified: boolean | null; grade: unknown; reason: string | undefined }[] = [];
+  const ports: CanaryExecutionPorts = { monotonicMs: () => 0,
+    admit: async () => ({ state: "admitted" }),
+    request: async () => ({ text: answer, toolCalls: [], resources }),
+    save: async (run, grade) => { saved.push({ verified: run.verified, grade, reason: run.outcomeReason }); } };
+  const control = await executeCanary(fixture.item, pin, ports, undefined, fixture.context);
+  assert.equal(control.run.verified, true);
+  assert.equal(control.grade?.passed, true);
+
+  const byteLength = Buffer.byteLength;
+  let answerMeasurements = 0, failures = 0;
+  const measurement = t.mock.method(Buffer, "byteLength", (...args: Parameters<typeof Buffer.byteLength>) => {
+    // The first measurement enforces the response bound; the second captures the final trace.
+    if (args[0] === answer && ++answerMeasurements === 2) {
+      failures++;
+      throw new Error("final-trace-measurement-unavailable");
+    }
+    return byteLength(...args);
+  });
+  try {
+    const result = await executeCanary(fixture.item, pin, ports, undefined, fixture.context);
+    assert.equal(failures, 1);
+    assert.equal(result.state, "unavailable");
+    assert.equal(result.run.verified, null);
+    assert.equal(result.grade, null);
+    assert.equal(result.reason, "private-trace-grading-unavailable");
+    assert.equal(result.run.outcomeReason, result.reason);
+    assert.equal(result.error, undefined);
+    assert.equal(result.privateTrace, undefined);
+    assert.equal(result.run.attempts[0]?.terminal, "complete");
+    assert.deepEqual(saved[1], { verified: null, grade: null, reason: "private-trace-grading-unavailable" });
+  } finally { measurement.mock.restore(); }
+  const restored = await executeCanary(fixture.item, pin, ports, undefined, fixture.context);
+  assert.equal(restored.run.verified, true);
+  assert.equal(restored.grade?.passed, true);
+  assert.equal(saved.length, 3);
+});
