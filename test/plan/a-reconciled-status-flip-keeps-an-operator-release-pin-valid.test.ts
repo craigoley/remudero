@@ -4,8 +4,10 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { operatorReleaseContractChanged, operatorReleasePin, RELEASE_LIFECYCLE_STATUSES } from "#src/lib/operator-release.js";
-import { buildMeasurementCadenceRow, buildPlanReconcileCadenceInput, planReconcileCadence, planReconcileLintHold, type PlanReconcileLint } from "#src/lib/measurement-cadence.js";
+// Namespace imports: a name this build adds reads undefined at base, so each test fails on its own assertion there.
+import * as release from "#src/lib/operator-release.js";
+import * as cadence from "#src/lib/measurement-cadence.js";
+import type { PlanReconcileLint } from "#src/lib/measurement-cadence.js";
 import { planReconcileLanding } from "#src/lib/feedback-landing.js";
 import { loadPlan, mergePlanBlobs, TASK_STATUSES, type Task } from "#src/lib/plan.js";
 import { reconcilePlan } from "#src/lib/plan-reconcile.js";
@@ -59,14 +61,13 @@ function pinnedTask(id: string): Task {
 }
 
 test("W1-T11175 criterion 1: a status flip leaves an operator release pin valid, and a contract edit does not", () => {
-  assert.deepEqual([...RELEASE_LIFECYCLE_STATUSES], [...TASK_STATUSES], "the release pin's status set mirrors plan.ts's");
   for (const id of ["W1-T10431", "W1-T10970"]) {
     const onMain = pinnedTask(id);
-    const writtenAfter: Task = { ...onMain, risk_ruling: { ...onMain.risk_ruling!, operator_release_pin: operatorReleasePin(onMain) } };
+    const writtenAfter: Task = { ...onMain, risk_ruling: { ...onMain.risk_ruling!, operator_release_pin: release.operatorReleasePin(onMain) } };
     for (const [label, task] of [["the pin on main", onMain], ["a pin written by this build", writtenAfter]] as const) {
-      assert.equal(operatorReleaseContractChanged(task), false, `${id}, ${label}, as queued`);
+      assert.equal(release.operatorReleaseContractChanged(task), false, `${id}, ${label}, as queued`);
       for (const status of TASK_STATUSES) {
-        assert.equal(operatorReleaseContractChanged({ ...task, status }), false, `${id}, ${label}: status ${status} is bookkeeping`);
+        assert.equal(release.operatorReleaseContractChanged({ ...task, status }), false, `${id}, ${label}: status ${status} is bookkeeping`);
       }
       const merged: Task = { ...task, status: "merged" };
       const edits: Array<[string, Task]> = [
@@ -76,10 +77,11 @@ test("W1-T11175 criterion 1: a status flip leaves an operator release pin valid,
         ["design", { ...merged, design: `${merged.design ?? ""}\nan added design step` }],
       ];
       for (const [field, edited] of edits) {
-        assert.equal(operatorReleaseContractChanged(edited), true, `${id}, ${label}: an edit to ${field} still reads changed`);
+        assert.equal(release.operatorReleaseContractChanged(edited), true, `${id}, ${label}: an edit to ${field} still reads changed`);
       }
     }
   }
+  assert.deepEqual([...(release.RELEASE_LIFECYCLE_STATUSES ?? [])], [...TASK_STATUSES], "the release pin's status set mirrors plan.ts's");
 });
 
 test("W1-T11175 criterion 2: reconciling every shard on main with the pinned flip set adds no blocking operator-release-contract violation", () => {
@@ -96,7 +98,7 @@ test("W1-T11175 criterion 2: reconciling every shard on main with the pinned fli
     const gained = [...after.get(id)!].filter((rule) => !before.get(id)!.has(rule));
     assert.deepEqual(gained, [], `${id}'s flip makes its shard newly violate, so the shard census would grow`);
   }
-  const production = planReconcileLintHold()(REPO_ROOT, shards, writes);
+  const production = cadence.planReconcileLintHold()(REPO_ROOT, shards, writes);
   assert.deepEqual(production.held, [], "the production hold, linting as the shard census does, holds none of them");
   assert.equal(production.landable.length, PINNED_FLIP_SET.length);
 });
@@ -125,18 +127,18 @@ test("W1-T11175 criterion 3: the production landing lands every lint-clean flip,
       landed.push(inputs.map((i) => i.relPath));
       return refusal ? { landed: false, files: [], error: refusal } : { landed: true, files: inputs.map((i) => i.relPath) };
     });
-    return buildPlanReconcileCadenceInput({ checkoutRoot: REPO_ROOT, readShards: () => shards, creditedMergedIds: () => new Set(flipSet), land: landing.land, lint });
+    return cadence.buildPlanReconcileCadenceInput({ checkoutRoot: REPO_ROOT, readShards: () => shards, creditedMergedIds: () => new Set(flipSet), land: landing.land, lint });
   };
 
   const landed: string[][] = [];
-  const report = planReconcileCadence(build(victimBreaksOnMerge, landed));
+  const report = cadence.planReconcileCadence(build(victimBreaksOnMerge, landed));
   assert.equal(report.drift, flipSet.length);
   assert.equal(report.status, "landed");
   assert.deepEqual(report.held, [{ taskId: victim, rule: "operator-release-contract" }]);
   assert.equal(landed.length, 1, "one landing for the landable flips");
   const pathOf = new Map(shards.map((s) => [s.taskId, s.path.slice(REPO_ROOT.length + 1)]));
   assert.deepEqual(landed[0].sort(), flipSet.filter((id) => id !== victim).map((id) => pathOf.get(id)!).sort());
-  const row = buildMeasurementCadenceRow({ planReconcile: report } as Parameters<typeof buildMeasurementCadenceRow>[0]);
+  const row = cadence.buildMeasurementCadenceRow({ planReconcile: report } as Parameters<typeof cadence.buildMeasurementCadenceRow>[0]);
   assert.deepEqual((row.plan_reconcile as { held?: unknown }).held, [{ taskId: victim, rule: "operator-release-contract" }], "the ran row names each held task and its rule");
 
   const everyFlipBreaks: PlanReconcileLint = (plan, only, root) => {
@@ -145,10 +147,10 @@ test("W1-T11175 criterion 3: the production landing lands every lint-clean flip,
     return results;
   };
   const none: string[][] = [];
-  const allHeld = planReconcileCadence(build(everyFlipBreaks, none));
+  const allHeld = cadence.planReconcileCadence(build(everyFlipBreaks, none));
   assert.equal(allHeld.status, "reported", "zero landable writes is reported, not thrown");
   assert.equal(allHeld.held?.length, flipSet.length);
   assert.deepEqual(none, [], "nothing reaches the landing bridge");
 
-  assert.throws(() => planReconcileCadence(build(realLint, [], "simulated preflight refusal")), /simulated preflight refusal/, "W1-T9695: any other refusal still throws");
+  assert.throws(() => cadence.planReconcileCadence(build(realLint, [], "simulated preflight refusal")), /simulated preflight refusal/, "W1-T9695: any other refusal still throws");
 });
