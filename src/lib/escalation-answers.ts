@@ -58,7 +58,7 @@ import { appendQuestionAnswer } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { contributionOriginFromRest, feedbackContentDigest, observeFeedbackSource, readAdmissionRestAsync,
   type AdmissionRead, type AdmissionSettings, type FeedbackAdmissionSubject } from "./contributor-admission.js";
-import { openLedgerUnion } from "./ledger-union.js";
+import { createEscalationTriageHistoryReader, type EscalationTriageHistoryReader, type EscalationTriageSlice } from "./sweep.js";
 import { captureFeedbackReply, replyRefusalFor, type PanelGraphDeps } from "./panel-graph.js";
 import { feedbackEntryRepoPath, findFeedbackBySubmissionKey, qualifyCanonicalGrillContinuation, stageFeedbackCapture } from "./feedback.js";
 import { parse as parseYaml } from "yaml";
@@ -543,6 +543,22 @@ async function raiseRefusalAlarms(
 }
 
 /**
+ * W1-T11262: the refusal history readEscalationAnswers folds. OBSERVED 2026-11-03 on the Azure host: the full
+ * sweep's escalation_answers stage took 331-2,066 s, walking and decompressing about 750 rotations for these three
+ * steps on every pass. The slice reader keeps a durable digest per rotation and reads only new live bytes.
+ */
+export const ESCALATION_ANSWER_HISTORY_SLICE: EscalationTriageSlice = {
+  holder: "escalation-answers.refusal-history",
+  steps: ["escalation_answer.ignored", "escalation_answer.refusal_alarm", "panel.question_answered"],
+};
+
+let escalationAnswerHistoryReader: EscalationTriageHistoryReader | undefined;
+/** Created on first use: sweep.ts and this module import each other, so nothing of sweep.ts runs at load. */
+export function escalationAnswerHistory(): EscalationTriageHistoryReader {
+  return escalationAnswerHistoryReader ??= createEscalationTriageHistoryReader({ slice: ESCALATION_ANSWER_HISTORY_SLICE });
+}
+
+/**
  * Poll every OPEN needs-question issue for a NEW repository-owner reply, and land each accepted
  * one in `plan/questions.ndjson` — the exact store {@link "./worker.js".appendQuestionAnswer}
  * already writes, which `operatorVerdictEvidence` (lib/sweep.ts) already reads each sweep pass.
@@ -554,7 +570,9 @@ export async function readEscalationAnswers(
   runId: string,
   gateway: EscalationAnswerGateway,
   // W1-T8511: `feedback`, when set, ALSO answers the grilled feedback record a `TRIAGE-<id>` issue names.
-  deps: LedgerWriterDeps & { feedback?: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand"> },
+  deps: LedgerWriterDeps & { feedback?: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">;
+    /** W1-T11262: the refusal-history reader; absent, the process-wide {@link ESCALATION_ANSWER_HISTORY_SLICE} reader. */
+    history?: EscalationTriageHistoryReader },
   clock: Clock = systemClock,
 ): Promise<EscalationAnswerResult> {
   const current: Record<string, unknown>[] = [];
@@ -575,11 +593,9 @@ export async function readEscalationAnswers(
   const history: Record<string, unknown>[] = [];
   let historyReadable = true;
   if (gateway.refusalIssues) {
-    for await (const row of openLedgerUnion(dirname(deps.ledgerPath), {
-      step: ["escalation_answer.ignored", "escalation_answer.refusal_alarm", "panel.question_answered"],
-      onUnreadArchive: () => { historyReadable = false; },
-      onUnreadLive: () => { historyReadable = false; },
-    })) history.push(row);
+    const read = await (deps.history ?? escalationAnswerHistory())(dirname(deps.ledgerPath));
+    historyReadable = read.ok;
+    if (historyReadable) history.push(...read.rows);
     if (!historyReadable) {
       unreadable++;
       writeLedger(deps.ledgerPath, { step: "escalation_answer.refusal_alarm_unreadable", run_id: runId, task_id: "ESCALATION-ANSWERS",
