@@ -1,0 +1,32 @@
+- id: W1-T11144
+  title: "The host janitor prunes superseded fleet images and stopped fleet containers by evidence — three remudero images hold 11.65 GB (3.92 GB each) beside 11 stopped containers on a data disk 84% full, and deploy/rmd-host-cleanup.sh removes neither"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: rmd-host-cleanup.sh gains a docker pass that removes only what nothing names
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs: []
+  files:
+    - deploy/rmd-host-cleanup.sh
+    - test/deploy/the-janitor-prunes-superseded-images-and-stopped-containers.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A stopped fleet container that no running container, unit, recycle lock or kept rollback names is removed, and a fleet image that no container uses is removed except the newest superseded image per repository, which is kept for rollback
+      proof: "unit test: test/deploy/the-janitor-prunes-superseded-images-and-stopped-containers.test.ts"
+    - claim: DRY_RUN=1 lists every candidate with its evidence and removes nothing, a failed docker probe keeps everything, and every removal and keep is logged with its reason
+      proof: "grep: W1-T11144 criterion 2 in test/deploy/the-janitor-prunes-superseded-images-and-stopped-containers.test.ts"
+  rationale: |
+    MEASURED 2026-10-27 on the Azure host (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - The fleet image is 3.92 GB (playwright 1.05 GB, CLIs 719 MB, npm 402 MB). Three images take 11.65 GB, plus 11 stopped containers.
+    - The data disk is 84% full.
+    READ at origin/main d04469fa2: deploy/rmd-host-cleanup.sh (2,075 lines) uses docker only to probe mounts (snapshot_docker, is_docker_mount, DOCKER_OK) so it keeps what a container uses. It never removes an image or a stopped container.
+  design: |
+    Add one pass after the existing snapshot_docker. List fleet containers (by the fleet's name prefixes) with State and Image, and fleet images by repository with Created. A stopped container is a candidate only when its name is not one the units or the recycle lock name as current or rollback. An image is a candidate only when no container (running or kept) uses it and a newer image of the same repository exists, keeping the newest superseded one. Remove with `docker rm` / `docker rmi` (never `-f`, never a prune-all), so docker itself refuses anything still in use. DOCKER_OK != 1 keeps everything. DRY_RUN=1 lists. Read only names, states, image ids and dates; never Cmd, Env or Args.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 13 (p3), split into its separate mechanisms: this janitor pass, and the shared object store (filed beside it).
+    OPEN QUESTION FOR THE OPERATOR, not filed: does the daemon image need playwright? It is 1.05 GB of the 3.92 GB image. Browser checks may belong in a separate image used only by the jobs that need one. That is an image-composition decision, so it is raised here rather than filed.

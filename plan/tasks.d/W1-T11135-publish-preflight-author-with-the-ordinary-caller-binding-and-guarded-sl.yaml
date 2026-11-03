@@ -6,7 +6,10 @@
   type: implement
   verify: auto
   risk: medium
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=285cef0b9d3731aa
+  # backlog gardener: placed=2026-11-03T04:16:36.005Z
   attempts: 0
   files:
     - scripts/preflight-author.mjs
