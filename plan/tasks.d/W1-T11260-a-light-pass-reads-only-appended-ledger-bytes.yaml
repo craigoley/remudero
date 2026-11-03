@@ -8,13 +8,14 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # the default reader behind the light pass's ledger reads; the rows each caller sees are unchanged
+  risk: high # Rule 19: the default reader behind the light pass's ledger reads, plus the ledger-read-intent census that pins those bindings by name; the rows each caller sees are unchanged
   origin: operator-session#review-throughput-2026-11-03
   plan_refs:
     - W1-T11210
   files:
     - src/lib/sweep.ts
     - test/sweep/a-light-pass-reads-only-appended-ledger-bytes.test.ts
+    - test/ledger-read-intent.test.ts # its census pins the three marked readLedger bindings to readLedgerLines by name
   status: queued
   attempts: 0
   acceptance:
