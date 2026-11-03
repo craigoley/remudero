@@ -3413,7 +3413,7 @@ export interface PreflightStepLog {
   job(job: string, ok: boolean, ms: number): void;
 }
 
-export function createPreflightStepLog(path: string, report: (line: string) => void = (line) => console.error(line)): PreflightStepLog {
+export function createPreflightStepLog(path: string): PreflightStepLog {
   let broken = false;
   const write = (record: Record<string, unknown>) => {
     if (broken) return;
@@ -3421,7 +3421,7 @@ export function createPreflightStepLog(path: string, report: (line: string) => v
       appendFileSync(path, JSON.stringify(record) + "\n");
     } catch (e) {
       broken = true;
-      report(`### step log NOT written to ${path}: ${String((e as Error)?.message ?? e)}`);
+      console.error(`### step log NOT written to ${path}: ${String((e as Error)?.message ?? e)}`);
     }
   };
   return {
@@ -3438,6 +3438,16 @@ export function createPreflightStepLog(path: string, report: (line: string) => v
       });
     },
     job: (job, ok, ms) => write({ job, ok, ms: Math.round(ms) }),
+  };
+}
+
+/** W1-T11105: the phases and fast-gate jobs one `rmd preflight` invocation runs, as its step log's first line names them. */
+export function preflightStepLogPlan(rest: readonly string[], core: boolean): { phases: string[]; fastJobs: string[] } {
+  const fastTier = core && !rest.includes("--no-fast");
+  const fullTiers = core ? ["--ci-parity", "--coverage", "--proofs"].filter((flag) => rest.includes(flag)).map((flag) => flag.slice(2)) : [];
+  return {
+    phases: ["default", ...(fastTier ? ["fast", "ci-checks", "fast-coverage"] : []), ...fullTiers],
+    fastJobs: fastTier ? FAST_GATE_STEPS.map(({ job }) => job) : [],
   };
 }
 

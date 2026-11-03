@@ -6,15 +6,16 @@ import { test } from "node:test";
 
 // @ts-ignore the executable .mjs module has no declaration file.
 import { main as censusMain } from "#scripts/census-precheck.mjs";
-import { CENSUS_COUNTS_LOG_ENV, CENSUS_COUNTS_STEP_JOB, FAST_GATE_STEPS } from "#src/lib/ci-parity.js";
+import {
+  CENSUS_COUNTS_LOG_ENV, CENSUS_COUNTS_STEP_JOB, FAST_GATE_STEPS, createPreflightStepLog, preflightStepLogPlan, runPreflightFast,
+} from "#src/lib/ci-parity.js";
 import type { PreflightSpawn } from "#src/lib/commit-message.js";
 import {
   GATE_STEP_LOG_NAME, defaultRunGate, deriveLightGate, preopenGateLedgerFields, readPreflightStepLog, runPreopenGate,
   type GateRun, type PreflightStepRecord,
 } from "#src/lib/preopen-gate.js";
-import { preflightCommand } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const noPush = async () => ({ kind: "skipped" as const, reason: "fixture has no remote" });
 const noProcfs = () => [];
@@ -31,55 +32,64 @@ function records(path: string): PreflightStepRecord[] {
   return read;
 }
 
-/** Drive the real preflightCommand over an injected spawn, keeping the census-precheck child's environment. */
-async function preflightWith(rest: string[]): Promise<{ censusEnv: NodeJS.ProcessEnv | undefined; spawned: boolean }> {
+/** The fast gate over a few real FAST_GATE_STEPS rows and an injected spawn, keeping the census-precheck child's environment. */
+function fastGateWith(stepLog?: ReturnType<typeof createPreflightStepLog>) {
   let censusEnv: NodeJS.ProcessEnv | undefined;
-  let spawned = false;
+  let censusSpawned = false;
   const spawn: PreflightSpawn = (_file, args, opts) => {
     if (args.some((arg) => arg.endsWith("census-precheck.mjs"))) {
-      spawned = true;
+      censusSpawned = true;
       censusEnv = opts?.env;
     }
-    if (args.includes("rev-list")) return { status: 0, stdout: "0\n", stderr: "" };
-    return { ...finishJudgedRun(args, opts), stdout: "\0feat(x): fine\n", stderr: "" };
+    return { status: args.some((arg) => arg.endsWith("list-rule-suites.mjs")) ? 1 : 0, stdout: "", stderr: "" };
   };
-  const log = console.log;
-  const error = console.error;
-  console.log = () => {};
-  console.error = () => {};
+  const steps = FAST_GATE_STEPS.filter(({ job }) => ["rule-checks", "cli-reference", "census-precheck"].includes(job));
+  const prior = process.env.RMD_AUTHOR_CENSUS_ANSWERED;
+  delete process.env.RMD_AUTHOR_CENSUS_ANSWERED;
   try {
-    await preflightCommand(rest, { spawn, loadavg: () => [1, 1, 1], cpuCount: 4 });
+    const result = runPreflightFast(REPO_ROOT, { steps, spawn, ...(stepLog ? { stepLog } : {}) });
+    return { result, censusEnv, censusSpawned };
   } finally {
-    console.log = log;
-    console.error = error;
+    if (prior !== undefined) process.env.RMD_AUTHOR_CENSUS_ANSWERED = prior;
   }
-  return { censusEnv, spawned };
 }
 
-test("W1-T11105 criterion 1: rmd preflight --step-log appends its plan, each finished phase and each fast-gate job, and hands census-precheck the log", async (t) => {
-  const path = join(scratch(t, "steplog"), "steps.ndjson");
-  const { censusEnv, spawned } = await preflightWith(["--step-log", path]);
-  const lines = records(path);
+test("W1-T11105 criterion 1: the step log's first line names the phases and fast-gate jobs this invocation runs", () => {
   const jobs = FAST_GATE_STEPS.map(({ job }) => job);
-  assert.deepEqual(lines[0], { plan: { phases: ["default", "fast", "ci-checks", "fast-coverage"], fast_jobs: jobs } },
-    "the first line names what this invocation runs");
-  const phases = lines.filter((line) => typeof line.phase === "string");
-  assert.deepEqual(phases.map((line) => line.phase), ["default", "fast", "ci-checks", "fast-coverage"], "one line per finished phase, in order");
-  for (const line of phases) {
-    assert.equal(typeof line.ok, "boolean", `${String(line.phase)} records its verdict`);
-    assert.equal(typeof line.ms, "number");
-    assert.ok(Array.isArray(line.failed));
-  }
-  const logged = new Set(lines.filter((line) => typeof line.job === "string").map((line) => line.job));
-  for (const job of jobs) assert.ok(logged.has(job), `fast-gate job ${job} is logged as it finishes`);
-  assert.ok(spawned, "the fixture reached the census-precheck leaf");
-  assert.equal(censusEnv?.[CENSUS_COUNTS_LOG_ENV], path, "census-precheck receives the log through its environment, never a flag");
+  assert.deepEqual(preflightStepLogPlan([], true), { phases: ["default", "fast", "ci-checks", "fast-coverage"], fastJobs: jobs });
+  assert.deepEqual(preflightStepLogPlan(["--no-fast", "--ci-parity"], true), { phases: ["default", "ci-parity"], fastJobs: [] });
+  assert.deepEqual(preflightStepLogPlan([], false), { phases: ["default"], fastJobs: [] }, "a consumer repo runs no fast tier");
 });
 
-test("W1-T11105 criterion 1: without --step-log nothing is logged and census-precheck gets no log", async () => {
-  const { censusEnv, spawned } = await preflightWith([]);
-  assert.ok(spawned);
-  assert.equal(censusEnv?.[CENSUS_COUNTS_LOG_ENV], undefined);
+test("W1-T11105 criterion 1: the fast gate logs each job as it finishes and hands census-precheck the log; without a log nothing changes", (t) => {
+  const path = join(scratch(t, "steplog"), "steps.ndjson");
+  const stepLog = createPreflightStepLog(path);
+  stepLog.plan(["default", "fast"], ["rule-checks", "cli-reference", "census-precheck"]);
+  const logged = fastGateWith(stepLog);
+  stepLog.phase("fast", logged.result, 12.4);
+  const lines = records(path);
+  assert.deepEqual(lines[0], { plan: { phases: ["default", "fast"], fast_jobs: ["rule-checks", "cli-reference", "census-precheck"] } });
+  const jobs = lines.filter((line) => typeof line.job === "string");
+  assert.deepEqual(jobs.map(({ job, ok }) => ({ job, ok })), logged.result.steps.map(({ name, ok }) => ({ job: name, ok })),
+    "one line per fast-gate job, in the order they finished, carrying each verdict");
+  assert.ok(jobs.every((line) => typeof line.ms === "number"));
+  assert.deepEqual(lines.at(-1), { phase: "fast", ok: false, ms: 12, failed: ["rule-checks"] }, "a phase line names its failed steps");
+  assert.ok(logged.censusSpawned, "the fixture reached the census-precheck leaf");
+  assert.equal(logged.censusEnv?.[CENSUS_COUNTS_LOG_ENV], path, "census-precheck receives the log through its environment, never a flag");
+
+  const plain = fastGateWith();
+  assert.equal(plain.censusEnv?.[CENSUS_COUNTS_LOG_ENV], undefined, "without a step log census-precheck gets no log");
+  assert.deepEqual(plain.result.steps.map(({ name, ok }) => ({ name, ok })), logged.result.steps.map(({ name, ok }) => ({ name, ok })),
+    "every step runs and decides as before");
+});
+
+test("W1-T11105 criterion 1: an unwritable step log is reported once and changes no verdict", (t) => {
+  const stepLog = createPreflightStepLog(join(scratch(t, "unwritable"), "missing-dir", "steps.ndjson"));
+  const said: string[] = [];
+  t.mock.method(console, "error", (line: string) => { said.push(line); });
+  const logged = fastGateWith(stepLog);
+  assert.equal(logged.result.steps.length, 3);
+  assert.equal(said.filter((line) => line.includes("step log NOT written")).length, 1);
 });
 
 /** A census fixture: the real rule-suite selector, one src leaf and one test; the head adds a clock read or not. */

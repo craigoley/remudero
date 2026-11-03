@@ -832,6 +832,7 @@ import {
   runPreflightCoverage,
   runPreflightFast,
   createPreflightStepLog,
+  preflightStepLogPlan,
   runTreeAdvisoryLine,
   judgedTestShellOut,
   prepareJudgedTestRun,
@@ -19797,12 +19798,10 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     ciParity: rest.includes("--ci-parity"), coverage: rest.includes("--coverage"), proofs: rest.includes("--proofs"),
   });
   const core = project.kind === "core";
-  const fastTier = core && !rest.includes("--no-fast");
-  stepLog?.plan(
-    ["default", ...(fastTier ? ["fast", "ci-checks", "fast-coverage"] : []),
-      ...(core ? ["--ci-parity", "--coverage", "--proofs"].filter((flag) => rest.includes(flag)).map((flag) => flag.slice(2)) : [])],
-    fastTier ? FAST_GATE_STEPS.map(({ job }) => job) : [],
-  );
+  if (stepLog) {
+    const planned = preflightStepLogPlan(rest, core);
+    stepLog.plan(planned.phases, planned.fastJobs);
+  }
   const result = phase("default", () => core
     ? runPreflight(root, { ...deps, range, spawn, onPhase })
     // Preserve the executor identity that selects the bounded subprocess, including with metrics.

@@ -533,8 +533,10 @@ export function readPreflightStepLog(
     try {
       const record: unknown = JSON.parse(line);
       if (record && typeof record === "object" && !Array.isArray(record)) records.push(record as PreflightStepRecord);
-    } catch {
-      // A line the backstop kill tore mid-write names no finished unit; the units it would have named read unreached.
+    } catch (error) {
+      // A line the backstop kill tore mid-write names no finished unit, so the units it would have named read unreached.
+      const torn = String((error as Error)?.message ?? error);
+      records.push({ torn });
     }
   }
   return records;
