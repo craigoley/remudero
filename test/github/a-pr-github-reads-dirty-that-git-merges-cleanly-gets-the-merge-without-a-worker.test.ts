@@ -84,17 +84,15 @@ async function fixture(t: TestContext, kind: "rename" | "both" = "rename") {
 test("W1-T11167 criterion 1: a PR GitHub reads dirty that git merges cleanly across a rename main made gets git's merge pushed, with no worker", async (t) => {
   const f = await fixture(t);
   assert.equal(f.probe.verdict, "clean", "git's ort merge follows the rename");
-  // `merge-tree -X` needs git >= 2.40, so the rename-blind control is a real merge in a scratch worktree.
-  const scratch = join(f.repo.dir, "blind");
-  f.repo.git("worktree", "add", "-q", "--detach", scratch, f.headSha);
-  t.after(() => { rmSync(scratch, { recursive: true, force: true }); });
-  const blind = spawnSync("git", ["-C", scratch, "merge", "-s", "ort", "-X", "no-renames", "--no-commit", "--no-ff", f.mainSha],
-    { encoding: "utf8" });
-  assert.equal(blind.status, 1, `positive control: a rename-blind merge conflicts, as GitHub's did on #15602: ${blind.stderr}`);
-  assert.ok(spawnSync("git", ["-C", scratch, "ls-files", "-u"], { encoding: "utf8" }).stdout.includes("a.ts"),
-    "the rename-blind conflict is on a.ts");
-  spawnSync("git", ["-C", scratch, "merge", "--abort"]);
-  f.repo.git("worktree", "remove", "--force", scratch);
+  // read-tree's three-way merge never detects renames on any git version (`-X no-renames` is ignored by ort on 2.39).
+  const blindIndex = join(f.repo.dir, ".git", "blind-index");
+  t.after(() => { rmSync(blindIndex, { force: true }); });
+  const env = { ...process.env, GIT_INDEX_FILE: blindIndex };
+  const base = f.repo.git("merge-base", f.headSha, f.mainSha);
+  const blind = spawnSync("git", ["-C", f.repo.dir, "read-tree", "-m", base, f.headSha, f.mainSha], { encoding: "utf8", env });
+  assert.equal(blind.status, 0, `the rename-blind three-way read completes: ${blind.stderr}`);
+  assert.ok(spawnSync("git", ["-C", f.repo.dir, "ls-files", "-u"], { encoding: "utf8", env }).stdout.includes("a.ts"),
+    "positive control: a rename-blind merge conflicts on a.ts, as GitHub's did on #15602");
   f.deps.claimFixAdmission = () => assert.fail("the clean-merge route takes no fix capacity");
   await f.run();
   const head = f.remoteHead();
