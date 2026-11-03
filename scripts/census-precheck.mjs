@@ -34,7 +34,7 @@ import { parse, parseExpressionAt } from "acorn";
 import { isTrustRootPath, scanTrustRootText, trustRootFor } from "../src/lib/trust-root-text.ts";
 import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
 import { createHash } from "node:crypto";
-import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -1857,6 +1857,20 @@ export function snapshotControllerBudget() {
     timeoutMs: Object.values(stages).reduce((sum, count) => sum + count, 0) * CENSUS_SUITE_CHILD_TIME_BOUND_MS };
 }
 
+/**
+ * W1-T11105: with RMD_CENSUS_COUNTS_LOG set (by the fast gate's census-precheck leaf), append this run's counts verdict
+ * to the preflight step log the moment it is known, before any census suite starts, so a gate killed later in this
+ * script still records it. A failed write is reported and never changes the exit status.
+ */
+function logCensusCounts(path, ok, ms) {
+  if (!path) return;
+  try {
+    appendFileSync(path, `${JSON.stringify({ job: "census-precheck:counts", ok, ms: Math.round(ms) })}\n`);
+  } catch (e) {
+    console.error(`census-precheck: counts verdict NOT logged to ${path}: ${String(e?.message ?? e)}`);
+  }
+}
+
 function reportCensusCounts(violations, changed, base) {
   if (violations.length > 0) {
     console.error(`census-precheck: this branch grows ${violations.length} census count(s) CI will refuse:`);
@@ -1889,6 +1903,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
   const unmeasured = [];
   const snapshotUnmeasured = [];
   const suiteErrors = [];
+  const countsStartedAt = performance.now();
   try {
     const snapshot = readCensusSnapshot();
     if (snapshot && resolve(snapshot.root) !== root) throw new Error("census snapshot belongs to another worktree");
@@ -1918,6 +1933,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       violations = [...violations, ...censusParityViolations({ changed, ...readers,
         population: (extras) => ciCensusPopulation(listCiRuleSuites(root), extras) })];
     }
+    logCensusCounts(process.env.RMD_CENSUS_COUNTS_LOG, violations.length === 0, performance.now() - countsStartedAt);
     if (values["counts-only"]) return reportCensusCounts(violations, changed, values.base);
     const countsRefuse = violations.length > 0;
     const instrument = evaluateInstrumentSurface({
