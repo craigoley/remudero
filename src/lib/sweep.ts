@@ -7170,6 +7170,9 @@ export interface OpenPrView {
    *  alone for an unarmed plan PR in that state ({@link isHumanHoldCandidate}). `undefined` means not
    *  a candidate, over the per-pass cap, or no hold on such a plan PR, and every row behaves as before. */
   scannerBlocker?: ScannerBlockerObservation;
+  /** W1-T11153 — a person's CHANGES_REQUESTED hold read for a review-queue PR (green, no review verdict at this
+   *  head), which {@link scannerBlocker} never covers. `undefined`: not in the queue, over the cap, or no hold. */
+  reviewQueueHold?: ScannerBlockerObservation;
   /** W1-T5633 — the open high CodeQL alerts analysed at THIS head, read ONLY when the head's latest
    *  `CodeQL` results check concluded failure. `undefined` (no such check, a green one, an unread
    *  listing, or a head already ruled on) leaves the `mergeable` arm exactly as it was. */
@@ -13881,7 +13884,7 @@ export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>
   passes.forEach(({ row, at }, i) => {
     const text = `${String(row.stand_down_reason ?? "")} ${String(row.reason ?? "")}`;
     const admissionHeld = row.acted === false && typeof row.stand_down_reason === "string" && (
-      /^not admitted this pass: semantic post-review admission bound \d+(?:, in-flight \d+)?(?:; admitted #\d+(?:, #\d+)* ahead)?$/.test(row.stand_down_reason) ||
+      /^not admitted this pass: semantic post-review admission bound \d+(?:, in-flight \d+)?(?:; admitted #\d+(?:, #\d+)* ahead)?(?:; queued behind reviews that need no person: .+)?$/.test(row.stand_down_reason) ||
       /^not admitted this pass: at most \d+ plan-filing post-review admissions (?:per light pass|available across light passes)$/.test(row.stand_down_reason) ||
       /^not admitted this pass: plan-lane bound \d+, in-flight \d+$/.test(row.stand_down_reason) ||
       row.stand_down_reason === "not admitted this pass: restart latched, and the review would outlast its drain" ||
@@ -14367,6 +14370,9 @@ export interface SweepDeps {
   readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
   /** Full act-time guard read, shared with fix arms; stale-red release still reads again. */
   readLiveStateAtAct?: SweepDeps["readLiveState"];
+  /** W1-T11153: the open-PR reader the light pass started from, re-read when a freed lane refills so a PR that
+   *  became eligible after the pass-start snapshot is ordered by its own admission key. Absent: the snapshot. */
+  readOpenPrsForRefill?: () => Promise<OpenPrView[]>;
   /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted. A changed head
    *  stands down as `sweep.head_moved`; an undefined (unreadable) head leaves the act unchanged. */
   readLiveHeadSha?: (pr: OpenPrView) => string | undefined | Promise<string | undefined>;
@@ -17489,8 +17495,15 @@ function workerAdmissionHoldReason(deps: SweepDeps, kind?: "review"): string | u
  *  bounded workers pull the entries that have waited longest. GitHub answers newest-first, so
  *  cutting by position defers the oldest tail indefinitely. THE KEY IS the IMMUTABLE `createdAt`,
  *  with `prNumber` as tiebreak, keeping the comparator TOTAL. */
-export function orderPendingReviews<T extends { pr: Pick<OpenPrView, "createdAt" | "prNumber"> }>(
+export function orderPendingReviews<T extends { pr: Pick<OpenPrView, "createdAt" | "prNumber"> }>(jobs: readonly T[]): T[] {
+  return orderPendingReviewsNeedsPersonLast(jobs);
+}
+
+/** W1-T11153 — {@link orderPendingReviews} with a review that needs a person to merge placed after every one that
+ *  does not; oldest-first within each group. Without a predicate it IS the oldest-first order. */
+export function orderPendingReviewsNeedsPersonLast<T extends { pr: Pick<OpenPrView, "createdAt" | "prNumber"> }>(
   jobs: readonly T[],
+  needsPerson?: (pr: T["pr"]) => boolean,
 ): T[] {
   const createdMs = (job: T): number | undefined => {
     const raw = job.pr.createdAt;
@@ -17498,12 +17511,218 @@ export function orderPendingReviews<T extends { pr: Pick<OpenPrView, "createdAt"
     const parsed = Date.parse(raw);
     return Number.isNaN(parsed) ? undefined : parsed;
   };
+  const group = (job: T): number => (needsPerson?.(job.pr) === true ? 1 : 0);
   return [...jobs].sort((a, b) => {
+    const ga = group(a);
+    const gb = group(b);
+    if (ga !== gb) return ga - gb;
     const ta = createdMs(a);
     const tb = createdMs(b);
     if (ta !== undefined && tb !== undefined && ta !== tb) return ta - tb;
     return a.pr.prNumber - b.pr.prNumber;
   });
+}
+
+/** W1-T11153 — why a review-eligible PR cannot merge without a person, or undefined when it can: a standing human
+ *  CHANGES_REQUESTED review read at this head, or a needs-human escalation some lane delivered at this head that no
+ *  operator answer has spent ({@link ownEscalationAtHead}; a stall report's own issue never counts). The review
+ *  lane admits such a PR only after every eligible PR that needs no person, so it never takes the only slot while
+ *  a mergeable review waits (W1-T10992's recon: 333 of 709 light passes, 40 of them with no review started). */
+export function needsPersonToMerge(
+  pr: OpenPrView,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): string | undefined {
+  for (const blocker of [pr.scannerBlocker, pr.reviewQueueHold]) {
+    if (blocker?.kind !== "changes-requested" || blocker.headSha !== pr.headSha || blocker.holds.length === 0) continue;
+    return `a CHANGES_REQUESTED review from ${blocker.holds.map((hold) => hold.login).join(", ")} stands at this head`;
+  }
+  if (pr.pendingAnswer !== undefined && pr.pendingAnswer.spent !== true) return undefined;
+  const escalation = ownEscalationAtHead(ledgerLines, pr);
+  if (escalation === undefined) return undefined;
+  return `a needs-human escalation is open at head ${pr.headSha.slice(0, 7)}` +
+    (escalation.issueUrl === undefined ? "" : ` (${escalation.issueUrl})`);
+}
+
+/** W1-T11153 — one completed review read back off the ledger: `review.pending_posted` to `review.posted` at one head. */
+export interface ReviewEpisode {
+  cls: string;
+  durationMs: number;
+  passed: boolean;
+  priorFails: number;
+  route: string;
+}
+
+/** The measured history the shadow review order ranks against. */
+export interface ReviewHistory {
+  episodes: ReviewEpisode[];
+  /** Upper bounds of the code proof-count buckets: the population's own quartiles. */
+  proofQuartiles: number[];
+  failsByPrUrl: Map<string, number>;
+  routeByPr: Map<number, string>;
+}
+
+const median = (values: readonly number[]): number | undefined => {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1]! + sorted[mid]!) / 2;
+};
+
+/** The review class: plan-only, or code bucketed by its declared proof count against the population's quartiles. */
+export function reviewClass(planOnly: boolean, proofs: number, quartiles: readonly number[]): string {
+  if (planOnly) return "plan";
+  const bucket = quartiles.findIndex((bound) => proofs <= bound);
+  return `code:${bucket === -1 ? quartiles.length : bucket}`;
+}
+
+const failBucket = (fails: number): number => Math.min(3, fails);
+
+/** W1-T11153 — the review episodes, prior FAIL counts and loop-decision routes the shadow order reads, in ledger order. */
+export function reviewHistoryFromLedger(rows: ReadonlyArray<Record<string, unknown>>): ReviewHistory {
+  const started = new Map<string, number>();
+  const raw: Array<{ planOnly: boolean; proofs: number; durationMs: number; passed: boolean; priorFails: number; route: string }> = [];
+  const failsByPrUrl = new Map<string, number>();
+  const routeByPr = new Map<number, string>();
+  const routeByUrl = new Map<string, string>();
+  for (const row of rows) {
+    const ts = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+    if (row.step === "sweep.disposed" && typeof row.pr_number === "number") {
+      const route = (row.loop_decision as { route?: unknown } | undefined)?.route;
+      if (typeof route === "string") {
+        routeByPr.set(row.pr_number, route);
+        if (typeof row.pr_url === "string") routeByUrl.set(row.pr_url, route);
+      }
+      continue;
+    }
+    if (typeof row.pr_url !== "string" || typeof row.head_sha !== "string") continue;
+    const key = `${row.pr_url}@${row.head_sha}`;
+    if (row.step === "review.pending_posted" && Number.isFinite(ts)) {
+      started.set(key, ts);
+      continue;
+    }
+    if (row.step !== "review.posted" || (row.state !== "success" && row.state !== "failure")) continue;
+    const start = started.get(key);
+    const priorFails = failsByPrUrl.get(row.pr_url) ?? 0;
+    if (start !== undefined && Number.isFinite(ts) && ts >= start) {
+      const verdict = row.decision_verdict as { planOnly?: unknown } | undefined;
+      raw.push({ planOnly: verdict?.planOnly === true, proofs: Array.isArray(row.proof_exec) ? row.proof_exec.length : 0,
+        durationMs: ts - start, passed: row.state === "success", priorFails, route: routeByUrl.get(row.pr_url) ?? "none" });
+      started.delete(key);
+    }
+    if (row.state === "failure") failsByPrUrl.set(row.pr_url, priorFails + 1);
+  }
+  const codeProofs = raw.filter((e) => !e.planOnly).map((e) => e.proofs).sort((a, b) => a - b);
+  const quartile = (q: number): number | undefined =>
+    codeProofs.length === 0 ? undefined : codeProofs[Math.min(codeProofs.length - 1, Math.floor(q * codeProofs.length))];
+  const proofQuartiles = [...new Set([0.25, 0.5, 0.75].map(quartile).filter((v): v is number => v !== undefined))];
+  return {
+    episodes: raw.map((e) => ({ cls: reviewClass(e.planOnly, e.proofs, proofQuartiles), durationMs: e.durationMs,
+      passed: e.passed, priorFails: e.priorFails, route: e.route })),
+    proofQuartiles, failsByPrUrl, routeByPr,
+  };
+}
+
+/** One candidate's terms in the shadow order. */
+export interface ReviewPriorityTerms {
+  pr_number: number;
+  cls: string;
+  cost_ms: number;
+  value: number;
+  wait_ms: number;
+  age: number;
+  rank: number;
+}
+
+/** W1-T11153 — measured expected value per expected lane-minute plus the wait in units of the lane's median service
+ *  time. Undefined when the candidate's class has no history, so the caller keeps the actual order. Pure. */
+export function reviewPriority(pr: OpenPrView, history: ReviewHistory, nowMs: number): ReviewPriorityTerms | undefined {
+  const cls = reviewClass(pr.isPlanFiling === true, parseAcceptanceBlock(pr.body ?? "").length, history.proofQuartiles);
+  const ofClass = history.episodes.filter((e) => e.cls === cls);
+  const cost = median(ofClass.map((e) => e.durationMs));
+  const service = median(history.episodes.map((e) => e.durationMs));
+  if (cost === undefined || service === undefined || cost <= 0 || service <= 0) return undefined;
+  const fails = failBucket(history.failsByPrUrl.get(pr.prUrl) ?? 0);
+  const passRate = (rows: readonly ReviewEpisode[]): number | undefined =>
+    rows.length === 0 ? undefined : rows.filter((e) => e.passed).length / rows.length;
+  const route = history.routeByPr.get(pr.prNumber) ?? "none";
+  const value = (passRate(ofClass.filter((e) => failBucket(e.priorFails) === fails)) ?? passRate(ofClass)!) *
+    (passRate(history.episodes.filter((e) => e.route === route)) ?? 1);
+  const created = Date.parse(reviewAdmissionKey(pr));
+  const waitMs = Number.isNaN(created) ? 0 : Math.max(0, nowMs - created);
+  const age = waitMs / service;
+  return { pr_number: pr.prNumber, cls, cost_ms: cost, value, wait_ms: waitMs, age, rank: value / (cost / 60_000) + age };
+}
+
+/** W1-T11153 — the order the cost/value rule WOULD pick over the same eligible list and width, beside the actual
+ *  picks. Shadow only: it never decides a pick. With no history for some candidate's class it equals the actual order. */
+export function reviewOrderShadow(
+  eligible: readonly OpenPrView[],
+  actual: readonly OpenPrView[],
+  history: ReviewHistory,
+  nowMs: number,
+  width: number,
+): { actual: number[]; shadow: number[]; terms: ReviewPriorityTerms[]; would_wait_ms: Record<string, number> } {
+  const terms = eligible.map((pr) => reviewPriority(pr, history, nowMs));
+  const known = terms.every((t): t is ReviewPriorityTerms => t !== undefined);
+  // With no history for some class there is nothing to rank by, so the shadow order IS the actual
+  // admission order: the actual picks first, then the rest of the eligible list behind them.
+  const picked = new Set(actual.map((pr) => pr.prNumber));
+  const order = known
+    ? [...terms].sort((a, b) => b.rank - a.rank || a.pr_number - b.pr_number).map((t) => t.pr_number)
+    : [...actual.map((pr) => pr.prNumber), ...eligible.map((pr) => pr.prNumber).filter((n) => !picked.has(n))];
+  const lanes = Math.max(1, width);
+  const costOf = new Map(terms.flatMap((t) => (t === undefined ? [] : [[t.pr_number, t.cost_ms] as const])));
+  const would_wait_ms: Record<string, number> = {};
+  let ahead = 0;
+  for (const prNumber of order) {
+    would_wait_ms[String(prNumber)] = Math.round(ahead / lanes);
+    ahead += costOf.get(prNumber) ?? 0;
+  }
+  return {
+    actual: actual.map((pr) => pr.prNumber),
+    // The same number of picks as the actual order made, so the two compare slot for slot.
+    shadow: order.slice(0, actual.length),
+    terms: terms.filter((t): t is ReviewPriorityTerms => t !== undefined),
+    would_wait_ms,
+  };
+}
+
+/** W1-T11153 — ledger the shadow order beside the actual picks. A failure is logged and never reaches admission. */
+export function recordReviewOrderShadow(
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "log" | "appendLine" | "dryRun">,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  eligible: readonly OpenPrView[],
+  actual: readonly OpenPrView[],
+  nowMs: number,
+  width: number,
+): void {
+  if (deps.dryRun || eligible.length === 0) return;
+  try {
+    const shadow = reviewOrderShadow(eligible, actual, reviewHistoryFromLedger(ledgerLines), nowMs, width);
+    (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step: "sweep.review_order_shadow",
+      pass: "light", width, ...shadow });
+  } catch (error) {
+    deps.log?.("sweep.review_order_shadow.failed", { error: String((error as Error)?.message ?? error) });
+  }
+}
+
+/** The stand-down suffix naming why a PR was queued behind the others (empty when it needs no person). */
+export function needsPersonNote(pr: OpenPrView, ledgerLines: ReadonlyArray<Record<string, unknown>>): string {
+  const why = needsPersonToMerge(pr, ledgerLines);
+  return why === undefined ? "" : `; queued behind reviews that need no person: ${why}`;
+}
+
+/** The predicate {@link orderPendingReviews} and {@link selectReviewAdmissions} take, memoized per PR head. */
+export function needsPersonPredicate(
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): (pr: OpenPrView) => boolean {
+  const memo = new Map<string, boolean>();
+  return (pr) => {
+    const key = `${pr.prNumber}@${pr.headSha}`;
+    let value = memo.get(key);
+    if (value === undefined) memo.set(key, value = needsPersonToMerge(pr, ledgerLines) !== undefined);
+    return value;
+  };
 }
 
 export function sweepWalkOrder(prs: readonly Pick<OpenPrView, "createdAt" | "prNumber">[]): number[] {
@@ -18459,7 +18678,8 @@ export async function runSweep(
       ? Date.parse(priorBlocker.since) : Date.parse(pr.lastActivityAt);
     return Number.isNaN(at) ? now : at;
   };
-  const fullReviewQueue = orderPendingReviews((fullReviewCandidates ?? []).map((candidate) => ({ pr: candidate })))
+  const fullNeedsPerson = needsPersonPredicate(ledgerLines);
+  const fullReviewQueue = orderPendingReviewsNeedsPersonLast((fullReviewCandidates ?? []).map((candidate) => ({ pr: candidate })), fullNeedsPerson)
     .slice(0, fullReviews.planned).map(({ pr }) => ({ prNumber: pr.prNumber, sinceMs: waitSinceMs(pr, true) }));
   const fullRepairAdmission =
     fullRepairActiveWorkers === undefined || fullReviewQueueDepth === undefined || fullReviewLanes === undefined
@@ -22942,7 +23162,7 @@ export async function runSweep(
   // deferred the same oldest tail every pass.
   const overtakenReviews = fullRepairAdmission?.overtaken() ?? new Set<number>(); // W1-T9582
   const overtakenJobs = pendingReviews.filter((job) => overtakenReviews.has(job.pr.prNumber));
-  const orderedReviews = orderPendingReviews(pendingReviews.filter((job) => !overtakenReviews.has(job.pr.prNumber)));
+  const orderedReviews = orderPendingReviewsNeedsPersonLast(pendingReviews.filter((job) => !overtakenReviews.has(job.pr.prNumber)), fullNeedsPerson);
   type ReviewLane = { jobs: typeof orderedReviews; next: number; stop?: string; cls: ReviewLaneClass };
   const codeLane: ReviewLane = { jobs: orderedReviews.filter((job) => !reviewsInPlanLane(job.pr)), next: 0, cls: "review" };
   const planLane: ReviewLane = { jobs: orderedReviews.filter((job) => reviewsInPlanLane(job.pr)), next: 0, cls: "plan-review" };
@@ -23876,7 +24096,10 @@ export async function runSweepLightPass(
   const unreserved = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
   const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length)
     .planFilings.length, "light");
-  const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available);
+  const needsPerson = needsPersonPredicate(selectionLedgerLines);
+  const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available, needsPerson);
+  recordReviewOrderShadow(deps, selectionLedgerLines, reviewAdmissionCandidates(unreserved, policy, now, outcomes),
+    selected.spawning, now, semanticBound);
   const latchHeld = new Set<number>();
   const admitAfterLatch = (pr: OpenPrView): boolean =>
     deps.restartAdmission?.(reviewsInPlanLane(pr) ? "plan-review" : "review", "light") !== false || !latchHeld.add(pr.prNumber);
@@ -23893,7 +24116,7 @@ export async function runSweepLightPass(
   // admits the next of them at once (`refillFreedLanes` below) instead of idling until another pass.
   const refillTail = selectReviewAdmissions(
     openPrs.filter((pr) => !spawningNumbers.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-    policy, now, outcomes, openPrs.length,
+    policy, now, outcomes, openPrs.length, undefined, needsPerson,
   ).spawning;
   let refillArmed = false;
   // W1-T2584 parity: provider capacity is account-wide, so a pass whose review met the gh budget
@@ -24032,7 +24255,8 @@ export async function runSweepLightPass(
                       ? `not admitted this pass: plan-lane bound ${planBound.bound}, in-flight ${planBound.inFlight}`
                       : `not admitted this pass: semantic post-review admission bound ${semanticBound}` +
                         inFlightNote(reviewsInFlight) +
-                        (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
+                        (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : "") +
+                        needsPersonNote(pr, selectionLedgerLines))
                   : baseStandDownReasonFor?.(d),
             };
       const planMergeTurn = planMergeSequence.get(pr.prNumber);
@@ -24128,8 +24352,40 @@ export async function runSweepLightPass(
       });
     },
   });
+  // W1-T11153: the view the refill tail was last derived from. Every refill re-reads it at refill time
+  // and re-derives eligibility and order from it. Refills are bounded by the freed lanes, so the reads are too.
+  let refillViewReadAtMs = now;
+  let refillViewUnreadable = false;
+  const refilledHeads = new Set<string>();
+  const refreshRefillTail = async (): Promise<void> => {
+    // After one failed read this pass keeps the older view rather than retrying GitHub once per refill.
+    if (!deps.readOpenPrsForRefill || refillViewUnreadable) return;
+    let fresh: OpenPrView[];
+    try {
+      fresh = await deps.readOpenPrsForRefill();
+    } catch (error) {
+      // Not an erasing catch: the error is logged, the refill row's view_age_ms shows the older view it
+      // kept, and the refill still runs from that view.
+      refillViewUnreadable = true;
+      deps.log?.("sweep.review_refill.view_unreadable", { error: String((error as Error)?.message ?? error) });
+      return;
+    }
+    refillViewReadAtMs = deps.now ? deps.now() : systemClock.now();
+    const freshViews = fresh.map(pr => completedRefusalRetryView(promiseHarvestRetryView(pr, selectionLedgerLines), selectionPrior));
+    refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
+      freshViews.filter((pr) => !spawningNumbers.has(pr.prNumber) && !refilledHeads.has(lightPassHeadKey(pr)) &&
+        !lightPassReservedHeads.has(lightPassHeadKey(pr))),
+      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson,
+    ).spawning);
+  };
   const admitOneRefill = async (): Promise<boolean> => {
-    if (refillTail.length === 0 || providerFloorMet || deps.restartAdmission?.("review", "light-refill") === false) return false;
+    if (providerFloorMet || deps.restartAdmission?.("review", "light-refill") === false) return false;
+    // Read the queue only when a lane is actually free, so a refill that admits nothing reads nothing.
+    const freeWidth = effectiveReviewWidth(deps, policy, Math.max(1, refillTail.length), deps.now ? deps.now() : systemClock.now(),
+      selectionLedgerLines, (deps.readActiveWorkerCount ?? activeWorkerCount)());
+    if (reviewAdmissionBound(freeWidth).bound === 0) return false;
+    await refreshRefillTail();
+    if (refillTail.length === 0) return false;
     const nowMs = deps.now ? deps.now() : systemClock.now();
     const width = effectiveReviewWidth(deps, policy, refillTail.length, nowMs, selectionLedgerLines,
       (deps.readActiveWorkerCount ?? activeWorkerCount)());
@@ -24139,6 +24395,7 @@ export async function runSweepLightPass(
     if (next === undefined) return false;
     const key = lightPassHeadKey(next);
     if (lightPassReservedHeads.has(key)) return true;
+    refilledHeads.add(key);
     // Reserve before the first await, exactly as selection does, so no overlapping pass can race it.
     lightPassSpawningReservations++;
     lightPassReservedHeads.add(key);
@@ -24155,7 +24412,8 @@ export async function runSweepLightPass(
       if (unreserve()) onOwnLaneFreed();
     };
     const row = { run_id: deps.runId, task_id: next.taskId ?? "SWEEP", pr_number: next.prNumber,
-      pr_url: next.prUrl, head_sha: next.headSha, width, in_flight: inFlight, snapshot_age_ms: nowMs - now };
+      pr_url: next.prUrl, head_sha: next.headSha, width, in_flight: inFlight, snapshot_age_ms: nowMs - now,
+      view_age_ms: nowMs - refillViewReadAtMs };
     let skip: string | undefined;
     try {
       const live = deps.readLiveStateAtAct ? await deps.readLiveStateAtAct(next) : undefined;
@@ -24490,6 +24748,7 @@ export function selectReviewAdmissions(
   outcomes: ReviewAdmissionOutcomes = EMPTY_REVIEW_ADMISSION_OUTCOMES,
   reviewWidth: number = Math.max(1, policy.reviewLanes),
   planLaneWidth: number = derivePlanLaneBound(undefined, policy, 0).available,
+  needsPerson?: (pr: OpenPrView) => boolean,
 ): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
   // W1-T2583: selection and execution must agree on outcome-keyed eligibility, so the caller folds
   // both sets once from the same reader `runSweep` uses and filters here before either lane ranks.
@@ -24501,6 +24760,10 @@ export function selectReviewAdmissions(
   const rest = eligible.filter((pr) => !reviewsInPlanLane(pr));
 
   const oldestFirst = (a: OpenPrView, b: OpenPrView): number => {
+    // W1-T11153: a PR that needs a person to merge is admitted only after every one that does not.
+    const ga = needsPerson?.(a) === true ? 1 : 0;
+    const gb = needsPerson?.(b) === true ? 1 : 0;
+    if (ga !== gb) return ga - gb;
     const ka = Date.parse(reviewAdmissionKey(a));
     const kb = Date.parse(reviewAdmissionKey(b));
     const aa = Number.isNaN(ka) ? -Infinity : now - ka;
