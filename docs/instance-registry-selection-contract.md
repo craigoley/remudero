@@ -266,8 +266,10 @@ field-trials-refresh and fleet-heartbeat. The session's existing parent must be 
 owned mode-0700 directory. The session and its `.observations` sibling are mode 0600,
 regular single-link files opened without following symlinks. Observations stop at
 64 KiB; failure records a fixed diagnostic and the original shell effect continues.
-Shell capture and each observation have a five-second process deadline, including
-observer children that inherit capture pipes. Timeout terminates only the private
+Shell capture and each observation have a process deadline, including observer
+children that inherit capture pipes. It is a 20-second backstop by default (whole
+seconds in `RMD_REGISTRY_SHADOW_DEADLINE_S`): a healthy observer exits in well under a
+second, and five seconds killed healthy cold starts on the CPU-saturated fleet host. Timeout terminates only the private
 observer process group, emits the same fixed diagnostic and resumes legacy behavior.
 The installed `~/.local/bin/rmd-field-trials-refresh` command resolves its adapter
 and source entry through the trusted `<RMD_STATE_DIR>/daemon-install` checkout,

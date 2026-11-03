@@ -4,6 +4,10 @@ registry_shadow_session=""
 registry_shadow_pin="${registry_shadow_pin:-}"
 registry_shadow_root="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 registry_shadow_args=()
+# BACKSTOP, not pacing: a healthy observer exits in well under a second, so this bounds only a hung one.
+# Five seconds killed healthy cold starts on the CPU-saturated fleet host (#15638's review, 2026-11-03).
+registry_shadow_deadline_s="${RMD_REGISTRY_SHADOW_DEADLINE_S:-20}"
+case "$registry_shadow_deadline_s" in ''|*[!0-9]*|0) registry_shadow_deadline_s=20 ;; esac
 
 # A known child without this argv grammar keeps its original arguments. This probes one
 # trusted script's bounded header, never executes an old reader as a capability probe.
@@ -14,7 +18,7 @@ registry_shadow_supports() {
 registry_shadow_call() (
   local observer_pid deadline_pid observer_status=0
   # Keep job control local to this subshell: each job has a private process group.
-  # The five-second deadline kills the observer AND its inherited-pipe children,
+  # The deadline kills the observer AND its inherited-pipe children,
   # including a child-entry process stalled before capture or during observation.
   {
     set -m
@@ -37,7 +41,7 @@ registry_shadow_call() (
         --session "$registry_shadow_session" "$@"
     ) &
     observer_pid=$!
-    (sleep 5; kill -KILL -- "-$observer_pid" 2>/dev/null || :) >/dev/null 2>&1 &
+    (sleep "$registry_shadow_deadline_s"; kill -KILL -- "-$observer_pid" 2>/dev/null || :) >/dev/null 2>&1 &
     deadline_pid=$!
     wait "$observer_pid" || observer_status=$?
     kill -KILL -- "-$deadline_pid" 2>/dev/null || :

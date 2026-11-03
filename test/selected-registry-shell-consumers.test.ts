@@ -349,10 +349,33 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers: inst
   }
 });
 
+test("selected shell qualification preserves mixed version legacy effects: a healthy observer slower than five seconds still records", t => {
+  // #15638's review on the CPU-saturated host lost this suite's observations to a five-second deadline. The
+  // default is a backstop for a hung observer, so a healthy but slow cold start must still land its rows.
+  const root = mkdtempSync(join(tmpdir(), "rmd-shell-slow-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  chmodSync(root, 0o700);
+  const registry = join(root, "selected-private.yaml"), session = join(root, "session.json"), bin = join(root, "bin");
+  writeFileSync(registry, "instances:\n  core:\n    github_repo: craigoley/remudero\n    mode: shadow\n", { mode: 0o600 });
+  mkdirSync(bin);
+  writeFileSync(join(bin, "node"), `#!/bin/sh\nsleep 6\nexec '${process.execPath.replaceAll("'", "'\\''")}' "$@"\n`, { mode: 0o700 });
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, RMD_INSTANCE_REGISTRY: registry };
+  delete env.RMD_REGISTRY_SHADOW_DEADLINE_S;
+  const shadow = spawnSync("bash", ["-c", '. "$1"; registry_shadow_start --selected-registry-shadow "$2"; ' +
+    'registry_shadow_observe field-trials core craigoley/remudero host', "_", join(REPO_ROOT, "deploy/registry-shadow.sh"), session],
+  { env, encoding: "utf8", timeout: 120_000 });
+  assert.equal(shadow.status, 0, shadow.stderr);
+  assert.doesNotMatch(shadow.stderr, /instance_registry\.shell_shadow_unrecorded/, "a slow healthy observer is not killed");
+  const rows = readFileSync(session + ".observations", "utf8").trim().split("\n");
+  assert.equal(rows.length, 1, "the observation landed");
+});
+
 for (const phase of ["capture", "observation"] as const) {
 test(`selected shell defaults and failures remain shadow only without live effects: observer deadlines (${phase})`, t => {
   const historical = bash32(t);
-  for (const interpreter of [{ shell: "bash", env: {} }, historical]) {
+  for (const base of [{ shell: "bash", env: {} as NodeJS.ProcessEnv }, historical]) {
+      // The production backstop is 20 s; pinning 5 s keeps this hung-observer proof fast.
+      const interpreter = { ...base, env: { ...base.env, RMD_REGISTRY_SHADOW_DEADLINE_S: "5" } };
       const f = registryShellFixture(t);
       const script = join(REPO_ROOT, "deploy/host-update.sh");
       const legacy = f.run(script, ["--print-daemon-run"], interpreter.env, interpreter.shell);
