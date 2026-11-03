@@ -44,23 +44,24 @@ function fixHistory(lengthMs: number, rounds = 3): string[] {
   ]).flat();
 }
 
-/** `sweep.review_started` → `review.posted` pairs, each `lengthMs` long. */
-function reviewHistory(lengthMs: number, pairs = 3): string[] {
+/** `sweep.review_started` → `review.posted` pairs, each `lengthMs` long; `planOnly` sets the posted row's `plan_only`. */
+function reviewHistory(lengthMs: number, pairs = 3, planOnly?: boolean, firstPr = 900): string[] {
   const end = Date.now() - minute;
   return Array.from({ length: pairs }, (_, i) => [
-    JSON.stringify({ ts: new Date(end - lengthMs - i).toISOString(), step: "sweep.review_started", pr_number: 900 + i }),
-    JSON.stringify({ ts: new Date(end - i).toISOString(), step: "review.posted", pr_url: `https://github.com/acme/remudero/pull/${900 + i}` }),
+    JSON.stringify({ ts: new Date(end - lengthMs - i).toISOString(), step: "sweep.review_started", pr_number: firstPr + i }),
+    JSON.stringify({ ts: new Date(end - i).toISOString(), step: "review.posted", pr_url: `https://github.com/acme/remudero/pull/${firstPr + i}`,
+      ...(planOnly === undefined ? {} : { plan_only: planOnly }) }),
   ]).flat();
 }
 
 interface Row { step: string; extra: Record<string, unknown> }
-interface LightPass { scope: LightPassScope | undefined; latched: boolean; atMin: number; fix: boolean; review: boolean }
-interface FullPass { latched: boolean; hold: string | undefined; review: boolean }
+interface LightPass { scope: LightPassScope | undefined; latched: boolean; atMin: number; fix: boolean; review: boolean; plan?: boolean }
+interface FullPass { latched: boolean; hold: string | undefined; review: boolean; plan?: boolean }
 
 /** One lane (task A) runs; `latch()` makes the tree stale so the dispatch tick latches the restart. The fake light
  *  pass dispatches a fix and admits a review unless the scope's predicate refuses; the fake full pass does the same
  *  through its gate. */
-function latchedLane(t: TestContext, ledger: readonly string[], opts: { fullSweep?: boolean } = {}) {
+function latchedLane(t: TestContext, ledger: readonly string[], opts: { fullSweep?: boolean; planProbe?: boolean } = {}) {
   assert.equal(inFlightReviewCount(), 0, "precondition: no review leaked from another test");
   assert.equal(detachedSweepActionCount(), 0, "precondition: no detached action leaked from another test");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t9808-`));
@@ -97,11 +98,13 @@ function latchedLane(t: TestContext, ledger: readonly string[], opts: { fullSwee
     sweepLight: async (scope?: LightPassScope) => {
       light.push({ scope, latched: stale, atMin: (nowMs - start) / minute,
         fix: !scope?.reviewOnly && scope?.admit?.("fix-dispatch", "light") !== false,
-        review: scope?.admit?.("review", "light") !== false });
+        review: scope?.admit?.("review", "light") !== false,
+        ...(opts.planProbe ? { plan: scope?.admit?.("plan-review", "light") !== false } : {}) });
     },
     ...(opts.fullSweep ? {
       sweep: async (gate?: ReviewAdmissionGate) => {
-        full.push({ latched: stale, hold: gate?.workerAdmissionHold?.(), review: gate?.() ?? true });
+        full.push({ latched: stale, hold: gate?.workerAdmissionHold?.(), review: gate?.() ?? true,
+          ...(opts.planProbe ? { plan: gate?.("plan-review") ?? true } : {}) });
       },
     } : {}),
   } as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 1, max: 1, sweepWallClockBoundMs: BOUND_MS, sweepRetriggerIntervalMs: minute });
@@ -273,6 +276,38 @@ test("W1-T9808: with no latch or no history admission is unchanged", async (t) =
     await eventually(() => sweep.started.includes(9), "the freed lane did not refill");
   } finally {
     await sweep.finish();
+  }
+});
+
+test("W1-T11148 criterion 4: the latch judges a plan review on the plan median and a code review on the code median", async (t) => {
+  // Plan reviews run 1 min and code reviews 12 min: the all-review median, 6.5 min, fits the 10 min the drain has left.
+  const history = [...reviewHistory(minute, 3, true, 900), ...reviewHistory(12 * minute, 3, false, 950)];
+  assert.equal(daemonModule.medianReviewRunMs(history), (minute + 12 * minute) / 2);
+  assert.equal(daemonModule.medianReviewRunMs(history, true), minute);
+  assert.equal(daemonModule.medianReviewRunMs(history, false), 12 * minute);
+  const h = latchedLane(t, history, { fullSweep: true, planProbe: true });
+  try {
+    await h.tick();
+    await h.latch(1);
+    const light = h.light.filter((pass) => pass.latched);
+    assert.ok(light.length >= 1, "the ticker ran its light pass after the latch");
+    assert.ok(light.every((pass) => pass.plan && !pass.review), JSON.stringify(light));
+    const full = h.full.filter((pass) => pass.latched);
+    assert.ok(full.length >= 1 && full.every((pass) => pass.plan && !pass.review), JSON.stringify(full));
+    const hold = h.held().find((row) => row.kind === "review");
+    assert.equal(hold?.measured_length_ms, 12 * minute, "a code review is held on the code median");
+    assert.equal(h.held().some((row) => row.kind === "plan-review"), false, "a 1-min plan review is never held");
+  } finally {
+    await h.cleanup();
+  }
+  // A class with no history of its own falls back to the all-review median, as before.
+  const unclassed = latchedLane(t, reviewHistory(12 * minute), { planProbe: true });
+  try {
+    await unclassed.latch(1);
+    const after = unclassed.light.filter((pass) => pass.latched);
+    assert.ok(after.length >= 1 && after.every((pass) => !pass.plan && !pass.review), JSON.stringify(after));
+  } finally {
+    await unclassed.cleanup();
   }
 });
 

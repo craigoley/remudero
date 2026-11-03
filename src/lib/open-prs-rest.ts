@@ -831,6 +831,15 @@ export function isHumanHoldCandidate(pr: HumanHoldCandidateInput): boolean {
   return (pr.autoMergeArmed === true || mergesDirectlyAsPlanPr(pr)) && greenReviewedButBlocked(pr);
 }
 
+/** W1-T11153 — the review queue: a non-draft PR whose checks are green and whose head carries no review
+ *  verdict yet. Review admission orders it, so a person's CHANGES_REQUESTED hold on it is read too. */
+export function isReviewQueueHoldCandidate(pr: Pick<ScannerBlockerCandidateInput, "isDraft" | "checksState" | "reviewState">): boolean {
+  return pr.isDraft !== true && pr.checksState === "green" && pr.reviewState !== "success" && pr.reviewState !== "failure";
+}
+
+/** BACKSTOP: one review listing per review-queue PR per pass, oldest first; admission order matters at the queue head. */
+export const REVIEW_QUEUE_HOLD_READ_CAP = 8;
+
 export interface ScannerAlertIdentity {
   alertNumber: number;
   ruleId: string;
@@ -1114,6 +1123,26 @@ export function* hydrateScannerBlockerObservationsSteps(
       ? yield* observeChangesRequestedSteps(owner, repo, candidate, fetch)
       : yield* observeScannerBlockerSteps(owner, repo, candidate, fetch);
     if (observation !== undefined) out.set(candidate.number, observation);
+  }
+  return out;
+}
+
+/**
+ * W1-T11153 — the human CHANGES_REQUESTED holds standing on review-queue PRs ({@link isReviewQueueHoldCandidate}),
+ * one review listing each, the oldest `cap` candidates first. Only a `changes-requested` observation is kept: an
+ * unreadable listing leaves the PR absent, so admission orders it exactly as before.
+ */
+export function* hydrateReviewQueueHoldsSteps(
+  owner: string,
+  repo: string,
+  candidates: readonly ScannerBlockerCandidate[],
+  fetch: GhApiFetcher,
+  cap: number = REVIEW_QUEUE_HOLD_READ_CAP,
+): GhReadSteps<Map<number, ScannerBlockerObservation>> {
+  const out = new Map<number, ScannerBlockerObservation>();
+  for (const candidate of candidates.slice(0, cap)) {
+    const observation = yield* observeChangesRequestedSteps(owner, repo, candidate, fetch);
+    if (observation?.kind === "changes-requested") out.set(candidate.number, observation);
   }
   return out;
 }
@@ -1645,6 +1674,8 @@ interface RestPrFile {
 export const PLAN_FILING_FILE_RESPONSE_CAP = 100;
 /** BACKSTOP: retained complete observations stay far above the measured open-PR population. */
 export const PLAN_FILING_FILE_CACHE_MAX_ENTRIES = 256;
+/** BACKSTOP: uncached file reads a pass may spend, the value W1-T2439 derived; W1-T9824 learns it (W1-T11148 moved it). */
+export const PLAN_FILING_FILE_MISS_CAP = 3;
 
 export interface PlanFilingFileCandidate {
   number: number;
@@ -1708,11 +1739,9 @@ function rememberPlanFilingMissCursor(
   }
 }
 
-/**
- * Read a bounded set of actual PR file lists. Complete positive and negative observations are
- * cached by repository, PR and head SHA; failures and capped misses remain unknown and are never
- * promoted to a plan-filing fact. A cache hit costs none of this pass's miss budget.
- */
+/** Read a bounded set of actual PR file lists. Complete positive and negative observations are
+ *  cached by repository, PR and head SHA; failures and capped misses remain unknown and are never
+ *  promoted to a plan-filing fact. A cache hit costs none of this pass's miss budget. */
 export function hydratePlanFilingFiles(
   owner: string,
   repo: string,

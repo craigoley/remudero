@@ -22,3 +22,11 @@
     Last 24 h: n 44, p50 11.3, p90 237.4 min.
     Slowest PRs: #16191 (383.7 min), #16147 (344.6 min), #16210 (271.5 min).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.62
+    reasons:
+      - "low-confidence verdict (0.62 < 0.7) — on the change's description/files alone, no diff was read — The description and declared files (src/lib/sweep.ts plus a new test file) show no contact with secrets, credentials, auth, permissions, data or branch deletion, or deploy/infrastructure policy.; on the change's description/files alone, no diff was read — The acceptance criterion is a concrete grep-verifiable test, and the missing test file is simply what the change creates, so the finding is checkable from what is shown.; on the change's description/files alone, no diff was read — The family track record (2 declined of 4 decided) is mediocre, and the rationale hints at a possible bound change, but neither shows an operator-only decision or an irreversible action. The PR still passes CI and review."
+    judged_at: "2026-11-03T03:42:47.412Z"
+    pin: "0d109fcd6bfb2c3f43296125af023d63c12b82bd7195ec7d3c2de8ac0aef2ecf"

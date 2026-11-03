@@ -1,0 +1,48 @@
+- id: W1-T11166
+  title: A head proven clean against an older main does not inherit "clean" after main moves, and its unread mergeability is probed against the new main first
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, which main a remembered mergeability belongs to, read in the sweep and in its merge probe; high because a probe conflict on an unread pass can admit the merge-conflict worker
+  band_meaning: blast-radius
+  origin: operator-session#conflict-findings-2026-11-03
+  plan_refs:
+    - W1-T4470
+    - W1-T9723
+    - W1-T9454
+    - W1-T4914
+    - W1-T11062
+  files:
+    - src/lib/sweep.ts
+    - src/lib/merge-probe.ts
+    - test/ci/a-head-proven-clean-against-an-older-main-does-not-inherit-clean.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Replaying #15638 (W1-T9795, head 35fa075): a sweep.disposed row that read clean at 2026-11-02T21:14:47.999Z against main 116c844 is not inherited by an unread pass once main is ab39118, which conflicts with that head on src/run-task.ts; the same row is still inherited while main is 116c844; a dirty row is still inherited after main moves; a row with no recorded main is not inherited as clean when main is known; and with no main read the W1-T4470 behaviour is unchanged"
+      proof: "unit test: test/ci/a-head-proven-clean-against-an-older-main-does-not-inherit-clean.test.ts"
+    - claim: Every sweep.disposed row that carries merge_state also carries the main tip it was read against as merge_main_sha, and a pass that refuses an inheritance says so in its reason
+      proof: "grep: merge_main_sha in src/lib/sweep.ts"
+    - claim: The merge probe gives a PR whose remembered clean was refused because main moved the same first slots as a dirty PR, and a conflict it finds is applied to a PR whose mergeability was unread this pass
+      proof: "grep: W1-T11166 in src/lib/merge-probe.ts"
+  rationale: |
+    OBSERVED in ~/Remudero-notes/conflict-evidence-1103 (7-day conflict rows, origin/main 7338c1fd) and re-read on origin/main c0a6f1c74.
+    - The hysteresis (W1-T4470, src/lib/sweep.ts lastKnownMergeStateFromLedger and withInheritedMergeState, lines 9492-9540) is keyed on pr_number + head_sha only. sweep.disposed records merge_state but not the main it was read against, so a head proven clean against an old main keeps "clean" however far main moves.
+    - #15638 (W1-T9795, head 35fa0751dd0f): GitHub last read it clean at 2026-11-02T21:14:47.999Z. Every pass from 21:22Z to 00:20Z read its mergeability as unread, and each one re-inherited "clean" from the pass before it, 16 rows in a chain. Locally, `git merge-tree` of that head is clean against 116c844 (main at 21:14Z) and conflicts on src/run-task.ts against b95cd21 (merged 23:12:24Z) and every later main. The 23:29Z and 23:59Z passes still inherited clean. At 00:02:16Z the fix rung read REST dirty and stood down at rung.strike for "the sweep's own conflicted disposition". At 00:20:25Z the sweep, still on inherited clean, disposed refused-escalate.
+    - #15602 (W1-T10722, head ee01645): light passes inherited a clean observed 2026-10-31T00:39:06.809Z, two days and more than 200 main commits old, between full passes that read it dirty on GitHub at 18:38Z, 19:54Z and 21:02Z. The 10-31 row was the acted seed row that rotation keeps; the newer deduped dirty rows had been compacted out of the live ledger. The rung stood down for dirty 3 times (23:23Z-00:00Z).
+    - #16201 (W1-T11094): armed-idle at 21:58Z on an inherited clean.
+    - Across the extracted rows: 142 sweep.disposed rows inherited clean or behind, over 8 PRs. Of the 33 rung.strike dirty stand-downs (21 tasks), 4 directly followed an inherited clean on the same head; the extract has no prior disposition for 23 of them. So this task removes one feeder of the rung/sweep deadlock, and the rung-to-sweep handoff task filed next closes the deadlock itself.
+    - The merge probe (merge-probe.ts) already ranks dirty and unknown heads first, but an unread head with a stale remembered clean is ranked with every other PR. No sweep.merge_probe row exists for #15638's head 35fa075 in the extract. applyMergeProbeEvidence applies a probe conflict only to a dirty or unknown read, never to an unread one.
+  design: |
+    1. lastKnownMergeStateFromLedger also returns the row's merge_main_sha as mainSha.
+    2. The sweep.disposed row writes merge_main_sha (this pass's mainTipSha) whenever it writes merge_state and mainTipSha was read.
+    3. withInheritedMergeState takes this pass's mainTipSha. A remembered clean or behind is inherited only when its mainSha equals mainTipSha. When main moved, or the row has no mainSha, the read stays unknown and the result names the refused observation; the reason says which main it was read against and that main has moved. A remembered dirty is still inherited across a main move: main moving forward does not resolve a conflict, and the merge-conflict round re-merges current main anyway. With no mainTipSha read, behaviour is unchanged.
+    4. probeOpenPrMerges ranks a PR whose remembered clean or behind was refused against its fetched main in the first tier with dirty and unknown heads. applyMergeProbeEvidence treats an unread mergeability (mergeState and mergeableState both absent) as needing evidence, so a probe conflict reaches that pass's disposition as dirty with merge-probe evidence.
+    5. Tests replay the #15638 rows through withInheritedMergeState and runSweep (readMainTip injected), and drive probeOpenPrMerges and applyMergeProbeEvidence over a gitRepo() fixture with a real conflict. Show delete-the-fix: each test goes red with src/lib/sweep.ts and src/lib/merge-probe.ts restored from base.
+    Comment-neutral in src. Out of scope: the rung-to-sweep handoff and empty or truncated compare evidence (each filed separately), and GitHub-dirty but locally-clean merges (#15602 rename skew, findings item 7).
+  note: |
+    Reserved with rmd next-task-id for plan-file-1793666125349. Operator ruling 2026-11-02: rmd must resolve merge conflicts automatically, with a gardener as the backstop. Findings item 1 of ~/Remudero-notes/conflict-findings-2026-11-03.md. Hand-built on a run-W1-T11166 branch.

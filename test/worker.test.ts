@@ -1002,6 +1002,8 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
     served_model_reason: "no assistant message in the stream reported a real model before the call ended",
     effort: "high",
     tokens: { input: 1000, output: 200, cacheRead: 500, cacheCreation: 50 },
+    // All four usage counters came off the result envelope, so the state is named "observed".
+    token_usage_state: "observed",
     cache_read_input_tokens: 500,
     cache_creation_input_tokens: 50,
     total_cost_usd: 1.23,
