@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { Config } from "../src/lib/config.js";
-import type { WorktreeReapSummary } from "../src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorktreeReapSummary } from "#src/lib/worker.js";
 import {
   ADHOC_LANE_REAP_GRACE_MS,
   adhocLaneRoot,
@@ -14,8 +14,8 @@ import {
   reapStaleWorktreesAsync,
   runAdhocLaneReapRung,
   unmanagedWorktreeLanes,
-} from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /**
  * test/adhoc-lane-reap.test.ts — W1-T2847, the REAP half.

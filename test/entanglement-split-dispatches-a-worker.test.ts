@@ -30,12 +30,12 @@ import {
   renderPrerequisitePrPrompt,
   runFixRung,
   type FixRungOutcome,
-} from "./helpers/run-task-test.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+} from "#test/helpers/run-task-test.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 // ── fixtures — mirror test/fix-rung-no-task.test.ts's own W1-T1095 helpers exactly ──────────────
 

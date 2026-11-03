@@ -3,12 +3,12 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";
-import { productionLifetimePressureHook, routeAdaptiveLifetimePressure } from "../src/run-task.js";
-import { VERIFY_HUMAN_JUDGED_STEP } from "../src/lib/verify-human-judge.js";
-import type { Config } from "../src/lib/config-schema.js";
-import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { shadowJudgeSampled } from "#src/lib/shadow-judge.js";
+import { productionLifetimePressureHook, routeAdaptiveLifetimePressure } from "#src/run-task.js";
+import { VERIFY_HUMAN_JUDGED_STEP } from "#src/lib/verify-human-judge.js";
+import type { Config } from "#src/lib/config-schema.js";
+import type { WorkerResult, spawnWorker } from "#src/lib/worker.js";
 
 // W1-T4025 exported `routeAdaptiveLifetimePressure` with no caller in test/, so the whole shard
 // projection — the evidence string and the observation key the judge is asked about — shipped

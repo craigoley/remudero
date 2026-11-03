@@ -12,12 +12,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { typecheckStep, type PreflightSpawn } from "../src/lib/commit-message.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { typecheckStep, type PreflightSpawn } from "#src/lib/commit-message.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   lowMemoryTypecheckArgs, TSC_DEFAULT_CHECKERS, TSC_LOW_MEMORY_MIN_CHECKERS, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES,
-} from "../src/lib/typecheck-buildinfo.js";
-import { runTypecheck } from "../src/lib/typecheck-run.js";
+} from "#src/lib/typecheck-buildinfo.js";
+import { runTypecheck } from "#src/lib/typecheck-run.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TSC = join(REPO_ROOT, "node_modules", ".bin", "tsc");

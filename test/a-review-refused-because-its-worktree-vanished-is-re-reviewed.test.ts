@@ -3,13 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { FixProgressInput } from "../src/lib/fix-progress-judge.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { postReviewStatusGuarded } from "../src/lib/review.js";
-import { checkReviewerCodeFreshness, checkReviewerCodeFreshnessAsync } from "../src/lib/self-sync.js";
+import type { FixProgressInput } from "#src/lib/fix-progress-judge.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { postReviewStatusGuarded } from "#src/lib/review.js";
+import { checkReviewerCodeFreshness, checkReviewerCodeFreshnessAsync } from "#src/lib/self-sync.js";
 import {
   REFUSED_POST_HOST_GAP_REREVIEW_STEP, runSweep, type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 
 const MIN = 60_000;
 const NOW = Date.parse("2026-10-11T12:00:00Z");

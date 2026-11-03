@@ -22,9 +22,9 @@ import { basename, join } from "node:path";
 
 import type { execFileSync } from "node:child_process";
 
-import { defaultProofSpawner, ensureDeps, PROOF_INSTALL_ARGS } from "../src/lib/review.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { defaultProofSpawner, ensureDeps, PROOF_INSTALL_ARGS } from "#src/lib/review.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 /** The fixture's own ceiling. Long enough that an unkilled child is unmistakable against the 1s
  *  bound below, short enough that a total failure of this fix costs seconds, never a hung suite. */

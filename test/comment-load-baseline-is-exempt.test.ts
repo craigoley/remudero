@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ENTANGLEMENT_EXEMPT_INSTRUMENTS, detectInstrumentEntanglement } from "../src/lib/review.js";
+import { ENTANGLEMENT_EXEMPT_INSTRUMENTS, detectInstrumentEntanglement } from "#src/lib/review.js";
 
 const COMMENT_LOAD_BASELINE = "scripts/comment-load-baseline.json";
 // THE CONTROL MOVED, AND WHY MATTERS MORE THAN WHICH PATH IT IS. This was

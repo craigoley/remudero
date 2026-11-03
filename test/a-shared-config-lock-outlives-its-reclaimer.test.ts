@@ -12,9 +12,9 @@ import {
   runWorktreeReapRung,
   wireCredentialHelperSocket,
   worktreeAdd,
-} from "../src/lib/worker.js";
-import type { Config } from "../src/lib/config.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /** Every temp dir this suite makes carries {@link RMD_TMP_PREFIX}, so `sweepStaleTempDirs` can
  *  reap it on the next boot. The prefix arrives as a PARAMETER, which is why the callsite check

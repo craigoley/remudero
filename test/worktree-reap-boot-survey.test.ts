@@ -18,9 +18,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import type { WorktreeReapSummary } from "../src/lib/worker.js";
-import { logWorktreeReapBootSurvey } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorktreeReapSummary } from "#src/lib/worker.js";
+import { logWorktreeReapBootSurvey } from "#src/run-task.js";
 
 const CONFIG = { root: "/nonexistent-repo-root-for-wiring-test" } as never;
 

@@ -7,7 +7,7 @@ import {
   planRiskJudgeAction,
   type RiskJudgeInput,
   type RiskJudgeVerdict,
-} from "../src/lib/risk-judge.js";
+} from "#src/lib/risk-judge.js";
 
 /**
  * W1-T2284 — THE JUDGE GRADES THE PATCH BY READING THE BUG REPORT.

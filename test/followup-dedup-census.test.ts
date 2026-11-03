@@ -29,8 +29,8 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mineFollowups, type LedgerRecord } from "../src/lib/retro.js";
-import { DEFAULT_DUPLICATE_CUTOFF } from "../src/lib/knowledge-dedup.js";
+import { mineFollowups, type LedgerRecord } from "#src/lib/retro.js";
+import { DEFAULT_DUPLICATE_CUTOFF } from "#src/lib/knowledge-dedup.js";
 import {
   containmentRatio,
   followupDedupCensus,
@@ -41,7 +41,7 @@ import {
   stripMintedFollowupAffix,
   type CensusEntry,
   type RoutedProposal,
-} from "../src/lib/followup-dedup-census.js";
+} from "#src/lib/followup-dedup-census.js";
 
 // ── the embedded corpus fixture, real-shaped (see header) ──────────────────────────────────
 

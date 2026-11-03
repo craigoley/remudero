@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
+import { checkProofCommand, CHECK_PROOF_EXIT } from "#src/run-task.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const NEEDLE = "dirty_proof_marker_W1_T5808";

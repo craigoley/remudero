@@ -25,13 +25,13 @@ import {
   RUN_BRANCH_UNFILED_RE,
   renderPrerequisitePrPrompt,
   runFixRung,
-} from "./helpers/run-task-test.js";
-import { acceptanceAuthorTimeCheck, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/run-task-test.js";
+import { acceptanceAuthorTimeCheck, type CriterionVerdict, type ReviewVerdict } from "#src/lib/review.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { listArchivedTranscripts, TRANSCRIPT_EXCERPT_CAP } from "#src/run-task.js";
 import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";

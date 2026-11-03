@@ -9,8 +9,8 @@ import {
   useCapabilityGrant,
   verifyCapabilityGrant,
   type CapabilityUseRequest,
-} from "../src/lib/capability-grant.js";
-import { envelope } from "../src/lib/untrusted-envelope.js";
+} from "#src/lib/capability-grant.js";
+import { envelope } from "#src/lib/untrusted-envelope.js";
 
 const APPROVAL = { approvedBy: "operator:alice", approvedAt: new Date(Date.now() - 1_000).toISOString() };
 

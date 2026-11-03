@@ -6,8 +6,8 @@ import {
   OPENWEIGHT_PRICES,
   OPENWEIGHT_TEMPERATURE,
   selectOpenWeightModel,
-} from "../src/lib/worker-provider.js";
-import { loadMounts } from "../src/lib/mounts.js";
+} from "#src/lib/worker-provider.js";
+import { loadMounts } from "#src/lib/mounts.js";
 
 // W1-T3689. A cash deployment reaches the wire only if THREE tables know it: its price (the
 // reservation refuses an unpriced deployment rather than borrowing a neighbour's rate), its

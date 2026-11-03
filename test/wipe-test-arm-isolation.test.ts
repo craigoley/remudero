@@ -3,16 +3,16 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import type { RunResult } from "../src/lib/run-result.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { wipeTestCommand } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { wipeTestCommand } from "#src/run-task.js";
 import {
   resolveWipeTestArmOrder,
   resolveWipeTestArmPermission,
   WIPE_TEST_PAIR_STEP,
-} from "../src/lib/wipe-test.js";
+} from "#src/lib/wipe-test.js";
 
 /**
  * test/wipe-test-arm-isolation.test.ts — W1-T1256, THE ARMS ARE NOT INDEPENDENT.
@@ -143,7 +143,7 @@ test("wipeTestCommand: BOTH dispatched arms carry noMerge:true -- the ruling is 
     seenNoMerge.push(opts.noMerge);
     seenMask.push(opts.maskLearnings);
     return opts.maskLearnings ? realRunResult({ runId: "R-B" }) : realRunResult({ runId: "R-A" });
-  }) as unknown as typeof import("../src/run-task.js").runTask;
+  }) as unknown as typeof import("#src/run-task.js").runTask;
 
   const code = await wipeTestCommand(["W1-T86", "--repo", "remudero", "--allow-non-sandbox"], {
     config,
@@ -162,7 +162,7 @@ test("wipeTestCommand: with ZERO prior pairs ledgered for this task, arm A (lear
   const runTaskFn = (async (_taskId: string, opts: { maskLearnings?: boolean } = {}) => {
     dispatchOrder.push(opts.maskLearnings ? "B" : "A");
     return opts.maskLearnings ? realRunResult({ runId: "R-B" }) : realRunResult({ runId: "R-A" });
-  }) as unknown as typeof import("../src/run-task.js").runTask;
+  }) as unknown as typeof import("#src/run-task.js").runTask;
 
   const code = await wipeTestCommand(["W1-T86", "--repo", "remudero", "--allow-non-sandbox"], {
     config,
@@ -190,7 +190,7 @@ test("wipeTestCommand: with ONE prior pair already ledgered for this task, arm B
   const runTaskFn = (async (_taskId: string, opts: { maskLearnings?: boolean } = {}) => {
     dispatchOrder.push(opts.maskLearnings ? "B" : "A");
     return opts.maskLearnings ? realRunResult({ runId: "R-B" }) : realRunResult({ runId: "R-A" });
-  }) as unknown as typeof import("../src/run-task.js").runTask;
+  }) as unknown as typeof import("#src/run-task.js").runTask;
 
   const code = await wipeTestCommand(["W1-T86", "--repo", "remudero", "--allow-non-sandbox"], {
     config,

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
-import { relayConnectCommand } from "../src/run-task.js";
+import { relayConnectCommand } from "#src/run-task.js";
 
 // ── W1-T431: the `rmd relay` CLI wiring (MASTER-PLAN §7A/§6A, D-11) ──
 //

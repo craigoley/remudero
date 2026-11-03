@@ -20,8 +20,8 @@ import {
   outOfDeclaredScopeFiles,
   renderFixPrompt,
   scopeGuardOutOfScopeFiles,
-} from "../src/run-task.js";
-import { REGENERABLE_ARTIFACT_GENERATORS, isRegenerableArtifactConflict } from "../src/lib/sweep.js";
+} from "#src/run-task.js";
+import { REGENERABLE_ARTIFACT_GENERATORS, isRegenerableArtifactConflict } from "#src/lib/sweep.js";
 
 const COMMENT_LOAD = "scripts/comment-load-baseline.json";
 const SIZE_TWIN = "scripts/source-size-baseline.json";

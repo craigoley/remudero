@@ -45,6 +45,8 @@ interface Entry {
   at: number;
   immutable: boolean;
   evidence?: unknown;
+  /** The head an OPEN read was asked for; a lookup naming another head re-reads once. */
+  head?: string;
 }
 
 /** Evidence exposure only: no feedback decision, merge credit or runtime-adoption claim. */
@@ -124,7 +126,7 @@ export function createChangedFilesCache(
   const entries = new Map<string, Entry>();
   const ambiguous = new Set<string>();
   const failedAt = new Map<string, number>();
-  const queue: Array<{ url: string; immutable: boolean; headRefOid?: string }> = [];
+  const queue: Array<{ url: string; immutable: boolean; headRefOid?: string; head?: string }> = [];
   const pending = new Set<string>();
   let active = 0;
   let dirty = false;
@@ -187,7 +189,7 @@ export function createChangedFilesCache(
 
   const pump = (): void => {
     while (active < concurrency && queue.length > 0) {
-      const job = queue.shift() as { url: string; immutable: boolean; headRefOid?: string };
+      const job = queue.shift() as { url: string; immutable: boolean; headRefOid?: string; head?: string };
       active += 1;
       const number = job.url.match(/\/pull\/(\d+)/)?.[1] as string;
       void fetchFiles(number, job.headRefOid !== undefined)
@@ -197,7 +199,7 @@ export function createChangedFilesCache(
               failedAt.set(job.url, clock.now());
               return;
             }
-            entries.set(job.url, { files, at: clock.now(), immutable: job.immutable,
+            entries.set(job.url, { files, at: clock.now(), immutable: job.immutable, ...(job.head ? { head: job.head } : {}),
               ...(job.headRefOid ? { evidence: { repository, prNumber: Number(number), headRefOid: job.headRefOid,
                 prState: "MERGED", source: "github_rest_pull_files_paginated", complete: true } } : {}) });
             ambiguous.delete(job.url);
@@ -222,14 +224,14 @@ export function createChangedFilesCache(
     }
   };
 
-  const schedule = (url: string, immutable: boolean, headRefOid?: string): void => {
+  const schedule = (url: string, immutable: boolean, headRefOid?: string, head?: string): void => {
     if (options.readOnly) return;
     if (pending.has(url)) return;
     const failed = failedAt.get(url);
     if (failed !== undefined && clock.now() - failed < failureTtlMs) return;
     if (pending.size === 0) idle = new Promise<void>((resolve) => (wakeIdle = resolve));
     pending.add(url);
-    queue.push({ url, immutable, headRefOid });
+    queue.push({ url, immutable, headRefOid, head });
     // Deferred to a later tick so a board snapshot's synchronous derivation is never interleaved with a spawn.
     setImmediate(pump);
   };
@@ -243,7 +245,13 @@ export function createChangedFilesCache(
       const hit = entries.get(prUrl);
       // A list read while the PR was OPEN can predate its last push, so a now-terminal PR re-reads once to
       // make its durable copy — still answering the older list meanwhile, as the memo always did.
-      if (!hit || (immutable && !hit.immutable)) schedule(prUrl, immutable, state === "MERGED" && isImmutableHead(headRefOid) ? headRefOid : undefined);
+      // An OPEN list is keyed on its head too: a push moves the head, so a lookup naming a head the
+      // entry was not read at re-reads once (still serving the older list meanwhile).
+      const headMoved = hit !== undefined && !hit.immutable && !immutable && isImmutableHead(headRefOid) && hit.head !== headRefOid;
+      if (!hit || (immutable && !hit.immutable) || headMoved) {
+        schedule(prUrl, immutable, state === "MERGED" && isImmutableHead(headRefOid) ? headRefOid : undefined,
+          !immutable && isImmutableHead(headRefOid) ? headRefOid : undefined);
+      }
       return hit ? [...hit.files] : undefined;
     },
     evidence(prUrl, state, headRefOid) {

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { fixBranchClaimKey, prOwnerCommand } from "../src/run-task.js";
+import { fixBranchClaimKey, prOwnerCommand } from "#src/run-task.js";
 
 const PR = 4851;
 const TASK = "W1-TCLAIM";

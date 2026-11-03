@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { collectCiFailureCorpus } from "../src/lib/ci-failure-corpus.js";
-import { readCiPrGraphql } from "../src/lib/ci-learning-graphql.js";
+import { collectCiFailureCorpus } from "#src/lib/ci-failure-corpus.js";
+import { readCiPrGraphql } from "#src/lib/ci-learning-graphql.js";
 
 function page(sha: string, contexts: unknown, hasNextPage = false, endCursor: string | null = null): unknown {
   return { data: { repository: { pullRequest: { commits: {

@@ -20,7 +20,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { worktreeLockIsPidAlive, type RunLockInfo } from "../src/lib/worker.js";
+import { worktreeLockIsPidAlive, type RunLockInfo } from "#src/lib/worker.js";
 
 const LOCK_STARTED_AT = "2026-08-08T12:00:00.000Z";
 const LOCK_STARTED_MS = Date.parse(LOCK_STARTED_AT);

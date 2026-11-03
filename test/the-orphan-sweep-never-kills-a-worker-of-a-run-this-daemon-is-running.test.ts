@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { acquireInflightLock } from "../src/lib/inflight-lock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { sweepOrphanWorkers, type OrphanMarkers, type OrphanSweepReport } from "../src/lib/worker-containment.js";
+import type { Config } from "#src/lib/config.js";
+import { acquireInflightLock } from "#src/lib/inflight-lock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { sweepOrphanWorkers, type OrphanMarkers, type OrphanSweepReport } from "#src/lib/worker-containment.js";
 
 // W1-T5998 — runDaemon's per-poll orphan sweep counted a run as active only while its id held a
 // state/inflight lock. Review workers take none, and a sweep fix worker carries the daemon's own
@@ -26,7 +26,7 @@ const PREVIOUS_DAEMON = "DAEMON-1791279951516";
 type RunActive = (ownRunId: string, inflightDir: string, isPidAlive?: (pid: number) => boolean) => (runId: string) => boolean;
 
 async function productionRunActive(): Promise<RunActive> {
-  const mod = (await import("../src/run-task.js")) as Record<string, unknown>;
+  const mod = (await import("#src/run-task.js")) as Record<string, unknown>;
   const factory = mod.orphanSweepRunActive;
   assert.equal(typeof factory, "function", "run-task.ts must export the isRunActive the daemon's sweep uses");
   return factory as RunActive;
@@ -52,7 +52,7 @@ function inflightDir(): string {
 
 test("the orphan sweep leaves a live review worker alone while its review runs, and kills it once the review returned", async () => {
   const runActive = await productionRunActive();
-  const { reviewCommand } = await import("../src/run-task.js");
+  const { reviewCommand } = await import("#src/run-task.js");
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}orphan-sweep-review-`));
   const isRunActive = runActive(OWN_DAEMON, join(root, "state", "inflight"));
   let reviewRunId: string | undefined;

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ciFrictionGatePricedPrs, ciFrictionLadder, priceCiFrictionCauses } from "../src/lib/ci-friction-gardener.js";
-import type { CiFrictionCausePrice } from "../src/lib/ci-friction-gardener.js";
-import type { CiFrictionRemedyTask, OwnerSearch } from "../src/lib/ci-friction-remedy.js";
-import { measureGateFireRates, type GateFireRate, type GateWindowPr } from "../src/lib/gate-fire-rate.js";
+import { ciFrictionGatePricedPrs, ciFrictionLadder, priceCiFrictionCauses } from "#src/lib/ci-friction-gardener.js";
+import type { CiFrictionCausePrice } from "#src/lib/ci-friction-gardener.js";
+import type { CiFrictionRemedyTask, OwnerSearch } from "#src/lib/ci-friction-remedy.js";
+import { measureGateFireRates, type GateFireRate, type GateWindowPr } from "#src/lib/gate-fire-rate.js";
 
 // The ci-friction gardener priced every gate by the wall time of ALL its runs, green or red. The eight coverage-shard
 // legs, each a long job that runs on every PR, became its eight costliest "causes" (W1-T7358 & co.) with no failure

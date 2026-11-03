@@ -12,7 +12,7 @@ import {
   isDuplicateReviewComment,
   postReviewCommentGuarded,
   type PrCommentRecord,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 /**
  * W1-T2419 — THE REVIEWER RE-POSTS AN UNCHANGED VERDICT AS A NEW COMMENT ON EVERY SWEEP PASS.

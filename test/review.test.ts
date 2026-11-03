@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { reviewerAbandonmentLedgerFields, reviewCommand } from "../src/run-task.js";
-import { WorkerAbandonedError } from "../src/lib/worker.js";
+import { reviewerAbandonmentLedgerFields, reviewCommand } from "#src/run-task.js";
+import { WorkerAbandonedError } from "#src/lib/worker.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import {
   REVIEW_CONTEXT,
   reviewContractDigest,
@@ -58,8 +58,8 @@ import {
   type ProofExecutor,
   type ProofSpawner,
   type WhitelistedProof,
-} from "../src/lib/review.js";
-import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
+} from "#src/lib/review.js";
+import { inlineJudgedTally } from "#test/helpers/judged-pool-run.js";
 
 // W1-T229: source text of run-task.ts, read once, so the plan-only carve-out
 // falsifier below can verify by STRUCTURE (call-site count) rather than by
@@ -2887,7 +2887,7 @@ test("shardDeclaredFilesInDiff: reads a plan shard's own files: list off an ADDE
 // unreachable from the tests. This drives `runReview` all the way into it — the first test that
 // does — with `gh` stubbed onto PATH so nothing touches the network.
 test("W1-T359: runReview posts the unmet-criteria PR comment, and folds the advisory rubric into the SAME comment", async () => {
-  const { runReview } = await import("../src/run-task.js");
+  const { runReview } = await import("#src/run-task.js");
   const root = mkdtempSync(join(tmpdir(), "rmd-rubric-comment-"));
   const binDir = mkdtempSync(join(tmpdir(), "rmd-rubric-gh-"));
   const oldPath = process.env.PATH;
@@ -2982,7 +2982,7 @@ esac
 // injects a fake, so each catch arm is unreachable" shape CLAUDE.md names. The property is
 // OPTIONAL and defaults to the real judge, so no existing caller or fixture changes.
 test("W1-T359: a throwing rubric judge degrades to today's review — no advisory section, verdict unaffected", async () => {
-  const { runReview } = await import("../src/run-task.js");
+  const { runReview } = await import("#src/run-task.js");
   const root = mkdtempSync(join(tmpdir(), "rmd-rubric-throw-"));
   const binDir = mkdtempSync(join(tmpdir(), "rmd-rubric-throw-gh-"));
   const oldPath = process.env.PATH;

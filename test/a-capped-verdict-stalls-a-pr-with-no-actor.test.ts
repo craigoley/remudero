@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildFixRungDispatchArgs, runFixRung } from "./helpers/run-task-test.js";
-import { deriveFixMode, FIX_MODE_RULES, renderFixPrompt } from "../src/lib/prompt-render.js";
+import { buildFixRungDispatchArgs, runFixRung } from "#test/helpers/run-task-test.js";
+import { deriveFixMode, FIX_MODE_RULES, renderFixPrompt } from "#src/lib/prompt-render.js";
 import {
   cappedProofDiscriminationFromLedger,
   DEFAULT_SWEEP_POLICY,
@@ -16,13 +16,13 @@ import {
   type OpenPrView,
   type ProofDiscriminationEvidence,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#test/helpers/sweep-test.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const TASK = "W1-T3306-FIXTURE";
 const PR_URL = "https://github.com/acme/remudero/pull/3306";

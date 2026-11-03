@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { changedFilesCachePath, createChangedFilesCache } from "../src/lib/changed-files-cache.js";
-import { buildBatchedGithub, type BatchedPr } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import type { Clock } from "../src/lib/clock.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { changedFilesCachePath, createChangedFilesCache } from "#src/lib/changed-files-cache.js";
+import { buildBatchedGithub, type BatchedPr } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import type { Clock } from "#src/lib/clock.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import type { GitHub } from "#src/lib/status.js";
 
 const url = (n: number): string => `https://github.com/o/r/pull/${n}`;

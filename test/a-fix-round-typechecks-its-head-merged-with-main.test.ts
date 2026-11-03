@@ -9,10 +9,10 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { FixRoundPushError, pushFixRound } from "../src/run-task.js";
-import { mergedHeadTypechecks } from "../src/lib/merge-probe.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { FixRoundPushError, pushFixRound } from "#src/run-task.js";
+import { mergedHeadTypechecks } from "#src/lib/merge-probe.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
 const git = (dir: string, ...args: string[]): string => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: ENV }).trim();

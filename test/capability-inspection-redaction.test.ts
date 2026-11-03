@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createCapabilityGrant, InMemoryCapabilityGrantStore } from "../src/lib/capability-grant.js";
-import { inspectCapabilityDecision, replayCapabilityDecisions, CAPABILITY_INSPECTION_MAX_CASES, CAPABILITY_INSPECTION_MAX_STRING } from "../src/lib/capability-inspection.js";
+import { createCapabilityGrant, InMemoryCapabilityGrantStore } from "#src/lib/capability-grant.js";
+import { inspectCapabilityDecision, replayCapabilityDecisions, CAPABILITY_INSPECTION_MAX_CASES, CAPABILITY_INSPECTION_MAX_STRING } from "#src/lib/capability-inspection.js";
 
 test("test/capability-inspection-redaction.test.ts: allowlisted output omits payloads and bounds counts and strings", () => {
   const payload = "sensitive-attacker-payload";

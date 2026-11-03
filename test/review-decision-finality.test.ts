@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import {
   REVIEW_ENGINE_REVISION,
   claimReviewDecision,
@@ -14,13 +14,13 @@ import {
   type ReviewEvaluatorProvenance,
   type ReviewState,
   type ReviewVerdict,
-} from "../src/lib/review.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { runFixRung, type ReviewRunResult } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { runFixRung, type ReviewRunResult } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const PR = "https://github.com/o/r/pull/7";
 const TASK = "W1-T2722";

@@ -9,9 +9,9 @@ import {
   ledgerExceedsRotationCeiling,
   rotateLedger,
   type LedgerLine,
-} from "../src/lib/ledger.js";
-import { resolveReviewProviderProvenance } from "../src/lib/review-provider-provenance.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#src/lib/ledger.js";
+import { resolveReviewProviderProvenance } from "#src/lib/review-provider-provenance.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 test("W1-T2594: rotation retains the exact-head producer row needed by reviewer routing", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-provider-rotation-"));

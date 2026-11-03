@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ensureTaskTrailer } from "../src/run-task.js";
+import { ensureTaskTrailer } from "#src/run-task.js";
 
 // ── THE DEFECT (W1-T2435) ────────────────────────────────────────────────────────────
 // `ensureTaskTrailer` wrapped both its read (`gh pr view`) and its write (`gh pr edit`) in

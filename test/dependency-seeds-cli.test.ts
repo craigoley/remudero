@@ -1,12 +1,156 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 // @ts-expect-error -- standalone .mjs tool is outside tsconfig and has no declarations.
-import { attestedOpen, ownerOnlyHome, seedIsOpen } from "../scripts/dependency-seeds.mjs";
+import { attestedOpen, ownerOnlyHome, seedIsOpen } from "#scripts/dependency-seeds.mjs";
+// @ts-expect-error -- standalone .mjs tool has no declarations.
+import * as dependencyCli from "#scripts/dependency-seeds.mjs";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { sampleWorkspaceUsage } from "#src/lib/workspace-usage.js";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+
+test("W1-T10949: cleanup drops only completed owner-disposable payload while active shared and unpublished inputs remain protected", (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-owned-cleanup-")));
+  const cli = join(REPO_ROOT, "scripts/dependency-seeds.mjs");
+  const run = (...args: string[]) => spawnSync(process.execPath, [cli, ...args], {
+    encoding: "utf8", env: { ...process.env, RMD_DEPENDENCY_SEED_ROOT: "" },
+  });
+  const dead = spawnSync(process.execPath, ["-e", ""], { encoding: "utf8" }).pid;
+  const make = (name: string, pid = dead) => {
+    const scratch = join(root, name);
+    const result = run("allocate", scratch, "--owner", "owner-a", "--kind", "coverage", "--consumers", String(pid));
+    assert.equal(result.status, 0, result.stderr);
+    const allocated = JSON.parse(result.stdout), payload = allocated.payload;
+    writeFileSync(join(payload, "raw.json"), "disposable ranges");
+    const measured = sampleWorkspaceUsage(root, { roots: [], scratchRoots: [allocated.scratchRoot], maxMs: 1000 });
+    assert.equal(measured.completeness, "complete"); assert.ok(measured.generatedPathBytes! > 0);
+    const receipt = join(root, `${name}-receipt.json`);
+    writeFileSync(receipt, JSON.stringify({ version: 1, owner: "owner-a", scratch,
+      completed: true, published: true, disposable: true, exclusive: true }), { mode: 0o600 });
+    return { scratch, payload, receipt };
+  };
+  const clean = (f: ReturnType<typeof make>, extra = {}) => dependencyCli.cleanupOwnedScratch(f.scratch, {
+    owner: "owner-a", receipt: f.receipt, apply: true, isOpen: () => false, ...extra,
+  });
+  try {
+    const done = make("done");
+    const dry = dependencyCli.cleanupOwnedScratch(done.scratch, { owner: "owner-a", receipt: done.receipt });
+    assert.equal(dry.action, "would-remove"); assert.equal(existsSync(done.payload), true);
+    assert.ok(dry.observedPathBytes > 0); assert.equal(dry.entries, 2);
+    assert.equal(clean(done).action, "remove"); assert.equal(existsSync(done.payload), false);
+    assert.equal(readFileSync(done.receipt, "utf8").includes('"published":true'), true);
+    const journal = JSON.parse(readFileSync(join(done.scratch, "cleanup.json"), "utf8"));
+    assert.equal(journal.action, "remove"); assert.equal(journal.receipt, done.receipt);
+    assert.match(journal.receiptSha256, /^[a-f0-9]{64}$/);
+    assert.equal(existsSync(join(done.scratch, ".rmd-owned-disposable.json")), true);
+
+    const active = make("active", process.pid);
+    assert.match(clean(active).reason, /consumer/); assert.equal(existsSync(active.payload), true);
+    const hiddenConsumer = make("hidden-consumer");
+    const deniedProbe = t.mock.method(process, "kill", () => { throw Object.assign(new Error("permission denied"), { code: "EPERM" }); });
+    try { assert.match(clean(hiddenConsumer).reason, /consumer unverified.*permission denied/); }
+    finally { deniedProbe.mock.restore(); }
+    assert.equal(existsSync(hiddenConsumer.payload), true);
+    const lent = make("lent"); assert.match(clean(lent, { isOpen: () => true }).reason, /open/);
+    assert.equal(existsSync(lent.payload), true);
+    const unknown = make("unknown");
+    assert.match(clean(unknown, { isOpen: () => { throw new Error("scan unavailable"); } }).reason, /scan unavailable/);
+    assert.equal(existsSync(unknown.payload), true);
+    assert.match(clean(unknown, { isOpen: () => undefined }).reason, /unverified/);
+    assert.equal(existsSync(unknown.payload), true);
+    const wrongOwner = make("wrong-owner");
+    assert.throws(() => clean(wrongOwner, { owner: "owner-b" }), /owner/);
+    assert.equal(existsSync(wrongOwner.payload), true);
+    const foreign = make("foreign-namespace"), marker = join(foreign.scratch, ".rmd-owned-disposable.json");
+    const foreignRecord = JSON.parse(readFileSync(marker, "utf8"));
+    foreignRecord.namespace = "foreign mount or pid namespace"; writeFileSync(marker, JSON.stringify(foreignRecord));
+    assert.throws(() => clean(foreign), /identity/); assert.equal(existsSync(foreign.payload), true);
+
+    for (const field of ["completed", "published", "disposable", "exclusive"]) {
+      const f = make(field), receipt = JSON.parse(readFileSync(f.receipt, "utf8"));
+      receipt[field] = false; writeFileSync(f.receipt, JSON.stringify(receipt));
+      assert.throws(() => clean(f), /receipt/); assert.equal(existsSync(f.payload), true);
+    }
+    const shared = make("shared"), outside = join(root, "shared-generation"); mkdirSync(outside);
+    writeFileSync(join(outside, "keep"), "immutable input");
+    symlinkSync(outside, join(shared.payload, "borrowed"));
+    assert.throws(() => clean(shared), /link/); assert.equal(readFileSync(join(outside, "keep"), "utf8"), "immutable input");
+    const hardlinked = make("hardlinked"); linkSync(join(outside, "keep"), join(hardlinked.payload, "lent"));
+    assert.throws(() => clean(hardlinked), /link/); assert.equal(existsSync(hardlinked.payload), true);
+    if (process.platform === "linux") {
+      const mounted = make("mounted"), originalRead = fs.readFileSync;
+      const fakeMount = t.mock.method(fs, "readFileSync", ((...args: Parameters<typeof fs.readFileSync>) => {
+        if (args[0] === "/proc/self/mountinfo") return `42 1 0:1 / ${mounted.payload}/borrowed rw - tmpfs tmpfs rw\n`;
+        return Reflect.apply(originalRead, fs, args);
+      }) as typeof fs.readFileSync);
+      syncBuiltinESMExports();
+      try { assert.throws(() => clean(mounted), /mount/); assert.equal(existsSync(mounted.payload), true); }
+      finally { fakeMount.mock.restore(); syncBuiltinESMExports(); }
+    }
+    const changed = make("changed"); renameSync(changed.payload, `${changed.payload}-old`); mkdirSync(changed.payload, { mode: 0o700 });
+    assert.throws(() => clean(changed), /identity/); assert.equal(existsSync(`${changed.payload}-old/raw.json`), true);
+    const evidence = make("evidence");
+    const inside = join(evidence.payload, "receipt.json"); renameSync(evidence.receipt, inside);
+    assert.throws(() => clean(evidence, { receipt: inside }), /outside/); assert.equal(existsSync(inside), true);
+    const source = make("unpublished"); mkdirSync(join(source.payload, ".git"));
+    assert.throws(() => clean(source), /protected/); assert.equal(existsSync(source.payload), true);
+    const claim = make("reserved"); writeFileSync(join(claim.payload, "cash-reservation"), "held");
+    assert.throws(() => clean(claim), /protected/); assert.equal(existsSync(claim.payload), true);
+    const linkedReceipt = make("linked-receipt");
+    const alias = join(root, "receipt-alias"); symlinkSync(linkedReceipt.receipt, alias);
+    assert.throws(() => clean(linkedReceipt, { receipt: alias }), /outside/);
+    const publicReceipt = make("public-receipt"); chmodSync(publicReceipt.receipt, 0o644);
+    assert.throws(() => clean(publicReceipt), /unverified/);
+    const bound = make("bounded");
+    for (let n = 0; n < 10000; n++) writeFileSync(join(bound.payload, `range-${n}.json`), "{}");
+    assert.throws(() => clean(bound), /bound/); assert.equal(existsSync(bound.payload), true);
+    const swapped = make("changed-during-scan");
+    assert.throws(() => clean(swapped, { isOpen: () => { writeFileSync(join(swapped.payload, "later"), "unpublished"); return false; } }), /changed/);
+    assert.equal(existsSync(join(swapped.payload, "later")), true);
+    assert.equal(existsSync(join(swapped.scratch, "cleanup-intent.json")), true);
+    assert.equal(existsSync(join(swapped.scratch, "cleanup.json")), false);
+
+    const real = make("real-cli");
+    const outcome = run("cleanup", real.scratch, "--owner", "owner-a", "--receipt", real.receipt);
+    assert.equal(outcome.status, 0, outcome.stderr); assert.equal(JSON.parse(outcome.stdout).action, "would-remove");
+    assert.equal(existsSync(real.payload), true);
+    const cwd = spawnSync(process.execPath, [cli, "cleanup", real.scratch, "--owner", "owner-a", "--receipt", real.receipt, "--apply"], {
+      cwd: real.payload, env: { ...process.env, RMD_DEPENDENCY_SEED_ROOT: "" }, encoding: "utf8",
+    });
+    assert.equal(cwd.status, 1); assert.match(cwd.stderr, /current working directory/);
+    const defaultScan = run("cleanup", real.scratch, "--owner", "owner-a", "--receipt", real.receipt, "--apply");
+    assert.equal(defaultScan.status, 0, defaultScan.stderr);
+    const scanned = JSON.parse(defaultScan.stdout);
+    if (scanned.action === "keep") {
+      assert.match(scanned.reason, /open|scan/); assert.equal(existsSync(real.payload), true);
+    } else {
+      assert.equal(scanned.action, "remove"); assert.equal(existsSync(real.payload), false);
+    }
+    if (process.platform === "linux") {
+      const shellScan = make("real-scanner"), bin = join(root, "bin"); mkdirSync(bin);
+      writeFileSync(join(bin, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      const previousPath = process.env.PATH;
+      process.env.PATH = bin;
+      try {
+        assert.equal(clean(shellScan, { isOpen: (path: string) => seedIsOpen(path, 0) }).action, "remove");
+        assert.equal(existsSync(shellScan.payload), false);
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+      }
+    }
+    assert.notEqual(run("allocate", real.scratch, "--owner", "owner-a", "--kind", "coverage", "--consumers", String(dead)).status, 0);
+    const protectedParent = join(root, "seed-store"); mkdirSync(protectedParent, { mode: 0o700 });
+    writeFileSync(join(protectedParent, ".rmd-dependency-seed-root.json"), '{"version":1}');
+    const protectedAllocation = run("allocate", join(protectedParent, "scratch"), "--owner", "owner-a", "--kind", "coverage", "--consumers", String(dead));
+    assert.equal(protectedAllocation.status, 1); assert.match(protectedAllocation.stderr, /protected/);
+    assert.equal(existsSync(join(protectedParent, "scratch")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("dependency seed CLI requires administrator scans and distinguishes no-open-files from unknown", () => {
   assert.throws(() => seedIsOpen("/seed", 501), /administrator/);

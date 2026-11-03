@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fixedClock } from "../src/lib/clock.js";
-import { ciFrictionLadder, ciFrictionGardenSpec, ciFrictionHandFixRounds, readCiFrictionHandFixes, priceCiFrictionCauses, landedCiFrictionOrigins } from "../src/lib/ci-friction-gardener.js";
-import { ciFrictionEvidence, ciFrictionRemedyRationale, locateCiFrictionOwner } from "../src/lib/ci-friction-remedy.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { ciFrictionLadder, ciFrictionGardenSpec, ciFrictionHandFixRounds, readCiFrictionHandFixes, priceCiFrictionCauses, landedCiFrictionOrigins } from "#src/lib/ci-friction-gardener.js";
+import { ciFrictionEvidence, ciFrictionRemedyRationale, locateCiFrictionOwner } from "#src/lib/ci-friction-remedy.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const clock = fixedClock(Date.parse("2026-10-02T12:00:00Z"));
 const rounds = [

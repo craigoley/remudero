@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
+import { skipInMutationSandbox } from "#test/helpers/mutation-sandbox.js";
 import {
   anySpecialistConcern,
   buildSpecialistCommentArgs,
@@ -20,10 +20,10 @@ import {
   testingTrigger,
   type SpecialistName,
   type SpecialistPanelInput,
-} from "../src/lib/specialist-panel.js";
-import type { DiffSummary } from "../src/lib/risk-score.js";
-import type { Mount } from "../src/lib/mounts.js";
-import { writeMutantModule } from "./helpers/mutant-module.js";
+} from "#src/lib/specialist-panel.js";
+import type { DiffSummary } from "#src/lib/risk-score.js";
+import type { Mount } from "#src/lib/mounts.js";
+import { writeMutantModule } from "#test/helpers/mutant-module.js";
 
 function diffOf(...files: { path: string; content?: string }[]): DiffSummary {
   return { files: files.map((f) => ({ path: f.path, additions: 1, deletions: 0, content: f.content })) };
@@ -260,7 +260,7 @@ test("W1-T948: removing the assignment fails the positive test", skipInMutationS
   // destroys the coverage record of modules this suite never mentions
   // (test/helpers/mutant-module.ts carries the measurement).
   const mutantPath = writeMutantModule("specialist-panel.ts", mutatedSrc);
-  const mutant = (await import(mutantPath)) as typeof import("../src/lib/specialist-panel.js");
+  const mutant = (await import(mutantPath)) as typeof import("#src/lib/specialist-panel.js");
   const mutantMetadata = mutant.taskMetadataFromPrinciples({ tdd: "strict" });
   assert.equal(
     mutant.testingTrigger(mutantMetadata),

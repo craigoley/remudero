@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { REVIEW_LOCK_TTL_MS, postReviewPending, type PrLifecycleState } from "../src/lib/review.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { REVIEW_LOCK_TTL_MS, postReviewPending, type PrLifecycleState } from "#src/lib/review.js";
 
 /**
  * W1-T3647 — #5672 measured the defect: a `remudero-review=pending` claim posted at 23:42 was

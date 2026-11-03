@@ -1,0 +1,31 @@
+- id: W1-T11111
+  title: "A COMPLETE OPEN-QUEUE COHORT IS RIGHT-CENSORED — the flow report names a producer to slow only after measured inflow outruns drain and review wait worsens"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  risk: high # shadow report only; it grants no review, merge, dispatch, cadence or gate authority
+  priority: 1.1
+  author_class: operator
+  origin: "operator-session#open-queue-pressure-2026-11-02"
+  plan_refs: [W1-T5904, W1-T5687, W1-T5688, W1-T11005, W1-T11026, W1-T11076]
+  files:
+    - src/lib/flow-gardener.ts
+    - test/gardeners/a-right-censored-open-queue-flow-report-recommends-producer-slowdown-in-shadow.test.ts
+  acceptance:
+    - claim: "the flow report right-censors open PR ages, keeps review wait, merge-preflight refusal and ready-to-direct-merge wait distinct, recommends a producer only after two consecutive complete windows show arrivals exceeding merged-or-closed drain while review-stage p50 worsens, returns UNKNOWN without a recommendation on stale or incomplete evidence, and replays #16147/#16186 without treating either as merge-ready before current-head review"
+      proof: "unit test: test/gardeners/a-right-censored-open-queue-flow-report-recommends-producer-slowdown-in-shadow.test.ts"
+    - claim: "the report writes a reason-bearing flow.open_queue_shadow row with mode shadow, permission not-granted, action none, evidence window, cohort counts, producer and observed stage ages, without extra per-PR GitHub reads"
+      proof: 'grep: flow\.open_queue_shadow in src/lib/flow-gardener.ts'
+  rationale: |
+    The existing W1-T5904 flow gardener measures PRs that merged; open PRs are right-censored out of its cohort, so it cannot yet compare producer inflow with the queue's drain while work is accumulating. W1-T11076 already supplies a shadow decision for repeated review failures, and W1-T5687/W1-T5688 already detect and recover daemon stalls; this task adds the missing open-queue producer-pressure view without duplicating those mechanisms.
+
+    MEASURED 2026-11-02 from the complete GitHub PR census and ledger union:
+    - Eight comment-compression implementation PRs (#15986, #15987, #15988, #16007, #16009, #16011, #16012, #16014) arrived from 05:05Z to 12:09Z on Nov 1, before the first in-cohort merge at 22:57Z; all eight eventually merged, with a 15h25m median created-to-merged time. The producer burst accumulated while review work waited, then drained in about 4h09m.
+    - #16186 was eligible for review at 13:08Z on Nov 2, admitted at 17:43Z, and merged at 17:53Z. Its 17:53 review-capacity row reports queue depth 4, effective width 1 of 4, five active workers, reason cpu-pressure.
+    - #16147 spent 7h33m open; its current-head review was eligible at 06:13Z and not admitted until 11:58Z. `pr.stuck` named the stall but did not create review capacity.
+    - The fixed four-open-PR Codex cap is removed. This report has no numeric queue-depth gate and never acts. It recommends a producer only when complete repeated evidence shows arrivals outrunning merged/closed drain while review-stage age worsens; an operator retains control of any cadence change. Incomplete or stale evidence is UNKNOWN.
+
+    The task adds one plan PR and one implementation PR but can guide a single operator decision that prevents a repeat burst of eight producer PRs and reveals which active review waits are being masked by the merged-only cohort. The expected queue benefit exceeds the two PRs this task adds; the normal review, merge, and human-control gates remain in force.
+  note: "Shadow-only measurement. Keep right-censored open work separate from merged-flow baselines; do not widen review capacity, change any producer cadence, or take a PR action."
