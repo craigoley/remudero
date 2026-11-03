@@ -15926,6 +15926,26 @@ export function fixRungInputsUnchanged(row: Record<string, unknown>, current: Fi
     row.read_body_sha256 !== current.bodySha256);
 }
 
+/** W1-T10653 — WHEN DID THIS HEAD'S RUNG FIRST STAND DOWN ON AN ALREADY-OPEN ESCALATION, and has nothing dispatched since?
+ *  {@link fixRungInputsUnchanged} refuses to call that stand-down a hold (the issue closing must release it), so the held
+ *  SLO never aged it: PR #14195 waited 4.5h on a question no one answered. The age starts at the FIRST consecutive row. */
+export function openEscalationStandDownSince(
+  lines: ReadonlyArray<Record<string, unknown>>, taskId: string | undefined, headSha: string,
+): string | undefined {
+  if (taskId === undefined) return undefined;
+  let since: string | undefined;
+  for (const row of lines) {
+    if (row.task_id !== taskId || !String(row.step).startsWith("fix.")) continue;
+    const open = row.step === "fix.stood_down" && row.site === "rung.strike" && row.read_head_sha === headSha &&
+      typeof row.ts === "string" && typeof row.reason === "string" &&
+      row.reason.startsWith("a needs-human escalation for this exact (task, PR, head ") &&
+      row.reason.includes(", cause) is ALREADY OPEN and ");
+    if (open) since ??= row.ts as string;
+    else if (row.step === "fix.dispatch" || row.step === "fix.done") since = undefined;
+  }
+  return since;
+}
+
 /** Operator ruling 2026-10-30: how long a PR may wait on an unanswered fix-lane escalation before the ladder acts. */
 export const HELD_ESCALATION_SLO_MS = 6 * 60 * 60_000;
 
@@ -20766,6 +20786,18 @@ export async function runSweep(
         disposition = "refused-escalate";
         reason = `fix stood down at ${held.hold.site} and nothing it read has changed (head ${pr.headSha.slice(0, 7)}, task contract` +
           `${standDownBodySha === undefined ? "" : ", PR body"}) — no worker is dispatched until one does: ${held.hold.reason}`;
+        ruleBlockerByIndex.set(prIndex, "escalated");
+      }
+    }
+    // W1-T10653: an already-open-escalation stand-down is not a hold, so it never reached the SLO below; once it has aged past
+    // the SLO it is read as one, so the ladder's rebuild clears it instead of the fix lane standing down for good.
+    if (heldEscalationAt === undefined && disposition === "blocked-fixable" && !deps.dryRun) {
+      const openSince = openEscalationStandDownSince(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha);
+      if (openSince !== undefined && now - Date.parse(openSince) >= HELD_ESCALATION_SLO_MS) {
+        heldEscalationAt = openSince;
+        disposition = "refused-escalate";
+        reason = `fix stood down on an already-open needs-human escalation since ${openSince} (head ${pr.headSha.slice(0, 7)}) — ` +
+          "unanswered past the held-escalation SLO, so the ladder's rebuild acts";
         ruleBlockerByIndex.set(prIndex, "escalated");
       }
     }
