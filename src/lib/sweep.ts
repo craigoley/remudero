@@ -21687,7 +21687,7 @@ export async function runSweep(
                   standDownReason = unavailable;
                   return false;
                 }
-                const input = await buildFixProgressInputWithHostedProofs({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber,
+                const facts = { redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber,
                   headSha: pr.headSha,
                   strikesSpent: Math.max(pr.priorStrikes, fixRoundTally(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha).strikes),
                   currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")),
@@ -21696,7 +21696,11 @@ export async function runSweep(
                   operatorAnswer: pr.pendingAnswer?.constraint,
                   formerCeiling: progressParkedReason?.startsWith("proof-repair-refusals") ? MAX_PROOF_REPAIR_REFUSALS_PER_HEAD
                     : progressParkedReason?.startsWith("rerun-still-red") || progressParkedReason?.startsWith("amendment-closed") ? 1
-                    : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: progressParkedReason }, deps.readHostedProofResults);
+                    : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: progressParkedReason };
+                // Preserve admission ordering when hosted evidence cannot be read.
+                const input = deps.readHostedProofResults
+                  ? await buildFixProgressInputWithHostedProofs(facts, deps.readHostedProofResults)
+                  : buildFixProgressInput(facts);
                 const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
                 const latched = ledgerLines.filter(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
                   row.head_sha === pr.headSha && row.progress_escalated_key === inputKey);
