@@ -19574,11 +19574,15 @@ export async function runSweep(
       : undefined;
     const scannerPreparationReason = extraDisposedFields?.code_scanning_fix_preparing === true &&
       typeof extraDisposedFields.code_scanning_fix_reason === "string" ? extraDisposedFields.code_scanning_fix_reason : undefined;
+    const refusedMergeState = withInheritedMergeState(pr, ledgerLines, mainTipSha).refused;
     const shownReason = (mergeHold !== undefined
       ? `held by ${describeHoldSetter(mergeHold)}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
       : securityText ? securityText : scannerPreparationReason !== undefined ? scannerPreparationReason : notDispatched !== undefined
         ? `${reason.replace(/\bdispatching\b/g, "would dispatch")} — NOT DISPATCHED this pass: ${notDispatched}`
-        : reason) + (policyCause ? `; ${policyCause}` : "");
+        : reason) + (policyCause ? `; ${policyCause}` : "") + (refusedMergeState && mainTipSha !== undefined
+          ? ` — mergeability unread this pass; last known "${refusedMergeState.state}" for head ${pr.headSha.slice(0, 7)} ` +
+            `was read against main ${refusedMergeState.mainSha?.slice(0, 7) ?? "(unrecorded)"}, and main is now ${mainTipSha.slice(0, 7)}, so it is not inherited (W1-T11166)`
+          : "");
     if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, dispatch_held: dispatchHold.fields.dispatch_held };
     const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : infrastructureBlockerByPr.get(pr.prNumber) ??
       finalBlocker(ruleBlockerByIndex.get(index)!, {
@@ -19759,7 +19763,7 @@ export async function runSweep(
     // zero-check-run remedies, and the ledgered row itself. Without this, `pr.mergeState` stayed
     // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
-    let { pr, inherited: inheritedMergeState, refused: refusedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines, mainTipSha);
+    let { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines, mainTipSha);
     noteHeadObservation(pr.prNumber, pr.headSha, passClockMs());
     const loopDecision = loopDecisions.has(pr.prNumber) ? undefined : decideLoopOutcome({
       taskId: pr.taskId, prNumber: pr.prNumber, prUrl: pr.prUrl, headSha: pr.headSha,
@@ -20072,9 +20076,6 @@ export async function runSweep(
         `${reason} — mergeability unread this pass; inherited last known "${inheritedMergeState.state}" ` +
         `observed ${inheritedMergeState.observedAt ?? "at an undated prior pass"} for this exact head ` +
         `${pr.headSha.slice(0, 7)} (W1-T4470)`;
-    } else if (refusedMergeState && mainTipSha !== undefined) {
-      reason = `${reason} — mergeability unread this pass; last known "${refusedMergeState.state}" for head ${pr.headSha.slice(0, 7)} ` +
-        `was read against main ${refusedMergeState.mainSha?.slice(0, 7) ?? "(unrecorded)"}, and main is now ${mainTipSha.slice(0, 7)}, so it is not inherited (W1-T11166)`;
     }
     // W1-T9932: a plan-only red that is EVERY failure a classified infrastructure step takes W1-T3194's re-run,
     // admitted as that re-run is, and never the plan route: no plan repair is due (#12415).

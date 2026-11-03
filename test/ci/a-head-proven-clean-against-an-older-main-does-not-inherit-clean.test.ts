@@ -66,7 +66,7 @@ test("W1-T11166: a remembered clean is inherited only while main is the main it 
   assert.equal(behind.pr.mergeState, undefined, "behind is a fact about one main too");
 });
 
-function sweepDeps(ledgerPath: string, mainTip: string, now: number): SweepDeps {
+function sweepDeps(ledgerPath: string, mainTip: string | undefined, now: number): SweepDeps {
   return {
     ledgerPath, runId: "SWEEP-W1-T11166", now: () => now, readMainTip: () => mainTip,
     arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, repushAbsent: async () => "repushed",
@@ -94,6 +94,44 @@ test("W1-T11166: the sweep records the main a mergeability was read against and 
   assert.match(String(refused?.reason), /read against main 116c844/);
   assert.match(String(refused?.reason), /main is now ab39118/);
 });
+
+for (const state of ["clean", "behind"] as const) {
+  for (const recordedMain of [MAIN_AT_CLEAN, undefined]) {
+    test(`W1-T11166: a red plan filing retains its refused ${state} observation from ${recordedMain ?? "unrecorded main"}`, async (t) => {
+      const repo = gitRepo();
+      t.after(() => repo.cleanup());
+      const filing = pr({
+        taskId: undefined, isPlanFiling: true, planFilingSource: "github-files",
+        reviewState: "success", checksState: "red",
+        ciFailures: [{ name: "lint-plan", conclusion: "FAILURE", logTail: "a plan violation needs repair" }],
+      });
+      for (const mainTip of [MAIN_AT_STAND_DOWN, recordedMain]) {
+        const ledgerPath = join(repo.dir, `plan-${mainTip ?? "unread"}.ndjson`);
+        writeFileSync(ledgerPath, "");
+        appendLedger(ledgerPath, { run_id: "SWEEP-old", ...readClean({
+          merge_state: state, ...(recordedMain === undefined ? {} : { merge_main_sha: recordedMain }),
+        }) });
+        const result = await runSweep([filing],
+          sweepDeps(ledgerPath, mainTip, Date.parse("2026-11-02T23:59:23.156Z")), DEFAULT_SWEEP_POLICY);
+        const disposed = readLedgerLines(ledgerPath).findLast(row => row.step === "sweep.disposed");
+        assert.equal(disposed?.disposition, "refused-escalate");
+        assert.match(String(disposed?.reason), /plan-only PR is red on lint-plan/);
+        assert.equal(result.actions[0]?.reason, disposed?.reason, "the action and ledger show the same final reason");
+        if (mainTip === MAIN_AT_STAND_DOWN) {
+          assert.equal(disposed?.merge_state, undefined);
+          assert.equal(disposed?.merge_main_sha, undefined);
+          assert.match(String(disposed?.reason), new RegExp(`last known "${state}" for head 35fa075`));
+          assert.ok(String(disposed?.reason).includes(`read against main ${recordedMain?.slice(0, 7) ?? "(unrecorded)"}`));
+          assert.match(String(disposed?.reason), /main is now ab39118, so it is not inherited/);
+        } else {
+          assert.equal(disposed?.merge_state, state, "same main or no main read preserves inheritance");
+          assert.equal(disposed?.merge_main_sha, mainTip);
+          assert.doesNotMatch(String(disposed?.reason), /so it is not inherited/);
+        }
+      }
+    });
+  }
+}
 
 function conflictFixture(t: TestContext) {
   const repo = gitRepo();
