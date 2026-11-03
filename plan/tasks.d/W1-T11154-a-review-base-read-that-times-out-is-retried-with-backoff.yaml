@@ -1,0 +1,53 @@
+- id: W1-T11154
+  title: "A review's task-id base read that hits its timeout is retried with backoff before the verdict is withheld — 28 reviews in the window posted 'id reservation unreadable: base read timed out — verdict withheld' (20 runs and about 85 lane-minutes counted as post_refused harness noise), each a filing whose ls-tree + cat-file --batch read of origin/main healthily takes about 208 ms but was killed at its 120 s backstop on the loaded host, and each withheld verdict sends the PR back to the queue"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern, a timed-out review base read is retried before it reads unknown; one module and its test
+  origin: operator-session#review-lane-findings-2026-11-02
+  plan_refs:
+    - W1-T9651
+    - W1-T4414
+  files:
+    - src/lib/review.ts
+    - test/review/a-review-base-read-that-times-out-is-retried-with-backoff.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When reviewTaskIdEvidenceAsync's origin/main declarations read throws ReviewGitTimeout, it retries the same read with backoff (each wait doubling from the timed-out attempt's own elapsed time) while the time spent stays under the measured median review duration, and a retry that succeeds yields the same ownership findings and base declarations as a first-attempt read
+      proof: "unit test: test/review/a-review-base-read-that-times-out-is-retried-with-backoff.test.ts"
+    - claim: A read that still times out once the retry budget is spent reads every added id unknown with base-unreadable exactly as today, and a non-timeout git failure is never retried
+      proof: "grep: W1-T11154 criterion 2 in test/review/a-review-base-read-that-times-out-is-retried-with-backoff.test.ts"
+    - claim: Each retry ledgers review.base_read_retry with the attempt number, the elapsed time of the attempt that timed out, the wait before the next, and the host load average at each attempt
+      proof: "grep: W1-T11154 criterion 3 in test/review/a-review-base-read-that-times-out-is-retried-with-backoff.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 over a 7-day ledger union (~/Remudero-notes/review-lane-findings-2026-11-02.md and its raw extract, read-only):
+    - review.post_refused: 81 runs, about 3 lane-hours. 28 rows read "remudero-review: FAIL — id W1-T<n> reservation unreadable
+      (UNKNOWN): base read timed out — verdict withheld" (24 plus 4 with "+N more"); the findings count 20 distinct runs, about 85
+      lane-minutes, as the base cat-file class.
+    - Host load at the time: load average 34-47 on 8 cores, core CPU PSI full median 29% (last 24 h).
+    - FAILs overturned with no code change were 3 (1.1%): harness noise is about 1-4% of verdicts, and this is one of its named classes.
+    READ at origin/main 1368db581, src/lib/review.ts:
+    - REVIEW_BASE_READ_GIT_TIMEOUT_MS = 120_000, documented as "fires only on a hung git, never on a slow healthy one" (one batch over
+      1,079 shards took 208 ms, 2026-09-05). plan/tasks.d now holds about 4,700 shards.
+    - reviewTaskIdEvidenceAsync catches ReviewGitTimeout from taskIdDeclarationsAtRefAsync once and returns
+      unknownOwnership(added, "base-unreadable: ...") with an empty base; the "base read timed out" description follows. No retry.
+    NOT COVERED: W1-T9651 (merged) made a git stopped at its bound read as a timeout. W1-T11132 (#16266, open) classes a review proof
+    that fails only under load as inconclusive; it covers proof execution, not this evidence read.
+  design: |
+    1. Wrap the base read in reviewTaskIdEvidenceAsync in a retry loop that catches only ReviewGitTimeout. Wait = the timed-out
+       attempt's elapsed time, doubling per attempt. Budget = the measured median review duration (the same reading the restart
+       latch already uses, medianReviewRunMs over review rows); with no history, one retry.
+    2. Before each retry read /proc/loadavg (os.loadavg) and ledger review.base_read_retry {attempt, timed_out_after_ms, wait_ms,
+       load1}. A retry may start early when the 1-minute load has fallen below the load at the timeout.
+    3. Exhausted: unchanged unknownOwnership output and description.
+    Tests go in test/review/a-review-base-read-that-times-out-is-retried-with-backoff.test.ts, titled verbatim as in the proofs, over
+    the real reviewTaskIdEvidenceAsync with an injected AsyncGitBlobRunner that times out N times, and a fake clock.
+  note: |
+    reservation hand-off: plan-file-1793657969812 -> plan-file-1793657969812
+    Reserved with rmd next-task-id --branch plan-file-1793657969812 from the operator checkout. Filed 2026-11-02 from the review-lane
+    findings, item 5a (p2), harness noise. Items 5b (W1-T11155) and 5c (W1-T11156) are filed as their own shards (Rule 19).

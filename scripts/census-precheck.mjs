@@ -1857,12 +1857,23 @@ export function snapshotControllerBudget() {
     timeoutMs: Object.values(stages).reduce((sum, count) => sum + count, 0) * CENSUS_SUITE_CHILD_TIME_BOUND_MS };
 }
 
+function reportCensusCounts(violations, changed, base) {
+  if (violations.length > 0) {
+    console.error(`census-precheck: this branch grows ${violations.length} census count(s) CI will refuse:`);
+    for (const v of violations) console.error(`  ${v}`);
+    return 1;
+  }
+  console.log(`census-precheck: counts OK — ${changed.length} changed file(s) checked against ${base}; census suites not run (--counts-only)`);
+  return 0;
+}
+
 export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild } = {}) {
   let values;
   try {
     ({ values } = parseArgs({
       args: argv,
-      options: { root: { type: "string", default: "." }, base: { type: "string", default: "origin/main" }, "snapshot-budget": { type: "boolean", default: false } },
+      options: { root: { type: "string", default: "." }, base: { type: "string", default: "origin/main" }, "snapshot-budget": { type: "boolean", default: false },
+        "counts-only": { type: "boolean", default: false } },
     }));
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);
@@ -1907,6 +1918,8 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       violations = [...violations, ...censusParityViolations({ changed, ...readers,
         population: (extras) => ciCensusPopulation(listCiRuleSuites(root), extras) })];
     }
+    if (values["counts-only"]) return reportCensusCounts(violations, changed, values.base);
+    const countsRefuse = violations.length > 0;
     const instrument = evaluateInstrumentSurface({
       changed,
       readHead: readers.readHead,
@@ -1928,7 +1941,8 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     });
     violations.push(...instrument.violations);
     if (instrument.unmeasured !== null) unmeasured.push(`instrument-surface NOT MEASURED - ${instrument.unmeasured}`);
-    const suites = evaluateAdmittedCensusSuites({
+    if (countsRefuse) unmeasured.unshift("census suites NOT STARTED - the counts above already refuse this branch");
+    const suites = countsRefuse ? { violations: [], unmeasured: null } : evaluateAdmittedCensusSuites({
       changed,
       ...readers,
       loadMembers: () => admitted(root),
