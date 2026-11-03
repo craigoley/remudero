@@ -5,16 +5,38 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 import { readOwnedChildPhase } from "#src/lib/run-child.js";
 import { RUN_CHILD_SCHEMA, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
-import { buildSweepEffects, runReview } from "#src/run-task.js";
-import type { runReview as runReviewCommand } from "#src/cli/commands/review.js";
+import {
+  reviewCommand as reviewCommandImpl, runReview as runReviewCommand, type ReviewCommandHost,
+} from "#src/cli/commands/review.js";
 import type { Config } from "#src/lib/config.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import {
-  adoptChildWork, childWorkCount, childWorkHoldsReviewKey, childWorkLeftRunning,
+  adoptChildWork, buildSweepEffects, childWorkCount, childWorkHoldsReviewKey, childWorkLeftRunning,
   DEFAULT_SWEEP_POLICY, drainInFlightReviews, registerChildWork, resetChildWork,
   reportReviewPhase, reviewAdmissionBound, runSweep, runSweepLightPass, settleChildWork,
   type ChildWorkRegistration, type OpenPrView, type SweepDeps,
 } from "#src/lib/sweep.js";
+
+function unexpected(): never { throw new Error("unexpected review fixture dependency"); }
+const reviewHost: ReviewCommandHost = {
+  GIT_UNTRACKED_FILES_ALL: "--untracked-files=all",
+  JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+  acceptedReviewAttemptId: (value) => typeof value === "string" ? value : undefined,
+  attributeWorkerStreamEvent: unexpected,
+  ledgeredNonDispatchSpawn: unexpected,
+  lintPlanForReview: unexpected,
+  liveWorkerRunIds: new Set<string>(),
+  materializeReviewWorktree: unexpected,
+  readHeadShaRest: () => "a".repeat(40),
+  readMainPlanTreeSha: unexpected,
+  realDeps: () => ({ reviewWorktree: { fetch: unexpected } }) as ReturnType<ReviewCommandHost["realDeps"]>,
+  reviewPostedDescription: (verdict) => verdict.summary,
+  reviewWorkerLockId: (runId) => runId,
+  reviewerClockBoundMs: unexpected,
+  reviewSubjectGit: unexpected,
+};
+const runReview = runReviewCommand.bind(null, reviewHost);
+const reviewCommand = reviewCommandImpl.bind(null, reviewHost);
 
 function gate() {
   let resolve!: () => void;
@@ -193,6 +215,42 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
     assert.equal(typeof rows.find((r) => r.step === "sweep.post_review.done")?.post_to_settle_ms, "number");
     reportReviewPhase("posted");
     assert.deepEqual(phases, ["posted"], "the completed review's observer is not global");
+  });
+
+  test("reviewCommand forwards the posted phase before worktree cleanup", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rmd-review-command-phase-"));
+    const head = "a".repeat(40);
+    const events: string[] = [];
+    const onPhase = (phase: string): void => { events.push(phase); };
+    try {
+      const exit = await reviewCommand("1", [], {
+        resolveOwnerRepo: () => ({ owner: "o", repo: "r" }),
+        fetchView: () => ({ number: 1, html_url: "https://github.com/o/r/pull/1",
+          state: "open", head: { ref: "manual-review", sha: head }, body: "" }),
+        loadConfig: () => ({ root }) as Config,
+        fetchHead: () => {},
+        postReviewPending: async () => ({ posted: true }),
+        materialize: () => ({ worktreePath: join(root, "head") }),
+        buildBaseProof: () => ({ baseCheckoutDir: undefined, baseIsCheckout: false,
+          baseUnreadablePaths: new Set<string>(), addedTestFiles: new Set<string>() }),
+        withMaterialized: async (path, _repo, body) => {
+          try { return await body(); }
+          finally { if (path) events.push("cleanup"); }
+        },
+        onPhase,
+        runReview: async (args) => {
+          assert.equal(args.onPhase, onPhase, "the command must retain the caller's phase observer");
+          args.onPhase!("posted");
+          return {
+            state: "failure", headSha: head, reviewerOutcome: "test", criteria: [],
+            testTheater: false, summary: "withheld fixture verdict", floorDegraded: false,
+            capped: false, keywordOnly: false, planOnly: false, verdictWithheld: "fixture refusal",
+          };
+        },
+      });
+      assert.equal(exit, 2);
+      assert.deepEqual(events, ["posted", "cleanup"]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   for (const publication of ["posted", "refused"] as const) {
