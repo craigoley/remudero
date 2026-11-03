@@ -112,6 +112,24 @@ test("runner grades app-owned traces and rejects imported trust claims", async (
   assert.equal(result.privateTrace?.binding.caseId, item.id);
 });
 
+test("an incomplete private trace preserves denied events without producing a model grade", async () => {
+  const fixture = privateExecutionCase(cases[0]!, "partial-denied"), argsTooLarge = { body: "x".repeat(33 * 1024) };
+  let savedGrade: { passed: boolean; reason: string; schemaValid: boolean } | null | undefined;
+  const ports: CanaryExecutionPorts = { monotonicMs: () => 0,
+    admit: async () => ({ state: "admitted" }),
+    request: async () => ({ text: JSON.stringify(fixture.item.expected), toolCalls: [
+      { name: "unlisted-tool", args: {} }, { name: "unlisted-tool", args: argsTooLarge }], resources }),
+    save: async (_run, grade) => { savedGrade = grade; } };
+  const result = await executeCanary(fixture.item, pin, ports, undefined, fixture.context);
+  assert.equal(result.privateGrade?.state, "unavailable");
+  assert.equal(result.run.verified, null);
+  assert.equal(result.grade, null);
+  assert.equal(result.reason, "private-trace-size-bound");
+  assert.equal(result.privateTrace?.complete, false);
+  assert.equal(result.privateTrace?.events.some(event => event.denied), true);
+  assert.equal(savedGrade, null);
+});
+
 test("runner retains a denied observation without scoring an incomplete trace", async () => {
   const { item, context } = privateExecutionCase(cases[0]!, "partial-denial");
   const cycle: Record<string, unknown> = {}; cycle.self = cycle;
@@ -187,6 +205,44 @@ test("private trace capture failure is unavailable and is not mislabeled as prov
   assert.equal(result.run.outcomeReason, "private-trace-json-invalid");
   assert.equal(result.run.verified, null);
   assert.equal(result.privateGrade?.state, "unavailable");
+  assert.equal(result.error, undefined);
+  assert.equal(savedGrade, null);
+});
+
+test("private trace grading failure after a complete response stays unavailable with truthful execution cause", async () => {
+  const fixture = privateExecutionCase(cases[0]!, "grading-finalizer");
+  let requestRevokedCorpus = false, revokedCorpusReads = 0, savedGrade: unknown;
+  const context = {
+    get corpus() {
+      if (requestRevokedCorpus) {
+        revokedCorpusReads++;
+        throw new Error("synthetic trusted corpus context read failure");
+      }
+      return fixture.context.corpus;
+    },
+    slotId: fixture.context.slotId,
+  };
+  const ports: CanaryExecutionPorts = { monotonicMs: () => 0,
+    admit: async () => ({ state: "admitted" }),
+    request: async input => {
+      assert.equal(input.prompt, fixture.item.prompt);
+      requestRevokedCorpus = true;
+      return { text: JSON.stringify(fixture.item.expected), toolCalls: [], resources };
+    },
+    save: async (_run, grade) => { savedGrade = grade; } };
+  const result = await executeCanary(fixture.item, pin, ports, undefined, context);
+  // The only post-request corpus access is the grader argument; finalization calls
+  // recorder.finish immediately before that access in model-canary-runner.ts.
+  assert.equal(revokedCorpusReads, 1);
+  assert.equal(result.state, "unavailable");
+  assert.equal(result.reason, "private-trace-grading-unavailable");
+  assert.equal(result.run.outcomeReason, "private-trace-grading-unavailable");
+  assert.equal(result.run.attempts.length, 1);
+  assert.equal(result.run.attempts[0]!.terminal, "complete", "provider completed normally; this is not a model failure");
+  assert.equal(result.run.verified, null);
+  assert.equal(result.grade, null);
+  assert.equal(result.privateGrade, undefined);
+  assert.equal(result.privateTrace, undefined);
   assert.equal(result.error, undefined);
   assert.equal(savedGrade, null);
 });

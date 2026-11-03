@@ -10,7 +10,7 @@ import type { CanarySlotOwner } from "#src/lib/model-canary-owner.js";
 import { buildCanarySchedule, executeCanarySchedule, type CanarySlot, type CanarySchedulePorts } from "#src/lib/model-canary-schedule.js";
 import { commonCanarySuite, canarySuiteDigest } from "#src/lib/model-canary-suite.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { readOwnedPrivateTraceReceipt } from "#src/lib/model-canary-owner.js";
+import { codingAttemptConsumptionBinding, readOwnedPrivateTraceReceipt } from "#src/lib/model-canary-owner.js";
 import { privateCorpusCases, validatePrivateCorpus,
   type PrivateCanaryBundleV1, type PrivateTraceReceiptV1 } from "#src/lib/model-canary-private-corpus.js";
 import { gradePrivateTrace, loadPrivateTraceFromCustody } from "#src/lib/model-canary-trace-grader.js";
@@ -132,6 +132,31 @@ test("canary durable owner admits exactly one of concurrent real native children
     assert.equal(results.filter(r => r === "already-owned-or-terminal").length, 2);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("canary owner consumes coding source once in the existing started slot row", () => fixture(dir => {
+  const coding = commonCanarySuite().find(item => item.family === "coding")!;
+  const [slot] = buildCanarySchedule("2026-10-11", "coding-owner", [coding],
+    [{ model: "test-model", route: "test-route", effort: "medium",
+      suiteHash: canarySuiteDigest([coding]), billing: "subscription" }]).slots;
+  const owner = openOwner(dir);
+  const input = { runId: "c0044072-86e2-4b85-b871-3735362cb490",
+    canaryAttemptId: "d1044072-86e2-4b85-b871-3735362cb491",
+    workerSpawnAttemptId: "e2044072-86e2-4b85-b871-3735362cb492", sourceDigest: "a".repeat(64) };
+  try {
+    assert.equal(owner.claim(slot), "claimed");
+    const consumed = owner.consumeCodingAttempt(slot, input);
+    assert.equal(consumed.state, "consumed");
+    if (consumed.state !== "consumed") return;
+    const binding = codingAttemptConsumptionBinding(consumed.capability);
+    assert.equal(binding?.runId, input.runId);
+    assert.equal(binding?.canaryAttemptId, input.canaryAttemptId);
+    assert.equal(binding?.workerSpawnAttemptId, input.workerSpawnAttemptId);
+    assert.equal(binding?.sourceDigest, input.sourceDigest);
+    assert.ok(binding?.codingExecutionAttemptId);
+    assert.equal(owner.consumeCodingAttempt(slot, input).state, "already-consumed");
+    assert.equal(codingAttemptConsumptionBinding({ ...consumed.capability }), null);
+  } finally { owner.close(); }
+}));
 
 test("canary durable owner refuses public git symlinked and nonprivate directories", () => fixture(dir => {
   const shared = join(dir, "shared"), linked = join(dir, "linked"), repo = join(dir, "repo");
@@ -270,36 +295,39 @@ test("canary owner retains denied observations in incomplete traces only with un
     complete: false, reason: "private-trace-dispatch-unavailable" };
   const trace: PrivateTraceReceiptV1 = { ...body,
     digest: createHash("sha256").update(canonicalJson(body)).digest("hex") };
-  const failed = { ...base, state: "scored" as const, reason: "unauthorized-action",
+  const incompleteScored = { ...base, state: "scored" as const, reason: "unauthorized-action",
     grade: { passed: false, reason: "unauthorized-action", schemaValid: false },
     run: { ...base.run, id: runId, verified: false, outcomeReason: "unauthorized-action" }, privateTrace: trace,
     privateGrade: { state: "scored", passed: false, finalPassed: null, tracePassed: false,
       schemaValid: false, reason: "unauthorized-action" } } as Outcome & { privateTrace: PrivateTraceReceiptV1; privateGrade: Record<string, unknown> };
+  const unavailable = { ...base, reason: "private-trace-dispatch-unavailable", grade: null,
+    run: { ...base.run, id: runId, verified: null, outcomeReason: "private-trace-dispatch-unavailable" }, privateTrace: trace,
+    privateGrade: { state: "unavailable", reason: "private-trace-dispatch-unavailable" } } as Outcome & { privateTrace: PrivateTraceReceiptV1; privateGrade: Record<string, unknown> };
   const owner = openOwner(dir);
   try {
     assert.equal(owner.claim(slot), "claimed");
-    assert.throws(() => owner.terminal(slot, failed), /private-trace-grade-invalid/);
-    owner.terminal(slot, { ...base, run: { ...base.run, id: runId }, privateTrace: trace,
-      privateGrade: { state: "unavailable", reason: trace.reason! } });
-  }
-  finally { owner.close(); }
+    assert.throws(() => owner.terminal(slot, incompleteScored), /private-trace-grade-invalid/);
+    owner.terminal(slot, unavailable);
+  } finally { owner.close(); }
   const loaded = readOwnedPrivateTraceReceipt(dir, slot, trace.binding);
   assert.equal(loaded.state, "available");
   if (loaded.state === "available") {
     assert.equal(loaded.receipt.complete, false);
-    assert.equal(loaded.receipt.events[0]?.denied, true);
+    assert.equal(loaded.receipt.events.some(event => event.denied), true);
   }
   const db = new DatabaseSync(join(dir, "model-canary-slots.sqlite"));
   try {
     const row = db.prepare("SELECT receipt FROM canary_slots_v1 WHERE id=?").get(slot.id) as { receipt: string };
-    const stored = JSON.parse(row.receipt);
-    assert.equal(stored.run.verified, null); assert.equal(stored.grade, null);
-    stored.state = "scored"; stored.run = failed.run;
-    stored.grade = failed.grade; stored.reason = failed.reason;
+    const stored = JSON.parse(row.receipt) as Record<string, unknown>;
+    stored.state = "scored";
+    stored.reason = "unauthorized-action";
+    stored.grade = incompleteScored.grade;
+    stored.run = incompleteScored.run;
     db.prepare("UPDATE canary_slots_v1 SET receipt=? WHERE id=?").run(JSON.stringify(stored), slot.id);
   } finally { db.close(); }
   assert.deepEqual(readOwnedPrivateTraceReceipt(dir, slot, trace.binding),
-    { state: "unavailable", reason: "canary-owner-private-trace-grade-invalid" });
+    { state: "unavailable", reason: "canary-owner-private-trace-grade-invalid" },
+    "readback must also reject a stored incomplete trace relabeled as a scored model failure");
 }));
 
 test("canary owner readback rejects stored private-grade disagreement", () => fixture(dir => {

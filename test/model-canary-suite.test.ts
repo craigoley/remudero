@@ -3,10 +3,14 @@ import { test } from "node:test";
 import { canarySuiteDigest, canaryTools, commonCanarySuite, gradeCanary, weeklyCanarySuite } from "../src/lib/model-canary-suite.js";
 
 test("canary common cases refuse fabricated completion and grade actual failure recovery", () => {
-  const suite = commonCanarySuite(); assert.equal(suite.length, 12);
-  assert.equal(new Set(suite.map(c => c.id)).size, 12);
+  const suite = commonCanarySuite(); assert.equal(suite.length, 13);
+  assert.equal(new Set(suite.map(c => c.id)).size, 13);
   assert.equal(canarySuiteDigest(suite), canarySuiteDigest(commonCanarySuite()));
   for (const item of suite) {
+    if (item.family === "coding") {
+      assert.equal(gradeCanary(item, JSON.stringify(item.expected), []).reason, "coding-native-scorer-required");
+      continue;
+    }
     const tools = canaryTools(item), trace = item.tools === "none" ? [] : item.tools === "inventory"
       ? [tools("inventory", { item: item.id.endsWith("A") ? "A" : "B" })]
       : item.tools === "retry" ? [tools("lookup", {}), tools("lookup", {})] : [tools("lookup", {})];

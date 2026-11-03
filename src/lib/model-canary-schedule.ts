@@ -6,8 +6,9 @@ import { executeCanary, type CanaryPin, type CanaryExecutionPorts } from "./mode
 import { canaryTrialBlockId, type CanaryTrialBlock } from "./model-canary-metrics.js";
 import type { CanaryRetentionContract } from "./model-canary-retention.js";
 import type { CanaryContextContract } from "./model-canary-context.js";
-import { validatePrivateCorpus, privateCorpusCases,
-  type PrivateCanaryBundleV1, type PrivateCorpusTrustAnchors } from "./model-canary-private-corpus.js";
+import { isValidatedPrivateCorpus, privateCorpusCaseMatches, validatePrivateCorpus, privateCorpusCases,
+  type PrivateCanaryBundleV1, type PrivateCorpusTrustAnchors, type ValidatedPrivateCorpus } from "./model-canary-private-corpus.js";
+import { isQualifiedCodingExecutionPort } from "./model-canary-coding-port-capability.js";
 
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 export interface CanarySlot { id: string; caseId: string; pin: CanaryPin; aaLabel: "A" | "B" | null;
@@ -47,17 +48,66 @@ export interface CanarySchedulePorts {
   terminal(slot: CanarySlot, outcome: Awaited<ReturnType<typeof executeCanary>>): Promise<void>;
 }
 
+/** Preserve the exact case object/key order used to build a prepared suite hash while joining it
+ * to the process-local validated corpus capability before any slot can be claimed. */
+export interface PreparedPrivateCanaryCasesV1 {
+  readonly cases: readonly CanaryCase[];
+  readonly corpus: ValidatedPrivateCorpus;
+}
+
 export async function executeCanarySchedule(plan: ReturnType<typeof buildCanarySchedule>,
-  input: readonly CanaryCase[] | PrivateCanaryBundleV1, ports: CanarySchedulePorts,
+  input: readonly CanaryCase[] | PrivateCanaryBundleV1 | ValidatedPrivateCorpus | PreparedPrivateCanaryCasesV1,
+  ports: CanarySchedulePorts,
   trustAnchors: PrivateCorpusTrustAnchors = {}) {
-  // A native private bundle is data, not execution authority. Validate at this existing entry;
-  // eligibility, durable claim and per-call admission still precede every provider request.
-  const privateCorpus = Array.isArray(input) ? null : validatePrivateCorpus(input, trustAnchors);
-  if (privateCorpus?.state === "unavailable") throw new Error(privateCorpus.reason);
-  const corpus = privateCorpus?.state === "available" ? privateCorpus.corpus : null;
-  const cases = corpus ? privateCorpusCases(corpus)! : input as readonly CanaryCase[];
+  // JSON bundle input is validated here; an existing process-local capability may be reused but
+  // cannot be recreated from its serialized shape. Eligibility and durable claim still gate calls.
+  const preparedShape = !Array.isArray(input) && input !== null && typeof input === "object"
+    && Object.hasOwn(input, "cases") && Object.hasOwn(input, "corpus");
+  const prepared = preparedShape ? input as PreparedPrivateCanaryCasesV1 : null;
+  const directCases = Array.isArray(input) ? input as readonly CanaryCase[] : prepared?.cases ?? null;
+  let corpus: ValidatedPrivateCorpus | null = null;
+  if (preparedShape) {
+    if (!prepared || !isValidatedPrivateCorpus(prepared.corpus)
+      || !Array.isArray(prepared.cases)
+      || Object.keys(input as object).sort().join("\0") !== ["cases", "corpus"].join("\0")
+      || prepared.cases.some(item => !privateCorpusCaseMatches(prepared.corpus, item)))
+      throw new Error("canary-schedule-private-case-mismatch");
+    corpus = prepared.corpus;
+  } else if (directCases === null) {
+    if (isValidatedPrivateCorpus(input)) corpus = input;
+    else {
+      const validation = validatePrivateCorpus(input, trustAnchors);
+      if (validation.state === "unavailable") throw new Error(validation.reason);
+      corpus = validation.corpus;
+    }
+  }
+  const allCases = prepared ? prepared.cases : corpus ? privateCorpusCases(corpus)! : directCases!;
+  let cases = allCases;
+  if (corpus) {
+    // A validated corpus may contain cases outside this prepared shard. The plan's ordered
+    // case groups select the exact native subset; every referenced id must resolve in custody.
+    const plannedIds: string[] = [], seen = new Set<string>();
+    let prior: string | undefined;
+    for (const slot of plan.slots) {
+      if (typeof slot.caseId !== "string" || !slot.caseId) throw new Error("canary-schedule-slot-invalid");
+      if (slot.caseId !== prior) {
+        if (seen.has(slot.caseId)) throw new Error("canary-schedule-case-order-invalid");
+        seen.add(slot.caseId); plannedIds.push(slot.caseId); prior = slot.caseId;
+      }
+    }
+    const byId = new Map(allCases.map(item => [item.id, item]));
+    cases = plannedIds.map(id => {
+      const item = byId.get(id);
+      if (!item) throw new Error("canary-schedule-case-not-in-private-corpus");
+      return item;
+    });
+  }
   if (plan.suiteHash !== canarySuiteDigest(cases) || plan.digest !== digest(JSON.stringify(plan.slots)))
     throw new Error("canary-schedule-changed");
+  if (corpus && cases.some(item => !privateCorpusCaseMatches(corpus!, item)))
+    throw new Error("canary-schedule-private-case-mismatch");
+  if (cases.some(item => item.family === "coding") && !corpus)
+    throw new Error("canary-schedule-coding-private-corpus-required");
   let completed = 0, skipped = 0;
   for (const slot of plan.slots) {
     const plannedSlotIds = plan.slots.filter(s => s.caseId === slot.caseId).map(s => s.id);
@@ -71,9 +121,15 @@ export async function executeCanarySchedule(plan: ReturnType<typeof buildCanaryS
       return { state: "deferred" as const, completed, skipped, nextSlot: slot.id };
     const item = cases.find(c => c.id === slot.caseId);
     if (!item || slot.pin.suiteHash !== plan.suiteHash) throw new Error("canary-schedule-slot-invalid");
+    let execution: CanaryExecutionPorts | undefined;
+    if (item.family === "coding") {
+      execution = ports.ports(slot);
+      if (!isQualifiedCodingExecutionPort(execution.executeCoding))
+        return { state: "deferred" as const, completed, skipped, nextSlot: slot.id };
+    }
     if (await ports.claim(slot) !== "claimed") { skipped++; continue; }
     // An exception after claiming leaves ownership held. Never silently retry a possibly billed call.
-    const execution = ports.ports(slot);
+    execution ??= ports.ports(slot);
     const outcome = await executeCanary(item, slot.pin, { ...execution, save: async (run, grade) => {
       run.trial = structuredClone(trial);
       await execution.save(run, grade);

@@ -45,6 +45,24 @@ test("canary projection keeps historical runs unpaired and repeated cases as one
   assert.equal(g.invoiceUsd, null);
 });
 
+test("canary metrics retain distinct canary and worker spawn identities through an explicit join", () => {
+  const row = run("run-join"), call = attempt("canary-attempt");
+  const workerSpawnAttemptId = "b2044072-86e2-4b85-b871-3735362cb492";
+  call.executionEvidence = executionEvidence(workerSpawnAttemptId);
+  call.workerExecutionJoin = { version: "canary-worker-execution-join-v1", runId: row.id,
+    canaryAttemptId: call.id, workerSpawnAttemptId, unit: "worker-spawn", measurementScope: "returned-terminal-result" };
+  row.attempts = [call];
+  const projection = projectCanaryRuns([row]).groups[0]!.executionEvidence;
+  assert.equal(projection.observed, 1);
+  assert.equal(projection.attemptRows[0]!.attemptId, call.id);
+  assert.equal(projection.attemptRows[0]!.workerSpawnAttemptId, workerSpawnAttemptId);
+  const mismatched = { ...row, id: "run-other", attempts: [{ ...call,
+    workerExecutionJoin: { ...call.workerExecutionJoin, runId: "run-wrong" } }] };
+  const invalid = projectCanaryRuns([mismatched]).groups[0]!.executionEvidence;
+  assert.equal(invalid.invalid, 1);
+  assert.equal(invalid.attemptRows[0]!.workerSpawnAttemptId, workerSpawnAttemptId);
+});
+
 test("canary projection refuses case block corruption and reused durable slot identities", () => {
   const a = trialRun("one");
   const corruptions = [
@@ -79,6 +97,22 @@ test("canary cost includes failed attempts and retries without fabricating missi
   assert.equal(projectCanaryRuns([run("unknown", null)]).groups[0]!.apiEstimate.perCorrectTaskUsd, null);
 });
 
+test("synthetic replay, native execution, and legacy unknown runs never share quality denominators", () => {
+  const replay = run("replay"); replay.executionSource = "synthetic-control-replay";
+  replay.sourceActivity = { kind: "synthetic-canary", source: "model-canary-v1", sourceReceiptId: "fixture-digest", lane: "offline-replay" };
+  const native = run("native"); native.executionSource = "native-provider-execution";
+  const legacy = run("legacy");
+  const projection = projectCanaryRuns([replay, native, legacy]);
+  const groups = projection.groups;
+  assert.equal(projection.executionSourceTrust, "caller-declared-unverified");
+  assert.equal(groups.length, 3);
+  assert.deepEqual(groups.map(group => [group.executionSource, group.tasks, group.correct]).sort(), [
+    ["native-provider-execution", 1, 1], ["synthetic-control-replay", 1, 1], ["unclassified", 1, 1],
+  ]);
+  assert.throws(() => projectCanaryRuns([{ ...legacy, executionSource: "caller-claimed" } as unknown as CanaryRun]),
+    /execution-source-invalid/);
+});
+
 test("canary cohort projection refuses conflicting duplicates and distinguishes served identity", () => {
   const a = run("same"); assert.equal(projectCanaryRuns([a, structuredClone(a)]).uniqueRuns, 1);
   assert.throws(() => projectCanaryRuns([a, { ...a, verified: false }]), /conflicting/);
@@ -101,6 +135,7 @@ test("canary stream timing preserves unknown TTFT and refuses an invalid monoton
 test("W1-T10956: cost and resource drilldowns preserve missing evidence and keep non-dispatch reviews outside coding cohorts", () => {
   const measured = run("measured");
   measured.family = "review";
+  measured.executionSource = "native-provider-execution";
   measured.attempts[0]!.executionEvidence = executionEvidence(measured.attempts[0]!.id);
   measured.sourceActivity = { kind: "coding-dispatch", source: "benchmark-run-v1", sourceReceiptId: "receipt-coding", lane: "impl" };
   const review = run("review");
@@ -108,31 +143,59 @@ test("W1-T10956: cost and resource drilldowns preserve missing evidence and keep
   review.sourceActivity = { kind: "non-dispatch-review", source: "benchmark-run-v1", sourceReceiptId: "receipt-review", lane: "review" };
   const syntheticReview = run("synthetic-review");
   syntheticReview.family = "review";
+  syntheticReview.executionSource = "synthetic-control-replay";
   syntheticReview.sourceActivity = { kind: "synthetic-canary", source: "model-canary-v1", sourceReceiptId: "receipt-synthetic", lane: "canary" };
   const unknown = run("unknown");
   unknown.family = "review";
   const projected = projectCanaryRuns([measured, review, syntheticReview, unknown]);
-  const all = projected.groups.find(group => group.tasks === 4)!;
-  assert.equal(all.passRate, 1);
-  assert.equal(all.executionEvidence.observed, 1);
-  assert.equal(all.executionEvidence.absent, 3);
-  assert.equal(all.executionEvidence.invalid, 0);
-  assert.equal(all.executionEvidence.freshness.state, "unknown");
-  assert.equal(all.executionEvidence.workerDurationMs.observed, 1);
-  assert.equal(all.executionEvidence.workerDurationMs.p50, 0);
-  assert.equal(all.executionEvidence.peakRssBytes.observed, 0);
-  assert.equal(all.executionEvidence.peakRssBytes.unavailable, 4);
-  assert.equal(all.executionEvidence.accounting.apiUsageRatedUsd.observed, 1);
-  assert.equal(all.executionEvidence.accounting.apiUsageRatedUsd.observedLowerBound, 0);
-  assert.equal(all.executionEvidence.accounting.apiUsageRatedUsd.total, null);
-  assert.equal(all.executionEvidence.accounting.invoiceUsd.total, null);
-  assert.equal(all.executionEvidence.accounting.invoiceUsd.observed, 0);
-  assert.equal(all.apiEstimate.totalUsd, .08);
-  assert.equal(all.codingCohort.includedAttempts, 1);
-  assert.equal(all.codingCohort.excludedNonDispatchReviewAttempts, 1);
-  assert.equal(all.codingCohort.excludedSyntheticCanaryAttempts, 1);
-  assert.equal(all.codingCohort.unclassifiedAttempts, 1);
-  assert.deepEqual(all.codingCohort.sourceReceiptIds, ["receipt-coding", "receipt-review", "receipt-synthetic"]);
+  const native = projected.groups.find(group => group.executionSource === "native-provider-execution")!;
+  const unclassified = projected.groups.find(group => group.executionSource === "unclassified" && group.tasks === 2)!;
+  const replay = projected.groups.find(group => group.executionSource === "synthetic-control-replay")!;
+  assert.equal(native.tasks, 1);
+  assert.equal(native.passRate, 1);
+  assert.equal(native.executionEvidence.observed, 1);
+  assert.equal(native.executionEvidence.absent, 0);
+  assert.equal(native.executionEvidence.invalid, 0);
+  assert.equal(native.executionEvidence.freshness.state, "unknown");
+  assert.equal(native.executionEvidence.workerDurationMs.observed, 1);
+  assert.equal(native.executionEvidence.workerDurationMs.p50, 0);
+  assert.equal(native.executionEvidence.peakRssBytes.observed, 0);
+  assert.equal(native.executionEvidence.peakRssBytes.unavailable, 1);
+  assert.equal(native.executionEvidence.accounting.apiUsageRatedUsd.observed, 1);
+  assert.equal(native.executionEvidence.accounting.apiUsageRatedUsd.observedLowerBound, 0);
+  assert.equal(native.executionEvidence.accounting.apiUsageRatedUsd.total, 0);
+  assert.equal(native.executionEvidence.accounting.invoiceUsd.total, null);
+  assert.equal(native.executionEvidence.accounting.invoiceUsd.observed, 0);
+  assert.equal(native.apiEstimate.totalUsd, .02);
+  assert.equal(native.codingCohort.includedAttempts, 1);
+  assert.equal(native.codingCohort.excludedNonDispatchReviewAttempts, 0);
+  assert.equal(native.codingCohort.excludedSyntheticCanaryAttempts, 0);
+  assert.equal(native.codingCohort.unclassifiedAttempts, 0);
+  assert.deepEqual(native.codingCohort.sourceReceiptIds, ["receipt-coding"]);
+  assert.equal(unclassified.passRate, 1);
+  assert.equal(unclassified.executionEvidence.observed, 0);
+  assert.equal(unclassified.executionEvidence.absent, 2);
+  assert.equal(unclassified.executionEvidence.invalid, 0);
+  assert.equal(unclassified.executionEvidence.freshness.state, "unknown");
+  assert.equal(unclassified.executionEvidence.workerDurationMs.unavailable, 2);
+  assert.equal(unclassified.executionEvidence.peakRssBytes.unavailable, 2);
+  assert.equal(unclassified.executionEvidence.accounting.apiUsageRatedUsd.total, null);
+  assert.equal(unclassified.executionEvidence.accounting.invoiceUsd.total, null);
+  assert.equal(unclassified.apiEstimate.totalUsd, .04);
+  assert.equal(unclassified.codingCohort.includedAttempts, 0);
+  assert.equal(unclassified.codingCohort.excludedNonDispatchReviewAttempts, 1);
+  assert.equal(unclassified.codingCohort.excludedSyntheticCanaryAttempts, 0);
+  assert.equal(unclassified.codingCohort.unclassifiedAttempts, 1);
+  assert.deepEqual(unclassified.codingCohort.sourceReceiptIds, ["receipt-review"]);
+  assert.equal(replay.tasks, 1);
+  assert.equal(replay.executionEvidence.observed, 0);
+  assert.equal(replay.executionEvidence.absent, 1);
+  assert.equal(replay.executionEvidence.peakRssBytes.unavailable, 1);
+  assert.equal(replay.executionEvidence.accounting.invoiceUsd.total, null);
+  assert.equal(replay.apiEstimate.totalUsd, .02);
+  assert.equal(replay.codingCohort.includedAttempts, 0);
+  assert.equal(replay.codingCohort.excludedSyntheticCanaryAttempts, 1);
+  assert.deepEqual(replay.codingCohort.sourceReceiptIds, ["receipt-synthetic"]);
 });
 
 test("canary execution evidence rejects mismatched identities and forged or malformed private JSON without changing quality", () => {

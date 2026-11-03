@@ -80,6 +80,15 @@ test("trace grader rejects unauthorized actions despite a correct final answer",
   const oversized = createApplicationTraceRecorder(corpus.corpus,item.item.id,expectedBinding);
   assert.throws(()=>oversized.dispatch("unlisted-tool",{body:"x".repeat(33*1024)}),/private-trace-size-bound/);
   assert.equal(gradePrivateTrace(corpus.corpus,item.item.id,answer,oversized.finish(answer),expectedBinding).state,"unavailable");
+
+  const partialDenied = createApplicationTraceRecorder(corpus.corpus,item.item.id,expectedBinding);
+  partialDenied.dispatch("unlisted-tool",{});
+  assert.throws(()=>partialDenied.dispatch("unlisted-tool",{body:"x".repeat(33*1024)}),/private-trace-size-bound/);
+  const partialToken=partialDenied.finish(answer), partialReceipt=capturedPrivateTraceReceipt(partialToken);
+  assert.equal(partialReceipt?.complete,false);
+  assert.equal(partialReceipt?.events.some(event=>event.denied),true,"the earlier app-owned action remains in the receipt");
+  assert.deepEqual(gradePrivateTrace(corpus.corpus,item.item.id,answer,partialToken,expectedBinding),
+    {state:"unavailable",reason:"private-trace-size-bound"});
 });
 
 test("missing traces and scorer errors remain unavailable", () => {
@@ -231,6 +240,32 @@ test("trace grader cannot establish binding equality when canonical serializatio
     assert.equal(failures, 1, "the canonical binding comparison reached the failing serializer");
   } finally { serializer.mock.restore(); }
   assert.deepEqual(gradePrivateTrace(corpus.corpus, item.item.id, answer, trace, expectedBinding), control);
+});
+
+test("trace custody rejects receipt accessors and records oversized raw final text as incomplete", () => {
+  const item = sampleCase(), corpus = validatePrivateCorpus(bundle(item));
+  assert.equal(corpus.state, "available");
+  if (corpus.state !== "available") return;
+  const expectedBinding = binding(corpus.corpus, item.item.id), answer = JSON.stringify(item.item.expected);
+  const recorder = createApplicationTraceRecorder(corpus.corpus, item.item.id, expectedBinding);
+  const receipt = capturedPrivateTraceReceipt(recorder.finish(answer));
+  assert.ok(receipt);
+  let getterCalls = 0;
+  const malformedReceipt = Object.defineProperty({ ...receipt }, "finalText", { enumerable: true,
+    get() { getterCalls++; return answer; } });
+  assert.deepEqual(loadPrivateTraceFromCustody(corpus.corpus, item.item.id, expectedBinding,
+    () => ({ state: "available", receipt: malformedReceipt })),
+  { state: "unavailable", reason: "private-trace-json-invalid" });
+  assert.equal(getterCalls, 0, "untrusted receipt fields must not execute accessors");
+
+  const oversized = createApplicationTraceRecorder(corpus.corpus, item.item.id, expectedBinding);
+  const trace = oversized.finish("x".repeat(65_537)), incomplete = capturedPrivateTraceReceipt(trace);
+  assert.ok(incomplete);
+  assert.equal(incomplete.complete, false);
+  assert.equal(incomplete.finalText, null);
+  assert.equal(incomplete.reason, "private-trace-final-text-bound");
+  assert.deepEqual(gradePrivateTrace(corpus.corpus, item.item.id, null, trace, expectedBinding),
+    { state: "unavailable", reason: "private-trace-final-text-bound" });
 });
 
 test("trace custody rejects malformed receipt bytes after a verified owner read", () => {

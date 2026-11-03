@@ -155,6 +155,24 @@ const CHMOD_REMEDY =
  */
 const DECLARED: readonly Declared[] = [
   {
+    kind: "chmod", file: "routing/model-canary-host-bridge.test.ts", key: "0o600", count: 1,
+    reason:
+      "The bridge fixture normalizes its Unix socket mode before the client policy reads it. " +
+      "This controls explicit stat-mode validation; it does not assert that uid 0 is denied access.",
+  },
+  {
+    kind: "chmod", file: "routing/model-canary-private-replay.cli.test.ts", key: "0o600", count: 3,
+    reason:
+      "The replay fixtures create private JSON/SQLite inputs and restore the supported owner mode " +
+      "after a stat-mode refusal. The assertions inspect mode policy and remain valid under uid 0.",
+  },
+  {
+    kind: "chmod", file: "routing/model-canary-private-replay.cli.test.ts", key: "0o640", count: 1,
+    reason:
+      "The replay CLI refusal fixture adds a group-readable bit to exercise the explicit owner-file " +
+      "mode check before opening its database; it does not rely on an OS access denial.",
+  },
+  {
     kind: "chmod", file: "dependency-seeds-cli.test.ts", key: "0o644", count: 1,
     reason:
       "The owner-cleanup reader rejects a receipt with group/world mode bits by explicit stat-mode " +

@@ -2,8 +2,9 @@
 import { mkdirSync, writeFileSync, existsSync, realpathSync, lstatSync, openSync, fstatSync, readSync, closeSync, constants } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { canarySuiteDigest, commonCanarySuite, weeklyCanarySuite, MODEL_CANARY_VERSION } from "./model-canary-suite.js";
-import { projectCanaryRuns, type CanaryRun } from "./model-canary-metrics.js";
+import { canarySuiteDigest, commonCanarySuite, weeklyCanarySuite, MODEL_CANARY_VERSION,
+  type CanaryCase } from "./model-canary-suite.js";
+import { projectCanaryRuns, type CanaryRun, type CanarySourceActivity } from "./model-canary-metrics.js";
 import { renderCanaryReport } from "./model-canary-report.js";
 import { retentionCanaryProtocol } from "./model-canary-retention.js";
 import { contextCanaryProtocol } from "./model-canary-context.js";
@@ -14,8 +15,17 @@ import { planCanaryMatrix } from "./model-canary-matrix-plan.js";
 import { validatePrivateCorpus, buildPrivateCanaryRequest } from "./model-canary-private-corpus.js";
 import { capturedPrivateTraceReceipt, gradePrivateTrace, loadPrivateTraceFromCustody,
   type PrivateTraceBindingV1 } from "./model-canary-trace-grader.js";
-import { readOwnedPrivateTraceReceipt } from "./model-canary-owner.js";
-import type { CanarySlot } from "./model-canary-schedule.js";
+import { CanarySlotOwner, readOwnedPrivateTraceReceipt } from "./model-canary-owner.js";
+import { replayPrivateControl } from "./model-canary-replay-private.js";
+import { buildCanarySchedule, executeCanarySchedule, type CanarySchedulePorts, type CanarySlot } from "./model-canary-schedule.js";
+import type { CanaryExecutionPorts } from "./model-canary-runner.js";
+import { isRegisteredCanarySlotOwner } from "./model-canary-coding-capabilities.js";
+import { createCodingCanaryExecutionPort } from "./model-canary-coding-adapter.js";
+import { registerQualifiedCodingExecutionPort } from "./model-canary-coding-port-capability.js";
+import { getQualifiedLinuxCodingBounds, isQualifiedLinuxCodingProfile,
+  type QualifiedLinuxCodingProfile } from "./model-canary-systemd-bwrap-backend.js";
+import { codingLedgerSave, type CodingLedgerWriter } from "./model-canary-ledger.js";
+import type { ValidatedPrivateCorpus } from "./model-canary-private-corpus.js";
 
 function boundedInput(input: string, limit = 8 * 1024 * 1024, privateOwned = false): string {
   if (!Number.isInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0
@@ -80,6 +90,29 @@ function privateTrustAnchors(flag: string | undefined, file: string | undefined)
 }
 
 export function canaryCommand(argv: readonly string[]) {
+  if (argv[0] === "prepare-coding") {
+    const [, outDir, corpusFile, flag, keyFile] = argv;
+    if (![3, 5].includes(argv.length) || !outDir || !corpusFile)
+      throw new Error("usage: model-canary-command prepare-coding <private-out-dir> <private-corpus.json> [--trust-anchors <private-anchor-file>]");
+    const validated = validatePrivateCorpus(JSON.parse(boundedInput(corpusFile, 2 * 1024 * 1024, true)),
+      privateTrustAnchors(flag, keyFile));
+    if (validated.state !== "available") throw new Error(validated.reason);
+    const cases = validated.metadata.cases.filter(item => item.family === "coding");
+    const requests = cases.map(item => {
+      const projected = buildPrivateCanaryRequest(validated.corpus, item.caseId);
+      if (projected.state !== "available") throw new Error(projected.reason);
+      return { request: projected.request, join: { requestId: projected.request.requestId,
+        caseId: item.caseId, corpusDigest: validated.metadata.digest, scorerDigest: item.scorerDigest } };
+    });
+    privateOutput(outDir, "model-canary-coding-requests.json", JSON.stringify({
+      version: "model-canary-coding-requests-v1", state: "prepared-not-activated",
+      requests: requests.map(item => item.request) }, null, 2) + "\n");
+    privateOutput(outDir, "model-canary-coding-joins.json", JSON.stringify({
+      version: "model-canary-coding-joins-v1", corpusDigest: validated.metadata.digest,
+      joins: requests.map(item => item.join), execution: "requires-native-owner-and-qualified-linux-profile" }, null, 2) + "\n");
+    return { state: "prepared-not-activated", cases: cases.length, corpusDigest: validated.metadata.digest,
+      execution: "requires-native-owner-and-qualified-linux-profile" };
+  }
   if (argv[0] === "prepare-private") {
     const [, outDir, input, flag, keyFile] = argv;
     if (![3, 5].includes(argv.length) || !outDir || !input)
@@ -134,7 +167,9 @@ export function canaryCommand(argv: readonly string[]) {
     privateOutput(outDir, "model-canary-private-grade.json", JSON.stringify({
       version: "model-canary-private-grade-v1", corpusDigest: corpus.metadata.digest,
       evidenceSource: custodyAvailable ? "operator-selected-private-owner-custody" : "unavailable",
-      binding: captured?.binding ?? null, grade }, null, 2) + "\n");
+      binding: captured?.binding ?? null,
+      observedUnauthorizedAction: captured === null ? null : captured.events.some(event => event.denied),
+      grade }, null, 2) + "\n");
     return { state: "private-regrade", gradeState: grade.state,
       passed: grade.state === "scored" ? grade.passed : null, reason: grade.reason };
   }
@@ -220,8 +255,96 @@ export function canaryCommand(argv: readonly string[]) {
   return { state: "private-projection", runs: projection.uniqueRuns };
 }
 
+export interface OwnedCodingCanaryPorts {
+  owner: CanarySlotOwner;
+  profile: QualifiedLinuxCodingProfile | null;
+  privateCorpus: ValidatedPrivateCorpus;
+  ledgerPath: string;
+  schedulePorts: Pick<CanarySchedulePorts, "eligibility"> & {
+    ports(slot: CanarySlot): CanaryExecutionPorts;
+  };
+  appendCodingLedger?: CodingLedgerWriter;
+}
+
+/** @internal Source-unit control only. Production callers must omit this and use the native factory. */
+export interface OwnedCodingCanaryTestDependencies {
+  codingPortFactory?: (slot: CanarySlot, owner: CanarySlotOwner,
+    profile: QualifiedLinuxCodingProfile | null) => NonNullable<CanaryExecutionPorts["executeCoding"]> | null;
+}
+
+/**
+ * App-owned native schedule composition. The CLI cannot construct these capabilities from JSON:
+ * the caller supplies the already-owned SQLite owner, opaque qualified host profile, validated
+ * private corpus, and its ordinary allowance/worker-backed ports. Missing native authority
+ * defers before the schedule can claim, admit, or request a model response.
+ */
+export async function executeOwnedCodingCanarySchedule(input: OwnedCodingCanaryPorts,
+  plan: ReturnType<typeof buildCanarySchedule>, cases: readonly CanaryCase[],
+  internal: OwnedCodingCanaryTestDependencies = {}) {
+  const hasCoding = cases.some(item => item.family === "coding");
+  const firstCodingSlot = plan.slots.find(slot => cases.some(item => item.id === slot.caseId && item.family === "coding"));
+  const hasQualifiedProfile = isQualifiedLinuxCodingProfile(input.profile)
+    && getQualifiedLinuxCodingBounds(input.profile) !== null;
+  if (!input.ledgerPath || !isRegisteredCanarySlotOwner(input.owner)
+    || (hasCoding && (!hasQualifiedProfile && !internal.codingPortFactory)))
+    return { state: "deferred" as const, completed: 0, skipped: 0, nextSlot: firstCodingSlot?.id ?? null };
+
+  const ports: CanarySchedulePorts = {
+    eligibility: input.schedulePorts.eligibility,
+    claim: async slot => input.owner.claim(slot),
+    ports: slot => {
+      const base = input.schedulePorts.ports(slot);
+      const { executeCoding: _callerExecutor, ...trustedPorts } = base;
+      const executeCoding = cases.some(item => item.id === slot.caseId && item.family === "coding")
+        ? (internal.codingPortFactory
+          ? (() => {
+            const injected = internal.codingPortFactory!(slot, input.owner, input.profile);
+            return injected ? registerQualifiedCodingExecutionPort(injected) : null;
+          })()
+          : createCodingCanaryExecutionPort({ slot, owner: input.owner, profile: input.profile })) ?? undefined
+        : undefined;
+      const save = trustedPorts.save;
+      return { ...trustedPorts, ...(executeCoding ? { executeCoding } : {}), save: async (run, grade) => {
+        if (run.family === "coding") {
+          const activity: CanarySourceActivity = { kind: "synthetic-canary", source: "model-canary-v1",
+            sourceReceiptId: run.id, lane: "coding-control" };
+          run.executionSource = "native-provider-execution";
+          run.sourceActivity = activity;
+        }
+        await save(run, grade);
+      } };
+    },
+    terminal: async (slot, outcome) => {
+      input.owner.terminal(slot, outcome);
+      if (outcome.run.family === "coding")
+        codingLedgerSave(input.ledgerPath, outcome, input.appendCodingLedger);
+    },
+  };
+  return executeCanarySchedule(plan, { cases, corpus: input.privateCorpus }, ports);
+}
+
+async function replayPrivateCli(argv: readonly string[]) {
+  const [, corpusFile, responseFile, ownerDir, flag, keyFile] = argv;
+  if (![4, 6].includes(argv.length) || !corpusFile || !responseFile || !ownerDir)
+    throw new Error("usage: model-canary-command replay-private <private-corpus.json> <response-script.json> <operator-selected-private-owner-dir> [--trust-anchors <private-anchor-file>]");
+  const rawCorpus: unknown = JSON.parse(boundedInput(corpusFile, 2 * 1024 * 1024, true));
+  const replayInput: unknown = JSON.parse(boundedInput(responseFile, 128 * 1024, true));
+  return replayPrivateControl({ rawCorpus, replayInput, ownerDir,
+    trustAnchors: privateTrustAnchors(flag, keyFile) });
+}
+
 // diff-cov: process-boundary — standalone CLI stdout flush and exit; the native child control proves this entry.
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const result = canaryCommand(process.argv.slice(2));
-  process.stdout.write(JSON.stringify(result) + "\n", () => process.exit(0));
+  const argv = process.argv.slice(2);
+  if (argv[0] === "replay-private") {
+    void replayPrivateCli(argv).then(result => {
+      process.stdout.write(JSON.stringify(result) + "\n");
+    }).catch(() => {
+      process.stderr.write("private-replay-failed\n");
+      process.exitCode = 1;
+    });
+  } else {
+    const result = canaryCommand(argv);
+    process.stdout.write(JSON.stringify(result) + "\n", () => process.exit(0));
+  }
 }

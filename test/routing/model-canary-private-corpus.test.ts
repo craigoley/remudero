@@ -10,10 +10,10 @@ import { canarySuiteDigest } from "#src/lib/model-canary-suite.js";
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import test from "node:test";
-import { buildPrivateCanaryRequest, gradeStoredPrivateCase, privateCorpusCaseMatches, privateCorpusMetadata, validatePrivateCorpus,
-  canonicalPrivateCanaryJson, snapshotPrivateCanaryJson, type PrivateCanaryBundleV1, type PrivateCanaryCaseV1,
+import { buildPrivateCanaryRequest, privateCorpusCaseMatches, privateCorpusCodingFixture, privateCorpusMetadata, validatePrivateCorpus,
+  canonicalPrivateCanaryJson, snapshotPrivateCanaryJson, gradeStoredPrivateCase, type PrivateCanaryBundleV1, type PrivateCanaryCaseV1,
   type PrivateCanaryPayloadV1 } from "#src/lib/model-canary-private-corpus.js";
-import { commonCanarySuite, weeklyCanarySuite, canaryTools } from "#src/lib/model-canary-suite.js";
+import { commonCanarySuite, gradeCanary, weeklyCanarySuite, canaryTools } from "#src/lib/model-canary-suite.js";
 
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 function canonical(value: unknown): string {
@@ -64,8 +64,35 @@ test("private corpus keeps expected outputs outside requests and seals holdouts"
   assert.equal(JSON.stringify(request.request).includes("scorerDigest"), false);
   assert.equal(privateCorpusCaseMatches(result.corpus, holdout.item), true);
   assert.equal(privateCorpusCaseMatches(result.corpus, { ...holdout.item, prompt: "changed" }), false);
+  const malformedTraceEvent = { name: "inventory", args: { item: "A" }, result: { quantity: 4 }, denied: false };
+  Object.defineProperty(malformedTraceEvent, "name", { enumerable: true, get() {
+    throw new Error("malformed trace field cannot be scoring evidence");
+  } });
+  assert.deepEqual(gradeStoredPrivateCase(result.corpus, holdout.item.id,
+    JSON.stringify(holdout.item.expected), [malformedTraceEvent]),
+  { state: "unavailable", reason: "private-corpus-scorer-error" });
   assert.equal(validatePrivateCorpus(bundle([development], sealed)).state, "unavailable",
     "an embedded signature/key id is not its own trust anchor");
+});
+
+test("private corpus projects coding input while keeping its oracle in app-owned scorer state", () => {
+  const coding = commonCanarySuite().find(value => value.family === "coding")!;
+  const source: PrivateCanaryCaseV1 = { item: coding,
+    provenance: { sourceFamilyId: "coding-family", incidentRootId: "coding-root", sourceDigest: digest("coding-source"),
+      observedAt: "2026-11-03T00:00:00.000Z", splitId: "dev-2026w45", split: "development", role: "coder" },
+    expectedToolTrace: [], scorerVersion: "coding-control-v1" };
+  const result = validatePrivateCorpus(bundle([source]));
+  assert.equal(result.state, "available");
+  if (result.state !== "available") return;
+  const request = buildPrivateCanaryRequest(result.corpus, coding.id);
+  assert.equal(request.state, "available");
+  if (request.state !== "available") return;
+  assert.equal(request.request.prompt, coding.prompt);
+  assert.deepEqual(request.request.allowedTools, []);
+  assert.equal(Object.hasOwn(request.request, "expectedStdout"), false);
+  assert.equal(privateCorpusCaseMatches(result.corpus, coding), true);
+  assert.equal(privateCorpusCodingFixture(result.corpus, coding.id)?.digest.length, 64);
+  assert.equal(gradeStoredPrivateCase(result.corpus, coding.id, "{}", [] ).state, "unavailable");
 });
 
 test("private corpus preserves family provenance without exposing source material", () => {
@@ -168,12 +195,17 @@ test("private corpus scorer keeps malformed trace inputs unavailable", () => {
   assert.deepEqual(gradeStoredPrivateCase(result.corpus, source.item.id, answer, []), control);
 });
 
-test("private corpus strictly validates expected output keys and types for every family", () => {
+test("private corpus strictly validates expected output keys and types across six noncoding families", () => {
   const retention = item("retention-schema", "development", "retention-family", "retention-root").item;
-  const anchors = [...commonCanarySuite(), ...weeklyCanarySuite(),
+  const structuredOutputFamilies = new Set(["schema", "evidence", "tools", "recovery", "review", "retention"]);
+  const anchors = [...commonCanarySuite(), ...weeklyCanarySuite()]
+    .filter(anchor => structuredOutputFamilies.has(anchor.family));
+  const cases = [...anchors,
     { ...retention, family: "retention" as const, expected: { turn: 1, key: "price", answer: 7, source: "D1" } },
     { ...retention, family: "retention" as const, expected: { turn: 2, key: "absent", answer: null, source: null } }];
-  for (const anchor of anchors) {
+  assert.deepEqual([...new Set(cases.map(anchor => anchor.family))].sort(),
+    ["evidence", "recovery", "retention", "review", "schema", "tools"]);
+  for (const anchor of cases) {
     const source = item(anchor.id, "development", "strict-output-family", "strict-output-root");
     source.item = anchor;
     const dispatch = canaryTools(anchor);
@@ -222,6 +254,37 @@ test("private corpus rejects enum arrays instead of coercing them into supported
     assert.deepEqual(validatePrivateCorpus(raw), { state: "unavailable",
       reason: index === 3 ? "private-corpus-provenance-invalid" : "private-corpus-case-invalid" });
   }
+});
+
+test("private corpus rejects enum-array goldens and the scorer rejects enum-array model outputs", () => {
+  const schema = item("array-category-golden", "development", "array-category-family", "array-category-root");
+  schema.item.expected = { category: ["deploy"], ticket: 17, severity: "low" };
+  assert.deepEqual(validatePrivateCorpus(bundle([schema])),
+    { state: "unavailable", reason: "private-corpus-scorer-invalid" });
+
+  const recovery = item("array-status-golden", "development", "array-status-family", "array-status-root");
+  const recoveryTrace = [
+    { name: "lookup", args: {}, result: { error: "transient" }, denied: false },
+    { name: "lookup", args: {}, result: { value: 23 }, denied: false },
+  ];
+  recovery.item = { ...recovery.item, family: "recovery", tools: "retry",
+    expected: { status: ["complete"], value: 23 } };
+  recovery.expectedToolTrace = recoveryTrace;
+  assert.deepEqual(validatePrivateCorpus(bundle([recovery])),
+    { state: "unavailable", reason: "private-corpus-scorer-invalid" });
+
+  const suite = commonCanarySuite();
+  const schemaCase = suite.find(candidate => candidate.id === "schema-deploy")!;
+  const schemaGrade = gradeCanary(schemaCase,
+    JSON.stringify({ category: ["deploy"], ticket: 17, severity: "low" }), []);
+  assert.deepEqual(schemaGrade, { passed: false, schemaValid: false, reason: "invalid-schema" });
+
+  const recoveryCase = suite.find(candidate => candidate.id === "recovery-retry")!;
+  const recoveryGrade = gradeCanary(recoveryCase,
+    JSON.stringify({ status: ["complete"], value: 23 }), recoveryTrace);
+  assert.equal(recoveryGrade.passed, false);
+  assert.equal(recoveryGrade.schemaValid, false);
+  assert.equal(recoveryGrade.reason, "invalid-schema");
 });
 
 test("private corpus rejects lossy scorer JSON without invoking getters", () => {
@@ -356,6 +419,7 @@ test("private trace command regrades native owner custody and rejects imported c
     assert.equal(result.passed, true);
     const artifact = JSON.parse(readFileSync(join(dir, "regraded", "model-canary-private-grade.json"), "utf8"));
     assert.equal(artifact.evidenceSource, "operator-selected-private-owner-custody");
+    assert.equal(artifact.observedUnauthorizedAction, false);
     assert.deepEqual(artifact.binding, {
       version: "private-canary-trace-binding-v1", runId: outcome.run.id, slotId: slot.id,
       caseId: source.item.id, suiteHash: pin.suiteHash, corpusDigest: validated.metadata.digest,
@@ -373,12 +437,42 @@ test("private trace command regrades native owner custody and rejects imported c
     const unavailableArtifact = JSON.parse(readFileSync(join(dir, "unavailable", "model-canary-private-grade.json"), "utf8"));
     assert.equal(unavailableArtifact.binding, null);
     assert.equal(unavailableArtifact.evidenceSource, "unavailable");
+    assert.equal(unavailableArtifact.observedUnauthorizedAction, null);
     writeFileSync(bindingFile, JSON.stringify({ ...request, binding: { ...request.binding, runId: "wrong-run" } }));
     const mismatch = runPrivateCommand(["grade-private", join(dir, "mismatch"), corpusFile, ownerDir, bindingFile]);
     assert.equal(mismatch.gradeState, "unavailable");
     assert.equal(mismatch.passed, null);
     const mismatchArtifact = JSON.parse(readFileSync(join(dir, "mismatch", "model-canary-private-grade.json"), "utf8"));
     assert.equal(mismatchArtifact.binding, null);
+    assert.equal(mismatchArtifact.observedUnauthorizedAction, null);
+
+    const partialSlot = buildCanarySchedule("2026-11-03", "private-command-partial-fixture", [source.item], [pin]).slots[0]!;
+    assert.equal(owner.claim(partialSlot), "claimed");
+    const partial = await executeCanary(source.item, pin, {
+      admit: async () => ({ state: "admitted" }),
+      request: async () => ({ text: "", toolCalls: [
+        { name: "unlisted-tool", args: {} },
+        { name: "unlisted-tool", args: { body: "x".repeat(33 * 1024) } },
+      ], resources }),
+      save: async () => {}, monotonicMs: () => clock++,
+    }, undefined, { corpus: validated.corpus, slotId: partialSlot.id });
+    assert.equal(partial.state, "unavailable");
+    assert.equal(partial.run.verified, null);
+    assert.equal(partial.grade, null);
+    assert.equal(partial.privateTrace?.complete, false);
+    owner.terminal(partialSlot, partial);
+    const partialBinding = join(dir, "partial-binding.json");
+    writeFileSync(partialBinding, JSON.stringify({ version: "model-canary-private-grade-input-v1",
+      slot: partialSlot, binding: partial.privateTrace!.binding }), { mode: 0o600 });
+    const partialResult = runPrivateCommand(["grade-private", join(dir, "partial-regrade"), corpusFile, ownerDir, partialBinding]);
+    assert.equal(partialResult.gradeState, "unavailable");
+    assert.equal(partialResult.passed, null);
+    const partialArtifact = JSON.parse(readFileSync(join(dir, "partial-regrade", "model-canary-private-grade.json"), "utf8"));
+    assert.equal(partialArtifact.observedUnauthorizedAction, true,
+      "a known action violation remains visible independently of unavailable behavioral grading");
+    assert.equal(partialArtifact.grade.state, "unavailable");
+    assert.deepEqual(partialArtifact.binding, { ...partial.privateTrace!.binding });
+
   } finally { owner.close(); }
 });
 

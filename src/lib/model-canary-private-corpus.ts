@@ -1,6 +1,7 @@
 /** Private canary corpus validation, request projection and scorer storage. */
 import { createHash, createPublicKey, randomUUID, verify as verifySignature } from "node:crypto";
 import { canaryTools, gradeCanary, type CanaryCase, type CanaryToolEvent } from "./model-canary-suite.js";
+import { codingRequestFixture, syntheticCodingFixture, type CodingFixture } from "./model-canary-coding.js";
 import { fixedClock } from "./clock.js";
 
 export type PrivateCanarySplit = "development" | "sealed-holdout";
@@ -21,7 +22,7 @@ export interface PrivateCanaryCaseV1 {
   provenance: PrivateCanaryProvenanceV1;
   /** Expected tools are scorer-only and are matched against recorder-captured events. */
   expectedToolTrace: readonly CanaryToolEvent[];
-  scorerVersion: "exact-json-and-application-trace-v1";
+  scorerVersion: "exact-json-and-application-trace-v1" | "coding-control-v1";
 }
 
 export interface PrivateCanaryPayloadV1 {
@@ -101,6 +102,7 @@ interface PrivateScorerCase {
   provenance: PrivateCanaryProvenanceV1;
   expectedToolTrace: readonly CanaryToolEvent[];
   scorerDigest: string;
+  codingFixture?: CodingFixture;
 }
 interface PrivateCorpusSnapshot {
   digest: string;
@@ -254,20 +256,21 @@ function validExpectedOutput(family: CanaryCase["family"], expected: Record<stri
     case "retention": return exactKeys(expected, ["turn", "key", "answer", "source"])
       && integer(expected.turn) && typeof expected.key === "string" && numberOrNull(expected.answer)
       && (expected.source === null || typeof expected.source === "string");
+    case "coding": return false;
   }
 }
 
 function normalizeCase(raw: unknown, split: PrivateCanarySplit): PrivateScorerCase {
   const safe = cloneFiniteJson(raw);
   if (!exactKeys(safe, ["item", "provenance", "expectedToolTrace", "scorerVersion"])
-    || safe.scorerVersion !== "exact-json-and-application-trace-v1"
+    || !(safe.scorerVersion === "exact-json-and-application-trace-v1" || safe.scorerVersion === "coding-control-v1")
     || !exactKeys(safe.provenance, ["sourceFamilyId", "incidentRootId", "sourceDigest", "observedAt", "splitId", "split", "role"])
     || !Array.isArray(safe.expectedToolTrace)) fail("private-corpus-case-invalid");
   const item = safe.item;
-  if (!exactKeys(item, ["id", "family", "prompt", "expected", "tools", "cadence"])
+  if (!exactKeys(item, ["id", "family", "prompt", "expected", "tools", "cadence"], ["codingControl"])
     || typeof item.id !== "string" || item.id.length < 1 || item.id.length > 120
     || typeof item.family !== "string"
-    || !["schema", "evidence", "tools", "recovery", "review", "retention"].includes(item.family)
+    || !["schema", "evidence", "tools", "recovery", "review", "retention", "coding"].includes(item.family)
     || typeof item.prompt !== "string" || Buffer.byteLength(item.prompt) > MAX_PROMPT_BYTES
     || !record(item.expected)
     || typeof item.tools !== "string" || !["none", "inventory", "retry", "approval"].includes(item.tools)
@@ -286,14 +289,29 @@ function normalizeCase(raw: unknown, split: PrivateCanarySplit): PrivateScorerCa
       || event.name.length > 100 || event.denied !== false) fail("private-corpus-scorer-invalid");
   }
   const itemSnapshot = safe.item as unknown as CanaryCase;
-  if (!validExpectedOutput(itemSnapshot.family, itemSnapshot.expected)) fail("private-corpus-scorer-invalid");
   const provenance = safe.provenance as unknown as PrivateCanaryProvenanceV1;
   const expectedToolTrace = safe.expectedToolTrace as unknown as readonly CanaryToolEvent[];
-  const scorerControl = gradeCanary(itemSnapshot, JSON.stringify(itemSnapshot.expected), expectedToolTrace);
-  if (!scorerControl.passed) fail("private-corpus-scorer-invalid");
-  // Goldens must fit the same bounds as an actual final response and owner-captured trace.
-  const finalText = JSON.stringify(itemSnapshot.expected);
-  if (Buffer.byteLength(finalText, "utf8") > 65_536) fail("private-corpus-scorer-invalid");
+  const codingCase = itemSnapshot.family === "coding";
+  let codingFixture: CodingFixture | undefined;
+  if (codingCase) {
+    const control = (itemSnapshot as CanaryCase).codingControl;
+    if (safe.scorerVersion !== "coding-control-v1" || !exactKeys(control, ["version", "seed"])
+      || control.version !== "coding-control-v1" || typeof control.seed !== "string"
+      || control.seed.length < 1 || control.seed.length > 256 || Object.keys(itemSnapshot.expected).length !== 0
+      || itemSnapshot.tools !== "none" || expectedToolTrace.length !== 0)
+      fail("private-corpus-coding-case-invalid");
+    codingFixture = syntheticCodingFixture(control.seed);
+    if (itemSnapshot.prompt !== codingFixture.prompt) fail("private-corpus-coding-case-invalid");
+  } else {
+    if (safe.scorerVersion !== "exact-json-and-application-trace-v1" || itemSnapshot.codingControl !== undefined)
+      fail("private-corpus-case-invalid");
+    if (!validExpectedOutput(itemSnapshot.family, itemSnapshot.expected)) fail("private-corpus-scorer-invalid");
+    const scorerControl = gradeCanary(itemSnapshot, JSON.stringify(itemSnapshot.expected), expectedToolTrace);
+    if (!scorerControl.passed) fail("private-corpus-scorer-invalid");
+    // Goldens must fit the same bounds as an actual final response and owner-captured trace.
+    const finalText = JSON.stringify(itemSnapshot.expected);
+    if (Buffer.byteLength(finalText, "utf8") > 65_536) fail("private-corpus-scorer-invalid");
+  }
   try { canonicalJson(expectedToolTrace, 32 * 1024); }
   catch { // A trace that exceeds the real recorder bound cannot be a usable golden.
     fail("private-corpus-scorer-invalid");
@@ -301,13 +319,16 @@ function normalizeCase(raw: unknown, split: PrivateCanarySplit): PrivateScorerCa
   // Check the signed gold trace against the same deterministic application simulator the
   // recorder uses. Scorer agreement with a self-consistent but impossible claimed result is
   // insufficient (for example, inventory A is quantity 4, not an arbitrary signed quantity).
-  const dispatch = canaryTools(itemSnapshot);
-  const simulatedToolTrace = expectedToolTrace.map(event => dispatch(event.name, event.args));
-  if (canonicalJson(simulatedToolTrace, 32 * 1024) !== canonicalJson(expectedToolTrace, 32 * 1024))
-    fail("private-corpus-scorer-invalid");
+  if (!codingCase) {
+    const dispatch = canaryTools(itemSnapshot);
+    const simulatedToolTrace = expectedToolTrace.map(event => dispatch(event.name, event.args));
+    if (canonicalJson(simulatedToolTrace, 32 * 1024) !== canonicalJson(expectedToolTrace, 32 * 1024))
+      fail("private-corpus-scorer-invalid");
+  }
   const scorerDigest = sha256(canonicalJson({ version: safe.scorerVersion, expected: itemSnapshot.expected,
-    family: itemSnapshot.family, tools: itemSnapshot.tools, expectedToolTrace }));
-  return Object.freeze({ item: itemSnapshot, provenance, expectedToolTrace, scorerDigest });
+    family: itemSnapshot.family, tools: itemSnapshot.tools, expectedToolTrace,
+    ...(codingFixture ? { codingFixtureDigest: codingFixture.digest } : {}) }));
+  return Object.freeze({ item: itemSnapshot, provenance, expectedToolTrace, scorerDigest, ...(codingFixture ? { codingFixture } : {}) });
 }
 
 function payloadCases(payload: unknown, split: PrivateCanarySplit): PrivateScorerCase[] {
@@ -404,12 +425,23 @@ export function buildPrivateCanaryRequest(corpus: ValidatedPrivateCorpus, caseId
   if (!snapshot) return { state: "unavailable", reason: "private-corpus-capability-unrecognized" };
   const item = snapshot.cases.get(caseId);
   if (!item) return { state: "unavailable", reason: "private-corpus-case-unknown" };
+  const prompt = item.codingFixture ? codingRequestFixture(item.codingFixture).prompt : item.item.prompt;
   return { state: "available", request: Object.freeze({ requestId: randomUUID(),
-    prompt: item.item.prompt, allowedTools: toolsFor(item.item) }) };
+    prompt, allowedTools: toolsFor(item.item) }) };
+}
+
+/** App-only execution input; never place its expectedStdout in a provider or host request. */
+export function privateCorpusCodingFixture(corpus: ValidatedPrivateCorpus, caseId: string): CodingFixture | null {
+  return corpusSnapshots.get(corpus)?.cases.get(caseId)?.codingFixture ?? null;
 }
 
 export function privateCorpusMetadata(corpus: ValidatedPrivateCorpus): PrivateCorpusMetadataV1 | null {
   return corpusSnapshots.get(corpus)?.metadata ?? null;
+}
+
+/** True only for the process-local capability minted by validatePrivateCorpus; JSON copies never qualify. */
+export function isValidatedPrivateCorpus(value: unknown): value is ValidatedPrivateCorpus {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && corpusSnapshots.has(value);
 }
 
 /** Native schedule input only; scorer-bearing cases must never be projected into provider requests. */
@@ -424,7 +456,7 @@ export function privateCorpusCaseMatches(corpus: ValidatedPrivateCorpus, item: C
   if (!snapshot) return false;
   try {
     const safe = cloneFiniteJson(item);
-    if (!exactKeys(safe, ["id", "family", "prompt", "expected", "tools", "cadence"])
+    if (!exactKeys(safe, ["id", "family", "prompt", "expected", "tools", "cadence"], ["codingControl"])
       || typeof safe.id !== "string") return false;
     const stored = snapshot.cases.get(safe.id);
     return stored !== undefined && canonicalJson(safe) === canonicalJson(stored.item);
@@ -446,6 +478,7 @@ export function gradeStoredPrivateCase(corpus: ValidatedPrivateCorpus, caseId: s
   finalText: string, events: readonly CanaryToolEvent[]) {
   const snapshot = corpusSnapshots.get(corpus), item = snapshot?.cases.get(caseId);
   if (!item) return { state: "unavailable" as const, reason: "private-corpus-capability-unrecognized" };
+  if (item.codingFixture) return { state: "unavailable" as const, reason: "coding-native-scorer-required" };
   if (typeof finalText !== "string" || Buffer.byteLength(finalText, "utf8") > 65_536 || !Array.isArray(events) || events.length > 32)
     return { state: "unavailable" as const, reason: "private-corpus-grader-input-bound" };
   try {

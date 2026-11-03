@@ -30,7 +30,7 @@ export function analyzeCanaryPairs(input: readonly CanaryRun[]) {
     rows.push(run); blocks.set(run.trial.blockId, rows);
   }
   const exclusions: { blockId: string; reason: string; observedSlots: number; plannedSlots: number }[] = [];
-  const comparisons = new Map<string, { suiteHash: string; family: string; route: string; effort: string;
+  const comparisons = new Map<string, { executionSource: string; suiteHash: string; family: string; route: string; effort: string;
     billing: "api" | "subscription"; mode: "A/A" | "models"; left: string; right: string;
     pairs: { blockId: string; day: string; caseId: string; leftRunId: string; rightRunId: string;
       differences: Record<Metric, number | null> }[] }>();
@@ -39,6 +39,10 @@ export function analyzeCanaryPairs(input: readonly CanaryRun[]) {
     const first = rows[0]!, trial = first.trial!;
     const exclude = (reason: string) => exclusions.push({ blockId, reason, observedSlots: rows.length,
       plannedSlots: trial.plannedSlotIds.length });
+    const executionSources = new Set(rows.map(run => run.executionSource ?? "unclassified"));
+    if (executionSources.size !== 1) { exclude("mixed-execution-source"); continue; }
+    const executionSource = first.executionSource ?? "unclassified";
+    if (executionSource === "synthetic-control-replay") { exclude("synthetic-control-replay"); continue; }
     if (rows.length !== trial.plannedSlotIds.length
       || trial.plannedSlotIds.some(id => !rows.some(r => r.trial!.slotId === id))) {
       exclude("incomplete-planned-block"); continue;
@@ -61,8 +65,8 @@ export function analyzeCanaryPairs(input: readonly CanaryRun[]) {
     const add = (left: CanaryRun, right: CanaryRun, mode: "A/A" | "models") => {
       if (left.route !== right.route || left.effort !== right.effort
         || left.attempts[0]!.billing !== right.attempts[0]!.billing) return;
-      const key = JSON.stringify([first.suiteHash, first.family, mode, configuration(left), configuration(right)]);
-      const group = comparisons.get(key) ?? { suiteHash: first.suiteHash, family: first.family,
+      const key = JSON.stringify([executionSource, first.suiteHash, first.family, mode, configuration(left), configuration(right)]);
+      const group = comparisons.get(key) ?? { executionSource, suiteHash: first.suiteHash, family: first.family,
         route: left.route, effort: left.effort, billing: left.attempts[0]!.billing, mode,
         left: left.model, right: right.model, pairs: [] };
       const differences = {} as Record<Metric, number | null>;

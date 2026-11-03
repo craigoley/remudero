@@ -3,8 +3,10 @@ import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
 import type { WorkspaceUsageEvidence } from "./workspace-usage.js";
 import type { WorkerExecutionEvidenceV1 } from "./worker-execution-evidence.js";
+import type { CodingConfiguredBounds, CodingObservedResources } from "./model-canary-coding.js";
 
 export type CanaryBilling = "api" | "subscription";
+export type CanaryExecutionSource = "native-provider-execution" | "synthetic-control-replay";
 export type CanarySourceActivityKind = "coding-dispatch" | "non-dispatch-review" | "synthetic-canary" | "other";
 /** Explicit source classification only. Canary family labels do not establish dispatch activity. */
 export interface CanarySourceActivity {
@@ -49,6 +51,31 @@ export interface CanaryAttempt {
   workspaceUsage?: WorkspaceUsageEvidence;
   /** Optional, source-bound worker-spawn evidence. Legacy request measurements remain separate. */
   executionEvidence?: WorkerExecutionEvidenceV1;
+  /** Explicit producer-side join; never rewrite the worker's own attemptId to the canary ID. */
+  workerExecutionJoin?: CanaryWorkerExecutionJoinV1;
+  codingExecution?: CodingExecutionObservationV1;
+}
+export interface CanaryWorkerExecutionJoinV1 {
+  version: "canary-worker-execution-join-v1";
+  runId: string;
+  canaryAttemptId: string;
+  workerSpawnAttemptId: string;
+  unit: "worker-spawn";
+  measurementScope: "returned-terminal-result";
+}
+export interface CodingExecutionObservationV1 {
+  version: "canary-coding-execution-observation-v1";
+  canaryAttemptId: string;
+  workerSpawnAttemptId: string | null;
+  codingExecutionAttemptId: string | null;
+  hostExecutionId: string | null;
+  sourceDigest: string | null;
+  fixtureDigest: string;
+  state: "scored" | "unavailable";
+  reason: string;
+  configured: CodingConfiguredBounds | null;
+  observed: CodingObservedResources | null;
+  closure: "proven" | "unavailable";
 }
 export interface CanaryRun {
   id: string;
@@ -58,6 +85,8 @@ export interface CanaryRun {
   route: string;
   effort: string;
   family: string;
+  /** Durable source class; absence is legacy/unclassified, never assumed native. */
+  executionSource?: CanaryExecutionSource;
   verified: boolean | null;
   totalDurationMs: number | null;
   attempts: CanaryAttempt[];
@@ -109,14 +138,22 @@ function unavailableOnly(value: unknown): boolean {
 }
 
 /** Validate only the frozen v1 fields consumed here. Private JSON is data, not a trusted TS object. */
-function inspectExecutionEvidence(value: unknown, attempt: CanaryAttempt): EvidenceDisposition {
+function inspectExecutionEvidence(value: unknown, attempt: CanaryAttempt, run: CanaryRun): EvidenceDisposition {
   if (value === undefined) return { state: "absent" };
   const invalid = (reason: string): EvidenceDisposition => ({ state: "invalid", reason });
   if (!record(value)) return invalid("evidence-not-object");
   if (!boundedString(attempt.id)) return invalid("attempt-id-invalid");
   if (value.version !== "worker-execution-evidence-v1") return invalid("unsupported-evidence-version");
   if (value.unit !== "worker-spawn" || value.measurementScope !== "returned-terminal-result") return invalid("unsupported-evidence-scope");
-  if (value.attemptId !== attempt.id) return invalid("attempt-id-mismatch");
+  const join = attempt.workerExecutionJoin;
+  if (join === undefined) {
+    if (value.attemptId !== attempt.id) return invalid("attempt-id-mismatch");
+  } else if (!record(join) || Object.keys(join).length !== 6
+    || join.version !== "canary-worker-execution-join-v1" || join.runId !== run.id
+    || join.canaryAttemptId !== attempt.id || typeof join.workerSpawnAttemptId !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(join.workerSpawnAttemptId)
+    || join.unit !== "worker-spawn" || join.measurementScope !== "returned-terminal-result"
+    || value.attemptId !== join.workerSpawnAttemptId) return invalid("worker-execution-join-invalid");
   if (!record(value.identity) || !record(value.execution) || !record(value.accounting)) return invalid("evidence-section-invalid");
 
   const identity = value.identity, execution = value.execution, accounting = value.accounting;
@@ -199,6 +236,7 @@ export interface CanaryExecutionEvidenceProjection {
   sourceAttemptIdsTruncated: boolean;
   attemptRows: Array<{
     attemptId: string;
+    workerSpawnAttemptId: string | null;
     state: "observed" | "absent" | "invalid";
     reason: string | null;
     workerDurationMs: number | null;
@@ -235,6 +273,16 @@ export interface CanaryExecutionEvidenceProjection {
     heldUsd: CanaryEvidenceMetricCoverage;
   };
   exclusions: Record<string, number>;
+}
+export interface CanaryCodingExecutionProjection {
+  attempts: number;
+  observed: number;
+  unavailable: number;
+  invalid: number;
+  rows: Array<{ canaryAttemptId: string; workerSpawnAttemptId: string | null; hostExecutionId: string | null;
+    codingExecutionAttemptId: string | null; sourceDigest: string | null; fixtureDigest: string | null;
+    state: "scored" | "unavailable" | "invalid"; reason: string; closure: "proven" | "unavailable";
+    configured: CodingConfiguredBounds | null; observedResources: CodingObservedResources | null }>;
 }
 export interface CanaryCodingCohortCoverage {
   includedAttempts: number;
@@ -282,7 +330,9 @@ function executionProjection(attempts: readonly CanaryAttempt[], dispositions: R
   const valid = rows.filter(row => row.disposition.state === "observed");
   const amount = (value: EvidenceRead<number>) => value.state === "observed" ? value.value : null;
   const attemptRows = rows.map(({ attempt, disposition }) => {
-    if (disposition.state !== "observed") return { attemptId: attempt.id, state: disposition.state,
+    const workerSpawnAttemptId = attempt.workerExecutionJoin?.workerSpawnAttemptId
+      ?? (attempt.executionEvidence?.attemptId === attempt.id ? attempt.id : null);
+    if (disposition.state !== "observed") return { attemptId: attempt.id, workerSpawnAttemptId, state: disposition.state,
       reason: disposition.state === "invalid" ? disposition.reason : "worker-execution-evidence-not-present",
       workerDurationMs: null, firstTextMs: null, inputTokens: null, outputTokens: null,
       cacheReadTokens: null, cacheCreationTokens: null, billingMode: null, apiUsageRatedUsd: null,
@@ -291,7 +341,7 @@ function executionProjection(attempts: readonly CanaryAttempt[], dispositions: R
     // A partial usage object does not establish any field as complete. Keep it
     // visible in coverage while withholding per-attempt numeric counters.
     const tokens = tokenUsage.state === "observed" ? tokenUsage.value : null;
-    return { attemptId: attempt.id, state: "observed" as const, reason: null,
+    return { attemptId: attempt.id, workerSpawnAttemptId, state: "observed" as const, reason: null,
       workerDurationMs: amount(evidence.execution.durationMs), firstTextMs: amount(evidence.execution.firstTextMs),
       inputTokens: tokens?.input ?? null, outputTokens: tokens?.output ?? null,
       cacheReadTokens: tokens?.cacheRead ?? null, cacheCreationTokens: tokens?.cacheCreation ?? null,
@@ -375,6 +425,57 @@ function executionProjection(attempts: readonly CanaryAttempt[], dispositions: R
     }, exclusions };
 }
 
+function inspectCodingExecution(value: unknown, attempt: CanaryAttempt, run: CanaryRun):
+  | { state: "absent" }
+  | { state: "invalid"; reason: string }
+  | { state: "observed"; evidence: CodingExecutionObservationV1 } {
+  if (value === undefined) return { state: "absent" };
+  const invalid = (reason: string) => ({ state: "invalid" as const, reason });
+  if (run.family !== "coding" || !record(value)) return invalid("coding-execution-scope-invalid");
+  const fields = ["version", "canaryAttemptId", "workerSpawnAttemptId", "codingExecutionAttemptId", "hostExecutionId",
+    "sourceDigest", "fixtureDigest", "state", "reason", "configured", "observed", "closure"];
+  if (Object.keys(value).length !== fields.length || !fields.every(field => Object.hasOwn(value, field))
+    || value.version !== "canary-coding-execution-observation-v1" || value.canaryAttemptId !== attempt.id
+    || !(value.workerSpawnAttemptId === null || typeof value.workerSpawnAttemptId === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.workerSpawnAttemptId))
+    || (value.workerSpawnAttemptId !== null && (value.workerSpawnAttemptId !== attempt.workerExecutionJoin?.workerSpawnAttemptId
+      || !attempt.workerExecutionJoin || attempt.workerExecutionJoin.canaryAttemptId !== attempt.id
+      || attempt.workerExecutionJoin.runId !== run.id)) || value.codingExecutionAttemptId !== null
+      && (typeof value.codingExecutionAttemptId !== "string" || !/^[0-9a-f-]{36}$/i.test(value.codingExecutionAttemptId))
+    || !(value.hostExecutionId === null || typeof value.hostExecutionId === "string" && value.hostExecutionId.length <= 256)
+    || !(value.sourceDigest === null || typeof value.sourceDigest === "string" && /^[a-f0-9]{64}$/.test(value.sourceDigest))
+    || typeof value.fixtureDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.fixtureDigest)
+    || !(value.state === "scored" || value.state === "unavailable")
+    || typeof value.reason !== "string" || value.reason.length < 1 || value.reason.length > 200
+    || !(value.closure === "proven" || value.closure === "unavailable")
+    || !(value.configured === null || record(value.configured))
+    || !(value.observed === null || record(value.observed))) return invalid("coding-execution-identity-invalid");
+  if (value.state === "scored" && (value.closure !== "proven" || value.hostExecutionId === null
+    || value.workerSpawnAttemptId === null || value.codingExecutionAttemptId === null || value.sourceDigest === null
+    || value.configured === null || value.observed === null)) return invalid("coding-execution-score-unqualified");
+  return { state: "observed", evidence: value as unknown as CodingExecutionObservationV1 };
+}
+
+function codingExecutionProjection(attempts: readonly CanaryAttempt[], dispositions: ReadonlyMap<string, ReturnType<typeof inspectCodingExecution>>): CanaryCodingExecutionProjection {
+  const rows = attempts.map(attempt => {
+    const disposition = dispositions.get(attempt.id) ?? { state: "absent" as const };
+    const base = { canaryAttemptId: attempt.id,
+      workerSpawnAttemptId: attempt.workerExecutionJoin?.workerSpawnAttemptId ?? null };
+    if (disposition.state !== "observed") return { ...base, hostExecutionId: null, codingExecutionAttemptId: null,
+      sourceDigest: null, fixtureDigest: null, state: disposition.state === "invalid" ? "invalid" as const : "unavailable" as const,
+      reason: disposition.state === "invalid" ? disposition.reason : "coding-execution-evidence-not-present",
+      closure: "unavailable" as const, configured: null, observedResources: null };
+    const evidence = disposition.evidence;
+    return { ...base, hostExecutionId: evidence.hostExecutionId,
+      codingExecutionAttemptId: evidence.codingExecutionAttemptId || null, sourceDigest: evidence.sourceDigest,
+      fixtureDigest: evidence.fixtureDigest, state: evidence.state, reason: evidence.reason, closure: evidence.closure,
+      configured: evidence.configured, observedResources: evidence.observed };
+  });
+  return { attempts: rows.length, observed: rows.filter(row => row.state === "scored").length,
+    unavailable: rows.filter(row => row.state === "unavailable").length,
+    invalid: rows.filter(row => row.state === "invalid").length, rows };
+}
+
 function codingCohortProjection(runs: readonly CanaryRun[]): CanaryCodingCohortCoverage {
   const coverage: CanaryCodingCohortCoverage = { includedAttempts: 0, excludedNonDispatchReviewAttempts: 0,
     excludedSyntheticCanaryAttempts: 0, excludedOtherAttempts: 0, unclassifiedAttempts: 0, sourceReceiptIds: [] };
@@ -434,11 +535,15 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
   const attemptIds = new Set<string>();
   const trialSlots = new Set<string>();
   const executionByAttempt = new Map<string, EvidenceDisposition>();
+  const codingByAttempt = new Map<string, ReturnType<typeof inspectCodingExecution>>();
   for (const run of input) {
     if (!run.id || !run.caseId || !/^[a-f0-9]{64}$/.test(run.suiteHash) || !run.model || !run.route || !run.effort || !run.family)
       throw new Error("canary-run-identity-invalid");
     if ((run.verified !== null && typeof run.verified !== "boolean")
       || (run.totalDurationMs !== null && !nonnegativeMeasurement(run.totalDurationMs))) throw new Error("canary-run-outcome-invalid");
+    if (run.executionSource !== undefined
+      && !["native-provider-execution", "synthetic-control-replay"].includes(run.executionSource))
+      throw new Error("canary-execution-source-invalid");
     if (run.trial !== undefined) {
       const t = run.trial, hash = /^[a-f0-9]{64}$/;
       if (!t || t.version !== "canary-trial-block-v1" || !/^\d{4}-\d{2}-\d{2}$/.test(t.day)
@@ -467,7 +572,8 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
     for (const attempt of run.attempts) {
       if (!attempt.id || attemptIds.has(attempt.id)) throw new Error("canary-attempt-identity-reused");
       attemptIds.add(attempt.id);
-      executionByAttempt.set(attempt.id, inspectExecutionEvidence(attempt.executionEvidence, attempt));
+      executionByAttempt.set(attempt.id, inspectExecutionEvidence(attempt.executionEvidence, attempt, run));
+      codingByAttempt.set(attempt.id, inspectCodingExecution(attempt.codingExecution, attempt, run));
       for (const value of [attempt.durationMs, attempt.firstTextMs, attempt.generationMs, attempt.inputTokens,
         attempt.outputTokens, attempt.cacheReadTokens, attempt.cacheWriteTokens, attempt.reasoningTokens, attempt.usageRatedUsd])
         if (value !== null && !nonnegativeMeasurement(value)) throw new Error("canary-measurement-invalid");
@@ -483,11 +589,12 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
   }
   const groups = new Map<string, CanaryRun[]>();
   for (const run of runs.values()) {
-    const key = JSON.stringify([run.suiteHash, run.model, run.route, run.effort, run.family]);
+    const executionSource = run.executionSource ?? "unclassified";
+    const key = JSON.stringify([executionSource, run.suiteHash, run.model, run.route, run.effort, run.family]);
     const rows = groups.get(key) ?? []; rows.push(run); groups.set(key, rows);
   }
   return { version: "model-canary-metrics-v1" as const, private: true as const, uniqueRuns: runs.size,
-    groups: [...groups.values()].map(rows => {
+    executionSourceTrust: "caller-declared-unverified" as const, groups: [...groups.values()].map(rows => {
       const attempts = rows.flatMap(r => r.attempts);
       const observed = rows.filter(r => r.verified !== null).length;
       const correct = rows.filter(r => r.verified === true).length;
@@ -501,7 +608,8 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
           perCorrectTaskUsd: calls.length && known.length === calls.length && observed === rows.length && correct > 0 ? measured / correct : null };
       };
       const row = rows[0]!;
-      return { suiteHash: row.suiteHash, model: row.model, route: row.route, effort: row.effort, family: row.family,
+      return { executionSource: row.executionSource ?? "unclassified",
+        suiteHash: row.suiteHash, model: row.model, route: row.route, effort: row.effort, family: row.family,
         tasks: rows.length, distinctCases: new Set(rows.map(r => r.caseId)).size, attempts: attempts.length,
         trialBlocks: new Set(rows.flatMap(r => r.trial ? [r.trial.blockId] : [])).size,
         unpairedRuns: rows.filter(r => !r.trial).length,
@@ -515,6 +623,8 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
         identityComparable: attempts.length > 0 && attempts.every(a => a.servedModel === row.model),
         failedAttempts: attempts.filter(a => a.terminal !== "complete").length,
         apiEstimate: cost("api"), subscriptionNotional: cost("subscription"), invoiceUsd: null,
-        executionEvidence: executionProjection(attempts, executionByAttempt), codingCohort: codingCohortProjection(rows) };
+        executionEvidence: executionProjection(attempts, executionByAttempt),
+        codingExecution: row.family === "coding" ? codingExecutionProjection(attempts, codingByAttempt) : null,
+        codingCohort: codingCohortProjection(rows) };
     }) };
 }

@@ -17,6 +17,34 @@ function block(day = "2026-10-10", caseId = "case-1", aa = false): CanaryRun[] {
       blockId: canaryTrialBlockId(day, suiteHash, caseId, scheduleDigest, slots), aaLabel: aa ? i ? "B" : "A" : null } }));
 }
 
+test("paired canary analysis excludes synthetic replay controls and refuses mixed source blocks", () => {
+  const synthetic = block();
+  for (const row of synthetic) row.executionSource = "synthetic-control-replay";
+  const excluded = analyzeCanaryPairs(synthetic);
+  assert.equal(excluded.completeBlocks, 0);
+  assert.equal(excluded.exclusions[0]!.reason, "synthetic-control-replay");
+  const mixed = block(); mixed[0]!.executionSource = "native-provider-execution";
+  mixed[1]!.executionSource = "synthetic-control-replay";
+  assert.equal(analyzeCanaryPairs(mixed).exclusions[0]!.reason, "mixed-execution-source");
+});
+
+test("private report labels and filters synthetic controls separately from provider metrics", () => {
+  const provider = block(); for (const row of provider) row.executionSource = "native-provider-execution";
+  const synthetic = block("2026-10-11"); for (const row of synthetic) row.executionSource = "synthetic-control-replay";
+  const html = renderCanaryReport([...provider, ...synthetic]);
+  const data = JSON.parse(html.match(/<script type="application\/json" id="data">([^<]+)<\/script>/)![1]!);
+  const nativeGroups = data.projection.groups.filter((g: { executionSource: string }) => g.executionSource === "native-provider-execution");
+  const replayGroups = data.projection.groups.filter((g: { executionSource: string }) => g.executionSource === "synthetic-control-replay");
+  assert.equal(nativeGroups.length, 2, "each native model keeps its own group");
+  assert.equal(replayGroups.length, 2, "each replay model keeps its own group");
+  assert.equal([...nativeGroups, ...replayGroups].every((g: { tasks: number }) => g.tasks === 1), true);
+  assert.match(html, /Declared execution source/); assert.match(html, /Declared synthetic control replay/);
+  assert.match(html, /labels are declarations, not attestations/);
+  assert.match(html, /matching native owner receipts/);
+  assert.equal(data.analysis.comparisons.every((g: { executionSource: string }) => g.executionSource === "native-provider-execution"), true);
+  assert.equal(data.analysis.exclusions.some((row: { reason: string }) => row.reason === "synthetic-control-replay"), true);
+});
+
 test("paired canary analysis requires complete scheduled blocks and retains descriptive metric provenance", () => {
   const rows = block(), result = analyzeCanaryPairs(rows), c = result.comparisons[0]!;
   assert.equal(result.completeBlocks, 1); assert.equal(result.inference, "descriptive-only");
