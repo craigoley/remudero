@@ -1,0 +1,72 @@
+- id: W1-T11161
+  title: A plan-only diff's coverage-ratchet reports a named not-applicable pass on its own diff-class evidence whether or not the coverage matrix ran, and any other skipped matrix stays red; #16297 and #16322 went red because coverage-ledger hit its 1-minute ceiling and skipped the matrix
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # operator-instructed 2026-11-02; changes CI gating for plan-only diffs; security gates unchanged. Rule 19: one concern, how the coverage aggregator answers a plan-only diff
+  band_meaning: span
+  origin: "operator instruction 2026-11-02 (in chat): plan only PRs get a super fast lane that doesn't require all this overhead"
+  plan_refs:
+    - W1-T2428
+    - W1-T3345
+    - W1-T5892
+    - W1-T9448
+    - W1-T4404
+  files:
+    - .github/workflows/ci.yml
+    - test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts
+    - test/workflow-single-suite-run.test.ts
+    - test/fast-lane-classifier.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the coverage-shard matrix result is skipped, the coverage-ratchet aggregator classifies the pull request's own diff with scripts/diff-class.mjs --coverage-class (the predicate the shards use) and passes only for PLAN_ONLY, printing a not-applicable line that names the class, the changed-file count and the coverage-ledger result it saw
+      proof: "unit test: test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts"
+    - claim: A skipped matrix on any other class, on an unreadable or failed classification (diff-class fails closed to SOURCE), or on a push, merge_group or workflow_dispatch event still fails the aggregator with today's "never ran" message, so an unexplained skip is never green
+      proof: "grep: W1-T11161 criterion 2 in test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts"
+    - claim: A plan-only diff whose matrix did run also ends the aggregator with the same named not-applicable line rather than a bare pass, and the success, failure and cancelled arms are otherwise unchanged
+      proof: "grep: W1-T11161 criterion 3 in test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 (GitHub REST, read through the broker; read-only):
+    - #16322, run 41538944616: coverage-ledger CANCELLED after 1m46s (22:38:18-22:40:04Z) at its timeout-minutes: 1. The
+      coverage-shard matrix, which needs coverage-ledger, was skipped. The coverage-ratchet aggregator then failed:
+      "the shard matrix never ran (matrix result: skipped)".
+    - #16297, run 41534926238 attempt 1: coverage-ledger cancelled after 69 s (22:10:39-22:11:48Z); coverage-ratchet failure at
+      22:12:14Z. The re-run's coverage-ledger finished in 30 s and the matrix ran.
+    - So the skip is not a plan-only short-circuit. It is the ledger job's 1-minute ceiling, which includes checkout and
+      setup-node, firing on a slow runner. For a PLAN_ONLY diff that job does nothing anyway: its resolve step exits on
+      "class=PLAN_ONLY, no instrumented split".
+    - #16246 (plan-only, 1 file): 71 check runs, 70.8 job-minutes, 16.4 min wall. ci-shard 1-8 took 231-393 s each (~42 min),
+      light-gates 519 s, the 8 coverage shards 39-54 s each.
+    WHY THE OPERATOR'S "lint-plan plus the selector's suites" IS ALREADY TRUE, AND WHAT THAT MEANS FOR THE GAIN:
+    - ci.yml's PLAN_ONLY lane runs `diff-class.mjs --list-plan-reading-suites`. For one new shard that is 624 of 4293 suites.
+    - The affected-suite selector (src/lib/affected-suites.ts affectedSelectionOrFull) picks the same 624 for that path, every one
+      for "reads a changed file by path": they enumerate plan/tasks.d, which a new shard can break.
+    - So the projected 70 -> ~5 workflow-minutes is not reachable by selection. This task removes the false red and the
+      unexplained-skip ambiguity. The coverage matrix's own ~6 job-minutes and light-gates' 8.7 minutes stay; reported, not filed.
+    SECURITY GATES ARE UNTOUCHED: security-merge-policy.yml, codeql.yml and their required contexts are not in files: and change
+    in no way. ci-gate (a required context) still aggregates coverage-ratchet; nothing posts or forges a status.
+  design: |
+    1. coverage-ratchet-required gains a classify step that runs only on pull_request when needs.coverage-ratchet.result is skipped
+       or success: a sparse checkout (fetch-depth 2; scripts/, src/lib/plan-scope.ts, .nvmrc), setup-node, then
+       `git diff --name-only HEAD^1...HEAD` into diff-class.mjs --coverage-class, its stdout clamped to the five known tokens as the
+       shard's classify step does. Its outputs (class, count) feed the existing case statement.
+    2. The skipped arm passes with "coverage-ratchet: not applicable — class=PLAN_ONLY over N changed file(s) per
+       scripts/diff-class.mjs; coverage-ledger=<result>; no source line can move coverage" only when class is PLAN_ONLY. Every other
+       path keeps its message and exit 1. The success arm prints the same line when that class is PLAN_ONLY.
+    3. No `if:` is added anywhere (test/diff-coverage.test.ts forbids step `if:` in both coverage jobs): every guard is shell. The
+       aggregator's existing checkout and setup-node move above the gate so the classify step can read the diff. On a not-applicable
+       skip the gate writes not_applicable=true and the artifact step stands down as PLAN_ONLY, so every later fast-lane guard skips
+       (download-artifact at the pinned sha succeeds on zero pattern matches). Two existing tests learn the new consumer:
+       workflow-single-suite-run (one plain-node classification, never --import tsx) and fast-lane-classifier (seven jobs read it).
+  falsifier: |
+    At origin/main, the aggregator's bash with SHARD_RESULT=skipped exits 1 for a PR whose only change is a plan/tasks.d shard,
+    which is what #16297 attempt 1 and #16322 recorded.
+  note: |
+    Reserved with rmd next-task-id --branch plan-file-1793659332843. Operator: file, do not hand-build (CI workflow change); the
+    operator decides after reading the dry analysis. NOT THIS TASK, reported separately: coverage-ledger's 1-minute ceiling also
+    cancels on SOURCE diffs (a real-coverage false red). The test basename avoids "ratchet" so it is not counted as a rule suite.

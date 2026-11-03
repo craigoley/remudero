@@ -138,7 +138,7 @@ test("W1-T9106: the launcher applies the learned ceiling to the daemon verb only
     assert.deepEqual(launchHeapCeiling(text, INHERITED, join(f.dir, "elsewhere", "state"), Date.now()), { ceiling_source: "inherited", reason: "written for another instance" });
     assert.deepEqual(launchHeapCeiling(text, INHERITED, f.stateDir, file.valid_until), { ceiling_source: "inherited", reason: "stale" });
     assert.equal(file.valid_until - file.written_at, HEAP_CEILING_CURRENT_MS);
-    writeFileSync(heapCeilingPath(f.stateDir), JSON.stringify({ ...file, valid_until: Date.now() - 1 }));
+    writeFileSync(heapCeilingPath(f.stateDir), JSON.stringify({ ...file, valid_until: 1 }));
     assert.equal(launch(f, "daemon", INHERITED).node_options, INHERITED, "a stale file keeps the inherited ceiling");
     writeFileSync(heapCeilingPath(f.stateDir), JSON.stringify({ ...file, ceiling_mib: 12 }));
     assert.equal(launch(f, "daemon", INHERITED).node_options, INHERITED, "a damaged ceiling keeps the inherited one");

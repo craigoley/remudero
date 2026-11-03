@@ -1,0 +1,91 @@
+- id: W1-T11167
+  title: "A PR GitHub reads dirty that git merges cleanly gets git's merge of main pushed by the sweep, with no fix worker — #15602 sat dirty on GitHub from 2026-11-02 17:43Z while every local merge probe of its exact head read clean (a rename main made, R094, that git's ort merge follows and GitHub's merge does not), update-branch answered 422 twice, and the only route left was a merge-conflict worker round for a conflict git cannot see"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, the sweep pushes git's own clean merge of main when GitHub alone calls the PR dirty; high because it pushes a merge to a fleet run branch
+  band_meaning: blast-radius
+  origin: operator-session#conflict-findings-2026-11-03
+  plan_refs:
+    - W1-T9578
+    - W1-T6133
+    - W1-T4914
+    - W1-T9454
+    - W1-T3602
+    - W1-T2548
+  files:
+    - src/lib/sweep.ts
+    - src/lib/ledger.ts
+    - test/github/a-pr-github-reads-dirty-that-git-merges-cleanly-gets-the-merge-without-a-worker.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A PR on its own task's run branch that GitHub reads dirty, while the pass's sweep.merge_probe row for its exact head and the pass's main tip reads verdict clean, gets git's merge of main pushed to its branch as a two-parent merge commit carrying the PR's Remudero-Task trailer, under the same head and main leases, sandbox and fence regenerateConflictViaGit already holds, and no fix worker is dispatched or charged; the fixture is a main that renames a file the head edited, which git follows and a rename-blind merge does not
+      proof: "unit test: test/github/a-pr-github-reads-dirty-that-git-merges-cleanly-gets-the-merge-without-a-worker.test.ts"
+    - claim: A head or main that moved before the push refuses as lease-mismatch, and a probe row for a different main, no probe row, a probe verdict other than clean, or a local merge that leaves any unmerged path pushes nothing and reaches today's conflicted worker row unchanged
+      proof: "grep: W1-T11167 criterion 2 in test/github/a-pr-github-reads-dirty-that-git-merges-cleanly-gets-the-merge-without-a-worker.test.ts"
+    - claim: Each attempt writes one sweep.conflict_regenerated row with mode clean-merge, the GitHub mergeable state it overrode, the rename pairs the merge followed on paths the head touched, the new head and the outcome; a later pass at the same head and main reads that row and does not attempt again, and a new head that GitHub still reads dirty at the same main falls through to the worker row
+      proof: "grep: W1-T11167 criterion 3 in test/github/a-pr-github-reads-dirty-that-git-merges-cleanly-gets-the-merge-without-a-worker.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 ~00:30Z over the 7-day conflict rows of the core ledger union (~/Remudero-notes/conflict-findings-2026-11-03.md,
+    evidence in ~/Remudero-notes/conflict-evidence-1103/, read-only). Code reference origin/main 7338c1fd, re-read at c0a6f1c74.
+    #15602 (W1-T10722, head ee01645, branch run-W1-T10722-*):
+    - GitHub read dirty from 2026-11-02T17:43Z. The compare evidence named scripts/test-tier-manifest.json and src/run-task.ts.
+    - sweep.update_branch.conflict at 17:32:57Z (behind_by 187) and 22:17:16Z (behind_by 200): "merge conflict between base and
+      head (HTTP 422)". 6 update-branch attempts, 2 updated, 4 conflict.
+    - Every local probe read clean: 4 sweep.merge_probe rows, among them main 995bd369 at 20:37:36Z (behind_by 200) and main
+      754a0037 at 23:05:29Z (behind_by 228), each with conflict_paths [].
+    - The findings attribute the split to a rename main made (R094): ort follows it, GitHub's merge apparently does not.
+    WHY NOTHING RESOLVES IT TODAY:
+    - The regenerate route in the sweep's conflicted arm fires only on a probe verdict of conflict whose every path is a
+      REGENERABLE_ARTIFACT_GENERATORS key. A clean probe never reaches it.
+    - Called anyway, regenerateConflictViaGit returns outcome error, "probe conflict no longer has unmerged paths", when its
+      `git merge --no-commit` leaves nothing unmerged. That is the one case where git's merge is already the resolution.
+    - The conflicted arm then routes the PR to a merge-conflict fix worker, charged a fix's memory and admission, to resolve a
+      conflict git cannot reproduce. update-branch is GitHub's own merge and answers 422.
+    - 0 sweep.conflict_regenerated rows were written fleet-wide in the 7 days, so no row shows the route ever ran.
+    WHY THIS IS SAFE. It is W1-T9578's premise with an empty unmerged set: git's own three-way merge decides every path, and the
+    PR's head is the merge's first parent, so the push is a fast-forward of the branch under a lease on head and main. Once main
+    is an ancestor of the head, GitHub's own merge of the new head is trivially clean. The new head gets a fresh review and CI
+    like any other head, and that is the fence W1-T3602 asked for: no byte is chosen by hand.
+    NOT COVERED ELSEWHERE: W1-T9578 (merged, #13952, its shard still reads queued) resolves registry-only conflicts. W1-T9454
+    (merged) uses the probe as evidence for the same worker. Items 1-3 of the same findings (base-aware hysteresis, probe beats
+    compare, the handoff deadlock) are being filed and built in a sibling operator session. They decide whether the PR is read as
+    conflicted. This task decides what the conflicted arm does when git says the merge is clean. Item 7's conflict gardener
+    re-enters this route as its deterministic tier.
+  design: |
+    1. TRIGGER. In the sweep's conflicted arm, beside the regenerable check, for a PR on its own task's run branch
+       (fixHeadAcceptable): when the pass's sweep.merge_probe row for this exact head_sha and mainTipSha reads verdict clean,
+       take the clean-merge route. No row for that pair, or any other verdict, leaves today's flow unchanged.
+    2. RESOLVE through regenerateConflictViaGit, which gains a mode. In clean-merge mode a `git merge --no-edit --no-commit`
+       that exits 0 with an empty `git ls-files -u` is committed as a merge commit, "fix(sweep): merge main where GitHub's merge
+       reports a conflict git does not", with the PR's Remudero-Task trailer. Any unmerged path, a non-zero merge, or a staged
+       path outside the merge's own result aborts the merge and falls through. The fetch, lease checks, detached worktree,
+       ancestry check, assertLiveWriteAllowed, push and cleanup are the existing ones. No new WORKTREE_SITE_REGISTRY entry.
+       In regenerable mode, an empty unmerged set stays an error, as today.
+    3. RECORD. Use the existing sweep.conflict_regenerated step with mode clean-merge, github_mergeable_state, and renames (the
+       `git diff --name-status -M` R-pairs between the merge base and main on paths the head changed), plus today's fields.
+       Keep one attempt per (head, main), keyed on that row and inFlightConflictRegenerations.
+    4. VERIFY. A new head is reviewed and CI'd as any other. If GitHub still reads it dirty at the same main, nothing re-pushes,
+       and the worker row runs.
+    5. COST. One git merge. No worker spawns, so there is no fix-admission charge. src/run-task.ts is untouched.
+    Tests go in the new file, titled verbatim as in the proofs, against real throwaway repos (gitRepo()): a main that renames a
+    file the head edited (git merges it cleanly); a head and main that edit one line both ways (unmerged, falls through); and a
+    lease that moves between the probe and the push.
+  falsifier: |
+    At origin/main the rename fixture reads probe verdict clean, the conflicted arm skips the regenerate route, and the PR gets
+    the merge-conflict worker row with no push, so the first test fails. A regenerateConflictViaGit call on it returns outcome
+    error, "probe conflict no longer has unmerged paths". If the unmerged-set check is dropped, the both-sides fixture is pushed
+    with conflict markers and the second test fails. If the per-(head, main) receipt is dropped, a second pass pushes again and
+    the third test fails.
+  note: |
+    reservation hand-off: plan-file-1793666131000 -> plan-file-1793666131000
+    Reserved with rmd next-task-id --branch plan-file-1793666131000. Filed 2026-11-03 from the conflict findings, item 4 (p1),
+    under the operator ruling of 2026-11-02 that rmd must resolve merge conflicts automatically, with a gardener as the backstop.
+    This task extends W1-T9578's regenerateConflictViaGit and edits the same arm of src/lib/sweep.ts as items 1-3 (item 1 is W1-T11166, #16362; sibling
+    session). Build it after they merge if they are still open. They are not named in depends_on because they are not on main
+    at filing.
