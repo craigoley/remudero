@@ -18352,6 +18352,31 @@ export async function runSweep(
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   deps.markPrelude?.("armed_body_guard");
   const ledgerLines = readLedger(deps.ledgerPath);
+  const openEscalationHistory = new Map<string, ReadonlyArray<Record<string, unknown>>>();
+  const openEscalationSince = (pr: OpenPrView): string | undefined => {
+    const taskId = fixLedgerTaskIdFor(pr);
+    const key = `${pr.prNumber}@${pr.headSha}`;
+    let history = openEscalationHistory.get(key);
+    if (history === undefined) {
+      history = ledgerLines;
+      // Rotation prefers an older acted receipt to a newer hold. Recover that head's hold and
+      // subsequent dispatch/done resets together, in timestamp order, from the archived history.
+      const checkpoint = ledgerLines.findLast(row => row.step === "sweep.disposed" && row.acted === true &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.task_id === taskId);
+      if (taskId !== undefined && checkpoint !== undefined && !deps.readLedger && !deps.dryRun) {
+        const union = readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
+          step: ["sweep.disposed", "fix.stood_down", "fix.dispatch", "fix.done"],
+          since: typeof checkpoint.ts === "string" ? checkpoint.ts : undefined,
+          pattern: new RegExp(JSON.stringify(taskId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+          refuseIncomplete: true,
+        });
+        if (union.ok) history = [...union.rows, ...ledgerLines.filter(row => row.task_id === taskId)].sort((a, b) =>
+          String(a.ts ?? "").localeCompare(String(b.ts ?? "")));
+      }
+      openEscalationHistory.set(key, history);
+    }
+    return openEscalationStandDownSince(history, taskId, pr.headSha, pr.prNumber);
+  };
   let contractHoldRefreshSpent = false;
   // W1-T10608: at most one design-hold main adoption per pass, so a main fix never fans out update-branch.
   let designMainAdoptionSpent = false;
@@ -20949,7 +20974,7 @@ export async function runSweep(
     // W1-T10653: an already-open-escalation stand-down is not a hold, so it never reached the SLO below; once it has aged past
     // the SLO it is read as one, so the ladder's rebuild clears it instead of the fix lane standing down for good.
     if (heldEscalationAt === undefined && disposition === "blocked-fixable" && !deps.dryRun) {
-      const openSince = openEscalationStandDownSince(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha, pr.prNumber);
+      const openSince = openEscalationSince(pr);
       if (openSince !== undefined && now - Date.parse(openSince) >= HELD_ESCALATION_SLO_MS) {
         const issues = await readOpenEscalations();
         const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
@@ -21755,8 +21780,7 @@ export async function runSweep(
                   spent = false;
                   standDownReason = openHold.reason;
                   extraDisposedFields = { ...extraDisposedFields,
-                    open_escalation_hold_since: openEscalationStandDownSince(ledgerLines, fixLedgerTaskIdFor(pr),
-                      pr.headSha, pr.prNumber) ?? clockFromMillisFn(() => now).iso() };
+                    open_escalation_hold_since: openEscalationSince(pr) ?? clockFromMillisFn(() => now).iso() };
                   break;
                 }
               }

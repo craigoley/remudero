@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
 import type { Plan } from "#src/lib/plan.js";
+import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { buildSweepEffects, HELD_ESCALATION_SLO_MS, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 
@@ -100,10 +102,78 @@ function fixture(t: { after: (fn: () => void) => void }, heldForMs: number, cloc
     priorStrikes: 1, autoMergeArmed: false, lastActivityAt: stamp(-heldForMs),
     body: `Builds the remedy.\n\nRemudero-Task: ${TASK}\n`,
   };
-  return { rows, calls, observations, judged, effects, pr, open, sweep: () => runSweep([pr], deps) };
+  return { rows, calls, observations, judged, effects, pr, open, deps, sweep: () => runSweep([pr], deps) };
 }
 
 test("W1-T10653: flow-review-failed-n-unmet-criterion clears without a person", async (t) => {
+  for (const scenario of ["control", "older action", "completed repair resets the hold"]) {
+    await t.test(`hourly ledger rotation: ${scenario}`, async (t) => {
+      const olderAction = scenario !== "control";
+      const reset = scenario === "completed repair resets the hold";
+      const clock = { now: NOW - HELD_ESCALATION_SLO_MS };
+      const heldSince = new Date(clock.now).toISOString();
+      const h = fixture(t, HELD_ESCALATION_SLO_MS, clock, false, undefined, true);
+      const seed = { step: "sweep.disposed", task_id: TASK, pr_number: PR, head_sha: HEAD, run_id: RUN,
+        disposition: "blocked-fixable", acted: true, ts: new Date(clock.now - 80 * MIN).toISOString() };
+      const initialRows: Record<string, unknown>[] = olderAction ? [seed] : [];
+      if (reset) initialRows.push({ ...seed, acted: false, ts: new Date(clock.now - 70 * MIN).toISOString(),
+        open_escalation_hold_since: new Date(clock.now - 70 * MIN).toISOString() });
+      writeFileSync(h.deps.ledgerPath, initialRows.map(row => JSON.stringify(row) + "\n").join(""));
+      delete h.deps.readLedger;
+      h.deps.appendLine = (path, row) => appendLedger(path, { ts: new Date(clock.now).toISOString(), ...row });
+      if (reset) h.deps.appendLine(h.deps.ledgerPath, { step: "fix.done", task_id: TASK, head_sha: HEAD,
+        run_id: RUN, ts: new Date(clock.now - 10 * MIN).toISOString() });
+      const holds: unknown[] = [];
+      let closedAt: number | undefined;
+      for (let hour = 0; hour <= 7; hour++) {
+        clock.now = Date.parse(heldSince) + hour * 60 * MIN;
+        // Each call reloads the rotated ledger, without any in-memory hold history.
+        await h.sweep();
+        const rows = readLedgerLines(h.deps.ledgerPath);
+        if (h.calls.includes("close")) {
+          closedAt = hour;
+          assert.deepEqual(h.calls, ["close"], "the same head must rebuild exactly once");
+          assert.equal(rows.filter(row => row.step === "sweep.strike_ladder.requeued").length, 1);
+          break;
+        }
+        holds.push(rows.findLast(row => row.step === "sweep.disposed")?.open_escalation_hold_since);
+        writeFileSync(h.deps.ledgerPath, JSON.stringify({ step: "ci.polling", detail: "x".repeat(64_000) }) + "\n", { flag: "a" });
+        const rotated = rotateLedger(h.deps.ledgerPath, { ceilingBytes: 64_000, smoothingWindowMs: 0,
+          now: () => new Date(clock.now) });
+        assert.equal(rotated.rotated, true, `exercise the real dedup block at hour ${hour}`);
+        if (olderAction) {
+          assert.ok(readLedgerLines(h.deps.ledgerPath).some(row => row.step === "sweep.disposed" &&
+            row.acted === true && row.ts === seed.ts), "rotation keeps the older action receipt");
+        }
+      }
+      assert.equal(closedAt, 6, "a seven-hour replay must rebuild at six hours, including the older-action history");
+      assert.deepEqual(holds, Array(6).fill(heldSince), "every pre-SLO pass must preserve the original hold time");
+    });
+  }
+
+  for (const incomplete of [false, true]) {
+    await t.test(`archive recovery refuses incomplete history ${incomplete}`, async (t) => {
+      const clock = { now: NOW };
+      const h = fixture(t, HELD_ESCALATION_SLO_MS, clock, false, undefined, true);
+      const seed = { step: "sweep.disposed", task_id: TASK, pr_number: PR, head_sha: HEAD, run_id: RUN,
+        disposition: "blocked-fixable", acted: true, ts: stamp(-8 * 60 * MIN) };
+      const oldHold = { ...seed, acted: false, ts: stamp(-7 * 60 * MIN), open_escalation_hold_since: stamp(-7 * 60 * MIN) };
+      const liveHold = { ...oldHold, ts: stamp(-60 * MIN), open_escalation_hold_since: stamp(-60 * MIN) };
+      writeFileSync(h.deps.ledgerPath, [seed, liveHold].map(row => JSON.stringify(row) + "\n").join(""));
+      writeFileSync(join(dirname(h.deps.ledgerPath), "ledger.2026-10-30T05-00-00-000Z.ndjson"), JSON.stringify(oldHold) + "\n");
+      if (incomplete) writeFileSync(join(dirname(h.deps.ledgerPath), "ledger.2026-10-30T05-30-00-000Z.ndjson.gz"), "unreadable gzip");
+      delete h.deps.readLedger;
+      h.deps.appendLine = (path, row) => appendLedger(path, { ts: new Date(clock.now).toISOString(), ...row });
+      await h.sweep();
+      assert.deepEqual(h.calls, incomplete ? [] : ["close"],
+        "only a complete archive can prove that the newer live timer has already expired");
+      const rows = readLedgerLines(h.deps.ledgerPath);
+      assert.equal(rows.some(row => row.step === "sweep.strike_ladder.requeued"), !incomplete);
+      if (incomplete) assert.equal(rows.findLast(row => row.step === "sweep.disposed")?.open_escalation_hold_since,
+        liveHold.open_escalation_hold_since, "an unreadable archive preserves the live hold");
+    });
+  }
+
   for (const issueOpen of [false, true]) {
     await t.test(`aged fix-lane hold with escalation ${issueOpen ? "open" : "closed"}`, async (t) => {
       const legacy = fixture(t, HELD_ESCALATION_SLO_MS + MIN);
