@@ -731,7 +731,8 @@ const MAIN_FAILED_FILES = /^(?:\S+Z )?FLAKE-RETRY-FILES: retrying \d+ failed fil
 
 /**
  * W1-T5409: test files failing in main's own CI at a sha. On main the coverage shards skip their run
- * (W1-T1033), so the failures are read from the eight `ci-shard (k/8)` jobs of the newest completed
+ * (W1-T1033), so the failures are read from the eight `ci-shard (k/8)` jobs, and every
+ * `test-slow-shard (k/n)` job, of the newest completed
  * main run at that sha, through the same jobs/logs API the PR-run reader uses. No completed run is
  * no result (`undefined`); a malformed or incomplete read throws, which the guard ledgers as
  * `selector-shadow.base_unread`. A green run is `[]` without reading any job log.
@@ -759,8 +760,13 @@ export function selectorShadowMainFailures(
     if (shards.length !== 8 || shards.some((job) => job.status !== "completed" || !Number.isInteger(job.id))) {
       throw new Error(`selector shadow: main run ${run.id} lacks eight completed test shards`);
     }
+    // A slow-tier file runs on main only in test-slow-shard, so its failure is never in a ci-shard log.
+    const slow = body.jobs.filter((job) => /^test-slow-shard \(\d+\/\d+\)$/.test(job.name ?? ""));
+    if (slow.some((job) => job.status !== "completed" || !Number.isInteger(job.id))) {
+      throw new Error(`selector shadow: main run ${run.id} has an incomplete slow-tier shard`);
+    }
     const files = new Set<string>();
-    for (const job of shards.filter((j) => j.conclusion === "failure")) {
+    for (const job of [...shards, ...slow].filter((j) => j.conclusion === "failure")) {
       for (const line of (await readText(["api", `repos/${owner}/${repo}/actions/jobs/${job.id}/logs`])).split(/\r?\n/)) {
         const named = MAIN_FAILED_FILES.exec(line);
         if (named) for (const file of named[1]!.split(", ")) if (file.trim()) files.add(file.trim());
