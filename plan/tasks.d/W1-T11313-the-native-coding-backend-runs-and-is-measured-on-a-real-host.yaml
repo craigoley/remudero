@@ -63,3 +63,11 @@
   note: |
     reservation hand-off: plan-file-1793796329000 -> plan-file-1793796329000
     Reserved with rmd next-task-id --branch plan-file-1793796329000 from the operator session's ops worktree. The code for these modules exists at #16606 head 7a883fd1c5. Rebuild it from there rather than rewriting it.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-04T16:22:14.115Z"
+    pin: "ebfdb4ddcf75039da99e5e6a235e08e01e377d2b80da80c4c70d6d88fab9c157"
