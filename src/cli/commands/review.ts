@@ -31,7 +31,7 @@ import { visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk 
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -1214,20 +1214,17 @@ export async function runReview(host: ReviewCommandHost, args: {
       evaluatorProvenance,
     };
   }
-  const unmet = verdict.criteria.filter((c) => !c.met);
   // W1-T166: holdout criteria are reviewer-visible but WORKER-hidden. `verdict.state`
   // above already folded them into the pass/fail decision; the DISPLAYED claim/reason
   // text below must not — this feeds the `review.posted` ledger's `unmet_criteria`/
   // `reasons` (which a cold-dispatch fix rung reconstructs verbatim, unmetFromLedger)
   // AND the PR comment further down, both `gh`-readable by the very worker a holdout
   // criterion must never reach.
-  const visibleUnmet = visibleCriteria(unmet);
-  const unmetClaims = visibleUnmet.map((c) => c.claim);
   // W1-T1016: `reviewLedgerReasons` is the SAME pure rule this line used to compute inline
   // (per-visible-unmet-criterion reason + testTheater), now ALSO covering the changeset-
   // contradiction path so `reasons` is never `[]` for the one failure shape the fleet already
   // owns a `blocked-fixable` disposition row for — see that function's own doc (lib/review.ts).
-  const reasons = reviewLedgerReasons(verdict);
+  const { visibleUnmet, unmetClaims, reasons } = reviewUnmetFields(verdict);
   // OBSERVABILITY (W1-T65 design): per-criterion proof_exec outcome, so an
   // OBSERVED verdict (executed_pass/executed_fail) is legible on the ledger vs a
   // KEYWORD one (not_executable), and an environment hiccup (exec_error) is never
@@ -1477,6 +1474,16 @@ export function refreshReviewSubjectInstall(
 export type MaterializeReviewWorktreeResult =
   | { worktreePath: string; failure?: undefined }
   | { worktreePath: undefined; failure: MaterializationFailure };
+
+/** Worker-visible publication fields, excluding proofs that reached no conclusion. */
+export function reviewUnmetFields(verdict: ReviewVerdict) {
+  const visibleUnmet = visibleCriteria(unmetReviewCriteria(verdict.criteria));
+  return {
+    visibleUnmet,
+    unmetClaims: visibleUnmet.map(c => c.claim),
+    reasons: reviewLedgerReasons(verdict),
+  };
+}
 
 /** Manual review cause annotation; an in-flight claim is not a missing PR-head checkout. */
 export function reviewVerdictAnnotation(

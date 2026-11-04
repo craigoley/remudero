@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { after, test } from "node:test";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { judgeReview, judgeReviewAsync, memoizeAsyncProofExecutor, preparePromisedReviewDecision, recordedLoad1,
-  sampleHostLoad, type ReviewEvidence, type ReviewVerdict } from "#src/lib/review.js";
+import { execWhitelistedProof, judgeReview, judgeReviewAsync, memoizeAsyncProofExecutor, preparePromisedReviewDecision, recordedLoad1,
+  reviewLedgerReasons, sampleHostLoad, type ProofExecutor, type ReviewEvidence, type ReviewVerdict } from "#src/lib/review.js";
+import { reviewUnmetFields } from "#src/cli/commands/review.js";
 import { DEFAULT_SWEEP_POLICY, inconclusiveLoadLowered, INCONCLUSIVE_LOAD_MAX_RERUNS, observeLightPassReviewEligibility, runSweep, runSweepLightPass,
   type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 
@@ -42,6 +43,46 @@ test("a unit-test proof ended by a timeout is inconclusive_load, pending, with t
   assert.match(verdict.summary, /inconclusive-load/);
   // never an unmet criterion: it names no failing claim and so seeds no fix round
   assert.doesNotMatch(verdict.summary, /the behaviour holds/);
+});
+
+test("truncated TAP through the real executor stays inconclusive with load through sync and async judging", async () => {
+  const exec: ProofExecutor = (proof, cwd) => execWhitelistedProof(proof, cwd, 60_000, () => {
+    throw Object.assign(new Error("Command failed: node --test"), {
+      status: 1, signal: null, stdout: "TAP version 13\n# Subtest: first result\nok 1 - first result\n",
+    });
+  }, { preparedArgs: ["--test", "--test-reporter=tap", PROOF_FILE] });
+  for (const async of [false, true]) {
+    const evidence: ReviewEvidence = { diff: DIFF, report: `the behaviour holds ${PROOF_FILE}`,
+      headCheckoutDir: checkout, sampleLoad: samples(30, 41),
+      ...(async ? { asyncExecProof: async (proof, cwd) => exec(proof, cwd) } : { execProof: exec }) };
+    const verdict = async ? await judgeReviewAsync(criteria, evidence) : judgeReview(criteria, evidence);
+    const [criterion] = verdict.criteria;
+    assert.equal(criterion.proof_exec, "inconclusive_load");
+    assert.equal(criterion.proof_skip, "incomplete-run");
+    assert.equal(criterion.met, false, "keyword coverage cannot turn an interrupted run into success");
+    assert.deepEqual(criterion.load, { start: { load1: 30, cpuPsiSomeAvg10Pct: 60 }, end: { load1: 41, cpuPsiSomeAvg10Pct: 60 } });
+    assert.equal(verdict.state, "pending");
+    assert.equal(verdict.floorState, "pending");
+    assert.deepEqual(reviewUnmetFields(verdict), { visibleUnmet: [], unmetClaims: [], reasons: [] });
+    assert.equal(JSON.parse(JSON.stringify({ decision_verdict: verdict })).decision_verdict.criteria[0].load.end.load1, 41);
+  }
+});
+
+test("publication sends only conclusive failures to fix workers when inconclusive load is mixed in", () => {
+  const failed = { claim: "another behaviour holds", proof: "unit test: test/other.test.ts" };
+  const verdict = judgeReview([...criteria, failed], {
+    diff: DIFF, report: "the behaviour holds another behaviour holds", headCheckoutDir: checkout,
+    sampleLoad: samples(30, 41), hostedCiFilePassed: new Map([[PROOF_FILE, "passed"]]), execProof: () => "fail",
+  });
+  assert.equal(verdict.state, "failure", "the conclusive failure still needs a fix");
+  assert.deepEqual(verdict.criteria.map(c => c.proof_exec), ["inconclusive_load", "executed_fail"]);
+  const fields = reviewUnmetFields(verdict);
+  assert.deepEqual(fields.visibleUnmet, [verdict.criteria[1]]);
+  assert.deepEqual(fields.unmetClaims, [failed.claim]);
+  assert.deepEqual(fields.reasons, [verdict.criteria[1].reason]);
+  assert.deepEqual(reviewLedgerReasons(verdict), fields.reasons);
+  assert.deepEqual(reviewLedgerReasons({ ...verdict, criteria: [{ ...verdict.criteria[0], holdout: true },
+    { ...verdict.criteria[1], holdout: true }], testTheater: true }), ["test theater: added tests assert nothing"]);
 });
 
 test("a unit-test proof killed by a signal is inconclusive_load, not exec_error", () => {

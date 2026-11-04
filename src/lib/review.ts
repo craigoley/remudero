@@ -4503,15 +4503,13 @@ export function judgeCriterion(
               `loader, an uncaught module-load error, …), not the named test; not executed, keyword ` +
               `floor applied`;
           } else if (e instanceof PureProofIncompleteRunError) {
-            proofExec = "exec_error";
             // W1-T2740, the same rule as the sibling arm: record the DISCRIMINATOR, never the stream. The bounded
             // fact is that node's completion signal is absent after N real results.
             proofSkip = "incomplete-run";
-            reason =
-              `${reason} — NOTE: proof's run reported ${e.completedResults} passing subtest(s) and ` +
-              `then stopped before node's trailing summary — an incomplete run (cut off by a ` +
-              `timeout kill, an external signal, or an OOM), so it never reached a verdict about ` +
-              `this criterion; not executed, keyword floor applied`;
+            inconclusiveUnderLoad(
+              `reported ${e.completedResults} passing subtest(s) and then stopped before node's trailing summary ` +
+              "(cut off by a timeout kill, an external signal, or an OOM)",
+            );
           } else if (whitelisted.kind === "test" && endedByTimeoutSignalOrSpawnError(e)) {
             // A timeout, a signal or a sandbox exec_error ended the run: it reached no verdict about the criterion.
             inconclusiveUnderLoad(`could not complete (${e instanceof Error ? e.message.split("\n")[0].slice(0, 120) : "exec error"})`);
@@ -5932,7 +5930,7 @@ export function judgeReview(
   // W1-T11132: an `inconclusive_load` proof concluded nothing, so it is never an unmet criterion — it holds the verdict
   // PENDING (like `cannot_evaluate`) and triggers no fix round. A conclusive failure elsewhere still fails the review.
   const inconclusiveLoad = verdicts.some((v) => v.proof_exec === "inconclusive_load");
-  const unmet = verdicts.filter((v) => !v.met && v.proof_exec !== "inconclusive_load");
+  const unmet = unmetReviewCriteria(verdicts);
   const noCriteria = criteria.length === 0;
   // W1-T2221: hoisted ahead of `state` (was computed only for `floorState`) so `state` can consult it on a plan-only
   // diff — see `unmetForState`.
@@ -7315,6 +7313,13 @@ export function reviewLedgerLegibilityFields(
   };
 }
 
+/** A proof that concluded nothing is pending, so publication and verdict rollup must not call it unmet. */
+export function unmetReviewCriteria<T extends Pick<CriterionVerdict, "met"> & Partial<Pick<CriterionVerdict, "proof_exec">>>(
+  criteria: readonly T[],
+): T[] {
+  return criteria.filter(c => !c.met && c.proof_exec !== "inconclusive_load");
+}
+
 /** The `reasons` array the `review.posted` line carries (W1-T1016): one per VISIBLE unmet criterion, plus a
  * test-theater entry when {@link ReviewVerdict.testTheater} fires — the rule run-task.ts used to compute inline, now
  * pure and exported. THE ROUTING GAP THIS CLOSES: the changeset-contradiction path fails the verdict WITHOUT
@@ -7325,10 +7330,10 @@ export function reviewLedgerLegibilityFields(
 export function reviewLedgerReasons(
   verdict: Pick<ReviewVerdict, "testTheater" | "summary"> &
     Partial<Pick<ReviewVerdict, "changesetContradictions">> & {
-      criteria: ReadonlyArray<Pick<CriterionVerdict, "met" | "holdout" | "reason">>;
+      criteria: ReadonlyArray<Pick<CriterionVerdict, "met" | "holdout" | "reason"> & Partial<Pick<CriterionVerdict, "proof_exec">>>;
     },
 ): string[] {
-  const unmet = verdict.criteria.filter((c) => !c.met);
+  const unmet = unmetReviewCriteria(verdict.criteria);
   const reasons = visibleCriteria(unmet).map((c) => c.reason);
   if (verdict.testTheater) reasons.push("test theater: added tests assert nothing");
   if (reasons.length === 0 && (verdict.changesetContradictions?.length ?? 0) > 0) {
