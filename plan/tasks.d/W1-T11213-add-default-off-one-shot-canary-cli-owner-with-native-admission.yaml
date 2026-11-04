@@ -1,0 +1,123 @@
+- id: W1-T11213
+  title: Add a default-off one-shot canary CLI owner with native admission
+  repo: remudero
+  depends_on:
+    - W1-T11212
+    - W1-T10957
+    - W1-T11120
+    - W1-T11118
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: high
+  band_meaning: blast-radius
+  origin: operator-approved-followups:2026-11-03
+  plan_refs:
+    - W1-T10957
+    - W1-T11120
+    - W1-T11118
+  files:
+    - src/lib/model-canary-command.ts
+    - src/lib/model-canary-owner.ts
+    - src/lib/worker.ts
+    - src/lib/model-canary-pilot-approval.ts
+    - src/lib/model-canary-pilot-execution.ts
+    - test/model-canary-owner.test.ts
+    - test/routing/model-canary-provider-invocation-guard.test.ts
+    - test/routing/model-canary-pilot-approval.test.ts
+    - test/routing/model-canary-pilot-execution.test.ts
+    - test/routing/model-canary-pilot-cli.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: >-
+    Implement the missing source-owned one-shot composition behind an absent-by-default private
+    approval record. Existing preparation, projection and replay remain inert. The source task does
+    not fund or activate a pilot; live approval and the separately funded fixed lifetime allowance
+    remain a later operator action.
+  design: >-
+    Add an explicit one-shot CLI mode in the actual standalone CLI bootstrap, awaited there so the
+    result is not serialized as `{}` and legacy synchronous `canaryCommand()` callers remain unchanged.
+    Dynamically import real `worker.ts` only after default-off, funding, source and corpus capability
+    checks pass; prepare, prepare-coding, project and replay must remain provider-inert and must not
+    load worker defaults. Do not add a daemon timer or recurring job. The approval
+    action is separate from execution and cannot be minted from arbitrary JSON, a manifest field or
+    task budget. Before that approval, deterministically select one qualified ordinary nonpremium cash
+    pin from the actual configured native effective census using existing route, endpoint, price,
+    tool-free-context and exact-effort-codec policy. Record the selected provider/model/effort/endpoint/
+    price pin and source/config digests, plus every rejected candidate and its reason, in owner-private
+    approval state. If no candidate qualifies, report unavailable before approval, claim or request.
+    The approval records a human operator's explicit future funding/approval only after that boundary,
+    and binds the exact selected pin, committed source/runtime and private corpus/scorer to the $10
+    lifetime/$2 smoke ceilings and a unique one-shot ID. Validate owner-private XDG state outside
+    every Git ancestor, no symlinks, expected UID/mode, exact committed source ancestry, and the
+    required normal CI/source qualification receipts before
+    issuing process-local run and budget capabilities. Persist one unique run claim in the shared
+    pilot owner before admission. Build only the two same-identity A/A slots with the existing pure
+    `buildCanarySchedule` primitive, then execute those exactly two owned slots through the existing
+    `CanarySlotOwner`, shared pilot budget and terminal-record path using low-level `executeCanary`.
+    Do not add a general recurring schedule or alter the existing generic daily schedule's squeeze
+    predicate. For the first smoke allow only a fixed noncoding text/structured
+    case and same-configuration A/A pair, at most two requests and one turn. Disable tools through a
+    native provider-specific control and verify the effective request; an empty Codex tools array is
+    not proof that ambient tools are unavailable, so Codex is excluded from this slice. Permit the
+    selected pin only when the existing native effective census and ordinary cash policy prove its
+    route, endpoint, configured price, tool-free context and exact effort codec eligible. At execution,
+    revalidate that exact approved pin and source/config digests; never reselect or fall back to another
+    model after approval. Add a narrow optional `beforeProviderInvocation` hook to
+    `worker.ts`, absent by default, and invoke it at every provider-selection/fallback boundary before
+    adapter launch and outside telemetry catches. The hook validates provider, model, effort, billing and
+    expected AsyncLocalStorage budget context; it returns a synchronous structured allow/refuse verdict.
+    Reject promises/thenables, malformed verdicts, throws and refusals as fatal before any fallback can
+    run. Capture the opaque budget capability lexically in reserve/settle callbacks. Resolve the
+    normal native cash route and verify the approved endpoint, configured price and exact effort
+    codec for the selected pin; do not use subscription-capacity eligibility. Read fresh `activeWorkerCount`
+    immediately before launch; if the exact cash route is unavailable or another worker is active,
+    defer without transport. This is a point-in-time policy snapshot, not
+    a production exclusivity lease. Use normal cash caps and never set `cashSqueezed` or emergency
+    fallback flags. Record global squeeze state as unavailable/not applicable, not as a measured false
+    value. Keep subscription out of this cash-only
+    slice until genuine shared capacity ownership exists. For each of the two A/A workers, set
+    `maxTurns: 1`; the existing cash loop counts each HTTP send, including retries, against this bound.
+    The request body uses the exact approved model/effort, so fake-transport tests capture and verify
+    the actual body. If the approved effort codec is unsupported, omitted or no longer matches, refuse
+    before launch. Do not
+    add a new HTTP fallback mechanism. If
+    source/runtime/CI binding, spend identity, served identity, invocation count or settlement is
+    unavailable, defer and retain the owner hold. Join the real `WorkerExecutionEvidenceV1` attempt ID;
+    preserve the actual canary run/attempt IDs and returned worker UUID as separate identities. Mark
+    case activity `synthetic-canary` so it cannot increment field-trial coding or merged-task
+    completion counts. Use native-provider execution classification only when a real native worker
+    transport is actually observed. Never pass W1-T11213 as a completed work task or import trusted
+    JSON identities. Use existing native owner terminal receipts and canary-ledger classification
+    hooks. No call to a real provider in source tests, no host execution, no
+    coding task, no route promotion, no daemon deployment/adoption.
+  acceptance:
+    - claim: Existing prepare, prepare-coding, project and replay remain unable to invoke a provider or spawn a worker.
+      proof: 'unit test: existing canary prepare project and replay paths remain provider inert'
+    - claim: Without a validated private approval record and Task A budget capability, execute-once defers before worker admission or transport.
+      proof: 'unit test: execute once refuses before admission when approval or pilot capability is absent'
+    - claim: Approval binds exact source/runtime and corpus/scorer digests and cannot be created from JSON or a prepared manifest.
+      proof: 'unit test: pilot approval is owner written and bound to the exact source runtime and corpus'
+    - claim: The actual command bootstrap creates the private approval through its source-owned approval function.
+      proof: 'grep: createCanaryPilotApproval( in src/lib/model-canary-command.ts'
+    - claim: The actual command bootstrap invokes the one-shot executor rather than leaving it as an unused export.
+      proof: 'grep: executeCanaryPilotOnce( in src/lib/model-canary-command.ts'
+    - claim: The optional `beforeProviderInvocation` hook runs at every selection/fallback boundary outside telemetry catches; pin/context mismatch or a throwing hook aborts before the provider adapter call.
+      proof: 'unit test: test/routing/model-canary-provider-invocation-guard.test.ts'
+    - claim: The synchronous guard rejects thenables and malformed/refuse results; any guard failure is fatal and cannot reach a fallback provider.
+      proof: 'unit test: provider invocation guard rejects async refusal and never launches fallback'
+    - claim: A fresh ineligible route or active-worker snapshot defers; fake transport captures the exact model/effort body and a one-turn cap bounds each arm to one send.
+      proof: 'unit test: active worker defers and captured request body preserves exact pin and one send'
+    - claim: The one-shot claim refuses a second run after success failure cancellation or unknown billing, while a complete A/A smoke writes two separate observed arm receipts and emits no winner or promotion.
+      proof: 'unit test: one-shot A A smoke records both real worker attempt IDs and cannot be replayed'
+  falsifier: >-
+    Remove the absent-record gate and require the zero-launch default-off test to fail. Skip the
+    `beforeProviderInvocation` hook at any selection/fallback or move it inside a telemetry catch and
+    require the throwing-hook test to fail. Permit transport with a mismatched pin, lost context,
+    thenable/refusal verdict or active-worker snapshot and require zero-launch/defer tests to fail.
+    Drop the durable unique run claim and require second invocation
+    after terminal/unknown outcomes to fail. Fabricate a served/attempt identity and require the
+    arm-receipt test to fail. Keep test transports fake and confirm zero provider calls and zero spend.

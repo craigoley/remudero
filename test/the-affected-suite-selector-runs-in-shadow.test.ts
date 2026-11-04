@@ -401,3 +401,19 @@ esac
   assert.match(pfBroken.detail, /could not read its input \(no git\); it would run the FULL suite/);
   assert.match(affectedSuitesStep(REPO_ROOT, ["src/a.ts"], () => input(["src/a.ts"])).detail, /would run 2 suite\(s\); this mode still runs everything/);
 });
+
+test("the open-weight probe suite is selected in the narrow arm for each recorded miss edge (run 41111628169)", () => {
+  const suite = "test/openweight-probe.test.ts";
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of ["src/lib/worker-provider.ts", "scripts/openweight-probe.mjs"]) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow arm`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.narrow?.includes(suite), "an unrelated source change must not select the suite");
+});
