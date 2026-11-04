@@ -14,7 +14,7 @@ const LINES = ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10"];
  * A run branch that edits a.ts, and a main that either renames a.ts to b.ts with an edit of its own ("rename", which git's
  * ort merge follows and a rename-blind merge does not) or edits the same line ("both", a real conflict).
  */
-async function fixture(t: TestContext, kind: "rename" | "both" = "rename") {
+async function fixture(t: TestContext, kind: "rename" | "both" | "rename-mixed" = "rename") {
   const origin = gitRepo({ bare: true });
   const repo = gitRepo();
   t.after(() => { repo.cleanup(); origin.cleanup(); });
@@ -24,6 +24,7 @@ async function fixture(t: TestContext, kind: "rename" | "both" = "rename") {
   const write = (path: string, lines: readonly string[]) => writeFileSync(join(repo.dir, path), `${lines.join("\n")}\n`);
   write("a.ts", LINES);
   write("other.txt", ["base"]);
+  write("README.md", ["base"]);
   repo.git("add", ".");
   repo.git("commit", "-qm", "chore(test): seed");
   const branch = "run-W1-T11167-1793666131000";
@@ -33,9 +34,11 @@ async function fixture(t: TestContext, kind: "rename" | "both" = "rename") {
   const headSha = repo.git("rev-parse", "HEAD");
   repo.git("push", "-q", "origin", branch);
   repo.git("checkout", "-q", "main");
-  if (kind === "rename") {
+  if (kind === "rename" || kind === "rename-mixed") {
     repo.git("mv", "a.ts", "b.ts");
     write("b.ts", LINES.map(line => line === "l9" ? "l9-main" : line));
+    // An ordinary modification whose path sorts before the rename record, and whose name starts with "R".
+    if (kind === "rename-mixed") write("README.md", ["main"]);
   } else write("a.ts", LINES.map(line => line === "l2" ? "l2-main" : line));
   repo.git("add", ".");
   repo.git("commit", "-qm", "chore(test): edit main");
@@ -172,4 +175,17 @@ test("W1-T11167 criterion 3: one clean-merge attempt per head and main, recordin
   assert.equal(f.remoteHead(), pushed, "the merged head is never re-merged");
   assert.deepEqual(f.counts(), { workers: 1, admissions: 1, attempts: 1 }, "GitHub still dirty at the same main: the worker row runs");
   assert.equal(f.receipts().length, 1);
+});
+
+test("W1-T11167 criterion 3: a modified README.md listed before the rename record still records the rename pair", async (t) => {
+  const f = await fixture(t, "rename-mixed");
+  // Positive control: git lists the M README.md record ahead of the rename, the order that misparsed.
+  const records = f.repo.git("diff", "--name-status", "-M", f.headSha + "~1", f.mainSha).split("\n");
+  assert.ok(records[0]!.startsWith("M") && records[0]!.endsWith("README.md"), records.join(" | "));
+  assert.ok(records.some(line => /^R\d+\ta\.ts\tb\.ts$/.test(line)), records.join(" | "));
+  await f.run();
+  const [receipt] = f.receipts();
+  assert.equal(receipt!.mode, "clean-merge");
+  assert.deepEqual(receipt!.renames, [{ from: "a.ts", to: "b.ts" }],
+    "a status-looking path (README.md) never consumes the real rename record after it");
 });

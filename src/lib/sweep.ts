@@ -2056,11 +2056,15 @@ export async function regenerateConflictViaGit(
           .split("\0").filter(Boolean));
         const fields = (await run(worktreePath, ["diff", "--name-status", "-M", "-z", base, mainSha])).split("\0");
         const renames: Array<{ from: string; to: string }> = [];
-        for (let at = 0; at < fields.length; at++) {
-          if (!fields[at]!.startsWith("R")) continue;
-          const from = fields[at + 1]!, to = fields[at + 2]!;
-          at += 2;
-          if (touched.has(from)) renames.push({ from, to });
+        // Walk whole -z records (status, path, and a second path for R/C): a path such as README.md
+        // must never be read as a status, or it consumes the real rename record after it.
+        for (let at = 0; at < fields.length;) {
+          const status = fields[at++]!;
+          if (status === "") continue;
+          const from = fields[at++]!;
+          if (!/^[RC]/.test(status)) continue;
+          const to = fields[at++]!;
+          if (status.startsWith("R") && touched.has(from)) renames.push({ from, to });
         }
         followed = renames;
       } else if (unmerged.length === 0) {
