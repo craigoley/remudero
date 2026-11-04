@@ -13,9 +13,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { fixedClock } from "../src/lib/clock.js";
 import * as registryGrammar from "../src/lib/instance-registry.js";
 import {
@@ -26,11 +25,13 @@ import {
   registryDrift,
   type InstanceRegistryErrorCode,
 } from "../src/lib/instance-registry.js";
-import { buildRegistryRoute, type RegistryRouteInput } from "../src/lib/serve.js";
+import { buildRegistryRoute, buildServeRoutes, type RegistryRouteInput, type ServeDeps } from "#src/lib/serve.js";
+import { withInstanceRegistryRuntime } from "#src/lib/instance-registry-selection.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO } from "../src/lib/instance-registry-selection.js";
 import type { Route } from "../src/lib/service.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const NOW = Date.parse("2026-09-23T12:00:00.000Z");
 
 /** One instance row in the shell readers' grammar, carrying the private fields the route must hide. */
@@ -341,9 +342,23 @@ test("recycle-container and install-host-units accept the project layer's fields
       env: { ...process.env, RMD_INSTANCE_REGISTRY: registryPath, RMD_RECYCLE_DOCKERENV_PATH: join(dir, "no-dockerenv") },
     });
   const ok = recycle(accepted);
-  assert.match(ok.stderr, /unknown argument '--no-such-flag'/, ok.stderr);
+  assert.equal(ok.status, 2, "the unsupported argument remains an error, not a successful lifecycle effect");
+  assert.match(ok.stderr, /selected lifecycle diagnostic \(private details withheld\)/, ok.stderr);
+  assert.equal((ok.stdout + ok.stderr).includes(dir), false);
+  assert.equal(ok.stderr.includes("--no-such-flag"), false, "argument details may contain private data and remain redacted");
+  const acceptedReader = spawnSync(BASH_BIN, ["-c",
+    'source "$1"; selected_registry_init "$2" demo fixture || exit; printf selected-reader-ready',
+    "selected-reader-control", join(REPO_ROOT, "deploy", "recycle-container.sh"), REPO_ROOT], {
+    encoding: "utf8", cwd: REPO_ROOT, env: { ...process.env, RMD_INSTANCE_REGISTRY: accepted },
+  });
+  assert.equal(acceptedReader.status, 0, acceptedReader.stderr);
+  assert.equal(acceptedReader.stdout, "selected-reader-ready", "actual shared launcher reader is the healthy acceptance control");
   assert.doesNotMatch(ok.stderr, /unknown field/);
-  assert.match(recycle(refused).stderr, /unknown field 'bogus_field'/, "control: the probe sees a refusal");
+  const recycleRefused = recycle(refused);
+  assert.notEqual(recycleRefused.status, 0, "control: explicit invalid selection still refuses");
+  assert.match(recycleRefused.stderr, /REFUSING -- selected registry unavailable \(malformed\)/);
+  assert.equal((recycleRefused.stdout + recycleRefused.stderr).includes(dir), false, "selected diagnostics expose no private file path");
+  assert.equal(recycleRefused.stderr.includes("bogus_field"), false, "selected diagnostics do not echo private field names or values");
 
   const install = (registryPath: string, name: string) =>
     spawnSync(BASH_BIN, [join(REPO_ROOT, "deploy", "install-host-units.sh"), "--install", "--instance", "demo"], {
@@ -606,6 +621,43 @@ test("selected registry route snapshots explicit input and preserves true absenc
   assert.deepEqual(await initial.binding.recheck(), { kind: "refused", reason: "unsupported_field" });
 });
 
+test("selected runtime registry route retains its invocation and rechecks before each public read", async (t) => {
+  const dir = fixtureDir(t), path = join(dir, "selected-runtime.yaml"), other = join(dir, "other-runtime.yaml");
+  writeFileSync(path, registry(row("private", { github_repo: "selected/project", mode: "shadow" })));
+  writeFileSync(other, registry(row("private", { github_repo: "other/project", mode: "shadow" })));
+  const legacy = await invoke(routeOver(dir, FLEET, FLEET));
+  assert.equal(legacy.body.source, "repo", "healthy absent selection keeps the legacy route");
+  assert.deepEqual(await withInstanceRegistryRuntime(() => invoke(routeOver(dir, FLEET, FLEET)), {}), legacy);
+  let retained!: Route;
+  await withInstanceRegistryRuntime(async () => {
+    retained = routeOver(dir, FLEET, FLEET);
+    const selected = await invoke(retained);
+    assert.equal(selected.status, 200);
+    assert.equal(selected.body.source, "selected");
+    assert.equal(selected.body.publicationPermission, "not-granted");
+    assert.match(selected.text, /selected\/project/);
+    for (const privateValue of [dir, "/home/operator", "azurecr", "mode", "image"]) {
+      assert.equal(selected.text.includes(privateValue), false, privateValue);
+    }
+    assert.deepEqual(await withInstanceRegistryRuntime(() => invoke(retained), { envPath: other }), selected,
+      "a different same-named instance cannot retarget a captured route");
+    const replacement = join(dir, "replacement-runtime.yaml");
+    writeFileSync(replacement, readFileSync(path));
+    renameSync(replacement, path);
+    const revised = await invoke(retained);
+    assert.equal(revised.status, 503, "equal bytes at another inode cannot use the prior binding");
+    assert.deepEqual(revised.body, { error: "selected_registry_unavailable", reason: "revision_changed" });
+    rmSync(path);
+    const missing = await invoke(retained);
+    assert.equal(missing.status, 503);
+    assert.deepEqual(missing.body, { error: "selected_registry_unavailable", reason: "missing" });
+    assert.equal(missing.text.includes(dir), false);
+  }, { envPath: path });
+  assert.deepEqual((await invoke(retained)).body,
+    { error: "selected_registry_unavailable", reason: "invocation_closed" },
+    "a completed invocation cannot lend authority to an escaped route");
+});
+
 function lifecycleRow(root: string): string {
   return registry(row("widgets", {
     repo: "widgets", github_repo: "acme/widgets", project: "fixture", retired: "false", mode: "shadow", primary: "false",
@@ -656,4 +708,74 @@ test("selected registry lifecycle field contract is immutable and shared by both
   assert.deepEqual([...fields].sort(), [...observed].sort(), "full lifecycle grammar plus existing selected mode, no wildcard or invented field");
   assert.throws(() => fields.push("future_authority"), TypeError);
   assert.throws(() => Object.defineProperty(fields, "0", { value: "future_authority" }), TypeError);
+});
+
+/** Assemble the production table, with no selected-registry route dependency injected. */
+function assembledRegistryRoute(root: string): Route {
+  mkdirSync(join(root, "state"), { recursive: true });
+  mkdirSync(join(root, "plan"), { recursive: true });
+  const ledgerPath = join(root, "state", "ledger.ndjson"), planPath = join(root, "plan", "tasks.yaml");
+  writeFileSync(ledgerPath, "");
+  writeFileSync(planPath, "[]\n");
+  const github = fakeGitHub();
+  const deps: ServeDeps = {
+    board: { plan: { tasks: [], byId: new Map() }, ledgerPath, github },
+    panelGraph: { root, planPath, ledgerPath, github: { prView: () => null }, statusGithub: github,
+      ratify: { approve: () => {}, reframe: () => {} } },
+    ledgerPath, issues: { close: () => {} }, fleetControlRoot: root, questionsRoot: root,
+    tokens: { read: "fixture-read", write: "fixture-write" }, githubAppRefresh: { env: {} }, log: () => {},
+  };
+  const route = buildServeRoutes(deps).find(r => r.method === "GET" && r.path === "/v1/registry");
+  assert.ok(route, "real serve assembly must mount the registry reader");
+  return route;
+}
+
+test("private registry selection reaches real host and daemon readers: serve default assembly", async t => {
+  const root = fixtureDir(t), selected = join(root, "private-selected.yaml");
+  mkdirSync(join(root, ".remudero"));
+  writeFileSync(join(root, ".remudero", "daemon-instances.yaml"), FLEET);
+  writeFileSync(selected, registry(row("selected-only", { github_repo: "owner/private", project: "private", mode: "shadow" })));
+  const legacy = await invoke(assembledRegistryRoute(root));
+  assert.equal(legacy.status, 200);
+  assert.ok(legacy.text.includes("craigoley/remudero"), "unselected default is the legacy positive control");
+  await withInstanceRegistryRuntime(async () => {
+    const route = assembledRegistryRoute(root), first = await invoke(route);
+    assert.equal(first.status, 200);
+    assert.equal(first.body.source, "selected");
+    assert.equal(first.body.publicationPermission, "not-granted");
+    assert.ok(first.text.includes("owner/private"));
+    assert.equal(first.text.includes("craigoley/remudero"), false);
+    assert.equal(first.text.includes("/home/operator"), false);
+    assert.equal(first.text.includes(selected), false);
+  }, { envPath: selected });
+});
+
+test("private registry selection preserves legacy and refuses unknown selected inputs: serve binding", async t => {
+  const root = fixtureDir(t), selected = join(root, "private-selected.yaml");
+  mkdirSync(join(root, ".remudero"));
+  writeFileSync(join(root, ".remudero", "daemon-instances.yaml"), FLEET);
+  const text = registry(row("selected-only", { github_repo: "owner/private", mode: "shadow" }));
+  for (const change of ["same-byte-replacement", "changed", "missing", "symlink", "closed"]) {
+    rmSync(selected, { force: true });
+    writeFileSync(selected, text);
+    let route: Route | undefined;
+    await withInstanceRegistryRuntime(async () => {
+      route = assembledRegistryRoute(root);
+      assert.equal((await invoke(route)).status, 200);
+      if (change === "closed") return;
+      renameSync(selected, selected + ".original");
+      if (change === "same-byte-replacement") writeFileSync(selected, text);
+      if (change === "changed") writeFileSync(selected, FLEET);
+      if (change === "symlink") symlinkSync(selected + ".original", selected);
+      const refused = await invoke(route);
+      assert.equal(refused.status, 503, change);
+      assert.equal(refused.body.error, "selected_registry_unavailable");
+      assert.equal(refused.text.includes(root), false);
+      assert.equal(refused.text.includes("craigoley/remudero"), false, "never use healthy legacy/cache evidence");
+    }, { envPath: selected });
+    assert.ok(route);
+    const closed = await invoke(route);
+    assert.equal(closed.status, 503, "a captured route cannot fall back after its invocation closes");
+    assert.equal(closed.body.reason, "invocation_closed");
+  }
 });

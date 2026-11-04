@@ -298,6 +298,8 @@ export interface ReadModelView {
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
   /** The newest projected instant among the ledger rows this view reads, or null before its first input. */
   ledgerReads?(db: ReadModelDb): string | null;
+  /** What reuse fingerprints instead of `ledgerReads` when the two differ; it never stamps a source's asOf. */
+  digestReads?(db: ReadModelDb): string | null;
   /** Work ahead of `materialize`, one bounded step per `more()`; false while some remains, and no body is built before it is done. */
   prepare?(ctx: ReadModelViewContext, more: () => boolean): boolean;
   stages?(ctx: ReadModelViewContext): Record<string, number> | undefined;
@@ -377,8 +379,12 @@ export function builtLedgerSource(built: ViewSource, state: ReadModelInstanceSta
 export const readModelStatusView: ReadModelView = {
   name: READ_MODEL_STATUS_VIEW,
   version: 1,
-  // Status's ledger rows are quarantined rows; generation and lease state are in inputDigest.
+  // Status reads the projector head and its quarantine; reuse fingerprints only quarantine (W1-T5884 diagnostics move the head).
   ledgerReads: db => {
+    const row = db.prepare("SELECT max(m) AS last_ms FROM (SELECT max(ts_ms) AS m FROM seen WHERE ts_ms > 0 UNION ALL SELECT max(ts_ms) FROM quarantine)").get();
+    return row?.last_ms == null ? null : fixedClock(Number(row.last_ms)).iso();
+  },
+  digestReads: db => {
     const row = db.prepare("SELECT MAX(ts_ms) AS last_ms FROM quarantine").get();
     return row?.last_ms == null ? null : fixedClock(Number(row.last_ms)).iso();
   },
@@ -1589,12 +1595,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     });
   }
 
-  function restamp(unit: ViewUnit, ctx: ReadModelViewContext, readAsOf: Map<string, string | null>): void {
+  function restamp(unit: ViewUnit, ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined): void {
     for (const id of unit.builtKeys!) {
       const entry = latest.get(id)!;
       const sources = entry.body.sources.map(source => {
         const instance = ctx.instances.find(({ state }) => source.name === `${LEDGER_SOURCE_PREFIX}${state.instance}`);
-        return instance ? { ...ledgerSource(instance.state, ctx.now), asOf: readAsOf.get(source.name)! }
+        return instance ? { ...ledgerSource(instance.state, ctx.now), ...(readAsOf?.has(source.name) ? { asOf: readAsOf.get(source.name)! } : {}) }
           : { ...source, asOf: fixedClock(ctx.now).iso() };
       });
       publishEntry({ ...entry, body: { ...entry.body, sources, asOf: oldestAsOf(sources) } });
@@ -1626,10 +1632,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         const readAsOf = read ? new Map(scoped.instances.map(({ state, db }) =>
           [`${LEDGER_SOURCE_PREFIX}${state.instance}`, db ? read(db) : null])) : undefined;
         const reusable = reusableSources(unit, scoped);
-        try { if (unit.builtKeys === undefined || reusable) digest = inputDigest(scoped, readAsOf); }
+        const fingerprint = live.digestReads;
+        const digestAsOf = fingerprint ? new Map(scoped.instances.map(({ state, db }) =>
+          [`${LEDGER_SOURCE_PREFIX}${state.instance}`, db ? fingerprint(db) : null])) : readAsOf;
+        try { if (unit.builtKeys === undefined || reusable) digest = inputDigest(scoped, digestAsOf); }
         catch (error) { log("read_model.view_digest_unreadable", { ...named, error: (error as Error).message }); }
         if (digest !== undefined && digest === unit.lastInputDigest && reusable) {
-          restamp(unit, scoped, readAsOf!);
+          restamp(unit, scoped, readAsOf);
           skipped = true;
         } else {
           for (const { key, data, sources } of live.materialize(scoped)) {

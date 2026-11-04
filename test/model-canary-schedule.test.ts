@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { buildCanarySchedule, executeCanarySchedule, type CanarySchedulePorts } from "../src/lib/model-canary-schedule.js";
-import { commonCanarySuite, canarySuiteDigest } from "../src/lib/model-canary-suite.js";
-import { projectCanaryRuns, type CanaryRun } from "../src/lib/model-canary-metrics.js";
+import { buildCanarySchedule, executeCanarySchedule, type CanarySchedulePorts } from "#src/lib/model-canary-schedule.js";
+import { commonCanarySuite, canarySuiteDigest } from "#src/lib/model-canary-suite.js";
+import { projectCanaryRuns, type CanaryRun } from "#src/lib/model-canary-metrics.js";
+import { privateCorpusCases, validatePrivateCorpus, type PrivateCanaryBundleV1, type PrivateCanaryCaseV1 } from "#src/lib/model-canary-private-corpus.js";
+import { executeCanary } from "#src/lib/model-canary-runner.js";
 
 test("canary schedule pins paired cases and A A labels without duplicate execution after a crash", async () => {
   const cases = commonCanarySuite().slice(0, 2), suiteHash = canarySuiteDigest(cases);
@@ -108,4 +111,81 @@ test("canary schedule defers production pressure and never grants experimental p
   assert.throws(() => buildCanarySchedule("2026-02-30", "s", cases, [pin]), /day/);
   assert.throws(() => buildCanarySchedule("2026-10-11", "s", cases, [pin, pin]), /pin/);
   assert.throws(() => buildCanarySchedule("2026-10-11", "s", [], [pin]), /population/);
+});
+
+test("native schedule binds private grading to the actual claimed slot", async () => {
+  const cases = commonCanarySuite().slice(0, 1), item = cases[0]!;
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+  const privateCase: PrivateCanaryCaseV1 = { item, provenance: { sourceFamilyId: "family-schedule",
+    incidentRootId: "root-schedule", sourceDigest: hash("source"), observedAt: "2026-11-03T00:00:00.000Z",
+    splitId: "dev-v1", split: "development", role: "worker" }, expectedToolTrace: [],
+    scorerVersion: "exact-json-and-application-trace-v1" };
+  const bundle: PrivateCanaryBundleV1 = { version: "model-canary-private-bundle-v1", development: {
+    version: "model-canary-private-payload-v1", split: "development", cases: [privateCase] } };
+  const validated = validatePrivateCorpus(bundle);
+  assert.equal(validated.state, "available");
+  if (validated.state !== "available") return;
+  const nativeCases = privateCorpusCases(validated.corpus)!;
+  const pin = { model: "private-model", route: "subscription", effort: "low",
+    suiteHash: canarySuiteDigest(nativeCases), billing: "subscription" as const };
+  const plan = buildCanarySchedule("2026-10-11", "private-slot-seed", nativeCases, [pin]);
+  const changedCase = { ...item, prompt: `${item.prompt} changed body` };
+  const changedCases = [changedCase];
+  let mismatchClaims = 0;
+  const changedPin = { ...pin, suiteHash: canarySuiteDigest(changedCases) };
+  await assert.rejects(() => executeCanarySchedule(buildCanarySchedule("2026-10-11", "private-mismatch",
+    changedCases, [changedPin]), bundle, {
+    eligibility: async () => ({ sourceAdopted: true, adapterQualified: true, productionBusy: false, squeeze: false,
+      spareSubscription: true, experimentalCashAllowed: false, premium: false }),
+    claim: async () => { mismatchClaims++; return "claimed"; }, terminal: async () => {},
+    ports: () => { throw new Error("mismatched private case must not execute"); },
+  }), /canary-schedule-changed/);
+  assert.equal(mismatchClaims, 0, "full private case body is checked before native claim");
+  let terminalOutcome: Awaited<ReturnType<typeof executeCanary>> | undefined;
+  const result = await executeCanarySchedule(plan, bundle, {
+    eligibility: async () => ({ sourceAdopted: true, adapterQualified: true, productionBusy: false, squeeze: false,
+      spareSubscription: true, experimentalCashAllowed: false, premium: false }),
+    claim: async () => "claimed",
+    ports: slot => ({ admit: async () => ({ state: "admitted" }), monotonicMs: () => 0, save: async () => {},
+      request: async input => { assert.equal("suiteHash" in input.pin, false);
+        return { text: JSON.stringify(item.expected), toolCalls: [], resources: { durationMs: 1, firstTextMs: null,
+          generationMs: null, inputTokens: 1, outputTokens: 1, cacheReadTokens: null, cacheWriteTokens: null,
+          reasoningTokens: null, usageRatedUsd: null, billing: "subscription", servedModel: slot.pin.model,
+          terminal: "complete" } }; } }),
+    terminal: async (_slot, outcome) => { terminalOutcome = outcome; },
+  });
+  assert.equal(result.state, "finished");
+  assert.ok(terminalOutcome);
+  const outcome = terminalOutcome!;
+  assert.equal(outcome.privateTrace?.binding.slotId, plan.slots[0]!.id);
+  assert.equal(outcome.privateTrace?.binding.runId, outcome.run.id);
+  assert.equal(outcome.run.verified, true);
+  assert.equal(Object.isFrozen(nativeCases), true);
+  assert.equal(Object.isFrozen(nativeCases[0]), true);
+  assert.equal(privateCorpusCases(JSON.parse(JSON.stringify(validated.corpus))), null);
+
+  let claims = 0, requests = 0;
+  const guarded: CanarySchedulePorts = {
+    eligibility: async () => ({ sourceAdopted: true, adapterQualified: true, productionBusy: true, squeeze: false,
+      spareSubscription: true, experimentalCashAllowed: false, premium: false }),
+    claim: async () => { claims++; return "claimed"; },
+    ports: () => ({ admit: async () => ({ state: "refused", reason: "private-allowance" }), monotonicMs: () => 0,
+      request: async () => { requests++; throw new Error("not admitted"); },
+      save: async (run, grade) => { assert.equal(run.verified, null); assert.equal(grade, null); } }),
+    terminal: async (_slot, result) => {
+      assert.equal(result.privateGrade?.state, "unavailable");
+      assert.equal(result.privateTrace?.binding.slotId, plan.slots[0]!.id);
+      assert.equal(result.reason, "private-allowance");
+    },
+  };
+  await assert.rejects(() => executeCanarySchedule(plan, { ...bundle, trusted: true } as typeof bundle, guarded),
+    /private-corpus-bundle-invalid/);
+  await assert.rejects(() => executeCanarySchedule(plan, validated.corpus as typeof bundle, guarded),
+    /private-corpus-bundle-invalid/);
+  assert.equal((await executeCanarySchedule(plan, bundle, guarded)).completed, 0);
+  assert.equal(claims, 0, "private preparation cannot bypass production pressure");
+  const eligibility = await guarded.eligibility(plan.slots[0]!);
+  guarded.eligibility = async () => ({ ...eligibility, productionBusy: false });
+  assert.equal((await executeCanarySchedule(plan, bundle, guarded)).state, "deferred");
+  assert.equal(claims, 1); assert.equal(requests, 0, "per-call admission still controls private execution");
 });

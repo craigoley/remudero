@@ -16,6 +16,7 @@
  * `dispatch.lane_target` once per reading in both; only `enforce` lets it cap NEW admissions (a tick's dispatch set
  * and each lane refill). A running lane is never stopped by a lower target.
  */
+import { readFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname } from "node:path";
 
@@ -289,10 +290,54 @@ export interface LaneGovernorPorts {
   mode: () => LaneGovernorMode;
   read: () => LaneMemoryReading;
   cpuCount: () => number;
+  /** W1-T11129 — the container's cgroup cpu.stat usage_usec, or null when unread (the learner then holds still). */
+  cpuUsageUsec?: () => number | null;
+}
+
+/** W1-T11129 — the one lane class the dispatch target counts: every in-flight lane is one unit of it. */
+export const LANE_CPU_CLASS = "lane";
+
+/** W1-T11129 — the container's own cgroup cpu.stat usage_usec (cgroup v2, read inside the container's namespace). */
+export function readCgroupCpuUsageUsec(path = "/sys/fs/cgroup/cpu.stat", read: (path: string) => string = (p) => readFileSync(p, "utf8")): number | null {
+  try { return parseCpuUsageUsec(read(path)); }
+  catch { return null; } // unread: the learner holds still and the bound falls back to the CPU count
+}
+
+let publishedCpuLaneBound: number | null = null;
+
+/** W1-T11129 — the daemon publishes the learned CPU lane bound each reading; review capacity reads it as its hold. */
+export function publishLaneCpuBound(bound: number | null): void {
+  publishedCpuLaneBound = bound !== null && Number.isFinite(bound) ? bound : null;
+}
+
+/**
+ * W1-T11129 — one CPU reading for the dispatch target: sample the container's cpu.stat through the ports, count the
+ * in-flight lanes as one class, learn, and return the reading laneTarget takes plus the bound it implies. An unread or
+ * throwing counter leaves the learner as it was, so the bound stays unlearned and the cap stays at the CPU count.
+ */
+export function readLaneCpu(
+  learner: LaneCpuLearnerState, ports: Pick<LaneGovernorPorts, "cpuCount" | "cpuUsageUsec">, nowMs: number, inFlight: number,
+): { learner: LaneCpuLearnerState; cpu: LaneCpuReading; bound: number | null } {
+  let usageUsec: number | null = null;
+  try { usageUsec = ports.cpuUsageUsec?.() ?? null; }
+  catch { usageUsec = null; }
+  const next = usageUsec === null ? learner : learnLaneCpu(learner, {
+    atMs: nowMs, usageUsec, runningClasses: Array.from({ length: Math.max(0, Math.floor(inFlight)) }, () => LANE_CPU_CLASS),
+  });
+  const cpu = laneCpuReading(next, LANE_CPU_CLASS);
+  return { learner: next, cpu, bound: cpuLaneBound(ports.cpuCount(), cpu) };
+}
+
+/** The last published learned CPU lane bound, or undefined while unlearned or unread. */
+export function publishedLaneCpuBound(): number | undefined {
+  return publishedCpuLaneBound === null ? undefined : publishedCpuLaneBound;
 }
 
 /** The real ports over a daemon state directory (`<root>/state`, the ledger's directory). */
 export function defaultLaneGovernorPorts(stateDir: string): LaneGovernorPorts {
   const root = dirname(stateDir);
-  return { mode: () => loadLaneGovernorMode(), read: () => readLaneMemory(root), cpuCount: () => availableParallelism() };
+  return {
+    mode: () => loadLaneGovernorMode(), read: () => readLaneMemory(root), cpuCount: () => availableParallelism(),
+    cpuUsageUsec: () => readCgroupCpuUsageUsec(),
+  };
 }

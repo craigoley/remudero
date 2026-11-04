@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { HEADROOM_SAMPLE_MAX_AGE_MS, runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
-import type { RunResult } from "../src/run-task.js";
+import type { RunResult } from "#src/lib/run-result.js";
 import type { UsageSnapshot } from "../src/lib/headroom.js";
 
 const YAML = `

@@ -155,7 +155,7 @@ import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, sys
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
-import { defaultLaneGovernorPorts, LANE_TARGET_STEP, laneTarget, laneTargetPayload, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget } from "./lane-governor.js";
+import { defaultLaneGovernorPorts, initialLaneCpuLearner, LANE_TARGET_STEP, laneTarget, laneTargetPayload, publishLaneCpuBound, readLaneCpu, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget } from "./lane-governor.js";
 import type { LaneGovernorMode } from "./policy.js";
 import {
   createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimBeforeMemoryRestart, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
@@ -554,6 +554,8 @@ export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[stri
 /** W1-T5720 — BACKSTOP: the longest tick 1's cadences and the garden fan-out wait, from boot, for the
  *  first full pass. That pass's own 559 s bound normally opens the gate first, so this fires never. */
 export const BOOT_CADENCE_GATE_BOUND_MS = 10 * 60_000;
+/** How long a running tick goes before the due timer asks auto-triage again; its policy still decides any fire. */
+export const AUTO_TRIAGE_REARM_MS = 15 * 60_000;
 
 /** W1-T9119: the decompressed bytes the retro check's ledger read would open, and the rotations behind the figure. */
 export interface RetroReadProjection { projectedBytes: number; rotations: number; undigested: number; unreadable?: string[] }
@@ -1109,6 +1111,8 @@ export interface DaemonOpts {
   sweepRetriggerIntervalMs?: number;
   /** W1-T5720: the boot gate's bound in real ms (default {@link BOOT_CADENCE_GATE_BOUND_MS}). */
   bootCadenceGateBoundMs?: number;
+  /** How long a running tick goes before the due timer checks auto-triage again (default {@link AUTO_TRIAGE_REARM_MS}). */
+  autoTriageRearmMs?: number;
   /** How long a lifetime runs before a freshness restart may take it (default {@link FRESHNESS_MIN_LIFETIME_MS}, the
    *  operator ruling of 2026-10-17). A test of a different restart mechanic passes 0 to reach it at once. */
   freshnessMinLifetimeMs?: number;
@@ -4200,6 +4204,8 @@ export async function runDaemon(
     log(LANE_TARGET_STEP, { mode: "shadow", mode_unread: error instanceof Error ? error.message : String(error) });
   }
   let laneTargetReading: { atMs: number; result: LaneTarget } | undefined;
+  // W1-T11129: the CPU arm learns from the container's cgroup cpu.stat at each reading, counting the lanes in flight.
+  let laneCpuLearner = initialLaneCpuLearner();
   /** The lanes new admissions may fill: the governor's target under enforce, otherwise unbounded. */
   const enforcedLaneTarget = (inFlight: number, wipBound: number | undefined): number => {
     if (!laneGovernorPorts) return Infinity;
@@ -4211,7 +4217,12 @@ export async function runDaemon(
         const reason = error instanceof Error ? error.message : String(error);
         memory = { unread: reason };
       }
-      const result = laneTarget({ previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount() });
+      const cpuReading = readLaneCpu(laneCpuLearner, laneGovernorPorts, nowMs, inFlight);
+      laneCpuLearner = cpuReading.learner;
+      publishLaneCpuBound(cpuReading.bound);
+      const result = laneTarget({
+        previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount(), cpu: cpuReading.cpu,
+      });
       laneTargetReading = { atMs: nowMs, result };
       log(LANE_TARGET_STEP, laneTargetPayload(result, { mode: laneGovernorMode, fixed: laneCount, inFlight }));
     }
@@ -5811,6 +5822,18 @@ export async function runDaemon(
     }
     return false;
   });
+  /** Auto-triage alone may run again inside a tick: hour-long ticks held it to one fire each (2026-11-03 ledger). */
+  const autoTriageRearmMs = opts.autoTriageRearmMs ?? AUTO_TRIAGE_REARM_MS;
+  let lastAutoTriageSignals: Parameters<typeof autoTriageCadence.run> | undefined;
+  let lastAutoTriageRunAtMs: number | undefined;
+  const runAutoTriage = (...signals: Parameters<typeof autoTriageCadence.run>): Promise<boolean> => {
+    lastAutoTriageSignals = signals;
+    lastAutoTriageRunAtMs = daemonClock.now();
+    return autoTriageCadence.run(...signals);
+  };
+  const autoTriageRearmed = (): Parameters<typeof autoTriageCadence.run> | undefined =>
+    lastAutoTriageSignals !== undefined && lastAutoTriageRunAtMs !== undefined &&
+    daemonClock.now() - lastAutoTriageRunAtMs >= autoTriageRearmMs ? lastAutoTriageSignals : undefined;
   // Timer starts spending rungs only after this cycle passes headroom, cost, and WIP governors.
   let spendGatesOpen = false;
   /** W1-T9321: the debts a gated tick left. The sweeps read nothing the rungs decide; the retro and auto-triage spend,
@@ -5822,8 +5845,8 @@ export async function runDaemon(
     if (spendGatesOpen && retroCadence.owed()) {
       paid.push(readOnly.then(() => (spendGatesOpen && retroCadence.owed() ? retroCadence.run() : undefined)));
     }
-    const triageDebt = autoTriageCadence.owed();
-    if (spendGatesOpen && triageDebt) paid.push(autoTriageCadence.run(...triageDebt));
+    const triageDebt = autoTriageCadence.owed() ?? autoTriageRearmed();
+    if (spendGatesOpen && triageDebt) paid.push(runAutoTriage(...triageDebt));
     return paid;
   };
   const dueRungsTick = (): void => {
@@ -6963,8 +6986,11 @@ export async function runDaemon(
     // W1-T9321: one slot, `autoTriageCadence`; a gated tick owes it this tick's census for the due timer to pay.
     const autoTriageSignals = { deferralPending: deferredPairings > 0, dispatchCount: dispatchSet.length, laneBudget };
     if (cadencesThisTick && deps.checkAutoTriage) {
-      if (await autoTriageCadence.run(autoTriageSignals)) continue;
-    } else if (deps.checkAutoTriage) autoTriageCadence.owe(autoTriageSignals);
+      if (await runAutoTriage(autoTriageSignals)) continue;
+    } else if (deps.checkAutoTriage) {
+      lastAutoTriageSignals = [autoTriageSignals];
+      autoTriageCadence.owe(autoTriageSignals);
+    }
 
     dispatchSet.unshift(...occupiedTasks);
     if (dispatchSet.length === 0) {

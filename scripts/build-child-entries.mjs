@@ -203,6 +203,13 @@ export function sourceHashStillCurrent(root, hash) {
   return cached?.hash === hash && cached.signature === sourceSignature(root, loadEsbuild(root).version);
 }
 
+/** Carry a compact source witness across the wrapper process without hashing the source contents twice. */
+export function mainEntrySource(root) {
+  root = resolve(root);
+  const hash = memoizedSourceHash(root, { computed: 0, reused: 0, bytes_read: 0, ms: 0 });
+  return { hash, signature: payloadDigest(sourceHashes.get(root).signature) };
+}
+
 /**
  * An esbuild plugin that keeps every module's own `import.meta.url`. A bundle otherwise collapses
  * all of them to the bundle's URL, and 40-odd src modules derive repo-root, script and worker paths
@@ -435,8 +442,8 @@ export function workerBundle(root, module, { outDir = OUT_DIR, treeHash, verifyS
 
 // ── bundlemain: the daemon's own main starts from the run-task bundle (operator ruling 2026-10-19) ─────────────────
 
-/** The `rmd` verbs whose long-lived main process bin/rmd starts from the run-task bundle when it is current. */
-export const BUNDLED_MAIN_VERBS = Object.freeze(["daemon"]);
+/** The `rmd` verbs bin/rmd starts from the run-task bundle when it is current. */
+export const BUNDLED_MAIN_VERBS = Object.freeze(["daemon", "review"]);
 /** Written beside the bundle before a bundled main starts; settled by that main's first tick (ADR 0006 extension). */
 export const MAIN_ATTEMPT_NAME = "main-attempt.json";
 /** Present beside the bundle: every bundled main starts on tsx instead (the per-tree off switch). */
@@ -468,21 +475,24 @@ export function settleMainAttempt(root, outDir = OUT_DIR, now = () => new Date()
 /**
  * Which entry `rmd <verb>` starts from in `root`: the run-task bundle under plain node when it is current for the tree
  * AND every declared worker bundle is current AND its linked map is beside it AND no bundled boot of this source has
- * failed before its first tick; tsx on any doubt, with the reason. A stale or missing build is built once here first.
- * Never throws. A bundle choice writes the attempt marker; the main settles it at its first tick
- * ({@link settleMainAttempt}), so an unsettled attempt for the same source demotes the next boot to tsx.
+ * failed before its first tick; tsx on any doubt, with the reason. The daemon builds a stale or missing build once,
+ * then writes an attempt marker settled at its first tick ({@link settleMainAttempt}); an unsettled attempt demotes
+ * its next boot. Reviews use only existing bundles and never read or write daemon boot attempts. Never throws.
  */
-export async function mainEntry(root, verb, { outDir = OUT_DIR, build = buildChildEntries, now = () => new Date().toISOString() } = {}) {
+export async function mainEntry(root, verb, { outDir = OUT_DIR, build = buildChildEntries, now = () => new Date().toISOString(), source } = {}) {
   try {
     root = resolve(root);
     if (!BUNDLED_MAIN_VERBS.includes(verb)) return tsx("verb-not-bundled");
     const dir = resolve(root, outDir);
     if (existsSync(join(dir, MAIN_OFF_NAME))) return tsx("switched-off");
-    let treeHash = sourceHash(root);
+    if (source !== undefined && (!SHA256_HEX.test(source?.hash) ||
+      source.signature !== payloadDigest(sourceSignature(root, loadEsbuild(root).version)))) return tsx("source-signature-changed");
+    let treeHash = source?.hash ?? sourceHash(root);
     let verdict = childEntryIsCurrent(root, "run-task", { outDir, treeHash });
     let built = false;
     // A current bundle without its map (a build from before recipe 5's maps) is rebuilt too: source maps stay on.
     if (!verdict.current || !existsSync(`${verdict.bundle}.map`)) {
+      if (verb === "review") return tsx(verdict.current ? "map-missing" : verdict.reason);
       try {
         await build({ root, outDir, layoutDir: outDir });
       } catch (err) {
@@ -498,6 +508,7 @@ export async function mainEntry(root, verb, { outDir = OUT_DIR, build = buildChi
       if (!worker.current) return tsx(`worker-not-bundled: ${module}: ${worker.reason}`);
     }
     if (!existsSync(`${verdict.bundle}.map`)) return tsx("map-missing");
+    if (verb === "review") return { kind: "bundle", reason: verdict.reason, bundle: verdict.bundle };
     const attempt = readMainAttempt(root, outDir);
     if (attempt && attempt.sourceHash === treeHash && attempt.settled !== true) {
       return tsx(`demoted: a bundled ${attempt.verb ?? verb} boot of this source never reached its first tick`);
@@ -526,7 +537,16 @@ async function main(argv) {
   const mainAt = argv.indexOf("--main-entry");
   if (mainAt >= 0) {
     // bin/rmd reads one line, `<kind>\t<reason>\t<bundle>`, and execs the bundle only for kind `bundle`.
-    const choice = await mainEntry(root, argv[mainAt + 1] ?? "");
+    const sourceAt = argv.indexOf("--main-entry-source");
+    let source;
+    if (sourceAt >= 0 && argv[sourceAt + 1]) {
+      try { source = JSON.parse(argv[sourceAt + 1]); }
+      catch (err) {
+        process.stdout.write(`tsx\tinvalid-source-witness: ${String(err.message).replace(/[\t\n]/g, " ")}\t\n`);
+        return 0;
+      }
+    }
+    const choice = await mainEntry(root, argv[mainAt + 1] ?? "", { source });
     process.stdout.write(`${choice.kind}\t${choice.reason.replace(/[\t\n]/g, " ")}\t${choice.bundle ?? ""}\n`);
     return 0;
   }

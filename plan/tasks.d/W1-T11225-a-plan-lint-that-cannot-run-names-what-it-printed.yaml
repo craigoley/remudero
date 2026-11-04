@@ -1,0 +1,37 @@
+- id: W1-T11225
+  title: A review whose plan lint prints no summary records the lint child's own redacted output tail, and its reason names the child's last output line, so a "could not run" verdict carries its own cause
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one function's failure arm: what a review keeps from a lint child it already captured
+  origin: operator-session#wreckterra-pr6-lint-recon-2026-11-03
+  plan_refs:
+    - W1-T4423
+  files:
+    - src/run-task.ts
+    - test/plan/a-plan-lint-that-cannot-run-names-what-it-printed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the lint child exits with no summary line, lintPlanForReview ledgers one row carrying the exit status and the child's redacted, bounded output tail, and the outcome's reason ends with the child's last non-blank output line; a secret-shaped token in that output never reaches the row or the reason, and a child that printed nothing keeps today's reason unchanged
+      proof: "unit test: test/plan/a-plan-lint-that-cannot-run-names-what-it-printed.test.ts"
+    - claim: The review's plan-lint failure arm ledgers the child's output under its own step
+      proof: "grep: review\\.plan_lint_unreadable in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-03:
+    - wreckterra#6 got remudero-review FAIL "plan-only PASS withheld, lint-plan could not run: lint-plan exited 1 with no summary" twice, at 16:46Z (review code 0e4d3c70f) and 17:05Z. wreckterra#1 got the same verdict on 2026-10-25. Those are the only three "no summary" verdicts in the ledger union.
+    - The 16:46Z lint ran in remudero-daemon as a bundle (child_entry.spawned kind bundle, reason store-hit, engine tree state/engines/464c3914..., core 0e4d3c70f). The child wrote no ledger row in its window.
+    - The same lint over the same PR head passes outside the review: in-process lintPlanCommand at core 3348849ff (one review.ts-only commit before 0e4d3c70f) over a fresh clone, and over a git worktree of a clone, both print "rmd lint-plan: 1 task(s) checked (1 new/changed vs 8dcce032af9c) — 0 failing, 1 warning(s)". A cloud tsx run at 0e4d3c70f also passes.
+    - spawnReviewPlanLint captures the child's stdout and stderr. planLintOutcomeFromOutput reads only a "### rmd lint-plan:" line or the summary, so a child that dies before either line leaves "exited 1 with no summary" and the cause is discarded. Re-running the child by hand needs RMD_SELF_SYNC_DONE=1 inside the production daemon, which the operator session's guard refuses, so today the cause can only be recovered by an operator rerun.
+  design: |
+    In lintPlanForReview, after planLintOutcomeFromOutput returns ran: false for a child that did run:
+    - Ledger one row (step review.plan_lint_unreadable) with the exit status, the signal if any, and formatTail(result.stdout, result.stderr, 20, 2000) from src/lib/proofExecutor.ts, which already redacts secret shapes and bounds lines and characters.
+    - When that tail is non-empty, append "; it printed: <last non-blank line of the tail, at most 160 characters>" to the reason.
+    NOT IN SCOPE: why the wreckterra lint dies; the first build's own ledger row will name it. The summary parser, the child launch, its environment and the verdict itself are unchanged.
+  note: |
+    reservation hand-off: run-unfiled-1793725941065 -> run-unfiled-1793725941065
+    Reserved with rmd next-task-id (W1-T11225 on run-unfiled-1793725941065). Found by the operator session's wreckterra#6 lint recon.

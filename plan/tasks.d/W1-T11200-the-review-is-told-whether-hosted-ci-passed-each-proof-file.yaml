@@ -1,0 +1,40 @@
+- id: W1-T11200
+  title: "The review is told whether hosted CI passed each unit-test proof's file at the head it judges, by the same off-host-pass reader the fix lane's progress judge uses, so a proof that fails only in the loaded review sandbox while CI passes it is inconclusive load (W1-T11132's arm (b)) — #15532's motivating failure"
+  repo: remudero
+  depends_on: [W1-T11132, W1-T11133]
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, the hosted-CI per-file pass evidence a review receives; it reads GitHub check runs and feeds a verdict input
+  origin: operator-session#review-sandbox-load-2026-11-02
+  plan_refs:
+    - W1-T11132
+    - W1-T11133
+    - W1-T10742
+  files:
+    - src/cli/commands/review.ts
+    - test/review/the-review-is-told-whether-hosted-ci-passed-each-proof-file.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: runReview fills ReviewEvidence.hostedCiFilePassed for each unit-test proof's file from the head's concluded hosted CI shard checks, through W1-T11133's off-host-pass reader rather than a second GitHub reader; a file whose shard has not concluded, a failed or unreadable read, or a head other than the one judged leaves it absent
+      proof: "unit test: test/review/the-review-is-told-whether-hosted-ci-passed-each-proof-file.test.ts"
+    - claim: The evidence says passed only when the shard that ran that file concluded success at that exact head; a failed shard says failed, and a proof whose file CI did not run is absent
+      proof: "grep: W1-T11200 criterion 2 in test/review/the-review-is-told-whether-hosted-ci-passed-each-proof-file.test.ts"
+  rationale: |
+    Split out of W1-T11132 on 2026-11-03, when the hand build stopped before any code.
+    - W1-T11132's arm (b), "a proof that failed while hosted CI passed the same test file at the same head", needs GitHub check data. src/lib/review.ts receives GitHub-side inputs only through ReviewEvidence, which src/cli/commands/review.ts fills, and the library makes no check-run read.
+    - #15532 (W1-T10573), the motivating case, is arm (b): the test runner completed, and a subtest failed on a child's spawnSync timeout (null !== 2). Arm (a), a timeout, signal or exec_error ending the run itself, does not catch it.
+    - W1-T11133 (in flight, a run-W1-T11133-* branch exists) gives the fix lane's progress judge an off-host-pass signal for the same failures. This task reuses its reader, so the fleet has one GitHub reader for "hosted CI passed this file", not two.
+    - It also needs a mapping from test file to the CI shard that ran it. Read it from W1-T11133's reader, or from the shard assignment CI itself uses, never from a second hand-kept list.
+  design: |
+    1. After W1-T11133 merges, take its off-host-pass reader and expose the per-file answer (passed | failed | absent) for a head.
+    2. runReview calls it once per review, for the head it judges, and sets ReviewEvidence.hostedCiFilePassed. Any read failure leaves the field absent and is ledgered with its reason. Absent means W1-T11132's arm (b) stays off, exactly as today.
+    3. Coordinate with W1-T10742, so the pre-open gate and the review name the same outcome.
+  falsifier: |
+    At origin/main ReviewEvidence carries no hosted-CI per-file evidence, so a review-sandbox proof that fails while hosted CI passes the same file is executed_fail.
+  note: |
+    reservation hand-off: plan-file-1793709789299 -> plan-file-1793709789299
+    Reserved with rmd next-task-id --branch plan-file-1793709789299 from the operator checkout. The test path is where rmd test-place put a stub importing src/cli/commands/review.ts and src/lib/review.ts (test/review/, high).

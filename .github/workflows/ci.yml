@@ -55,7 +55,8 @@ permissions:
 # W1-T4406: ONE FLAG — the pull_request-time switch design note (iv) calls for, so flipping it (or
 # reverting it) is a one-line, one-PR change. "0" until the W1-T4404 shadow record shows two weeks
 # with no missed real failure: every existing pull_request behavior below stays byte-for-byte
-# unchanged while it reads "0" (see the `ci` job's Test step, the one reader of this flag).
+# unchanged while it reads "0". W1-T5705/W1-T5930: only the coverage lane reads it; `ci`'s Test
+# step does not, so a SOURCE pull request keeps one instrumented test verdict at either value.
 env:
   RMD_AFFECTED_SUITE_LIVE: "0"
 
@@ -354,34 +355,15 @@ jobs:
             cp merge-group-suites.txt affected-suites-selected.txt
             CLASS="AFFECTED"
           fi
-          # W1-T4406: ONE FLAG (this workflow's own top-level env; default "0"). Until the W1-T4404
-          # shadow record earns the flip, this block never fires and a pull_request SOURCE diff
-          # takes the unchanged W1-T3207 skip below, byte-for-byte. Flipped to "1", it runs the
-          # live W1-T4404 selector (src/lib/affected-suites.ts — the SAME pure function `rmd
-          # preflight` shares) instead of deferring to coverage-ratchet, which is the mechanism
-          # that actually moves the run off every PR push. A fullRun verdict (a config, lockfile,
-          # workflow or test-helper change the selector does not model) leaves CLASS untouched, so
-          # it falls through to the ordinary full fast tier below, unmodified.
-          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ]; then
-            node --import tsx -e '
-              import { readFileSync, writeFileSync } from "node:fs";
-              const root = process.env.GITHUB_WORKSPACE || process.cwd();
-              const changed = readFileSync(process.argv[1], "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
-              const mod = await import(root + "/src/lib/affected-suites.ts");
-              const sel = mod.affectedSelectionOrFull(changed, () => mod.readAffectedSuitesInput(root, changed));
-              writeFileSync(process.argv[2], sel.fullRun ? "full\n" : sel.suites.map((s) => s + "\n").join(""));
-              console.log("W1-T4406: live selection for " + changed.length + " changed file(s) -> " + (sel.fullRun ? "FULL: " + sel.reasons[0] : sel.suites.length + " suite(s)"));
-            ' changed-files.txt affected-suites-selected.txt || echo "full" > affected-suites-selected.txt
-            if [ "$(head -n 1 affected-suites-selected.txt 2>/dev/null || true)" != "full" ]; then
-              CLASS="AFFECTED"
-            fi
-          fi
+          # W1-T5930: ONE TEST VERDICT. RMD_AFFECTED_SUITE_LIVE narrows coverage-shard (W1-T5705), the
+          # instrumented owner of a SOURCE pull request's test verdict; this step no longer reads it, so
+          # a SOURCE pull request takes the W1-T3207 skip below at either flag value.
           if [ "$CLASS" != "SOURCE" ]; then
             COUNT=0
             if [ "$CLASS" = "TEST_ONLY" ]; then
               SUITES="$(tail -n +2 test-only-run.txt)"
             elif [ "$CLASS" = "AFFECTED" ]; then
-              # W1-T4406: the live selector's own suite list, run through the exact same
+              # W1-T5940: the merge group's own suite list, run through the exact same
               # duration-balanced candidate-shard machinery the plan-reading lane below uses.
               SUITES="$(cat affected-suites-selected.txt 2>/dev/null || true)"
             else
@@ -422,9 +404,9 @@ jobs:
           # names the tokens; this comment must not, because a comment inside a run body IS part of
           # the body the census reads.) It was briefly written as two adjacent string literals to
           # dodge the census by text, which is what prompted narrowing the rule instead.
-          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" != "1" ]; then
-            echo "W1-T3207: coverage-ratchet owns the single instrumented full-suite run; ci skips the quieter second harness on PR source diffs."
-            echo "- W1-T3207: skipped the quieter ci test harness on SOURCE; coverage-ratchet owns the single instrumented full-suite run for this PR." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ]; then
+            echo "W1-T3207: coverage-ratchet owns the single instrumented test verdict; ci skips the quieter second harness on PR source diffs."
+            echo "- W1-T3207: skipped the quieter ci test harness on SOURCE; coverage-ratchet owns the single instrumented test verdict for this PR." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ "$CLASS" = "SOURCE" ]; then
@@ -804,6 +786,37 @@ jobs:
               ;;
           esac
 
+  test-slow-plan:
+    # W1-T11206: derives test-slow-shard's matrix from the recorded per-file durations in
+    # scripts/test-tier-manifest.json — the smallest shard count whose slowest shard is predicted to
+    # finish within 60% of test-slow-shard's 35-minute ceiling. No install: the planner imports
+    # only node: built-ins. If it fails, test-slow-shard is skipped and test-slow fails closed.
+    name: test-slow-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            scripts
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Derive the slow-tier shard count from recorded durations (W1-T11206)
+        id: plan
+        run: |
+          node scripts/test-tier-manifest.mjs --print-slow-shards > slow-plan.txt
+          cat slow-plan.txt
+          if ! grep -q '^count=[1-9][0-9]*$' slow-plan.txt || ! grep -q '^shards=\[' slow-plan.txt; then
+            echo "::error::W1-T11206: --print-slow-shards printed no shard list and count."
+            exit 1
+          fi
+          cat slow-plan.txt >> "$GITHUB_OUTPUT"
+
   test-slow-shard:
     # W1-T2904: the SLOW tier, split out of the `ci` matrix's file-count sharding, which cannot
     # balance a suite where one file (test/run-task.test.ts, ~58s alone) sits wherever its hash
@@ -812,12 +825,17 @@ jobs:
     # heuristic) and runs exactly the files at or above its threshold. It is REQUIRED through
     # ci-gate before the fast shards may exclude those files. It registers on every pull_request
     # event (W1-T1033), so the required context is never silently absent.
-    name: test-slow-shard (${{ matrix.shard }}/2)
+    #
+    # W1-T11206: the matrix and its total come from test-slow-plan, so the shard count grows with
+    # the recorded durations and no total is written here. ci-gate.yml's ADVISORY list names these
+    # checks as `test-slow-shard (*/*)`; the required verdict stays the stable `test-slow`.
+    name: test-slow-shard (${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }})
+    needs: [test-slow-plan]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: ${{ fromJSON(needs.test-slow-plan.outputs.shards) }}
     # W1-T4396: no job-level if — the push lane runs the slow tier too. W1-T3207 skips it on a
     # SOURCE pull request, so without this the 107 slowest files ran on main nowhere at all. It is
     # its own job, so it never lengthens the fast shards' critical path.
@@ -933,9 +951,9 @@ jobs:
           if [ "${{ steps.plan-reading.outputs.class }}" = "PUSH" ]; then
             # W1-T4396: main's push lane. One bounded failed-file retry, as the fast shards get.
             echo "W1-T4396: push to main — running the slow tier."
-            node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --shard ${{ matrix.shard }}/2 --base HEAD
+            node scripts/test-tier-manifest.mjs --run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base HEAD --retry
           else
-            npm run --silent test:slow -- --shard ${{ matrix.shard }}/2 --base "origin/${GITHUB_BASE_REF}"
+            npm run --silent test:slow -- --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base "origin/${GITHUB_BASE_REF}"
           fi
       - name: Upload slow-tier duration evidence (structured Node test events, W1-T3302)
         if: ${{ always() }}
@@ -2059,9 +2077,47 @@ jobs:
     # job AND this dependent aggregator. See test/workflow-job-timeouts.test.ts.
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            scripts/
+            src/lib/plan-scope.ts
+            src/lib/rule-suites.ts
+            package.json
+            package-lock.json
+            .nvmrc
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      # W1-T11161: the gate below reads this diff's class from the same predicate the shards use, so a
+      # PLAN_ONLY diff whose matrix was skipped upstream is judged on evidence, not on the skip.
+      - name: Classify this pull request's diff for the coverage gate (W1-T11161)
+        id: coverage-plan-class
+        env:
+          MATRIX_RESULT: ${{ needs.coverage-ratchet.result }}
+        run: |
+          CLASS=SOURCE
+          COUNT=0
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && { [ "${MATRIX_RESULT:-}" = "skipped" ] || [ "${MATRIX_RESULT:-}" = "success" ]; }; then
+            git diff --name-only HEAD^1...HEAD > coverage-class-files.txt 2>/dev/null || : > coverage-class-files.txt
+            COUNT="$(grep -c . coverage-class-files.txt || true)"
+            CLASS="$(node scripts/diff-class.mjs --coverage-class --changed-files coverage-class-files.txt 2>coverage-class.log)" || CLASS=SOURCE
+            case "$CLASS" in PLAN_ONLY|DOCS_ONLY|TEST_ONLY|NO_SRC|SOURCE) ;; *) CLASS=SOURCE ;; esac
+            cat coverage-class.log 2>/dev/null || true
+          fi
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
       - name: Require every coverage shard to produce an artifact
+        id: coverage-gate
         env:
           SHARD_RESULT: ${{ needs.coverage-ratchet.result }}
+          COVERAGE_CLASS: ${{ steps.coverage-plan-class.outputs.class }}
+          COVERAGE_CLASS_COUNT: ${{ steps.coverage-plan-class.outputs.count }}
+          CLASS_EVENT: ${{ github.event_name }}
+          LEDGER_RESULT: ${{ needs.coverage-ledger.result }}
           RUN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_REPO_SLUG: ${{ github.repository }}
@@ -2113,9 +2169,16 @@ jobs:
             rm -f "$LOG_FILE"
           }
 
+          plan_only_evidenced() {
+            [ "${CLASS_EVENT:-}" = "pull_request" ] && [ "${COVERAGE_CLASS:-}" = "PLAN_ONLY" ] && [[ "${COVERAGE_CLASS_COUNT:-}" =~ ^[1-9][0-9]*$ ]]
+          }
+          not_applicable_line() {
+            echo "coverage-ratchet: not applicable — class=PLAN_ONLY over ${COVERAGE_CLASS_COUNT} changed file(s) per scripts/diff-class.mjs; coverage-ledger=${LEDGER_RESULT:-unknown}; no source line can move coverage (W1-T11161)."
+          }
+
           case "$SHARD_RESULT" in
             success)
-            :
+              if plan_only_evidenced; then not_applicable_line; fi
               ;;
             failure)
               echo "coverage-ratchet: a coverage shard FAILED (matrix result: failure) — open the shard log; this is a real break until that log says otherwise."
@@ -2151,6 +2214,11 @@ jobs:
               exit 1
               ;;
             skipped)
+              if plan_only_evidenced; then
+                not_applicable_line
+                echo "not_applicable=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+                exit 0
+              fi
               echo "coverage-ratchet: the shard matrix never ran (matrix result: skipped) — nothing was measured, so nothing is certified. Open the workflow run to see which upstream job gated it."
               exit 1
               ;;
@@ -2159,13 +2227,17 @@ jobs:
               exit 1
               ;;
           esac
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
+      - name: Restore the full checkout for coverage artifact consumption
+        id: coverage-full-checkout
+        env:
+          NOT_APPLICABLE: ${{ steps.coverage-gate.outputs.not_applicable }}
+        run: |
+          if [ "${NOT_APPLICABLE:-}" = "true" ]; then
+            echo "coverage-ratchet: PLAN_ONLY — no full checkout or history is needed."
+            exit 0
+          fi
+          git sparse-checkout disable
+          git fetch --unshallow
       - name: Download coverage shards
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -2173,7 +2245,15 @@ jobs:
           path: coverage-shards
       - name: Require downloaded coverage shard artifacts
         id: coverage-artifact
+        env:
+          NOT_APPLICABLE: ${{ steps.coverage-gate.outputs.not_applicable }}
         run: |
+          if [ "${NOT_APPLICABLE:-}" = "true" ]; then
+            echo "coverage-ratchet: not applicable (W1-T11161) — the matrix was skipped for a PLAN_ONLY diff; no shard artifact is expected."
+            echo "event=pull_request" >> "$GITHUB_OUTPUT"
+            echo "class=PLAN_ONLY" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           EXPECTED=""
           for SHARD in 1 2 3 4 5 6 7 8; do
             CLASS_FILE="coverage-shards/coverage-shard-${SHARD}/class"
@@ -2328,6 +2408,16 @@ jobs:
           # W1-T5892: a merge-group lcov whose shards all succeeded records provenance, so it may pin a floor.
           node scripts/coverage-floor.mjs provenance --producer coverage-merged --lcov coverage-merged-artifact/lcov.info \
             --out coverage-merged-artifact/provenance.json --matrix-result "$MATRIX_RESULT"
+      - name: Emit bounded source SF evidence for the native coverage consumer
+        run: |
+          node scripts/coverage-floor.mjs owning-sf --include-changed-source --lcov coverage/lcov.info \
+            --file src/lib/model-canary-command.ts \
+            --file src/lib/model-canary-owner.ts \
+            --file src/lib/model-canary-pilot-approval.ts \
+            --file src/lib/model-canary-pilot-budget.ts \
+            --file src/lib/model-canary-pilot-execution.ts \
+            --file src/lib/worker-provider.ts \
+            --file src/lib/worker.ts
       - name: Upload merged coverage artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -2403,6 +2493,7 @@ jobs:
           npm ci
       - name: Determine whether this diff can move src/lib/classify.ts's mutation score
         id: trigger
+        if: steps.classify.outputs.class == 'SOURCE'
         run: |
           set -euo pipefail
           git diff --name-only HEAD^1...HEAD > changed-files.txt
@@ -2602,7 +2693,7 @@ jobs:
     # is empty. FALSIFIER: test/the-ci-gate-reports-on-the-merge-group-commit.test.ts.
     name: ci-gate
     runs-on: ubuntu-latest
-    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
+    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-plan, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
     # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
     # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
     # GitHub re-evaluates this job condition when cancelling: the second arm releases that run.

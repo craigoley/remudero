@@ -1055,13 +1055,17 @@ export function isWorktreeNodeModulesRefusal(err: unknown): err is { reasonClass
 }
 
 /** W1-T5344 — which kind of per-task DELIVERY failure ended a lane. */
-export type LaneDeliveryFailureClass = "command_failed" | "pr_open_refused" | "push_credential_missing";
+export type LaneDeliveryFailureClass =
+  | "command_failed" | "pr_open_refused" | "push_credential_missing" | "spawn_output_overflow" | "spawn_no_pid";
 
 /** W1-T5344 — a lane's rejection recognised as ONE TASK's delivery failure: its class and the
  *  first line of its message (the ledger carries no multi-line stderr). */
 export interface LaneDeliveryFailure {
   failureClass: LaneDeliveryFailureClass;
   firstLine: string;
+  /** W1-T11136: for an output overflow, the spawned file and its first argument, so the call can be found by name. */
+  spawnFile?: string;
+  spawnArg?: string;
 }
 
 /** A SPAWNED command's failure — `execFileSync`'s own message prefix. The daemon's
@@ -1071,9 +1075,29 @@ export const SPAWNED_COMMAND_FAILED_RE = /^Command failed: /;
 
 /** A dead CREDENTIAL is the fleet's failure, not the task's: every lane would hit it next, so it
  *  keeps today's fatal path (test/daemon.test.ts "W1-T3165 ... auth refusals ... remain fatal"). */
+/** W1-T11136: worker-containment.ts's spawnDetachedGroup throw when spawn returned no pid. Anchored, as above. */
+export const SPAWN_NO_PID_RE = /^spawnDetachedGroup: child process has no pid /;
+
+/** W1-T11136: Node's own overflow shape (spawnSync, and execFileSync rethrowing it): code ENOBUFS, syscall `spawnSync <file>`. */
+function spawnOutputOverflow(err: unknown): LaneDeliveryFailure | undefined {
+  if (!(err instanceof Error)) return undefined;
+  const { code, syscall, path, spawnargs } = err as { code?: unknown; syscall?: unknown; path?: unknown; spawnargs?: unknown };
+  if (code !== "ENOBUFS" || typeof syscall !== "string" || !syscall.startsWith("spawnSync")) return undefined;
+  const spawnFile = typeof path === "string" ? path : syscall.slice("spawnSync ".length);
+  const first = Array.isArray(spawnargs) && spawnargs.length > 0 ? String(spawnargs[0]).slice(0, 120) : undefined;
+  const named = first === undefined ? spawnFile : `${spawnFile} ${first}`;
+  return {
+    failureClass: "spawn_output_overflow",
+    firstLine: firstLineOf(`${firstLineOf(err.message)} — overflowed: ${named}`),
+    spawnFile,
+    ...(first === undefined ? {} : { spawnArg: first }),
+  };
+}
+
 export const CREDENTIAL_REFUSAL_RE = /Bad credentials|HTTP 401|Authentication failed|could not read Username|Permission denied \(publickey\)/i;
 
-/** W1-T5344: end only the failed lane for `Command failed: ` or `PrOpenRefusedError`.
+/** W1-T5344: end only the failed lane for `Command failed: ` or `PrOpenRefusedError`;
+ *  W1-T11136 adds a spawn output overflow and a pid-less spawnDetachedGroup.
  *  Repeated delivery-refusal crashes previously restarted the daemon on the same task.
  *  Match PR refusals by name/tag, not prose; importing pr-open.ts creates a
  *  daemon → drain → pr-open → self-sync → daemon cycle (cf. {@link isWorktreeNodeModulesRefusal}).
@@ -1081,6 +1105,9 @@ export const CREDENTIAL_REFUSAL_RE = /Bad credentials|HTTP 401|Authentication fa
  *  Callers check transient/spawn-infra/read-failure backoffs first. Shared with daemon settlement. */
 export function laneDeliveryFailure(err: unknown): LaneDeliveryFailure | undefined {
   if (isPrOpenRefusal(err)) return { failureClass: "pr_open_refused", firstLine: firstLineOf(err.message) };
+  const overflow = spawnOutputOverflow(err);
+  if (overflow) return overflow;
+  if (err instanceof Error && SPAWN_NO_PID_RE.test(err.message)) return { failureClass: "spawn_no_pid", firstLine: firstLineOf(err.message) };
   if (!(err instanceof Error) || !SPAWNED_COMMAND_FAILED_RE.test(err.message)) return undefined;
   const stderr = (err as { stderr?: unknown }).stderr;
   if (CREDENTIAL_REFUSAL_RE.test(`${err.message}\n${stderr == null ? "" : String(stderr)}`)) return undefined;
@@ -1103,6 +1130,17 @@ function isPrOpenRefusal(err: unknown): err is Error {
     err.name === "PrOpenRefusedError" &&
     typeof (err as { refusalClass?: unknown }).refusalClass === "string"
   );
+}
+
+/** The `drain.lane_failed` row both paths write; an overflow also names its spawned file and first argument. */
+function laneFailedRow(task: string, delivery: LaneDeliveryFailure): Record<string, unknown> {
+  return {
+    task,
+    class: delivery.failureClass,
+    error: delivery.firstLine,
+    ...(delivery.spawnFile === undefined ? {} : { spawn_file: delivery.spawnFile }),
+    ...(delivery.spawnArg === undefined ? {} : { spawn_arg: delivery.spawnArg }),
+  };
 }
 
 function firstLineOf(message: string): string {
@@ -2007,6 +2045,14 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       result = await deps.runOne(next.id);
     } catch (e) {
       await flushLifetimePressure();
+      // W1-T11136: the same classifier as the parallel settle, so one task's delivery failure ends its lane here too.
+      const delivery = laneDeliveryFailure(e);
+      if (delivery) {
+        continued.push({ taskId: next.id, verdict: "lane_failed" });
+        continuedIds.add(next.id);
+        log("drain.lane_failed", laneFailedRow(next.id, delivery));
+        continue;
+      }
       return summary("error", `${next.id}: ${String((e as Error)?.message ?? e)}`);
     }
     await flushLifetimePressure();
@@ -2615,7 +2661,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         if (delivery) {
           continued.push({ taskId: t.id, verdict: "lane_failed" });
           continuedIds.add(t.id);
-          settledLog("drain.lane_failed", { task: t.id, class: delivery.failureClass, error: delivery.firstLine }, t.id);
+          settledLog("drain.lane_failed", laneFailedRow(t.id, delivery), t.id);
           continue;
         }
         settledLog("drain.lane_error", { task: t.id, message }, t.id);

@@ -1,0 +1,46 @@
+- id: W1-T11211
+  title: "A ci-log fix round on a head that already has a FAIL review carries that same-head review's unmet criteria and verified findings, named as current rather than stale — 104 of 497 ci-log rounds in 7 days (45 PRs) ran while a FAIL review existed at that exact head and were told it may be stale"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, the evidence a ci-log fix round carries; it spans fix.ts's evidence assembly and prompt-render's ci-log text
+  origin: operator-session#fix-lane-gaps-2026-11-03
+  plan_refs:
+    - W1-T138
+    - W1-T226
+    - W1-T11209
+  files:
+    - src/cli/commands/fix.ts
+    - src/lib/prompt-render.ts
+    - test/worker/a-ci-log-fix-round-carries-the-same-head-review-findings.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When a fix round is in ci-log mode and a review.posted FAIL exists for the PR at the exact head the round targets, the round's evidence carries that review's unmet criteria and its verified findings for that head alongside the CI failures; a review at any other head is not carried
+      proof: "unit test: test/worker/a-ci-log-fix-round-carries-the-same-head-review-findings.test.ts"
+    - claim: The ci-log prompt renders those criteria and findings in their own section, which says they were judged at this exact head and are current, and keeps the stale-review caution only when no same-head review exists; with no same-head review the prompt is unchanged
+      proof: "grep: W1-T11211 criterion 2 in test/worker/a-ci-log-fix-round-carries-the-same-head-review-findings.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 over the 7-day core ledger union (303 rotated files plus live, read-only):
+    - fix.dispatch by mode: ci-log 497, reviewer-unmet 302, merge-conflict 109, plan-gate 13, body-coverage 5, gate-fix 5.
+    - 104 of the 497 ci-log rounds (21%, 45 PRs) targeted a head that already had a review.posted FAIL. The join is on fix.dispatch's repair_pr_url and head_sha.
+    - Positive control: the same join matches 302 of 302 reviewer-unmet rounds to their FAIL.
+    - #16240 (W1-T10877): five rounds ran in ci-log mode while its only fixable red was the review's semantic finding, plus a main-red views test no PR change could fix. Each round fixed something else, marked FIXED, and the same FAIL came back.
+    WHY. fix.ts seeds `noReviewYet = opts.ciFailures !== undefined` on the invariant "review only ever runs once CI is green", and flips it back to true whenever CI is red again (W1-T138).
+    - That invariant is false once a review has run on green CI and a shard then goes red for a reason outside the PR: a main-red test, a flake, or a re-run.
+    - In that state FIX_MODE_RULES picks ci-log (prompt-render.ts, ci-log before reviewer-unmet). The ci-log text tells the worker any review verdict "may simply be STALE … do not touch acceptance criteria … to chase a reviewer verdict here".
+    - The same-head review's findings (verifiedReviewFindingsForFix already filters by head) never reach the worker.
+    KEPT: the ci-log mode and its precedence. CI red still blocks merge whatever the review says, so the round's target is still the CI red. The stale caution stays for a review at another head, which W1-T138 is right about. W1-T11209 makes the carried clauses whole.
+  design: |
+    1. fix.ts: when the evidence is ci-log-shaped (noReviewYet), read the newest review.posted for this PR at the round's head (priorHeadSha). If it is a failure with unmet criteria, add review: { unmetCriteria, summary, findings: verifiedReviewFindingsForFix(…, priorHeadSha) } beside ciFailures. FIX_MODE_RULES is unchanged, so the mode stays ci-log.
+    2. prompt-render.ts ci-log branch: when evidence.review has unmet criteria, render them after the CI failures under "A review at this exact head also judged these criteria unmet — current, not stale", one block per criterion with the same claim, proof, reason and finding envelope reviewer-unmet uses. Name the CI failures as this round's target, and the review findings as what must also be true before merge. The stale-review caution is rendered only when evidence.review is absent.
+    3. fix.dispatch gains same_head_review_unmet (a count) when carried, so the share of ci-log rounds carrying review evidence is readable from the ledger.
+  falsifier: |
+    At origin/main a ci-log round for a head with a review.posted FAIL renders no unmet criterion and tells the worker any review verdict may be stale.
+  note: |
+    reservation hand-off: plan-file-1793714664183 -> plan-file-1793714664183
+    Reserved with rmd next-task-id --branch plan-file-1793714664183 from the operator checkout. Found by the hand fix of #16240 on 2026-11-03. Operator, in chat: "go with all of your recommendations". The test path is where rmd test-place put a stub importing src/lib/prompt-render.ts and src/cli/commands/fix.ts (test/worker/, high).

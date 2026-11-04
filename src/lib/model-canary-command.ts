@@ -11,8 +11,13 @@ import { randomBytes } from "node:crypto";
 import { rotatingCanarySuite } from "./model-canary-rotation.js";
 import { buildEffectiveConfigCensus, type BuildEffectiveConfigCensusInput } from "./model-canary-config-census.js";
 import { planCanaryMatrix } from "./model-canary-matrix-plan.js";
+import { validatePrivateCorpus, buildPrivateCanaryRequest } from "./model-canary-private-corpus.js";
+import { capturedPrivateTraceReceipt, gradePrivateTrace, loadPrivateTraceFromCustody,
+  type PrivateTraceBindingV1 } from "./model-canary-trace-grader.js";
+import { readOwnedPrivateTraceReceipt } from "./model-canary-owner.js";
+import type { CanarySlot } from "./model-canary-schedule.js";
 
-function boundedInput(input: string, limit = 8 * 1024 * 1024): string {
+function boundedInput(input: string, limit = 8 * 1024 * 1024, privateOwned = false): string {
   if (!Number.isInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0
     || !Number.isInteger(constants.O_NONBLOCK) || constants.O_NONBLOCK <= 0)
     throw new Error("canary-input-platform-unsupported");
@@ -20,6 +25,8 @@ function boundedInput(input: string, limit = 8 * 1024 * 1024): string {
   try {
     const info = fstatSync(fd);
     if (!info.isFile()) throw new Error("canary-input-regular-file-required");
+    if (privateOwned && ((info.mode & 0o077) !== 0 || typeof process.getuid !== "function" || info.uid !== process.getuid()))
+      throw new Error("canary-input-private-owned-file-required");
     if (info.size > limit) throw new Error("canary-input-bound");
     const buffer = Buffer.alloc(limit + 1);
     let length = 0;
@@ -60,7 +67,78 @@ function privateOutput(dir: string, name: string, data: string) {
   writeFileSync(join(dir, name), data, { encoding: "utf8", flag: "wx", mode: 0o600 });
 }
 
+function privateTrustAnchors(flag: string | undefined, file: string | undefined): Readonly<Record<string, string>> {
+  if (flag === undefined && file === undefined) return {};
+  if (flag !== "--trust-anchors" || !file) throw new Error("canary-private-trust-anchor-argument-invalid");
+  // This separate, operator-selected file is the trust source; corpus JSON cannot select a key.
+  const parsed: unknown = JSON.parse(boundedInput(file, 64 * 1024, true));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+    || Object.keys(parsed).length > 16 || Object.entries(parsed).some(([id, key]) =>
+      !/^[a-zA-Z0-9._-]{1,100}$/.test(id) || typeof key !== "string" || key.length > 4096))
+    throw new Error("canary-private-trust-anchors-invalid");
+  return parsed as Readonly<Record<string, string>>;
+}
+
 export function canaryCommand(argv: readonly string[]) {
+  if (argv[0] === "prepare-private") {
+    const [, outDir, input, flag, keyFile] = argv;
+    if (![3, 5].includes(argv.length) || !outDir || !input)
+      throw new Error("usage: model-canary-command prepare-private <private-out-dir> <private-corpus.json> [--trust-anchors <private-anchor-file>]");
+    const bundle: unknown = JSON.parse(boundedInput(input, 2 * 1024 * 1024, true));
+    const corpus = validatePrivateCorpus(bundle, privateTrustAnchors(flag, keyFile));
+    if (corpus.state !== "available") throw new Error(corpus.reason);
+    const requests = corpus.metadata.cases.map(item => {
+      const projected = buildPrivateCanaryRequest(corpus.corpus, item.caseId);
+      if (projected.state !== "available") throw new Error(projected.reason);
+      return { request: projected.request, join: { requestId: projected.request.requestId,
+        caseId: item.caseId, corpusDigest: corpus.metadata.digest, scorerDigest: item.scorerDigest } };
+    });
+    // Request payload and scorer/provenance joins are separate files; none grants execution.
+    privateOutput(outDir, "model-canary-private-scorer.json", JSON.stringify(bundle, null, 2) + "\n");
+    privateOutput(outDir, "model-canary-private-requests.json", JSON.stringify({
+      version: "model-canary-private-requests-v1", state: "prepared-not-activated",
+      requests: requests.map(item => item.request) }, null, 2) + "\n");
+    privateOutput(outDir, "model-canary-private-joins.json", JSON.stringify({
+      version: "model-canary-private-joins-v1", metadata: corpus.metadata,
+      joins: requests.map(item => item.join) }, null, 2) + "\n");
+    return { state: "prepared-not-activated", corpusDigest: corpus.metadata.digest,
+      cases: corpus.metadata.cases.length, splits: corpus.metadata.splits,
+      execution: "qualified-native-owner-required" };
+  }
+  if (argv[0] === "grade-private") {
+    const [, outDir, corpusFile, ownerDirectory, bindingFile, flag, keyFile] = argv;
+    if (![5, 7].includes(argv.length) || !outDir || !corpusFile || !ownerDirectory || !bindingFile)
+      throw new Error("usage: model-canary-command grade-private <private-out-dir> <private-corpus.json> <operator-selected-private-owner-dir> <binding.json> [--trust-anchors <private-anchor-file>]");
+    const corpus = validatePrivateCorpus(JSON.parse(boundedInput(corpusFile, 2 * 1024 * 1024, true)),
+      privateTrustAnchors(flag, keyFile));
+    if (corpus.state !== "available") throw new Error(corpus.reason);
+    const value: unknown = JSON.parse(boundedInput(bindingFile, 128 * 1024, true));
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("canary-private-binding-required");
+    const request = value as Record<string, unknown>;
+    if (request.version !== "model-canary-private-grade-input-v1" || Object.keys(request).length !== 3
+      || !request.slot || typeof request.slot !== "object" || Array.isArray(request.slot)
+      || !request.binding || typeof request.binding !== "object" || Array.isArray(request.binding))
+      throw new Error("canary-private-binding-input-invalid");
+    const slot = request.slot as CanarySlot, binding = request.binding as PrivateTraceBindingV1;
+    // Caller must select this trusted owner directory out of band; neither corpus nor run JSON selects it.
+    // This operator choice is a custody channel, not proof of configuration provenance.
+    // Same-UID host tampering is outside this private-custody boundary; this is not a signature.
+    const loaded = loadPrivateTraceFromCustody(corpus.corpus, slot.caseId, binding,
+      () => readOwnedPrivateTraceReceipt(ownerDirectory, slot, binding));
+    const captured = loaded.state === "available" ? capturedPrivateTraceReceipt(loaded.trace) : null;
+    const custodyAvailable = loaded.state === "available" && captured !== null;
+    const grade = loaded.state === "available" && captured !== null
+      ? gradePrivateTrace(corpus.corpus, slot.caseId, loaded.finalText, loaded.trace, binding)
+      : { state: "unavailable" as const, reason: loaded.state === "unavailable"
+        ? loaded.reason : "private-trace-capture-unavailable" };
+    privateOutput(outDir, "model-canary-private-grade.json", JSON.stringify({
+      version: "model-canary-private-grade-v1", corpusDigest: corpus.metadata.digest,
+      evidenceSource: custodyAvailable ? "operator-selected-private-owner-custody" : "unavailable",
+      binding: captured?.binding ?? null, grade }, null, 2) + "\n");
+    return { state: "private-regrade", gradeState: grade.state,
+      passed: grade.state === "scored" ? grade.passed : null, reason: grade.reason };
+  }
+
   if (argv[0] === "prepare-matrix") {
     const [, outDir, input] = argv;
     if (argv.length !== 3 || !outDir || !input)

@@ -544,7 +544,8 @@ import { dropTierRowsBeforePush, prePushGateRefusal } from "./lib/pre-push-refus
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
-import { buildProjectInit, parseProjectInitArgs } from "./lib/project-init.js";
+import { buildProjectInit, parseProjectInitArgs, ProjectInitError } from "./lib/project-init.js";
+import { writeProjectInit } from "./lib/project-init-write.js";
 import {
   OnboardError,
   parseOnboardArgs,
@@ -635,6 +636,7 @@ import { readPlanBase } from "./lib/plan-base-reader.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
+import { assertInstanceRegistryRuntimeCurrent, InstanceRegistryRuntimeError, instanceRegistryRuntimePresent, runtimeInstanceRegistryText, withInstanceRegistryRuntime } from "./lib/instance-registry-selection.js";
 import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
@@ -1837,6 +1839,8 @@ export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdict
  * stays the fail-closed floor for any PR this earlier gate misses; this is additive, not a
  * replacement. Extracted so a test can drive it against a counting fake, never a real `gh`/git call.
  */
+export type FreshTreeEntry = { kind: "bundle" | "tsx" | "unknown"; reason: string };
+
 /** W1-T3723 — what {@link buildFreshTreeReviewRunner} needs, all injected so a test drives it
  *  without git, a worktree or a spawn. A `type` whose name does NOT end in `Deps`, deliberately:
  *  `scripts/deps-interface-baseline.json`'s census can only shrink, and another `*Deps` shape is
@@ -1854,7 +1858,8 @@ export type FreshTreeReviewSeams = {
   addWorktree: (repoDir: string, worktreePath: string, revision: string) => void;
   /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code; on a
    *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
-  spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void) => Promise<number>;
+  spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void,
+    parentEnv?: NodeJS.ProcessEnv, onEntry?: (entry: FreshTreeEntry) => void) => Promise<number>;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
   /**
@@ -1963,9 +1968,10 @@ export function buildFreshTreeReviewRunner(
   rest: string[],
   freshness: { originMainSha: string },
   onFailure?: (failure: string) => void,
+  onEntry?: (entry: FreshTreeEntry) => void,
 ) => Promise<number | undefined> {
   const prepared = new Map<string, string>();
-  return async (prArg, rest, freshness, onFailure) => {
+  return async (prArg, rest, freshness, onFailure, onEntry) => {
     const sha = freshness.originMainSha;
     try {
       let worktree = prepared.get(sha);
@@ -1984,7 +1990,7 @@ export function buildFreshTreeReviewRunner(
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
-        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure);
+        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure, undefined, onEntry);
       };
       return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
     } catch (err) {
@@ -2095,17 +2101,25 @@ export function spawnRmdReviewForFreshTree(
   args: string[],
   onFailure?: (failure: string) => void,
   parentEnv: NodeJS.ProcessEnv = process.env,
+  onEntry?: (entry: FreshTreeEntry) => void,
+  store: { storeRoot?: string } = {},
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
+    const prepared = materializeMainEntryFromStore(worktree, store.storeRoot);
+    const sourceArgs = prepared.source ? ["--main-entry-source", JSON.stringify(prepared.source)] : [];
     // A daemon's installation token is copied at spawn and may expire during proof execution.
     // An App-backed child mints its own fresh token in main(); other callers keep their identity.
     const appConfigured = Boolean(parentEnv.GH_APP_ID && parentEnv.GH_APP_INSTALLATION_ID && parentEnv.GH_APP_PRIVATE_KEY_PATH);
-    const child = spawn(join(worktree, "bin", "rmd"), ["review", ...args], {
+    const child = spawn(join(worktree, "bin", "rmd"), [...sourceArgs, "review", ...args], {
       cwd: worktree,
       // W1-T4055: stderr is piped only to be TEED — every byte still reaches this process's stderr.
-      stdio: ["inherit", "inherit", "pipe"],
+      stdio: ["inherit", "inherit", "pipe", "pipe"],
       // The child IS at origin/main, so a self-sync there is a refusal and a wasted fetch.
       env: { ...parentEnv, RMD_SELF_SYNC_DONE: "1", ...(appConfigured ? { GH_TOKEN: "" } : {}) },
+    });
+    let entryReport = "";
+    (child.stdio[3] as import("node:stream").Readable).on("data", (chunk: Buffer) => {
+      entryReport = (entryReport + chunk.toString("utf8")).slice(0, 1024);
     });
     let held = "";
     child.stderr?.on("data", (chunk: Buffer) => {
@@ -2115,6 +2129,11 @@ export function spawnRmdReviewForFreshTree(
     child.on("error", reject);
     // `close`, not `exit`: only `close` guarantees the piped stderr has been read to its end.
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      const [kind, reason] = entryReport.trim().split("\t");
+      const storeReason = prepared.lookup.outcome === "miss" ? prepared.lookup.reason
+        : prepared.lookup.outcome === "hit" ? "store-hit" : "tree-current";
+      onEntry?.({ kind: kind === "bundle" || kind === "tsx" ? kind : "unknown",
+        reason: `${reason || "launcher-did-not-report"}; ${storeReason}` });
       const exitCode = code ?? 1;
       if (exitCode !== 0) onFailure?.(signal && !held.trim() ? `killed by ${signal}` : freshTreeFailureText(held));
       resolve(exitCode);
@@ -2170,6 +2189,7 @@ export function buildReviewerCodeFreshnessGate(
     rest: string[],
     freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
     onFailure?: (failure: string) => void,
+    onEntry?: (entry: FreshTreeEntry) => void,
   ) => Promise<number | undefined>,
 ): {
   call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
@@ -2196,11 +2216,12 @@ export function buildReviewerCodeFreshnessGate(
           // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
           // nothing but an exit code ledgered; the cause is what the next fix needs.
           let failure: string | undefined;
+          let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
           const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
-          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }).then((code) => {
+          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }).then((code) => {
             if (code !== undefined) {
               const why = code === 0 ? {} : { failure: failure ?? "no failure reported" };
-              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, ...why });
+              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, entry_kind: entry.kind, entry_reason: entry.reason, ...why });
               return code;
             }
             // COULD NOT RUN — fall through to the original skip rather than judging with stale
@@ -17287,10 +17308,29 @@ export async function nextTaskIdCommand(
   overlapDeps: OverlapWarningDeps = {},
   deps: NextTaskIdReserveDeps = {},
 ): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch", "--count"], ["--offline", "--reserve", "--no-reserve", "--audit", "--reap", "--apply", "--reconcile"]);
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch", "--count", "--max-scan"], ["--offline", "--reserve", "--no-reserve", "--audit", "--reap", "--apply", "--reconcile"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
+  }
+  const maxScanFlagCount = rest.filter((arg) => arg === "--max-scan").length;
+  let requestedMaxScan: number | undefined;
+  if (maxScanFlagCount > 0) {
+    const rawMaxScan = flagValue(rest, "--max-scan");
+    const parsedMaxScan = rawMaxScan !== undefined && /^\d+$/.test(rawMaxScan) ? Number(rawMaxScan) : NaN;
+    if (maxScanFlagCount !== 1 || !Number.isSafeInteger(parsedMaxScan) || parsedMaxScan < 1 || parsedMaxScan > 200) {
+      console.error("### rmd next-task-id: --max-scan must be an integer between 1 and 200\n" + USAGE);
+      return 2;
+    }
+    if (!rest.includes("--reserve")) {
+      console.error("### rmd next-task-id: --max-scan requires explicit --reserve\n" + USAGE);
+      return 2;
+    }
+    if (rest.includes("--prefix") || rest.includes("--repo")) {
+      console.error("### rmd next-task-id: --max-scan applies only to W1 task reservations, not --prefix\n" + USAGE);
+      return 2;
+    }
+    requestedMaxScan = parsedMaxScan;
   }
   const reap = rest.includes("--reap");
   if ((reap && (!rest.includes("--audit") || rest.some(a => ["--offline", "--audit-age-days", "--prefix", "--repo"].includes(a))))
@@ -17444,7 +17484,7 @@ export async function nextTaskIdCommand(
           "other source can yet see, so claiming atomically on it while it is unreadable risks " +
           "reissuing a live id (the W1-T2316 reissue, #2965/#2970). Nothing was claimed. Printing " +
           "(without --reserve) still works — only the ATOMIC claim refuses. Retry once the surface " +
-          "is reachable.",
+          `is reachable.${requestedMaxScan === undefined ? "" : ` Max scan: ${requestedMaxScan} candidate(s).`}`,
       );
       return 2;
     }
@@ -17486,7 +17526,7 @@ export async function nextTaskIdCommand(
       // reserveTaskIdBlockRemote, a failure keeps the ids already held, so only those are printed.
       const contestedAt: number[] = [];
       const { held, error } = reserveTaskIdsKeepingHeld(mint.n, countArg.count, (from) => {
-        const handle = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(from, reserver));
+        const handle = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(from, reserver, { maxScan: requestedMaxScan ?? 50 }));
         contestedAt.push(contested.length);
         return handle;
       });
@@ -17495,7 +17535,7 @@ export async function nextTaskIdCommand(
         for (const line of contested.slice(contestedAt[i - 1] ?? 0, contestedAt[i])) console.log(line);
         // W1-T6026: a takeover rides the RESERVED line itself, and leaves one durable row.
         const takeover = handle.takenOver ? ` — ${describeReservationTakeover(handle.takenOver)}` : "";
-        console.log(`RESERVED ${handle.taskId} on origin (${handle.ref}) after ${handle.attempts} attempt(s)${takeover}`);
+        console.log(`RESERVED ${handle.taskId} on origin (${handle.ref}) after ${handle.attempts} attempt(s)${requestedMaxScan === undefined ? "" : ` (max-scan: ${requestedMaxScan})`}${takeover}`);
         if (handle.takenOver) logRow("next_task_id.reclaimed", reservationTakeoverFields(handle, handle.takenOver));
         if (i === 0 && handle.taskId !== mint.id) console.log(`(note: the reservation walk advanced from ${mint.id}; ${handle.taskId} is the id actually HELD)`);
       });
@@ -17508,7 +17548,7 @@ export async function nextTaskIdCommand(
         (overlapDeps.say ?? console.log)(line);
     } catch (e) {
       const err = e as TaskIdReservationError;
-      console.error(describeReservationRefusal(err.outcome, err.message));
+      console.error(describeReservationRefusal(err.outcome, `${err.message}${requestedMaxScan === undefined ? "" : ` (max-scan: ${requestedMaxScan})`}`));
       return 2;
     }
   }
@@ -33508,26 +33548,35 @@ async function stopCommand(rest: string[]): Promise<number> {
  * through the checkout's instance registry and this process's `config.root` (pause-target.ts),
  * never the cwd, the repository, the hostname or a pid. A refusal returns before anything is written.
  */
-function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], config: Config): PauseTarget | undefined {
-  // `RMD_INSTANCE_REGISTRY` is the override the shell readers already honor (install-host-units.sh,
-  // host-update.sh, recycle-container.sh); otherwise the checkout's own registry.
-  const override = process.env.RMD_INSTANCE_REGISTRY?.trim();
-  const registryPath = override ? override : daemonInstanceRegistryPath(repoRoot);
-  let registryText: string | undefined;
+async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], config: Config): Promise<PauseTarget | undefined> {
+  const explicit = process.env.RMD_INSTANCE_REGISTRY !== undefined;
+  const resolveTarget = async (): Promise<PauseTarget | undefined> => {
+    const registryPath = explicit ? "selected registry" : daemonInstanceRegistryPath(repoRoot);
+    let registryText: string | undefined;
+    if (explicit) {
+      await assertInstanceRegistryRuntimeCurrent();
+      registryText = runtimeInstanceRegistryText();
+    } else {
+      try {
+        registryText = readFileSync(registryPath, "utf8");
+      } catch {
+        registryText = undefined; // The legacy resolver retains its existing unreadable-target refusal.
+      }
+    }
+    const resolution = resolvePauseTarget({ configRoot: config.root, instance: flagValue(rest, "--instance"), registryText, registryPath });
+    if (resolution.ok) return resolution.target;
+    // Selected target diagnostics can contain private state directories and instance names.
+    console.error(`### rmd ${verb} — REFUSED: ${explicit ? "selected registry target unavailable — nothing was changed" : resolution.refusal}.`);
+    return undefined;
+  };
   try {
-    registryText = readFileSync(registryPath, "utf8");
-  } catch {
-    registryText = undefined; // resolvePauseTarget refuses on an unreadable registry, naming the path.
+    return explicit && !instanceRegistryRuntimePresent()
+      ? await withInstanceRegistryRuntime(resolveTarget) : await resolveTarget();
+  } catch (error) {
+    if (!(error instanceof InstanceRegistryRuntimeError)) throw error;
+    console.error(`### rmd ${verb} — REFUSED: selected registry unavailable — nothing was changed.`);
+    return undefined;
   }
-  const resolution = resolvePauseTarget({
-    configRoot: config.root,
-    instance: flagValue(rest, "--instance"),
-    registryText,
-    registryPath,
-  });
-  if (resolution.ok) return resolution.target;
-  console.error(`### rmd ${verb} — REFUSED: ${resolution.refusal}.`);
-  return undefined;
 }
 
 /**
@@ -33572,7 +33621,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     );
     return 0;
   }
-  const target = pauseTargetOrRefuse("pause", rest, config);
+  const target = await pauseTargetOrRefuse("pause", rest, config);
   if (!target) return 2;
   const info = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "pause", {
     instanceName: target.instance, stateRoot: target.root, namespace: "host",
@@ -33592,7 +33641,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     requested_by_pid: info.pid,
   });
   console.log(
-    `### rmd pause — instance '${target.instance}' (${target.root}) is PAUSED (drain-and-hold). Its in-flight task still ` +
+    `### rmd pause — instance '${target.instance}'${process.env.RMD_INSTANCE_REGISTRY === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
       `reaches merge; it spawns nothing new until \`rmd resume --instance ${target.instance}\`. No other instance is held.`,
   );
   return 0;
@@ -33626,7 +33675,7 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
     console.log(`### rmd resume --fleet — ${sharedPauseRef()} ${cleared ? "deleted" : "NOT deleted (the push did not land)"}; no instance flag was touched.`);
     return cleared ? 0 : 1;
   }
-  const target = pauseTargetOrRefuse("resume", rest, config);
+  const target = await pauseTargetOrRefuse("resume", rest, config);
   if (!target) return 2;
   const result = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "resume", {
     instanceName: target.instance, stateRoot: target.root, namespace: "host",
@@ -34481,12 +34530,12 @@ async function triageCommandLocked(
         { name: "feedback_raw", value: triageFeedbackBlock, external: true },
       ]),
     });
-    const loop = await runRelintLoop({
+    const loop = await runRelintLoop<{ decision: ReturnType<typeof decideTriage>; changedFiles: string[] }>({
       lane: "triage",
       filedIds: reservedIds,
       initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1), triageFeedbackBlock),
       log,
-      run: async (prompt, attempt) => {
+      run: async (prompt, attempt, previous) => {
         worker = await spawn({
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
@@ -34514,11 +34563,19 @@ async function triageCommandLocked(
         const changedFiles = worktreeChangedFiles(worktreePath);
         const verdict = parseTriageVerdict(workerTranscript(worker));
         const citation = verdict?.kind === "already_decided" ? unresolvedCitationReferents(verdict.citation, worktreeCitationEvidence(worktreePath)) : undefined;
-        return { decision: decideTriage({ verdict, changedFiles, citation }), changedFiles };
+        const decision = decideTriage({ verdict, changedFiles, citation });
+        // A verdictless repair may retain only the proposal whose complete file scope it preserves.
+        if (decision.action === "error" && decision.cause === "unparseable_verdict" &&
+            previous?.decision.action === "propose" && changedFiles.length === previous.changedFiles.length &&
+            changedFiles.every(file => previous.changedFiles.includes(file))) {
+          return { decision: { ...previous.decision, files: changedFiles }, changedFiles };
+        }
+        return { decision, changedFiles };
       },
       filed: (r) => r.decision.action === "propose",
       lint: () =>
         lintFiledTasks(worktreePath, reservedIds, {
+          taskRepoOwner: owner,
           newMonolithIds: newMonolithIdsAgainstBase(worktreePath),
         }),
     });
@@ -39963,7 +40020,9 @@ async function initCommand(rest: string[]): Promise<number> {
  * external repo (auth, default-branch detection, PR conflicts, etc.) is out of this task's
  * scope — the note on W1-T27 calls the live end-to-end provisioning a separate
  * operator-attested confirmation (Rule 18), not part of auto-verify. Keeping the live-mutation
- * path manual also keeps this command trivially safe to run against any repo name.
+ * path manual also keeps this command trivially safe to run against any repo name. `--write`
+ * only puts the generated files into a local checkout (lib/project-init-write.ts), refusing
+ * before any write when one already exists; it still pushes nothing.
  */
 async function projectCommand(rest: string[]): Promise<number> {
   const sub = rest[0];
@@ -39996,12 +40055,21 @@ async function projectCommand(rest: string[]): Promise<number> {
     `baselines captured: coverage=${payload.baselines.coveragePct}% branches=${payload.baselines.branchesPct}% ` +
       `mutation=${payload.baselines.mutationScorePct}% dup=${payload.baselines.dupPct}% (at ${payload.baselines.capturedAt})`,
   );
+  let written: string[] | undefined;
+  try {
+    written = parsed.args.writeDir === undefined ? undefined : writeProjectInit(payload, parsed.args.writeDir);
+  } catch (e) {
+    if (!(e instanceof ProjectInitError)) throw e;
+    console.error(e.message);
+    return 2;
+  }
+  if (written) console.log(`wrote ${written.length} file(s) under ${parsed.args.writeDir}: ${written.join(", ")}`);
   console.log(
     "\nThis command GENERATES the stack; it does not push/open a PR or arm branch protection " +
       "itself (manual next steps):",
   );
   console.log(
-    `  1. Write the files listed above into a branch of ${owner}/${parsed.args.repo} and open a PR gated by ci-gate + remudero-review.`,
+    `  1. ${written ? "Commit the written files to" : "Write the files listed above into"} a branch of ${owner}/${parsed.args.repo} and open a PR gated by ci-gate + remudero-review.`,
   );
   console.log(`  2. Once that PR is merged, arm branch protection:`);
   console.log(
@@ -41438,9 +41506,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "next-task-id",
-    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit [--reap [--apply | --reconcile]]] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>]",
+    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit [--reap [--apply | --reconcile]]] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>] [--max-scan <1..200>]",
     summary: "Claim the next task id, or preview orphan cleanup with --audit --reap; --apply deletes under leases.",
-    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. --audit --reap previews only CANDIDATE rows past a freshly measured bar: the largest HELD-anchor-to-first-PR delay, floored at RESERVATION_PUSH_GRACE_MS, with n/max/p50 and population reported. It reads anchors with one private-namespace fetch; any unread surface or empty measured population refuses deletion. --reap alone writes one planned summary; --apply verifies a PENDING intent per id before one batched, guarded, leased push, then verifies confirmed released/skipped outcomes. Missing push results or outcome writes report UNKNOWN and return nonzero with recoverable intents. Unresolved batches block further deletion at that repository/state root. --audit --reap --reconcile reads the complete compressed, rotated-plain and live ledger union and freshly reads each pending exact ref; it records observed_absent with actor UNKNOWN, foreign or unchanged without deleting. Unread or torn history refuses action; reconciliation never retries a deletion. A later deletion requires another complete audit and explicit --reap --apply. Neither apply nor reconciliation runs automatically. --offline refuses --reap; --audit-age-days applies only to audit alone. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and --audit alone never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder. W1-T9683 --count <n> reserves n ids from ONE open-PR read and one history scan, each walk starting above the last id held (contention advances and is reported exactly as for one id), all under the same holder; it prints a RESERVED line per id it holds and a final `HELD k of n:` line, and a partial result (k < n) prints only the ids it holds and exits 2. --count is refused beside --offline, --no-reserve, --audit and --prefix.",
+    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. --audit --reap previews only CANDIDATE rows past a freshly measured bar: the largest HELD-anchor-to-first-PR delay, floored at RESERVATION_PUSH_GRACE_MS, with n/max/p50 and population reported. It reads anchors with one private-namespace fetch; any unread surface or empty measured population refuses deletion. --reap alone writes one planned summary; --apply verifies a PENDING intent per id before one batched, guarded, leased push, then verifies confirmed released/skipped outcomes. Missing push results or outcome writes report UNKNOWN and return nonzero with recoverable intents. Unresolved batches block further deletion at that repository/state root. --audit --reap --reconcile reads the complete compressed, rotated-plain and live ledger union and freshly reads each pending exact ref; it records observed_absent with actor UNKNOWN, foreign or unchanged without deleting. Unread or torn history refuses action; reconciliation never retries a deletion. A later deletion requires another complete audit and explicit --reap --apply. Neither apply nor reconciliation runs automatically. --offline refuses --reap; --audit-age-days applies only to audit alone. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and --audit alone never pushes or deletes a ref. --max-scan N widens the W1 reservation walk from its default 50 candidates to N (1..200); it requires explicit --reserve and does not apply to --prefix. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder. W1-T9683 --count <n> reserves n ids from ONE open-PR read and one history scan, each walk starting above the last id held (contention advances and is reported exactly as for one id), all under the same holder; it prints a RESERVED line per id it holds and a final `HELD k of n:` line, and a partial result (k < n) prints only the ids it holds and exits 2. --count is refused beside --offline, --no-reserve, --audit and --prefix.",
   },
   {
     name: "emissions",
@@ -41891,9 +41959,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "project",
-    syntax: "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>",
+    syntax: "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n> [--write <abs-dir>]",
     summary: "Fleet-inheritance onboarding: generate the whole gate stack for a target repo.",
-    detail: "fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself",
+    detail: "fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps; --write <abs-dir> also writes every file (and .remudero/branch-protection.json) into that checkout, refusing before any write if one already exists; does not push/PR/arm protection itself",
   },
   {
     name: "onboard",
@@ -42137,7 +42205,7 @@ import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./li
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
-import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js";
+import { buildIntoStore, childEntryStoreRoot, materializeMainEntryFromStore } from "./lib/child-entry-store.js";
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
@@ -42960,6 +43028,12 @@ export async function main(
   if (inspectionArgv[0] === "authority" && inspectionArgv[1] === "inspect") {
     await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
     return;
+  }
+  // Recovery controls keep their existing authority and target checks even if selection is broken.
+  // PAUSE validates its target locally; --fleet retains its independent authenticated Git path.
+  if (inspectionArgv[0] !== "stop" && inspectionArgv[0] !== "pause"
+    && process.env.RMD_INSTANCE_REGISTRY !== undefined && !instanceRegistryRuntimePresent()) {
+    return withInstanceRegistryRuntime(() => main(deps));
   }
   // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's
   // own spawns included) must reach a ledger row and a named exit code, not Node's default crash.

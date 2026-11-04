@@ -1,0 +1,29 @@
+id: incident-038bd94ba04770d0
+ts: 2026-11-04T00:45:35.397Z
+raw: >-
+  Incident 038bd94ba047: intervention
+  conflict:conflict-rebase:merge-conflict-no-valid-conflicting-file
+
+  First seen: 2026-11-04T00:42:59.757Z
+
+  Last seen: 2026-11-04T00:42:59.757Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#14817@982a8b229 actor=claude cause=conflict:conflict-rebase:merge-conflict-no-valid-conflicting-file — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#038bd94ba04770d0f7461c25d0295963b246456da11e8ab2c3bc0386e3892deb
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

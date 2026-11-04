@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
 import {
   cpuLaneBound,
+  defaultLaneGovernorPorts,
+  publishLaneCpuBound,
+  publishedLaneCpuBound,
+  readCgroupCpuUsageUsec,
+  readLaneCpu,
+  type LaneGovernorPorts,
   initialLaneCpuLearner,
   laneCpuReading,
   laneTarget,
@@ -14,10 +24,13 @@ import {
   cpuPressureTier,
   cpuWeightShare,
   selectAdaptiveReviewWidth,
+  selectRuntimeReviewWidth,
   type ReviewCapacityObservation,
   type ReviewCapacityPolicy,
   type ReviewCapacityState,
 } from "#src/lib/review-capacity.js";
+import { loadPlan } from "#src/lib/plan.js";
+import type { RunResult } from "#src/lib/run-result.js";
 
 // W1-T11129 — the governor learns CPU from cgroup cpu.stat; review sheds on that and on PSI relative to its weight share.
 
@@ -80,7 +93,9 @@ const POLICY = {
   latencyExpansionRatio: 2,
   unhealthySettlementThreshold: 2,
   minHealthySettlements: 1,
-} as unknown as ReviewCapacityPolicy; // no cpuPsiHighPct: nothing may read one
+  // Read only while the weight share is UNREAD (today's fixed line, W1-T11150's suite pins it); with a share, never.
+  cpuPsiHighPct: 20,
+} as unknown as ReviewCapacityPolicy;
 const BOUNDS = { minWidth: 1, baseWidth: 4, maxWidth: 5 };
 
 function observation(over: Partial<ReviewCapacityObservation>): ReviewCapacityObservation {
@@ -108,23 +123,23 @@ test("W1-T11129 criterion 2: a PSI full that is only the low weight's own conten
   const decision = run({ effectiveWidth: 4, healthySamples: 0 }, { cpuPsiFullAvg10Pct: 40, cpuWeightShare: share });
   assert.notEqual(decision.reason, "cpu-pressure");
   assert.equal(decision.effectiveWidth, 4);
-  // The same reading with no weight excuse is the container's own overload.
-  assert.equal(run({ effectiveWidth: 4, healthySamples: 0 }, { cpuPsiFullAvg10Pct: 40 }).reason, "cpu-pressure");
+  // The same reading with no weight excuse (a share of 1: the container is the whole host) is its own overload.
+  assert.equal(run({ effectiveWidth: 4, healthySamples: 0 }, { cpuPsiFullAvg10Pct: 40, cpuWeightShare: 1 }).reason, "cpu-pressure");
 });
 
 test("W1-T11129 criterion 2: the shed is tiered, hold then shrink one then halve while it persists", () => {
   const prior: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 2 };
   // The band just above the calm line holds: nothing shed, nothing added.
-  const hold = run(prior, { cpuPsiFullAvg10Pct: 8, cpuPsiSomeAvg10Pct: 70 });
+  const hold = run(prior, { cpuPsiFullAvg10Pct: 8, cpuPsiSomeAvg10Pct: 70, cpuWeightShare: 1 });
   assert.equal(hold.effectiveWidth, 4);
   assert.notEqual(hold.reason, "cpu-pressure");
   assert.equal(hold.evidence.healthySamples, 0);
   // Beyond it the first sample shrinks one lane...
-  const first = selectAdaptiveReviewWidth(prior, POLICY, observation({ cpuPsiFullAvg10Pct: 25 }), BOUNDS);
+  const first = selectAdaptiveReviewWidth(prior, POLICY, observation({ cpuPsiFullAvg10Pct: 25, cpuWeightShare: 1 }), BOUNDS);
   assert.equal(first.decision.reason, "cpu-pressure");
   assert.equal(first.decision.effectiveWidth, 3);
   // ...and an overload that persists halves.
-  const second = selectAdaptiveReviewWidth(first.state, POLICY, observation({ cpuPsiFullAvg10Pct: 25 }), BOUNDS);
+  const second = selectAdaptiveReviewWidth(first.state, POLICY, observation({ cpuPsiFullAvg10Pct: 25, cpuWeightShare: 1 }), BOUNDS);
   assert.equal(second.decision.effectiveWidth, 1);
   assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: 25, cpuPsiSomeAvg10Pct: 70 }, POLICY).tier, "shrink");
   assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: 25, cpuPsiSomeAvg10Pct: 70 }, POLICY, true).tier, "halve");
@@ -156,3 +171,84 @@ test("W1-T11129 criterion 2: cpuWeightShare is the container's weight over the r
   assert.equal(cpuWeightShare(0, [100]), undefined);
   assert.equal(cpuWeightShare(100, []), undefined);
 });
+
+function cgroupDir(t: { after: (fn: () => void) => void }): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-lane-cpu-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+test("W1-T11129 criterion 1: the real cpu.stat reader and readLaneCpu learn the bound the daemon hands laneTarget", (t) => {
+  const dir = cgroupDir(t);
+  const stat = join(dir, "cpu.stat");
+  const write = (usageUsec: number) => writeFileSync(stat, `usage_usec ${usageUsec}\nuser_usec 1\nsystem_usec 1\n`);
+  const ports: Pick<LaneGovernorPorts, "cpuCount" | "cpuUsageUsec"> = { cpuCount: () => 8, cpuUsageUsec: () => readCgroupCpuUsageUsec(stat) };
+  // Idle twice (one CPU of non-lane work), then two lanes using three CPUs: 1 baseline + 1 per lane.
+  write(0);
+  let step = readLaneCpu(initialLaneCpuLearner(), ports, 0, 0);
+  write(1_000_000);
+  step = readLaneCpu(step.learner, ports, 1_000, 0);
+  assert.equal(step.bound, null, "no lane has run yet: unlearned, so the cap stays at the cpu count");
+  write(4_000_000);
+  step = readLaneCpu(step.learner, ports, 2_000, 2);
+  assert.deepEqual(step.cpu, { baselineCpus: 1, perLaneCpus: 1 });
+  assert.equal(step.bound, 7, "(8 host cpus - 1 baseline) / 1 cpu per lane");
+  const result = laneTarget({ ...baseInputs, previous: { target: 20 }, cpu: step.cpu });
+  assert.equal(result.target, 7);
+  assert.equal(result.binding, "cpu");
+  // An unreadable counter leaves the learner untouched.
+  rmSync(stat);
+  assert.equal(readCgroupCpuUsageUsec(stat), null);
+  assert.deepEqual(readLaneCpu(step.learner, ports, 3_000, 2).learner, step.learner);
+  // The real default port is the container's own cgroup file; off Linux it reads as unread, never a throw.
+  const usage = defaultLaneGovernorPorts(join(dir, "state")).cpuUsageUsec!();
+  assert.ok(usage === null || Number.isFinite(usage));
+});
+
+test("W1-T11129 criterion 1: runDaemon samples cpu.stat on each lane-target reading and publishes the learned bound", async (t) => {
+  const dir = cgroupDir(t);
+  const planFile = join(dir, "tasks.yaml");
+  writeFileSync(planFile, "- id: A\n  title: A\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/A.ts]\n");
+  let calls = 0;
+  const ports: LaneGovernorPorts = {
+    mode: () => "shadow",
+    read: () => { throw new Error("memory unread in this test"); },
+    cpuCount: () => 8,
+    cpuUsageUsec: () => { calls += 1; return calls * 1_000_000; },
+  };
+  publishLaneCpuBound(5);
+  const merged = new Set<string>();
+  const clock = { ms: Date.parse("2026-11-04T00:00:00Z") };
+  await runDaemon(loadPlan(planFile), {
+    refreshMerged: () => (id: string) => merged.has(id),
+    log: () => {},
+    runOne: async (id: string) => { merged.add(id); return { taskId: id, merged: true, verdict: "merged", costUsd: 0, prUrl: "https://x" } as unknown as RunResult; },
+    sleep: async () => {},
+    now: () => new Date((clock.ms += 1_000)),
+    laneGovernor: ports,
+  } as unknown as DaemonDeps, { max: 1, laneCount: 2, pollIntervalMs: 1000 });
+  assert.ok(calls >= 1, "the production lane-target reading consulted the cgroup cpu counter");
+  assert.equal(publishedLaneCpuBound(), undefined, "a reading that learned nothing publishes no bound, replacing the stale one");
+});
+
+test("W1-T11129 criterion 2: an unread weight share keeps today's fixed shed line", () => {
+  // No share: today's line (cpuPsiHighPct) decides, unchanged; a known share of 1 decides by the tier instead.
+  assert.equal(run({ effectiveWidth: 4, healthySamples: 0 }, { cpuPsiFullAvg10Pct: 20 }).reason, "cpu-pressure");
+  assert.notEqual(run({ effectiveWidth: 4, healthySamples: 0 }, { cpuPsiFullAvg10Pct: 19 }).reason, "cpu-pressure");
+  assert.notEqual(run({ effectiveWidth: 4, healthySamples: 0 }, { cpuPsiFullAvg10Pct: 8, cpuWeightShare: 1 }).reason, "cpu-pressure");
+});
+
+test("W1-T11129 criterion 2: the runtime adapter reads the daemon's published cpu lane bound", (t) => {
+  const root = cgroupDir(t);
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  publishLaneCpuBound(3);
+  t.after(() => publishLaneCpuBound(null));
+  selectRuntimeReviewWidth({
+    root, queueDepth: 4, activeWorkers: 0, nowMs: Date.parse("2026-11-04T00:00:00Z"), ledgerLines: [], policy: POLICY,
+    baseWidth: 2, minWidth: 1, maxWidth: 3, log: (step, extra) => logs.push({ step, extra }),
+  });
+  assert.equal(logs[0]?.step, "review.capacity");
+  assert.equal(logs[0]?.extra?.lane_cpu_bound, 3, "the bound reaches the observation the CPU verdict reads");
+  assert.equal(logs[0]?.extra?.cpu_weight_share, null, "no share producer is wired: the row says so");
+});
+

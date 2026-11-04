@@ -7,6 +7,7 @@
  */
 import { readFileSync } from "node:fs";
 import { cpus, loadavg } from "node:os";
+import { publishedLaneCpuBound } from "./lane-governor.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 
 export function initialReviewCapacityState(baseWidth: number): ReviewCapacityState {
@@ -20,9 +21,9 @@ export interface ReviewCapacityPolicy {
   sampleCadenceMs: number;
   telemetryCadenceMs: number;
   cpuPsiLowPct: number;
-  /** RETIRED by W1-T11129: nothing reads it. The CPU shed judges PSI against the container's weight share and the
-   *  lane governor's learned CPU verdict. Kept only until sweep.ts's row validator and its fixtures drop it. */
-  cpuPsiHighPct?: number;
+  /** W1-T11129 — read only while the container's cpu.weight share is UNREAD: an unread input keeps today's fixed shed
+   *  line. With the share known, the shed is the weight-relative tier ({@link cpuPressureTier}) and this is not read. */
+  cpuPsiHighPct: number;
   memoryPsiLowPct: number;
   memoryPsiHighPct: number;
   providerAllowancePct: number;
@@ -62,6 +63,15 @@ export interface ReviewSettlementObservation {
    *  reviews on both sides carry a size; it can only EXCUSE a raw expansion, never create one. */
   baselineLatencyPerUnitMs?: number;
   recentLatencyPerUnitMs?: number;
+  /** W1-T11150 — the median time of recent reviews' CPU phase (setup plus proofs). Taken from
+   *  `setup_ms` + `proofs_ms` when a `review.posted` row carries both; otherwise from the fields the
+   *  producer DOES write today — the `sweep.post_review.attempt` row's timestamp to the same head's
+   *  `review.posted` (or `.done`) timestamp, an upper bound on the phase. Absent without history; the
+   *  shed then settles in one telemetry cadence. */
+  cpuPhaseMs?: number;
+  /** W1-T11150 — reviews attempted and not yet settled whose age is within the CPU phase: the review
+   *  lane's own CPU share, counted from the same `sweep.post_review.attempt` rows. */
+  cpuPhaseChildren?: number;
 }
 
 export interface ReviewCapacityObservation {
@@ -81,9 +91,34 @@ export interface ReviewCapacityObservation {
   /** 1-minute load average and core count: attribution only (`pressureSource`), never a gate. */
   hostLoad1?: number;
   hostCpuCount?: number;
+  /** W1-T11150 — review children currently in their CPU phase: the review lane's own CPU share.
+   *  Absent when the caller cannot count them; a suspension then lifts only on a source change. */
+  reviewCpuChildren?: number;
   provider: ReviewProviderCapacityObservation;
   settlements: ReviewSettlementObservation;
 }
+
+/** W1-T11150 — a CPU shed awaiting, or past, the check of its own effect. */
+export interface ReviewCpuShed {
+  atMs: number;
+  /** The PSI full reading that triggered the shed. */
+  reading: number;
+  widthBefore: number;
+  widthAtShed: number;
+  /** The lowest reading seen since the shed: the reference proportional relief is measured against. */
+  lowest: number;
+  source: ReviewPressureSource;
+  effect: ReviewShedEffect;
+}
+
+/** W1-T11150 — CPU sheds suspended on a source because the last one did not lower the pressure. */
+export interface ReviewCpuShedSuspension {
+  source: ReviewPressureSource;
+  reading: number;
+  reviewCpuChildren?: number;
+}
+
+export type ReviewShedEffect = "effective" | "ineffective" | "pending";
 
 export interface ReviewCapacityState {
   effectiveWidth: number;
@@ -91,6 +126,10 @@ export interface ReviewCapacityState {
   lastHealthySampleAtMs?: number;
   lastTelemetryAtMs?: number;
   lastTelemetrySignature?: string;
+  /** W1-T11150 — recent CPU PSI full readings: the sample-to-sample spread is the noise band. */
+  cpuReadings?: ReadonlyArray<{ atMs: number; v: number }>;
+  shed?: ReviewCpuShed;
+  suspended?: ReviewCpuShedSuspension;
   /** W1-T11129 — the previous sample shed on CPU; an overload that persists then halves instead of shrinking one. */
   cpuShed?: boolean;
 }
@@ -163,6 +202,13 @@ export interface ReviewCapacityEvidence {
   hostCpuCount?: number;
   /** Which class of load a pressure-type decision is attributed to; undefined when none fired. */
   pressureSource?: ReviewPressureSource;
+  /** W1-T11150 — the shed's own effect, auditable from the row: undefined when no CPU shed is open
+   *  or suspended. `shedReading` is the reading that triggered it, `noiseBand` the spread judged by. */
+  shedEffect?: ReviewShedEffect;
+  shedReading?: number;
+  currentReading?: number;
+  noiseBand?: number;
+  shedSuspended: boolean;
 }
 
 /** `fleet-budget`: fleet workers fill the host worker budget. `host-load`: the load average exceeds
@@ -266,6 +312,23 @@ export function cpuPressureTier(
   return { tier: finite(observation.laneCpuBound) ? "hold" : "calm", calm: true };
 }
 
+/** How many CPU readings the noise band looks back over. */
+const CPU_READING_HISTORY = 16;
+
+/** The reading's own spread: the median absolute sample-to-sample change since `fromMs`. Zero with
+ *  fewer than two samples, so a single reading cannot excuse a shed that did nothing. */
+function cpuNoiseBand(readings: ReadonlyArray<{ atMs: number; v: number }>, fromMs: number): number {
+  const inWindow = readings.filter((entry) => entry.atMs >= fromMs);
+  const steps: number[] = [];
+  for (let i = 1; i < inWindow.length; i += 1) steps.push(Math.abs(inWindow[i]!.v - inWindow[i - 1]!.v));
+  return median(steps) ?? 0;
+}
+
+/** More review children are in their CPU phase than when the suspension began. */
+function childrenGrew(observation: Pick<ReviewCapacityObservation, "reviewCpuChildren">, held: ReviewCpuShedSuspension): boolean {
+  return finite(observation.reviewCpuChildren) && finite(held.reviewCpuChildren) && observation.reviewCpuChildren > held.reviewCpuChildren;
+}
+
 /** Pure controller. Direct host pressure sheds one lane per sample; sustained, PSI-corroborated
  *  review latency sheds PROPORTIONALLY to its expansion; once PSI is back at or below both low
  *  watermarks a shed width returns to base in ONE sample (the PSI band between low and high is the
@@ -283,7 +346,27 @@ export function selectAdaptiveReviewWidth(
   let healthySamples = Math.max(0, Math.trunc(prior.healthySamples));
   let lastHealthySampleAtMs = prior.lastHealthySampleAtMs;
   let reason: ReviewCapacityReason = "backlog-not-sustained";
+  const readingNow = finite(observation.cpuPsiFullAvg10Pct) ? observation.cpuPsiFullAvg10Pct : undefined;
+  const pressureSource = reviewPressureSource(observation, policy.hostWorkerBudget);
+  const settleMs = finite(observation.settlements.cpuPhaseMs) && observation.settlements.cpuPhaseMs > 0
+    ? observation.settlements.cpuPhaseMs
+    : policy.telemetryCadenceMs;
+  const priorReadings = prior.cpuReadings ?? [];
+  const cpuReadings =
+    readingNow === undefined
+      ? priorReadings
+      : [...priorReadings, { atMs: observation.nowMs, v: readingNow }].slice(-CPU_READING_HISTORY);
+  let shed: ReviewCpuShed | undefined = prior.shed ? { ...prior.shed } : undefined;
+  let suspended: ReviewCpuShedSuspension | undefined = prior.suspended;
   let cpuShed = false;
+  // W1-T11129 — with the cpu.weight share known, the tiered weight-relative verdict replaces the fixed cpuPsiHighPct
+  // line everywhere this controller read it. An unread share keeps today's fixed line exactly (no excuse is invented).
+  const shareKnown = finite(observation.cpuWeightShare) && observation.cpuWeightShare > 0;
+  const cpu = cpuPressureTier(observation, policy, prior.cpuShed === true);
+  const cpuOverloaded = shareKnown
+    ? cpu.tier === "shrink" || cpu.tier === "halve"
+    : readingNow !== undefined && readingNow >= policy.cpuPsiHighPct;
+  const cpuCalm = shareKnown ? cpu.calm : readingNow !== undefined && readingNow <= policy.cpuPsiLowPct;
 
   const directPressure = (nextReason: ReviewCapacityReason): void => {
     effectiveWidth = Math.max(minWidth, effectiveWidth - 1);
@@ -292,7 +375,6 @@ export function selectAdaptiveReviewWidth(
     reason = nextReason;
   };
 
-  const cpu = cpuPressureTier(observation, policy, prior.cpuShed === true);
   const latencyRatio = reviewLatencyRatio(observation.settlements);
   const latencyExpanded = latencyRatio !== undefined && latencyRatio >= policy.latencyExpansionRatio;
   // 2026-10-06 — PSI AT OR BELOW BOTH LOW WATERMARKS, and only when both readings exist: an unread
@@ -300,7 +382,7 @@ export function selectAdaptiveReviewWidth(
   const psiCalm =
     finite(observation.cpuPsiFullAvg10Pct) &&
     finite(observation.memoryPsiSomeAvg10Pct) &&
-    cpu.calm &&
+    cpuCalm &&
     observation.memoryPsiSomeAvg10Pct <= policy.memoryPsiLowPct;
   // Back to base in one sample, never past what the host worker budget leaves room for, and never
   // above base: lanes above it stay earned by the healthy window below.
@@ -309,6 +391,45 @@ export function selectAdaptiveReviewWidth(
     const room = Math.trunc(policy.hostWorkerBudget) - Math.max(0, Math.trunc(observation.activeWorkers));
     effectiveWidth = Math.max(effectiveWidth, Math.min(baseWidth, room));
   };
+
+  // W1-T11150 — THE SHED CHECKS ITS OWN EFFECT. MEASURED 2026-11-02: all 78 cpu-pressure sheds in
+  // the window were attributed to host-load, width sat at 1 for 75% of 24 h while core's PSI full
+  // held a median 29%, and recovery needed <= 5, so the 5-20 band held the floor. Shedding review
+  // lanes cannot lower pressure that review is not causing.
+  if (suspended && (pressureSource !== suspended.source || psiCalm || childrenGrew(observation, suspended))) {
+    suspended = undefined; // the source changed, the lane's own CPU share rose, or the pressure ended
+  }
+  const band = cpuNoiseBand(cpuReadings, (shed?.atMs ?? observation.nowMs) - settleMs);
+  const roomNow = Math.trunc(policy.hostWorkerBudget) - Math.max(0, Math.trunc(observation.activeWorkers));
+  if (shed && shed.effect === "pending" && readingNow !== undefined && observation.nowMs - shed.atMs >= settleMs) {
+    if (shed.reading - readingNow > band) {
+      shed.effect = "effective";
+    } else {
+      // Ineffective: hand the lanes back and stop shedding on this source until it changes.
+      const back = Math.min(clampedWidth(shed.widthBefore, bounds), Math.max(effectiveWidth, roomNow));
+      effectiveWidth = Math.max(effectiveWidth, back);
+      suspended = {
+        source: shed.source,
+        reading: shed.reading,
+        ...(finite(observation.reviewCpuChildren) ? { reviewCpuChildren: observation.reviewCpuChildren } : {}),
+      };
+      shed = undefined;
+    }
+  }
+  const previousReading = priorReadings.length > 0 ? priorReadings[priorReadings.length - 1]!.v : undefined;
+  if (shed && readingNow !== undefined && !cpuOverloaded) {
+    shed.lowest = Math.min(shed.lowest, readingNow);
+    if (previousReading !== undefined && readingNow <= previousReading && effectiveWidth < baseWidth) {
+      // Proportional restore: relief is the fraction of the shedding reading's excess (over the calm
+      // line) that has gone, measured against the lowest reading seen since. Never past base or room.
+      const excess = shed.reading - policy.cpuPsiLowPct;
+      const relief = excess > 0 ? Math.min(1, Math.max(0, (shed.reading - shed.lowest) / excess)) : 1;
+      if (relief > 0) {
+        const target = shed.widthAtShed + Math.ceil((baseWidth - shed.widthAtShed) * relief);
+        effectiveWidth = Math.max(effectiveWidth, Math.min(baseWidth, target, Math.max(effectiveWidth, roomNow)));
+      }
+    }
+  }
 
   // W1-T2985 — DECIDE ON `full`, REPORT `some`. This read `cpuPsiSomeAvg10Pct >= cpuPsiHighPct`.
   // MEASURED on the fleet 2026-09-06, two builds and a retro running healthily: cpu `some
@@ -320,16 +441,27 @@ export function selectAdaptiveReviewWidth(
   // `some` still rides along in the decision row below, where it is diagnosis rather than input.
   // W1-T11129 — NO FIXED SHED LINE. MEASURED 2026-10-27: core's cpu `full` of 36-44 crossed a fixed 20 and held review
   // at width 1 of 4 with 10 PRs queued, though core's cpu.weight was 59 against serve's 303, so its PSI measured the
-  // weight's own contention. The verdict is now tiered: past the learned lane capacity, hold; PSI over what the
-  // weight share predicts, shrink one; PSI most of the way to its ceiling, halve. It grows back through `psiCalm`.
-  if (cpu.tier === "halve") {
-    const halved = Math.floor(effectiveWidth / 2);
+  // weight's own contention. The verdict is tiered: PSI over what the weight share predicts shrinks one lane, an
+  // overload that persists halves, and the band between holds. W1-T11150's effect check still judges each shed.
+  if (readingNow !== undefined && cpuOverloaded && !suspended) {
+    const widthBefore = effectiveWidth;
     directPressure("cpu-pressure");
-    effectiveWidth = Math.max(minWidth, Math.min(effectiveWidth, halved));
+    if (shareKnown && cpu.tier === "halve") effectiveWidth = Math.max(minWidth, Math.min(effectiveWidth, Math.floor(widthBefore / 2)));
     cpuShed = true;
-  } else if (cpu.tier === "shrink") {
-    directPressure("cpu-pressure");
-    cpuShed = true;
+    if (effectiveWidth < widthBefore) {
+      if (shed && shed.effect === "pending") shed.widthAtShed = effectiveWidth;
+      else {
+        shed = {
+          atMs: observation.nowMs,
+          reading: readingNow,
+          widthBefore,
+          widthAtShed: effectiveWidth,
+          lowest: readingNow,
+          source: pressureSource,
+          effect: "pending",
+        };
+      }
+    }
   } else if (
     finite(observation.memoryPsiSomeAvg10Pct) &&
     observation.memoryPsiSomeAvg10Pct >= policy.memoryPsiHighPct
@@ -420,7 +552,7 @@ export function selectAdaptiveReviewWidth(
       lastHealthySampleAtMs = undefined;
       reason = "host-worker-budget";
     } else if (
-      !cpu.calm ||
+      !cpuCalm ||
       observation.memoryPsiSomeAvg10Pct! > policy.memoryPsiLowPct
     ) {
       healthySamples = 0;
@@ -457,6 +589,9 @@ export function selectAdaptiveReviewWidth(
     }
   }
 
+  if (shed && effectiveWidth >= baseWidth) shed = undefined; // fully handed back
+  const shedEffect: ReviewShedEffect | undefined = suspended ? "ineffective" : shed?.effect;
+  const shedReading = shed?.reading ?? suspended?.reading;
   const evidence: ReviewCapacityEvidence = {
     queueDepth: Math.max(0, Math.trunc(observation.queueDepth)),
     effectiveWidth,
@@ -505,9 +640,11 @@ export function selectAdaptiveReviewWidth(
     ...(latencyRatio !== undefined ? { reviewLatencyRatio: latencyRatio } : {}),
     ...(finite(observation.hostLoad1) ? { hostLoad1: observation.hostLoad1 } : {}),
     ...(finite(observation.hostCpuCount) ? { hostCpuCount: observation.hostCpuCount } : {}),
-    ...(PRESSURE_REASONS.has(reason)
-      ? { pressureSource: reviewPressureSource(observation, policy.hostWorkerBudget) }
-      : {}),
+    ...(PRESSURE_REASONS.has(reason) ? { pressureSource } : {}),
+    ...(shedEffect !== undefined ? { shedEffect } : {}),
+    ...(shedReading !== undefined ? { shedReading, noiseBand: band } : {}),
+    ...(readingNow !== undefined ? { currentReading: readingNow } : {}),
+    shedSuspended: suspended !== undefined,
   };
   const signature = `${effectiveWidth}:${reason}`;
   const shouldLog =
@@ -521,6 +658,9 @@ export function selectAdaptiveReviewWidth(
     ...(cpuShed ? { cpuShed } : {}),
     lastTelemetrySignature: signature,
     lastTelemetryAtMs: shouldLog ? observation.nowMs : prior.lastTelemetryAtMs,
+    ...(cpuReadings.length > 0 ? { cpuReadings } : {}),
+    ...(shed ? { shed } : {}),
+    ...(suspended ? { suspended } : {}),
   };
   return { state, decision: { effectiveWidth, reason, shouldLog, evidence } };
 }
@@ -667,6 +807,12 @@ export function summarizeReviewSettlements(
   const baselineCutoff = nowMs - windowMs * REVIEW_LATENCY_BASELINE_WINDOWS;
   const attempts = new Map<string, number>();
   const unitsBySha = new Map<string, number>();
+  const cpuPhases: number[] = [];
+  /** W1-T11150 — attempts not yet settled, by head: `sweep.post_review.attempt` is the one start mark
+   *  production writes for hosted and in-process reviews alike. A `reuse` review runs no setup or
+   *  proofs, so it is neither timed nor counted as a CPU child. */
+  const startedByHead = new Map<string, { tsMs: number; cheap: boolean }>();
+  const wallPhases: number[] = [];
   const completed: Array<CompletedReview & { tsMs: number }> = [];
   let successes = 0;
   let failures = 0;
@@ -680,10 +826,21 @@ export function summarizeReviewSettlements(
     const inWindow = tsMs >= cutoff;
     if (line.step === "sweep.post_review.attempt") {
       attempts.set(key, tsMs);
+      if (typeof line.head_sha === "string") startedByHead.set(line.head_sha, { tsMs, cheap: line.review_mode === "reuse" });
     } else if (line.step === "review.posted") {
       const units = reviewSizeUnits(line);
       if (units !== undefined && typeof line.head_sha === "string") unitsBySha.set(line.head_sha, units);
+      // W1-T11150: setup-plus-proofs, when the row carries both phases; otherwise the wall time from
+      // this head's attempt row to this row, which production always writes.
+      const started = typeof line.head_sha === "string" ? startedByHead.get(line.head_sha) : undefined;
+      if (finite(line.setup_ms as number | undefined) && finite(line.proofs_ms as number | undefined)) {
+        cpuPhases.push((line.setup_ms as number) + (line.proofs_ms as number));
+      } else if (started && !started.cheap && tsMs >= started.tsMs) {
+        wallPhases.push(tsMs - started.tsMs);
+      }
+      if (typeof line.head_sha === "string") startedByHead.delete(line.head_sha);
     } else if (line.step === "sweep.post_review.done") {
+      if (typeof line.head_sha === "string") startedByHead.delete(line.head_sha);
       if (inWindow) successes += 1;
       const startedAt = attempts.get(key);
       if (startedAt !== undefined && tsMs >= startedAt) {
@@ -692,6 +849,7 @@ export function summarizeReviewSettlements(
       }
       attempts.delete(key);
     } else if (line.step === "sweep.post_review.failed") {
+      if (typeof line.head_sha === "string") startedByHead.delete(line.head_sha);
       if (inWindow) {
         failures += 1;
         if (/timeout|timed out|abandon/i.test(String(line.error ?? ""))) timeouts += 1;
@@ -706,10 +864,20 @@ export function summarizeReviewSettlements(
   const verdict = recentSet.length >= REVIEW_LATENCY_MIN_SAMPLES && baselineSet.length >= REVIEW_LATENCY_MIN_SAMPLES;
   const baselinePerUnit = verdict ? medianPerUnit(baselineSet) : undefined;
   const recentPerUnit = verdict ? medianPerUnit(recentSet) : undefined;
+  const cpuPhaseMs = cpuPhases.length > 0 ? median(cpuPhases) : median(wallPhases.slice(-REVIEW_LATENCY_RECENT_SAMPLES));
+  // A review still unsettled after its usual CPU phase (or the settlement window, with no history)
+  // is waiting on the reviewer, not loading the CPU — and a crashed one never settles.
+  const phaseBoundMs = cpuPhaseMs !== undefined && cpuPhaseMs > 0 ? cpuPhaseMs : windowMs;
+  let cpuPhaseChildren = 0;
+  for (const started of startedByHead.values()) {
+    if (!started.cheap && nowMs - started.tsMs <= phaseBoundMs) cpuPhaseChildren += 1;
+  }
   return {
     successes,
     failures,
     timeouts,
+    ...(cpuPhaseChildren > 0 ? { cpuPhaseChildren } : {}),
+    ...(cpuPhaseMs !== undefined ? { cpuPhaseMs } : {}),
     ...(verdict
       ? {
           baselineLatencyMs: median(baselineSet.map((review) => review.latencyMs)),
@@ -735,8 +903,9 @@ export interface RuntimeReviewCapacityInput extends ReviewCapacityBounds {
   ledgerLines: ReadonlyArray<Record<string, unknown>>;
   policy: ReviewCapacityPolicy;
   log: (step: string, extra?: Record<string, unknown>) => void;
-  /** W1-T11129 — the container's weight share and the governor's learned CPU lane bound, when the caller has them. */
+  /** W1-T11129 — the container's weight share, when the caller has it. */
   cpuWeightShare?: number;
+  /** W1-T11129 — the governor's learned CPU lane bound; absent, the daemon's last published one is read. */
   laneCpuBound?: number;
 }
 
@@ -751,15 +920,19 @@ export function cpuWeightShare(own: number, running: readonly number[]): number 
 export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): number {
   const prior = runtimeStates.get(input.root) ?? initialReviewCapacityState(input.baseWidth);
   const providerStatus = readProviderRoutingStatus(input.root, { now: () => input.nowMs });
+  const settlements = summarizeReviewSettlements(input.ledgerLines, input.nowMs, input.policy.settlementWindowMs);
   const observation: ReviewCapacityObservation = {
     nowMs: input.nowMs,
     queueDepth: input.queueDepth,
     activeWorkers: input.activeWorkers,
     ...readReviewHostObservation(),
     ...(input.cpuWeightShare !== undefined ? { cpuWeightShare: input.cpuWeightShare } : {}),
-    ...(input.laneCpuBound !== undefined ? { laneCpuBound: input.laneCpuBound } : {}),
+    ...((input.laneCpuBound ?? publishedLaneCpuBound()) !== undefined ? { laneCpuBound: input.laneCpuBound ?? publishedLaneCpuBound() } : {}),
+    // W1-T11150 — the review lane's own CPU share: reviews attempted and still inside their CPU phase.
+    // Absent from the fold means none were counted: always supplied, so a later rise is visible.
+    reviewCpuChildren: settlements.cpuPhaseChildren ?? 0,
     provider: reviewProviderObservation(providerStatus, input.nowMs),
-    settlements: summarizeReviewSettlements(input.ledgerLines, input.nowMs, input.policy.settlementWindowMs),
+    settlements,
   };
   const result = selectAdaptiveReviewWidth(prior, input.policy, observation, input);
   runtimeStates.set(input.root, result.state);
@@ -783,6 +956,9 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       // beside it: the `cpu-pressure` arm still consults it, and dropping it would trade one blind
       // spot for another.
       cpu_psi_full_avg10_pct: result.decision.evidence.cpuPsiFullAvg10Pct ?? null,
+      // W1-T11129 — the CPU verdict's two learned inputs, so a shed or hold is auditable from its own row.
+      cpu_weight_share: observation.cpuWeightShare ?? null,
+      lane_cpu_bound: observation.laneCpuBound ?? null,
       // Which host readings were non-finite. Empty whenever telemetry was complete.
       telemetry_absent: result.decision.evidence.absentHostReadings,
       provider_fresh: result.decision.evidence.providerFresh,
@@ -806,6 +982,12 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       host_load1: result.decision.evidence.hostLoad1 ?? null,
       host_cpu_count: result.decision.evidence.hostCpuCount ?? null,
       pressure_source: result.decision.evidence.pressureSource ?? null,
+      // W1-T11150 — the CPU shed's own measured effect, so every shed is auditable from the ledger.
+      shed_effect: result.decision.evidence.shedEffect ?? null,
+      shed_reading: result.decision.evidence.shedReading ?? null,
+      current_reading: result.decision.evidence.currentReading ?? null,
+      noise_band: result.decision.evidence.noiseBand ?? null,
+      shed_suspended: result.decision.evidence.shedSuspended,
     });
   }
   return result.decision.effectiveWidth;
