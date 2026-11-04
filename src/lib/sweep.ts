@@ -14577,6 +14577,8 @@ export interface SweepDeps {
   runId: string;
   /** Ledger reader (dedup); defaults to readLedgerLines. Injectable for tests. */
   readLedger?: (path: string) => Array<Record<string, unknown>>;
+  /** Host load used to admit a retry of an inconclusive proof. */
+  sampleLoad?: () => HostLoadSample;
   /** W1-T3471 — bounded archive∪live reader for the arm predicate, consulted only after the
    *  live-file verdict miss. An incomplete result preserves the historical fail-open. */
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined;
@@ -14773,13 +14775,14 @@ export function inconclusiveLoadLowered(
   const verdict = row.decision_verdict as ReviewVerdict | undefined;
   const inconclusive = verdict?.criteria?.filter(criterion => criterion.proof_exec === "inconclusive_load") ?? [];
   if (inconclusive.length === 0 || verdict?.cannotEvaluate === true || verdict?.promisedFollowUpObservation?.state === "unknown") return false;
+  if (verdict?.criteria.some(c => !c.met && c.proof_exec !== "inconclusive_load") || verdict?.testTheater || verdict?.criteriaTampered) return false;
   const priorRuns = rows.filter(r => r.step === "review.posted" && r.state === "pending" &&
     ((r.decision_verdict as ReviewVerdict | undefined)?.criteria ?? []).some(c => c.proof_exec === "inconclusive_load")).length;
   if (priorRuns > INCONCLUSIVE_LOAD_MAX_RERUNS) return false;
   const recorded = inconclusive.map(criterion => recordedLoad1(criterion.load)).filter((n): n is number => n !== undefined);
   if (recorded.length !== inconclusive.length) return false;
   const now = sample().load1;
-  return now !== undefined && now < Math.max(...recorded);
+  return now !== undefined && now < Math.min(...recorded);
 }
 
 function promiseHarvestRetryView(
@@ -15552,6 +15555,7 @@ async function codeScanningGateForHead(
 function priorActionsFromLedger(
   lines: Array<Record<string, unknown>>,
   openPrs?: ReadonlyArray<OpenPrView>,
+  sample: () => HostLoadSample = sampleHostLoad,
 ): PriorActions {
   const armed = new Set<string>();
   const fixed = new Set<string>();
@@ -15792,7 +15796,8 @@ function priorActionsFromLedger(
   // verdict: release its key so the supersedes demand fires and the claim admits ONE re-review.
   for (const pr of openPrs ?? []) {
     const key = reviewOutcomeKeyForPr(pr);
-    if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key)) || incompletePromiseHarvestFromLedger(pr, lines)) reviewDelivered.delete(key);
+    if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key)) || incompletePromiseHarvestFromLedger(pr, lines) ||
+        inconclusiveLoadLowered(pr, lines, sample)) reviewDelivered.delete(key);
   }
   return {
     armed,
@@ -18381,7 +18386,7 @@ export async function runSweep(
   const progressWitness = (pr: OpenPrView): FixProgressWitness => ({ reviewInputDigest: pr.reviewInputDigest,
     contractRevision: pr.taskId === undefined || pr.taskId === "unfiled" || pr.taskId === `PR-${pr.prNumber}`
       ? null : readWitnessContractRevision(pr.taskId) });
-  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines));
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines, deps.sampleLoad));
   // W1-T9970: the running reviewer image, read at most once per pass and only when a blocked-fixable PR asks.
   let runningImage: { sha: string | undefined } | undefined;
   // W1-T9124: a body-only edit leaves the head-keyed status on the old verdict; queue one re-review of the new input.
@@ -18786,7 +18791,7 @@ export async function runSweep(
     if (union.archiveCount === 0 || !union.ok) return { complete: false, lines: [] };
     return { complete: true, lines: parseLedger(union.matches.join("\n")) };
   });
-  const prior = priorActionsFromLedger(ledgerLines, openPrs);
+  const prior = priorActionsFromLedger(ledgerLines, openPrs, deps.sampleLoad);
   const freshnessBackoff = async (
     refusals: ReadonlyMap<string, ReviewerCodeFreshnessRefusal>, pr: OpenPrView,
   ): Promise<string | undefined> => {
@@ -19659,7 +19664,7 @@ export async function runSweep(
     claimedReviewKeys.add(reviewKey);
     try {
       const freshLines = readLedger(deps.ledgerPath);
-      const fresh = priorActionsFromLedger(freshLines, openPrs);
+      const fresh = priorActionsFromLedger(freshLines, openPrs, deps.sampleLoad);
       const delivered = fresh.reviewDelivered.has(reviewKey) && !incompletePromiseHarvestFromLedger(pr, freshLines);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
@@ -20303,7 +20308,7 @@ export async function runSweep(
       log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
-    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines);
+    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines, deps.sampleLoad);
     pr = { ...pr, reviewPendingOwnerGone: dispositionView.reviewPendingOwnerGone,
       reviewPendingOwnerGoneReason: dispositionView.reviewPendingOwnerGoneReason };
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
@@ -24229,8 +24234,8 @@ export function observeLightPassReviewEligibility(
   if (openPrs.length === 0 || deps.dryRun) return [];
   const now = deps.now ? deps.now() : systemClock.now();
   const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
-  const retryViews = openPrs.map(pr => promiseHarvestRetryView(pr, lines));
-  const prior = priorActionsFromLedger(lines, retryViews);
+  const retryViews = openPrs.map(pr => promiseHarvestRetryView(pr, lines, deps.sampleLoad));
+  const prior = priorActionsFromLedger(lines, retryViews, deps.sampleLoad);
   const views = retryViews.map(pr => completedRefusalRetryView(pr, prior));
   const freshnessBackoffs = new Set<string>();
   for (const pr of views) {
@@ -24281,8 +24286,8 @@ export async function runSweepLightPass(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
-  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines));
-  const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs);
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
+  const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs, deps.sampleLoad);
   openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
   const freshnessBackoffs = new Set<string>();
   for (const pr of openPrs) {
@@ -24595,7 +24600,7 @@ export async function runSweepLightPass(
       return;
     }
     refillViewReadAtMs = deps.now ? deps.now() : systemClock.now();
-    const freshViews = fresh.map(pr => completedRefusalRetryView(promiseHarvestRetryView(pr, selectionLedgerLines), selectionPrior));
+    const freshViews = fresh.map(pr => completedRefusalRetryView(promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad), selectionPrior));
     refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
       freshViews.filter((pr) => !spawningNumbers.has(pr.prNumber) && !refilledHeads.has(lightPassHeadKey(pr)) &&
         !lightPassReservedHeads.has(lightPassHeadKey(pr))),

@@ -551,6 +551,8 @@ export interface ReviewEvidence {
   /** W1-T11132: the recorded load of a prior `inconclusive_load` review of this head. A failure that reproduces while the
    *  proof starts BELOW it is conclusive (`executed_fail`) rather than load-attributed again. */
   priorInconclusiveLoad1?: number;
+  /** Exact-proof prior loads recovered for this head by the production decision preparation. */
+  priorInconclusiveLoads?: ReadonlyMap<string, number>;
   /** Host-load seam for the proof start/end readings; defaults to {@link sampleHostLoad}. */
   sampleLoad?: () => HostLoadSample;
   /** The RESOLVED canonical `owner/repo` this review's proofs execute against (W1-T3525) — reused
@@ -968,6 +970,8 @@ export interface WhitelistedProof {
   failureOutput?: string;
   /** Just the output tail of a run graded `"fail"` (no argv/exit header) — {@link recordFailureTail} writes it. */
   failureTail?: string;
+  /** Actual executor readings, retained when its result or error is replayed. */
+  executionLoad?: ProofLoadRecord;
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
@@ -3839,6 +3843,7 @@ export interface ProofExecContext {
   hostedCiFilePassed?: ReadonlyMap<string, "passed" | "failed">;
   priorInconclusiveLoad1?: number;
   sampleLoad?: () => HostLoadSample;
+  executionLoadsRecorded?: boolean;
   /** Source observed by the bounded async review path, not an unverified report string. */
   proofFormCorrections?: ReadonlyMap<string, string | undefined>;
   missingExportNotes?: ReadonlyMap<string, string | undefined>;
@@ -4302,19 +4307,20 @@ export function judgeCriterion(
           `this diff's own plan shard \`files:\` — a forward reference to work not yet built, not a ` +
           `failure; not executed, keyword floor applied`;
       } else {
-        const exec = execCtx.exec ?? execWhitelistedProof;
-        const sampleLoad = execCtx.sampleLoad ?? sampleHostLoad;
-        const loadStart = sampleLoad();
+        const rawExec = execCtx.exec ?? execWhitelistedProof;
+        const exec = execCtx.executionLoadsRecorded ? rawExec : memoizeProofExecutor(rawExec, execCtx.sampleLoad).exec;
+        const priorLoad = execCtx.priorInconclusiveLoad1;
         // A `unit test:` proof that concluded NOTHING under load (W1-T11132); a `grep:` proof is not load-shaped.
         const inconclusiveUnderLoad = (why: string): void => {
           proofExec = "inconclusive_load";
           met = false;
-          proofLoad = { start: loadStart, end: sampleLoad() };
+          proofLoad = whitelisted.kind === "test" ? whitelisted.executionLoad : undefined;
           reason = `${reason} — NOTE: proof (${whitelisted.kind}: ${whitelisted.label}) ${why}; inconclusive under ` +
             `host load, not an unmet criterion — the review is pending until a re-review at lower load`;
         };
         try {
           const outcome = exec(whitelisted, execCtx.cwd);
+          proofLoad = whitelisted.kind === "test" ? whitelisted.executionLoad : undefined;
           const filingTarget = outcome === "pass" ? undefined : filingHeadForwardTarget(whitelisted, execCtx, outcome);
           if (outcome === "pass") {
             if (
@@ -4449,7 +4455,7 @@ export function judgeCriterion(
             whitelisted.kind === "test" && !whitelisted.nameFiltered &&
             execCtx.hostedCiFilePassed?.get(whitelisted.label) === "passed" &&
             // A failure that REPRODUCES with the proof starting below the load the prior review recorded is conclusive.
-            !(execCtx.priorInconclusiveLoad1 !== undefined && (loadStart.load1 ?? Infinity) < execCtx.priorInconclusiveLoad1)
+            !(priorLoad !== undefined && (proofLoad?.start.load1 ?? Infinity) < priorLoad)
           ) {
             inconclusiveUnderLoad("failed here while hosted CI passed the same file at this head");
           } else {
@@ -4458,7 +4464,6 @@ export function judgeCriterion(
             reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
             proofFailureOutput = whitelisted.failureOutput;
             failureTail = whitelisted.failureTail;
-            proofLoad = { start: loadStart, end: sampleLoad() };
           }
         } catch (e) {
           if (e instanceof ProofCannotLoadError) {
@@ -5458,6 +5463,15 @@ export async function preparePromisedReviewDecision(args: {
     prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt,
   });
   const defaultProofExecutor = memoizeAsyncProofExecutor(execWhitelistedProofAsync);
+  const priorRow = existsSync(ledgerPath) ? await priorPostedReviewRow(ledgerPath, task.id, prUrl) : undefined;
+  const priorVerdict = priorRow?.decision_verdict as ReviewVerdict | undefined;
+  const priorInconclusiveLoads = new Map<string, number>();
+  if (priorRow?.head_sha === input.headSha && priorRow?.state === "pending") {
+    for (const criterion of priorVerdict?.criteria ?? []) {
+      const load = recordedLoad1(criterion.load);
+      if (criterion.proof_exec === "inconclusive_load" && load !== undefined) priorInconclusiveLoads.set(criterion.proof, load);
+    }
+  }
   let withinFoldReuses = 0;
   return {
     decisionDigest: reviewDecisionDigest({ ...input, promisedFollowUpObservation: observation }),
@@ -5467,6 +5481,7 @@ export async function preparePromisedReviewDecision(args: {
       const verdict = await judgeReviewAsync([...input.acceptance], {
         ...evidence, diff: input.diff, report: input.report, implementationReport: input.implementationReport,
         headCheckoutDir, promisedFollowUpObservation: observation,
+        priorInconclusiveLoads,
         ...(useDefault ? { asyncExecProof: defaultProofExecutor } : {}),
       });
       if (!useDefault) return verdict;
@@ -5670,13 +5685,13 @@ export interface ProofExecutionMemo {
   reuses: () => number;
 }
 
-export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
+export function memoizeProofExecutor(exec: ProofExecutor, sample: () => HostLoadSample = sampleHostLoad): ProofExecutionMemo {
   // Two maps rather than one sentinel-bearing map: a cached THROW and a cached "no-match" must not be distinguishable
   // only by a value that could itself be a legitimate result.
   const returned = new Map<string, {
-    outcome: ReturnType<ProofExecutor>; failureOutput?: string; failureTail?: string;
+    outcome: ReturnType<ProofExecutor>; failureOutput?: string; failureTail?: string; load: ProofLoadRecord;
   }>();
-  const thrown = new Map<string, unknown>();
+  const thrown = new Map<string, { error: unknown; load: ProofLoadRecord }>();
   let uniqueRuns = 0;
   let reuses = 0;
   const keyOf = (w: WhitelistedProof, cwd: string): string =>
@@ -5687,22 +5702,31 @@ export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
       const key = keyOf(whitelisted, cwd);
       if (thrown.has(key)) {
         reuses += 1;
-        throw thrown.get(key);
+        const prior = thrown.get(key)!;
+        whitelisted.executionLoad = prior.load;
+        throw prior.error;
       }
       if (returned.has(key)) {
         reuses += 1;
         const prior = returned.get(key)!;
         whitelisted.failureOutput = prior.failureOutput;
         whitelisted.failureTail = prior.failureTail;
+        whitelisted.executionLoad = prior.load;
         return prior.outcome;
       }
       uniqueRuns += 1;
+      const start = sample();
+      whitelisted.executionLoad = undefined;
       try {
         const outcome = exec(whitelisted, cwd);
-        returned.set(key, { outcome, failureOutput: whitelisted.failureOutput, failureTail: whitelisted.failureTail });
+        const load = whitelisted.executionLoad ?? { start, end: sample() };
+        whitelisted.executionLoad = load;
+        returned.set(key, { outcome, failureOutput: whitelisted.failureOutput, failureTail: whitelisted.failureTail, load });
         return outcome;
       } catch (e) {
-        thrown.set(key, e);
+        const load = whitelisted.executionLoad ?? { start, end: sample() };
+        whitelisted.executionLoad = load;
+        thrown.set(key, { error: e, load });
         throw e;
       }
     },
@@ -5716,12 +5740,13 @@ export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
  * Missing identity delegates to the real executor, preserving its failure/UNKNOWN behavior. */
 interface AsyncProofExecutionObservation {
   cwd: string; command: string; args: string[]; outcome?: ReturnType<ProofExecutor>; error?: string;
+  load?: ProofLoadRecord;
 }
 
-export function memoizeAsyncProofExecutor(exec: AsyncProofExecutor): AsyncProofExecutor &
+export function memoizeAsyncProofExecutor(exec: AsyncProofExecutor, sample: () => HostLoadSample = sampleHostLoad): AsyncProofExecutor &
   Pick<ProofExecutionMemo, "uniqueRuns" | "reuses"> & { observations: () => readonly AsyncProofExecutionObservation[] } {
-  type Observation = { outcome: ReturnType<ProofExecutor>; matchedLines?: string[];
-    loadError?: string; failureOutput?: string; failureTail?: string };
+  type Observation = ({ outcome: ReturnType<ProofExecutor>; matchedLines?: string[];
+    loadError?: string; failureOutput?: string; failureTail?: string } | { error: unknown }) & { load: ProofLoadRecord };
   const observations = new Map<string, Promise<Observation>>();
   const records: AsyncProofExecutionObservation[] = [];
   let uniqueRuns = 0, reuses = 0;
@@ -5729,14 +5754,18 @@ export function memoizeAsyncProofExecutor(exec: AsyncProofExecutor): AsyncProofE
     const observe = async (): Promise<Observation> => {
       const record: AsyncProofExecutionObservation = { cwd, command: whitelisted.command, args: [...whitelisted.args] };
       records.push(record);
+      const start = sample();
+      whitelisted.executionLoad = undefined;
       try {
         const outcome = await exec(whitelisted, cwd);
         record.outcome = outcome;
+        record.load = whitelisted.executionLoad ?? { start, end: sample() };
         return { outcome, matchedLines: whitelisted.matchedLines?.slice(), loadError: whitelisted.loadError,
-          failureOutput: whitelisted.failureOutput, failureTail: whitelisted.failureTail };
+          failureOutput: whitelisted.failureOutput, failureTail: whitelisted.failureTail, load: record.load };
       } catch (error) {
         record.error = String((error as Error)?.message ?? error).slice(0, STATUS_DESC_MAX);
-        throw error;
+        record.load = whitelisted.executionLoad ?? { start, end: sample() };
+        return { error, load: record.load };
       }
     };
     let identity: string;
@@ -5745,17 +5774,18 @@ export function memoizeAsyncProofExecutor(exec: AsyncProofExecutor): AsyncProofE
       identity = `${stat.dev}:${stat.ino}`;
     } catch (error) {
       // No cache identity is not a passing observation; let the executor report the actual failure.
-      uniqueRuns++;
-      return (await observe()).outcome;
+      identity = "";
     }
     const key = JSON.stringify([cwd, identity, whitelisted.command, [...whitelisted.args]]);
-    let observation = observations.get(key);
+    let observation = identity ? observations.get(key) : undefined;
     if (!observation) {
       uniqueRuns++;
       observation = observe();
-      observations.set(key, observation);
+      if (identity) observations.set(key, observation);
     } else reuses++;
     const prior = await observation;
+    whitelisted.executionLoad = prior.load;
+    if ("error" in prior) throw prior.error;
     whitelisted.matchedLines = prior.matchedLines?.slice();
     whitelisted.loadError = prior.loadError;
     whitelisted.failureOutput = prior.failureOutput;
@@ -5789,7 +5819,8 @@ export function judgeReview(
   // Absent headCheckoutDir ⇒ execCtx undefined ⇒ every criterion is not_executable and the keyword floor is
   // byte-identical to pre-W1-T65. W1-T2743: ONE memo per judgeReview call. Built here rather than inside
   // judgeCriterion so that function stays byte-compatible for its audit callers, which must keep spawning per call.
-  const proofMemo = evidence.headCheckoutDir ? memoizeProofExecutor(evidence.execProof ?? execWhitelistedProof) : undefined;
+  const proofMemo = evidence.headCheckoutDir
+    ? memoizeProofExecutor(evidence.execProof ?? execWhitelistedProof, evidence.sampleLoad) : undefined;
   const unsandboxedBefore = unsandboxedProofSpawns;
   const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
     ? {
@@ -5799,6 +5830,7 @@ export function judgeReview(
         hostedCiFilePassed: evidence.hostedCiFilePassed,
         priorInconclusiveLoad1: evidence.priorInconclusiveLoad1,
         sampleLoad: evidence.sampleLoad,
+        executionLoadsRecorded: true,
         exec: proofMemo?.exec,
         target: evidence.target,
         baseCwd: evidence.baseCheckoutDir,
@@ -5817,7 +5849,8 @@ export function judgeReview(
       c,
       reportTokens,
       evidence.semantic?.[i],
-      execCtx,
+      execCtx && evidence.priorInconclusiveLoads
+        ? { ...execCtx, priorInconclusiveLoad1: evidence.priorInconclusiveLoads.get(c.proof) } : execCtx,
       evidence.reportIsSubstitute,
       evidence.semanticClauses?.[i],
       evidence.reportSubstituteCause,
@@ -6088,14 +6121,14 @@ export async function judgeReviewAsync(
   if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
   const unsandboxedBefore = unsandboxedProofSpawns;
   type Observation =
-    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string; failureTail?: string }
-    | { error: unknown };
+    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string; failureTail?: string; load?: ProofLoadRecord }
+    | { error: unknown; load?: ProofLoadRecord };
   const observed = new Map<string, Observation>();
   const proofFormCorrections = new Map<string, string | undefined>();
   const missingExportNotes = new Map<string, string | undefined>();
   const keyOf = (w: WhitelistedProof, cwd: string) => JSON.stringify([cwd, w.command, [...w.args]]);
-  const asyncExec: AsyncProofExecutor = evidence.asyncExecProof ??
-    (evidence.execProof ? async (w, cwd) => evidence.execProof!(w, cwd) : execWhitelistedProofAsync);
+  const asyncExec = memoizeAsyncProofExecutor(evidence.asyncExecProof ??
+    (evidence.execProof ? async (w, cwd) => evidence.execProof!(w, cwd) : execWhitelistedProofAsync), evidence.sampleLoad);
   // The first fold requests head runs. A passing head may request a base run in the next fold.
   // No proof is launched until the existing judge asks for it, preserving filing carve-outs.
   for (let pass = 0; pass <= criteria.length * 3 + 1; pass++) {
@@ -6104,6 +6137,7 @@ export async function judgeReviewAsync(
       const key = keyOf(whitelisted, cwd);
       const prior = observed.get(key);
       if (prior) {
+        whitelisted.executionLoad = prior.load;
         if ("error" in prior) throw prior.error;
         whitelisted.matchedLines = prior.matchedLines;
         whitelisted.loadError = prior.loadError;
@@ -6114,7 +6148,8 @@ export async function judgeReviewAsync(
       pending.set(key, { whitelisted, cwd });
       throw new Error("async proof observation pending");
     };
-    const verdict = judgeReview(criteria, { ...evidence, execProof: replay, proofFormCorrections, missingExportNotes });
+    const verdict = judgeReview(criteria, { ...evidence, execProof: replay, proofFormCorrections, missingExportNotes,
+      sampleLoad: () => ({}) });
     const pendingForms = verdict.criteria.filter(c => c.proof_exec === "executed_fail" && !proofFormCorrections.has(c.proof));
     if (pending.size === 0 && pendingForms.length === 0) return { ...verdict, ...proofSandboxRecord(unsandboxedBefore) };
     for (const [key, { whitelisted, cwd }] of pending) {
@@ -6123,10 +6158,11 @@ export async function judgeReviewAsync(
         observed.set(key, {
           outcome, matchedLines: whitelisted.matchedLines, loadError: whitelisted.loadError, failureOutput: whitelisted.failureOutput,
           failureTail: whitelisted.failureTail,
+          load: whitelisted.executionLoad,
         });
       } catch (error) {
         // Preserve this exact proof error for the next deterministic verdict fold.
-        observed.set(key, { error });
+        observed.set(key, { error, load: whitelisted.executionLoad });
         const output = (error as { loadOutput?: unknown })?.loadOutput;
         if (whitelisted.kind === "test" && cwd === evidence.baseCheckoutDir && typeof output === "string") {
           const noteKey = JSON.stringify([cwd, evidence.headCheckoutDir, output]);
@@ -6285,8 +6321,8 @@ export async function priorPostedReviewRow(
     line.step === "review.posted" && reviewRowNamesPr(line, taskId, prUrl) && Boolean(line.decision_verdict);
   const live = readLiveLedgerRecords(ledgerPath).filter(names).at(-1);
   if (live) return live;
-  const key = taskId === undefined ? "" : `|"task_id":${JSON.stringify(taskId)}`;
-  const pattern = new RegExp(`"pr_url":${JSON.stringify(prUrl)}${key}`.replace(/[.*+?^${}()[\]\\]/g, "\\$&"));
+  const patterns = [`"pr_url":${JSON.stringify(prUrl)}`, ...(taskId === undefined ? [] : [`"task_id":${JSON.stringify(taskId)}`])];
+  const pattern = new RegExp(patterns.map(value => value.replace(/[.*+?^${}()[\]\\]/g, "\\$&")).join("|"));
   const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { pattern, step: "review.posted", requireArchives: true, refuseIncomplete: true });
   return union.rawLines.flatMap((raw) => {
     try {
