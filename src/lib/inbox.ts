@@ -27,7 +27,7 @@ import { appendThreadEvent, captureInboxInput, verifiedInboxInput, type InboxCau
 import { inboxKind, isAgeOnlyInboxInformation } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
+import { defaultGetProcessStartTime, isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
 import { fitConventionalTitle } from "./commit-message.js";
@@ -3232,8 +3232,8 @@ export interface UpdateProposalRegistryOpts {
   /** Injectable blocking sleep (tests fake it to skip real delay). Default = a real, busy-wait-free sleep (mirrors
    *  lib/deployer.ts's own injected-sleep discipline). */
   sleep?: (ms: number) => void;
-  /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests). Defaults to {@link
-   *  import("./fs-race-safe.js").defaultGetProcessStartTime}. */
+  /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests).
+   *  Defaults to a process-free /proc read; unavailable identity remains indeterminate. */
   getProcessStartTime?: (pid: number) => number | null;
   /** Called whenever a reclaim attempt loses the race to another reclaimer (see {@link reclaimStaleLock}). Defaults
    *  to a `console.error` trace; tests override it to observe the event directly instead of scraping stderr. */
@@ -3260,8 +3260,21 @@ function parseRegistryLockInfo(raw: string): RegistryLockInfo | null {
   }
 }
 
+/** W1-T11128: the poll waits on a SharedArrayBuffer, never a forked `sleep` child — a fork per 20 ms poll is what
+ *  stalled serve's main thread on a host already forking ~190 processes a second. Same bound, same interval. */
 function defaultRegistryLockSleep(ms: number): void {
-  execFileSync("sleep", [String(ms / 1000)]);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
+}
+
+/** Read the portable identity probe off the loop, retaining its existing parsing and unknown result. */
+async function registryProcessStartTimeAsync(pid: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    execFile("ps", ["-o", "etime=", "-p", String(pid)], { encoding: "utf8" }, (error, stdout) => {
+      resolve(error ? null : defaultGetProcessStartTime(pid, {
+        execFileSync: (() => stdout) as unknown as typeof execFileSync,
+      }));
+    });
+  });
 }
 
 const ownedAsyncRegistryLocks = new Set<string>();
@@ -3552,9 +3565,18 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      // The shared reclamation predicate stays synchronous; collect its portable identity inputs off the loop.
+      const starts = new Map<number, number | null>();
+      const getStart = opts.getProcessStartTime ?? ((pid: number) => starts.get(pid) ?? null);
+      if (!opts.getProcessStartTime) {
+        const held = parseRegistryLockInfo(await readFileIfExistsAsync(lockPath) ?? "");
+        for (const pid of new Set([1, ...(held ? [held.pid] : [])])) {
+          starts.set(pid, await registryProcessStartTimeAsync(pid));
+        }
+      }
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseRegistryLockInfo,
-        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
+        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: getStart }),
         onLostReclaim: opts.onLostReclaim,
         beforeDelete: opts.__beforeReclaimDelete,
       });

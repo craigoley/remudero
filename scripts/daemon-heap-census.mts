@@ -25,6 +25,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeHeapSnapshot } from "node:v8";
 import { gzipSync } from "node:zlib";
+import type { DaemonMemoryGrowthRow } from "../src/lib/daemon-memory-census.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -49,7 +50,7 @@ const skip = new Set((flag("--skip") ?? "").split(",").filter(Boolean));
 const owner = flag("--owner") ?? "craigoley";
 const repo = flag("--repo") ?? "remudero";
 const census = await import("../src/lib/daemon-memory-census.ts");
-const { createIncrementalLedgerUnion, createLedgerRotationMemo, ledgerRotationEntries } = await import("../src/lib/ledger-union.ts");
+const { createIncrementalLedgerUnion, createLedgerRotationMemo, ledgerRotationEntries, readLedgerUnionRecordsSync } = await import("../src/lib/ledger-union.ts");
 const { loadPlan } = await import("../src/lib/plan.ts");
 const { createBoardSnapshotCache } = await import("../src/lib/board-snapshot-cache.ts");
 const { createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, ESCALATION_TRIAGE_HISTORY_SLICE, ESCALATION_REJUDGED_STEP } =
@@ -321,9 +322,13 @@ for (const spec of specs) {
 
 const started = Date.now();
 const measured = await census.measureHeapHolders(specs, { collect: () => gc(), heapUsed: () => process.memoryUsage().heapUsed, log });
+const memoryHistory = readLedgerUnionRecordsSync(stateDir, { step: census.DAEMON_MEMORY_STEP, refuseIncomplete: true });
+if (!memoryHistory.ok) throw new Error(`unreadable daemon.memory history: ${memoryHistory.unread.join(", ")}`);
 const sha = (spawnSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" }).stdout ?? "").trim() || "unknown";
 const date = new Date().toISOString().slice(0, 10);
 const ranking = census.rankHeapCensus(measured, { liveSetBytes, censusSha: sha, censusDate: date,
+  memoryRows: memoryHistory.rows.filter((row): row is Record<string, unknown> & DaemonMemoryGrowthRow =>
+    row.step === census.DAEMON_MEMORY_STEP),
   corpus: synthetic ? `synthetic corpus ${shape.rotations}x${shape.rowsPerRotation} rows, ${shape.closedPrs} closed PRs` : `private state copy ${stateCopy}` });
 const calibration = census.calibrationFrom(ranking);
 const extra = moduleReading ? { module_child: moduleReading } : {};

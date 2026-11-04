@@ -134,6 +134,9 @@ import {
   createAnchorGrepCache,
   createFragmentMemo,
   gitGrepAnchorTrue,
+  gitGrepAnchorTrueAsync,
+  warmAnchorGrepCache,
+  warmedAnchorGrep,
   readOriginMainSha,
   parseDraftCache,
   parseDraftInFlightCache,
@@ -2053,10 +2056,29 @@ function inboxClassifyState(deps: PanelGraphDeps): InboxClassifyState {
 }
 
 /** The anchor-grep predicate one pass hands every proposal: answered per main commit from the deps' cache. */
-function anchorGrepFor(deps: PanelGraphDeps, sha: string | undefined): (anchor: EvidenceAnchor) => boolean {
+function anchorGrepFor(deps: PanelGraphDeps, sha: string | undefined, warmFailures?: ReadonlyMap<string, unknown>, answers?: ReadonlyMap<string, boolean>): (anchor: EvidenceAnchor) => boolean {
   const grep = deps.inboxGrepAnchor ?? gitGrepAnchorTrue;
   const cache = inboxClassifyState(deps).grep;
-  return (anchor) => cachedAnchorGrep(cache, sha, anchor, (ref, a) => grep(deps.root, ref, a));
+  const cached = (anchor: EvidenceAnchor): boolean => cachedAnchorGrep(cache, sha, anchor, (ref, a) => grep(deps.root, ref, a));
+  // A warmed pass rethrows a failed warm grep where the sync grep would have thrown; every other key is a cache hit.
+  return warmFailures === undefined || deps.inboxGrepAnchor !== undefined ? cached
+    : (anchor) => warmedAnchorGrep(cache, sha, warmFailures, anchor,
+      (_ref, a) => answers!.get(JSON.stringify([a.pattern, a.path ?? null]))!);
+}
+
+/** Warm async answers for this pass, including cache overflow and an unresolved main ref. */
+async function warmInboxAnchors(deps: PanelGraphDeps, sha: string | undefined, proposals: readonly Proposal[], failures: Map<string, unknown>, answers: Map<string, boolean>): Promise<void> {
+  if (deps.inboxGrepAnchor !== undefined) return;
+  const cache = sha === undefined ? createAnchorGrepCache() : inboxClassifyState(deps).grep;
+  // Snapshot hits before awaiting: a concurrent refresh may warm this shared cache for a newer sha.
+  if (cache.sha === sha) for (const [key, answer] of cache.results) answers.set(key, answer);
+  const warmed = await warmAnchorGrepCache(cache, sha ?? "origin/main", proposals.flatMap((p) => p.evidenceAnchors),
+    async (ref, anchor) => {
+      const answer = await gitGrepAnchorTrueAsync(deps.root, ref, anchor);
+      answers.set(JSON.stringify([anchor.pattern, anchor.path ?? null]), answer);
+      return answer;
+    });
+  for (const [key, err] of warmed) failures.set(key, err);
 }
 
 /** One pass's inputs, read, with the per-proposal step still to run — so the same pass can run whole or in slices. */
@@ -2348,8 +2370,11 @@ export async function classifyAllProposalsSliced(
   }
   if (state.pending !== undefined && state.pending.generation === state.generation && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
+  const warmFailures = new Map<string, unknown>();
+  const answers = new Map<string, boolean>();
+  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha, warmFailures, answers), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
   const run = async (): Promise<ClassifiedInbox> => {
+    await warmInboxAnchors(deps, fp.sha, pass.proposals, warmFailures, answers);
     const classifications: InboxClassification[] = [];
     for (let i = 0; i < pass.proposals.length; i += INBOX_CLASSIFY_SLICE) {
       if (i > 0) await yieldNow();

@@ -786,6 +786,37 @@ jobs:
               ;;
           esac
 
+  test-slow-plan:
+    # W1-T11206: derives test-slow-shard's matrix from the recorded per-file durations in
+    # scripts/test-tier-manifest.json — the smallest shard count whose slowest shard is predicted to
+    # finish within 60% of test-slow-shard's 35-minute ceiling. No install: the planner imports
+    # only node: built-ins. If it fails, test-slow-shard is skipped and test-slow fails closed.
+    name: test-slow-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            scripts
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Derive the slow-tier shard count from recorded durations (W1-T11206)
+        id: plan
+        run: |
+          node scripts/test-tier-manifest.mjs --print-slow-shards > slow-plan.txt
+          cat slow-plan.txt
+          if ! grep -q '^count=[1-9][0-9]*$' slow-plan.txt || ! grep -q '^shards=\[' slow-plan.txt; then
+            echo "::error::W1-T11206: --print-slow-shards printed no shard list and count."
+            exit 1
+          fi
+          cat slow-plan.txt >> "$GITHUB_OUTPUT"
+
   test-slow-shard:
     # W1-T2904: the SLOW tier, split out of the `ci` matrix's file-count sharding, which cannot
     # balance a suite where one file (test/run-task.test.ts, ~58s alone) sits wherever its hash
@@ -794,12 +825,17 @@ jobs:
     # heuristic) and runs exactly the files at or above its threshold. It is REQUIRED through
     # ci-gate before the fast shards may exclude those files. It registers on every pull_request
     # event (W1-T1033), so the required context is never silently absent.
-    name: test-slow-shard (${{ matrix.shard }}/2)
+    #
+    # W1-T11206: the matrix and its total come from test-slow-plan, so the shard count grows with
+    # the recorded durations and no total is written here. ci-gate.yml's ADVISORY list names these
+    # checks as `test-slow-shard (*/*)`; the required verdict stays the stable `test-slow`.
+    name: test-slow-shard (${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }})
+    needs: [test-slow-plan]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: ${{ fromJSON(needs.test-slow-plan.outputs.shards) }}
     # W1-T4396: no job-level if — the push lane runs the slow tier too. W1-T3207 skips it on a
     # SOURCE pull request, so without this the 107 slowest files ran on main nowhere at all. It is
     # its own job, so it never lengthens the fast shards' critical path.
@@ -915,9 +951,9 @@ jobs:
           if [ "${{ steps.plan-reading.outputs.class }}" = "PUSH" ]; then
             # W1-T4396: main's push lane. One bounded failed-file retry, as the fast shards get.
             echo "W1-T4396: push to main — running the slow tier."
-            node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --shard ${{ matrix.shard }}/2 --base HEAD
+            node scripts/test-tier-manifest.mjs --run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base HEAD --retry
           else
-            npm run --silent test:slow -- --shard ${{ matrix.shard }}/2 --base "origin/${GITHUB_BASE_REF}"
+            npm run --silent test:slow -- --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base "origin/${GITHUB_BASE_REF}"
           fi
       - name: Upload slow-tier duration evidence (structured Node test events, W1-T3302)
         if: ${{ always() }}
@@ -2657,7 +2693,7 @@ jobs:
     # is empty. FALSIFIER: test/the-ci-gate-reports-on-the-merge-group-commit.test.ts.
     name: ci-gate
     runs-on: ubuntu-latest
-    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
+    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-plan, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
     # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
     # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
     # GitHub re-evaluates this job condition when cancelling: the second arm releases that run.
