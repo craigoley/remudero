@@ -30,6 +30,7 @@ function snapshot(source: string) {
 test("W1-T11190: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/plan.ts"), "utf8");
   const actual = snapshot(source);
+  assert.ok(actual.comments.includes("// comments compressed"), "retain the acceptance proof's compression marker");
   const release = actual.comments.find(comment => comment.includes("W1-T3206"));
   assert.ok(release, "retain the operator-release invariant and its citation");
   const before = compressionPinBase("src/lib/plan.ts", import.meta.url);

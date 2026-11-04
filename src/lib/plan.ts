@@ -11,8 +11,8 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { RepoLayout } from "./repo-layout.js";
 import { PLACEMENT_DIR, placeTest, type SubsystemMap } from "./test-placement.js";
 
-/** The plan/tasks.yaml loader and validator (schema v1, MASTER-PLAN §2), read-only — the control
- *  plane flips `status`; every task's `prompt` is pre-authored (G-2). */
+// comments compressed
+/** Read-only plan/tasks.yaml loader/validator (schema v1, MASTER-PLAN §2); control plane owns status, prompts are pre-authored (G-2). */
 
 export const TASK_STATUSES = [
   "queued",
@@ -304,9 +304,7 @@ export function unmetTaskPrecondition(task: Task, opts: TaskPreconditionOptions 
   return undefined;
 }
 
-/** W1-T3206: `rmd approve` releases verify:human through an auditable operator ledger row.
- *  `isDispatchEligible` and {@link assertRunnable} otherwise refuse; the plan stays byte-identical.
- *  Standing rule 15 forbids workers rewriting `verify:` to release a task. */
+/** W1-T3206: `rmd approve` releases verify:human via operator ledger; otherwise `isDispatchEligible` and {@link assertRunnable} refuse. Rule 15 forbids worker `verify:` edits; plan stays unchanged. */
 export const RELEASE_LEDGER_STEP = "ratify.approved";
 
 /** Task ids released by an operator, read from {@link RELEASE_LEDGER_STEP} rows. Pure over the
