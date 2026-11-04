@@ -5,6 +5,7 @@ import { test, type TestContext } from "node:test";
 
 import { triageCommand } from "#test/helpers/run-task-test.js";
 import { lintFiledTasks } from "#src/lib/relint.js";
+import { parseWhitelistedProof } from "#src/lib/review.js";
 import { parseTriageVerdict } from "#src/lib/triage.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -15,11 +16,11 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 const FEEDBACK_ID = "fb-triage-relint-verdict";
 const CORE_PROOF = "unit test: test/relint-loop.test.ts";
 
-function taskYaml(id: string, status: string, proof = CORE_PROOF): string {
+function taskYaml(id: string, status: string, proof = CORE_PROOF, repo = "remudero"): string {
   return [
     `- id: ${id}`,
     "  title: repair the triage filing",
-    "  repo: remudero",
+    `  repo: ${repo}`,
     `  origin: feedback#${FEEDBACK_ID}`,
     "  depends_on: []",
     "  type: implement",
@@ -45,7 +46,9 @@ function worker(text: string): WorkerResult {
   } as unknown as WorkerResult;
 }
 
-type Round = { status: string; proof?: string; text?: string; extraFile?: string; replaceFiled?: boolean };
+type Round = {
+  status: string; proof?: string; repo?: string; text?: string; extraFile?: string; replaceFiled?: boolean;
+};
 
 async function runRepair(t: TestContext, rounds: Round[]) {
   const origin = gitRepo({ bare: true, scope: t });
@@ -90,11 +93,11 @@ async function runRepair(t: TestContext, rounds: Round[]) {
         assert.ok(id, "every repair retains the originally reserved task id");
         mkdirSync(join(args.cwd, "plan", "tasks.d"), { recursive: true });
         writeFileSync(join(args.cwd, "plan", "tasks.d", `${id}-repair.yaml`),
-          taskYaml(id, round.status, round.proof));
+          taskYaml(id, round.status, round.proof, round.repo));
         if (round.replaceFiled) {
           rmSync(join(args.cwd, "plan", "tasks.d", `${id}-repair.yaml`));
           writeFileSync(join(args.cwd, "plan", "tasks.d", `${id}-replacement.yaml`),
-            taskYaml(id, round.status, round.proof));
+            taskYaml(id, round.status, round.proof, round.repo));
         }
         if (round.extraFile) writeFileSync(join(args.cwd, round.extraFile), "unexpected scope\n");
         findings.push(lintFiledTasks(args.cwd, [id]));
@@ -144,6 +147,23 @@ test("a repaired attempt's files are relinted, not skipped as not-filed", async 
   assert.match(result.prompts[2], /\[proof-dialect\]/,
     "the next prompt carries the real finding from the repaired second attempt");
   assert.deepEqual(result.ledger.filter(row => row.step === "triage.relint").map(row => row.attempt), [1, 2]);
+  assertProposed(result);
+});
+
+test("a non-core suite-root proof survives the retry instead of being downgraded", async t => {
+  const proof = "unit test: the console drawer keeps focus after closing";
+  const target = { owner: "craigoley", repo: "remudero-console" };
+  const result = await runRepair(t, [
+    { status: "open", proof, repo: "remudero-console" },
+    { status: "queued", proof, repo: "remudero-console" },
+  ]);
+  assert.equal(parseTriageVerdict(result.transcripts[1]), null, "the repair carries no fresh verdict line");
+  const registered = parseWhitelistedProof(proof, target);
+  assert.equal(registered?.kind, "test", "the console proof resolves as an executable test under its registered suite");
+  assert.equal(result.findings[0].length, 1);
+  assert.equal(result.findings[0][0].check, "plan-load", "only the status defect is flagged, not the proof");
+  assert.deepEqual(result.findings[1], [], "the repaired non-core proof is not downgraded to a dead-proof finding");
+  assert.doesNotMatch(result.prompts[1], /\[proof-dialect\]|dead proof floor/);
   assertProposed(result);
 });
 
