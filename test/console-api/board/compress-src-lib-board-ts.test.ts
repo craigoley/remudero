@@ -7,14 +7,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { transformSync } from "esbuild";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-// Frozen from 6482258c5d1cc2395dfafcbb71e1b50d86b5d626 before compression.
-const BEFORE = {
-  comments: 335,
-  tokens: "5dc2290efd8bbfee87951d992963f8a53d080b3b4335feaa8c5ea8dfb54da720",
-  emitted: "d6900852fd9737674ec2271981c7715085b2ba59d858d48725b96c6b09e46bb6",
-};
+// Measured at 6482258c5d1cc2395dfafcbb71e1b50d86b5d626 before compression.
+const BEFORE = { comments: 335 };
 
 function executableDigest(source: string): string {
   const scanner = createScanner(true, undefined, source);
@@ -56,8 +53,12 @@ test("W1-T11081: comment compression preserves executable code", () => {
   assert.notEqual(emittedDigest("function f() { return value; }"),
     emittedDigest("function f() { return\nvalue; }"), "emission detects automatic semicolon insertion");
   const source = readFileSync(join(REPO_ROOT, "src/lib/board.ts"), "utf8");
-  assert.equal(executableDigest(source), BEFORE.tokens, "all executable token kinds and spellings survive");
-  assert.equal(emittedDigest(source), BEFORE.emitted, "emitted JavaScript and ASI behavior survive");
+  const before = compressionPinBase("src/lib/board.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free (#16082).
+    assert.equal(executableDigest(source), executableDigest(before), "all executable token kinds and spellings survive");
+    assert.equal(emittedDigest(source), emittedDigest(before), "emitted JavaScript and ASI behavior survive");
+  }
   const comments = source.split("\n").filter(line => /^(?:\/\/|\/\*|\*)/.test(line.trim())).length;
   assert.ok(comments < BEFORE.comments, `comments must decrease from ${BEFORE.comments}, found ${comments}`);
 });

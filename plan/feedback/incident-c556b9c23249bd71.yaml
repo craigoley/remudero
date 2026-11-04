@@ -1,0 +1,29 @@
+id: incident-c556b9c23249bd71
+ts: 2026-11-03T21:59:46.209Z
+raw: >-
+  Incident c556b9c23249: intervention
+  awaiting-review:review-lane:checks-green-review-never-posted-running
+
+  First seen: 2026-11-03T21:58:31.944Z
+
+  Last seen: 2026-11-03T21:59:43.307Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#14861@56b4facc6 actor=claude cause=awaiting-review:review-lane:checks-green-review-never-posted-running — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#c556b9c23249bd71788168bcee5a93f69f76e9c4860a1188254667049351ffdf
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

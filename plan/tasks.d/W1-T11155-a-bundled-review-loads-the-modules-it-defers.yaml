@@ -1,13 +1,14 @@
 - id: W1-T11155
-  title: "A bundled review loads the modules it defers — review.ts reaches status.ts and escalate.ts through `await import(variable)`, which esbuild cannot bundle, so the run-task bundle resolves './status.js' beside itself and every bundled review that verifies a live remudero-review status throws ERR_MODULE_NOT_FOUND for dist/child-entries/status.js and withholds its verdict (36 post_refused rows from 2026-10-24 to 2026-11-01, still recurring)"
+  title: "The shared child-entry review bundle resolves its deferred modules and plan-lint runtime packages"
   repo: remudero
   depends_on: []
   priority: 2
   type: implement
+  budget_usd: 30.00
   verify: auto
   principles:
     tdd: strict
-  risk: high # Rule 19: one concern, review's deferred imports resolve in its bundle; it spans review.ts and the two modules it defers to (status.ts, escalate.ts)
+  risk: high # Rule 19: one concern, the shared run-task bundle resolves review and plan-lint runtime dependencies outside the Core checkout.
   band_meaning: span
   origin: operator-session#review-lane-findings-2026-11-02
   plan_refs:
@@ -20,10 +21,11 @@
     - src/lib/status.ts
     - src/lib/escalate.ts
     - test/worker/a-bundled-review-loads-the-modules-it-defers.test.ts
+    - scripts/build-child-entries.mjs
   status: queued
   attempts: 0
   acceptance:
-    - claim: The run-task child-entry bundle built by scripts/build-child-entries.mjs from the tree resolves the module review.ts defers for replayPublisher's required-status read (today `./status.js`) and for the cannot-evaluate escalation (today `./escalate.js`), so a bundled run of each path loads it instead of throwing ERR_MODULE_NOT_FOUND, and neither deferral closes a dependency cycle that depcruise refuses
+    - claim: The run-task child-entry bundle built by scripts/build-child-entries.mjs resolves both review.ts deferred modules and runtime package imports required by plan lint (including `yaml`) when executed from the shared store outside the Core checkout; removing the relevant bundling change reproduces the corresponding ERR_MODULE_NOT_FOUND failure, and neither deferral closes a dependency cycle that depcruise refuses
       proof: "unit test: test/worker/a-bundled-review-loads-the-modules-it-defers.test.ts"
     - claim: No module in a CHILD_ENTRIES or WORKER_ENTRIES bundle graph passes a relative specifier held in a variable to import(); the test lists every such site so a new one fails it by name
       proof: "grep: W1-T11155 criterion 2 in test/worker/a-bundled-review-loads-the-modules-it-defers.test.ts"
@@ -46,17 +48,22 @@
     module that is never emitted into dist/child-entries, whatever the switch order, so the cause is the unbundled deferred import.
     NOT COVERED: W1-T9854 (queued) classes a harness module that cannot load as an environment failure; it would relabel this row, not
     stop it. W1-T8959 (merged, #12719) added the required-publisher read. W1-T8777 (merged) built the worker bundles.
+    REPRODUCED 2026-11-03: the Azure current-main `rmd review 6 --repo wreckterra` run passed its acceptance grep, then `lint-plan`
+      did not run because the shared stored `run-task.mjs` bundle threw `ERR_MODULE_NOT_FOUND` for package `yaml` from outside the
+      Core checkout. The plan-only review remained FAILURE and no semantic model review ran. PR #16584 was diagnostic only and closed
+      without merge, so it did not change the dependency-resolution path.
   design: |
     1. Break the cycle instead of hiding it: move readRequiredStatusCheckContextsAsync's dependency for replayPublisher (and the
        escalation calls) behind a seam the composition root passes in, or into a leaf module both graphs can import statically, so
        review.ts needs no deferred relative import. If a deferral must stay, its specifier is a string literal esbuild bundles.
     2. Never rename or wrap the import to dodge depcruise: if the cycle cannot be broken without a gate change, STOP and report it to
        the operator (house rule).
-    3. The test builds the run-task bundle into a temp tree with the real buildChildEntries, imports it, and drives both paths with
-       injected readers; criterion 2 scans the bundle graphs' sources for import() of a non-literal relative specifier.
+    3. The test builds the run-task bundle into a temp tree with the real buildChildEntries, executes it from a directory outside the Core checkout with the same runtime dependency layout as the shared child-entry store, and drives both deferred review paths with injected readers; it proves the required plan-lint runtime packages resolve and that removing the dependency-resolution change restores the missing-package failure. Criterion 2 scans the bundle graphs' sources for import() of a non-literal relative specifier.
+    4. Use a supported, portable esbuild/runtime dependency strategy for compatible packages such as `yaml`; retain externalization only where required by Node-specific or native modules. Bump the bundle recipe version when the recipe changes. Do not rely on `NODE_PATH` for ESM resolution without a regression test that falsifies the observed failure.
     Tests go in test/worker/a-bundled-review-loads-the-modules-it-defers.test.ts, titled verbatim as in the proofs.
   note: |
     reservation hand-off: plan-file-1793657970812 -> plan-file-1793657970812
     Reserved with rmd next-task-id --branch plan-file-1793657970812 from the operator checkout. Filed 2026-11-02 from the review-lane
     findings, item 5b (p2), harness noise; 5a is W1-T11154 and 5c is W1-T11156 (Rule 19). If the builder finds the leaf move needs
     a new leaf module in files:, it amends this record first.
+    Approved bounded amendment 2026-11-03: add the bundle builder (the test path was already in scope), exercise shared-store package resolution, and cap this task at $30.
