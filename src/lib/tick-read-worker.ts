@@ -1651,6 +1651,8 @@ export function resolveReviewTaskId(
  *  gets, on any branch, so the trailer can never cost a review (#13305: refused on every pass for 4.5 h). */
 export function usesUntaskedReviewMetadata(taskId: string | undefined, headRefName: string): boolean {
   if (taskId === undefined || taskId === UNFILED_RUN_SENTINEL || /^PR-[1-9]\d*$/.test(taskId)) return true;
+  // W1-T11258: a pre-number hand PR's placeholder gets defaults only on its own run branch.
+  if (taskId === "PR-pending" && /^run-PR-pending-[0-9]+$/.test(headRefName)) return true;
   return taskIdFromRunBranch(headRefName) === taskId &&
     /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+|main-repair-(?:(?:ratchet|revert)-)?[0-9a-f]{12})$/.test(taskId);
 }
