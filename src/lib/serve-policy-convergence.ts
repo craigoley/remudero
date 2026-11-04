@@ -24,13 +24,14 @@
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fixedClock } from "./clock.js";
 import {
   IMAGE_BUILD_SHA_PATH,
   IMAGE_RECYCLE_FAILURE_BACKOFF_MS,
   bakedPathCommitsBehind,
   daemonInstanceRegistryPath,
+  daemonInstanceRows,
   deployLedgerPath,
   githubSlugOf,
   imageShaContainerFor,
@@ -45,6 +46,8 @@ import {
   type RealDeployOpts,
   type ResourcePolicyDrift,
 } from "./deployer.js";
+import { InstanceRegistryRuntimeError, runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryText,
+  runtimeInstanceRegistryInstanceName, trustedInstanceRegistryLaunchPacket } from "./instance-registry-selection.js";
 import { ghIssueGateway, tryEscalate, type Escalation, type IssueGateway } from "./escalate.js";
 import { isPaused } from "./fleet-control.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -330,7 +333,7 @@ export function runServePolicyCycle(
 
 /** The real serve seams, or none when this state root is not the registry's primary instance. */
 export function realServePolicyDeps(
-  o: Pick<RealDeployOpts, "installPath" | "stateRoot" | "selectedRegistryObservation">,
+  o: Pick<RealDeployOpts, "installPath" | "stateRoot" | "instance" | "selectedRegistryObservation">,
   exec: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" }),
   issuesFor: (owner: string, repo: string) => IssueGateway = ghIssueGateway,
   budget: () => HostMemoryBudgetPolicy = () => loadHostMemoryBudgetPolicy(),
@@ -346,6 +349,20 @@ export function realServePolicyDeps(
   }
   if (isPrimaryDeployment(registryText, o.stateRoot) !== true) return {};
   const instanceName = instanceForStateRoot(registryText, o.stateRoot);
+  const selectedFile = runtimeInstanceRegistryPrivateFile();
+  const selectedText = runtimeInstanceRegistryText();
+  const selectedInstance = selectedText === undefined ? undefined
+    : runtimeInstanceRegistryInstanceName() ?? instanceForStateRoot(selectedText, o.stateRoot);
+  const selectedRow = selectedText === undefined || selectedInstance === undefined
+    ? undefined : daemonInstanceRows(selectedText).get(selectedInstance);
+  const normalisedDir = (dir: string): string => dir.replace(/\/+$/, "");
+  if ((selectedText !== undefined || selectedFile !== undefined) && (selectedText === undefined || selectedFile === undefined
+    || selectedInstance === undefined || selectedRow === undefined || !isAbsolute(selectedRow.stateDir) || !isAbsolute(o.stateRoot)
+    || normalisedDir(selectedRow.stateDir) !== normalisedDir(o.stateRoot)
+    || (o.instance !== undefined && o.instance !== selectedInstance))) {
+    throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
+  }
+  const selectedPacket = selectedFile === undefined ? undefined : trustedInstanceRegistryLaunchPacket(selectedInstance);
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const failedPath = join(o.stateRoot, "state", SERVE_POLICY_FAILED_FILE);
   const git = (args: readonly string[]): string => exec("git", ["-C", o.installPath, ...args]);
@@ -388,7 +405,7 @@ export function realServePolicyDeps(
       }
     },
     replaceServe: () => observeSelectedRegistrySync(observer, "serve-policy-replace", {
-      instanceName, stateRoot: o.stateRoot, containerName: SERVE_POLICY_CONTAINER, namespace: "host",
+      instanceName: selectedInstance ?? instanceName, stateRoot: o.stateRoot, containerName: SERVE_POLICY_CONTAINER, namespace: "host",
     }, () => {
       let admission: string[];
       try {
@@ -398,7 +415,33 @@ export function realServePolicyDeps(
         return { held: "policy_unread", detail: err instanceof Error ? err.message : String(err) };
       }
       try {
-        exec("env", [`RMD_STATE_DIR=${o.stateRoot}`, ...admission, "bash", join(o.installPath, "deploy", "serve-container.sh"), "--replace"]);
+        const script = join(o.installPath, "deploy", "serve-container.sh");
+        if (selectedPacket === undefined) {
+          // Preserve the legacy invocation exactly when no selected runtime is active.
+          exec("env", [`RMD_STATE_DIR=${o.stateRoot}`, ...admission, "bash", script, "--replace"]);
+        } else {
+          if (trustedInstanceRegistryLaunchPacket(selectedInstance) !== selectedPacket) {
+            throw new InstanceRegistryRuntimeError("revision_changed");
+          }
+          const packet = selectedPacket.split("\n");
+          try {
+            exec("env", [`RMD_STATE_DIR=${o.stateRoot}`, ...admission, "bash", "-c",
+              'export RMD_INSTANCE_REGISTRY="$1" RMD_INSTANCE_REGISTRY_DIGEST="$2" RMD_INSTANCE_REGISTRY_LAUNCH_BINDING="$3"; shift 3; exec bash "$@"',
+              "selected-registry-launch", packet[1]!, packet[2]!, packet[3]!, script, "--replace", "--instance", selectedInstance!]);
+          } catch (err) {
+            if (err instanceof InstanceRegistryRuntimeError) throw err;
+            const status = (err as { status?: unknown }).status;
+            if (status !== SERVE_REPLACE_HELD_EXIT) throw new InstanceRegistryRuntimeError("launcher_failed");
+            const stderr = String((err as { stderr?: unknown }).stderr ?? "");
+            const safeStderr = stderr.split(selectedFile!).join("[private registry]").split(packet[2]!).join("[private digest]")
+              .split(packet[3]!).join("[private binding]").split(packet[4]!).join("[private identity]");
+            const held = /HELD \(([a-z_]+)\) — (.*)/.exec(safeStderr);
+            return { held: held?.[1] ?? "held", detail: held?.[2] ?? "the selected serve replacement was held" };
+          }
+          if (trustedInstanceRegistryLaunchPacket(selectedInstance) !== selectedPacket) {
+            throw new InstanceRegistryRuntimeError("revision_changed");
+          }
+        }
       } catch (err) {
         const status = (err as { status?: unknown }).status;
         if (status !== SERVE_REPLACE_HELD_EXIT) throw err;

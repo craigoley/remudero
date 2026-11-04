@@ -198,3 +198,69 @@ test("the CI shadow record names each retried file's own pass-two outcome", () =
     { file: "test/c.test.ts", floor: "missed" },
   ]);
 });
+
+test("a stored miss is re-asked about main at its base each pass, so a corrected base-red read reaches it", async () => {
+  const miss = { file: "test/slow-red-on-main.test.ts", floor: "selected", narrow: "missed", retry: "failed" };
+  const stored = harness();
+  const first = await stored.pass([run(8120, [miss], { baseSha: "base-slow" })], async () => []);
+  assert.equal(first.narrow.missed, 1, "the reader of its day read main green, so the miss was charged and stored");
+  const later = await stored.pass([], async (sha) => (sha === "base-slow" ? [miss.file] : []));
+  assert.equal(later.narrow.missed, 0, "the stored miss is base-red once main's failure at its base is read");
+  assert.equal(later.observations.reattributed, 1);
+  assert.notEqual(later.verdict, "misses");
+
+  const green = harness();
+  await green.pass([run(8121, [miss], { baseSha: "base-green" })], async () => []);
+  const still = await green.pass([], async () => []);
+  assert.equal(still.narrow.missed, 1, "main green at the base keeps the miss charged");
+  assert.equal(still.observations.reattributed, 0);
+
+  const flaky = harness();
+  await flaky.pass([run(8122, [miss], { baseSha: "base-green" })], async () => []);
+  const recovered = await flaky.pass([run(8123, [], { recoveredFlakes: [miss.file] })], async () => []);
+  assert.equal(recovered.narrow.missed, 1, "a later window's retry recovery is not evidence about a stored run");
+});
+
+test("a stored miss stops counting only while today's selector, re-run on its own diff, selects the file", async () => {
+  const miss = { file: "test/edge-repaired.test.ts", floor: "selected", narrow: "missed", retry: "failed" };
+  const h = harness();
+  let today: "selected" | "missed" | "flake" | "full" | "throws" = "missed";
+  const asked: Array<{ id: number; baseSha?: string; headSha: string; failed: readonly string[] }> = [];
+  const replay: gardener.SelectorShadowReplay = {
+    owner: "acme", repo: "remudero",
+    readJson: async () => ({ workflow_runs: [] }),
+    select: async () => { throw new Error("no history to replay"); },
+    selectAtMain: async (run, failed) => {
+      asked.push({ id: run.id, headSha: run.headSha, ...(run.baseSha === undefined ? {} : { baseSha: run.baseSha }), failed });
+      if (today === "throws") throw new Error("checkout unavailable");
+      const record = today === "full"
+        ? { fullRun: true, floorSize: 10, failures: failed.map((file) => ({ file, floor: "selected", narrow: "selected" })) }
+        : { fullRun: false, floorSize: 10, narrowSize: 3, failures: failed.map((file) => ({ file, floor: "selected", narrow: today })) };
+      return { record, reasons: today === "full" ? ["unreadable input"] : [] };
+    },
+  };
+  const pass = (runs: gardener.SelectorShadowRun[]) =>
+    gardener.runSelectorShadowGardener(h.deps, () => runs, () => ["src/lib/changed.ts"], () => "W1-T9190", () => [], undefined, async () => [], { replay });
+
+  const first = await pass([run(8130, [miss], { baseSha: "base-edge" })]);
+  assert.equal(first.narrow.missed, 1, "today's selector still misses it, so it stays charged");
+  assert.equal(first.observations.repaired, 0);
+  assert.deepEqual(asked, [{ id: 8130, headSha: "head-8130", baseSha: "base-edge", failed: [miss.file] }], "the run's own diff is what is re-selected");
+
+  today = "selected";
+  const fixed = await pass([]);
+  assert.equal(fixed.narrow.missed, 0, "a repaired edge clears the stored miss");
+  assert.equal(fixed.observations.repaired, 1);
+  assert.deepEqual(fixed.unattributed.misses.map((m) => [m.file, m.reason]), [[miss.file, "repaired"]]);
+  assert.notEqual(fixed.verdict, "misses");
+  assert.deepEqual(h.rows("selector-shadow.repair_checked").at(-1), { ci_run_id: 8130, repaired: [miss.file] });
+
+  for (const answer of ["missed", "flake", "full", "throws"] as const) {
+    today = answer;
+    const again = await pass([]);
+    assert.equal(again.narrow.missed, 1, `${answer}: repaired is re-asked each pass, never stored, so the miss is charged again`);
+    assert.equal(again.observations.repaired, 0);
+  }
+  assert.equal(h.rows("selector-shadow.repair_unchecked").length, 1, "an unanswerable check is ledgered and leaves the miss charged");
+  assert.equal(h.rows("selector-shadow.repair_checked").at(-1)!.full_run, "unreadable input", "a full run is not a repair, and says why");
+});

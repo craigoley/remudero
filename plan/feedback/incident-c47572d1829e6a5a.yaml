@@ -1,0 +1,31 @@
+id: incident-c47572d1829e6a5a
+ts: 2026-11-03T21:57:43.645Z
+raw: >-
+  Incident c47572d1829e: intervention
+  review-failed:fix-lane:unmet-criterion-fix-round-judge-unavaila
+
+  First seen: 2026-11-03T20:36:20.496Z
+
+  Last seen: 2026-11-03T20:36:20.496Z
+
+  Count: 3, burn: 3.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#16240@9aae3e6d2 actor=cao825 cause=review-failed:fix-lane:unmet-criterion-fix-round-judge-unavaila — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#16240@bcded81ba actor=cao825 cause=review-failed:fix-lane:unmet-criterion-fix-round-judge-unavaila — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#16240@3a385c8c2 actor=cao825 cause=review-failed:fix-lane:unmet-criterion-fix-round-judge-unavaila — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#c47572d1829e6a5a9e3a71d94921e13e1ca5c23ab2ee24a04fec04602b63d1fa
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

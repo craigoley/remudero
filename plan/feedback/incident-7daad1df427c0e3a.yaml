@@ -1,0 +1,30 @@
+id: incident-7daad1df427c0e3a
+ts: 2026-11-04T09:56:09.778Z
+raw: >-
+  Incident 7daad1df427c: flow pr-stage-stall:other:plan-only PR is red on
+  mutation-ratchet — the code-fix lane cannot stage outside a plan filing, so no
+  fix is dispatched; the plan violation needs a plan repair
+
+  First seen: 2026-11-04T09:41:13.588Z
+
+  Last seen: 2026-11-04T09:41:13.588Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16570 other: repeat: "plan-only PR is red on mutation-ratchet — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair" x2
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#7daad1df427c0e3a555714cef3ade2d891ed9828f1178a17b9c6ae3553501e1b
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
