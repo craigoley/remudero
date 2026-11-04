@@ -59,6 +59,15 @@ test("W1-T10332: a precheck that times out is not measured and names the prechec
   assert.equal(observed.last.data?.timed_out_child, "scripts/census-precheck.mjs");
   assert.equal(observed.last.data?.refusal, undefined);
 
+  // The review's counterexample: a precheck killed by its bound after printing refusal rows is still a timeout.
+  const partial = runSync([{ ...killedByBound,
+    stdout: "census-precheck: this branch grows 1 census count(s) CI will refuse:\n  comment-load: src/x.ts grows\n" }, passed]);
+  assert.equal(partial.outcome.refusal, undefined, "rows a timed-out precheck printed before its kill are not a refusal");
+  assert.match(partial.outcome.unmeasured!, /census-precheck: not measured — scripts\/census-precheck\.mjs timed out at \d+ s \(SIGTERM\)/);
+  assert.equal(partial.children.length, 2, "the reach suite still runs after a timed-out precheck that printed rows");
+  assert.equal(partial.last.data?.outcome, "partially-measured");
+  assert.equal(partial.last.data?.timed_out_child, "scripts/census-precheck.mjs");
+
   const reachTimeout = runSync([passed, killedByBound]);
   assert.equal(reachTimeout.outcome.refusal, undefined);
   assert.match(reachTimeout.outcome.unmeasured!, /^census-precheck: not measured — test\/the-affected-suite-reach-ratchet\.test\.ts timed out at \d+ s/);

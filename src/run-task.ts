@@ -10845,7 +10845,6 @@ function* fixCensusSnapshotSteps(
   const precheck = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
     { cwd: scriptsRoot, env, encoding: "utf8", timeout: controllerTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
   const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
-  let refusal = censusPushRefusal(text);
   let unmeasured = precheck.status === 2 ? text.trim() : undefined;
   const unavailable = (subject: string, result: CensusChildResult, output: string) => {
     unmeasured = `${subject}: ${String(result.error ?? result.signal ?? (output || `exit ${result.status} without a complete test summary`)).slice(-4000)}`;
@@ -10860,8 +10859,9 @@ function* fixCensusSnapshotSteps(
     unmeasured = unmeasured ? `${unmeasured}\n${line}` : line;
     return true;
   };
-  if (!refusal && !timedOut("scripts/census-precheck.mjs", precheck, controllerTimeBoundMs) &&
-      (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2))) {
+  const precheckTimedOut = timedOut("scripts/census-precheck.mjs", precheck, controllerTimeBoundMs);
+  let refusal = precheckTimedOut ? undefined : censusPushRefusal(text);
+  if (!refusal && !precheckTimedOut && (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2))) {
     refusal = unavailable("census precheck child", precheck, text);
   }
   if (!refusal) {
