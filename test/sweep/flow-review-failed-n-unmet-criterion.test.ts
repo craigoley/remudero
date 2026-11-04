@@ -35,12 +35,12 @@ function designRound(heldForMs: number): Record<string, unknown>[] {
 }
 
 function fixture(t: { after: (fn: () => void) => void }, heldForMs: number, clock = { now: NOW }, design = false,
-  judge?: SweepDeps["fixProgressJudge"]) {
+  judge?: SweepDeps["fixProgressJudge"], sweepOwned = false) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}held-escalation-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "state"));
   const heldAt = stamp(-heldForMs);
-  const rows: Record<string, unknown>[] = [
+  const rows: Record<string, unknown>[] = sweepOwned ? [] : [
     { step: "sweep.disposed", pr_number: PR, head_sha: HEAD, task_id: TASK, run_id: RUN, disposition: "blocked-fixable",
       acted: true, ts: stamp(-heldForMs - 20 * MIN) },
     { step: "fix.dispatch", task_id: TASK, head_sha: HEAD, run_id: RUN, mode: "reviewer-unmet", strike: 1, ts: stamp(-heldForMs - 19 * MIN) },
@@ -50,6 +50,8 @@ function fixture(t: { after: (fn: () => void) => void }, heldForMs: number, cloc
   const calls: string[] = [];
   const judged: string[] = [];
   const open: OpenIssue[] = [];
+  if (sweepOwned) open.push({ number: 14219, url: "https://github.com/acme/remudero/issues/14219",
+    title: "[BLOCKED] review false-block", body: `**Task:** ${TASK}\n**Class:** BLOCKED\nhttps://github.com/acme/remudero/pull/${PR}\n**Head:** ${HEAD}\n**Cause:** review\n**Contract:** contract-A\n` });
   const closed = new Set<number>();
   const issues: IssueGateway = {
     ensureLabel: () => true, listOpen: () => open,
@@ -76,6 +78,7 @@ function fixture(t: { after: (fn: () => void) => void }, heldForMs: number, cloc
       return { verdict: "change-approach", reason: "the same round stood down twice", approach: "publish the proof through the PR body" };
     }),
     readTaskContractRevision: () => "contract-A",
+    readOpenEscalations: () => open,
     arm: () => { calls.push("arm"); },
     close: (candidate) => { calls.push("close"); closed.add(candidate.prNumber); },
     updateBranch: () => { calls.push("refresh"); return "updated"; },
@@ -95,15 +98,33 @@ function fixture(t: { after: (fn: () => void) => void }, heldForMs: number, cloc
     priorStrikes: 1, autoMergeArmed: false, lastActivityAt: stamp(-heldForMs),
     body: `Builds the remedy.\n\nRemudero-Task: ${TASK}\n`,
   };
-  return { rows, calls, judged, effects, pr, sweep: () => runSweep([pr], deps) };
+  return { rows, calls, judged, effects, pr, open, sweep: () => runSweep([pr], deps) };
 }
 
 test("W1-T10653: flow-review-failed-n-unmet-criterion clears without a person", async (t) => {
-  const aged = fixture(t, HELD_ESCALATION_SLO_MS + 10 * MIN);
-  await aged.sweep();
-  assert.deepEqual(aged.calls, ["close"], "an already-open escalation unanswered past the SLO is rebuilt, not stood down on forever");
-  assert.ok(aged.rows.some(r => r.step === "sweep.strike_ladder.requeued" && r.pr_number === PR), "the task is requeued");
-  const fresh = fixture(t, HELD_ESCALATION_SLO_MS - 10 * MIN);
-  await fresh.sweep();
-  assert.equal(fresh.calls.includes("close"), false, "inside the SLO the stand-down still holds");
+  const clock = { now: NOW - HELD_ESCALATION_SLO_MS - MIN };
+  const owned = fixture(t, HELD_ESCALATION_SLO_MS + MIN, clock, false, undefined, true);
+  await owned.sweep();
+  const hold = owned.rows.findLast(r => r.step === "sweep.disposed" && r.pr_number === PR);
+  assert.equal(hold?.open_escalation_hold_since, new Date(clock.now).toISOString(),
+    "the production open-issue guard persists when its own hold began");
+  assert.equal(owned.rows.some(r => r.step === "fix.stood_down"), false,
+    "the timer cannot rely on a fix-lane stand-down row for this path");
+  clock.now = NOW - 2 * MIN;
+  await owned.sweep();
+  assert.equal(owned.calls.includes("close"), false, "the sweep-owned hold stays inside its SLO");
+  clock.now = NOW;
+  await owned.sweep();
+  assert.deepEqual(owned.calls, ["close"], "the aged sweep-owned hold is rebuilt without an operator");
+  assert.ok(owned.rows.some(r => r.step === "sweep.strike_ladder.requeued" && r.pr_number === PR),
+    "the task is requeued after the production guard's hold expires");
+
+  const answeredClock = { now: NOW - HELD_ESCALATION_SLO_MS - MIN };
+  const answered = fixture(t, HELD_ESCALATION_SLO_MS + MIN, answeredClock, false, undefined, true);
+  await answered.sweep();
+  answered.open.length = 0;
+  answeredClock.now = NOW;
+  await answered.sweep();
+  assert.equal(answered.calls.includes("close"), false, "a closed escalation releases the sweep hold before the ladder");
+  assert.ok(answered.calls.includes("fix"), "the ordinary repair path resumes once the issue is closed");
 });
