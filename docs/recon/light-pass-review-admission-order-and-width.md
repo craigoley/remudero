@@ -2,6 +2,10 @@
 
 Recon only. This report changes no code, configuration or ledger. Any change it recommends is a separate filing.
 
+The criterion sections below preserve the previously computed results for the window in the corpus
+manifest. This repair adds the amended acceptance markers and clarifies measurement limits; it does
+not claim a fresh ledger replay. The underlying host ledger is unavailable in this repair checkout.
+
 ## Corpus
 
 - **Window:** 2026-10-26T22:10Z to 2026-11-02T22:10:43.010Z, the 7 days before this task was built. The newest ledger ts read is 2026-11-02T22:10:43.010Z.
@@ -70,7 +74,9 @@ W1-T10992 criterion 1 (amended in #16494) asks for a manifest instead of the ori
 - **Selection.** `selectReviewAdmissions` picks oldest first by `reviewAdmissionKey` (`createdAt`), in two lanes: spawning at the width, plan filings at a literal 3 (`src/lib/sweep.ts:24369`, `:6909`).
 - **The refill tail.** `refillTail` is chosen once, when the pass starts (`src/lib/sweep.ts:23859`). `admitOneRefill` (`src/lib/sweep.ts:24099`) admits from it whenever a lane frees, re-reading the width but not the queue.
 
-## 1. Refill jumps
+## Criterion 1: Refill jumps
+
+Criterion 1 marker
 
 **What counts as a jump.** A `sweep.review_refilled` row R admitted PR A at time tR. Its snapshot was taken at tR − `snapshot_age_ms`. R jumps PR J when all of these hold:
 
@@ -79,6 +85,12 @@ W1-T10992 criterion 1 (amended in #16494) asks for a manifest instead of the ori
 - At tR, J was still waiting: not admitted at that head, its head unchanged, and not closed.
 
 The table's "wait after jump" runs from the refill until J was admitted at that head. It is an **upper bound** on the wait the jump added. The counterfactual cannot be read from the ledger, because J could still have lost to the width.
+
+The recorded `snapshot_age_ms` and `sweep.review_eligible` timestamps support the snapshot and
+eligibility comparison. The ledger lacks `reviewAdmissionKey` / PR `createdAt`, so the older-first
+comparison uses the prior GitHub reads described in the corpus. The ledger alone cannot establish
+that ordering. It also lacks a counterfactual admission time without the jump, so the wait values
+below must not be interpreted as measured causal delay.
 
 **Totals:**
 
@@ -113,7 +125,9 @@ The table's "wait after jump" runs from the refill until J was admitted at that 
 
 The appendix numbers all 194 jump rows, accounting for the 103 refills that jumped at least one older eligible PR.
 
-## 2. Width per light pass, and the head of the queue
+## Criterion 2: Width per light pass, and the head of the queue
+
+Criterion 2 marker
 
 ### Width
 
@@ -131,6 +145,12 @@ The appendix numbers all 194 jump rows, accounting for the 103 refills that jump
 | Selector time share over the window | 64% | 5% | 6% | 25% (mean 1.91) |
 
 Of the 727 observable light passes, 462 admitted a review and have a reconstructed width: 257 at width 1, 24 at width 2, 40 at width 3, and 141 at width 4. The remaining 265 have no exact per-pass width; the 197 bound rows are overlapping evidence, not 197 additional passes. The selector time share is a duration measure, not a substitute for those unresolved pass counts.
+
+The missing per-pass `policySemanticBound` and missing records for silent light passes prevent an
+exact semantic-width distribution over every light pass. A refill's `width` describes that refill,
+not necessarily the initial width of its pass. Queue-head counts below additionally rely on the
+prior GitHub review and issue timelines: ledger rows do not record human review dismissal/approval
+times or escalation issue closure by a person. They therefore cannot supply those intervals alone.
 
 Width 1 comes from the `cpu-pressure` arm, or from the 5–20 PSI hold band after it. In the last 24 h of the window it was 75% of the time, and every `cpu-pressure` row in that span had `pressure_source: host-load`.
 
@@ -155,9 +175,11 @@ Width 1 comes from the `cpu-pressure` arm, or from the 5–20 PSI hold band afte
 
 By day, unmergeable-head passes were: 10-26 10, 10-27 15, 10-28 76, 10-29 66, 10-30 75, 10-31 55, 11-01 18, 11-02 18.
 
-## 3. Positive control: 2026-10-29, #15538
+## Criterion 3: Positive control: 2026-10-29, #15538
 
-Reproduced from the ledger as written:
+Criterion 3 marker
+
+The previously recorded replay and corpus re-read reproduced this control from the ledger as written:
 
 - #15538 (head `15d7b525c`) became eligible at 20:02:55.539Z, on the light surface.
 - The replay finds it jumped by three refills, all at width 1 / in-flight 0, from the same stale pass:
@@ -170,6 +192,9 @@ Reproduced from the ledger as written:
 
 - #15538 was admitted at 21:22:06.512Z (light surface).
 - Appendix rows 128, 131 and 134 are the three #15538 jumps in the full replay.
+- This control establishes that the prior replay saw the named eligibility, refill and admission
+  events. It does not establish the missing per-pass semantic width or counterfactual added wait;
+  those limits also apply to this case. PR age ordering requires the prior GitHub `createdAt` reads.
 - **Queue head, same evening.**
   - At 20:44:24Z, 20:53:44Z and 20:54:31Z the reconstructed queue head was #14793 (head `6aa3094dd`). At 20:53Z and 20:54Z #15133 was second.
   - #14793 carried a human CHANGES_REQUESTED review submitted 2026-10-27T18:10:38Z and dismissed at 21:13:07Z (issue timeline). So all three passes count as "head cannot merge without a person".
@@ -189,7 +214,9 @@ Reproduced from the ledger as written:
 | Added wait caused by a jump | Counterfactual, so not measurable. The report gives the upper bound: refill to the jumped PR's admission. |
 | Restart-latch refusals | Out of scope by operator decision 2026-10-29. Not measured as a jump cause. |
 
-## 5. Recommendation
+## Criterion 4: Recommendation
+
+Criterion 4 marker
 
 **Change the queue-head rule first, and make refills re-read the queue.** Both, as one follow-up filing. Leave the width to its own filing. The evidence for the head rule is the frequency of blocked heads, not a measured causal effect on admissions.
 
