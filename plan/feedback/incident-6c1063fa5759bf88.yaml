@@ -1,0 +1,28 @@
+id: incident-6c1063fa5759bf88
+ts: 2026-11-04T12:31:37.179Z
+raw: >-
+  Incident 6c1063fa5759: intervention hand-recycle:human at a terminal
+
+  First seen: 2026-11-04T12:31:32.414Z
+
+  Last seen: 2026-11-04T12:31:32.414Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=control action=recycle.invoked target=core actor=unknown cause=hand-recycle:human at a terminal — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#6c1063fa5759bf8884dca0391c33c144a529776d0ee710d8eb57de7fada6d9d8
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
