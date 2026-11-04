@@ -31,7 +31,7 @@ import { visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk 
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -399,6 +399,24 @@ export async function readChecksGreenReviewedAtHead(
   if (required.kind !== "contexts") return false;
   const rollup = await rollupForAsync(owner, repo, headSha, readJson);
   return checksStateFromRollup(rollup, required.contexts) === "green" && reviewStateFromRollup(rollup) === "success";
+}
+
+/** W1-T11151: the raw status poster, recording whether a publication threw. That is the one non-terminal outcome (the
+ *  guarded post ledgers `review.post_failed`), so it alone keeps the review's slot until it settles; a posted, refused,
+ *  withheld or replayed verdict is terminal and reports `posted`. */
+function failureRecordingPoster(): { post: (o: Parameters<typeof postReviewStatus>[0]) => Promise<void>; failed: () => boolean } {
+  let threw = false;
+  return {
+    post: async (o) => {
+      try {
+        await postReviewStatus(o);
+      } catch (error) {
+        threw = true;
+        throw error;
+      }
+    },
+    failed: () => threw,
+  };
 }
 
 export async function runReview(host: ReviewCommandHost, args: {
@@ -1141,7 +1159,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     recordReplay(classifyReviewOutcome(replayInput));
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
     log("review.post_refused", withheldReviewRefusalRow({ headSha, prUrl, reason: verdict.taskIdOwnershipWithheld, ownership: verdict.taskIdOwnership, inputDigest }));
-    // W1-T11151: a withheld verdict publishes nothing, so no `posted` phase: its slot is held until it settles.
+    // W1-T11151: a withheld verdict is terminal (its review.post_refused row is written), so it reports `posted`.
+    (args.onPhase ?? reportReviewPhase)("posted");
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -1156,7 +1175,9 @@ export async function runReview(host: ReviewCommandHost, args: {
     replayReviewerCodeSha = reviewerCodeFreshness.codeSha;
   }
   phases.postStart = systemClock.now();
+  const poster = failureRecordingPoster();
   const posted = await postReviewStatusGuarded({
+    post: poster.post,
     owner,
     repo,
     sha: headSha,
@@ -1176,9 +1197,9 @@ export async function runReview(host: ReviewCommandHost, args: {
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
   });
   phases.post = systemClock.now();
-  // W1-T11151: `posted` releases admission, so it fires only for a status GitHub accepted; a refused or failed
-  // publication (review.post_refused / review.post_failed) holds its slot until the review settles.
-  if (posted.posted) (args.onPhase ?? reportReviewPhase)("posted");
+  // W1-T11151: `posted` releases admission once the outcome is terminal: posted, refused (review.post_refused) or a
+  // replayed terminal. Only a publication that threw (review.post_failed) holds its slot until the review settles.
+  if (!poster.failed()) (args.onPhase ?? reportReviewPhase)("posted");
   if (posted.conflict) {
     decisionDisposition = "conflict";
     verdict = {
@@ -2232,7 +2253,9 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // restore the already-judged terminal status instead of reporting a success that GitHub cannot see.
   let replayStatusAction: "restored" | "confirmed" | undefined;
   if (verdict.decisionDisposition === "replayed" && verdict.reviewDecisionDigest) {
+    const restorePoster = failureRecordingPoster();
     const restored = await postStatusDep({
+      post: restorePoster.post,
       owner, repo, sha: view.headRefOid, state: verdict.state,
       description: reviewPostedDescription(verdict),
       taskId: reviewKey, evidence: reviewEvidenceStrength(verdict.criteria),
@@ -2271,8 +2294,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     } else {
       verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
     }
-    // W1-T11151: a restore that left nothing live is unposted, and holds its slot until it settles.
-    if (replayStatusAction !== undefined) (deps.onPhase ?? reportReviewPhase)("posted");
+    // W1-T11151: a restored, confirmed or refused replay is terminal; only a restore whose publication threw holds its slot.
+    if (!restorePoster.failed()) (deps.onPhase ?? reportReviewPhase)("posted");
   }
 
   console.log(

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -45,6 +45,13 @@ function gate() {
   return { promise, resolve };
 }
 const turn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+/** A head checkout git cannot read (no origin), holding the shard so the verdict would pass but for its reservation. */
+function withheldCheckout(root: string): string {
+  const dir = join(root, "head");
+  mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(dir, "plan", "tasks.d", "a.yaml"), "- id: W1-T99991\n  status: queued\n");
+  return dir;
+}
 async function eventually(check: () => boolean): Promise<void> {
   for (let i = 0; i < 100; i++) {
     if (check()) return;
@@ -254,17 +261,73 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  // W1-T11151 criterion 2: only a status GitHub accepted reports `posted`. A refused publication (stale reviewer code) and
-  // a failed one (the status POST itself errors, review.post_failed) end without posting, so they hold their slot.
-  for (const publication of ["posted", "refused", "failed"] as const) {
-    test(`W1-T11151 criterion 2: runReview reports posted only when its status is published (${publication})`, async () => {
+  // W1-T11151 design 1: a replay that restores or confirms its terminal status is terminal; a restore whose publication
+  // threw (the guarded post ledgers review.post_failed) holds its slot until the review settles.
+  for (const restore of ["confirmed", "failed"] as const) {
+    test(`W1-T11151 criterion 2: a replayed review reports posted unless its restore publication failed (${restore})`, async () => {
+      const root = mkdtempSync(join(tmpdir(), "rmd-review-replay-phase-"));
+      const head = "a".repeat(40);
+      const shim = ghShim([{ when: "statuses/", stderr: "HTTP 422: Validation Failed", exit: 1 }]);
+      const oldPath = process.env.PATH;
+      process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+      const events: string[] = [];
+      try {
+        await reviewCommand("1", [], {
+          resolveOwnerRepo: () => ({ owner: "o", repo: "r" }),
+          fetchView: () => ({ number: 1, html_url: "https://github.com/o/r/pull/1",
+            state: "open", head: { ref: "manual-review", sha: head }, body: "" }),
+          loadConfig: () => ({ root }) as Config,
+          fetchHead: () => {},
+          postReviewPending: async () => ({ posted: true }),
+          reviewerCodeFreshness: () => ({ status: "fresh" as const, codeSha: head, originMainSha: head, advance: "none" as const }),
+          materialize: () => ({ worktreePath: join(root, "head") }),
+          buildBaseProof: () => ({ baseCheckoutDir: undefined, baseIsCheckout: false,
+            baseUnreadablePaths: new Set<string>(), addedTestFiles: new Set<string>() }),
+          withMaterialized: async (_path, _repo, body) => body(),
+          onPhase: (phase) => events.push(`phase:${phase}`),
+          runReview: async () => ({
+            state: "success", headSha: head, reviewerOutcome: "test", criteria: [],
+            testTheater: false, summary: "replayed fixture verdict", floorDegraded: false,
+            capped: false, keywordOnly: false, planOnly: false,
+            decisionDisposition: "replayed", reviewDecisionDigest: "v2:fixture",
+          }),
+          // The guarded post's own contract: it calls its raw poster, and ledgers review.post_failed when that throws.
+          postStatus: async (o) => {
+            if (restore === "confirmed") return { posted: false, replayed: true };
+            try {
+              await o.post!({ owner: o.owner, repo: o.repo, sha: o.sha, state: o.state });
+              return { posted: true };
+            } catch (error) {
+              return { posted: false, reason: `posting remudero-review failed and was not applied: ${String(error)}` };
+            }
+          },
+        });
+        if (restore === "confirmed") assert.deepEqual(events, ["phase:posted"]);
+        else assert.deepEqual(events, [], "a restore whose publication threw holds its slot until it settles");
+      } finally {
+        process.env.PATH = oldPath;
+        rmSync(root, { recursive: true, force: true });
+        rmSync(shim.dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  // W1-T11151 design 1 / criteria 1 and 2: a terminal outcome reports `posted` before cleanup: a published status, a
+  // refused publication (stale reviewer code, review.post_refused) or a withheld verdict (an unreadable task-id
+  // reservation, review.post_refused). Only a publication that FAILED (the status POST errors, review.post_failed) ends
+  // without a terminal outcome, so it alone holds its slot until the review settles.
+  for (const publication of ["posted", "refused", "withheld", "failed"] as const) {
+    test(`W1-T11151 criterion 2: runReview reports posted for a terminal outcome and holds a failed publication (${publication})`, async () => {
       const root = mkdtempSync(join(tmpdir(), "rmd-review-terminal-"));
       const sha = "a".repeat(40);
       const prUrl = "https://github.com/o/r/pull/1";
       const shim = ghShim([
         ...(publication === "failed" ? [{ when: "statuses/", stderr: "HTTP 422: Validation Failed", exit: 1 }] : []),
         { when: "headRefOid", stdout: JSON.stringify({ headRefOid: sha }) },
-        { when: "pr diff", stdout: "diff --git a/plan/tasks.d/a.yaml b/plan/tasks.d/a.yaml\n+status: queued" },
+        { when: "pr diff", stdout: publication === "withheld"
+          // A task id this diff declares, read against a head checkout git cannot read: its reservation is unknown.
+          ? "diff --git a/plan/tasks.d/a.yaml b/plan/tasks.d/a.yaml\n--- a/plan/tasks.d/a.yaml\n+++ b/plan/tasks.d/a.yaml\n+- id: W1-T99991\n+  status: queued"
+          : "diff --git a/plan/tasks.d/a.yaml b/plan/tasks.d/a.yaml\n+status: queued" },
         { when: "pulls/", stdout: JSON.stringify({ number: 1, html_url: prUrl,
           state: "open", head: { ref: "branch", sha } }) },
       ]);
@@ -274,7 +337,9 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
       try {
         const args: Parameters<typeof runReviewCommand>[1] = {
           owner: "o", repo: "r", prUrl, task: { id: "W1-T11151", acceptance: [
-            { claim: "the plan is queued", proof: "grep: queued plan/tasks.d/a.yaml" },
+            { claim: "the plan is queued", proof: publication === "withheld"
+              // Executed against the head checkout, so the verdict passes but for the unreadable reservation.
+              ? "grep: status: queued in plan/tasks.d/a.yaml" : "grep: queued plan/tasks.d/a.yaml" },
           ] },
           report: "the plan is queued", settingsFile: join(root, "settings.json"),
           config: { root, claudeBin: "/bin/true" } as Config, spawnReviewer: false,
@@ -283,22 +348,32 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
           ...(publication === "refused" ? { reviewerCodeFreshness: () => ({
             status: "stale" as const, codeSha: sha, originMainSha: "b".repeat(40),
           }) } : {}),
+          ...(publication === "withheld" ? { headRefName: "branch", headCheckoutDir: withheldCheckout(root) } : {}),
           ledgerPath: join(root, "ledger.ndjson"), runId: `terminal-${publication}`,
           lintPlanForReviewFn: async () => ({ ran: true, label: "fixture", checked: 1, violations: [] }),
           disarm: () => "not-armed", arm: () => { events.push("arm"); return "armed"; },
         };
-        await runReview(args);
-        if (publication === "posted") {
-          assert.equal(events.filter((event) => event === "phase:posted").length, 1);
-          assert.ok(events.indexOf("phase:posted") < events.indexOf("review.posted"));
-        } else {
-          assert.equal(events.includes("phase:posted"), false, `a ${publication} publication must hold its slot until it settles`);
-          assert.equal(events.includes("review.posted"), false);
-        }
+        const result = await runReview(args);
+        const ledger = (() => { try { return readFileSync(args.ledgerPath, "utf8"); } catch { return ""; } })();
         if (publication === "failed") {
           // Positive control: the status POST really failed through the production publication path.
-          const ledger = readFileSync(args.ledgerPath, "utf8");
           assert.match(ledger, /"step":"review\.post_failed"/);
+          assert.equal(events.includes("phase:posted"), false, "a failed publication must hold its slot until it settles");
+          assert.equal(events.includes("review.posted"), false);
+          return;
+        }
+        assert.equal(events.filter((event) => event === "phase:posted").length, 1, `a ${publication} outcome is terminal`);
+        if (publication === "posted") {
+          assert.ok(events.indexOf("phase:posted") < events.indexOf("review.posted"));
+        } else {
+          assert.equal(events.includes("review.posted"), false);
+          // Positive controls: each outcome is the terminal refusal it names, written by the production path.
+          if (publication === "refused") assert.match(ledger, /"step":"review\.post_refused"/);
+          if (publication === "withheld") {
+            assert.ok(events.includes("review.post_refused"), "the withheld branch writes its review.post_refused row");
+            assert.ok(result.verdictWithheld, "the verdict is withheld");
+          }
+          assert.doesNotMatch(ledger, /"step":"review\.post_failed"/);
         }
       } finally {
         process.env.PATH = oldPath;
