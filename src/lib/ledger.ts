@@ -796,6 +796,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T10221: hostGapRereviewFacts joins library-owned refusals through this unique
   // per-review carrier. Dropping it makes a completed admitted attempt look unfinished.
   "review.provider_provenance",
+  // W1-T11149: sustainedReviewJudgeConcurrency (sweep.ts) seeds the provider bound from these rows.
+  "review.reviewer",
   "sweep.review_requeued", // W1-T9970: sweep and review read this per-head image request after rotation.
   "review.skipped_stale_reviewer_code", // W1-T3691: preserve the daemon's freshness restart history across boots.
   // status.ts's plan-only credit refusal reads it once rotation stops carrying a merged PR's review rows.
