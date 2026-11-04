@@ -1,12 +1,12 @@
-// @source-text-subject: worker.ts comment compression must preserve its pre-compression code.
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
+// @source-text-subject: worker.ts comment compression against its PR base.
 // @census-reads: src/lib/worker.ts
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
-import { createScanner, SyntaxKind } from "typescript/unstable/ast";
-import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 
 // scripts/ is outside tsconfig's include; load the real counter with its explicit runtime contract.
 const COMMENT_LOAD_SCRIPT = "#scripts/comment-load-ratchet.mjs";
@@ -14,8 +14,7 @@ const { countCommentLines } = await import(COMMENT_LOAD_SCRIPT) as {
   countCommentLines: (text: string, path: string) => { comments: number; code: number };
 };
 
-// Comment baseline at 3b28ef9e3, before compression: 2,018 lines (the filing measured 2,008).
-// Fingerprint token kinds, raw literal contents and preceding line breaks (ASI), including types.
+// Pre-compression comment baseline at 3b28ef9e3. Historical fingerprints live in the sibling suite.
 const BEFORE_COMMENT_LINES = 2018;
 
 function executableTokens(source: string): Array<[SyntaxKind, string, boolean]> {
@@ -41,7 +40,14 @@ function executableTokens(source: string): Array<[SyntaxKind, string, boolean]> 
   return tokens;
 }
 
-test("W1-T10879: comment compression preserves executable code", () => {
+test("W1-T10879: current worker retains the maintained comment reduction", () => {
+  const source = readFileSync(join(REPO_ROOT, "src/lib/worker.ts"), "utf8");
+  const { comments } = countCommentLines(source, "src/lib/worker.ts");
+  assert.ok(comments < BEFORE_COMMENT_LINES, `expected a real reduction from ${BEFORE_COMMENT_LINES} comment lines, observed ${comments}`);
+});
+
+// Historical fingerprint assertions are retained in the sibling historical suite.
+test("W1-T10879: comment compression preserves executable code: current PR-base comparison", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/worker.ts"), "utf8");
   const { comments } = countCommentLines(source, "src/lib/worker.ts");
   assert.ok(comments < BEFORE_COMMENT_LINES,

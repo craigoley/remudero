@@ -1,12 +1,13 @@
-// @source-text-subject: comment compression and executable-token preservation in src/lib/worker-provider.ts.
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
+// @source-text-subject: worker-provider.ts comment compression against its PR base.
+// @census-reads: src/lib/worker-provider.ts
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
-import { parse } from "@babel/parser";
-import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { parse } from "@babel/parser";
 
 function snapshot(source: string) {
   const parsed = parse(source, {
@@ -26,7 +27,14 @@ function snapshot(source: string) {
   };
 }
 
-test("W1-T10918: comment compression preserves executable code", () => {
+test("W1-T10918: current provider retains the maintained comment reduction", () => {
+  const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
+  assert.ok(actual.commentLines < 1357, "comment lines must decrease from the pre-compression source");
+  assert.ok(actual.commentBytes < 104858, "comment bytes must decrease; rewrapping alone is insufficient");
+});
+
+// Historical fingerprint assertions are retained in the historical suite.
+test("W1-T10918: comment compression preserves executable code: current PR-base comparison", () => {
   // Pre-compression source: 811d6e2d19018530bd12c885d307d08f02fb09bc.
   // Historical comparison evidence for this edit, not a new comment ceiling.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
