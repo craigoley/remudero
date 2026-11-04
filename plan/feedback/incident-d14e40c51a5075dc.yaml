@@ -1,0 +1,34 @@
+id: incident-d14e40c51a5075dc
+ts: 2026-11-04T03:53:16.056Z
+raw: >-
+  Incident d14e40c51a50: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) — the
+  operator requires the unfinished shard's cause before repair or rerun;
+  isolated falsifier checks pass, and available logs do not establish that cause
+  — mergeability unread this pass; last known "clean" for head <sha> was read
+  against main <sha>, and main is now <sha>, so it is not inherited (W1-T11166)
+
+  First seen: 2026-11-04T03:49:48.181Z
+
+  Last seen: 2026-11-04T03:49:48.181Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16652 escalated: already escalated (reason unreadable: no escalation of this PR at head 3c8a45f is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793759112997:1:1793762556731) — the operator requires the unfinished shard's cause before repair or rerun; isolated falsifier checks pass, and available logs do not establish that cause — mergeability unread this pass; last known "clean" for head 3c8a45f was read against main 6df835d, and main is now eeaf424, so it is not inherited (W1-T11166)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#d14e40c51a5075dc26ece5f740bac055e73f0d2fd00c97cbe643f9103ed207ba
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

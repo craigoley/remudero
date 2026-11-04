@@ -73,11 +73,15 @@ import { classifyGlobalArtifactRefusal } from "./learnings.js";
 import { DEFAULT_SUPERVISOR_INTERVAL_S } from "./launchd.js";
 import {
   classifyProposal,
+  createAnchorGrepCache,
   gitGrepAnchorTrue,
+  gitGrepAnchorTrueAsync,
   isRatifiedInLedger,
   parseDraftCache,
   parseProposalRegistry,
   refusalReason,
+  warmAnchorGrepCache,
+  warmedAnchorGrep,
   type DraftCache,
   type EvidenceAnchor,
   type InboxClassification,
@@ -644,6 +648,8 @@ export interface StatusBoardDeps {
   /** Local (no-network) evidence-anchor grep for INBOX; defaults to inbox.ts's `gitGrepAnchorTrue(repoDir,
    *  "origin/main", anchor)`. */
   grepAnchorTrue?: (anchor: EvidenceAnchor) => boolean;
+  /** Async INBOX reader used by served renders; defaults to gitGrepAnchorTrueAsync. */
+  grepAnchorTrueAsync?: (anchor: EvidenceAnchor) => Promise<boolean>;
   /** `state/inbox-proposals.json` reader; defaults to the real file under `root`, parsed by inbox.ts's own
    *  fail-soft-to-empty `parseProposalRegistry`. */
   readProposalRegistry?: () => Proposal[];
@@ -2315,6 +2321,47 @@ const HEADROOM_NEXT_ACTIONS: readonly NextActionRule<HeadroomSection>[] = [
 ];
 
 // ── buildStatusBoard — the ONE read model ───────────────────────────────────────────────────────
+
+/**
+ * W1-T11128: {@link buildStatusBoard} with INBOX's evidence anchors answered OFF the event loop. Every anchor the
+ * registry carries is warmed through {@link gitGrepAnchorTrueAsync} first (a failed or timed-out grep is carried and
+ * rethrown where the sync grep would have thrown), then the unchanged sync board reads those answers, so a caller
+ * that must not block its loop (serve) forks no `git grep` synchronously. An injected `grepAnchorTrue` still wins;
+ * `buildStatusBoard` itself keeps its synchronous contract for the CLI.
+ */
+export async function buildStatusBoardAsync(root: string, ledgerPath: string, deps: StatusBoardDeps): Promise<StatusBoardModel> {
+  if (deps.grepAnchorTrue) return buildStatusBoard(root, ledgerPath, deps);
+  const readRegistry = deps.readProposalRegistry ?? (() => parseProposalRegistry(readTextFileIfExists(join(root, "state", "inbox-proposals.json"))));
+  const ref = "origin/main";
+  const cache = createAnchorGrepCache();
+  // ONE registry read serves the warm and the board: a registry that changed between two reads handed the board an
+  // anchor the warm never saw, and that anchor took the sync `git grep` (review of #16432). A throwing read warms
+  // nothing and is rethrown by the board's own INBOX read, exactly as the sync board reports it.
+  let snapshot: { proposals: ReturnType<typeof readRegistry> } | { error: unknown };
+  try {
+    snapshot = { proposals: readRegistry() };
+  } catch (error) {
+    // Carried, not erased: the board's registry read below rethrows this exact error.
+    snapshot = { error };
+  }
+  const anchors: EvidenceAnchor[] = "proposals" in snapshot ? snapshot.proposals.flatMap((p) => p.evidenceAnchors) : [];
+  const answers = new Map<string, boolean>();
+  const failures = await warmAnchorGrepCache(cache, ref, anchors, async (r, anchor) => {
+    const answer = await (deps.grepAnchorTrueAsync?.(anchor) ?? gitGrepAnchorTrueAsync(deps.repoDir, r, anchor));
+    answers.set(JSON.stringify([anchor.pattern, anchor.path ?? null]), answer);
+    return answer;
+  });
+  return buildStatusBoard(root, ledgerPath, {
+    ...deps,
+    readProposalRegistry: () => {
+      if ("error" in snapshot) throw snapshot.error;
+      return snapshot.proposals;
+    },
+    // Classification may reset a full cache; this render's async answers survive that reset and overflow.
+    grepAnchorTrue: (anchor) => warmedAnchorGrep(cache, ref, failures, anchor,
+      (_r, a) => answers.get(JSON.stringify([a.pattern, a.path ?? null]))!),
+  });
+}
 
 export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusBoardDeps): StatusBoardModel {
   const now = deps.now ?? Date.now;

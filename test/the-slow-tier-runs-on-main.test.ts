@@ -68,6 +68,7 @@ function runJob(event: "push" | "pull_request", diffClass = "SOURCE"): { calls: 
   }
   bash(
     RUN_SLOW.replaceAll("${{ matrix.shard }}", "1")
+      .replaceAll("${{ needs.test-slow-plan.outputs.count }}", "2")
       .replaceAll("${{ steps.plan-reading.outputs.established }}", outputs.established ?? "")
       .replaceAll("${{ steps.plan-reading.outputs.class }}", outputs.class ?? ""),
   );
@@ -81,7 +82,7 @@ test("W1-T4396: the push lane runs the slow tier", () => {
   assert.deepEqual(push.outputs, { class: "PUSH", established: "false" });
   assert.equal(
     push.calls.trim(),
-    "node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --shard 1/2 --base HEAD",
+    "node scripts/test-tier-manifest.mjs --run slow --shard 1/2 --base HEAD --retry",
     "a push runs exactly the slow tier, once, behind the failed-file retry — and no PR-only tier check",
   );
   assert.match(push.out, /W1-T4396: push to main — running the slow tier/);
