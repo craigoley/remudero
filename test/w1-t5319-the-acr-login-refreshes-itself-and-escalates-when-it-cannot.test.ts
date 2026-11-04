@@ -33,7 +33,7 @@ function fixture(t: TestContext) {
     RMD_SERVE_REPO_DIR: join(root, "serve-repo"), RMD_SERVE_SUPERVISOR: "off",
     RMD_SERVE_DOCKERENV_PATH: join(root, "no-dockerenv"), RMD_HEARTBEAT_DRY_RUN: "1",
     RMD_SERVE_BANNER_WAIT_S: "0", RMD_HEARTBEAT_CONTAINER: "none",
-    RMD_INSTANCE_REGISTRY: join(root, "no-registry"), GH_TOKEN: "fixture-token",
+    RMD_INSTANCE_REGISTRY: undefined, GH_TOKEN: "fixture-token",
   };
   writeFileSync(join(bin, "az"), `#!/bin/bash
 printf 'az %s\n' "$*" >> "$CALLS"

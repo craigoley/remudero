@@ -1,0 +1,34 @@
+id: incident-9dcd38aaf9761f53
+ts: 2026-11-03T22:52:21.821Z
+raw: >-
+  Incident 9dcd38aaf976: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) — The
+  reviewer wants the plain `ledger.*.ndjson` rotation count, but the ledger
+  lives outside the worktree and this round has no shell, so the count can't be
+  measured. The count must be supplied by an operator or a worker with ledger
+  access.
+
+  First seen: 2026-11-03T22:51:09.231Z
+
+  Last seen: 2026-11-03T22:51:09.231Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16312 escalated: already escalated (reason unreadable: no escalation of this PR at head 8d6c7e8 is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793737148911:1:1793745531844) — The reviewer wants the plain `ledger.*.ndjson` rotation count, but the ledger lives outside the worktree and this round has no shell, so the count can't be measured. The count must be supplied by an operator or a worker with ledger access.
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#9dcd38aaf9761f5316e0feaaf617436b194bd464bf480b6ad6a04a5d7525bb8e
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

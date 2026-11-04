@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "@babel/parser";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function snapshot(source: string) {
@@ -30,9 +31,14 @@ test("W1-T11047: comment compression preserves executable code", () => {
   // Captured from ccdae0c920e7b6fbfeb01e72bbd69e802f5ddcae before compression.
   // Comparison evidence for this edit, not a new comment-volume ceiling.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/prompt-render.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 5302);
-  assert.equal(actual.tokenDigest, "26042422471f5279fe0aed6add069a9cf8fe30f7bf2a315a16c9bde37b37c368");
-  assert.equal(actual.astDigest, "f2838f55f57427e1f7eb2dbed0ab4448947e8b9005c7af0ba783aa3fa568319b");
+  const before = compressionPinBase("src/lib/prompt-render.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free (#16082).
+    const base = snapshot(before);
+    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
+    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+  }
   assert.ok(actual.commentLines < 531, "comment lines must decrease from the pre-compression source");
   assert.ok(actual.commentBytes < 38447, "comment bytes must decrease; rewrapping alone is insufficient");
 

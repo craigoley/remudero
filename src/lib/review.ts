@@ -459,6 +459,8 @@ export interface CriterionVerdict {
   holdout?: boolean;
   /** The worker's explicit refusal, if this criterion was declined under the closed grammar above. */
   refusal?: CriterionRefusal;
+  /** W1-T11209: the reviewer clause's full length, present only when the clause was cut to its budget. */
+  clauseChars?: number;
 }
 
 /** The two reasons a report can fail to be the PR body, which are NOT the same fact and have different remedies:
@@ -4461,9 +4463,11 @@ export function judgeCriterion(
       reason = semanticClause ? `${reason} — NOTE: ${downgradeNote}: ${semanticClause}` : `${reason} — NOTE: ${downgradeNote}`;
     }
   }
+  const clauseChars = !met && semantic === false ? clauseCutLength(semanticClause) : undefined;
 
   return {
     ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}),
+    ...(clauseChars !== undefined ? { clauseChars } : {}),
     ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}),
     ...(proofExec === "executed_fail" || proofExec === "cannot_evaluate"
       ? { failureTail: failureTail || "(the proof printed nothing)" } : {}), floorMet, holdout: !!criterion.holdout,
@@ -7494,7 +7498,8 @@ export function reviewerVerdictContract(count: number): string {
     `checked and what was missing, specific to this claim: "ran the named test, it`,
     `passes but asserts only that the file parses" tells someone what to fix.`,
     `A bare category like "non-responsive" repeats what the token already said and`,
-    `leaves them nothing to act on. One line; anything after a newline is dropped.`,
+    `leaves them nothing to act on. One line, at most ${REVIEWER_CLAUSE_MAX_CHARS} characters; anything after a`,
+    `newline is dropped, and a longer line is cut at a sentence end and marked.`,
     `PASS lines are never annotated — the clause is read only on FAIL.`,
     ``,
     `OPTIONAL FINDING RECEIPTS (not used to decide the status): if you found a`,
@@ -7531,9 +7536,27 @@ export function parseReviewerVerdicts(text: string, count: number): (boolean | u
   return semantic;
 }
 
-/** Longest clause {@link parseReviewerVerdictClauses} carries into a criterion's reason — long enough to name a
- *  remedy, short enough that a runaway line cannot reach the ledger whole (W1-T2263). */
-const REVIEWER_CLAUSE_MAX_CHARS = 160;
+/** BACKSTOP: the longest clause {@link parseReviewerVerdictClauses} carries into a criterion's reason — the structured
+ *  finding channel's mechanism budget (review-findings.ts), told to the reviewer, so a runaway line still cannot reach
+ *  the ledger whole (W1-T2263) while a written finding arrives entire (W1-T11209). */
+export const REVIEWER_CLAUSE_MAX_CHARS = 500;
+export const CLAUSE_CUT_RE = / \[…clause cut at (\d+) of (\d+) chars\]$/;
+
+/** Cut an over-budget clause at its last sentence end inside the budget, else its last word boundary, never mid-word. */
+function cutClause(inner: string): string {
+  const head = inner.slice(0, REVIEWER_CLAUSE_MAX_CHARS);
+  const sentence = Math.max(...[". ", "; ", "! ", "? "].map((stop) => head.lastIndexOf(stop)));
+  const word = head.search(/\s\S*$/);
+  const end = sentence > 0 ? sentence + 1 : word > 0 ? word : head.length;
+  const kept = head.slice(0, end).trimEnd();
+  return `${kept} […clause cut at ${kept.length} of ${inner.length} chars]`;
+}
+
+/** The full length a cut clause records, or undefined for a clause that arrived whole. */
+export function clauseCutLength(clause: string | undefined): number | undefined {
+  const cut = clause === undefined ? null : CLAUSE_CUT_RE.exec(clause);
+  return cut ? Number(cut[2]) : undefined;
+}
 
 /** Pull the bounded clause off a FAIL line's trailing text, already confined to one line by {@link
  *  REVIEW_VERDICT_LINE_RE}. {@link reviewerVerdictContract}'s own example shows a parenthetical after the token, so a
@@ -7545,7 +7568,7 @@ function extractBoundedClause(trailing: string): string | undefined {
   const paren = s.match(/^\(([^)]*)\)/);
   const inner = (paren ? paren[1] : s).trim();
   if (!inner) return undefined;
-  return inner.length > REVIEWER_CLAUSE_MAX_CHARS ? `${inner.slice(0, REVIEWER_CLAUSE_MAX_CHARS).trimEnd()}…` : inner;
+  return inner.length > REVIEWER_CLAUSE_MAX_CHARS ? cutClause(inner) : inner;
 }
 
 /** (W1-T2263) Companion to {@link parseReviewerVerdicts}, reading the SAME transcript through the SAME regex for the
