@@ -5765,7 +5765,7 @@ export function memoizeAsyncProofExecutor(exec: AsyncProofExecutor, sample: () =
       } catch (error) {
         record.error = String((error as Error)?.message ?? error).slice(0, STATUS_DESC_MAX);
         record.load = whitelisted.executionLoad ?? { start, end: sample() };
-        return { error, load: record.load };
+        return { error: error, load: record.load };
       }
     };
     let identity: string;
