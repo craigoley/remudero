@@ -897,12 +897,17 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
     const generation = qualifications[view], key = qualifiedStateKey(view, generation);
     return states.get(key) ?? states.set(key, { ...emptyState(), ...(generation === undefined ? {} : { view, qualificationGeneration: generation }) }).get(key)!;
   };
+  /** An archive of `view` under qualification `required`, carrying a well-formed population (W1-T11329); an
+   * archive with no qualification generation belongs to no qualification. */
+  const archivedPopulationOf = (archived: ViewShadowState, view: string, required: string | undefined): archived is ViewShadowState & { population: ShadowPopulationEvidence } =>
+    archived.view === view && required !== undefined && typeof archived.qualificationGeneration === "string" && archived.qualificationGeneration.startsWith(`${required}:retired:`)
+    && archived.population !== undefined && populationEvidenceShape(archived.population);
   /** Archived population records of this view's current qualification, newest life first per logical page (W1-T11329). */
   const retiredPages = (view: string, required: string | undefined): Map<string, ShadowPopulationEvidence["pages"][number]> => {
     const byKey = new Map<string, ShadowPopulationEvidence["pages"][number]>();
     if (required === undefined) return byKey;
     for (const archived of states.values()) {
-      if (archived.view !== view || !archived.qualificationGeneration?.startsWith(`${required}:retired:`) || !archived.population || !populationEvidenceShape(archived.population)) continue;
+      if (!archivedPopulationOf(archived, view, required)) continue;
       for (const page of archived.population.pages) {
         if (page.samples === 0 || page.lastSampleMs === null) continue;
         const seen = byKey.get(page.logicalKey);
@@ -925,7 +930,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
     if (!state.population) return undefined;
     const lives: Array<{ atMs: number; keys: Set<string> }> = [];
     for (const archived of states.values()) {
-      if (archived.view !== view || !archived.qualificationGeneration?.startsWith(`${state.qualificationGeneration}:retired:`) || !archived.population || !populationEvidenceShape(archived.population)) continue;
+      if (!archivedPopulationOf(archived, view, state.qualificationGeneration)) continue;
       const atMs = Math.max(...archived.population.pages.map(page => page.lastSampleMs ?? -Infinity), archived.streakSinceMs ?? -Infinity);
       if (Number.isFinite(atMs)) lives.push({ atMs, keys: new Set(archived.population.pages.map(page => page.logicalKey)) });
     }
