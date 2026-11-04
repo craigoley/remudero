@@ -1,5 +1,6 @@
 /** Small transactional counter updates; historical cursor keys are stored once, not copied per sample. */
 import { statSync } from "node:fs";
+import { systemClock } from "./clock.js";
 import { openShadowCounterDb, type ReadModelDb } from "./read-model-db.js";
 
 export type ShadowClassification = "legacy_horizon" | "timing" | "dedupe" | "real";
@@ -149,7 +150,7 @@ export function saveShadowCounter(path: string, legacy: Record<string, ViewShado
   const db = connection ?? openShadowCounterDb(shadowCounterPath(path));
   try {
     db.exec("BEGIN IMMEDIATE");
-    const atMs = change?.atMs ?? Date.now();
+    const atMs = change?.atMs ?? systemClock.now();
     migrateKeyTimes(db, atMs);
     if (db.meta("shadow_migrated") !== "1") {
       for (const [key, old] of Object.entries(legacy)) {
