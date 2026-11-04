@@ -118,8 +118,6 @@ export interface BaseProofDir {
 
 /** W1-T10407: the base reads must not vary with the host's git config (e.g. `diff.renames`). */
 const BASE_PROOF_HERMETIC = { env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } };
-/** `--detach`: no branch name is ever wanted here (W1-T232's lesson at the head). */
-const baseWorktreeArgs = (path: string, revision: string): string[] => ["worktree", "add", "--detach", path, revision];
 const MERGE_BASE_ARGS = ["merge-base", "origin/main", "HEAD"];
 // (W1-T3098) `--diff-filter=A` — ADDED ONLY, never M/D/R/C. The narrowing from `AM` is this
 // seam's correctness, and the two halves are asymmetric:
@@ -238,11 +236,13 @@ export function buildBaseProofDir(
     grepTree?: Omit<BaseGrepTreeReaders, "showBlob">;
   } = {},
 ): BaseProofDir {
+  // `--detach`: no branch name is ever wanted here (W1-T232's lesson at the head).
+  const detachedArgs = (path: string, revision: string) => ["worktree", "add", "--detach", path, revision];
   if (deps.detachedAsync) {
     const { path, revision, run } = deps.detachedAsync;
     return {
       baseCheckoutDir: path, baseUnreadablePaths: new Set(), addedTestFiles: new Set(), baseIsCheckout: false,
-      pendingCheckout: run(baseWorktreeArgs(path, revision)),
+      pendingCheckout: run(detachedArgs(path, revision)),
     };
   }
   const mergeBase = deps.mergeBase ?? ((cwd: string) => hostWorktreeGit(cwd, MERGE_BASE_ARGS, BASE_PROOF_HERMETIC).trim());
@@ -263,7 +263,7 @@ export function buildBaseProofDir(
       // stderr PIPED for the same reason `showBlob` pipes it: a base the repo cannot check out is
       // a degrade this function REPORTS (`baseWorktreeFailure`), never a `fatal:` line through a
       // passing review.
-      hostWorktreeGit(repoDir, baseWorktreeArgs(worktreePath, revision)));
+      hostWorktreeGit(repoDir, detachedArgs(worktreePath, revision)));
   const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
   const changedTestFiles =
     deps.changedTestFiles ?? ((headDir: string, base: string) => nameLines(hostWorktreeGit(headDir, addedTestArgs(base), BASE_PROOF_HERMETIC)));
@@ -429,7 +429,8 @@ export async function buildBaseProofDirAsync(
   }
   let worktreeFailure: string;
   try {
-    await git(at, baseWorktreeArgs(dir, base));
+    // The checkout is the sync builder's own `detachedAsync` shape (the run lane's, run-task.ts), run through the awaited leaf.
+    await buildBaseProofDir([], at, { detachedAsync: { path: dir, revision: base, run: async (args) => { await git(at, args); } } }).pendingCheckout;
     let added: string[] = [];
     try {
       added = await addedTests();
