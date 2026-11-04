@@ -138,6 +138,15 @@ test("W1-T11171 criterion 2: a full pass admits conflict rounds in descending bl
     await sweep.drainDetachedSweepActions();
   });
   assert.deepEqual(g.calls.admissions, [tieA.prNumber, tieB.prNumber]);
+  // The ranking reads the pass clock ONCE: a clock that advances between reads (a slower runner) must not make the
+  // later-measured of two equal conflicts look older and jump the tie.
+  let tick = 0;
+  const h = fixture([conflictRow(tieA, 2), conflictRow(tieB, 2)]);
+  await withLiveWritesAllowed(async () => {
+    await sweep.runSweep([tieA, tieB], { ...h.deps, now: () => now + (tick++) });
+    await sweep.drainDetachedSweepActions();
+  });
+  assert.deepEqual(h.calls.admissions, [tieA.prNumber, tieB.prNumber], "an advancing clock keeps equal conflicts in snapshot order");
 });
 
 test("W1-T11171 criterion 3: conflicted rows record age, dependents and blocked cost, and a light pass counts acted and deferred conflicts", async () => {

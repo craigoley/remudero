@@ -20406,10 +20406,13 @@ export async function runSweep(
   // Preserve held-head priority before arrival consumes the pass's refresh slots.
   if (!refreshAdmission.holding()) walkOrder.sort((a, b) => heldSinceMs(openPrs[a]) - heldSinceMs(openPrs[b]));
   // W1-T11171: conflicted PRs walk, and so take fix admission, in descending blocked cost among their own places.
+  // Every cost is measured at ONE instant: a clock read per PR makes the later-measured of two equal conflicts look
+  // older on a slow runner and reorders a tie the rule says keeps snapshot order.
+  const conflictRankedAtMs = passClockMs();
   walkOrder.splice(0, walkOrder.length, ...orderConflictsByBlockedCost(walkOrder,
     (index) => openPrs[index]?.mergeState === "dirty",
     (index) => conflictBlockedCost(openPrs[index]!, ledgerLines, deps.conflictDependents?.(openPrs[index]!) ?? 0,
-      passClockMs()).blocked_cost));
+      conflictRankedAtMs).blocked_cost));
   let lightConflictActed = 0;
   let lightConflictDeferred = 0;
   const rederivedPrs = new Set<number>();
