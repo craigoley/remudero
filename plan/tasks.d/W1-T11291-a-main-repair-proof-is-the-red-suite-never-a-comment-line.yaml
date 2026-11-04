@@ -1,0 +1,48 @@
+- id: W1-T11291
+  title: "A main repair's Acceptance proof is the suite that turned main red, which fails at the base by construction, and the diff-anchor fallback never greps a comment line, so a correct main repair is no longer CAPPED and main is not left red waiting for an operator"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, the proof a main-repair PR body carries; it decides whether main's repair can arm
+  origin: operator-session#main-repair-capped-2026-11-03
+  plan_refs:
+    - W1-T8572
+    - W1-T4263
+    - W1-T273
+  files:
+    - src/lib/main-repair-acceptance.ts
+    - src/run-task.ts
+    - test/a-main-repair-proof-is-the-red-suite-never-a-comment-line.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the main-repair dispatcher rewrites an inert or empty worker body, the criterion it writes is a unit test proof naming each red test file the repair was dispatched for (the test_files of main.repair.located) that the pushed diff makes pass, ahead of any diff-anchored grep
+      proof: "unit test: test/a-main-repair-proof-is-the-red-suite-never-a-comment-line.test.ts"
+    - claim: diffAnchor skips every added line the reviewer's comment classifier (matchedLinesAreAllComments in src/lib/review.ts) reads as a comment in that file's language, so its grep can never be graded executed_stale for matching only comments
+      proof: "grep: W1-T11291 criterion 2 in test/a-main-repair-proof-is-the-red-suite-never-a-comment-line.test.ts"
+    - claim: The main-repair body check on the production dispatch path passes the located red test files into the extracted module
+      proof: "grep: mainRepairAcceptanceFor( in src/run-task.ts"
+  rationale: |
+    OBSERVED on 2026-11-03: main was red from 22:30Z, when #16501's census met #15532's embedded fixture digests.
+    The daemon bisected it and opened #16634, a correct repair: green on every check, with the census suite passing at head and failing at base.
+    Its body carried one proof that the dispatcher wrote, a grep for the repair's first added line: "// @census-reads: none — only embedded immutable historical fixtures are checked."
+    That line is a comment. src/lib/review.ts grades a grep whose matches are all comments as executed_stale. So both local reviews of #16634 (deterministic and semantic) returned CAPPED: 0/1 proofs executed, and CAPPED cannot arm. Main stayed red, and every open PR's coverage shards stayed red, until an operator acted.
+    rmd check-proof on the same grep said it discriminated, because it does not apply the comment rule, so a dispatcher-side check would not have caught this.
+    The located row already names the red suites (test_files). Those suites fail at the base by definition, so they are the one proof that discriminates by construction.
+  design: |
+    1. Extract checkMainRepairWorkerBody, diffAnchor's main-repair use and addedTestCriterion's shape into src/lib/main-repair-acceptance.ts as mainRepairAcceptanceFor({ body, diffText, redTestFiles }), so the test does not import src/run-task.ts (reach ratchet).
+       - Keep the worker's executable criteria.
+       - Replace inert ones with "unit test: <red file>" for each red test file the diff touches or that the repair named.
+       - Fall back to a non-comment diff-anchored grep, then refuse, as today.
+    2. diffAnchor: skip an added line when matchedLinesAreAllComments([line], <context for the path>) is true. Use the same classifier the reviewer uses, so the two cannot drift.
+    3. src/run-task.ts: the dispatch passes the located row's test_files.
+    4. Tests: #16634's body and diff, reproduced as a fixture, now yield "unit test: test/gardeners/a-comment-compression-pin-never-freezes-its-module.test.ts". A diff whose first added line is a // comment anchors on the next code line.
+  falsifier: |
+    At origin/main a main-repair body whose worker proofs are inert is rewritten to grep the diff's first added line, even when it is a comment. The reviewer then caps it at 0 executed proofs.
+  note: |
+    reservation hand-off: plan-file-1793749401000 -> plan-file-1793749517000
+    Reserved with rmd next-task-id --branch plan-file-1793749401000 from the operator session's ops worktree. Operator, 2026-11-03, in chat: fix the reds and their root causes. #16634's own unblock (a body proof swapped to the census suite, plus a re-review) is left to the operator, because the session's classifier treats editing criteria and then self-reviewing as self-approval.

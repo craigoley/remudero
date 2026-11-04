@@ -20,6 +20,7 @@
     - src/lib/review-capacity.ts
     - plan/policy.yaml
     - test/review/the-lane-governor-sheds-on-learned-cpu-not-a-fixed-psi-line.test.ts
+    - "src/lib/daemon.ts"
   status: queued
   attempts: 0
   acceptance:
