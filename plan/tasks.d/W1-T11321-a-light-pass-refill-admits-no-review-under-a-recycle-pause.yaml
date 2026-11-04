@@ -1,0 +1,38 @@
+- id: W1-T11321
+  title: A light pass's freed-lane refill admits no review while a recycle's PAUSE is engaged, so a recycle's drain never waits on a review started after it began
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one admission check on the refill path; W1-T8136's review-only and pause-clock rules and every non-recycle PAUSE are unchanged
+  origin: operator-session#recycle-efficiency-2026-11-04
+  plan_refs:
+    - W1-T8136
+    - W1-T5804
+    - W1-T11153
+  files:
+    - src/lib/sweep.ts
+    - test/daemon/a-light-pass-refill-admits-no-review-under-a-recycle-pause.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: With a recycle PAUSE engaged (isRecyclePauseDetail), a light pass already running when the pause began admits no review through admitOneRefill when a lane frees, and ledgers why; with no PAUSE, or an operator PAUSE, the refill behaves as today
+      proof: "unit test: test/daemon/a-light-pass-refill-admits-no-review-under-a-recycle-pause.test.ts"
+    - claim: The refill's recycle-pause check names this task
+      proof: "grep: W1-T11321 in src/lib/sweep.ts"
+  rationale: |
+    OBSERVED 2026-11-04, under the recycle PAUSE that began 13:04:14Z:
+    - At 13:56:11Z the daemon's light pass (run DAEMON-1793789899544) logged sweep.review_refilled and sweep.review_admitted (surface light, review_mode full-review) for #16738. Its review (run review-PR16738-1793800601235) materialized at 13:58:36Z and assigned a codex worker at 13:58:39Z.
+    - The recycle's refusal at 14:00:25Z counted that worker as a blocker: recycle-blockers-json {"pid":2533333,"age_s":103,"worker_kind":"review"}.
+    - W1-T8136 closed review admission under a recycle PAUSE for the review-only light pass and the pause review clock. The refill path, admitOneRefill in runSweepLightPass (src/lib/sweep.ts), checks only providerFloorMet and deps.restartAdmission("review", "light-refill"), never the fleet PAUSE.
+    - So a light pass that started before the pause still admits reviews whenever one of its lanes frees.
+  design: |
+    In admitOneRefill, also stop refilling when the fleet hold is a recycle PAUSE, reusing the same source W1-T8136 reads (deps.workerAdmissionHold or resolveFleetControlHold with isRecyclePauseDetail). Ledger one sweep.review_refill_held row naming recycle_pause.
+    Mark the check with a comment naming W1-T11321.
+    NOT IN SCOPE: the review-only pass, the pause clock, operator PAUSEs, and the refill's selection order.
+  note: |
+    reservation hand-off: run-unfiled-1793801339784 -> run-unfiled-1793801339784
+    Reserved with rmd next-task-id (W1-T11321 on run-unfiled-1793801339784). From the operator session's recycle-efficiency research.
