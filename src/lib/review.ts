@@ -4497,10 +4497,6 @@ export function judgeCriterion(
               `own TAP wrapper reported the failure (a broken runtime: an unresolvable --import ` +
               `loader, an uncaught module-load error, …), not the named test; not executed, keyword ` +
               `floor applied`;
-          } else if (e instanceof PureProofIncompleteRunError && whitelisted.kind === "test") {
-            inconclusiveUnderLoad(
-              `reported ${e.completedResults} passing subtest(s) and then stopped before node's trailing summary ` +
-              "(a timeout kill, an external signal, or an OOM)");
           } else if (e instanceof PureProofIncompleteRunError) {
             proofExec = "exec_error";
             // W1-T2740, the same rule as the sibling arm: record the DISCRIMINATOR, never the stream. The bounded

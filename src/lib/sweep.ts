@@ -14752,7 +14752,7 @@ function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray
     /^promise harvest (?:unavailable:|corpus is unreadable)/.test(observation.reason));
 }
 
-/** W1-T11132: a head re-reviewed for an `inconclusive_load` proof at most this many times, so a proof that keeps
+/** PRIMARY CONTROL (W1-T11132): cap a head's `inconclusive_load` re-reviews, so a proof that keeps
  *  timing out as the host quietens cannot be re-run forever. */
 export const INCONCLUSIVE_LOAD_MAX_RERUNS = 3;
 
