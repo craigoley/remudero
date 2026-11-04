@@ -5,13 +5,14 @@
   priority: 2
   type: recon
   verify: human
-  risk: low
+  risk: high
   origin: operator-session#registry-followups-2026-11-03
   plan_refs:
     - W1-T10573
     - W1-T9795
   files:
     - docs/recon/rmd-instance-registry-has-two-meanings.md
+    - docs/docs-index.json
   status: queued
   attempts: 0
   acceptance:

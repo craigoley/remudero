@@ -1,4 +1,5 @@
 import { hostWorktreeGit } from "./worktree-git.js";
+import { withGuardrailAttempt } from "./benchmark-run.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -209,7 +210,8 @@ export async function runRelintLoop<D>(opts: {
 
   while (attempt < maxAttempts) {
     attempt++;
-    decision = await opts.run(prompt, attempt, attempt === 1 ? undefined : decision);
+    decision = await withGuardrailAttempt("relint-used", attempt, () =>
+      opts.run(prompt, attempt, attempt === 1 ? undefined : decision));
     if (!opts.filed(decision)) {
       violations = [];
       stop = "not-filed";

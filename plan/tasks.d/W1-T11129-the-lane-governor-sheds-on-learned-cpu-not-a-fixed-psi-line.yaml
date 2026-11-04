@@ -21,6 +21,8 @@
     - plan/policy.yaml
     - test/review/the-lane-governor-sheds-on-learned-cpu-not-a-fixed-psi-line.test.ts
     - "src/lib/daemon.ts"
+    - deploy/memory-high-tuner.sh
+    - test/a-squeezed-page-cache-grows-its-memory-high.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -41,4 +43,5 @@
     2. Review capacity replaces the fixed `cpuPsiHighPct` comparison with the governor's CPU verdict. PSI full is judged against the container's own weight share (weight / sum of running containers' weights), so contention the weight itself predicts is not overload. Shedding is tiered: hold, then shrink one review, then halve, and it widens back one step per calm window measured by the same reading.
     3. Remove `cpuPsiHighPct` from plan/policy.yaml once nothing reads it. The governor's own lane count keeps its current mode (shadow until enforced); the review shed reads the learned verdict in either mode, since it replaces a live fixed line.
   note: |
+    Amended 2026-11-04 (scope for #16523): deploy/memory-high-tuner.sh and its suite join files. Criterion 2 judges PSI against the container's cpu.weight SHARE, but a container reads only its own /sys/fs/cgroup/cpu.weight (core 59); its siblings' weights (serve 303, console 59, site 59) are visible only from the host under system.slice/docker-<id>.scope. The host-side tuner already resolves each container's cgroup scope on every tick and writes learned values into each instance's state dir, so it records every fleet container's cpu.weight there as well, and the daemon's lane-governor reader computes the share from that file. An unreadable file keeps the share unread, which keeps today's fixed line.
     Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 2 (p1, CPU). The operator's standing rules apply: no hard thresholds, and tiered, self-healing responses.
