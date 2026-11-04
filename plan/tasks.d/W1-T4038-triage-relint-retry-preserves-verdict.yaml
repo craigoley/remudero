@@ -71,7 +71,7 @@
   risk: high
   origin: "feedback#fb-1790086853999-c6a250"
   plan_refs: ["W1-T41", "W1-T2212", "W1-T286"]
-  files: [src/lib/relint.ts, src/run-task.ts, test/triage-relint-retry-preserves-verdict.test.ts]
+  files: [src/lib/relint.ts, src/run-task.ts, test/triage-relint-retry-preserves-verdict.test.ts, "src/lib/task-linter.ts"]
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=77750e5ff7b931f9
