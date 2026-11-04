@@ -38,3 +38,11 @@
   note: |
     reservation hand-off: plan-file-1793734567445 -> plan-file-1793734567445
     Reserved with rmd next-task-id --branch plan-file-1793734567445 from the operator session's ops worktree. The test title is a new test added to the existing W1-T9795 suite.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-04T02:24:15.534Z"
+    pin: "090a2e861659b6712c0a52abde11d72d5681220a134f5535b1d784b34d2bdcee"
