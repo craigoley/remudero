@@ -1,0 +1,35 @@
+id: incident-e7d01b12fc662495
+ts: 2026-11-04T08:54:51.141Z
+raw: >-
+  Incident e7d01b12fc66: flow pr-stage-stall:escalated:already escalated at
+  <n>-<n>-04T08:<n>:<n>.398Z in
+  https://github.com/craigoley/remudero/issues/<n>, still awaiting an operator:
+  PR https://github.com/craigoley/remudero/pull/<n> needs a clarification — fix
+  checkout claim declined <n> times on #<pr> at head <sha> (registered worktree
+  owner /home/node/Remudero/worktrees/sweep-W1-T10957-<sha>, live_branch_claim)
+  — FIX_CLAIM_DECLINE_BACKSTOP <n> reached, no further claim is attempted at
+  this head while that worktree exists
+
+  First seen: 2026-11-04T08:52:09.386Z
+
+  Last seen: 2026-11-04T08:52:09.386Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16606 escalated: already escalated at 2026-11-04T08:53:57.398Z in https://github.com/craigoley/remudero/issues/16712, still awaiting an operator: PR https://github.com/craigoley/remudero/pull/16606 needs a clarification — fix checkout claim declined 3 times on #16606 at head 64e8c55 (registered worktree owner /home/node/Remudero/worktrees/sweep-W1-T10957-1793775452054, live_branch_claim) — FIX_CLAIM_DECLINE_BACKSTOP 3 reached, no further claim is attempted at this head while that worktree exists
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#e7d01b12fc662495e823ebd0e5cf34842ce26f85f34eb126b8b5f05190f18a6f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

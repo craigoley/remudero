@@ -199,6 +199,8 @@ import {
   proofSandboxStatus,
   postedArmFactsFromLedger,
   REVIEW_CONTEXT,
+  recordedLoad1,
+  sampleHostLoad,
   reviewLedgerKeyFor,
   reviewTaskNarrative,
   UNFILED_RUN_SENTINEL,
@@ -210,6 +212,7 @@ import type {
   ArmDecision,
   AutomergeHold,
   CriterionVerdict,
+  HostLoadSample,
   PlanCriteriaAtHeadResult,
   ProofExecutor,
   ProofSkipReason,
@@ -7113,7 +7116,7 @@ export interface OpenPrView {
    *  dead, which keep {@link reviewPendingIsStale}'s timeout behaviour. Only the real gateway sets
    *  this, from the durable pending ledger row. */
   reviewPendingOwnerDead?: boolean;
-  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete";
+  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load";
   reviewPendingOwnerGoneReason?: string;
   /** W1-T2299 — when the current `reviewState` reading was posted, read off the same rollup entry
    *  already scanned. NOT A BODY-EDIT TIMESTAMP, and must never be documented as one: GitHub
@@ -11865,6 +11868,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           if (pr.reviewPendingOwnerGone === "refused-after-pending") {
             return `checks green, the pending review's post was refused after it began (${pr.reviewPendingOwnerGoneReason}) — re-running the review lane on #${pr.prNumber}`;
           }
+          if (pr.reviewPendingOwnerGone === "inconclusive-load") {
+            return `checks green, its proof was inconclusive under host load and the host is quieter now — re-running the review lane on #${pr.prNumber}`;
+          }
           if (pr.reviewPendingOwnerGone === "promise-harvest-incomplete") {
             return `checks green, its promise harvest did not complete — re-running the review lane on #${pr.prNumber}`;
           }
@@ -14621,6 +14627,8 @@ export interface SweepDeps {
   runId: string;
   /** Ledger reader (dedup); defaults to readLedgerLines. Injectable for tests. */
   readLedger?: (path: string) => Array<Readonly<Record<string, unknown>>>;
+  /** Host load used to admit a retry of an inconclusive proof. */
+  sampleLoad?: () => HostLoadSample;
   /** W1-T3471 — bounded archive∪live reader for the arm predicate, consulted only after the
    *  live-file verdict miss. An incomplete result preserves the historical fail-open. */
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined;
@@ -14796,10 +14804,38 @@ function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray
     /^promise harvest (?:unavailable:|corpus is unreadable)/.test(observation.reason));
 }
 
-function promiseHarvestRetryView(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): OpenPrView {
+/** W1-T11132 criterion 2. True when the head's latest review is pending for NO cause but `inconclusive_load` proofs and
+ *  this pass's own host load sample is strictly below the load the proof failed under (read from the recorded load,
+ *  no fixed threshold). An unreadable sample or recording compares as "not lower": no retry on a guess. */
+export function inconclusiveLoadLowered(
+  pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample,
+): boolean {
+  if (pr.reviewState !== "pending") return false;
+  const taskId = reviewOutcomeTaskIdFor(pr);
+  const rows = lines.filter(row => row.task_id === taskId && row.pr_url === pr.prUrl && row.head_sha === pr.headSha &&
+    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+  const row = rows.at(-1);
+  if (row?.step !== "review.posted" || row.state !== "pending") return false;
+  if (row.review_input_digest !== undefined && pr.reviewInputDigest !== undefined && row.review_input_digest !== pr.reviewInputDigest) return false;
+  if (pr.reviewPendingSince && typeof row.ts === "string" && Date.parse(pr.reviewPendingSince) > Date.parse(row.ts)) return false;
+  const verdict = row.decision_verdict as ReviewVerdict | undefined;
+  const inconclusive = verdict?.criteria?.filter(criterion => criterion.proof_exec === "inconclusive_load") ?? [];
+  if (inconclusive.length === 0 || verdict?.cannotEvaluate === true || verdict?.promisedFollowUpObservation?.state === "unknown") return false;
+  if (verdict?.criteria.some(c => !c.met && c.proof_exec !== "inconclusive_load") || verdict?.testTheater || verdict?.criteriaTampered) return false;
+  const recorded = inconclusive.map(criterion => recordedLoad1(criterion.load)).filter((n): n is number => n !== undefined);
+  if (recorded.length !== inconclusive.length) return false;
+  const now = sample().load1;
+  return now !== undefined && now < Math.min(...recorded);
+}
+
+function promiseHarvestRetryView(
+  pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample = sampleHostLoad,
+): OpenPrView {
   // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
   return incompletePromiseHarvestFromLedger(pr, lines)
     ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "promise-harvest-incomplete" }
+    : inconclusiveLoadLowered(pr, lines, sample)
+    ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "inconclusive-load" }
     : pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerGone === undefined
       ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
 }
@@ -15562,6 +15598,7 @@ async function codeScanningGateForHead(
 function priorActionsFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   openPrs?: ReadonlyArray<OpenPrView>,
+  sample: () => HostLoadSample = sampleHostLoad,
 ): PriorActions {
   const armed = new Set<string>();
   const fixed = new Set<string>();
@@ -15802,7 +15839,8 @@ function priorActionsFromLedger(
   // verdict: release its key so the supersedes demand fires and the claim admits ONE re-review.
   for (const pr of openPrs ?? []) {
     const key = reviewOutcomeKeyForPr(pr);
-    if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key)) || incompletePromiseHarvestFromLedger(pr, lines)) reviewDelivered.delete(key);
+    if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key)) || incompletePromiseHarvestFromLedger(pr, lines) ||
+        inconclusiveLoadLowered(pr, lines, sample)) reviewDelivered.delete(key);
   }
   return {
     armed,
@@ -18431,7 +18469,7 @@ export async function runSweep(
   const progressWitness = (pr: OpenPrView): FixProgressWitness => ({ reviewInputDigest: pr.reviewInputDigest,
     contractRevision: pr.taskId === undefined || pr.taskId === "unfiled" || pr.taskId === `PR-${pr.prNumber}`
       ? null : readWitnessContractRevision(pr.taskId) });
-  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines));
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines, deps.sampleLoad));
   // W1-T9970: the running reviewer image, read at most once per pass and only when a blocked-fixable PR asks.
   let runningImage: { sha: string | undefined } | undefined;
   // W1-T9124: a body-only edit leaves the head-keyed status on the old verdict; queue one re-review of the new input.
@@ -18836,7 +18874,7 @@ export async function runSweep(
     if (union.archiveCount === 0 || !union.ok) return { complete: false, lines: [] };
     return { complete: true, lines: parseLedger(union.matches.join("\n")) };
   });
-  const prior = priorActionsFromLedger(ledgerLines, openPrs);
+  const prior = priorActionsFromLedger(ledgerLines, openPrs, deps.sampleLoad);
   const freshnessBackoff = async (
     refusals: ReadonlyMap<string, ReviewerCodeFreshnessRefusal>, pr: OpenPrView,
   ): Promise<string | undefined> => {
@@ -19709,7 +19747,7 @@ export async function runSweep(
     claimedReviewKeys.add(reviewKey);
     try {
       const freshLines = readLedger(deps.ledgerPath);
-      const fresh = priorActionsFromLedger(freshLines, openPrs);
+      const fresh = priorActionsFromLedger(freshLines, openPrs, deps.sampleLoad);
       const delivered = fresh.reviewDelivered.has(reviewKey) && !incompletePromiseHarvestFromLedger(pr, freshLines);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
@@ -20353,7 +20391,7 @@ export async function runSweep(
       log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
-    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines);
+    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines, deps.sampleLoad);
     pr = { ...pr, reviewPendingOwnerGone: dispositionView.reviewPendingOwnerGone,
       reviewPendingOwnerGoneReason: dispositionView.reviewPendingOwnerGoneReason };
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
@@ -23525,6 +23563,7 @@ export async function runSweep(
       host_gap_rereview: hostGapSkips !== undefined,
       ...(hostGapSkips === undefined ? {} : { skips: [...hostGapSkips] }),
       ...(incompletePromiseHarvestFromLedger(job.pr, ledgerLines) ? { prior_cause: "promise-harvest-incomplete" } : {}),
+      ...(job.pr.reviewPendingOwnerGone === "inconclusive-load" ? { prior_cause: "inconclusive-load" } : {}),
       surface: deps.repairAdmissionSurface ?? "full",
       observation_version: 1,
     });
@@ -24321,8 +24360,8 @@ export function observeLightPassReviewEligibility(
   if (openPrs.length === 0 || deps.dryRun) return [];
   const now = deps.now ? deps.now() : systemClock.now();
   const lines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
-  const retryViews = openPrs.map(pr => promiseHarvestRetryView(pr, lines));
-  const prior = priorActionsFromLedger(lines, retryViews);
+  const retryViews = openPrs.map(pr => promiseHarvestRetryView(pr, lines, deps.sampleLoad));
+  const prior = priorActionsFromLedger(lines, retryViews, deps.sampleLoad);
   const views = retryViews.map(pr => completedRefusalRetryView(pr, prior));
   const freshnessBackoffs = new Set<string>();
   for (const pr of views) {
@@ -24373,8 +24412,8 @@ export async function runSweepLightPass(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
-  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines));
-  const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs);
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
+  const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs, deps.sampleLoad);
   openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
   const freshnessBackoffs = new Set<string>();
   for (const pr of openPrs) {
@@ -24694,7 +24733,7 @@ export async function runSweepLightPass(
       return;
     }
     refillViewReadAtMs = deps.now ? deps.now() : systemClock.now();
-    const freshViews = fresh.map(pr => completedRefusalRetryView(promiseHarvestRetryView(pr, selectionLedgerLines), selectionPrior));
+    const freshViews = fresh.map(pr => completedRefusalRetryView(promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad), selectionPrior));
     refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
       freshViews.filter((pr) => !spawningNumbers.has(pr.prNumber) && !refilledHeads.has(lightPassHeadKey(pr)) &&
         !lightPassReservedHeads.has(lightPassHeadKey(pr))),

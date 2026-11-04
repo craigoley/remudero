@@ -180,6 +180,7 @@ test("W1-T4032: a review-reuse fallback forwards the plan-only flag", async () =
   const root = mkdtempSync(join(tmpdir(), "rmd-review-reuse-plan-fallback-"));
   try {
     const calls: Array<{ pr: string; args: string[]; opts: Record<string, unknown> }> = [];
+    const phases: string[] = [];
     const effects = buildSweepEffects({
       owner: "craigoley",
       repo: "remudero",
@@ -192,6 +193,7 @@ test("W1-T4032: a review-reuse fallback forwards the plan-only flag", async () =
       reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: "abc", originMainSha: "abc", advance: "none" }),
       reviewCommandImpl: async (pr, args, opts) => {
         calls.push({ pr, args, opts });
+        opts.onPhase?.("posted");
         return 0;
       },
     } as BuildSweepEffectsDeps);
@@ -199,13 +201,16 @@ test("W1-T4032: a review-reuse fallback forwards the plan-only flag", async () =
     await effects.postReview?.(
       { prNumber: 807, headSha: "head", isPlanFiling: true } as never,
       { kind: "discriminate-only", judgedHeadSha: "old" },
+      undefined,
+      (phase) => phases.push(phase),
     );
 
+    assert.deepEqual(phases, ["posted"], "the fallback relays the terminal phase to its caller");
     assert.deepEqual(calls, [
       {
         pr: "807",
         args: ["--repo", "remudero"],
-        opts: { executionMode: "semantic", planOnlyFiling: true },
+        opts: { executionMode: "semantic", planOnlyFiling: true, onPhase: calls[0].opts.onPhase },
       },
     ]);
   } finally {
@@ -217,6 +222,7 @@ test("W1-T4032: an implementation fallback forwards false", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-review-reuse-implementation-fallback-"));
   try {
     const calls: Array<Record<string, unknown>> = [];
+    const phases: string[] = [];
     const effects = buildSweepEffects({
       owner: "craigoley",
       repo: "remudero",
@@ -229,6 +235,7 @@ test("W1-T4032: an implementation fallback forwards false", async () => {
       reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: "abc", originMainSha: "abc", advance: "none" }),
       reviewCommandImpl: async (_pr, _args, opts) => {
         calls.push(opts);
+        opts.onPhase?.("posted");
         return 0;
       },
     } as BuildSweepEffectsDeps);
@@ -236,9 +243,12 @@ test("W1-T4032: an implementation fallback forwards false", async () => {
     await effects.postReview?.(
       { prNumber: 808, headSha: "head", isPlanFiling: false } as never,
       { kind: "discriminate-only", judgedHeadSha: "old" },
+      undefined,
+      (phase) => phases.push(phase),
     );
 
-    assert.deepEqual(calls, [{ executionMode: "semantic", planOnlyFiling: false }]);
+    assert.deepEqual(phases, ["posted"], "the fallback relays the terminal phase to its caller");
+    assert.deepEqual(calls, [{ executionMode: "semantic", planOnlyFiling: false, onPhase: calls[0].onPhase }]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
