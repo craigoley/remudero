@@ -7749,8 +7749,8 @@ export async function runDaemon(
         // Even a phase-level logging failure cannot abandon promises the pool already owns.
         poolOutcome = await admittedWork;
         // W1-T11129: the pool's last lane, and any a fault or detach retired, never reaches refillLane: close its interval.
-        try { laneCpuTransition(() => { for (const task of admitted) laneCpuBuilds.delete(task.id); }); }
-        catch (reason) { phaseFaults.push({ phase: "dispatch.lane_cpu", reason }); }
+        // Never throws: readLaneCpu reads an unreadable or throwing counter as unread, and the rest is pure.
+        laneCpuTransition(() => { for (const task of admitted) laneCpuBuilds.delete(task.id); });
         // W1-T9089: the lanes phase is the wait from a mid-phase decision until the pool settled or detached its children.
         if (restartDecided) freshnessPhases.lanes = Math.max(0, daemonClock.now() - restartWait.decidedAtMs);
         // W1-T10000: the pool released every run waiting for its child's admission; the restart abandons each wait.
