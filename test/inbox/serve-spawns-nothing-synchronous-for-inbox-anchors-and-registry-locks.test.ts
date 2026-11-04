@@ -259,3 +259,68 @@ test("W1-T11128 criterion 2: the synchronous writer still updates an uncontended
   const result = updateProposalRegistry(registry, (current) => [...current, { id: "B", summary: "b", evidenceAnchors: [] }]);
   assert.deepEqual(result?.map((p) => p.id), ["A", "B"]);
 });
+
+test("a served status board whose registry changes between reads still greps no anchor synchronously (review of #16432)", async (t) => {
+  const repo = gitRepo({ kind: "serve-anchor-registry-change" });
+  t.after(() => repo.cleanup());
+  writeFileSync(join(repo.dir, "anchor.txt"), "the-present-anchor\n");
+  repo.git("add", "anchor.txt");
+  repo.git("commit", "--quiet", "-m", "anchor");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const first: Proposal[] = [{ id: "P1", summary: "first", evidenceAnchors: [{ description: "present", pattern: "the-present-anchor", path: "anchor.txt" }] }];
+  // The registry a second read would see: a proposal whose anchor the warm pass never read.
+  const changed: Proposal[] = [...first, { id: "P2", summary: "second", evidenceAnchors: [{ description: "added", pattern: "an-anchor-added-mid-render", path: "anchor.txt" }] }];
+  let reads = 0;
+  const root = tempRoot(t);
+  const deps: StatusBoardDeps = {
+    ...boardDeps(repo.dir, first),
+    readProposalRegistry: () => (reads++ === 0 ? first : changed),
+    readDraftCache: () => draftsFor(changed),
+  };
+
+  const spawns = recordSyncSpawns(t);
+  const board = await buildStatusBoardAsync(root, join(root, "none.ndjson"), deps);
+
+  assert.equal(reads, 1, "one registry read serves both the warm and the board");
+  assert.deepEqual(spawns.calls.filter((call) => call.includes('"grep"')), [], "no synchronous `git grep` for an anchor the registry gained mid-render");
+  assert.ok(spawns.asyncCalls.some(isGitGrep), `the anchor was read through the async git grep (async calls: ${spawns.asyncCalls.join(" | ")})`);
+  assert.deepEqual(board.inbox, buildStatusBoard(root, join(root, "none.ndjson"), boardDeps(repo.dir, first)).inbox,
+    "the board answers the snapshot the warm read");
+});
+
+test("a served registry prune that misses its deadline keeps the sync prune's refusal words (review of #16432)", async (t) => {
+  const shim = ghShim([{ when: "pulls?state=", stdout: "[]" }, { when: "issues?", stdout: "[]" }]);
+  const path = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${path}`;
+  t.after(() => void (process.env.PATH = path));
+  const repo = gitRepo({ kind: "serve-prune-deadline" });
+  t.after(() => repo.cleanup());
+  writeFileSync(join(repo.dir, "anchor.txt"), "the-present-anchor\n");
+  repo.git("add", "anchor.txt");
+  repo.git("commit", "--quiet", "-m", "anchor");
+  const mainSha = repo.git("rev-parse", "HEAD");
+  const root = repo.dir;
+  mkdirSync(join(root, "state"), { recursive: true });
+  mkdirSync(join(root, "plan"), { recursive: true });
+  const planPath = join(root, "plan", "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  writeFileSync(ledgerPath, `${JSON.stringify({ ts: "2026-10-01T01:00:00.000Z", step: "ratify.approved", task_id: "ruling:done" })}\n`);
+  const registry = join(root, "state", "inbox-proposals.json");
+  const evidenceAnchors = [{ description: "present", pattern: "the-present-anchor", path: "anchor.txt" }];
+  writeFileSync(registry, JSON.stringify({ proposals: ["ruling:done", "ruling:open"].map((id) => ({ id, summary: `about ${id}`, evidenceAnchors })) }));
+  const deps: PanelGraphDeps = {
+    root, inboxRoot: root, planPath, ledgerPath,
+    github: { prView: () => null },
+    statusGithub: fakeGitHub(),
+    ratify: { approve: () => undefined, reframe: () => undefined },
+    inboxMainSha: () => mainSha,
+  };
+  // A live foreign holder that never lets go: the prune's 2000 ms deadline is reached.
+  holdLock(`${registry}.lock`, liveForeignHolder(t));
+
+  await assert.rejects(refreshInboxClassification(deps, {}), (err: Error) => {
+    assert.match(err.message, /^updateProposalRegistry: timed out after 2000ms waiting for .*inbox-proposals\.json\.lock \(held by pid \d+\)$/);
+    return true;
+  });
+});
