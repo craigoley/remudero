@@ -6,7 +6,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "@babel/parser";
-import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function snapshot(source: string) {
@@ -27,16 +26,21 @@ function snapshot(source: string) {
 }
 
 test("W1-T11059: comment compression preserves executable code", () => {
-  // Snapshot: a25420801d59d6c2176a1c9dc00bb18153ac948f; measurements, not a new ceiling.
-  const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/github-transport.ts"), "utf8"));
-  const before = compressionPinBase("src/lib/github-transport.ts", import.meta.url);
-  if (before !== undefined) {
-    // Only on the PR that adds this pin: later feature edits to the module stay free (#16082).
-    const base = snapshot(before);
-    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
-      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
-    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
-  }
+  // W1-T11103: exact fingerprint of the three declared fresh-read edits; compression bounds stay fixed.
+  const source = readFileSync(join(REPO_ROOT, "src/lib/github-transport.ts"), "utf8");
+  const actual = snapshot(source);
+  assert.equal(actual.tokenCount, 12354);
+  assert.equal(actual.tokenDigest, "6266f3296906f7e088ae96fb813b752459254f816de83ac8589fe4530390ab30");
+  assert.equal(actual.astDigest, "d436d544b9283c4cceabb684bab5109915ae62fd33a6f4706a272e4cbcd476e0");
+  // Remove only this task's declared behavior and retain the original compression identity proof.
+  const withoutFresh = source
+    .replace("env?: NodeJS.ProcessEnv; fresh?: true } = {}", "env?: NodeJS.ProcessEnv } = {}")
+    .replace('${opts.fresh === true ? "fresh:" : ""}${JSON.stringify(args)}', '${JSON.stringify(args)}')
+    .replace("ghBrokeredAsync(args, opts, env)", "ghBrokeredAsync(args, {}, env)");
+  const originalTransport = snapshot(withoutFresh);
+  assert.equal(originalTransport.tokenCount, 12338);
+  assert.equal(originalTransport.tokenDigest, "de7dd199c036ad5be80d3e731a6350f4eb51f9354f58bb40d4c78d4f6bd107ae");
+  assert.equal(originalTransport.astDigest, "4321d09de1ed1004845d8a679f5f695f1112c6ca5fe5c409cc2d997b7bb521ff");
   assert.ok(actual.commentLines > 0 && actual.commentLines < 439,
     `comment lines must decrease from 439, found ${actual.commentLines}`);
   assert.ok(actual.commentBytes > 0 && actual.commentBytes < 35881,
