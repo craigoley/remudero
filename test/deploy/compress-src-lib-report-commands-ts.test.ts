@@ -27,7 +27,7 @@ function snapshot(source: string) {
 }
 
 test("W1-T11061: comment compression preserves executable code", () => {
-  // Frozen before compression at 69ba8151bb8f69458ace15c1dfd7e71e78396722; not a new ceiling.
+  // Pre-compression evidence at 69ba8151bb8f69458ace15c1dfd7e71e78396722, not a new volume ceiling.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/report-commands.ts"), "utf8"));
   const before = compressionPinBase("src/lib/report-commands.ts", import.meta.url);
   if (before !== undefined) {

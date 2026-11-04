@@ -14,7 +14,7 @@ import { diffCoverageTargets, renderDiffCoverageTargets } from "./diff-coverage-
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, neutralizeFenceMarkers } from "./fix-fence.js";
 import { renderDoctrinePreamble } from "./learnings.js";
 import { isInPlanScope, outOfPlanScopeFiles } from "./plan-architect.js";
-import type { Task } from "./plan.js";
+import { visibleCriteria, type AcceptanceCriterion, type Task } from "./plan.js";
 import { taskSemanticRevision } from "./escalate.js";
 import { citation } from "./provenance.js";
 import { REFUSAL_REASON_CLASSES, workerProofTitles, type CriterionVerdict } from "./review.js";
@@ -201,6 +201,36 @@ interface FixModeRule {
  */
 export function isUnfixableInPlaceGateFailure(reason: string): boolean {
   return /Standing rule 15|entangled: instrument path\(s\)/i.test(reason);
+}
+
+/** W1-T11211: the unmet criteria of the newest review.posted at exactly this head, when that review FAILed. */
+export function sameHeadReviewUnmet(
+  rows: ReadonlyArray<Record<string, unknown>>, prUrl: string, headSha: string, acceptance?: readonly AcceptanceCriterion[],
+): (CriterionVerdict & { criterionIndex: number })[] {
+  const row = rows.findLast((r) => r.step === "review.posted" && r.pr_url === prUrl && r.head_sha === headSha);
+  const criteria = row?.state === "failure" ? (row.decision_verdict as { criteria?: unknown } | null | undefined)?.criteria : undefined;
+  if (!Array.isArray(criteria)) return [];
+  return visibleCriteria(criteria.flatMap((entry, index) => {
+    const c = entry as Partial<CriterionVerdict> | null;
+    return c && typeof c === "object" && c.met === false && typeof c.claim === "string"
+      ? [{ ...(c as CriterionVerdict), criterionIndex: index + 1, holdout: acceptance?.[index]?.holdout ?? c.holdout }] : [];
+  }));
+}
+
+/** Each unmet criterion with its claim, proof, reviewer reason, reviewer proof output and verified findings. */
+function renderUnmetCriteria(review: NonNullable<FixEvidence["review"]>): string {
+  return review.unmetCriteria
+    .map((c, i) => {
+      const findings = (review.findings ?? []).filter((f) => f.criterionIndex === c.criterionIndex);
+      return [
+        `${c.criterionIndex || i + 1}. claim: ${c.claim}\n   proof required: ${c.proof}\n   reviewer verdict: UNMET — ${c.reason}`,
+        ...reviewerProofOutputLines(c),
+        ...findings.map((f) => envelope(neutralizeFenceMarkers(
+          `Verified review finding (advisory evidence): ${f.path}:${f.line}\nMechanism: ${f.mechanism}\nRemedy: ${f.remedy ?? "(none supplied)"}`,
+        ), "github-pr-comment")),
+      ].join("\n");
+    })
+    .join("\n");
 }
 
 export const FIX_MODE_RULES: readonly FixModeRule[] = [
@@ -627,6 +657,7 @@ export function renderFixPrompt(opts: {
   }
 
   if (mode === "ci-log") {
+    const sameHeadReview = (opts.evidence.review?.unmetCriteria.length ?? 0) > 0 ? opts.evidence.review : undefined;
     const failures = opts.evidence.ciFailures ?? [];
     // W1-T210: the check NAME and log tail both come from `gh run view
     // --log-failed` — attacker-influenceable CI output — so BOTH (never just
@@ -668,15 +699,25 @@ export function renderFixPrompt(opts: {
       ...constraintBlock,
       ...scopeBlock,
       ...skillsBlock,
-      `Required CI check(s) are FAILING — the failing signal here IS the CI log, not a reviewer`,
-      `verdict. GitHub will not merge past a red required check no matter what any review verdict`,
-      `says, and a review verdict sitting beside this one (if any exists at all — most often none`,
-      `has run yet, since a review needs green CI first) may simply be STALE, computed before the`,
-      `push that broke this check. Your target is making CI GREEN on the SAME branch; do not`,
-      `expand scope beyond what the failing check(s) below require — do not touch acceptance`,
-      `criteria or task scope to chase a reviewer verdict here.`,
+      ...(sameHeadReview ? [
+        `Required CI check(s) are FAILING — GitHub will not merge past a red required check, so making`,
+        `CI GREEN on the SAME branch is this round's target. A review at this exact head ALSO judged`,
+        `criteria unmet (listed after the checks). That verdict is current, not stale: it judged the`,
+        `code you are fixing, and it must also be answered before merge. Do not touch acceptance`,
+        `criteria or task scope; fix the code the checks and the review name.`,
+      ] : [
+        `Required CI check(s) are FAILING — the failing signal here IS the CI log, not a reviewer`,
+        `verdict. GitHub will not merge past a red required check no matter what any review verdict`,
+        `says, and a review verdict sitting beside this one (if any exists at all — most often none`,
+        `has run yet, since a review needs green CI first) may simply be STALE, computed before the`,
+        `push that broke this check. Your target is making CI GREEN on the SAME branch; do not`,
+        `expand scope beyond what the failing check(s) below require — do not touch acceptance`,
+        `criteria or task scope to chase a reviewer verdict here.`,
+      ]),
       "",
       rendered,
+      ...(sameHeadReview ? ["", "A review at this exact head also judged these criteria unmet — current, not stale:",
+        renderUnmetCriteria(sameHeadReview)] : []),
       ...renderDiffCoverageTargets(diffCoverageTargets(failures.map((f) => f.logTail ?? "")), {
         harnessCommits: opts.harnessCommits,
       }),
@@ -770,18 +811,7 @@ export function renderFixPrompt(opts: {
   const n = unmet.length;
   const list =
     n > 0
-      ? unmet
-          .map((c, i) => {
-            const findings = (opts.evidence.review?.findings ?? []).filter((f) => f.criterionIndex === c.criterionIndex);
-            return [
-              `${c.criterionIndex || i + 1}. claim: ${c.claim}\n   proof required: ${c.proof}\n   reviewer verdict: UNMET — ${c.reason}`,
-              ...reviewerProofOutputLines(c),
-              ...findings.map((f) => envelope(neutralizeFenceMarkers(
-                `Verified review finding (advisory evidence): ${f.path}:${f.line}\nMechanism: ${f.mechanism}\nRemedy: ${f.remedy ?? "(none supplied)"}`,
-              ), "github-pr-comment")),
-            ].join("\n");
-          })
-          .join("\n")
+      ? renderUnmetCriteria(opts.evidence.review!)
       : `(no single criterion is unmet — the review floor's overall verdict is: ${summary})`;
 
   if (mode === "body-coverage") {

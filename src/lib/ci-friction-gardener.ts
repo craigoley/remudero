@@ -691,7 +691,8 @@ export function refusalReasonKey(reason: unknown): string {
 /** A matrix check's FAMILY: `coverage-shard (5/8)` and `coverage-shard (5/4)` are one cause, so a
  *  shard-count change in ci.yml never splits one failure's cost across names. */
 export function ciCheckFamily(check: string): string {
-  return check.replace(/\s*\(\d+\/\d+\)\s*$/, "");
+  // W1-T11206: `*` is a run-time shard index or total (a matrix read from a needed job's output).
+  return check.replace(/\s*\((?:\d+|\*)\/(?:\d+|\*)\)\s*$/, "");
 }
 
 function ciLogCauses(r: LedgerRecord, redByHead: ReadonlyMap<string, string[]>, flaky: ReadonlySet<string>): CiFrictionCause[] {
@@ -1077,7 +1078,9 @@ export function expandWorkflowMatrix(matrix: unknown): Array<Record<string, unkn
   const keys = Object.keys(spec).filter(key => key !== "include" && key !== "exclude");
   let rows: Array<Record<string, unknown>> = keys.length > 0 ? [{}] : [];
   for (const key of keys) {
-    const values = spec[key];
+    // W1-T11206: a dimension read at run time from a needed job's output names its checks with `*`.
+    const values = typeof spec[key] === "string" && /^\$\{\{\s*fromJSON\(\s*needs\.[\w-]+\.outputs\.[\w-]+\s*\)\s*\}\}$/.test(spec[key] as string)
+      ? ["*"] : spec[key];
     if (!Array.isArray(values)) return `matrix.${key} is not a literal list`;
     rows = rows.flatMap(row => values.map(value => ({ ...row, [key]: value })));
   }
@@ -1114,6 +1117,7 @@ export function workflowJobCheckNames(name: string, matrix: unknown): string[] |
   for (const row of rows) {
     let failure: string | undefined;
     const rendered = name.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expression: string) => {
+      if (/^needs\.[\w-]+\.outputs\.[\w-]+$/.test(expression)) return "*";
       const key = /^matrix\.([\w-]+)$/.exec(expression)?.[1];
       const value = key === undefined ? undefined : row[key];
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);

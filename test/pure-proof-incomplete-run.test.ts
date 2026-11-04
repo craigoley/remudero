@@ -144,19 +144,20 @@ test("W1-T2740 (acceptance 1a): execWhitelistedProof — a pure-path run with pa
   );
 });
 
-test("W1-T2740 (acceptance 1b): judgeCriterion — a truncated pure-path proof DEGRADES to the keyword floor (exec_error), never hard-refusing a report that substantiates the claim", () => {
+test("W1-T2740 (acceptance 1b): judgeCriterion — a truncated pure-path proof is inconclusive_load even with a passing keyword floor", () => {
   const verdict = judgeCriterion(CRITERION, COVERING_TOKENS, undefined, ctxFor(TIMEOUT_TRUNCATED_STDOUT));
   assert.notEqual(verdict.proof_exec, "executed_fail", "the run never reached a verdict — it cannot mint one");
-  assert.equal(verdict.proof_exec, "exec_error");
+  assert.equal(verdict.proof_exec, "inconclusive_load");
   assert.equal(verdict.proof_skip, "incomplete-run");
-  assert.equal(verdict.met, true, "the keyword-floor pass stands verbatim — exec_error only degrades, never overrides");
+  assert.equal(verdict.met, false, "an incomplete run cannot substantiate the criterion (W1-T11132)");
+  assert.ok(verdict.load, "the interrupted run retains its execution load");
 });
 
-test("W1-T2740 (acceptance 1c): judgeCriterion — a truncated pure-path proof degrades a FAILING keyword floor too, so the degrade never rescues either", () => {
+test("W1-T2740 (acceptance 1c): judgeCriterion — a truncated pure-path proof is inconclusive_load with a failing keyword floor too", () => {
   const verdict = judgeCriterion(CRITERION, new Set(), undefined, ctxFor(TIMEOUT_TRUNCATED_STDOUT));
-  assert.equal(verdict.proof_exec, "exec_error");
+  assert.equal(verdict.proof_exec, "inconclusive_load");
   assert.equal(verdict.proof_skip, "incomplete-run");
-  assert.equal(verdict.met, false, "a degrade never OVERRIDES the floor in either direction");
+  assert.equal(verdict.met, false, "an incomplete run never substantiates a criterion");
 });
 
 // ── acceptance 2: the outcome is recorded by NAME, with a bounded discriminator, not the stream ──

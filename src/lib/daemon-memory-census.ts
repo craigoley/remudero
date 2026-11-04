@@ -436,6 +436,7 @@ export interface DaemonMemorySampleIo {
   memoryUsage?: () => NodeJS.MemoryUsage;
   /** /proc/self/status's text. */
   procStatus?: () => string;
+  cgroupMemoryEvents?: () => string;
   sourceMapsEnabled?: () => boolean;
   /** W1-T9822: the distinct source maps the stack formatter has parsed (source-map-count.ts). */
   sourceMapsParsed?: () => SourceMapsParsedReading;
@@ -481,8 +482,25 @@ export function readProcMemory(procStatus: () => string): Record<string, number 
   return fields;
 }
 
+/** Container counters, never inferred as zero when the file or either counter is unavailable. */
+export function readCgroupMemoryEvents(read: () => string): Record<string, number | string> {
+  let text: string;
+  try {
+    text = read();
+  } catch (error) {
+    return { error: `unreadable:${(error as NodeJS.ErrnoException).code ?? (error as Error).name}` };
+  }
+  const counters: Record<string, number> = {};
+  for (const name of ["oom", "oom_kill"]) {
+    const raw = new RegExp(`^${name}[ \\t]+([0-9]+)[ \\t]*$`, "m").exec(text)?.[1];
+    if (raw !== undefined && Number.isSafeInteger(Number(raw))) counters[name] = Number(raw);
+  }
+  return counters;
+}
+
 const defaultYieldTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 const defaultProcStatus = (): string => readFileSync("/proc/self/status", "utf8");
+const defaultCgroupMemoryEvents = (): string => readFileSync("/sys/fs/cgroup/memory.events", "utf8");
 
 /** Size one holder, never throwing: a holder that throws is named with its error. */
 async function readHolder(holder: DaemonMemoryHolder, meter: SliceMeter, nodeMax: number): Promise<DaemonHolderReading> {
@@ -558,6 +576,7 @@ export async function sampleDaemonMemoryCensus(
     external_bytes: usage.external,
     array_buffers_bytes: usage.arrayBuffers,
     ...readProcMemory(io.procStatus ?? defaultProcStatus),
+    cgroup_memory_events: readCgroupMemoryEvents(io.cgroupMemoryEvents ?? defaultCgroupMemoryEvents),
     heap: {
       used_bytes: heap.used_heap_size,
       total_bytes: heap.total_heap_size,
@@ -751,11 +770,109 @@ export interface ProposedHolderTask {
   acceptance: string;
 }
 
+export interface DaemonMemoryGrowthRow {
+  step: string;
+  ts?: string;
+  boot_head_sha?: string;
+  live_after_gc_bytes?: number;
+  holders?: readonly { name: string; bytes: number; error?: string; truncated?: boolean }[];
+}
+
+type GenerationStatus = "baseline" | "measured" | "unmeasured";
+export interface GenerationMetric {
+  holder: string;
+  samples: number;
+  status: GenerationStatus;
+  median_bytes?: number;
+  upper_quartile_bytes?: number;
+  spread_bytes?: number;
+}
+
+export interface DaemonMemoryGrowth {
+  generations: { boot_head_sha: string; samples: number; status: GenerationStatus; metrics: GenerationMetric[] }[];
+  rise?: {
+    holder: string; before_sha: string; after_sha: string; before_bytes: number; after_bytes: number;
+    upper_quartile_bytes: number; spread_bytes: number;
+  };
+  proposed_task?: ProposedHolderTask;
+}
+
+function quantile(values: readonly number[], fraction: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const at = (sorted.length - 1) * fraction;
+  const low = Math.floor(at);
+  return sorted[low]! + (sorted[Math.ceil(at)]! - sorted[low]!) * (at - low);
+}
+
+/** Compare equally weighted generation medians, using timestamps for boot order (input order without them).
+ * Sparse generations and incomplete holder readings remain unmeasured and never widen the measured baseline. */
+export function compareDaemonMemoryGenerations(rows: readonly DaemonMemoryGrowthRow[]): DaemonMemoryGrowth {
+  const ordered = rows.filter((row) => row.step === DAEMON_MEMORY_STEP && row.boot_head_sha);
+  if (ordered.every((row) => row.ts && Number.isFinite(Date.parse(row.ts)))) {
+    ordered.sort((a, b) => Date.parse(a.ts!) - Date.parse(b.ts!));
+  }
+  const grouped = new Map<string, DaemonMemoryGrowthRow[]>();
+  for (const row of ordered) {
+    const group = grouped.get(row.boot_head_sha!) ?? [];
+    group.push(row);
+    grouped.set(row.boot_head_sha!, group);
+  }
+  const names = [...new Set(ordered.flatMap((row) => row.holders?.map((h) => h.name) ?? []))].sort();
+  const result: DaemonMemoryGrowth = { generations: [] };
+  const finite = (n: number | undefined): n is number => n !== undefined && Number.isFinite(n) && n >= 0;
+  for (const [sha, group] of grouped) {
+    const previous = result.generations;
+    const sparse = previous.length > 0 && group.length < quantile(previous.map((g) => g.samples), 0.5);
+    const metrics = [...names, "unattributed_live_bytes"].map((holder): GenerationMetric => {
+      const values: number[] = [];
+      for (const row of group) {
+        const reading = row.holders?.find((h) => h.name === holder);
+        const value = holder === "unattributed_live_bytes" ? row.live_after_gc_bytes
+          : reading && reading.error === undefined && !reading.truncated ? reading.bytes : undefined;
+        if (finite(value)) values.push(value);
+      }
+      const earlier = previous.map((g) => ({ sha: g.boot_head_sha, metric: g.metrics.find((m) => m.holder === holder)! }));
+      const counts = earlier.map((g) => g.metric.samples).filter((n) => n > 0);
+      const metric: GenerationMetric = { holder, samples: values.length, status: "unmeasured" };
+      if (sparse || values.length === 0 || (counts.length > 0 && values.length < quantile(counts, 0.5))) return metric;
+      metric.median_bytes = quantile(values, 0.5);
+      const measured = earlier.filter((g) => g.metric.status !== "unmeasured");
+      metric.status = measured.length === 0 ? "baseline" : "measured";
+      if (measured.length === 0) return metric;
+      const medians = measured.map((g) => g.metric.median_bytes!);
+      const upper = quantile(medians, 0.75);
+      const spread = upper - quantile(medians, 0.25);
+      metric.upper_quartile_bytes = upper;
+      metric.spread_bytes = spread;
+      if (!result.rise && metric.median_bytes > upper + spread) {
+        const before = measured.at(-1)!;
+        result.rise = { holder, before_sha: before.sha, after_sha: sha, before_bytes: before.metric.median_bytes!,
+          after_bytes: metric.median_bytes, upper_quartile_bytes: upper, spread_bytes: spread };
+      }
+      return metric;
+    });
+    const status = metrics.every((m) => m.status === "unmeasured") ? "unmeasured"
+      : previous.length === 0 ? "baseline" : "measured";
+    result.generations.push({ boot_head_sha: sha, samples: group.length, status, metrics });
+  }
+  return result;
+}
+
 export interface RankedHolder extends CensusMeasurement {
   rank: number;
   share: number;
   per_entry_bytes: number;
   proposed_task?: ProposedHolderTask;
+}
+
+/** A live-series proposal can be filed even when the offline census has no measurement for its holder. */
+export interface GrowthProposalHolder extends Partial<RankedHolder> {
+  name: string;
+  holder: string;
+  files: readonly string[];
+  share: number;
+  source: "daemon.memory";
+  proposed_task: ProposedHolderTask;
 }
 
 export interface HeapCensusRanking {
@@ -764,16 +881,18 @@ export interface HeapCensusRanking {
   live_set_bytes: number;
   threshold_bytes: number;
   measured_bytes: number;
-  holders: RankedHolder[];
+  holders: (RankedHolder | GrowthProposalHolder)[];
+  growth?: DaemonMemoryGrowth;
 }
 
 /** Rank the measurements by retained bytes and propose a task for each holder at or above the filing threshold. */
 export function rankHeapCensus(measurements: readonly CensusMeasurement[], opts: {
   liveSetBytes: number; censusSha: string; censusDate: string; share?: number; filingBytes?: number; corpus?: string;
+  memoryRows?: readonly DaemonMemoryGrowthRow[];
 }): HeapCensusRanking {
   const threshold = censusFilingThreshold(opts.liveSetBytes, opts.share, opts.filingBytes);
   const sorted = [...measurements].sort((a, b) => b.retained_bytes - a.retained_bytes);
-  const holders = sorted.map((measurement, index): RankedHolder => {
+  const holders: HeapCensusRanking["holders"] = sorted.map((measurement, index): RankedHolder => {
     const share = opts.liveSetBytes > 0 ? measurement.retained_bytes / opts.liveSetBytes : 0;
     const perEntry = measurement.entries > 0 ? Math.round(measurement.retained_bytes / measurement.entries) : 0;
     const ranked: RankedHolder = { ...measurement, rank: index + 1, share, per_entry_bytes: perEntry };
@@ -794,9 +913,34 @@ export function rankHeapCensus(measurements: readonly CensusMeasurement[], opts:
     }
     return ranked;
   });
+  const growth = opts.memoryRows && compareDaemonMemoryGenerations(opts.memoryRows);
+  if (growth?.rise) {
+    const rise = growth.rise;
+    const metric = rise.holder === "unattributed_live_bytes" ? "live_after_gc_bytes" : rise.holder;
+    growth.proposed_task = {
+      subject: `shrink the daemon's ${rise.holder} growth between ${rise.before_sha} and ${rise.after_sha}`,
+      holder: rise.holder,
+      files: measurements.find((m) => m.holder === rise.holder)?.files ?? [],
+      evidence: [
+        `OBSERVED daemon.memory ${rise.before_sha}..${rise.after_sha}: ${metric} median rose from ` +
+          `${rise.before_bytes} to ${rise.after_bytes} bytes, above earlier upper quartile ${rise.upper_quartile_bytes} + IQR ${rise.spread_bytes}`,
+      ],
+      acceptance: `daemon.memory ${rise.holder === "unattributed_live_bytes" ? "live_after_gc_bytes" : `holder "${rise.holder}" bytes`} ` +
+        `p50 over one generation after the fix's boot_head_sha falls below ${rise.after_sha}'s generation`,
+    };
+    const holder = holders.find((h) => h.holder === rise.holder);
+    if (holder) holder.proposed_task = growth.proposed_task;
+    else holders.push({
+      name: "generation median (offline unmeasured)", holder: rise.holder, source: "daemon.memory",
+      files: growth.proposed_task.files,
+      share: opts.liveSetBytes > 0 ? rise.after_bytes / opts.liveSetBytes : 0,
+      proposed_task: growth.proposed_task,
+    });
+  }
   return {
     census_sha: opts.censusSha, census_date: opts.censusDate, live_set_bytes: opts.liveSetBytes, threshold_bytes: Math.round(threshold),
     measured_bytes: sorted.reduce((sum, m) => sum + m.retained_bytes, 0), holders,
+    ...(growth ? { growth } : {}),
   };
 }
 
@@ -810,8 +954,16 @@ export function renderHeapCensus(ranking: HeapCensusRanking): string {
     "|---:|---|---|---:|---:|---:|---:|:---:|",
   ];
   for (const row of ranking.holders) {
+    if ("source" in row) {
+      lines.push(`| — | ${row.holder} | ${row.name} | — | — | — | — | **file** |`);
+      continue;
+    }
     lines.push(`| ${row.rank} | ${row.holder} | ${row.name}${row.error ? ` (error: ${row.error})` : ""} | ${row.entries} | ${mib(row.retained_bytes)} | ` +
       `${(row.share * 100).toFixed(1)}% | ${row.per_entry_bytes} | ${row.proposed_task ? "**file**" : ""} |`);
+  }
+  if (ranking.growth) {
+    lines.push("", ...ranking.growth.generations.map((g) => `generation ${g.boot_head_sha}: ${g.status} (${g.samples} samples)`));
+    if (ranking.growth.proposed_task) lines.push(`proposed_task: ${ranking.growth.proposed_task.subject}`);
   }
   return `${lines.join("\n")}\n`;
 }
@@ -820,6 +972,7 @@ export function renderHeapCensus(ranking: HeapCensusRanking): string {
 export function calibrationFrom(ranking: HeapCensusRanking): Record<string, CensusCalibration> {
   const table: Record<string, CensusCalibration> = {};
   for (const row of ranking.holders) {
+    if ("source" in row) continue;
     if (!row.calibrationKey || row.error !== undefined || row.entries === 0) continue;
     table[row.calibrationKey] = { per_entry_bytes: row.per_entry_bytes, entries: row.entries, census_sha: ranking.census_sha.slice(0, 12), census_date: ranking.census_date };
   }

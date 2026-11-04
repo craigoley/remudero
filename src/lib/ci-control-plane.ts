@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 export type CiJob = {
   name?: string;
   uses?: string;
+  needs?: string | string[];
   strategy?: { matrix?: Record<string, unknown> };
   steps?: Array<{ run?: string }>;
 };
@@ -35,7 +36,28 @@ function substitute(name: string, key: string, value: unknown): string {
   return name.replace(new RegExp(`\\$\\{\\{\\s*matrix\\.${key}\\s*\\}\\}`, "g"), String(value));
 }
 
-function expandMatrixNames(template: string, matrix: Record<string, unknown>): string[] {
+/** W1-T11206: a matrix dimension whose values another job computes at run time. */
+const RUNTIME_MATRIX_VALUE = /^\$\{\{\s*fromJSON\(\s*needs\.([\w-]+)\.outputs\.[\w-]+\s*\)\s*\}\}$/;
+
+/** The check-run name a job registers when its matrix (or a total in its name) comes from a job it
+ *  `needs`: each run-time part is `*`, so ci-gate.yml can account for every shard with one entry,
+ *  e.g. `test-slow-shard (*\/*)`. Only a job named in this job's own `needs` may supply a part. */
+function runtimeMatrixName(template: string, matrix: Record<string, unknown>, needs: readonly string[]): string | undefined {
+  const runtime = Object.entries(matrix).filter(([, value]) => typeof value === "string" && RUNTIME_MATRIX_VALUE.test(value));
+  if (runtime.length === 0) return undefined;
+  if (runtime.length !== Object.keys(matrix).length) throw new Error(`a run-time matrix cannot be mixed with literal dimensions (${Object.keys(matrix).join(", ")})`);
+  for (const [key, value] of runtime) {
+    const producer = RUNTIME_MATRIX_VALUE.exec(value as string)![1]!;
+    if (!needs.includes(producer)) throw new Error(`matrix.${key} reads needs.${producer}, which this job does not need`);
+  }
+  let name = runtime.reduce((current, [key]) => substitute(current, key, "*"), template);
+  name = name.replace(/\$\{\{\s*needs\.([\w-]+)\.outputs\.[\w-]+\s*\}\}/g, (whole, producer: string) => (needs.includes(producer) ? "*" : whole));
+  return name;
+}
+
+function expandMatrixNames(template: string, matrix: Record<string, unknown>, needs: readonly string[] = []): string[] {
+  const runtime = runtimeMatrixName(template, matrix, needs);
+  if (runtime !== undefined) return [runtime];
   const keys = Object.keys(matrix);
   if (keys.length === 1 && keys[0] === "include") {
     if (!Array.isArray(matrix.include)) throw new Error(`matrix.include is not an array (${JSON.stringify(matrix.include)})`);
@@ -69,7 +91,8 @@ export function derivePrCheckCandidates(relPath: string, doc: WorkflowDoc): stri
       candidates.push(...(EXTERNAL_REUSABLE_WORKFLOW_NAMES[key] ?? [`${key} (unrecognized reusable-workflow caller — add its real check-run name(s) to EXTERNAL_REUSABLE_WORKFLOW_NAMES)`]));
       continue;
     }
-    for (const name of job.strategy?.matrix ? expandMatrixNames(job.name ?? jobId, job.strategy.matrix) : [job.name ?? jobId]) {
+    const needs = typeof job.needs === "string" ? [job.needs] : (job.needs ?? []);
+    for (const name of job.strategy?.matrix ? expandMatrixNames(job.name ?? jobId, job.strategy.matrix, needs) : [job.name ?? jobId]) {
       candidates.push(name.includes("${{") ? `${relPath}#${jobId} (unresolved template after matrix expansion: ${JSON.stringify(name)})` : name);
     }
     for (const name of postedCheckNames(job)) {
