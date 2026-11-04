@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
-import { basenameResolutionNote, resolveTestPath, type TestPathResolution } from "./test-path-resolver.js";
+import { basenameResolutionNote, resolveTestPath, type TestPathResolution, type TestPathResolverGit } from "./test-path-resolver.js";
 // Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
 export { resolveTestPath };
 import { createRequire } from "node:module";
@@ -1794,12 +1794,13 @@ export interface ResolvedProofText {
 export function resolveProofTestPath(
   proof: string,
   root: string,
-  opts: { tree?: string; target?: SuiteRegistryTarget } = {},
+  opts: { tree?: string; target?: SuiteRegistryTarget; git?: TestPathResolverGit } = {},
 ): ResolvedProofText {
   const w = parseWhitelistedProof(proof, opts.target);
   const cited = w ? citedTestPath(w) : undefined;
   if (cited === undefined) return { proof };
-  const resolution = resolveTestPath(cited, { root, ...(opts.tree === undefined ? {} : { tree: opts.tree }) });
+  // W1-T11341: an awaited caller hands the resolver its git answers, so the base tree is never read synchronously on the loop.
+  const resolution = resolveTestPath(cited, { root, ...(opts.tree === undefined ? {} : { tree: opts.tree }), ...(opts.git ? { git: opts.git } : {}) });
   if (!("path" in resolution) || resolution.how !== "basename") return { proof, cited, resolution };
   const at = proof.lastIndexOf(cited);
   const rewritten = proof.slice(0, at) + resolution.path + proof.slice(at + cited.length);

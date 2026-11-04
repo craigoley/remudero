@@ -6,11 +6,14 @@ import { createRequire } from "node:module";
 import { loadDefaultPolicy } from "./policy.js";
 import { breMetacharsIn } from "./bre-metachars.js";
 import { classifyGrepZeroHit } from "./grep-zero-cause.js";
-import { grepOnlyBaseTargets, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./proof-base-stale.js";
+import {
+  BLOB_READ_OPTIONS, LS_TREE_OPTIONS, blobReadArgv, grepOnlyBaseTargets, lsTreeArgv, lsTreeRows, materialiseBaseGrepTree,
+  type BaseGrepTreeReaders,
+} from "./proof-base-stale.js";
 import { spawnSync } from "node:child_process";
 import { PROOF_FILE_READ_BYTES } from "./proof-file-reader-child.js";
-import { hostWorktreeGit, WorktreePointerRefusedError, type HostWorktreeGitOptions } from "./worktree-git.js";
-import { resolveTestPath } from "./test-path-resolver.js";
+import { hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError, type HostWorktreeGitOptions } from "./worktree-git.js";
+import { resolveTestPath, type TestPathResolverGit } from "./test-path-resolver.js";
 import {
   explainGrepProofRefusal, explainUnitTestProofRefusal, materialiseBaseProofBlobs,
   parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs, resolveProofTestPath, wrappedGrepPattern,
@@ -113,6 +116,103 @@ export interface BaseProofDir {
   addedTestFiles: ReadonlySet<string>;
 }
 
+/** W1-T10407: the base reads must not vary with the host's git config (e.g. `diff.renames`). */
+const BASE_PROOF_HERMETIC = { env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } };
+/** `--detach`: no branch name is ever wanted here (W1-T232's lesson at the head). */
+const baseWorktreeArgs = (path: string, revision: string): string[] => ["worktree", "add", "--detach", path, revision];
+const MERGE_BASE_ARGS = ["merge-base", "origin/main", "HEAD"];
+// (W1-T3098) `--diff-filter=A` — ADDED ONLY, never M/D/R/C. The narrowing from `AM` is this
+// seam's correctness, and the two halves are asymmetric:
+//
+// ADDED IS THE POINT. A file the base never had makes `node --test` fail on a MISSING FILE there,
+// and "absent" is not "fails" — that result says nothing about the code. Copying it in makes the
+// base run the SAME test, which is what separates a new test passing at base anyway (proves
+// nothing, graded `executed_stale`) from one that needs this PR's own source change (real
+// discrimination, because its import or assertion is what is missing at base).
+//
+// MODIFIED MUST NOT BE COPIED. A modified file EXISTS at base and its own version already runs
+// there — that run IS the evidence. Overwriting it with the head version manufactures a pass: a
+// test legitimately FAILING at base passes instead, and the single strongest discrimination
+// signal (a task REPAIRING a failing test, the case CLAUDE.md names) silently grades stale.
+// MEASURED on this branch 2026-09-08, running
+// test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts under each filter: with `AM`
+// exactly one case reddens — "a unit-test proof that passes at head and fails at base reports
+// discrimination, verdict unchanged" — and with `A` the file is 8/8. That case is this rule's
+// falsifier; restore the `M` and it fails again.
+//
+// The pathspec restricts the walk to `test/` itself, matching design (iv): only files a
+// `unit test:` proof could ever name are ever copied.
+const addedTestArgs = (base: string): string[] => ["diff", "--name-only", "--diff-filter=A", base, "HEAD", "--", "test/"];
+const nameLines = (out: string): string[] => out.split("\n").map((l) => l.trim()).filter(Boolean);
+
+function noBaseProof(): BaseProofDir {
+  return { baseCheckoutDir: undefined, baseUnreadablePaths: new Set<string>(), baseIsCheckout: false, addedTestFiles: new Set<string>() };
+}
+
+/** No DIALECT proof at all (prose only, or no criteria) ⇒ nothing will ever be re-run against a base, so no checkout is
+ *  paid for. A single `grep:` OR `unit test:` proof is enough to want one. */
+function wantsBaseProof(criteria: ReadonlyArray<{ proof?: string }>): boolean {
+  return criteria.some((c) => typeof c.proof === "string" && parseWhitelistedProof(c.proof) !== null);
+}
+
+/** W1-T9860: the BASE tree resolves each cited test path in its own index, so a test that sat elsewhere at the base
+ *  is materialised where the base really had it. An exact hit or an unresolved path leaves the proof as cited. */
+function baseProofCriteria(
+  criteria: ReadonlyArray<{ proof?: string }>, headCheckoutDir: string, base: string, git?: TestPathResolverGit,
+): Array<{ proof?: string }> {
+  return criteria.map((c) =>
+    typeof c.proof === "string" ? { ...c, proof: resolveProofTestPath(c.proof, headCheckoutDir, { tree: base, ...(git ? { git } : {}) }).proof } : c);
+}
+
+function copyBaseFile(src: string, dest: string): void {
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, readFileSync(src));
+}
+
+/** (W1-T3098) THE DIFFERENTIAL RUN: a bare `git worktree add --detach <dir> <base>` (R-11) is a
+ *  checkout of the MERGE-BASE and so never contains a test the PR itself added — `node --test`
+ *  there finds nothing, exits nonzero, and the classifier used to read that as `discriminates`.
+ *  Copy the diff's ADDED `test/**` files in at the same repo-relative paths so the SAME
+ *  proof that just passed on the head can actually be re-run here. Best-effort per file: a copy
+ *  failure narrows what gets re-run — that one file's proof falls back to whatever it graded
+ *  before — it never downgrades `baseIsCheckout`, a fact about the WORKTREE, already true here. */
+function copyAddedTests(headCheckoutDir: string, dir: string, added: readonly string[], copyFile: (src: string, dest: string) => void): Set<string> {
+  const copied = new Set<string>();
+  for (const rel of added) {
+    try {
+      copyFile(join(headCheckoutDir, rel), join(dir, rel));
+      copied.add(rel); // W1-T3190: only on SUCCESS, so set and tree agree
+    } catch {
+      // per-file: leave this one path absent from the base tree, exactly as before W1-T3098
+    }
+  }
+  return copied;
+}
+
+function checkedOutBaseProof(dir: string, copied: Set<string>): BaseProofDir {
+  registerReviewerCheckout(dir);
+  return { baseCheckoutDir: dir, baseUnreadablePaths: new Set<string>(), baseIsCheckout: true, addedTestFiles: copied };
+}
+
+/** FALLBACK: the pre-R-11 blob materialisation, byte-for-byte, into the same dir. */
+function blobFallbackProof(
+  baseCriteria: ReadonlyArray<{ proof?: string }>, base: string, dir: string,
+  showBlob: (rev: string, rel: string) => string, worktreeFailure: string,
+): BaseProofDir {
+  const { written, unreadable } = materialiseBaseProofBlobs(baseCriteria, base, showBlob, (rel: string, contents: string) => {
+    const dest = join(dir, rel);
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, contents);
+  });
+  return {
+    baseCheckoutDir: written > 0 ? dir : undefined,
+    baseUnreadablePaths: new Set(unreadable),
+    baseIsCheckout: false,
+    addedTestFiles: new Set<string>(), // the blob fallback copies nothing in; absent means absent
+    baseWorktreeFailure: worktreeFailure,
+  };
+}
+
 /** Build a detached base checkout, or a grep-only tree. Report missing or unreadable base evidence. */
 export function buildBaseProofDir(
   criteria: ReadonlyArray<{ proof?: string }>,
@@ -138,17 +238,14 @@ export function buildBaseProofDir(
     grepTree?: Omit<BaseGrepTreeReaders, "showBlob">;
   } = {},
 ): BaseProofDir {
-  const detachedArgs = (path: string, revision: string) => ["worktree", "add", "--detach", path, revision];
   if (deps.detachedAsync) {
     const { path, revision, run } = deps.detachedAsync;
     return {
       baseCheckoutDir: path, baseUnreadablePaths: new Set(), addedTestFiles: new Set(), baseIsCheckout: false,
-      pendingCheckout: run(detachedArgs(path, revision)),
+      pendingCheckout: run(baseWorktreeArgs(path, revision)),
     };
   }
-  // W1-T10407: the base reads must not vary with the host's git config (e.g. `diff.renames`).
-  const hermetic = { env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } };
-  const mergeBase = deps.mergeBase ?? ((cwd: string) => hostWorktreeGit(cwd, ["merge-base", "origin/main", "HEAD"], hermetic).trim());
+  const mergeBase = deps.mergeBase ?? ((cwd: string) => hostWorktreeGit(cwd, MERGE_BASE_ARGS, BASE_PROOF_HERMETIC).trim());
   const showBlob =
     deps.showBlob ??
     ((cwd: string, rev: string, rel: string) =>
@@ -159,65 +256,28 @@ export function buildBaseProofDir(
       // absence-vs-read-failure classification `baseBlobErrorIsAbsence` keys on (`status: 128` vs a
       // Node `code`) was MEASURED with stderr already piped, and is locked by
       // test/base-blob-read-failure.test.ts Group 0.
-      hostWorktreeGit(cwd, ["show", `${rev}:${rel}`], { maxBuffer: 1 << 26, ...hermetic }));
+      hostWorktreeGit(cwd, ["show", `${rev}:${rel}`], { maxBuffer: 1 << 26, ...BASE_PROOF_HERMETIC }));
   const addWorktree =
     deps.addWorktree ??
     ((repoDir: string, worktreePath: string, revision: string) =>
       // stderr PIPED for the same reason `showBlob` pipes it: a base the repo cannot check out is
       // a degrade this function REPORTS (`baseWorktreeFailure`), never a `fatal:` line through a
-      // passing review. `--detach`: no branch name is ever wanted here (W1-T232's lesson at the head).
-      hostWorktreeGit(repoDir, detachedArgs(worktreePath, revision)));
+      // passing review.
+      hostWorktreeGit(repoDir, baseWorktreeArgs(worktreePath, revision)));
   const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
-  // (W1-T3098) `--diff-filter=A` — ADDED ONLY, never M/D/R/C. The narrowing from `AM` is this
-  // seam's correctness, and the two halves are asymmetric:
-  //
-  // ADDED IS THE POINT. A file the base never had makes `node --test` fail on a MISSING FILE there,
-  // and "absent" is not "fails" — that result says nothing about the code. Copying it in makes the
-  // base run the SAME test, which is what separates a new test passing at base anyway (proves
-  // nothing, graded `executed_stale`) from one that needs this PR's own source change (real
-  // discrimination, because its import or assertion is what is missing at base).
-  //
-  // MODIFIED MUST NOT BE COPIED. A modified file EXISTS at base and its own version already runs
-  // there — that run IS the evidence. Overwriting it with the head version manufactures a pass: a
-  // test legitimately FAILING at base passes instead, and the single strongest discrimination
-  // signal (a task REPAIRING a failing test, the case CLAUDE.md names) silently grades stale.
-  // MEASURED on this branch 2026-09-08, running
-  // test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts under each filter: with `AM`
-  // exactly one case reddens — "a unit-test proof that passes at head and fails at base reports
-  // discrimination, verdict unchanged" — and with `A` the file is 8/8. That case is this rule's
-  // falsifier; restore the `M` and it fails again.
-  //
-  // The pathspec restricts the walk to `test/` itself, matching design (iv): only files a
-  // `unit test:` proof could ever name are ever copied.
   const changedTestFiles =
-    deps.changedTestFiles ??
-    ((headDir: string, base: string) =>
-      hostWorktreeGit(headDir, ["diff", "--name-only", "--diff-filter=A", base, "HEAD", "--", "test/"], hermetic)
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean));
-  const copyFile =
-    deps.copyFile ??
-    ((src: string, dest: string) => {
-      mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, readFileSync(src));
-    });
+    deps.changedTestFiles ?? ((headDir: string, base: string) => nameLines(hostWorktreeGit(headDir, addedTestArgs(base), BASE_PROOF_HERMETIC)));
+  const copyFile = deps.copyFile ?? copyBaseFile;
 
-  const noBase: BaseProofDir = { baseCheckoutDir: undefined, baseUnreadablePaths: new Set<string>(), baseIsCheckout: false, addedTestFiles: new Set<string>() };
-  // No DIALECT proof at all (prose only, or no criteria) ⇒ nothing will ever be re-run against a
-  // base, so no checkout is paid for. A single `grep:` OR `unit test:` proof is enough to want one.
-  if (!criteria.some((c) => typeof c.proof === "string" && parseWhitelistedProof(c.proof) !== null)) return noBase;
+  if (!wantsBaseProof(criteria)) return noBaseProof();
   let base: string;
   try {
     base = mergeBase(headCheckoutDir);
   } catch {
-    return noBase; // unresolvable base ⇒ no staleness signal, never a false positive
+    return noBaseProof(); // unresolvable base ⇒ no staleness signal, never a false positive
   }
-  if (!base) return noBase;
-  // W1-T9860: the BASE tree resolves each cited test path in its own index, so a test that sat elsewhere at the base
-  // is materialised where the base really had it. An exact hit or an unresolved path leaves the proof as cited.
-  const baseCriteria = criteria.map((c) =>
-    typeof c.proof === "string" ? { ...c, proof: resolveProofTestPath(c.proof, headCheckoutDir, { tree: base }).proof } : c);
+  if (!base) return noBaseProof();
+  const baseCriteria = baseProofCriteria(criteria, headCheckoutDir, base);
 
   const dir = makeDir();
   // A review whose every proof is a `grep:` reads the base blobs it names and checks nothing out: the
@@ -243,55 +303,150 @@ export function buildBaseProofDir(
   let worktreeFailure: string;
   try {
     addWorktree(headCheckoutDir, dir, base);
-    registerReviewerCheckout(dir);
-    // (W1-T3098) THE DIFFERENTIAL RUN: a bare `git worktree add --detach <dir> <base>` (R-11) is a
-    // checkout of the MERGE-BASE and so never contains a test the PR itself added — `node --test`
-    // there finds nothing, exits nonzero, and the classifier used to read that as `discriminates`.
-    // Copy the diff's ADDED `test/**` files in at the same repo-relative paths so the SAME
-    // proof that just passed on the head can actually be re-run here. Best-effort and isolated in
-    // its own try: a copy failure (or a `git diff` that itself throws) narrows what gets re-run —
-    // that one file's proof falls back to whatever it graded before this change — it must never
-    // downgrade `baseIsCheckout`, which is a fact about the WORKTREE, already true by this point,
-    // not about any one file inside it.
-    const copiedTestFiles = new Set<string>();
+    let added: string[] = [];
     try {
-      for (const rel of changedTestFiles(headCheckoutDir, base)) {
-        try {
-          copyFile(join(headCheckoutDir, rel), join(dir, rel));
-          copiedTestFiles.add(rel); // W1-T3190: only on SUCCESS, so set and tree agree
-        } catch {
-          // per-file: leave this one path absent from the base tree, exactly as before this change
-        }
-      }
+      added = changedTestFiles(headCheckoutDir, base);
     } catch {
       // `changedTestFiles` itself failed to run (e.g. `git diff` broke) — no files copied, no worse
       // than the pre-W1-T3098 checkout.
     }
-    return { baseCheckoutDir: dir, baseUnreadablePaths: new Set<string>(), baseIsCheckout: true, addedTestFiles: copiedTestFiles };
+    return checkedOutBaseProof(dir, copyAddedTests(headCheckoutDir, dir, added, copyFile));
   } catch (e) {
     // Not erased: the reason rides out on `baseWorktreeFailure` below, where `rmd check-proof`
     // prints it and the classifier reads the fallback's `baseIsCheckout: false` (R-11).
     worktreeFailure = String((e as Error)?.message ?? e);
   }
-  // FALLBACK: the pre-R-11 blob materialisation, byte-for-byte, into the same dir.
-  const { written, unreadable } = materialiseBaseProofBlobs(
-    baseCriteria,
-    base,
-    (rev: string, rel: string) => showBlob(headCheckoutDir, rev, rel),
-    (rel: string, contents: string) => {
-      const dest = join(dir, rel);
-      mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, contents);
-    },
-  );
-  return {
-    baseCheckoutDir: written > 0 ? dir : undefined,
-    baseUnreadablePaths: new Set(unreadable),
-    baseIsCheckout: false,
-    addedTestFiles: new Set<string>(), // the blob fallback copies nothing in; absent means absent
+  return blobFallbackProof(baseCriteria, base, dir, (rev: string, rel: string) => showBlob(headCheckoutDir, rev, rel), worktreeFailure);
+}
 
-    baseWorktreeFailure: worktreeFailure,
-  };
+/** W1-T11341: the one git leaf {@link buildBaseProofDirAsync} runs, awaited. */
+export type AwaitedBaseGit = (cwd: string, args: readonly string[], opts?: HostWorktreeGitOptions) => Promise<string>;
+
+/** An awaited git failure in the shape a sync one has: a nonzero exit is `status`, so `baseBlobErrorIsAbsence` reads it. */
+function asSyncGitError(error: unknown): unknown {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code !== "number") return error;
+  return Object.assign(new Error(String((error as Error)?.message ?? error)), { status: code });
+}
+
+type AwaitedRead<T> = { value: T } | { error: unknown };
+
+/**
+ * Runs a synchronous, reader-driven step over answers fetched with awaited git. Each pass serves the reads it has already
+ * fetched and records the rest; a miss either throws (where the step already treats a throw as "unknown") or returns a
+ * placeholder the step reads as empty. The step re-runs until a pass misses nothing, so the result is the step's own
+ * result over real answers, and no read in it ever runs git on the loop. Every pass but the last runs in `scratch`.
+ */
+async function overAwaitedReads<R>(
+  step: (read: <T>(key: string, miss: "throw" | T, fetch: () => Promise<T>) => T, final: boolean) => R,
+): Promise<R> {
+  const answers = new Map<string, AwaitedRead<unknown>>();
+  for (;;) {
+    const missing = new Map<string, () => Promise<unknown>>();
+    const read = <T>(key: string, miss: "throw" | T, fetch: () => Promise<T>): T => {
+      const known = answers.get(key);
+      if (known && "value" in known) return known.value as T;
+      if (known) throw known.error;
+      missing.set(key, fetch);
+      if (miss === "throw") throw new Error(`awaited base read pending: ${key}`);
+      return miss;
+    };
+    step(read, false);
+    if (missing.size === 0) return step(read, true);
+    for (const [key, fetch] of missing) {
+      try {
+        answers.set(key, { value: await fetch() });
+      } catch (error) {
+        answers.set(key, { error: asSyncGitError(error) });
+      }
+    }
+  }
+}
+
+/**
+ * W1-T11341: {@link buildBaseProofDir} with every git awaited, so an in-process review (W1-T11162's plan filings, or any
+ * review while run children are off) never holds the daemon loop on the base build: one call held it 976 s on 11-04. The
+ * contract is the same — the grep tree, `baseUnreadablePaths`, `addedTestFiles`, the checkout and its blob fallback — and
+ * the pure steps are the same functions, fed awaited answers by {@link overAwaitedReads}. Any bound on that git is the
+ * awaited leaf's own loop-available bound (W1-T9651); there is no new timer.
+ */
+export async function buildBaseProofDirAsync(
+  criteria: ReadonlyArray<{ proof?: string }>,
+  headCheckoutDir: string,
+  deps: { git?: AwaitedBaseGit; makeDir?: () => string; copyFile?: (src: string, dest: string) => void } = {},
+): Promise<BaseProofDir> {
+  const git = deps.git ?? hostWorktreeGitAsync;
+  const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
+  if (!wantsBaseProof(criteria)) return noBaseProof();
+  let base: string;
+  try {
+    base = (await git(headCheckoutDir, MERGE_BASE_ARGS, BASE_PROOF_HERMETIC)).trim();
+  } catch {
+    return noBaseProof();
+  }
+  if (!base) return noBaseProof();
+  const at = headCheckoutDir;
+  const baseCriteria = await overAwaitedReads((read) => baseProofCriteria(criteria, at, base, {
+    treeSha: (root, rev) => read(`tree ${root} ${rev}`, "throw", async () =>
+      (await git(root, ["rev-parse", "--verify", "--quiet", `${rev}^{tree}`])).trim()),
+    listTestTree: (root, sha) => read(`tests ${root} ${sha}`, "throw", async () =>
+      (await git(root, ["ls-tree", "-r", "--name-only", "-z", sha, "--", "test/"], { maxBuffer: 1 << 26 })).split("\0").filter(Boolean)),
+  }));
+  const addedTests = async (): Promise<string[]> => nameLines(await git(at, addedTestArgs(base), BASE_PROOF_HERMETIC));
+
+  const dir = makeDir();
+  const grepTargets = grepOnlyBaseTargets(baseCriteria);
+  if (grepTargets !== undefined) {
+    const scratch = mkdtempSync(join(tmpdir(), "rmd-proof-base-pass-"));
+    let tree: ReturnType<typeof materialiseBaseGrepTree>;
+    try {
+      tree = await overAwaitedReads((read, final) => {
+        if (!final) {
+          rmSync(scratch, { recursive: true, force: true });
+          mkdirSync(scratch, { recursive: true });
+        }
+        return materialiseBaseGrepTree(at, base, grepTargets, final ? dir : scratch, {
+          listTree: (cwd, rev, paths, recursive) => read(`ls ${cwd} ${rev} ${recursive} ${paths.join("\0")}`, "throw", async () =>
+            lsTreeRows(await git(cwd, lsTreeArgv(rev, paths, recursive), LS_TREE_OPTIONS))),
+          readBlob: (cwd, rev, rel) => read(`blob ${cwd} ${rev} ${rel}`, Buffer.alloc(0), async () =>
+            Buffer.from(await git(cwd, blobReadArgv(rev, rel), BLOB_READ_OPTIONS), "latin1")),
+        });
+      });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+    if (tree.needsCheckout.length === 0) {
+      let added: string[] = [];
+      try {
+        if (grepTargets.some((t) => t.startsWith("test/"))) added = await addedTests();
+      } catch {
+        // `git diff` broke: no added file is known, which is the pre-W1-T3098 reading and never a false stale.
+      }
+      return { baseCheckoutDir: dir, baseUnreadablePaths: new Set(tree.unreadable), baseIsCheckout: false, baseIsGrepTree: true, addedTestFiles: new Set(added) };
+    }
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+  }
+  let worktreeFailure: string;
+  try {
+    await git(at, baseWorktreeArgs(dir, base));
+    let added: string[] = [];
+    try {
+      added = await addedTests();
+    } catch {
+      // no files copied, no worse than the pre-W1-T3098 checkout
+    }
+    return checkedOutBaseProof(dir, copyAddedTests(at, dir, added, deps.copyFile ?? copyBaseFile));
+  } catch (e) {
+    worktreeFailure = String((e as Error)?.message ?? e);
+  }
+  return await overAwaitedReads((read, final) => {
+    const show = (rev: string, rel: string): string => read(`show ${rev} ${rel}`, "throw", async () =>
+      await git(at, ["show", `${rev}:${rel}`], { maxBuffer: 1 << 26, ...BASE_PROOF_HERMETIC }));
+    if (final) return blobFallbackProof(baseCriteria, base, dir, show, worktreeFailure);
+    materialiseBaseProofBlobs(baseCriteria, base, show, () => {});
+    return noBaseProof();
+  });
 }
 
 /** A leading `<task-id>: ` describe prefix: Vitest's full name joins describe and it, so no file holds it verbatim. */
