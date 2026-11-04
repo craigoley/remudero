@@ -1,0 +1,28 @@
+id: incident-8ef0ecc7046189c4
+ts: 2026-11-04T01:57:54.062Z
+raw: >-
+  Incident 8ef0ecc70461: invariant reconcile.unreadable
+
+  First seen: 2026-11-04T01:23:45.984Z
+
+  Last seen: 2026-11-04T01:23:45.984Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - fleet reconciliation history unreadable: /home/node/Remudero/state/ledger.2026-10-25T04-01-44-492Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T04-17-00-476Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T04-33-47-707Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T04-49-43-797Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T05-01-52-990Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T05-17-21-069Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T05-33-57-327Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T05-46-11-035Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T06-00-40-822Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T06-19-40-114Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T06-32-45-449Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T06-43-39-633Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T06-52-18-076Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T07-02-37-386Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T07-12-54-307Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T07-25-49-513Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T07-37-51-892Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T07-48-38-994Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T07-52-48-478Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T07-58-04-836Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T08-02-18-975Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T08-07-07-663Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T08-12-49-941Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T08-23-38-567Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T08-31-05-787Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T08-35-52-381Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T08-40-08-458Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T08-44-33-189Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T08-50-37-259Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T08-55-20-435Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T09-00-25-302Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T09-08-18-552Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T09-14-51-317Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T09-15-00-692Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-25T09-57-21-559Z.ndjson.gz — the fleet reconciler repairs nothing until it can read its history; move the named file out of the state dir (/home/node/Remudero/state)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#8ef0ecc7046189c40c7b1c988569fa512ceb58f3f1e62f5021edd4ec50283f04
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
