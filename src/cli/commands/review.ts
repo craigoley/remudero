@@ -1195,6 +1195,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     evaluatorProvenance,
     reviewerCodeFreshness,
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
+    readRequiredContexts: readRequiredStatusCheckContextsAsync,
+    cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath: args.ledgerPath, runId: args.runId }),
   });
   phases.post = systemClock.now();
   // W1-T11151: `posted` releases admission once the outcome is terminal: posted, refused (review.post_refused) or a
@@ -2274,6 +2276,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       fetchCurrentStatus: () => reviewStatusEntryFromCombined(fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)))?.state,
       fetchCurrentStatusEntry: () => readReviewStatusEntry(owner, repo, view.headRefOid, deps.fetchView),
       fetchPublisher: deps.fetchView,
+      readRequiredContexts: readRequiredStatusCheckContextsAsync,
+      cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
     });
     if (restored.posted) {
       replayStatusAction = "restored";

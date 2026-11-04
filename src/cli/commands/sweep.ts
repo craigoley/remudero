@@ -10,7 +10,7 @@ import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.
 import { checkReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { ghJsonAsync } from "../../lib/github-transport.js";
-import { readLedgerLines, buildBatchedGithub, type GitHub } from "../../lib/status.js";
+import { readLedgerLines, buildBatchedGithub, readRequiredStatusCheckContextsAsync, type GitHub } from "../../lib/status.js";
 import { liveInflightRuns } from "../../lib/report-commands.js";
 import { worktreeRemove, runWorktreeReapRung, type WorktreeReapSummary } from "../../lib/worker.js";
 import { automaticBranchReapStateFileName, readAutomaticBranchReapState, writeAutomaticBranchReapState, type AutomaticBranchReapState } from "../../lib/branch-reaper.js";
@@ -19,7 +19,7 @@ import { lightPassFixAdmitted, type LightPassScope, type ReviewAdmissionGate, ty
 import type { BoardSnapshotCache } from "../../lib/board-snapshot-cache.js";
 import type { PanelGraphDeps } from "../../lib/panel-graph.js";
 import { createPlanFilingFileCache, type GhCallPacer } from "../../lib/open-prs-rest.js";
-import { configureEscalationTriage } from "../../lib/escalate.js";
+import { configureEscalationTriage, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
 import { escalatePostReviewStall } from "../../lib/escalation-catalogue.js";
 import { ghPrDiffAsync } from "../../lib/pr-diff.js";
 import { riskJudgePlanContextDigestFor } from "../../lib/risk-judge.js";
@@ -396,6 +396,8 @@ export function buildSweepEffects(
                 reviewInputDigest: pr.reviewInputDigest,
                 reviewEngineRevision: REVIEW_ENGINE_REVISION,
                 fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
+                readRequiredContexts: readRequiredStatusCheckContextsAsync,
+                cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(deps.owner, deps.repo), ledgerPath: deps.ledgerPath, runId: reuseRunId }),
               });
               if (!poster.failed()) onPhase?.("posted");
               if (!discriminationPosted.posted && !discriminationPosted.replayed) {
@@ -475,6 +477,8 @@ export function buildSweepEffects(
       reviewInputDigest: pr.reviewInputDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
+      readRequiredContexts: readRequiredStatusCheckContextsAsync,
+      cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(deps.owner, deps.repo), ledgerPath: deps.ledgerPath, runId: reuseRunId }),
     });
     if (!poster.failed()) onPhase?.("posted");
     if (!reusedStatus.posted && !reusedStatus.replayed) return 1;
