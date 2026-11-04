@@ -53,8 +53,13 @@ export function selectedRegistryLifecycleExec(installRoot: string, binding: { se
   const { session, pin } = binding;
   const recycler = join(installRoot, "deploy/recycle-container.sh"), serve = join(installRoot, "deploy/serve-container.sh");
   return (cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }): string => {
-    const script = cmd === "bash" && args[0] === recycler ? recycler
-      : cmd === "bash" && args[0] === "-c" && args[2] === "recycle-wait" && args[4] === recycler ? recycler
+    // W1-T10573 wraps its own recycler argv with the active packet. Admit only that maintained
+    // wrapper, then recognize the same two child shapes; never search arbitrary shell arguments.
+    const child = cmd === "bash" && args[0] === "-c" && args[2] === "selected-registry-launch"
+      && args[1] === 'export RMD_INSTANCE_REGISTRY="$1" RMD_INSTANCE_REGISTRY_DIGEST="$2" RMD_INSTANCE_REGISTRY_LAUNCH_BINDING="$3"; shift 3; exec bash "$@"'
+      ? args.slice(6) : args;
+    const script = cmd === "bash" && child[0] === recycler ? recycler
+      : cmd === "bash" && child[0] === "-c" && child[2] === "recycle-wait" && child[4] === recycler ? recycler
       : cmd === "env" && args[0]?.startsWith("RMD_STATE_DIR=") && args.at(-3) === "bash"
         && args.at(-2) === serve && args.at(-1) === "--replace" ? serve : undefined;
     let forward = false;
@@ -62,10 +67,13 @@ export function selectedRegistryLifecycleExec(installRoot: string, binding: { se
       try {
         const fd = openSync(script, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
         try {
-          if (!fstatSync(fd).isFile()) throw new Error("unsupported_child");
-          const header = Buffer.alloc(16384);
-          const count = readSync(fd, header, 0, header.length, 0);
-          const text = header.subarray(0, count).toString("utf8").split("\n").slice(0, 256).join("\n");
+          const stat = fstatSync(fd);
+          if (!stat.isFile() || stat.size > 4194304) throw new Error("unsupported_child");
+          const header = Buffer.alloc(stat.size + 1);
+          let count = 0, read: number;
+          while (count < header.length && (read = readSync(fd, header, count, header.length - count, count)) > 0) count += read;
+          if (count !== stat.size) throw new Error("child_changed");
+          const text = header.subarray(0, count).toString("utf8");
           forward = text.includes("--selected-registry-shadow)") && text.includes("--selected-registry-pin)");
         } finally { closeSync(fd); }
       } catch (error) {

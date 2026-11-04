@@ -311,6 +311,7 @@ interface RunOpts {
   unsetDockerHost?: boolean;
   unselectedRegistry?: boolean;
   forbidHostEffects?: boolean;
+  supervisorBinding?: { session?: string; pin?: string };
 }
 
 test("selected shell shadow reaches real lifecycle and heartbeat consumers: recycler preserves actual child argv", async t => {
@@ -387,9 +388,29 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
     writeFileSync(join(dir, bin), '#!/usr/bin/env bash\nprintf "forbidden\\t%s\\n" "$0" >> "$STUB_REC/calls"\nexit 97\n', { mode: 0o755 });
   }
   const github = opts.forbidHostEffects ? ghShim([{ when: "", exit: 97 }]) : undefined;
+  let command = opts.shellPath ?? "bash", argv = [opts.scriptPath ?? SCRIPT, ...(opts.args ?? [])];
+  if (opts.supervisorBinding) {
+    // Exercise the real lifecycle producer, including its active packet and derived-wait wrappers.
+    const driver = join(rec, "supervisor.mjs");
+    symlinkSync(join(REPO_ROOT, "src"), join(rec, "src"));
+    writeFileSync(join(rec, "package.json"), JSON.stringify({ type: "module", imports: { "#src/*": "./src/*" } }));
+    writeFileSync(driver, `
+import { withInstanceRegistryRuntime } from '#src/lib/instance-registry-selection.js';
+import { realDeployDeps } from '#src/lib/deployer.js';
+import { selectedRegistryLifecycleExec } from '#src/lib/selected-registry-consumers.js';
+await withInstanceRegistryRuntime(() => {
+  const deps = realDeployDeps({ installPath: ${JSON.stringify(REPO_ROOT)}, stateRoot: ${JSON.stringify(state)},
+    daemonLabel: 'fixture', serveLabel: 'fixture-serve', servePort: 4317, uid: 1000,
+    execFile: selectedRegistryLifecycleExec(${JSON.stringify(REPO_ROOT)}, ${JSON.stringify(opts.supervisorBinding)}) });
+  deps.restartBackends().find(backend => backend.name === 'recycle-container').restart();
+});
+`);
+    command = process.execPath;
+    argv = ["--import", join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"), driver];
+  }
   let r;
   try {
-    r = spawnSync(opts.shellPath ?? "bash", [opts.scriptPath ?? SCRIPT, ...(opts.args ?? [])], {
+    r = spawnSync(command, argv, {
       encoding: "utf8",
       cwd: REPO_ROOT,
       env: {
@@ -555,6 +576,50 @@ test("selected shell shadow coexists with the active selection: the recycler's l
     assert.ok(!JSON.stringify(shadowed.calls).includes(session), "no private session reaches a container transport");
   } finally { fixture.cleanup(); }
 });
+
+for (const history of [false, true]) {
+test(`selected shell shadow reaches real lifecycle and heartbeat consumers: active supervisor ${history ? "derived wait" : "default wait"}`, () => {
+  const fixture = privateRecyclerFixture(), runs: Run[] = [];
+  try {
+    const state = join(fixture.root, "state");
+    mkdirSync(join(state, "state/inflight"), { recursive: true });
+    mkdirSync(join(state, "worktrees"));
+    assert.deepEqual(readdirSync(join(state, "state/inflight")), []);
+    writeFileSync(join(state, "state/ledger.ndjson"), history ? '{"step":"implement.done","worker_duration_ms":1500}\n' : "");
+    const session = join(fixture.root, "session.json"), candidate = join(fixture.root, "shadow.yaml");
+    writeFileSync(candidate, readFileSync(fixture.selected));
+    const captured = spawnSync(process.execPath, ["--import", join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"),
+      join(REPO_ROOT, "src/lib/child-entry-argv.ts"), "--selected-registry-shadow", REPO_ROOT, "--shadow", "--capture",
+      "--session", session, "--registry", candidate], { env: { ...process.env, RMD_INSTANCE_REGISTRY: undefined }, encoding: "utf8" });
+    assert.equal(captured.status, 0, captured.stderr);
+    const pin = captured.stdout.trim();
+    assert.match(pin, /^[a-f0-9]{64}$/);
+    writeFileSync(candidate, readFileSync(candidate, "utf8") + "# revised independently of the active selection\n");
+    for (const shadow of [false, true]) runs.push(runRecycle("private-good", {
+      stateDir: state, unsetDockerHost: true, forbidHostEffects: true,
+      supervisorBinding: shadow ? { session, pin } : {},
+      extraEnv: { RMD_INSTANCE_REGISTRY: fixture.selected, RMD_RECYCLE_HOST_LOCK: join(fixture.root, "recycle.lock") },
+    }));
+    for (const run of runs) {
+      assert.equal(run.status, 0, run.stdout + run.stderr);
+      assert.match(run.stdout, /deploy\.recycle_wait_derived/);
+      assert.doesNotMatch(run.stdout + run.stderr, /derive_failed|ENOENT/);
+    }
+    const launches = (run: Run) => run.calls.filter(c => isRun(c) && c.argv.includes("-d"));
+    assert.ok(launches(runs[0]!).length > 0, "the real active lifecycle consumer launches its target");
+    assert.deepEqual(launches(runs[1]!), launches(runs[0]!), "shadow invalidation preserves the active launch");
+    const rows = readFileSync(session + ".observations", "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.ok(rows.length >= 2, "the actual recycler observes pause and final launch boundaries");
+    assert.ok(rows.every(row => row.action === "recycle" && row.target_instance === "fixture"
+      && row.reason === "digest_mismatch" && row.selected_outcome === "would-refuse"));
+    assert.equal(createHash("sha256").update(readFileSync(session)).digest("hex"), pin);
+    for (const value of [session, candidate, pin]) assert.ok(!JSON.stringify(runs[1]!.calls).includes(value));
+  } finally {
+    for (const run of runs) for (const dir of [run.fixtureRecordingDir, run.fixtureStubDir]) rmSync(dir, { recursive: true, force: true });
+    fixture.cleanup();
+  }
+});
+}
 
 test("private registry selection reaches real host and daemon readers: recorded readonly mount and image reader", async () => {
   const fixture = privateRecyclerFixture();

@@ -356,23 +356,23 @@ with the host installer's `/home/craigoleyagent/rmd-state2` default. It never so
 an adapter beside the installed command. A missing checkout leaves observations
 unrecorded while the independent refresh continues.
 
-Only this option enables observations. `RMD_INSTANCE_REGISTRY` alone retains its
-existing legacy meaning. Capture preserves absence and explicit empty/invalid input
+Only this option enables shadow observations. `RMD_INSTANCE_REGISTRY` alone retains
+W1-T10573's independent active selection contract. Capture preserves absence and explicit empty/invalid input
 separately, uses the maintained bounded reader and pins its digest and capabilities.
 Failed initial selection stays unknown. Existing sessions are never refreshed into
 healthy authority. A separate session digest travels through trusted launcher and
 installer/recycler child arguments as `--selected-registry-pin`; changing the session
 or selected bytes invalidates later observations. This option is not exported to
 workers or added to container environment/mount allowlists.
-Generated installer/recycler forwarding first checks the known child's bounded argv
-header. An older child without this grammar receives its original arguments and no
+Generated installer/recycler forwarding first checks the known child's complete argv
+grammar within a 4 MiB script bound. An older child without this grammar receives its original arguments and no
 private selection; missing child evidence remains unknown. Capability checking never
 executes an older heartbeat or field-trial script as a probe.
 The generated healthy watchdog also carries the session and pin into `deploy-run`
 when that trusted CLI supports the handoff. The supervisor snapshots the two argv
 values and uses its existing subprocess seams for the recycler (including its
-derived drain-wait wrapper) and independent serve replacement. Only those exact
-checkout child paths with both option cases in their bounded headers receive the
+derived drain-wait wrapper and W1-T10573's exact active-packet wrapper) and independent serve replacement. Only those exact
+checkout child paths with both option cases in their bounded scripts receive the
 private arguments. Other subprocesses retain their original argv and environment.
 Children recheck the original pin at their own effects, including after image pulls;
 neither a revised session nor revised selection is recaptured into fresh authority.
@@ -413,7 +413,7 @@ every receipt carries `publication_permission: not-granted`.
 Disposable transport fixtures exercise the real scripts, generated launcher and CLI.
 The mixed-version fixtures retain the installer and field-trials script from
 `f936be06908593755b64b37f79c56e563203fc55`, with file digests in their provenance
-receipt. Linux x64 runs a hash-verified Bash 3.2 package and its pinned libraries
+receipt. Linux x64 runs a hash-verified static Bash 3.2 package
 from disposable extraction roots; macOS verifies its native Bash 3.2 version.
 The mixed-version proof fails when its required historical interpreter is unavailable.
 This is source qualification only: merging can reach existing automatic image/code

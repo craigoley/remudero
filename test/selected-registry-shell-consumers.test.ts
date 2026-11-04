@@ -98,22 +98,36 @@ if [ "$1" = -l ]; then cat "$CRONTAB_SNAPSHOT"; else cat > "$CRONTAB_SNAPSHOT"; 
 /**
  * The historical Bash 3.2 interpreter, never vendored: (a) the host's own /bin/bash when it is 3.2 (macOS),
  * (b) an absolute executable named by RMD_TEST_BASH32 (provided outside the repository, e.g. a pinned CI
- * install), its version verified. (c) Otherwise the 3.2 leg is UNMEASURED: a named, visible diagnostic, and
- * the leg runs under the current bash so no assertion is skipped, but nothing claims it was 3.2.
+ * install), its version verified. Linux x64 can extract a hash-pinned historical static package
+ * into a disposable directory. Missing or incorrect historical interpreters fail qualification.
  */
 function bash32(t: { after(fn: () => void): void; diagnostic(message: string): void }) {
-  const probe = (shell: string) => spawnSync(shell, ["-c", 'printf "%s" "$BASH_VERSION"'], { encoding: "utf8" });
+  const env: NodeJS.ProcessEnv = { LC_ALL: "C" };
+  const probe = (shell: string) => spawnSync(shell, ["-c", 'printf "%s" "$BASH_VERSION"'],
+    { encoding: "utf8", env: { ...process.env, ...env } });
   const candidates = [process.platform === "darwin" ? "/bin/bash" : undefined, process.env.RMD_TEST_BASH32]
     .filter((shell): shell is string => typeof shell === "string" && isAbsolute(shell));
   for (const shell of candidates) {
     const version = probe(shell);
-    if (version.status === 0 && /^3\.2\./.test(version.stdout)) return { shell, env: {} as NodeJS.ProcessEnv, version: version.stdout, measured: true };
+    assert.equal(version.status, 0, `UNMEASURED: historical Bash unavailable: ${shell}`);
+    assert.match(version.stdout, /^3\.2\./, "UNMEASURED: RMD_TEST_BASH32 must actually be Bash 3.2");
+    return { shell, env, version: version.stdout, measured: true };
   }
-  const current = spawnSync("bash", ["-c", 'command -v bash; printf "%s" "$BASH_VERSION"'], { encoding: "utf8" });
-  assert.equal(current.status, 0, String(current.error ?? current.stderr));
-  const [shell, version] = current.stdout.split("\n");
-  t.diagnostic(`UNMEASURED: bash 3.2 leg ran under bash ${version} (${shell}); no native 3.2 /bin/bash and no RMD_TEST_BASH32 executable reporting 3.2`);
-  return { shell: shell!, env: {} as NodeJS.ProcessEnv, version: version!, measured: false };
+  assert.ok(process.platform === "linux" && process.arch === "x64", "UNMEASURED: provide RMD_TEST_BASH32 on this platform");
+  const root = mkdtempSync(join(tmpdir(), "rmd-bash32-")), archive = join(root, "bash.deb");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const download = spawnSync("curl", ["--fail", "--silent", "--show-error", "--max-time", "30", "--output", archive,
+    "https://old-releases.ubuntu.com/ubuntu/pool/universe/b/bash/bash-static_3.2-5ubuntu1_amd64.deb"], { encoding: "utf8" });
+  assert.equal(download.status, 0, `UNMEASURED: historical Bash download failed: ${download.stderr}`);
+  assert.equal(createHash("sha256").update(readFileSync(archive)).digest("hex"),
+    "ae1aa2e68409490cfeb71259226a7d9f52ac8f22ec11a25785adfc13410523c3");
+  const extracted = spawnSync("dpkg-deb", ["--extract", archive, root], { encoding: "utf8" });
+  assert.equal(extracted.status, 0, `UNMEASURED: historical Bash extraction failed: ${extracted.stderr}`);
+  const shell = join(root, "bin/bash-static"), version = probe(shell);
+  assert.equal(version.status, 0, version.stderr);
+  assert.match(version.stdout, /^3\.2\./);
+  t.diagnostic(`hash-pinned historical Bash ${version.stdout}`);
+  return { shell, env, version: version.stdout, measured: true };
 }
 
 test("selected shell capability probe reads the whole trusted child script", t => {
@@ -130,11 +144,24 @@ test("selected shell capability probe reads the whole trusted child script", t =
   assert.equal(supports(join(root, "absent.sh")), 1);
 });
 
-function supervisorFixture(t: { after(fn: () => void): void }) {
-  const f = registryShellFixture(t), pin = f.capture();
+function lifecycleFixture(t: { after(fn: () => void): void }) {
+  const f = registryShellFixture(t);
+  for (const dir of [join(f.state, "state/inflight"), join(f.state, "worktrees")]) {
+    mkdirSync(dir, { recursive: true });
+    assert.deepEqual(readdirSync(dir), [], "real lifecycle lock directories exist before qualification");
+  }
+  // RMD_INSTANCE_REGISTRY now enables W1-T10573's active launcher contract. The legacy leg is
+  // deliberately absent; its on-disk registry still supplies the supervisor's actual target.
+  delete f.env.RMD_INSTANCE_REGISTRY;
+  f.env.RMD_CLOUDFLARED_TOKEN_FILE = join(f.root, "absent-tunnel-token");
   writeFileSync(f.legacy, `instances:\n  core:\n    repo: remudero\n    github_repo: craigoley/remudero\n    state_dir: ${f.state}\n    container_name: remudero-daemon\n    primary: true\n    image: fixture.azurecr.io/remudero:latest\n    claude_dir: ${f.env.RMD_CLAUDE_DIR}\n    codex_dir: ${f.env.RMD_CODEX_DIR}\n    container_config_dir: ${f.env.RMD_CONTAINER_CONFIG_DIR}\n`);
   mkdirSync(join(f.state, "daemon-install/.remudero"));
   writeFileSync(join(f.state, "daemon-install/.remudero/daemon-instances.yaml"), readFileSync(f.legacy));
+  return f;
+}
+
+function supervisorFixture(t: { after(fn: () => void): void }) {
+  const f = lifecycleFixture(t), pin = f.capture();
   assert.equal(f.install().status, 0);
   mkdirSync(join(f.state, "remudero/bin"));
   symlinkSync(join(REPO_ROOT, "src"), join(f.state, "remudero/src"));
@@ -198,6 +225,8 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers: gene
   const call = f.receipts().find(c => c.bin === "rmd" && c.args[0] === "deploy-run");
   assert.ok(call, launch.stdout + launch.stderr);
   assert.deepEqual(call.args.slice(-4), ["--selected-registry-shadow", f.session, "--selected-registry-pin", f.pin]);
+  assert.match(launch.stdout, /deploy\.recycle_wait_derived/, "the real consumer reads its complete state root");
+  assert.doesNotMatch(launch.stdout + launch.stderr, /deploy\.recycle_wait_derive_failed|ENOENT/);
   assert.ok(f.rows().slice(offset).some(r => r.action === "recycle"), launch.stdout + launch.stderr);
   for (const name of ["remudero-daemon", "remudero-serve"]) {
     assert.ok(f.receipts().some(c => c.bin === "docker" && c.args[0] === "run" && c.args.includes(name)), launch.stdout + launch.stderr);
@@ -241,6 +270,9 @@ test("selected shell defaults and failures remain shadow only without live effec
   assert.deepEqual(exec("bash", [recycler, "--instance", "core"]).trim().split("\n"), ["--instance", "core", ...expected]);
   assert.deepEqual(exec("bash", ["-c", 'shift; exec bash "$@"', "recycle-wait", "15", recycler]).trim().split("\n"), expected);
   assert.deepEqual(exec("env", ["RMD_STATE_DIR=fixture", "bash", serve, "--replace"]).trim().split("\n"), ["--replace", ...expected]);
+  writeFileSync(recycler, "# padding\n".repeat(4000) + header + body);
+  assert.deepEqual(exec("bash", [recycler, "--instance", "core"]).trim().split("\n"), ["--instance", "core", ...expected],
+    "a real child option parser beyond 256 lines and 16 KiB still receives the binding");
   const legacy = selectedRegistryLifecycleExec(f.root, {});
   assert.equal(legacy("bash", [recycler, "--instance", "core"]), "--instance\ncore\n");
   assert.equal(selectedRegistryLifecycleExec(f.root, { pin: binding.pin })("bash", [recycler, "--instance", "core"]), "--instance\ncore\n");
@@ -255,6 +287,23 @@ test("selected shell defaults and failures remain shadow only without live effec
   assert.equal(exec("bash", [recycler, "--instance", "core"]), "--instance\ncore\n", "both transport options must be supported");
   writeFileSync(recycler, body);
   assert.equal(exec("bash", [recycler, "--instance", "core"]), "--instance\ncore\n", "old grammar keeps legacy argv");
+  writeFileSync(recycler, header + "# padding\n".repeat(466034) + body);
+  const oversizedErrors: unknown[][] = [];
+  const oversizedDiagnostic = t.mock.method(console, "error", (...args: unknown[]) => { oversizedErrors.push(args); });
+  try {
+    assert.equal(exec("bash", [recycler, "--instance", "core"]), "--instance\ncore\n", "oversized child evidence stays unqualified");
+    assert.equal(oversizedErrors.length, 1);
+  } finally { oversizedDiagnostic.mock.restore(); }
+  writeFileSync(recycler, header + body);
+  const readNormally = fs.readSync;
+  const changingRead = t.mock.method(fs, "readSync", (...args: Parameters<typeof fs.readSync>) => {
+    writeFileSync(recycler, header + body + "# grew after stat\n");
+    return Reflect.apply(readNormally, fs, args);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(exec("bash", [recycler, "--instance", "core"]), "--instance\ncore\n", "a growing child cannot supply truncated capability evidence");
+  } finally { changingRead.mock.restore(); syncBuiltinESMExports(); }
   rmSync(recycler); symlinkSync(serve, recycler);
   const errors: unknown[][] = [];
   t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args); });
@@ -288,12 +337,13 @@ test("selected shell defaults and failures remain shadow only without live effec
 });
 
 test("selected shell shadow reaches real lifecycle and heartbeat consumers", async t => {
-  const f = registryShellFixture(t), pin = f.capture();
+  const f = lifecycleFixture(t), pin = f.capture();
   const installed = f.install();
   assert.equal(installed.status, 0, installed.stderr);
   const launched = f.run(join(f.output, "launcher"), ["--boot"]);
   assert.equal(launched.status, 0, launched.stdout + launched.stderr);
-  const beat = f.run(join(REPO_ROOT, "scripts/fleet-heartbeat.sh"), ["--selected-registry-shadow", f.session]);
+  const beat = f.run(join(REPO_ROOT, "scripts/fleet-heartbeat.sh"), ["--selected-registry-shadow", f.session],
+    { RMD_INSTANCE_REGISTRY: f.legacy });
   assert.equal(beat.status, 0, beat.stderr);
   assert.ok(f.receipts().some(c => c.bin === "docker" && c.args[0] === "run"), "rendered launcher really launches a child");
   assert.ok(f.receipts().some(c => c.bin === "git" && c.args.includes("push")), "real heartbeat reaches publication");
