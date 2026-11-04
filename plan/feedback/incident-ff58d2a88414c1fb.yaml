@@ -1,0 +1,28 @@
+id: incident-ff58d2a88414c1fb
+ts: 2026-11-03T22:06:44.718Z
+raw: >-
+  Incident ff58d2a88414: invariant reconcile.unreadable
+
+  First seen: 2026-11-03T18:34:59.009Z
+
+  Last seen: 2026-11-03T18:34:59.009Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - fleet reconciliation history unreadable: /home/node/Remudero/state/ledger.2026-10-18T08-53-10-374Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-18T10-06-35-477Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-18T11-19-13-825Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-18T12-28-26-873Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-18T13-42-35-946Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-18T15-24-55-860Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-18T16-59-01-850Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-18T17-00-06-450Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-18T18-59-38-422Z.ndjson.gz — the fleet reconciler repairs nothing until it can read its history; move the named file out of the state dir (/home/node/Remudero/state)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#ff58d2a88414c1fbd134de33b8a0f3423cbc16e288780932a910b0a4b8cb4677
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

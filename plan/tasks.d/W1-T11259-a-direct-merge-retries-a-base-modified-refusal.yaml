@@ -1,0 +1,47 @@
+- id: W1-T11259
+  title: An already-clean plan PR whose direct merge GitHub refuses with "Base branch was modified" re-reads and retries within the same arm call, and a "ci-gate is expected" refusal is held for the next checks-green pass instead of failing the arm
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one function's refusal handling in the already-clean direct-merge fallback; the bounded retry loop is W1-T1280's, reused
+  origin: operator-session#review-throughput-2026-11-03
+  plan_refs:
+    - W1-T11163
+    - W1-T1280
+    - W1-T9212
+  files:
+    - src/lib/arm-auto-merge.ts
+    - test/github/a-direct-merge-retries-a-base-modified-refusal.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: In mergeDirectAfterPreflightSteps, a first mergeDirect that throws "Base branch was modified" (HTTP 405) and then succeeds after a re-read ends direct-merged in the same call; a re-read that reads CONFLICTING, or the retry cap, still ends direct-merge-failed; a non-405 error stays direct-merge-failed; a "Required status check ... is expected" refusal returns a hold with remedy retry-later, not direct-merge-failed
+      proof: "unit test: test/github/a-direct-merge-retries-a-base-modified-refusal.test.ts"
+    - claim: The already-clean fallback's refusal handling is marked as this task's and reuses W1-T1280's bounded unsettled-refusal loop
+      proof: "grep: W1-T11259 in src/lib/arm-auto-merge.ts"
+  rationale: |
+    OBSERVED 2026-11-03:
+    - #16577 (plan-only) posted remudero-review success at 18:24:18Z. At 18:29:00.220Z it logged automerge.arm_failed: outcome direct-merge-failed, head 8231bf46e, behind_by 5, mergeability MERGEABLE, remedy direct-merge.
+    - The error: "gh: Base branch was modified. Review and try the merge again. (HTTP 405)".
+    - The PR was still OPEN and CLEAN about 35 min later. This code already includes W1-T11163 (c0c6fb43e).
+    - mergeDirectAfterPreflightSteps calls deps.mergeDirect once; on any error it reads isMerged and returns direct-merge-failed.
+    - W1-T1280's re-read-and-retry loop (mergeDirectRefusalMayBeUnsettled, REST_MERGE_UNSETTLED_MAX_READS = 3, 2 s interval, readMergeFacts) is wired only on the rate-limit fallback path.
+    - Over the 24 h before 18:57Z (690 archives, 24,534 automerge rows):
+      - 138 automerge.clean_status_direct_merge rows succeeded, and 194 automerge.armed. That is the positive control.
+      - 34 automerge.arm_failed rows; 18 of them were already-clean fallbacks that failed on a 405, about 12% of attempts.
+      - Ten PRs read "Base branch was modified": #16304, #16318, #16369, #16370, #16428, #16493, #16496, #16503, #16508, #16577.
+      - Nine read "Required status check \"ci-gate\" is expected": #16433, #16455, #16470, #16481, #16484, #16487, #16504, #16562, #16582.
+      - Each failure waited 19-239 min, median about 53 min over 16 resolved PRs, for a later pass to merge it.
+  design: |
+    In mergeDirectAfterPreflightSteps (src/lib/arm-auto-merge.ts), widen the deps Pick to include readMergeFacts and ledgerLines. Then:
+    - When mergeDirect throws a refusal matching "Base branch was modified" and readMergeFacts is present, run W1-T1280's loop. Re-read the merge facts, re-run directMergePreflightSteps on MERGEABLE, and retry mergeDirect. Stop on CONFLICTING or at REST_MERGE_UNSETTLED_MAX_READS.
+    - When the refusal matches 'Required status check ".*" is expected', return a plan-pr-held-style hold with remedy retry-later, not direct-merge-failed, so W1-T9212's checks-green re-evaluation merges it on the next light pass after the check reports.
+    Mark the new handling with a comment naming W1-T11259.
+    NOT IN SCOPE: why ci-gate reads as expected at a head the arm path read as clean (a separate check-suite timeline question), and the auto-merge (--auto) path itself.
+  note: |
+    reservation hand-off: run-unfiled-1793732872741 -> run-unfiled-1793732872741
+    Reserved with rmd next-task-id (W1-T11259 on run-unfiled-1793732872741). From the operator session's review-throughput diagnosis.

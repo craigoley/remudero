@@ -1,0 +1,70 @@
+- id: W1-T11280
+  title: "Reuse the persisted GitHub snapshot in status JSON reads"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs:
+    - W1-T4208
+    - W1-T11155
+  files: [src/lib/report-commands.ts, test/status-json-deadline.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-11-03 in the PLAN-create-1793745608891 worktree. Line numbers are approximate (~); check them again at your head.
+    OBSERVED: the JSON-mode status gateway in `statusCommand` (src/lib/report-commands.ts ~946) calls
+    `buildBatchedGithub(owner, repo, { pacer, exec })` with NO `snapshotCache`. So every `rmd status --json` health
+    probe re-fetches the GitHub board inside its shared 30-second external-read deadline. The same module's task-case
+    path (~1153) already passes `{ snapshotCache: createBoardSnapshotCache(dirname(stateDir), owner, repo) }`, and
+    `createBoardSnapshotCache` is already imported (~14). That means the persisted repository snapshot exists and
+    other read paths already use it. Only the JSON status read ignores it.
+    PREDECESSOR: W1-T4208 (merged) added the overall status JSON deadline and the rule that a read which does not finish
+    is reported `unavailable`, never as empty. This task keeps that deadline and builds on it.
+    SEPARATE, NOT A DEPENDENCY: W1-T11155 (queued) fixes the shared child-entry bundle's deferred-module and package
+    resolution. It is a different concern in different files and does not block this task.
+    Settled by lookup: is this already filed or already decided? -> no. No task in plan/tasks.d or plan/tasks.yaml wires a
+      snapshot cache into the status JSON gateway, and DECISIONS.md and LEARNINGS.md say nothing about it (grep
+      BoardSnapshotCache / snapshotCache / status JSON).
+    Settled by lookup: does the persisted cache already model unusable evidence? -> yes. src/lib/board-snapshot-cache.ts
+      has `stale_observation` refusals, `truncated` / `snapshot_unavailable` reasons, and `open snapshot unreadable` results
+      (~284, ~366, ~563, ~772).
+    Settled by lookup: which deadline and failure semantics must stay? -> W1-T4208's shared external-read deadline and
+      its unavailable-not-empty rule (plan/tasks.d/W1-T4208-status-json-deadline.yaml; src/lib/report-commands.ts ~829-~994).
+    Settled by lookup: is W1-T11155 a prerequisite? -> no. It touches review/status/escalate and the bundle builder, not
+      report-commands.ts (plan/tasks.d/W1-T11155-a-bundled-review-loads-the-modules-it-defers.yaml).
+    Scope is the operator-approved proposal
+    (wreckterra-evidence-20261025/status-json-snapshot-cache-followup-proposal-20261103.json).
+  design: |
+    1. Change ONLY the JSON-mode `buildBatchedGithub` call in `statusCommand` so it also passes the persisted repository
+       `BoardSnapshotCache` (`createBoardSnapshotCache(<state root>, owner, repo)`, with the root chosen the same way the
+       task-case path chooses it). Keep the existing pacer and exec deadline wiring unchanged. Do not change the non-JSON branch.
+    2. FAIL CLOSED. If the snapshot is absent, stale, truncated or unreadable, or if a remote-ref read fails, the result
+       stays explicit. The rows that needed that evidence are reported `unavailable` with a reason, exactly as W1-T4208
+       requires. They are never empty, zero, or silently filled from an unusable snapshot.
+    3. Keep the 30-second status JSON read deadline, the selector rules and the admission rules exactly as they are.
+       This task adds no new knobs.
+    4. TDD, strictly: in test/status-json-deadline.test.ts, write the failing regressions before the change. (a) A fresh
+       persisted snapshot is used by the JSON status read without a full board re-fetch. (b) A missing, stale, truncated
+       or unreadable snapshot, and a remote-ref failure, each still yield explicit unavailable evidence within the deadline.
+       Put `W1-T11280` in each new test title.
+    NOT IN SCOPE: any other file, any change to board-snapshot-cache.ts or status.ts, any new task.
+  acceptance:
+    - claim: "the status JSON deadline suite, including the new snapshot-reuse and fail-closed regressions, passes"
+      proof: "unit test: test/status-json-deadline.test.ts"
+    - claim: "the regressions for consuming a fresh persisted snapshot and for unusable or missing evidence staying unavailable are titled with this task id"
+      proof: "grep: W1-T11280 in test/status-json-deadline.test.ts"
+  note: |
+    verify:auto: the change is one gateway option, and both outcomes can be checked against a seeded snapshot fixture
+    with an injected exec. budget_usd 30, as approved.
+    risk:high / band_meaning: span (Rule 19, #588 merits test): the task asserts ONE cross-file invariant: the JSON
+    status read uses a fresh persisted snapshot and fails closed on unusable evidence. It cannot be satisfied piecewise.
+    The new regressions in test/status-json-deadline.test.ts fail until the report-commands.ts gateway passes the cache,
+    and the gateway change has no other falsifier. That suite already exists from W1-T4208, so it is not renamed to this
+    shard's slug. The operator-approved scope is exactly this one task, so it is not split. The band reflects span only.
+    The change itself is still one read-only option on a status path that already fails closed.
+    No depends_on: W1-T4208 is merged, and W1-T11155 is separate.

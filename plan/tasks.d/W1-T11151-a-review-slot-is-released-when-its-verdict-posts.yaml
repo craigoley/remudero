@@ -18,6 +18,7 @@
     - src/cli/commands/review.ts
     - src/lib/run-child.ts
     - src/lib/sweep.ts
+    - src/run-task.ts
     - test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts
   status: queued
   attempts: 0
@@ -57,3 +58,4 @@
     findings, item 3 (p1), first half: release at post. The second half, cheap child start, is W1-T11152. Ordering: do not build in
     parallel with W1-T11149 (both edit the child registry in src/lib/sweep.ts and runReview); not in depends_on because it is not
     on main at filing.
+    Amended 2026-11-03 (scope-amendment/W1-T11151-detached-review-phase): src/run-task.ts joins files. The hand fix of #16452 found that runDetachedWork's review arm never forwards ctx.onPhase to reviewCommand, so a detached review child never writes review:posted to status.json; reportReviewPhase has no AsyncLocalStorage store outside the sweep's in-process postReview. The criterion-1 test drives the real detached-child path (run-child-main and its status.json writer, read back through readOwnedChildPhase) and must not import #src/run-task.js (reach ratchet).
