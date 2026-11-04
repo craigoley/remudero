@@ -31,7 +31,7 @@ test("W1-T11061: comment compression preserves executable code", () => {
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/report-commands.ts"), "utf8"));
   const before = compressionPinBase("src/lib/report-commands.ts", import.meta.url);
   if (before !== undefined) {
-    // Only on the PR that adds this pin: later feature edits to the module stay free.
+    // Only on the PR that adds this pin: later feature edits to the module stay free (#16082).
     const base = snapshot(before);
     assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
       [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");

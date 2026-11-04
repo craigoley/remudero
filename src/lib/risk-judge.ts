@@ -902,8 +902,8 @@ export interface RiskJudgeConfig {
   confidenceThreshold?: number;
   /** Default is fail-closed ESCALATE. Autonomous callers may retain deterministic gate behavior. */
   judgeUnavailableAction?: RiskJudgeActionKind;
-  /** W1-T7724 — the width of the BORDERLINE band above the threshold: a `low` verdict at or above the
-   *  threshold but under `threshold + borderlineBand` is UNCERTAIN, so it is re-judged with the diff when a
+  /** W1-T7724 — the width of the BORDERLINE band above the threshold: a `low` or `high` verdict at or above
+   *  the threshold but under `threshold + borderlineBand` is UNCERTAIN, so it is re-judged with the diff when a
    *  diff source is wired. Live policy (`risk.borderlineBand`); absent reads as 0, no band. It only picks
    *  WHICH verdicts get a second look — {@link planRiskJudgeAction} never reads it. */
   borderlineBand?: number;
@@ -940,8 +940,8 @@ export interface RiskPolicy {
    *  directly. `false` stops the direct release and stages a proposal instead — the SAME
    *  reviewed proposal/PR path every other release already goes through. */
   verifyHumanReleaseEnabled: boolean;
-  /** W1-T7724 — the borderline band above `confidenceThreshold` inside which a `low` verdict is still
-   *  uncertain and is re-judged with the diff. 0 (the default) is no band: only a verdict BELOW the
+  /** W1-T7724 — the borderline band above `confidenceThreshold` inside which a `low` or `high` verdict is
+   *  still uncertain and is re-judged with the diff. 0 (the default) is no band: only a verdict BELOW the
    *  threshold is uncertain. */
   borderlineBand?: number;
 }
@@ -1244,12 +1244,16 @@ export interface RiskJudgeResult {
   evidenceTier?: "description" | "diff";
 }
 
-/** W1-T7724 — is this description-tier verdict UNCERTAIN: a judged `low`, no STOP, whose confidence is under
- *  the threshold or inside the borderline band just above it. `high` is never uncertain (it escalates), and an
- *  unavailable judge is not a judgment at all. */
-export function isUncertainLowVerdict(verdict: RiskJudgeVerdict, config: RiskJudgeConfig = {}): boolean {
+/** W1-T7724 — is this description-tier verdict UNCERTAIN: a judged `low` or `high`, no STOP, whose confidence
+ *  is under the threshold or inside the borderline band just above it. A STOP always escalates, a confident
+ *  verdict of either label is acted on as it stands, and an unavailable judge is not a judgment at all.
+ *  An uncertain `high` is uncertain too: PR #16213 (W1-T10857) sat green with a review PASS for ten hours
+ *  behind a `high` at confidence 0.60 whose every reason was a gap in the metadata the diff would have settled.
+ *  The diff-tier verdict decides; an unread diff leaves the `high` standing, so it still escalates. */
+export function isUncertainVerdict(verdict: RiskJudgeVerdict, config: RiskJudgeConfig = {}): boolean {
   if (verdict.availability === "unavailable") return false;
-  if (verdict.verdict !== "low" || verdict.gateConsequence === "STOP") return false;
+  if (verdict.gateConsequence === "STOP") return false;
+  if (verdict.verdict !== "low" && verdict.verdict !== "high") return false;
   const threshold = config.confidenceThreshold ?? DEFAULT_CONFIDENCE_THRESHOLD;
   return verdict.confidence < threshold + Math.max(0, config.borderlineBand ?? 0);
 }
@@ -1304,14 +1308,14 @@ export async function runRiskJudge(
   const digest = input.planContextDigest === undefined ? {} : { plan_context_digest: input.planContextDigest };
   const tier1 = await assessRisk(input, deps);
   if (deps.signal?.aborted) return cancelledRiskJudgeResult();
-  // W1-T7724: an UNCERTAIN `low` is judged again with the diff; the second verdict decides. A `high`, a confident
-  // `low` and an unavailable judge never reach the diff tier.
+  // W1-T7724: an UNCERTAIN verdict, `low` or `high`, is judged again with the diff; the second verdict decides.
+  // A STOP, a confident verdict and an unavailable judge never reach the diff tier.
   let verdict = tier1;
   let evidenceTier: "description" | "diff" = "description";
   let evidence: RiskJudgeDiffEvidence | undefined;
   let actionConfig = config;
   let diffUnread: string | undefined;
-  if (deps.diffSource !== undefined && isUncertainLowVerdict(tier1, config)) {
+  if (deps.diffSource !== undefined && isUncertainVerdict(tier1, config)) {
     const second = await judgeWithDiff(input, deps, deps.diffSource);
     if (deps.signal?.aborted) return cancelledRiskJudgeResult();
     if (second.kind === "judged") {

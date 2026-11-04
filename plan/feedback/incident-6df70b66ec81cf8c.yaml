@@ -1,0 +1,32 @@
+id: incident-6df70b66ec81cf8c
+ts: 2026-11-03T22:03:02.468Z
+raw: >-
+  Incident 6df70b66ec81: flow pr-stage-stall:escalated:already escalated at
+  <n>-<n>-03T16:<n>:<n>.601Z in
+  https://github.com/craigoley/remudero/issues/<n>, still awaiting an operator:
+  PR #<pr> needs an instrument edit only the operator can grant —
+  https://github.com/craigoley/remudero/pull/<n>
+
+  First seen: 2026-11-03T16:18:27.312Z
+
+  Last seen: 2026-11-03T16:18:27.312Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16312 escalated: already escalated at 2026-11-03T16:01:34.601Z in https://github.com/craigoley/remudero/issues/16547, still awaiting an operator: PR #16312 needs an instrument edit only the operator can grant — https://github.com/craigoley/remudero/pull/16312
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#6df70b66ec81cf8c96ed415104fcff79b205f5abcd889bb134dd3d83cc50b829
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
