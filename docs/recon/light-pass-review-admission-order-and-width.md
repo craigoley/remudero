@@ -111,7 +111,7 @@ The table's "wait after jump" runs from the refill until J was admitted at that 
 |---|---|---|---|---|---|---|---|
 | 2 | 37 | 63 | 36 | 15 | 0 | 3 | 38 |
 
-All 194 rows are in the appendix.
+The appendix numbers all 194 jump rows, accounting for the 103 refills that jumped at least one older eligible PR.
 
 ## 2. Width per light pass, and the head of the queue
 
@@ -129,6 +129,8 @@ All 194 rows are in the appendix.
 | (b) at 197 passes that left a bound row (112 exact) | 140 (71%) | 6 | 7 | 44 (22%) |
 | (c) 301 refills | 221 (73%) | 14 | 8 | 58 (19%) |
 | Selector time share over the window | 64% | 5% | 6% | 25% (mean 1.91) |
+
+Of the 727 observable light passes, 462 admitted a review and have a reconstructed width: 257 at width 1, 24 at width 2, 40 at width 3, and 141 at width 4. The remaining 265 have no exact per-pass width; the 197 bound rows are overlapping evidence, not 197 additional passes. The selector time share is a duration measure, not a substitute for those unresolved pass counts.
 
 Width 1 comes from the `cpu-pressure` arm, or from the 5–20 PSI hold band after it. In the last 24 h of the window it was 75% of the time, and every `cpu-pressure` row in that span had `pressure_source: host-load`.
 
@@ -149,7 +151,7 @@ Width 1 comes from the `cpu-pressure` arm, or from the 5–20 PSI hold band afte
   - Needs-human escalation open at the head: 233 passes. 204 had at least one `ci` or other-cause issue; 29 had only `stage-stall` issues, which were raised because the PR had waited for review.
   - #15551: 83, #15520: 66, #15046: 44, #14567: 13, #16044: 13, #16033: 3, #14793: 2, #14176: 2, #16007: 2, #15368: 2, #14942: 1, #14986: 1, #15268: 1.
 - **Was that head admitted?** 21 of the 333 passes started its review; 312 did not.
-- **The pick that spends the width.** 130 passes left a "bound N" refusal with N > 0, no "admitted … ahead" list, and no `sweep.review_admitted` within 3 s. That is a pick that spent the width without starting a review. In 40 of them the head could not merge without a person: #14793 32, #14567 3, #15046 3, #15368 2.
+- **Potential width spent without admission.** 130 passes left a "bound N" refusal with N > 0, no "admitted … ahead" list, and no `sweep.review_admitted` within 3 s. In 40 of them the reconstructed head could not merge without a person: #14793 32, #14567 3, #15046 3, #15368 2. The ledger does not identify the pick on those passes, so this co-occurrence does not establish that the blocked head caused non-admission.
 
 By day, unmergeable-head passes were: 10-26 10, 10-27 15, 10-28 76, 10-29 66, 10-30 75, 10-31 55, 11-01 18, 11-02 18.
 
@@ -167,6 +169,7 @@ Reproduced from the ledger as written:
 | 20:11:52.973Z | #15553 | 1126151 ms | 70 min |
 
 - #15538 was admitted at 21:22:06.512Z (light surface).
+- Appendix rows 128, 131 and 134 are the three #15538 jumps in the full replay.
 - **Queue head, same evening.**
   - At 20:44:24Z, 20:53:44Z and 20:54:31Z the reconstructed queue head was #14793 (head `6aa3094dd`). At 20:53Z and 20:54Z #15133 was second.
   - #14793 carried a human CHANGES_REQUESTED review submitted 2026-10-27T18:10:38Z and dismissed at 21:13:07Z (issue timeline). So all three passes count as "head cannot merge without a person".
@@ -188,11 +191,11 @@ Reproduced from the ledger as written:
 
 ## 5. Recommendation
 
-**Change the queue-head rule first, and make refills re-read the queue.** Both, as one follow-up filing. Leave the width to its own filing.
+**Change the queue-head rule first, and make refills re-read the queue.** Both, as one follow-up filing. Leave the width to its own filing. The evidence for the head rule is the frequency of blocked heads, not a measured causal effect on admissions.
 
 **Evidence:**
 
-- **The head rule.** In 47.0% of observable light passes (333 of 709), the oldest-first head could not merge without a person. In 40 passes such a head spent the width with no review started. #14793 alone held the head for 94 passes across 10-27 to 10-29.
+- **The head rule.** In 47.0% of observable light passes with a non-empty spawning queue (333 of 709), the oldest-first head could not merge without a person. In 40 passes a blocked head coincided with a positive-bound refusal and no observed admission; causation is unresolved. #14793 alone held the head for 94 passes across 10-27 to 10-29.
   - A rule that sets aside heads blocked on a person sends the slot to a PR that can actually land.
   - "Blocked on a person" means a human CHANGES_REQUESTED in force, or an open needs-human escalation at that head that is not only a stage-stall raised by the wait itself.
   - The rule must still refresh the set-aside PR when its blocker clears; it must not drop it.
