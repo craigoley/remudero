@@ -13,7 +13,7 @@ import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, rea
 import { join } from "node:path";
 import { fixedClock } from "./clock.js";
 
-export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "IN_PASS" | "RECOVERING" | "CRASH_LOOP" | "UNKNOWN";
+export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "IN_PASS" | "IN_RECYCLE" | "RECOVERING" | "CRASH_LOOP" | "UNKNOWN";
 export type ProgressWatchdogAction = "none" | "capture-diagnostics" | "recycle" | "hold-revive";
 /** W1-T9702: where the open-PR count came from. A light pass writes one `sweep.pass` per PR, so only a full one counts. */
 export type OpenPrCountSource = "full_pass" | "full_pass_raised" | "max_over_window";
@@ -70,6 +70,7 @@ export interface ProgressWatchdogInput {
    *  launcher sets it), so the verb needs no new argument; neither present reads as no revivals. */
   revivalLog?: string;
   openPrCountSource?: OpenPrCountSource;
+  liveRecyclePausePid?: number;
 }
 
 function rowMs(row: Record<string, unknown>): number | undefined {
@@ -307,6 +308,10 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
     ({ state, action, progressAgeMs, generationBootMs, loopResumedMs, failedBoots15m, preNodeDeaths: preNode.count,
       ...(openPrCountSource ? { openPrCountSource } : {}), reason });
 
+  // W1-T11319: a live recycle's own PAUSE is not evidence of a stalled fleet.
+  if (input.liveRecyclePausePid !== undefined) {
+    return verdict("IN_RECYCLE", "none", `a live recycle (pid ${input.liveRecyclePausePid}) owns PAUSE; its pause is not a stall`);
+  }
   if (failedBoots15m >= CRASH_LOOP_BOOTS) {
     return verdict("CRASH_LOOP", "hold-revive", `${failedBoots15m} boots in 15 min logged daemon.paths and never reached daemon.boot`);
   }
