@@ -2336,7 +2336,12 @@ export async function buildStatusBoardAsync(root: string, ledgerPath: string, de
   // anchor the warm never saw, and that anchor took the sync `git grep` (review of #16432). A throwing read warms
   // nothing and is rethrown by the board's own INBOX read, exactly as the sync board reports it.
   let snapshot: { proposals: ReturnType<typeof readRegistry> } | { error: unknown };
-  try { snapshot = { proposals: readRegistry() }; } catch (error) { snapshot = { error }; }
+  try {
+    snapshot = { proposals: readRegistry() };
+  } catch (error) {
+    // Carried, not erased: the board's registry read below rethrows this exact error.
+    snapshot = { error };
+  }
   const anchors: EvidenceAnchor[] = "proposals" in snapshot ? snapshot.proposals.flatMap((p) => p.evidenceAnchors) : [];
   const failures = await warmAnchorGrepCache(cache, ref, anchors, (r, anchor) => gitGrepAnchorTrueAsync(deps.repoDir, r, anchor));
   return buildStatusBoard(root, ledgerPath, {
