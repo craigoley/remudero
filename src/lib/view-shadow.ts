@@ -27,7 +27,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { READ_MODEL_DIRNAME, openShadowCounterDb, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 import { computeViewBody, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewBody, type ViewDefinition, type ViewSource } from "./views.js";
-import { readShadowCounters, saveShadowCounter, shadowCounterPath, type ShadowClassification, type ShadowKeyChange, type ShadowPopulation, type ShadowPopulationEvidence, type ViewShadowState } from "./view-shadow-store.js";
+import { readShadowCounters, saveShadowCounter, shadowCounterPath, SHADOW_KEY_RETIRE_MS, type ShadowClassification, type ShadowKeyChange, type ShadowPopulation, type ShadowPopulationEvidence, type ViewShadowState } from "./view-shadow-store.js";
 
 export type { ShadowClassification, ShadowPopulation, ShadowPopulationEvidence, ViewShadowState } from "./view-shadow-store.js";
 
@@ -708,6 +708,8 @@ export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys" | "s
 
 export interface ShadowStore {
   load(): Record<string, ViewShadowState>;
+  /** When each loaded streak key of `view` was last sampled; absent for a store saved before W1-T11330. */
+  keyTimes?(view: string): ReadonlyMap<string, number> | undefined;
   save(view: string, state: ViewShadowState, keys?: ShadowKeyChange): void;
   close?(): void;
 }
@@ -719,11 +721,14 @@ export function viewShadowPath(stateDir: string): string {
 
 /** Counters survive a restart and a scratch wipe in `path`, written only behind the home read model's lease. */
 export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelLease, activeQualifications?: Readonly<Record<string, string>>): ShadowStore {
-  const states = storedShadowStates(path, db, activeQualifications);
+  const counters = readShadowCounters(path, true, activeQualifications);
+  const states = counters?.states ?? storedShadowStates(path, db, activeQualifications);
+  const keyTimes = counters?.keyTimes;
   let connection: ReadModelDb | undefined;
   let closed = false;
   return {
     load: () => ({ ...states }),
+    keyTimes: view => keyTimes?.get(view),
     save: (view, state, keys) => {
       if (closed) throw new Error("shadow store is closed");
       withWriteTransaction(db, lease, () => {
@@ -884,12 +889,34 @@ export interface ViewShadow {
 export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
   const clock = opts.clock ?? systemClock;
   const states = new Map<string, ViewShadowState>(Object.entries(opts.store?.load() ?? {}));
-  const streakKeys = new Map<string, Set<string>>();
+  /** Each streak's keys, least recently sampled first, with the time each was last sampled (W1-T11330). */
+  const streakKeys = new Map<string, Map<string, number>>();
   const persistenceFailed = new Set<string>();
+  const keysOf = (stateKey: string, state: ViewShadowState, now: number): Map<string, number> => {
+    const known = streakKeys.get(stateKey);
+    if (known) return known;
+    // A key with no stored time (a store saved before W1-T11330) counts as sampled now, as the store's upgrade stamps it.
+    const times = opts.store?.keyTimes?.(stateKey);
+    const keys = new Map((state.streakKeys ?? []).map(key => [key, times?.get(key) ?? now] as const).sort((a, b) => a[1] - b[1]));
+    streakKeys.set(stateKey, keys);
+    return keys;
+  };
+  /** Retires keys unsampled for a day; the persisted list catches up once it holds twice the live keys, or before a full write. */
+  const retireKeys = (stateKey: string, state: ViewShadowState, now: number, exact = false): void => {
+    const keys = streakKeys.get(stateKey);
+    if (!keys) return;
+    for (const [key, sampled] of keys) {
+      if (now - sampled < SHADOW_KEY_RETIRE_MS) break;
+      keys.delete(key);
+    }
+    const listed = state.streakKeys?.length ?? 0;
+    if (listed !== keys.size && (exact || listed >= 2 * keys.size)) state.streakKeys = (state.streakKeys ?? []).filter(key => keys.has(key));
+  };
   const qualifications = opts.qualifications ?? {};
   const populationOf = (view: string) => requiredPopulation(view, opts.populations, opts.populationViews);
   const persist = (key: string, state: ViewShadowState, keys: ShadowKeyChange): void => {
     // A later delta cannot replay a lost append or reset. Reconcile exact membership once after failure.
+    if (persistenceFailed.has(key)) retireKeys(key, state, clock.now(), true);
     try { opts.store?.save(key, state, persistenceFailed.has(key) ? undefined : keys); persistenceFailed.delete(key); }
     catch (error) { persistenceFailed.add(key); throw error; }
   };
@@ -987,6 +1014,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       let populationChanged = false;
       if (population && (!state.population || !samePopulation(state.population, population))) {
         const previous = state.population;
+        retireKeys(qualifiedStateKey(view, required), state, now, true);
         if (previous || state.samples > 0 || (state.streakKeys?.length ?? 0) > 0) {
           const digest = createHash("sha256").update(JSON.stringify([previous, state.streakSamples, state.streakKeys])).digest("hex");
           const archiveGeneration = `${required}:retired:${digest}`, archiveKey = qualifiedStateKey(view, archiveGeneration);
@@ -1043,9 +1071,10 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
           own.sinceMs ??= now; own.lastSampleMs = now; own.samples++; state.streakSamples++;
         }
       } else {
-        const keys = streakKeys.get(stateKey) ?? new Set(state.streakKeys ?? []);
-        streakKeys.set(stateKey, keys);
-        if (!keys.has(key)) { keys.add(key); (state.streakKeys ??= []).push(key); }
+        const keys = keysOf(stateKey, state, now);
+        if (!keys.has(key)) (state.streakKeys ??= []).push(key);
+        keys.delete(key); keys.set(key, now);
+        retireKeys(stateKey, state, now);
         state.streakSamples++;
       }
       if (diffs.some((d) => d.classification === "real")) {
@@ -1057,11 +1086,17 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, ...(required === undefined ? {} : { qualificationGeneration: required }), classes, ...(legacy.inputs ? { inputs: legacy.inputs } : {}), ...(legacy.paired ? { paired: legacy.paired } : {}), diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
       }
       summarize(view, state, now, { diffs });
-      persist(stateKey, state, population ? { reset: reset || populationChanged, ...(reset || populationChanged ? { replace: state.population!.pages.map(page => page.logicalKey) } : {}) } : { reset, ...(reset ? {} : { add: key }) });
+      persist(stateKey, state, population ? { reset: reset || populationChanged, ...(reset || populationChanged ? { replace: state.population!.pages.map(page => page.logicalKey) } : {}) } : { reset, ...(reset ? {} : { add: key, atMs: now }) });
       return { view, key, diffs };
     },
-    readiness: () => activeReadiness(new Map([...states].map(([key, state]) => [key, persistenceFailed.has(key)
-      ? { ...state, qualificationRefusal: "shadow persistence failed; current counters are not committed" } : state])), qualifications, clock.now(), undefined, populationOf),
+    readiness: () => {
+      const now = clock.now();
+      // A key unsampled for a day owes no more cadence, so readiness counts only the live keys.
+      for (const [key, state] of states) retireKeys(key, state, now);
+      return activeReadiness(new Map([...states].map(([key, state]) => [key, persistenceFailed.has(key)
+        ? { ...state, qualificationRefusal: "shadow persistence failed; current counters are not committed" } : state])), qualifications, now,
+      new Map([...streakKeys].map(([key, keys]) => [key, keys.size])), populationOf);
+    },
     close: () => opts.store?.close?.(),
   };
 }
