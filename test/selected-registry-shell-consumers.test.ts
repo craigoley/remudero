@@ -15,7 +15,7 @@ import { selectedRegistryShadowChild } from "#src/lib/child-entry-argv.js";
 import { SELECTED_REGISTRY_LAUNCH_WRAPPER, selectedRegistryLifecycleExec } from "#src/lib/selected-registry-consumers.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { registryShellFixture } from "#test/helpers/registry-shell-fixture.js";
+import { hermeticToolPath, registryShellFixture } from "#test/helpers/registry-shell-fixture.js";
 
 type Row = Record<string, unknown>;
 
@@ -80,7 +80,7 @@ if [ "$1" = -l ]; then cat "$CRONTAB_SNAPSHOT"; else cat > "$CRONTAB_SNAPSHOT"; 
   mkdirSync(join(trustedState, "daemon-install"), { recursive: true });
   symlinkSync(join(REPO_ROOT, "deploy"), join(trustedState, "daemon-install/deploy"));
   const cases = join(f.root, "cases.json"); writeFileSync(cases, "{}\n");
-  const env = { ...process.env, HOME: f.root, PATH: `${bin}:${process.env.PATH ?? ""}`,
+  const env = { ...process.env, HOME: f.root, PATH: hermeticToolPath(f.root, bin),
     RMD_STATE_DIR: trustedState, CRONTAB_SNAPSHOT: cron,
     DOCKER_CALLS: calls, RMD_INSTANCE_REGISTRY: legacyRegistry, RMD_FIELD_TRIALS_CASE_FILES: cases };
   const run = (args: string[] = [], script = join(REPO_ROOT, "deploy", "field-trials-refresh.sh"),

@@ -1,11 +1,37 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 export interface Receipt { bin: string; args: string[]; selected?: string; workerEnv?: Record<string, string> }
+
+/**
+ * A PATH that reads the same on every runner. The scripts under test fail open or early on a host without util-linux
+ * `flock`, and the deploy supervisor picks the real `launchctl` backend by binary presence, so a macOS runner would
+ * both skip the guarded work and kickstart a real job. This PATH carries a `flock` that runs its command without
+ * locking anything, and a copy of any system directory that holds `launchctl` with that one entry left out.
+ */
+export function hermeticToolPath(root: string, bin: string, inherited = process.env.PATH ?? ""): string {
+  const flock = join(bin, "flock");
+  writeFileSync(flock, `#!${process.execPath}
+const [, , ...args] = process.argv, rest = args.filter(a => a !== "-n" && a !== "-x" && a !== "-s");
+if (rest.length < 2) process.exit(0); // \`flock -n <fd>\`: nothing to lock in a disposable namespace
+const r = require("node:child_process").spawnSync(rest[1], rest.slice(2), { stdio: "inherit" });
+process.exit(r.status ?? 92);
+`, { mode: 0o700 });
+  const dirs = inherited.split(delimiter).filter(Boolean).map((dir, index) => {
+    if (!existsSync(join(dir, "launchctl"))) return dir;
+    const farm = join(root, `path-${index}`);
+    mkdirSync(farm, { recursive: true });
+    for (const name of readdirSync(dir)) {
+      if (name !== "launchctl") try { symlinkSync(join(dir, name), join(farm, name)); } catch { /* a repeated entry keeps the first link */ }
+    }
+    return farm;
+  });
+  return [bin, ...dirs].join(delimiter);
+}
 
 /** Real shell programs, disposable namespaces, recording external transports. */
 export function registryShellFixture(t: { after(fn: () => void): void }) {
@@ -131,7 +157,7 @@ process.exit(98);
       "memory.current": "1048576", "memory.events": "high 0", "memory.stat": "anon 1048576\nfile 0\nworkingset_refault_file 0" })) writeFileSync(join(dir, name), bytes + "\n");
   }
   const env: NodeJS.ProcessEnv = {
-    PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: join(root, "home"), TMPDIR: root,
+    PATH: hermeticToolPath(root, bin), HOME: join(root, "home"), TMPDIR: root,
     NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT,
     FIXTURE_UID: String(process.getuid?.()), FIXTURE_CALLS: callsPath, FIXTURE_PAYLOAD: payload,
     FIXTURE_SELECTED: selected, RMD_INSTANCE_REGISTRY: legacy, RMD_ROOT: state, RMD_STATE_DIR: state,
