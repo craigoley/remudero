@@ -1,0 +1,42 @@
+- id: W1-T11312
+  title: "A comment-compression pin that is not yet tracked compares against HEAD's source, so the proof-discrimination base run (which copies the PR's added pin into a merge-base checkout, untracked) reddens instead of passing vacuously, and a compression task whose only proof is its pin can discriminate again"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, when compressionPinBase compares; it decides whether every compression task's proof can pass review
+  origin: operator-session#compression-pin-vacuous-at-base-2026-11-04
+  plan_refs:
+    - W1-T10821
+    - W1-T3190
+    - W1-T273
+  files:
+    - test/helpers/compression-pin.ts
+    - test/infra/an-untracked-compression-pin-compares-against-head.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: compressionPinBase returns the merge-base source when the diff adds the pin, as today, and also returns HEAD's committed source when the pin file itself is untracked in the working tree (the reviewer's base run copies an added pin into a merge-base checkout), so a pin whose reductions sit behind "before === undefined" fails at the base and passes at the PR head; a tracked pin on a later PR still returns undefined
+      proof: "unit test: test/infra/an-untracked-compression-pin-compares-against-head.test.ts"
+    - claim: A test builds a real git fixture, commits a module, adds a pin that only asserts comment reduction behind the guard, and shows the pin fails when run untracked at the base commit, passes at the compression commit, and stays inert once tracked on a later commit
+      proof: "grep: W1-T11312 criterion 2 in test/infra/an-untracked-compression-pin-compares-against-head.test.ts"
+  rationale: |
+    OBSERVED 2026-11-04. #16652 (W1-T11190, compressing src/lib/plan.ts) burned six fix rounds on proof-discrimination. Its only proof, "unit test: test/plan/compress-src-lib-plan-ts.test.ts", is graded executed_stale: it passes at base too.
+    The reviewer's base run (W1-T3190) copies added test files into a merge-base worktree, where they are UNTRACKED.
+    compressionPinBase (test/helpers/compression-pin.ts) compares only when `git diff --diff-filter=A <merge-base>...HEAD` lists the pin. At base, HEAD is the merge-base, so that diff is empty, it returns undefined, and the pin's "if (before === undefined) return;" makes it pass.
+    #16501 (2026-11-03) moved all 35 pins to this base-relative shape. A pin keeps discriminating only if it also carries an unguarded measured count: test/github/compress-src-lib-branch-reaper-ts.test.ts asserts commentLines < 363 outside the guard. A pin written purely base-relative, which is what the gardener template now mints, cannot pass proof-discrimination.
+    An untracked pin is, by definition, being added, so comparing against HEAD then is the pin's own intended rule ("the PR that ADDS the pin"), not a new ceiling.
+  design: |
+    In compressionPinBase, before the added-diff check, run `git ls-files --error-unmatch -- <testPath>`. When it fails (untracked), return `git show HEAD:<sourcePath>`. A git failure other than "not tracked" still throws, as today.
+    Test with gitRepo fixtures (set a local user.name and user.email; the CI runner has no identity):
+    - At the base commit with the pin copied in untracked, the pin's reduction asserts run and fail.
+    - At the compression commit, they pass.
+    - On a later commit editing the module, the tracked pin is inert.
+  falsifier: |
+    At origin/main an untracked compression pin at the merge-base returns undefined from compressionPinBase, so its guarded assertions never run and the reviewer grades its proof executed_stale.
+  note: |
+    reservation hand-off: plan-file-1793794981000 -> plan-file-1793794981000
+    Reserved with rmd next-task-id --branch plan-file-1793794981000 from the operator session's ops worktree. The cause traces to the operator session's own #16501. Test path from rmd test-place test/helpers/compression-pin.ts (test/infra/).
