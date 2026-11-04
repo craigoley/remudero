@@ -2,50 +2,90 @@
 // `execFileSync sleep` per 20 ms registry-lock poll — and stalled the main thread 199 s in 5 minutes. These tests
 // record EVERY synchronous child_process call while the served paths run and expect none.
 import assert from "node:assert/strict";
-import childProcess, { spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs, { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { syncBuiltinESMExports } from "node:module";
-import { refreshInboxClassification } from "#src/lib/inbox-view.js";
-import { anchorFingerprint, updateProposalRegistry, type DraftedCandidate, type Proposal } from "#src/lib/inbox.js";
+import type { DraftedCandidate, Proposal } from "#src/lib/inbox.js";
 import type { PanelGraphDeps } from "#src/lib/panel-graph.js";
-import { buildStatusBoard, buildStatusBoardAsync, type StatusBoardDeps } from "#src/lib/status-board.js";
-import { statusCommand } from "#src/lib/report-commands.js";
+import type { StatusBoardDeps } from "#src/lib/status-board.js";
 import type { Config } from "#src/lib/config.js";
-import { loadPlanFromYaml } from "#src/lib/plan.js";
-import { makeTempDir } from "#src/lib/tmp.js";
-import { gitRepo } from "#test/helpers/git-repo.js";
-import { fakeGitHub } from "#test/helpers/fake-github.js";
-import { ghShim } from "#test/helpers/gh-shim.js";
-import { allowGhRefusals } from "#test/setup/tmp-hygiene.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+type SpawnRecord = { calls: string[]; asyncCalls: string[] };
+const recording = globalThis as typeof globalThis & { inboxSpawnRecord?: SpawnRecord };
+
+if (!process.argv.includes("--inbox-preimport-probe")) {
+  test("the inbox spawn proofs run in a fresh process instrumented before all dependency imports", async (t) => {
+    // tmp-hygiene itself imports fs-race-safe. Instrument BEFORE even that preload so a captured
+    // defaultProcessStartTimeSyscalls.execFileSync cannot escape the recorder.
+    const preload = `
+      import cp from 'node:child_process';
+      import { syncBuiltinESMExports } from 'node:module';
+      for (const name of ['execFileSync', 'execSync', 'spawnSync', 'execFile']) {
+        const real = cp[name];
+        cp[name] = function (...args) {
+          const record = globalThis.inboxSpawnRecord;
+          if (record) (name === 'execFile' ? record.asyncCalls : record.calls)
+            .push(name + ':' + String(args[0]) + ' ' + JSON.stringify(args[1]));
+          return real.apply(this, args);
+        };
+      }
+      syncBuiltinESMExports();
+    `;
+    const child = spawn(process.execPath, [
+      "--test-reporter=tap",
+      "--import", `data:text/javascript,${encodeURIComponent(preload)}`,
+      "--import", "tsx", "--import", join(REPO_ROOT, "test/setup/tmp-hygiene.ts"),
+      join(REPO_ROOT, "test/inbox/serve-spawns-nothing-synchronous-for-inbox-anchors-and-registry-locks.test.ts"),
+      "--inbox-preimport-probe",
+    ], {
+      cwd: REPO_ROOT, stdio: ["ignore", "pipe", "pipe"],
+      // Inheriting child-v8 would serialize test events to our stdout pipe instead of TAP.
+      env: { ...process.env, NODE_TEST_CONTEXT: "test-setup" },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    t.diagnostic(stdout.split("\n").filter((line) => /^# (tests|pass|fail) /.test(line)).join("; "));
+    assert.equal(code, 0, `fresh-process proofs failed:\n${stdout}\n${stderr}`);
+    assert.match(stdout, /# tests [1-9][0-9]*/);
+    assert.match(stdout, /# fail 0/);
+  });
+} else {
+const { refreshInboxClassification } = await import("#src/lib/inbox-view.js");
+const { anchorFingerprint, updateProposalRegistry, updateProposalRegistryAsync } = await import("#src/lib/inbox.js");
+const { buildStatusBoard, buildStatusBoardAsync } = await import("#src/lib/status-board.js");
+const { statusCommand } = await import("#src/lib/report-commands.js");
+const { loadPlanFromYaml } = await import("#src/lib/plan.js");
+const { makeTempDir } = await import("#src/lib/tmp.js");
+const { gitRepo } = await import("#test/helpers/git-repo.js");
+const { fakeGitHub } = await import("#test/helpers/fake-github.js");
+const { ghShim } = await import("#test/helpers/gh-shim.js");
+const { allowGhRefusals } = await import("#test/setup/tmp-hygiene.js");
+const { defaultGetProcessStartTime } = await import("#src/lib/fs-race-safe.js");
 
 allowGhRefusals("the slow-lane board read lists PRs through gh; this file's shim answers it offline");
 
-/** Record every synchronous child_process entry point (passing through to the real one), and republish the mocked
- *  builtin so inbox.ts's named imports see it. Returns the calls recorded so far. */
-function recordSyncSpawns(t: TestContext): { calls: string[]; asyncCalls: string[] } {
-  const calls: string[] = [];
-  const asyncCalls: string[] = [];
-  for (const name of ["execFileSync", "execSync", "spawnSync"] as const) {
-    const real = childProcess[name] as (...args: unknown[]) => unknown;
-    t.mock.method(childProcess, name, (...args: unknown[]) => {
-      calls.push(`${name}:${String(args[0])} ${JSON.stringify(args[1])}`);
-      return real(...args);
-    });
-  }
-  // The async form is recorded too (and passed through), so a test can show the anchor grep really ran OFF the loop
-  // rather than not at all.
-  const realExecFile = childProcess.execFile as (...args: unknown[]) => unknown;
-  t.mock.method(childProcess, "execFile", (...args: unknown[]) => {
-    asyncCalls.push(`execFile:${String(args[0])} ${JSON.stringify(args[1])}`);
-    return realExecFile(...args);
-  });
-  syncBuiltinESMExports();
-  t.after(() => syncBuiltinESMExports());
-  return { calls, asyncCalls };
+/** Activate the already-installed recorder only for the operation under test, excluding fixture setup. */
+function recordSyncSpawns(t: TestContext): SpawnRecord {
+  const record: SpawnRecord = { calls: [], asyncCalls: [] };
+  recording.inboxSpawnRecord = record;
+  t.after(() => { delete recording.inboxSpawnRecord; });
+  return record;
 }
+
+test("the pre-import recorder catches fs-race-safe's captured synchronous ps syscall", (t) => {
+  const spawns = recordSyncSpawns(t);
+  defaultGetProcessStartTime(process.pid);
+  assert.ok(spawns.calls.some((call) => call.startsWith("execFileSync:ps ")), spawns.calls.join("\n"));
+});
 
 const isGitGrep = (call: string): boolean => call.startsWith("execFile:git ") && call.includes('"grep"');
 
@@ -160,6 +200,8 @@ function boardDeps(repoDir: string, proposals: Proposal[]): StatusBoardDeps {
     isPidAlive: () => true,
     // The board's own pushed-branch sweep is another sync git read and not this task's subject; keep it out of the record.
     readPushedRunBranches: () => "",
+    readSharedPauseState: () => "absent",
+    readDispatchClaims: () => ({ status: "clear" }),
     plan: loadPlanFromYaml(PLAN_YAML, "fixture"),
     github: fakeGitHub(),
     readProposalRegistry: () => proposals,
@@ -184,9 +226,8 @@ test("a served status board answers INBOX's evidence anchors off the loop with t
   const actual = [];
   for (const proposals of [present, absent]) actual.push((await buildStatusBoardAsync(root, ledger, boardDeps(repo.dir, proposals))).inbox);
 
-  // The board's own dispatch-claim and pause reads shell `git ls-remote` synchronously; they are not INBOX's anchor
-  // check and not this task's subject, so the record is narrowed to the anchor grep.
-  assert.deepEqual(spawns.calls.filter((call) => call.includes('"grep"')), [], "no synchronous `git grep` while the board reads its anchors");
+  assert.deepEqual(spawns.calls, [], "no synchronous child_process call while the board reads its anchors");
+  assert.ok(spawns.asyncCalls.some(isGitGrep), "the board really read its anchors asynchronously");
   assert.deepEqual(actual, expected, "the same INBOX sections the sync board answers");
   assert.match(actual[1]!.headNotReadyReason ?? "", /evidence-drifted/, "an absent anchor still reads as drifted");
   assert.doesNotMatch(actual[0]!.headNotReadyReason ?? "", /evidence-drifted/, "a present anchor does not");
@@ -248,7 +289,7 @@ test("W1-T11128 criterion 2: the synchronous registry lock's poll starts no proc
   );
   const elapsed = Date.now() - started;
 
-  assert.deepEqual(spawns.calls, [], "no `sleep` child per poll");
+  assert.deepEqual(spawns.calls, [], "no synchronous child_process call in the complete contention loop");
   assert.ok(elapsed >= 140, `the bounded wait still waits (elapsed ${elapsed}ms)`);
 });
 
@@ -258,6 +299,68 @@ test("W1-T11128 criterion 2: the synchronous writer still updates an uncontended
   writeFileSync(registry, JSON.stringify({ proposals: [{ id: "A", summary: "a", evidenceAnchors: [] }] }));
   const result = updateProposalRegistry(registry, (current) => [...current, { id: "B", summary: "b", evidenceAnchors: [] }]);
   assert.deepEqual(result?.map((p) => p.id), ["A", "B"]);
+});
+
+test("both registry writers preserve boot and pid-reuse reclamation without subprocesses", async (t) => {
+  for (const writer of [updateProposalRegistry, updateProposalRegistryAsync]) {
+    for (const cause of ["reused-pid", "previous-boot", "dead-pid"] as const) {
+      await t.test(`${writer.name}: ${cause}`, async (t) => {
+        const root = tempRoot(t);
+        const registry = join(root, "state", "inbox-proposals.json");
+        const boot = Math.floor(Date.now() / 1000) - 60;
+        const pid = cause === "dead-pid" ? 999_999_999 : process.pid;
+        writeFileSync(`${registry}.lock`, JSON.stringify({ pid, host: hostname(), startedAt: new Date((boot + 20) * 1000).toISOString() }));
+        const read = fs.readFileSync.bind(fs) as (...args: unknown[]) => unknown;
+        t.mock.method(fs, "readFileSync", (...args: unknown[]) => {
+          if (args[0] === "/proc/stat") return `btime ${boot}\n`;
+          if (args[0] === "/proc/1/stat" || args[0] === `/proc/${pid}/stat`) {
+            if (cause === "dead-pid") throw Object.assign(new Error("process gone"), { code: "ENOENT" });
+            const fields = Array<string>(20).fill("0");
+            fields[19] = args[0] === "/proc/1/stat" ? (cause === "previous-boot" ? "4000" : "100") : "5000";
+            return `${pid} (holder with ) parentheses) ${fields.join(" ")}\n`;
+          }
+          return read(...args);
+        });
+        const spawns = recordSyncSpawns(t);
+        const result = await writer(registry, () => [{ id: "landed", summary: "landed", evidenceAnchors: [] }], { maxWaitMs: 2000 });
+        assert.deepEqual(result?.map((p) => p.id), ["landed"]);
+        assert.deepEqual(JSON.parse(readFileSync(registry, "utf8")).proposals.map((p: Proposal) => p.id), ["landed"]);
+        assert.equal(fs.existsSync(`${registry}.lock`), false, "the reclaimed lock is released after the update");
+        assert.deepEqual(spawns.calls, []);
+      });
+    }
+  }
+});
+
+test("unavailable kernel identity never reclaims a live holder or falls back to ps", async (t) => {
+  for (const writer of [updateProposalRegistry, updateProposalRegistryAsync]) {
+    for (const failure of ["unreadable", "malformed-stat", "missing-comm", "missing-boot", "overflow"] as const) {
+      await t.test(`${writer.name}: ${failure}`, async (t) => {
+        const root = tempRoot(t);
+        const registry = join(root, "state", "inbox-proposals.json");
+        holdLock(`${registry}.lock`, process.pid);
+        const original = readFileSync(`${registry}.lock`, "utf8");
+        const read = fs.readFileSync.bind(fs) as (...args: unknown[]) => unknown;
+        t.mock.method(fs, "readFileSync", (...args: unknown[]) => {
+          if (typeof args[0] === "string" && args[0].startsWith("/proc/")) {
+            if (failure === "unreadable") throw Object.assign(new Error("proc unavailable"), { code: "EACCES" });
+            if (args[0] === "/proc/stat") return failure === "missing-boot" ? "cpu 1 2 3\n" : "btime 1\n";
+            if (failure === "missing-comm") return "no process fields";
+            const fields = Array<string>(20).fill("0");
+            fields[19] = failure === "malformed-stat" ? "not-ticks" : failure === "overflow" ? "9".repeat(400) : "100";
+            return `1 (holder) ${fields.join(" ")}\n`;
+          }
+          return read(...args);
+        });
+        const spawns = recordSyncSpawns(t);
+        let updates = 0;
+        await assert.rejects(async () => writer(registry, () => { updates += 1; return []; }, { maxWaitMs: 40, pollIntervalMs: 5 }), /timed out after 40ms/);
+        assert.equal(updates, 0, "an indeterminate start time cannot authorize a write");
+        assert.equal(readFileSync(`${registry}.lock`, "utf8"), original, "the live lock stays intact");
+        assert.deepEqual(spawns.calls, [], "there is no ps fallback when /proc cannot answer");
+      });
+    }
+  }
 });
 
 test("a served status board whose registry changes between reads still greps no anchor synchronously (review of #16432)", async (t) => {
@@ -282,7 +385,7 @@ test("a served status board whose registry changes between reads still greps no 
   const board = await buildStatusBoardAsync(root, join(root, "none.ndjson"), deps);
 
   assert.equal(reads, 1, "one registry read serves both the warm and the board");
-  assert.deepEqual(spawns.calls.filter((call) => call.includes('"grep"')), [], "no synchronous `git grep` for an anchor the registry gained mid-render");
+  assert.deepEqual(spawns.calls, [], "no synchronous child_process call for an anchor the registry gained mid-render");
   assert.ok(spawns.asyncCalls.some(isGitGrep), `the anchor was read through the async git grep (async calls: ${spawns.asyncCalls.join(" | ")})`);
   assert.deepEqual(board.inbox, buildStatusBoard(root, join(root, "none.ndjson"), boardDeps(repo.dir, first)).inbox,
     "the board answers the snapshot the warm read");
@@ -324,3 +427,4 @@ test("a served registry prune that misses its deadline keeps the sync prune's re
     return true;
   });
 });
+}

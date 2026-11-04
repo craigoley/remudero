@@ -3232,8 +3232,8 @@ export interface UpdateProposalRegistryOpts {
   /** Injectable blocking sleep (tests fake it to skip real delay). Default = a real, busy-wait-free sleep (mirrors
    *  lib/deployer.ts's own injected-sleep discipline). */
   sleep?: (ms: number) => void;
-  /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests). Defaults to {@link
-   *  import("./fs-race-safe.js").defaultGetProcessStartTime}. */
+  /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests).
+   *  Defaults to a process-free /proc read; unavailable identity remains indeterminate. */
   getProcessStartTime?: (pid: number) => number | null;
   /** Called whenever a reclaim attempt loses the race to another reclaimer (see {@link reclaimStaleLock}). Defaults
    *  to a `console.error` trace; tests override it to observe the event directly instead of scraping stderr. */
@@ -3264,6 +3264,24 @@ function parseRegistryLockInfo(raw: string): RegistryLockInfo | null {
  *  stalled serve's main thread on a host already forking ~190 processes a second. Same bound, same interval. */
 function defaultRegistryLockSleep(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
+}
+
+/** Supply the existing staleness predicate with epoch ms without its default synchronous `ps`.
+ *  Linux stat field 22 uses USER_HZ (100); comm can contain spaces and parentheses.
+ *  Missing /proc (including non-Linux) is unknown identity, never evidence for reclamation. */
+function registryProcessStartTime(pid: number): number | null {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(") ");
+    const ticks = stat.slice(close + 2).trim().split(/\s+/)[19];
+    const boot = /^btime ([0-9]+)$/m.exec(fs.readFileSync("/proc/stat", "utf8"))?.[1];
+    if (close < 0 || !/^[0-9]+$/.test(ticks ?? "") || boot === undefined) return null;
+    const start = Number(boot) * 1000 + Number(ticks) * 10;
+    return Number.isFinite(start) ? start : null;
+  } catch (error) {
+    void error; // Unreadable kernel identity preserves isHolderStale's indeterminate result.
+    return null;
+  }
 }
 
 const ownedAsyncRegistryLocks = new Set<string>();
@@ -3342,7 +3360,7 @@ export function updateProposalRegistry(
       // alone, and the reclaim's delete is conditioned on the lock's on-disk identity.
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseRegistryLockInfo,
-        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
+        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime ?? registryProcessStartTime }),
         onLostReclaim: opts.onLostReclaim,
         beforeDelete: opts.__beforeReclaimDelete,
       });
@@ -3556,7 +3574,7 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseRegistryLockInfo,
-        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
+        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime ?? registryProcessStartTime }),
         onLostReclaim: opts.onLostReclaim,
         beforeDelete: opts.__beforeReclaimDelete,
       });
