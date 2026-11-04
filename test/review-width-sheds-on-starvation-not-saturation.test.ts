@@ -26,7 +26,6 @@ const POLICY: ReviewCapacityPolicy = {
   sampleCadenceMs: 60_000,
   telemetryCadenceMs: 300_000,
   cpuPsiLowPct: 5,
-  cpuPsiHighPct: 20,
   memoryPsiLowPct: 5,
   memoryPsiHighPct: 15,
   providerAllowancePct: 2,
@@ -41,6 +40,9 @@ function healthyBusyObservation(): ReviewCapacityObservation {
   return {
     cpuPsiSomeAvg10Pct: 80.57,
     cpuPsiFullAvg10Pct: 0,
+    // W1-T11129: a learned cpu.weight share of 1 (the container is the whole host, so its PSI has no weight excuse);
+    // with no share the CPU verdict holds and never sheds on PSI alone.
+    cpuWeightShare: 1,
     memoryPsiSomeAvg10Pct: 0,
     memAvailableMib: 23812,
     activeWorkers: 0,

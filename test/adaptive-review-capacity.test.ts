@@ -38,7 +38,6 @@ const POLICY: ReviewCapacityPolicy = {
   sampleCadenceMs: 60_000,
   telemetryCadenceMs: 300_000,
   cpuPsiLowPct: 5,
-  cpuPsiHighPct: 20,
   memoryPsiLowPct: 5,
   memoryPsiHighPct: 15,
   providerAllowancePct: 2,
@@ -56,6 +55,9 @@ function healthy(nowMs: number, over: Partial<ReviewCapacityObservation> = {}): 
     memAvailableMib: 4096,
     cpuPsiSomeAvg10Pct: 1,
     cpuPsiFullAvg10Pct: 0,
+    // W1-T11129: a learned cpu.weight share of 1 (the container is the whole host, so its PSI has no weight excuse);
+    // with no share the CPU verdict holds and never sheds on PSI alone.
+    cpuWeightShare: 1,
     memoryPsiSomeAvg10Pct: 1,
     provider: { fresh: true, readable: true, headroomPct: 80, reservePct: 5, ageMs: 1000 },
     settlements: { successes: 2, failures: 0, timeouts: 0 },
@@ -206,12 +208,17 @@ test("review-capacity policy rows are finite, bounded data", () => {
     /cpuPsiLowPct.*out of its declared bound/,
   );
 
+  // W1-T11129 retired cpuPsiHighPct: the loader neither requires nor reads it, so a cpu low watermark has no high row to
+  // be ordered against, and a stray row left in a policy file is ignored rather than becoming a fixed shed line again.
+  assert.equal("cpuPsiHighPct" in validateReviewCapacityPolicy(rows), false);
+  assert.equal("cpuPsiHighPct" in validateReviewCapacityPolicy({ ...rows, cpuPsiHighPct: { value: 20, min: 1, max: 100 } }), false);
+  assert.equal(validateReviewCapacityPolicy({ ...rows, cpuPsiLowPct: { value: 40, min: 0, max: 50 } }).cpuPsiLowPct, 40);
+
   const invalid: Array<[string, unknown, RegExp]> = [
     ["top-level scalar", null, /must be a mapping/],
     ["missing row", { ...rows, hostWorkerBudget: undefined }, /hostWorkerBudget.*bounded numeric row/],
     ["non-numeric row", { ...rows, hostWorkerBudget: { value: "4", min: 1, max: 8 } }, /finite value\/min\/max/],
     ["inverted bound", { ...rows, hostWorkerBudget: { value: 4, min: 8, max: 1 } }, /min \(8\) > max \(1\)/],
-    ["cpu watermarks", { ...rows, cpuPsiLowPct: { value: 20, min: 0, max: 30 } }, /PSI low watermarks/],
     ["memory watermarks", { ...rows, memoryPsiLowPct: { value: 15, min: 0, max: 30 } }, /PSI low watermarks/],
     ["non-integer worker budget", { ...rows, hostWorkerBudget: { value: 1.5, min: 1, max: 8 } }, /positive integer/],
     ["zero healthy samples", { ...rows, healthyWindowSamples: { value: 0, min: 0, max: 10 } }, /positive integer/],

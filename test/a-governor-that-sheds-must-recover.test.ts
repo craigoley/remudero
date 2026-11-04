@@ -31,7 +31,6 @@ const POLICY = {
   sampleCadenceMs: 60_000,
   telemetryCadenceMs: 300_000,
   cpuPsiLowPct: 5,
-  cpuPsiHighPct: 20,
   memoryPsiLowPct: 5,
   memoryPsiHighPct: 15,
   providerAllowancePct: 2,

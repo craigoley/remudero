@@ -141,8 +141,6 @@ const POLICY = {
   latencyExpansionRatio: 2,
   unhealthySettlementThreshold: 2,
   minHealthySettlements: 1,
-  // Read only while the weight share is UNREAD (today's fixed line, W1-T11150's suite pins it); with a share, never.
-  cpuPsiHighPct: 20,
 } as unknown as ReviewCapacityPolicy;
 const BOUNDS = { minWidth: 1, baseWidth: 4, maxWidth: 5 };
 
@@ -175,23 +173,28 @@ test("W1-T11129 criterion 2: a PSI full that is only the low weight's own conten
   assert.equal(run({ effectiveWidth: 4, healthySamples: 0 }, { cpuPsiFullAvg10Pct: 40, cpuWeightShare: 1 }).reason, "cpu-pressure");
 });
 
-test("W1-T11129 criterion 2: the shed is tiered, hold then shrink one then halve while it persists", () => {
+test("W1-T11129 criterion 2: with the share known, the shed and its restore keep W1-T11150's one-lane cadence", () => {
   const prior: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 2 };
-  // The band just above the calm line holds: nothing shed, nothing added.
+  // The band just above the calm line neither sheds nor grows.
   const hold = run(prior, { cpuPsiFullAvg10Pct: 8, cpuPsiSomeAvg10Pct: 70, cpuWeightShare: 1 });
   assert.equal(hold.effectiveWidth, 4);
   assert.notEqual(hold.reason, "cpu-pressure");
   assert.equal(hold.evidence.healthySamples, 0);
-  // Beyond it the first sample shrinks one lane...
-  const first = selectAdaptiveReviewWidth(prior, POLICY, observation({ cpuPsiFullAvg10Pct: 25, cpuWeightShare: 1 }), BOUNDS);
-  assert.equal(first.decision.reason, "cpu-pressure");
-  assert.equal(first.decision.effectiveWidth, 3);
-  // ...and an overload that persists halves.
-  const second = selectAdaptiveReviewWidth(first.state, POLICY, observation({ cpuPsiFullAvg10Pct: 25, cpuWeightShare: 1 }), BOUNDS);
-  assert.equal(second.decision.effectiveWidth, 1);
-  assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: 25, cpuPsiSomeAvg10Pct: 70 }, POLICY).tier, "shrink");
-  assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: 25, cpuPsiSomeAvg10Pct: 70 }, POLICY, true).tier, "halve");
-  assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: 8, cpuPsiSomeAvg10Pct: 70 }, POLICY).tier, "hold");
+  // Beyond it each overloaded sample sheds exactly one lane, however long the overload persists: no halving.
+  let state = prior;
+  const shed: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    const step = selectAdaptiveReviewWidth(state, POLICY, observation({ nowMs: i * 1_000, cpuPsiFullAvg10Pct: 25, cpuWeightShare: 1 }), BOUNDS);
+    assert.equal(step.decision.reason, "cpu-pressure");
+    shed.push(step.decision.effectiveWidth);
+    state = step.state;
+  }
+  assert.deepEqual(shed, [3, 2, 1]);
+  // Relief restores in proportion (W1-T11150) at once, not one lane per calm window.
+  const eased = selectAdaptiveReviewWidth(state, POLICY, observation({ nowMs: 3_000, cpuPsiFullAvg10Pct: 6, cpuWeightShare: 1 }), BOUNDS);
+  assert.ok(eased.decision.effectiveWidth >= 3, `restored in proportion to relief, got ${eased.decision.effectiveWidth}`);
+  assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: 25, cpuPsiSomeAvg10Pct: 70, cpuWeightShare: 1 }, POLICY).tier, "shed");
+  assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: 8, cpuPsiSomeAvg10Pct: 70, cpuWeightShare: 1 }, POLICY).tier, "hold");
   assert.equal(cpuPressureTier({ cpuPsiSomeAvg10Pct: 70 }, POLICY).calm, false);
 });
 
@@ -206,10 +209,10 @@ test("W1-T11129 criterion 2: the governor's learned cpu bound holds the width wi
 
 test("W1-T11129 criterion 2: width grows back on its own once the pressure eases", () => {
   let state: ReviewCapacityState = { effectiveWidth: 1, healthySamples: 0 };
-  const stressed = selectAdaptiveReviewWidth(state, POLICY, observation({ cpuPsiFullAvg10Pct: 60 }), BOUNDS);
+  const stressed = selectAdaptiveReviewWidth(state, POLICY, observation({ cpuPsiFullAvg10Pct: 60, cpuWeightShare: 1 }), BOUNDS);
   assert.equal(stressed.decision.effectiveWidth, 1);
   state = stressed.state;
-  const calm = selectAdaptiveReviewWidth(state, POLICY, observation({ cpuPsiFullAvg10Pct: 1 }), BOUNDS);
+  const calm = selectAdaptiveReviewWidth(state, POLICY, observation({ cpuPsiFullAvg10Pct: 1, cpuWeightShare: 1 }), BOUNDS);
   assert.equal(calm.decision.effectiveWidth, 4);
   assert.notEqual(calm.decision.reason, "cpu-pressure");
 });
@@ -337,11 +340,35 @@ test("W1-T11129 criterion 1: in runDaemon, a build that ends inside an interval 
   assert.equal(publishedLaneCpuBound(), 7, "every interval, the last lane's included, learned 1 CPU per build");
 });
 
-test("W1-T11129 criterion 2: an unread weight share keeps today's fixed shed line", () => {
-  // No share: today's line (cpuPsiHighPct) decides, unchanged; a known share of 1 decides by the tier instead.
-  assert.equal(run({ effectiveWidth: 4, healthySamples: 0 }, { cpuPsiFullAvg10Pct: 20 }).reason, "cpu-pressure");
-  assert.notEqual(run({ effectiveWidth: 4, healthySamples: 0 }, { cpuPsiFullAvg10Pct: 19 }).reason, "cpu-pressure");
-  assert.notEqual(run({ effectiveWidth: 4, healthySamples: 0 }, { cpuPsiFullAvg10Pct: 8, cpuWeightShare: 1 }).reason, "cpu-pressure");
+test("W1-T11129 criterion 2: an unread weight share holds: no fixed PSI line sheds", () => {
+  const prior: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 2 };
+  // The 2026-10-27 readings (core's full of 36-44) and beyond, with no share read: held at width 4, never shed to 1.
+  for (const full of [20, 40, 90]) {
+    const held = run(prior, { cpuPsiFullAvg10Pct: full });
+    assert.notEqual(held.reason, "cpu-pressure", `full ${full} with no share is not a shed`);
+    assert.equal(held.effectiveWidth, 4);
+    assert.equal(held.evidence.healthySamples, 0, "a hold, not calm: the width does not grow on it either");
+    assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: full, cpuPsiSomeAvg10Pct: 70 }, POLICY).tier, "hold");
+  }
+  // Calm is the same low watermark with or without a share, so recovery keeps its line.
+  assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: 5, cpuPsiSomeAvg10Pct: 70 }, POLICY).calm, true);
+  // A stale record reads as no share (readCpuWeightShare's own suite below), so it holds the same way.
+  // The same reading with the share known judges by the share: a share of 1 has no weight excuse and sheds.
+  assert.equal(run(prior, { cpuPsiFullAvg10Pct: 40, cpuWeightShare: 1 }).reason, "cpu-pressure");
+});
+
+test("W1-T11129 criterion 2: no cpuPsiHighPct remains, in the policy file or in any decision", () => {
+  const policyText = readFileSync(join(REPO_ROOT, "plan", "policy.yaml"), "utf8");
+  assert.equal(/^\s*cpuPsiHighPct:/m.test(policyText), false, "plan/policy.yaml carries no cpuPsiHighPct row");
+  // A policy object that still carries the old field decides exactly as one without it, share or no share.
+  const withStale = { ...POLICY, cpuPsiHighPct: 20 } as unknown as ReviewCapacityPolicy;
+  const prior: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 2 };
+  for (const over of [{ cpuPsiFullAvg10Pct: 25 }, { cpuPsiFullAvg10Pct: 25, cpuWeightShare: 1 }, { cpuPsiFullAvg10Pct: 3 }]) {
+    assert.deepEqual(
+      selectAdaptiveReviewWidth(prior, withStale, observation(over), BOUNDS).decision,
+      selectAdaptiveReviewWidth(prior, POLICY, observation(over), BOUNDS).decision,
+    );
+  }
 });
 
 test("W1-T11129 criterion 2: the runtime adapter reads the daemon's published cpu lane bound", (t) => {
@@ -420,44 +447,6 @@ test("W1-T11129 criterion 1: after learning, an unread or throwing counter falls
   const back = readLaneCpu(unread.learner, ports, 4_000, builds("A", "B"), true);
   assert.deepEqual(back.learner.perClass, learned.perClass, "the first sample after the gap only re-anchors the counter");
   assert.equal(back.bound, 7, "the counter is read again: the learned figures apply again");
-});
-
-test("W1-T11129 criterion 2: with the share known, width widens back one step per calm window", () => {
-  const settleMs = POLICY.telemetryCadenceMs;
-  // Shed to the floor on the container's own overload (share 1: no weight excuse).
-  let state: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 0 };
-  let nowMs = 0;
-  for (const full of [40, 40, 40]) {
-    state = selectAdaptiveReviewWidth(state, POLICY, observation({ nowMs, cpuPsiFullAvg10Pct: full, cpuWeightShare: 1 }), BOUNDS).state;
-    nowMs += 1_000;
-  }
-  assert.equal(state.effectiveWidth, 1);
-  const widths: number[] = [];
-  const calmAt = (at: number) => {
-    const next = selectAdaptiveReviewWidth(state, POLICY, observation({ nowMs: at, cpuPsiFullAvg10Pct: 1, cpuWeightShare: 1 }), BOUNDS);
-    state = next.state;
-    widths.push(next.decision.effectiveWidth);
-  };
-  // The pressure eases: the first calm sample opens the window; a sample inside it adds nothing.
-  calmAt(nowMs);
-  calmAt(nowMs + settleMs / 2);
-  assert.deepEqual(widths, [1, 1], "one calm sample is not a calm window: no 1 -> 4 jump");
-  // Each whole calm window earns one lane, and the next lane needs a window of its own.
-  calmAt(nowMs + settleMs);
-  calmAt(nowMs + settleMs + 1_000);
-  calmAt(nowMs + 2 * settleMs);
-  calmAt(nowMs + 3 * settleMs);
-  assert.deepEqual(widths, [1, 1, 2, 2, 3, 4]);
-  // A pressured sample ends the window: calm must last a whole window again before the next step.
-  state = { ...state, effectiveWidth: 2 };
-  const pressed = selectAdaptiveReviewWidth(state, POLICY, observation({ nowMs: nowMs + 3 * settleMs + 1_000, cpuPsiFullAvg10Pct: 8, cpuWeightShare: 1 }), BOUNDS);
-  assert.equal(pressed.decision.effectiveWidth, 2, "the hold band adds nothing");
-  assert.equal(pressed.state.cpuCalmSinceMs, undefined);
-  state = pressed.state;
-  widths.length = 0;
-  calmAt(nowMs + 3 * settleMs + 2_000);
-  calmAt(nowMs + 4 * settleMs + 2_000);
-  assert.deepEqual(widths, [2, 3]);
 });
 
 const TUNER = join(REPO_ROOT, "deploy", "memory-high-tuner.sh");

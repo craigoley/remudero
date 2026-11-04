@@ -21,7 +21,6 @@ const POLICY = {
   sampleCadenceMs: 60_000,
   telemetryCadenceMs: 300_000,
   cpuPsiLowPct: 5,
-  cpuPsiHighPct: 20,
   memoryPsiLowPct: 5,
   memoryPsiHighPct: 15,
   providerAllowancePct: 2,
@@ -41,6 +40,9 @@ function sample(nowMs: number, cpuFull: number, over: Partial<ReviewCapacityObse
     memAvailableMib: 28_000,
     cpuPsiSomeAvg10Pct: 80,
     cpuPsiFullAvg10Pct: cpuFull,
+    // W1-T11129: a learned cpu.weight share of 13/16. Against `some` 80 the weight itself predicts 15 points of `full`,
+    // so calm is at or under 15 and the shed starts above 15 + the low watermark 5 = 20: the line these sequences cross.
+    cpuWeightShare: 0.8125,
     memoryPsiSomeAvg10Pct: 0,
     activeWorkers: 0,
     queueDepth: 9,
@@ -152,7 +154,7 @@ test("W1-T11150 criterion 2 in test/review/a-review-shed-that-does-not-lower-pre
     [5_000, 25],
     [10_000, 25],
     [20_000, 19], // relief 6/20 -> 1 + ceil(3 * .3) = 2
-    [30_000, 12], // relief 13/20 -> 1 + ceil(3 * .65) = 3
+    [30_000, 16], // relief 9/20 -> 1 + ceil(3 * .45) = 3 (above the share's calm line of 15, so still a partial relief)
     [40_000, 6], // relief 19/20 -> 1 + ceil(2.85) = 4, never above base
   ]);
   assert.deepEqual(widths(decisions), [3, 2, 1, 2, 3, 4]);

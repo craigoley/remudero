@@ -6876,7 +6876,6 @@ const REVIEW_CAPACITY_FIELDS = [
   "sampleCadenceMs",
   "telemetryCadenceMs",
   "cpuPsiLowPct",
-  "cpuPsiHighPct",
   "memoryPsiLowPct",
   "memoryPsiHighPct",
   "providerAllowancePct",
@@ -6915,7 +6914,8 @@ export function validateReviewCapacityPolicy(raw: unknown): ReviewCapacityPolicy
     }
     output[field] = value;
   }
-  if (output.cpuPsiLowPct >= output.cpuPsiHighPct || output.memoryPsiLowPct >= output.memoryPsiHighPct) {
+  // W1-T11129: CPU has no high watermark to order against (the shed judges PSI against the cpu.weight share).
+  if (output.memoryPsiLowPct >= output.memoryPsiHighPct) {
     throw new PolicyError("policy.yaml: review-capacity PSI low watermarks must be below their high watermarks.");
   }
   for (const field of ["hostWorkerBudget", "healthyWindowSamples", "unhealthySettlementThreshold", "minHealthySettlements"] as const) {
