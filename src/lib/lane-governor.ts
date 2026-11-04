@@ -159,17 +159,26 @@ export function parseCpuUsageUsec(text: string): number | null {
   return raw === undefined ? null : Number(raw);
 }
 
-/** One reading of the cgroup CPU counter and the lane classes that were running across the interval ending at it. */
+/** One running lane: a stable identity for as long as it runs, and its class (the run-child rows' WorkerClass). */
+export interface RunningLane {
+  id: string;
+  cls: string;
+}
+
+/** One reading of the cgroup CPU counter and the lanes running at the instant it was taken. */
 export interface LaneCpuSample {
   atMs: number;
   usageUsec: number;
-  /** Class of each lane running through the interval since the previous sample (one entry per lane). */
-  runningClasses: readonly string[];
+  /** Every lane running at this instant, before any lane start or end the caller is about to apply. */
+  lanes: readonly RunningLane[];
+  /** The caller is about to start or end a lane: this sample closes the interval those lanes ran through. */
+  closes?: boolean;
 }
 
-/** What the CPU arm keeps between samples: the last counter reading and bounded rate histories. */
+/** What the CPU arm keeps between samples: the counter reading that opened the current interval, and rate histories. */
 export interface LaneCpuLearnerState {
-  last?: { atMs: number; usageUsec: number };
+  /** The reading that opened the current interval, and the identities of the lanes running through it. */
+  last?: { atMs: number; usageUsec: number; lanes: string };
   /** CPU use (CPUs) over intervals in which no lane ran. */
   idle: number[];
   /** CPU use per lane (CPUs), per class, from intervals in which lanes of that one class ran. */
@@ -194,24 +203,44 @@ function pushBounded(history: readonly number[], value: number): number[] {
   return [...history, value].slice(-CPU_HISTORY);
 }
 
+/** The set of running lanes as one comparable key: identities, order-free. */
+function laneSetKey(lanes: readonly RunningLane[]): string {
+  return JSON.stringify([...new Set(lanes.map((lane) => lane.id))].sort());
+}
+
 /**
- * Folds one `usage_usec` sample in. The delta over the interval is CPUs used; with no lane running it is the non-lane
- * baseline, and with lanes of one class running it is that class's per-lane figure after the baseline is taken off.
- * An interval with mixed classes, a counter that went backwards, or a baseline not yet learned teaches nothing.
- * Pure: the clock is the sample's own.
+ * Folds one `usage_usec` sample in. An interval runs from one lane start or end to the next, and its delta is CPUs
+ * used by exactly the lanes that ran THROUGH it: the caller samples with `closes` right BEFORE it applies a lane start
+ * or end, then {@link relabelLaneCpu} opens the next interval with the new lane set. A plain reading on the same lane
+ * set extends the open interval (so a reading taken just after a transition never yields a millisecond-long rate); a
+ * reading that finds a DIFFERENT lane set saw a start or end nobody sampled, so it re-opens the interval there and
+ * teaches nothing. With no lane running the rate is the non-lane baseline; with lanes of one class it is that class's
+ * per-lane figure after the baseline is taken off. Mixed classes, a counter that went backwards, or a baseline not yet
+ * learned teaches nothing. Pure: the clock is the sample's own.
  */
 export function learnLaneCpu(state: LaneCpuLearnerState, sample: LaneCpuSample): LaneCpuLearnerState {
   const last = state.last;
-  const next: LaneCpuLearnerState = { ...state, last: { atMs: sample.atMs, usageUsec: sample.usageUsec } };
-  if (last === undefined || sample.atMs <= last.atMs || sample.usageUsec < last.usageUsec) return next;
+  const lanes = laneSetKey(sample.lanes);
+  const next: LaneCpuLearnerState = { ...state, last: { atMs: sample.atMs, usageUsec: sample.usageUsec, lanes } };
+  if (last === undefined || sample.usageUsec < last.usageUsec || last.lanes !== lanes) return next;
+  if (sample.closes !== true) return state;
+  if (sample.atMs <= last.atMs) return next;
   const cpus = (sample.usageUsec - last.usageUsec) / 1000 / (sample.atMs - last.atMs);
-  if (sample.runningClasses.length === 0) return { ...next, idle: pushBounded(state.idle, cpus) };
-  const classes = new Set(sample.runningClasses);
+  if (sample.lanes.length === 0) return { ...next, idle: pushBounded(state.idle, cpus) };
+  const classes = new Set(sample.lanes.map((lane) => lane.cls));
   const baseline = median(state.idle);
   if (classes.size !== 1 || baseline === null) return next;
   const cls = [...classes][0]!;
-  const perLane = Math.max(0, cpus - baseline) / sample.runningClasses.length;
+  const perLane = Math.max(0, cpus - baseline) / new Set(sample.lanes.map((lane) => lane.id)).size;
   return { ...next, perClass: { ...state.perClass, [cls]: pushBounded(state.perClass[cls] ?? [], perLane) } };
+}
+
+/**
+ * A lane start or end the caller has just applied, at the instant of the sample taken right before it: the next
+ * interval opens with the new lane set. Without a counter reading there is no open interval to relabel.
+ */
+export function relabelLaneCpu(state: LaneCpuLearnerState, lanes: readonly RunningLane[]): LaneCpuLearnerState {
+  return state.last === undefined ? state : { ...state, last: { ...state.last, lanes: laneSetKey(lanes) } };
 }
 
 /** The learned figures for admitting a lane of class `laneClass`. */
@@ -302,14 +331,6 @@ export interface LaneGovernorPorts {
 export const DISPATCH_LANE_CPU_CLASS = "implement";
 export const REVIEW_LANE_CPU_CLASS = "review";
 
-/** The lanes of each class running through the interval a CPU sample closes. */
-export type RunningLaneClasses = Readonly<Partial<Record<string, number>>>;
-
-/** One entry per running lane, its class as the label, in a stable order. */
-export function runningLaneClasses(running: RunningLaneClasses): string[] {
-  return Object.keys(running).sort().flatMap((cls) => Array.from({ length: Math.max(0, Math.floor(running[cls] ?? 0)) }, () => cls));
-}
-
 /** W1-T11129 — the container's own cgroup cpu.stat usage_usec (cgroup v2, read inside the container's namespace). */
 export function readCgroupCpuUsageUsec(path = "/sys/fs/cgroup/cpu.stat", read: (path: string) => string = (p) => readFileSync(p, "utf8")): number | null {
   try { return parseCpuUsageUsec(read(path)); }
@@ -327,15 +348,16 @@ export function publishLaneCpuBound(bound: number | null): void {
 }
 
 /**
- * W1-T11129 — one CPU reading for the dispatch target: sample the container's cpu.stat through the ports, label each
- * running lane by its class, learn, and return the implement class's reading laneTarget takes plus the bound it
- * implies. An unread or throwing counter reads as unread NOW, learned history or not: the figures are null, so the
- * bound is null and the cap falls back to the CPU count rather than to medians the counter can no longer confirm. The
- * history is kept for when the counter returns, but the last sample is dropped, so the first interval after the gap
- * (whose lanes went unseen) teaches nothing.
+ * W1-T11129 — one CPU reading for the dispatch target: sample the container's cpu.stat through the ports with the lanes
+ * running at this instant (identity and class), learn (`closes` when a lane start or end follows), and return the
+ * implement class's reading laneTarget takes plus the bound it implies. An unread or throwing counter reads as unread
+ * NOW, learned history or not: the figures are null, so the bound is null and the cap falls back to the CPU count
+ * rather than to medians the counter can no longer confirm. The history is kept for when the counter returns, but the
+ * open interval is dropped, so the first interval after the gap (whose lanes went unseen) teaches nothing.
  */
 export function readLaneCpu(
-  learner: LaneCpuLearnerState, ports: Pick<LaneGovernorPorts, "cpuCount" | "cpuUsageUsec">, nowMs: number, running: RunningLaneClasses,
+  learner: LaneCpuLearnerState, ports: Pick<LaneGovernorPorts, "cpuCount" | "cpuUsageUsec">, nowMs: number, lanes: readonly RunningLane[],
+  closes = false,
 ): { learner: LaneCpuLearnerState; cpu: LaneCpuReading; bound: number | null } {
   let usageUsec: number | null = null;
   try { usageUsec = ports.cpuUsageUsec?.() ?? null; }
@@ -348,7 +370,7 @@ export function readLaneCpu(
     delete kept.last;
     return { learner: kept, cpu: { baselineCpus: null, perLaneCpus: null }, bound: null };
   }
-  const next = learnLaneCpu(learner, { atMs: nowMs, usageUsec, runningClasses: runningLaneClasses(running) });
+  const next = learnLaneCpu(learner, { atMs: nowMs, usageUsec, lanes, closes });
   const cpu = laneCpuReading(next, DISPATCH_LANE_CPU_CLASS);
   return { learner: next, cpu, bound: cpuLaneBound(ports.cpuCount(), cpu) };
 }

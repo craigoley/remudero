@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setImmediate as drainMicrotasks } from "node:timers/promises";
 import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
 import {
   cpuLaneBound,
@@ -15,8 +16,8 @@ import {
   readCgroupCpuUsageUsec,
   readCpuWeightShare,
   readLaneCpu,
+  relabelLaneCpu,
   REVIEW_LANE_CPU_CLASS,
-  runningLaneClasses,
   type LaneGovernorPorts,
   initialLaneCpuLearner,
   laneCpuReading,
@@ -25,6 +26,7 @@ import {
   parseCpuUsageUsec,
   type LaneCpuLearnerState,
   type LaneTargetInputs,
+  type RunningLane,
 } from "#src/lib/lane-governor.js";
 import {
   cpuPressureTier,
@@ -60,31 +62,70 @@ test("W1-T11129 criterion 1: an unread or unlearned input keeps the cap at the c
   }
 });
 
+const builds = (...ids: string[]): RunningLane[] => ids.map((id) => ({ id, cls: DISPATCH_LANE_CPU_CLASS }));
+const reviews = (...ids: string[]): RunningLane[] => ids.map((id) => ({ id, cls: REVIEW_LANE_CPU_CLASS }));
+
 test("W1-T11129 criterion 1: usage_usec deltas teach the baseline while idle and the per-lane figure while lanes run", () => {
   assert.equal(parseCpuUsageUsec("usage_usec 1234\nuser_usec 1\n"), 1234);
   assert.equal(parseCpuUsageUsec("user_usec 1\n"), null);
   let state: LaneCpuLearnerState = initialLaneCpuLearner();
-  const at = (atMs: number, usageUsec: number, runningClasses: string[]) => {
-    state = learnLaneCpu(state, { atMs, usageUsec, runningClasses });
+  // Each call closes the interval on `lanes` (a lane start or end follows); relabel opens the next on the new set.
+  const close = (atMs: number, usageUsec: number, lanes: RunningLane[]) => {
+    state = learnLaneCpu(state, { atMs, usageUsec, lanes, closes: true });
   };
-  at(0, 0, []);
-  at(10_000, 20_000_000, []); // 2 CPUs of non-lane work
+  close(0, 0, []);
+  close(10_000, 20_000_000, []); // 2 CPUs of non-lane work
+  state = relabelLaneCpu(state, builds("A", "B"));
   // 20 s long: 70 CPU-s over 20 s = 3.5 CPUs; less the 2 baseline, over 2 lanes.
-  at(30_000, 90_000_000, ["implement", "implement"]);
+  close(30_000, 90_000_000, builds("A", "B"));
   const reading = laneCpuReading(state, "implement");
   assert.equal(reading.baselineCpus, 2);
   assert.equal(reading.perLaneCpus, 0.75);
   assert.equal(laneCpuReading(state, "review").perLaneCpus, null);
   // A mixed-class interval, a backwards counter and an unlearned baseline teach nothing.
   const before = JSON.stringify(state.perClass);
-  at(40_000, 190_000_000, ["implement", "review"]);
-  at(50_000, 1, ["implement"]);
+  const mixed = [...builds("A"), ...reviews("R")];
+  state = relabelLaneCpu(state, mixed);
+  close(40_000, 190_000_000, mixed);
+  close(50_000, 1, mixed);
   assert.equal(JSON.stringify(state.perClass), before);
-  const fresh = learnLaneCpu(learnLaneCpu(initialLaneCpuLearner(), { atMs: 0, usageUsec: 0, runningClasses: [] }), {
-    atMs: 1000, usageUsec: 5_000_000, runningClasses: ["implement"],
-  });
+  const fresh = learnLaneCpu(
+    relabelLaneCpu(learnLaneCpu(initialLaneCpuLearner(), { atMs: 0, usageUsec: 0, lanes: [], closes: true }), builds("A")),
+    { atMs: 1000, usageUsec: 5_000_000, lanes: builds("A"), closes: true },
+  );
   assert.equal(fresh.idle.length, 0);
   assert.deepEqual(fresh.perClass, {});
+});
+
+test("W1-T11129 criterion 1: an interval is credited only to the lanes that ran through it", () => {
+  let state: LaneCpuLearnerState = initialLaneCpuLearner();
+  const sample = (atMs: number, usageUsec: number, lanes: RunningLane[], closes = false) => {
+    state = learnLaneCpu(state, { atMs, usageUsec, lanes, closes });
+  };
+  sample(0, 0, [], true);
+  sample(10_000, 10_000_000, [], true); // baseline: 1 CPU
+  state = relabelLaneCpu(state, builds("A", "B"));
+  // A plain reading on the same lanes extends the open interval: nothing is learned, nothing is re-anchored.
+  const open = state;
+  sample(15_000, 25_000_000, builds("A", "B"));
+  assert.deepEqual(state, open);
+  // A ends at 30 s: the sample BEFORE its removal credits the whole 20 s (3 CPUs) to both builds: 1 per lane.
+  sample(30_000, 70_000_000, builds("A", "B"), true);
+  assert.deepEqual(state.perClass, { implement: [1] });
+  state = relabelLaneCpu(state, builds("B"));
+  // A sample that finds lanes nobody sampled in (C started unseen) re-opens the interval there and teaches nothing,
+  // and so does one taken AFTER a removal (the set it sees is not the set that ran).
+  sample(40_000, 90_000_000, builds("B", "C"));
+  assert.deepEqual(state.perClass, { implement: [1] });
+  assert.equal(state.last?.atMs, 40_000);
+  sample(50_000, 120_000_000, builds("C"), true);
+  assert.deepEqual(state.perClass, { implement: [1] }, "B ended inside the interval: its CPU is lent to no one");
+  assert.deepEqual(state.idle, [1]);
+  // Ending the last lane: the interval is the build's, never the idle baseline's.
+  state = relabelLaneCpu(state, builds("C"));
+  sample(60_000, 140_000_000, builds("C"), true);
+  assert.deepEqual(state.perClass, { implement: [1, 1] });
+  assert.deepEqual(state.idle, [1], "a build that ran to the end of the interval never reads as idle");
 });
 
 const POLICY = {
@@ -192,12 +233,12 @@ test("W1-T11129 criterion 1: the real cpu.stat reader and readLaneCpu learn the 
   const ports: Pick<LaneGovernorPorts, "cpuCount" | "cpuUsageUsec"> = { cpuCount: () => 8, cpuUsageUsec: () => readCgroupCpuUsageUsec(stat) };
   // Idle twice (one CPU of non-lane work), then two implement lanes using three CPUs: 1 baseline + 1 per lane.
   write(0);
-  let step = readLaneCpu(initialLaneCpuLearner(), ports, 0, {});
+  let step = readLaneCpu(initialLaneCpuLearner(), ports, 0, []);
   write(1_000_000);
-  step = readLaneCpu(step.learner, ports, 1_000, {});
+  step = readLaneCpu(step.learner, ports, 1_000, [], true); // two builds start: the idle interval closes
   assert.equal(step.bound, null, "no lane has run yet: unlearned, so the cap stays at the cpu count");
   write(4_000_000);
-  step = readLaneCpu(step.learner, ports, 2_000, { [DISPATCH_LANE_CPU_CLASS]: 2 });
+  step = readLaneCpu(relabelLaneCpu(step.learner, builds("A", "B")), ports, 2_000, builds("A", "B"), true);
   assert.deepEqual(step.cpu, { baselineCpus: 1, perLaneCpus: 1 });
   assert.equal(step.bound, 7, "(8 host cpus - 1 baseline) / 1 cpu per lane");
   const result = laneTarget({ ...baseInputs, previous: { target: 20 }, cpu: step.cpu });
@@ -234,6 +275,68 @@ test("W1-T11129 criterion 1: runDaemon samples cpu.stat on each lane-target read
   assert.equal(publishedLaneCpuBound(), undefined, "a reading that learned nothing publishes no bound, replacing the stale one");
 });
 
+test("W1-T11129 criterion 1: in runDaemon, a build that ends inside an interval lends its CPU to no lane that remains", async (t) => {
+  const dir = cgroupDir(t);
+  const planFile = join(dir, "tasks.yaml");
+  const task = (id: string) => `- id: ${id}\n  title: ${id}\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/${id}.ts]\n`;
+  writeFileSync(planFile, task("A") + task("B") + task("C"));
+  // The container's real CPU, integrated over the test's clock: 1 CPU of non-lane work plus 1 CPU per build running.
+  // A build's CPU starts when its worker is called and stops when the test ends it, exactly as a child's would.
+  const clock = { ms: Date.parse("2026-11-04T00:00:00Z") };
+  let usageUsec = 0, buildsRunning = 0, accruedAtMs = clock.ms;
+  const accrue = () => { usageUsec += (clock.ms - accruedAtMs) * 1000 * (1 + buildsRunning); accruedAtMs = clock.ms; };
+  const advance = (ms: number) => { accrue(); clock.ms += ms; accrue(); };
+  const ports: LaneGovernorPorts = {
+    mode: () => "shadow",
+    read: () => { throw new Error("memory unread in this test"); },
+    cpuCount: () => 8,
+    cpuUsageUsec: () => { accrue(); return usageUsec; },
+  };
+  const release: Record<string, (r: RunResult) => void> = {};
+  const started: string[] = [];
+  const merged = new Set<string>();
+  const end = async (id: string) => {
+    accrue();
+    buildsRunning -= 1;
+    release[id]!({ taskId: id, merged: true, verdict: "merged", costUsd: 0, prUrl: `https://x/${id}` } as unknown as RunResult);
+    for (let i = 0; i < 20; i++) await drainMicrotasks();
+  };
+  publishLaneCpuBound(null);
+  t.after(() => publishLaneCpuBound(null));
+  const run = runDaemon(loadPlan(planFile), {
+    refreshMerged: () => (id: string) => merged.has(id),
+    log: () => {},
+    runOne: (id: string) => {
+      accrue();
+      buildsRunning += 1;
+      started.push(id);
+      return new Promise<RunResult>((resolve) => { release[id] = resolve; }).then((r) => { merged.add(id); return r; });
+    },
+    // Every admission reads this first: a minute of idle host passes before each build is admitted.
+    categorizedRefusalRejoinFor: () => { advance(60_000); return undefined; },
+    sleep: async () => {},
+    now: () => new Date(clock.ms),
+    laneGovernor: ports,
+  } as unknown as DaemonDeps, { max: 3, laneCount: 2, pollIntervalMs: 1000 });
+  for (let i = 0; i < 50 && started.length < 2; i++) await drainMicrotasks();
+  assert.deepEqual(started, ["A", "B"]);
+  // A and B both run for 100 s (3 CPUs in all), then A ends while B runs on.
+  advance(100_000);
+  await end("A");
+  assert.equal(publishedLaneCpuBound(), 7,
+    "the 100 s A and B ran together are credited to both: 1 CPU per build, so (8 - 1 baseline) / 1; crediting them to " +
+    "the one build left after the refill would read 2 per build and a bound of 3");
+  for (let i = 0; i < 50 && started.length < 3; i++) await drainMicrotasks();
+  assert.deepEqual(started, ["A", "B", "C"], "A's freed lane refilled with C");
+  advance(50_000);
+  await end("B");
+  advance(20_000);
+  await end("C");
+  const summary = await run;
+  assert.equal(summary.stopReason, "max_reached");
+  assert.equal(publishedLaneCpuBound(), 7, "every interval, the last lane's included, learned 1 CPU per build");
+});
+
 test("W1-T11129 criterion 2: an unread weight share keeps today's fixed shed line", () => {
   // No share: today's line (cpuPsiHighPct) decides, unchanged; a known share of 1 decides by the tier instead.
   assert.equal(run({ effectiveWidth: 4, healthySamples: 0 }, { cpuPsiFullAvg10Pct: 20 }).reason, "cpu-pressure");
@@ -256,31 +359,32 @@ test("W1-T11129 criterion 2: the runtime adapter reads the daemon's published cp
 });
 
 test("W1-T11129 criterion 1: each running lane is labelled by its class, and a class learns only from its own intervals", (t) => {
-  assert.deepEqual(runningLaneClasses({ [DISPATCH_LANE_CPU_CLASS]: 2, [REVIEW_LANE_CPU_CLASS]: 1 }), ["implement", "implement", "review"]);
-  assert.deepEqual(runningLaneClasses({ [DISPATCH_LANE_CPU_CLASS]: 0 }), []);
   const dir = cgroupDir(t);
   const stat = join(dir, "cpu.stat");
   const write = (usageUsec: number) => writeFileSync(stat, `usage_usec ${usageUsec}\n`);
   const ports: Pick<LaneGovernorPorts, "cpuCount" | "cpuUsageUsec"> = { cpuCount: () => 8, cpuUsageUsec: () => readCgroupCpuUsageUsec(stat) };
-  write(0);
-  let step = readLaneCpu(initialLaneCpuLearner(), ports, 0, {});
-  write(1_000_000);
-  step = readLaneCpu(step.learner, ports, 1_000, {}); // baseline: 1 CPU
+  // Each step closes the interval on the lanes that ran through it, then opens the next on `next`.
+  let learner = initialLaneCpuLearner();
+  const close = (atMs: number, usageUsec: number, lanes: RunningLane[], next: RunningLane[]) => {
+    write(usageUsec);
+    const step = readLaneCpu(learner, ports, atMs, lanes, true);
+    learner = relabelLaneCpu(step.learner, next);
+    return step;
+  };
+  close(0, 0, [], []);
+  close(1_000, 1_000_000, [], reviews("r1", "r2")); // baseline: 1 CPU
   // Two reviews using 4 CPUs over the baseline: the review class learns 2 per lane; the implement bound stays unlearned.
-  write(6_000_000);
-  step = readLaneCpu(step.learner, ports, 2_000, { [REVIEW_LANE_CPU_CLASS]: 2 });
-  assert.equal(laneCpuReading(step.learner, "review").perLaneCpus, 2);
+  let step = close(2_000, 6_000_000, reviews("r1", "r2"), [...builds("A"), ...reviews("r1")]);
+  assert.equal(laneCpuReading(learner, "review").perLaneCpus, 2);
   assert.equal(step.cpu.perLaneCpus, null, "the dispatch bound reads the implement class, which has not run");
   assert.equal(step.bound, null);
-  assert.equal(step.learner.perClass.lane, undefined, "no lane is labelled by a catch-all class");
+  assert.equal(learner.perClass.lane, undefined, "no lane is labelled by a catch-all class");
   // A build beside a review is a mixed interval: it teaches neither class.
-  write(9_000_000);
-  step = readLaneCpu(step.learner, ports, 3_000, { [DISPATCH_LANE_CPU_CLASS]: 1, [REVIEW_LANE_CPU_CLASS]: 1 });
-  assert.equal(step.learner.perClass.implement, undefined);
-  assert.deepEqual(step.learner.perClass.review, [2]);
-  // A build alone teaches the implement class, and the dispatch bound follows it.
-  write(10_500_000);
-  step = readLaneCpu(step.learner, ports, 4_000, { [DISPATCH_LANE_CPU_CLASS]: 1 });
+  close(3_000, 9_000_000, [...builds("A"), ...reviews("r1")], builds("A"));
+  assert.equal(learner.perClass.implement, undefined);
+  assert.deepEqual(learner.perClass.review, [2]);
+  // A build alone teaches the implement class, and the dispatch bound follows it. A lane listed twice is one lane.
+  step = close(4_000, 10_500_000, [...builds("A"), ...builds("A")], []);
   assert.deepEqual(step.cpu, { baselineCpus: 1, perLaneCpus: 0.5 });
   assert.equal(step.bound, 14, "(8 - 1) / 0.5");
 });
@@ -291,29 +395,29 @@ test("W1-T11129 criterion 1: after learning, an unread or throwing counter falls
   const write = (usageUsec: number) => writeFileSync(stat, `usage_usec ${usageUsec}\n`);
   const ports: Pick<LaneGovernorPorts, "cpuCount" | "cpuUsageUsec"> = { cpuCount: () => 8, cpuUsageUsec: () => readCgroupCpuUsageUsec(stat) };
   write(0);
-  let step = readLaneCpu(initialLaneCpuLearner(), ports, 0, {});
+  let step = readLaneCpu(initialLaneCpuLearner(), ports, 0, []);
   write(1_000_000);
-  step = readLaneCpu(step.learner, ports, 1_000, {});
+  step = readLaneCpu(step.learner, ports, 1_000, [], true);
   write(4_000_000);
-  step = readLaneCpu(step.learner, ports, 2_000, { [DISPATCH_LANE_CPU_CLASS]: 2 });
+  step = readLaneCpu(relabelLaneCpu(step.learner, builds("A", "B")), ports, 2_000, builds("A", "B"), true);
   assert.equal(step.bound, 7, "learned first");
-  const learned = step.learner;
+  const learned = relabelLaneCpu(step.learner, builds("A", "B"));
   // The counter goes unread (the file is gone): the reading is unread now, so the cap is the cpu count.
   rmSync(stat);
-  const unread = readLaneCpu(learned, ports, 3_000, { [DISPATCH_LANE_CPU_CLASS]: 2 });
+  const unread = readLaneCpu(learned, ports, 3_000, builds("A", "B"));
   assert.deepEqual(unread.cpu, { baselineCpus: null, perLaneCpus: null });
   assert.equal(unread.bound, null);
   const capped = laneTarget({ ...baseInputs, previous: { target: 20 }, cpu: unread.cpu });
   assert.equal(capped.target, 8, "the cap at the cpu count, not the learned 7");
   // A throwing port is the same unread counter.
-  const thrown = readLaneCpu(learned, { cpuCount: () => 8, cpuUsageUsec: () => { throw new Error("EACCES"); } }, 3_000, {});
+  const thrown = readLaneCpu(learned, { cpuCount: () => 8, cpuUsageUsec: () => { throw new Error("EACCES"); } }, 3_000, []);
   assert.equal(thrown.bound, null);
   assert.deepEqual(thrown.cpu, { baselineCpus: null, perLaneCpus: null });
   // The history survives the gap, but the interval spanning it (lanes unseen) teaches nothing.
   assert.deepEqual(unread.learner.idle, learned.idle);
   assert.deepEqual(unread.learner.perClass, learned.perClass);
   write(100_000_000);
-  const back = readLaneCpu(unread.learner, ports, 4_000, { [DISPATCH_LANE_CPU_CLASS]: 2 });
+  const back = readLaneCpu(unread.learner, ports, 4_000, builds("A", "B"), true);
   assert.deepEqual(back.learner.perClass, learned.perClass, "the first sample after the gap only re-anchors the counter");
   assert.equal(back.bound, 7, "the counter is read again: the learned figures apply again");
 });

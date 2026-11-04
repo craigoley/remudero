@@ -155,7 +155,7 @@ import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, sys
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
-import { defaultLaneGovernorPorts, DISPATCH_LANE_CPU_CLASS, initialLaneCpuLearner, LANE_TARGET_STEP, laneTarget, laneTargetPayload, publishLaneCpuBound, readLaneCpu, REVIEW_LANE_CPU_CLASS, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget } from "./lane-governor.js";
+import { defaultLaneGovernorPorts, DISPATCH_LANE_CPU_CLASS, initialLaneCpuLearner, LANE_TARGET_STEP, laneTarget, laneTargetPayload, publishLaneCpuBound, readLaneCpu, relabelLaneCpu, REVIEW_LANE_CPU_CLASS, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget, type RunningLane } from "./lane-governor.js";
 import type { LaneGovernorMode } from "./policy.js";
 import {
   createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimBeforeMemoryRestart, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
@@ -4204,9 +4204,39 @@ export async function runDaemon(
     log(LANE_TARGET_STEP, { mode: "shadow", mode_unread: error instanceof Error ? error.message : String(error) });
   }
   let laneTargetReading: { atMs: number; result: LaneTarget } | undefined;
-  // W1-T11129: the CPU arm learns from the container's cgroup cpu.stat at each reading, labelling the lanes in flight by
-  // class: each dispatch lane is an implement build, each in-process review a review.
+  // W1-T11129: the CPU arm learns from the container's cgroup cpu.stat, crediting each interval to the lanes that ran
+  // THROUGH it: each dispatch lane is an implement build (by task id), each in-process review a review. A lane start or
+  // end samples first, so the interval it closes is credited to the lanes from before it (never the set after a
+  // refill removed the finished lane), and the next interval opens with the new set.
   let laneCpuLearner = initialLaneCpuLearner();
+  const laneCpuBuilds = new Set<string>();
+  const laneCpuReviewIds = new WeakMap<object, string>();
+  let laneCpuReviewSeq = 0;
+  const runningCpuLanes = (starting?: string): RunningLane[] => {
+    const builds = new Set(laneCpuBuilds);
+    for (const child of children.values()) if (child.work === undefined) builds.add(child.taskId);
+    // The pool runs a worker before its start bookkeeping, so its child may already be registered: not yet a lane.
+    if (starting !== undefined) builds.delete(starting);
+    const reviews = inFlightReviewRunsNow().map((review) => {
+      let id = laneCpuReviewIds.get(review);
+      if (id === undefined) laneCpuReviewIds.set(review, id = `review-${++laneCpuReviewSeq}`);
+      return { id, cls: REVIEW_LANE_CPU_CLASS };
+    });
+    return [...[...builds].map((id) => ({ id: `build-${id}`, cls: DISPATCH_LANE_CPU_CLASS })), ...reviews];
+  };
+  const sampleLaneCpu = (nowMs: number, closes = false, starting?: string): ReturnType<typeof readLaneCpu> | undefined => {
+    if (!laneGovernorPorts) return undefined;
+    const reading = readLaneCpu(laneCpuLearner, laneGovernorPorts, nowMs, runningCpuLanes(starting), closes);
+    laneCpuLearner = reading.learner;
+    publishLaneCpuBound(reading.bound);
+    return reading;
+  };
+  /** A build lane starts or ends: close the interval on the lanes before it, apply it, open the next on the lanes after. */
+  const laneCpuTransition = (apply: () => void, starting?: string): void => {
+    sampleLaneCpu(daemonClock.now(), true, starting);
+    apply();
+    if (laneGovernorPorts) laneCpuLearner = relabelLaneCpu(laneCpuLearner, runningCpuLanes());
+  };
   /** The lanes new admissions may fill: the governor's target under enforce, otherwise unbounded. */
   const enforcedLaneTarget = (inFlight: number, wipBound: number | undefined): number => {
     if (!laneGovernorPorts) return Infinity;
@@ -4218,11 +4248,7 @@ export async function runDaemon(
         const reason = error instanceof Error ? error.message : String(error);
         memory = { unread: reason };
       }
-      const cpuReading = readLaneCpu(laneCpuLearner, laneGovernorPorts, nowMs, {
-        [DISPATCH_LANE_CPU_CLASS]: inFlight, [REVIEW_LANE_CPU_CLASS]: inFlightReviewCount(),
-      });
-      laneCpuLearner = cpuReading.learner;
-      publishLaneCpuBound(cpuReading.bound);
+      const cpuReading = sampleLaneCpu(nowMs)!;
       const result = laneTarget({
         previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount(), cpu: cpuReading.cpu,
       });
@@ -7350,10 +7376,13 @@ export async function runDaemon(
     // W1-T8235: a lane change is a sample. The hold that emptied the slot is whichever step this lane's decision wrote.
     const sampleLaneChange = (): void => sampleIdleLane(inFlightTasks.size, true, undefined, false);
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
-      inFlightTasks.delete(finished);
-      pendingChildren.delete(finished.id);
-      const child = batchChildren.get(finished);
-      if (child) children.delete(child.runId);
+      laneCpuTransition(() => {
+        inFlightTasks.delete(finished);
+        laneCpuBuilds.delete(finished.id);
+        pendingChildren.delete(finished.id);
+        const child = batchChildren.get(finished);
+        if (child) children.delete(child.runId);
+      });
       resetIdleLaneTick();
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
@@ -7633,6 +7662,7 @@ export async function runDaemon(
       const startedAtMs = preparedStartTimes.get(task.id) ?? daemonClock.now();
       if (restartDecided) admittedAfterRestart.add(task.id);
       laneStartedAtMs.set(task.id, startedAtMs);
+      laneCpuTransition(() => laneCpuBuilds.add(task.id), task.id);
       if (poolControl.occupied?.has(task)) return;
       attempted.push(task.id);
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
@@ -7718,6 +7748,9 @@ export async function runDaemon(
       } finally {
         // Even a phase-level logging failure cannot abandon promises the pool already owns.
         poolOutcome = await admittedWork;
+        // W1-T11129: the pool's last lane, and any a fault or detach retired, never reaches refillLane: close its interval.
+        try { laneCpuTransition(() => { for (const task of admitted) laneCpuBuilds.delete(task.id); }); }
+        catch (reason) { phaseFaults.push({ phase: "dispatch.lane_cpu", reason }); }
         // W1-T9089: the lanes phase is the wait from a mid-phase decision until the pool settled or detached its children.
         if (restartDecided) freshnessPhases.lanes = Math.max(0, daemonClock.now() - restartWait.decidedAtMs);
         // W1-T10000: the pool released every run waiting for its child's admission; the restart abandons each wait.
