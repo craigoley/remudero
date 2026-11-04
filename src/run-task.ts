@@ -34575,6 +34575,7 @@ async function triageCommandLocked(
       filed: (r) => r.decision.action === "propose",
       lint: () =>
         lintFiledTasks(worktreePath, reservedIds, {
+          taskRepoOwner: owner,
           newMonolithIds: newMonolithIdsAgainstBase(worktreePath),
         }),
     });

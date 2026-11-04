@@ -5,6 +5,8 @@ import { test, type TestContext } from "node:test";
 
 import { triageCommand } from "#test/helpers/run-task-test.js";
 import { lintFiledTasks } from "#src/lib/relint.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { lintTask } from "#src/lib/task-linter.js";
 import { parseWhitelistedProof } from "#src/lib/review.js";
 import { parseTriageVerdict } from "#src/lib/triage.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -100,7 +102,7 @@ async function runRepair(t: TestContext, rounds: Round[]) {
             taskYaml(id, round.status, round.proof, round.repo));
         }
         if (round.extraFile) writeFileSync(join(args.cwd, round.extraFile), "unexpected scope\n");
-        findings.push(lintFiledTasks(args.cwd, [id]));
+        findings.push(lintFiledTasks(args.cwd, [id], { taskRepoOwner: "craigoley" }));
         const text = round.text ?? (prompts.length === 1 ? `PROPOSED: file ${id}` : "The YAML is repaired.");
         transcripts.push(text);
         return worker(text);
@@ -151,7 +153,7 @@ test("a repaired attempt's files are relinted, not skipped as not-filed", async 
 });
 
 test("a non-core suite-root proof survives the retry instead of being downgraded", async t => {
-  const proof = "unit test: the console drawer keeps focus after closing";
+  const proof = "unit test: tests/drawer.test.ts";
   const target = { owner: "craigoley", repo: "remudero-console" };
   const result = await runRepair(t, [
     { status: "open", proof, repo: "remudero-console" },
@@ -160,11 +162,36 @@ test("a non-core suite-root proof survives the retry instead of being downgraded
   assert.equal(parseTriageVerdict(result.transcripts[1]), null, "the repair carries no fresh verdict line");
   const registered = parseWhitelistedProof(proof, target);
   assert.equal(registered?.kind, "test", "the console proof resolves as an executable test under its registered suite");
+  assert.equal(registered?.label, "tests/drawer.test.ts");
+  assert.equal(registered?.nameFiltered, undefined, "the proof names a suite path, not a test title");
   assert.equal(result.findings[0].length, 1);
   assert.equal(result.findings[0][0].check, "plan-load", "only the status defect is flagged, not the proof");
   assert.deepEqual(result.findings[1], [], "the repaired non-core proof is not downgraded to a dead-proof finding");
   assert.doesNotMatch(result.prompts[1], /\[proof-dialect\]|dead proof floor/);
   assertProposed(result);
+});
+
+test("task proof linting admits only the resolved owner's registered suite roots", () => {
+  const proof = "unit test: tests/drawer.test.ts";
+  const task = loadPlanFromYaml(taskYaml("W1-T5", "queued", proof, "remudero-console"), "fixture.yaml").tasks[0];
+  assert.equal(lintTask(task, { taskRepoOwner: "craigoley" }).ok, true);
+  for (const [candidate, opts] of [
+    [task, {}],
+    [{ ...task, repo: "remudero" }, { taskRepoOwner: "craigoley" }],
+    [task, { taskRepoOwner: "another-owner" }],
+    [{ ...task, repo: "unregistered" }, { taskRepoOwner: "craigoley" }],
+  ] as const) {
+    const result = lintTask(candidate, opts);
+    assert.equal(result.ok, false);
+    assert.ok(result.violations.some(v => v.check === "proof-dialect" && v.severity === "block"));
+  }
+  const core = { ...task, repo: "remudero", acceptance: [{ claim: "core suite", proof: CORE_PROOF }] };
+  assert.equal(lintTask(core).ok, true);
+  assert.equal(lintTask(core, { taskRepoOwner: "craigoley" }).ok, true);
+  const invalidRoot = { ...task, acceptance: [{ claim: "console suite", proof: CORE_PROOF }] };
+  const refused = lintTask(invalidRoot, { taskRepoOwner: "craigoley" });
+  assert.equal(refused.ok, false);
+  assert.match(refused.violations.find(v => v.check === "proof-dialect")?.message ?? "", /`tests\/` \(vitest\)/);
 });
 
 test("a verdictless repair cannot retain a proposal after expanding its file scope", async t => {
