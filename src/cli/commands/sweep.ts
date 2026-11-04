@@ -33,7 +33,7 @@ import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSeque
 import { DEFAULT_SWEEP_POLICY, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
 import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
-import { reviewCommand as reviewCommandFromModule, runReview as runReviewFromModule, type ReviewCommandDeps, type ReviewCommandHost } from "./review.js";
+import { failureRecordingPoster, reviewCommand as reviewCommandFromModule, runReview as runReviewFromModule, type ReviewCommandDeps, type ReviewCommandHost } from "./review.js";
 import { runFixRung as runFixRungFromModule, type FixCommandHost } from "./fix.js";
 import type { RunTaskCommandHost } from "./run-task-verb.js";
 
@@ -296,10 +296,11 @@ export function buildSweepEffects(
     reviewerHealthRoute ? reviewerHealthRoute(prArg, rest, opts, () => reviewerCodeGate.call(prArg, rest, opts)) : reviewerCodeGate.call(prArg, rest, opts);
   const reviewFallbackRunner =
     deps.reviewRunner ??
-    ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string) => {
+    ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void) => {
       const args = ["--repo", deps.repo];
       const opts = { executionMode: "semantic" as const, planOnlyFiling: isPlanFiling,
-        ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }) };
+        ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
+        ...(onPhase === undefined ? {} : { onPhase }) };
       return deps.reviewCommandImpl
         ? deps.reviewCommandImpl(String(_prNumber), args, opts)
         : reviewGateCall(String(_prNumber), args, opts);
@@ -311,7 +312,7 @@ export function buildSweepEffects(
   const buildBaseProofReuse =
     (deps.buildBaseProofDirImpl as typeof buildBaseProofDir | undefined) ?? buildBaseProofDir;
   const reviewReuseExecProof = deps.reviewReuseExecProofImpl as ProofExecutor | undefined;
-  const reviewReuseRunner = async (pr: OpenPrView, mode: ReviewDispatchMode, reviewAttemptId?: string): Promise<number> => {
+  const reviewReuseRunner: NonNullable<BuildSweepEffectsDeps["reviewReuseRunner"]> = async (pr, mode, reviewAttemptId, onPhase): Promise<number> => {
     const reuseRunId = reviewAttemptId === undefined ? deps.runId : `review-PR${pr.prNumber}-${systemClock.now()}`;
     if (reviewAttemptId !== undefined) {
       const key = { taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber), prUrl: pr.prUrl, headSha: pr.headSha };
@@ -328,7 +329,7 @@ export function buildSweepEffects(
         fallback_reason: reason,
         ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase);
     };
 
     if (mode.kind === "discriminate-only") {
@@ -379,7 +380,9 @@ export function buildSweepEffects(
                 ownDiffDigest: reuseInputs.currentOwnDiffDigest,
                 mergeBaseSha: reuseInputs.currentMergeBaseSha,
               };
+              const poster = failureRecordingPoster();
               const discriminationPosted = await postReviewStatusGuarded({
+                post: poster.post,
                 owner: deps.owner,
                 repo: deps.repo,
                 sha: pr.headSha,
@@ -394,6 +397,7 @@ export function buildSweepEffects(
                 reviewEngineRevision: REVIEW_ENGINE_REVISION,
                 fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
               });
+              if (!poster.failed()) onPhase?.("posted");
               if (!discriminationPosted.posted && !discriminationPosted.replayed) {
                 exitCode = 1;
               } else {
@@ -453,9 +457,11 @@ export function buildSweepEffects(
     const verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl))?.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase);
     }
+    const poster = failureRecordingPoster();
     const reusedStatus = await postReviewStatusGuarded({
+      post: poster.post,
       owner: deps.owner,
       repo: deps.repo,
       sha: pr.headSha,
@@ -470,6 +476,7 @@ export function buildSweepEffects(
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
     });
+    if (!poster.failed()) onPhase?.("posted");
     if (!reusedStatus.posted && !reusedStatus.replayed) return 1;
     appendLedger(deps.ledgerPath, {
       run_id: reuseRunId,

@@ -417,6 +417,21 @@ export function redCorpus(suites, runSuite = suiteFails) {
   });
 }
 
+/**
+ * Put the suites that name a guard's job first, keeping each group in corpus order.
+ *
+ * classifyGuard stops at the first suite that fails under the mutant, so the order sets the cost
+ * but never the verdict: the same suites run until one fails, and none is dropped. MEASURED on
+ * #16527's cancelled ci-shard (1/8) (2026-11-03): the catcher of a coverage-ratchet-required guard
+ * sat at corpus index 137 of 137, and under this order it is 14th; the step ran past the job's
+ * 35-min ceiling while measuring ~30 guards.
+ */
+export function catcherFirst(job, suites, textOf) {
+  const names = new RegExp(`(^|[^\\w-])${job.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^\\w-]|$)`);
+  const named = suites.filter((suite) => names.test(textOf(suite)));
+  return [...named, ...suites.filter((suite) => !named.includes(suite))];
+}
+
 export function classifyGuard(guard, original, suites, runSuite = suiteFails, apply = withMutant) {
   return apply(guard, original, (root) => {
     for (const suite of suites) {
@@ -517,10 +532,25 @@ function measure(argv, io, getScratch) {
       batches?.reset();
     }
   };
-  const classify = io.classify ?? ((guard, original, suites) => freshTree(() => classifyGuard(
-    guard, original, suites, (suite) => runSuite(suite, suites),
-    (g, text, fn) => withMutant(g, text, fn, { path: join(getScratch(suites), ".github/workflows/ci.yml"), write: writeFileSync }),
-  )));
+  const suiteTexts = new Map();
+  const suiteText = (suite) => {
+    if (!suiteTexts.has(suite)) {
+      let text = "";
+      try {
+        text = readFileSync(join(root, suite), "utf8");
+      } catch {
+        // An unreadable suite names no job: it keeps its corpus place in the second group and still runs.
+      }
+      suiteTexts.set(suite, text);
+    }
+    return suiteTexts.get(suite);
+  };
+  const classify = io.classify ?? ((guard, original, suites) => freshTree(() => {
+    // The pool prefetches the suites after the one asked for, so it must see this same order.
+    const ordered = catcherFirst(guard.job, suites, suiteText);
+    return classifyGuard(guard, original, ordered, (suite) => runSuite(suite, ordered),
+      (g, text, fn) => withMutant(g, text, fn, { path: join(getScratch(suites), ".github/workflows/ci.yml"), write: writeFileSync }));
+  }));
   const corpusCheck = io.redCorpus ?? ((suites) => freshTree(() => redCorpus(suites, (suite) => runSuite(suite, suites))));
   const writeBaseline = io.writeBaseline ?? ((text) => writeFileSync(join(root, "scripts/workflow-guard-mutation-baseline.json"), text));
   // W1-T3703: the merge-base a "caused vs inherited" split is judged against, resolved fresh each
