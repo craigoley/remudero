@@ -1,0 +1,46 @@
+- id: W1-T11324
+  title: The progress watchdog skips a progress row stamped more than the future-stamp tolerance past now, so a future-dated sweep.pass, review.posted or verdict.merged cannot hold its verdict at PROGRESSING while the fleet is stalled
+  repo: remudero
+  depends_on: []
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which rows the host's recycle trigger counts as progress; with no future rows its verdict is unchanged
+  origin: operator-session#recycle-and-ledger-2026-11-04
+  plan_refs:
+    - W1-T5407
+    - W1-T5484
+    - W1-T9516
+  files:
+    - src/lib/progress-watchdog.ts
+    - test/daemon/a-future-stamped-progress-row-cannot-hold-the-watchdog-at-progressing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: decideProgressWatchdog ignores a PROGRESS_STEPS row whose ts is more than LEDGER_FUTURE_STAMP_TOLERANCE_MS past nowMs when computing newestProgressMs, so a corpus whose only recent progress row is future-stamped yields the verdict an absent row would; the verdict counts the skipped rows, and a corpus with no future rows yields today's verdict exactly
+      proof: "unit test: test/daemon/a-future-stamped-progress-row-cannot-hold-the-watchdog-at-progressing.test.ts"
+    - claim: The watchdog's future-row filter names this task
+      proof: "grep: W1-T11324 in src/lib/progress-watchdog.ts"
+  rationale: |
+    OBSERVED 2026-11-04:
+    - decideProgressWatchdog (src/lib/progress-watchdog.ts) takes the maximum ts over PROGRESS_STEPS (sweep.pass, review.posted, verdict.merged), then sets progressAgeMs = Math.max(0, nowMs - newestProgressMs).
+    - A row stamped in the future therefore reads as age 0, PROGRESSING, until real time passes its stamp. A genuine stall would never reach STALLED, and the host launcher (deploy/install-host-units.sh / rmd-relaunch.sh) would never recycle.
+    - Such rows reach the core ledger: 5 cli.invoked rows stamped 2027-10-14 from a clock-shifted test run on 2026-09-30 (W1-T4923). The ledger flags new ones with ledger.future_stamp (W1-T5407) but does not drop them.
+    - fleet-liveness.ts already drops future-stamped rows for its own decision (W1-T5484). This decision, which starts container recycles, does not.
+    - INFERRED, not observed: no future-dated progress-step row has been seen. The five are cli.invoked, and today's 13:04Z STALLED verdict was not affected. This closes the reader before a clock-shifted writer reaches a progress step.
+  design: |
+    - In decideProgressWatchdog's newestProgressMs loop, skip a row whose ms - nowMs > LEDGER_FUTURE_STAMP_TOLERANCE_MS (import from src/lib/ledger.ts).
+    - Apply the same skip to the generation-boot and loop-resume helpers that read row times, so one future row cannot age a generation from the future either.
+    - Add futureStampedSkipped to the verdict object; the host's JSON parse ignores unknown fields.
+    - Mark it with a comment naming W1-T11324.
+    NOT IN SCOPE:
+    - the watchdog's thresholds and actions;
+    - the recycle script;
+    - quarantining archived rows;
+    - other readers (the pr-owner projection is its own task).
+  note: |
+    Build after W1-T11319 if it is still open: both edit src/lib/progress-watchdog.ts.
+    reservation hand-off: run-unfiled-1793801339784 -> run-unfiled-1793801339784
+    Reserved with rmd next-task-id (W1-T11324 on run-unfiled-1793801339784). From the operator session's 2026-11-04 recycle and ledger recon.

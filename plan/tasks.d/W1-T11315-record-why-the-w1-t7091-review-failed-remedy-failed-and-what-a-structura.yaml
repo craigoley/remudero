@@ -1,0 +1,27 @@
+- id: W1-T11315
+  title: Record why the W1-T7091 review-failed remedy failed and what a structurally different one looks like
+  repo: remudero
+  depends_on:
+    - W1-T7091
+    - W1-T10653
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - docs/forensics/sweep.md
+  acceptance:
+    - claim: The forensics page records which stand-down and needs-human steps the review-failed path in src/lib/sweep.ts takes, with the function names read
+      proof: "grep: review_failed_stand_down_path in docs/forensics/sweep.md"
+    - claim: The page records what the W1-T7091 diff changed and the measured evidence that review-failed still cost PR-hours afterwards (W1-T10653), so the cause of the failed remedy is named
+      proof: "grep: review_failed_remedy_failure_cause in docs/forensics/sweep.md"
+    - claim: The page proposes one structurally different remedy, naming its owner lane and how a later measurement would show it moved the cost
+      proof: "grep: review_failed_structural_alternative in docs/forensics/sweep.md"
+  origin: followup:W1-T10653-1793723384260:2026-11-03T16:34:17.640Z:0
+  rationale: >-
+    From the 2026-11-03 follow-up on W1-T10653-1793723384260, ratified via rmd approve:
+  
+    follow-up harvest [research]: Read the review-failed / needs-human stand-down path in
+    `src/lib/sweep.ts`, plus the W1-T7091 diff. This would show why that remedy failed and what a
+    structurally different one looks like. — from W1-T10653 (run W1-T10653-1793723384260)

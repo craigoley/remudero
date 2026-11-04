@@ -1,0 +1,41 @@
+- id: W1-T11329
+  title: "A paged view's per-page shadow evidence survives its page flapping out of and back into the population, so the inbox (0 real diffs in 1,457,553 samples, 137 population changes in 7.5 days) can reach readiness instead of restarting a page's day every time a section crosses a page boundary"
+  repo: remudero
+  depends_on: [W1-T11328]
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, how long a page's shadow evidence lives across population changes; it spans the inbox population producer and the comparator that keeps per-page evidence
+  origin: operator-session#serve-cpu-profile-2026-11-04
+  plan_refs:
+    - W1-T5362
+  files:
+    - src/lib/view-shadow.ts
+    - src/lib/inbox-view.ts
+    - test/console-api/views/a-page-that-flaps-keeps-its-shadow-evidence.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A page whose logical key leaves the population and returns with no real diff recorded in between keeps its incarnation, samples and sinceMs instead of restarting at zero with a fresh incarnation; a real diff still resets it, and a brand-new position still needs its own full day and cadence, so the readiness rule itself is unchanged
+      proof: "unit test: test/console-api/views/a-page-that-flaps-keeps-its-shadow-evidence.test.ts"
+    - claim: Each view.shadow_summary row for a paged view carries how many current pages are younger than a day and how many of those re-appeared rather than being new, so whether the trap persists is read from the ledger
+      proof: "grep: W1-T11329 criterion 2 in test/console-api/views/a-page-that-flaps-keeps-its-shadow-evidence.test.ts"
+  rationale: |
+    MEASURED 2026-11-04 (~/Remudero-notes/serve-cpu-profile-2026-11-04.md; read-model/view-shadow.json.sqlite, read-only): the inbox comparator has never qualified. The current qualification state holds 1,457,553 samples with zero real diffs (lastReal null) over 173 pages; 159 have a full day and cadence, and 14 are younger (the youngest 7.6 h).
+    The inbox population changed 137 times in 7.5 days (per day: 4, 20, 29, 11, 5, 20, 34, 14). Readiness needs every current page to hold its own full day (currentPopulationRefusal in src/lib/view-shadow.ts), so some page is always younger than a day.
+    The mechanism: inboxShadowPopulation (src/lib/inbox-view.ts) keys a page by position, meaning section, index and filters, and takes its incarnation from the immediately previous population only (old.get(logicalKey) ?? randomUUID()). The comparator keeps a page's samples only when its incarnation matches (the population-change block in view-shadow.ts). A page that drops out when a section shrinks below a page boundary, then returns, restarts its day.
+    The shadow comparator is about 40% of serve's CPU: the main thread, plus worker 11's legacyOf and prepareShadow at 22% and worker 7's shadow and compare at about 30%. A view that can never qualify shadows forever.
+  design: |
+    Keep a bounded per-logical-key memory of retired page evidence: incarnation, samples, sinceMs, lastSampleMs and the real-diff high-water mark, held for at most one day after the page leaves.
+    A key that re-enters with no real diff recorded since it left gets its evidence and incarnation back instead of a new one. inboxShadowPopulation reads incarnations from that memory, not only from the previous population.
+    The summary row adds pages_young and pages_young_reappeared.
+    Test against a real comparator and store:
+    - a page leaves, two population changes pass, and it returns within the hour keeping its samples and sinceMs;
+    - a real diff in between resets it;
+    - a never-seen position starts at zero.
+  falsifier: |
+    At origin/main a page that leaves the population and returns gets a fresh incarnation and zero samples, even with no real diff recorded in between.
+  note: |
+    reservation hand-off: plan-file-1793804074000 -> plan-file-1793804074000. Reserved with rmd next-task-id --branch plan-file-1793804074000 from the operator session's ops worktree. Evidence was gathered live with the operator's approval (a SIGUSR1 inspector CPU profile of serve, plus read-only reads of read-model/view-shadow.json.sqlite) and is recorded in ~/Remudero-notes/serve-cpu-profile-2026-11-04.md. W1-T11328, W1-T11329 and W1-T11330 all edit src/lib/view-shadow.ts, so depends_on chains them to keep parallel builds off one file.

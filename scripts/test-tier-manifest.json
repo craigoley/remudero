@@ -2210,7 +2210,7 @@
     "test/flow-awaiting-review-checks-green-review-never-posted.test.ts": 1600,
     "test/flow-awaiting-review-own-diff-unchanged-since-head-sha-but-the-merge-base-moved.test.ts": 1500,
     "test/flow-escalated-review-failing.test.ts": 2,
-    "test/flow-review-failed-n-unmet-criterion.test.ts": 1500,
+    "test/sweep/flow-review-failed-n-unmet-criterion.test.ts": 1500,
     "test/follow-up-policy-deduplication.test.ts": 2,
     "test/follow-up-policy-delivery.test.ts": 1,
     "test/follow-up-policy-source.test.ts": 2,

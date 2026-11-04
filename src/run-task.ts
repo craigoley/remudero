@@ -182,9 +182,8 @@ import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-upda
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { revisionedRead, type ReadGeneration } from "./lib/read-plane.js";
-import { LightPassPreReviewTiming, observeLightPassReviewEligibility } from "./lib/sweep.js";
-import { createDistanceProbeSequence, distanceRefreshProbeTargets } from "./lib/tick-read-worker.js";
-import { GITHUB_COMPARE_FILES_LISTED } from "./lib/base-reproduction.js";
+import { observeLightPassReviewEligibility } from "./lib/sweep.js";
+import { createReadyPrCompareReader } from "./lib/light-pass-compare.js";
 import { readPlaneWorkerInput } from "./lib/read-plane.worker.js";
 import { globSync, renameSync } from "node:fs";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
@@ -216,7 +215,7 @@ import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { admittedFixTestPaths } from "./lib/fix-test-scope.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
-  type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
+  type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, setGhReadActorResolver, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -632,6 +631,7 @@ import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, spoolingStarvationAlert } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { testPlaceOutcome } from "./lib/test-placement.js";
+import { selectedRegistryShadowMain } from "./selected-registry-shadow-main.js";
 import { readPlanBase } from "./lib/plan-base-reader.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
@@ -1322,7 +1322,7 @@ import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhR
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, observeSelectedRegistrySync,
-  selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+  selectedRegistryLifecycleExec, selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -28455,7 +28455,7 @@ async function deployCommand(rest: string[]): Promise<number> {
  */
 async function deployRunCommand(rest: string[]): Promise<number> {
   markLedgerProcessActor("host_automation");
-  const badArg = unknownArgError("deploy-run", rest, ["--state-root"], ["--dry-run", "--image-drift-only"]);
+  const badArg = unknownArgError("deploy-run", rest, ["--state-root", "--selected-registry-shadow", "--selected-registry-pin"], ["--dry-run", "--image-drift-only"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -28490,8 +28490,12 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     return 0;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const lifecycleExec = selectedRegistryLifecycleExec(assessment.installRoot, {
+    session: flagValue(rest, "--selected-registry-shadow"), pin: flagValue(rest, "--selected-registry-pin"),
+  });
   const deps = {
     ...realDeps().deployFor({
+      execFile: lifecycleExec,
       installPath: assessment.installRoot,
       stateRoot: effectiveConfig.root,
       daemonLabel: DAEMON_LABEL,
@@ -28535,7 +28539,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
       record: (step, fields) => deps.log(step, fields),
     } : undefined,
-  }) }, {
+  }, lifecycleExec) }, {
     dryRun: rest.includes("--dry-run"),
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
@@ -33243,55 +33247,9 @@ interface LightPassReadPorts {
   clock?: Pick<Clock, "now">;
 }
 
+/** W1-T11293: the light pass reads every READY PR's distance; the reader lives in src/lib/light-pass-compare.ts. */
 function createLightPassCompareReader(owner: string, repo: string, read: (args: string[]) => Promise<unknown>) {
-  type Facts = { behindBy: number; baseFiles?: BaseChangedFiles };
-  const memo = new Map<number, { head: string; main: string | undefined; value: Promise<Facts | undefined> }>();
-  const nextDistanceProbe = createDistanceProbeSequence();
-  return {
-    retain: (prs: readonly OpenPrView[]) => {
-      const heads = new Map(prs.map((pr) => [pr.prNumber, pr.headSha]));
-      for (const [number, entry] of memo) if (heads.get(number) !== entry.head) memo.delete(number);
-    },
-    read: async (prs: readonly OpenPrView[], main: string | undefined, timing: LightPassPreReviewTiming) => {
-      const behindMainByPr = new Map<number, number>();
-      const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
-      await timing.measure("compare", () => Promise.all(distanceRefreshProbeTargets(prs, nextDistanceProbe()).map(async (pr) => {
-        const start = timing.clock.now();
-        let entry = memo.get(pr.prNumber);
-        const cacheHit = main !== undefined && entry?.head === pr.headSha && entry.main === main;
-        if (!cacheHit) {
-          const value = Promise.resolve().then(async (): Promise<Facts | undefined> => {
-            const compare = await read(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...${main ?? "main"}`]) as {
-              ahead_by?: unknown; files?: unknown;
-            };
-            if (typeof compare?.ahead_by !== "number" || !Number.isFinite(compare.ahead_by)) return undefined;
-            return { behindBy: compare.ahead_by, ...(Array.isArray(compare.files) ? { baseFiles: {
-              files: compare.files.flatMap((f) => typeof f?.filename === "string" ? [f.filename] : []),
-              truncated: compare.files.length >= GITHUB_COMPARE_FILES_LISTED,
-            } } : {}) };
-          });
-          entry = { head: pr.headSha, main, value };
-          if (main !== undefined) memo.set(pr.prNumber, entry);
-        }
-        const row: Record<string, unknown> = { pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: main ?? null, cache_hit: cacheHit };
-        try {
-          const facts = await entry!.value;
-          row.outcome = facts ? "read" : "unreadable";
-          if (facts) {
-            behindMainByPr.set(pr.prNumber, facts.behindBy);
-            if (facts.baseFiles) baseChangedFilesByPr.set(pr.prNumber, facts.baseFiles);
-          } else if (memo.get(pr.prNumber) === entry) memo.delete(pr.prNumber);
-        } catch (error) {
-          Object.assign(row, { outcome: "error", error: String(error) });
-          if (memo.get(pr.prNumber) === entry) memo.delete(pr.prNumber);
-        } finally {
-          row.elapsed_ms = timing.clock.now() - start;
-          timing.compareReads.push(row);
-        }
-      })));
-      return { behindMainByPr, baseChangedFilesByPr };
-    },
-  };
+  return createReadyPrCompareReader(owner, repo, read);
 }
 
 export function buildSweepLightHook(
@@ -42209,7 +42167,7 @@ import { buildIntoStore, childEntryStoreRoot, materializeMainEntryFromStore } fr
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
-import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
 import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
 import { classEstimate, classTypical } from "./lib/host-memory-learning.js";
 import { type RunChildMode } from "./lib/policy.js";
@@ -42782,7 +42740,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-proof", (rest) => withSyncChildReservation("check-proof", () => checkProofCommand(rest, {}, USAGE), { bindSelf: true })],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
-  ["inspect", (rest) => readOnlyInspectionCommand(rest)],
+  ["inspect", (rest) => rest[0] === "selected-registry-shadow"
+    ? selectedRegistryShadowMain(rest.slice(1)) : readOnlyInspectionCommand(rest)],
   ["gh", async (rest) => await ghCommand(rest)],
   ["gh-broker", async (rest) => await ghBrokerCommand(
     rest,
@@ -43007,6 +42966,9 @@ export async function main(
   } = {},
 ): Promise<void> {
   const inspectionArgv = stripRepoRootFlag(process.argv.slice(2));
+  if (inspectionArgv[0] === "inspect" && inspectionArgv[1] === "selected-registry-shadow") {
+    return await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
+  }
   if (inspectionArgv[0] === "pr-state") {
     if (inspectionArgv.includes("--help") || inspectionArgv.includes("-h")) {
       console.log(commandHelp(commandSpec("pr-state")));
@@ -43276,18 +43238,7 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
   if (work.kind !== "review" || work.prNumber === undefined) {
     throw new Error(`the run child hosts no detached work of kind ${work.kind}${work.kind === "review" ? " without a PR number" : ""}`);
   }
-  const inputs = work.inputs ?? {};
-  const code = await (ports.reviewCommand ?? reviewCommand)(String(work.prNumber), typeof inputs.repo === "string" ? ["--repo", inputs.repo] : [], {
-    executionMode: "semantic",
-    ...(typeof inputs.planOnlyFiling === "boolean" ? { planOnlyFiling: inputs.planOnlyFiling } : {}),
-    ...(typeof inputs.reviewAttemptId === "string" ? { reviewAttemptId: inputs.reviewAttemptId } : {}),
-  });
-  if (code !== 0) {
-    throw Object.assign(new Error(`detached review of PR #${work.prNumber} exited with code ${code}`), {
-      code: String(code), reasonClass: code === 2 ? "review_withheld" : "review_failed",
-    });
-  }
-  return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
+  return runDetachedReview(work, ctx, ports.reviewCommand ?? reviewCommand);
 }
 
 /**

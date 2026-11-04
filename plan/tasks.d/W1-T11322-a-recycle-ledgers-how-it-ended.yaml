@@ -1,0 +1,42 @@
+- id: W1-T11322
+  title: Every recycle ledgers how it ended (replaced, refused or aborted) with its wait, its source and the blockers it waited on, so a recycle started from a terminal is not invisible once it exits
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # deploy/recycle-container.sh is a deploy path every recycle runs; this only adds one ledger row on exit and changes no decision
+  band_meaning: blast-radius
+  origin: operator-session#recycle-efficiency-2026-11-04
+  plan_refs:
+    - W1-T9515
+    - W1-T5281
+    - W1-T6597
+  files:
+    - deploy/recycle-container.sh
+    - test/deploy/a-recycle-ledgers-how-it-ended.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: On every exit after recycle.invoked, recycle-container.sh appends one recycle.ended row with outcome (replaced, refused or aborted), exit status, the last reason line, wait_s, wait_source, waited_s and, for a refusal, the recycle-blockers-json it printed; the row is written for a refusal, a signal before docker stop, and a success
+      proof: "unit test: test/deploy/a-recycle-ledgers-how-it-ended.test.ts"
+    - claim: The ended row names this task
+      proof: "grep: W1-T11322 in deploy/recycle-container.sh"
+  rationale: |
+    OBSERVED 2026-11-04:
+    - Two recycles ran: RECYCLE-3315651, invoked 12:26:41Z from a human SSH terminal, and RECYCLE-3864750, invoked 13:04:08Z by the progress watchdog.
+    - The ledger union holds a recycle.invoked row for each and nothing about how either ended.
+    - The second recycle's refusal ("REFUSING — 0 lane-holding and 2 lane-less worker(s) still in flight after 3000s" plus recycle-blockers-json naming a retro of 6,929 s and a review of 103 s) exists only in the launcher's captured stdout, the systemd journal, and one line in ~/rmd-revivals.log.
+    - The first recycle's outcome exists nowhere on the host. Its 3,000 s bound would have expired at about 13:16:41Z and it left the container untouched, but whether it refused, and on what, is unknowable.
+    - recycle-container.sh ledgers only recycle.invoked, hung_worker_passed, control_timeout, cadence_child_killed and git_author_commission.
+  design: |
+    Install an EXIT handler beside the existing cleanup that appends one recycle.ended JSON row to LEDGER_FILE: run_id RECYCLE-<pid>, outcome from the exit path (replaced on success, refused on a refusal exit, aborted on a signal), rc, the final reason line, wait_s, wait_source, waited_s, and blockers when a refusal printed recycle-blockers-json.
+    It reuses the script's existing ledger-append form (the hung_worker_passed row). A failed append never changes the exit status.
+    Mark it with a comment naming W1-T11322.
+    NOT IN SCOPE: any refusal rule, the wait, and the launcher.
+  note: |
+    Build after W1-T11318 if it is still open: both edit deploy/recycle-container.sh.
+    reservation hand-off: run-unfiled-1793801339784 -> run-unfiled-1793801339784
+    Reserved with rmd next-task-id (W1-T11322 on run-unfiled-1793801339784). From the operator session's recycle-efficiency research.
