@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-10 retro, finding 1"
   plan_refs: [W1-T3275, W1-T3297, W1-T4085]
-  files: [hooks/deny-floor.sh, scripts/gh-when-eligible.mjs, test/a-cadence-refusal-names-when-the-read-is-allowed.test.ts]
+  files: [hooks/deny-floor.sh, scripts/gh-when-eligible.mjs, src/lib/github-transport.ts, test/ci/a-cadence-refusal-names-when-the-read-is-allowed.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -36,13 +36,17 @@
     1. Every rule-9 refusal also prints `next eligible at <ISO-8601 UTC>`: the stamp's mtime plus the window. The
        existing wording is unchanged.
     2. scripts/gh-when-eligible.mjs `-- <gh args>` performs ONE bounded wait: it sleeps in-process until the shared stamp
-       is at least the floor old (never longer than one window), then execs `gh` with the given arguments.
-       - It never waits a second window: if another process stamps meanwhile, it exits 75 naming the new eligible instant.
-       - deny-floor admits it as a single read (no shell repetition, exactly one gh call).
-    3. Document both in the rule-9 comment block.
+       is at least the floor old (never longer than one window), then runs exactly one read.
+       - Reuse `ghArgvIsWrite`, `ghArgvBucketHint`, `ghReadCadenceStampPath` and the shared window from
+         src/lib/github-transport.ts. Refuse a write before waiting; do not duplicate the write classifier or stamp rules.
+       - Serialize final admission with the hook's stamp lock, recheck the stamp, and stamp admission before launching
+         `gh`. If another reader moves the stamp during the wait, exit 75 naming the updated eligible instant; never
+         wait a second window or retry the network call.
+       - The hook recognizes the helper as one read; no shell repetition and exactly one `gh` invocation.
+    3. Document the refusal instant and bounded read-only waiter in the rule-9 comment block.
   acceptance:
-    - claim: "a cadence refusal names the instant the next read is allowed, and the bounded waiter makes exactly one read after waiting at most one window"
-      proof: 'grep: test("W1-T7740: a cadence refusal names when the read is allowed" in test/a-cadence-refusal-names-when-the-read-is-allowed.test.ts'
+    - claim: "a refusal names the next eligible time, and the read-only waiter admits exactly one read after at most one window"
+      proof: 'grep: test("W1-T7740: the refusal names eligibility and the bounded waiter reads once" in test/ci/a-cadence-refusal-names-when-the-read-is-allowed.test.ts'
   falsifier: |
     Remove the `next eligible at` printf: the refusal test fails. Let the waiter wait across two windows: its bounded-wait
-    case (a fake clock, with the stamp refreshed mid-wait) fails.
+    case fails. Replace `ghArgvIsWrite` with an incomplete local classifier: write-shaped argv must be sent to the real `gh`.

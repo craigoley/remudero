@@ -171,7 +171,11 @@ test("W1-T3207: coverage gates consume downloaded artifacts without npm ci or Pl
   assert.match(body, /diff-coverage\.mjs --lcov coverage\/lcov\.info --diff pr\.diff/);
   assert.match(body, /coverage-ratchet\.mjs --lcov coverage\/lcov\.info --baseline scripts\/coverage-baseline\.json/);
   assert.doesNotMatch(body, /\bnpm ci\b|\bplaywright install\b/, "the artifact consumer installs neither npm dependencies nor Playwright");
-  assert.doesNotMatch(body, /diff-class\.mjs|--import tsx/, "the consumer must not need npm-installed tsx to classify the diff");
+  assert.doesNotMatch(body, /--import tsx/, "the consumer must not need npm-installed tsx to classify the diff");
+  // W1-T11161: the one classification it runs is the plain-node form the coverage-ledger job already runs with no install.
+  const classifications = body.match(/[^\n]*\bnode(?: --\S+)* scripts\/diff-class\.mjs[^\n]*/g) ?? [];
+  assert.deepEqual(classifications.map((line) => /CLASS="\$\(node scripts\/diff-class\.mjs --coverage-class /.test(line)), [true],
+    "the consumer classifies once, with plain node and no installed dependency");
 });
 
 test("W1-T3207: missing coverage artifact metadata fails closed", () => {

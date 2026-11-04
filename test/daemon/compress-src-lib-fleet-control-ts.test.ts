@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "@babel/parser";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function snapshot(source: string) {
@@ -31,9 +32,14 @@ test("W1-T11065: comment compression preserves executable code", () => {
   // Babel counts 385 lines including inline comments; the repository ratchet counts 382.
   // These are before/after measurements for this edit, not a new maintenance ceiling.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/fleet-control.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 5327);
-  assert.equal(actual.tokenDigest, "c8fb8b4cb207600d18b9d0d5d661ba233e6b009c7965880d32407bbdb68df95a");
-  assert.equal(actual.astDigest, "44d5b136c0fa507bef56ef9162c15e08a21300f4f9db92174570eb760ee990f7");
+  const before = compressionPinBase("src/lib/fleet-control.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free (#16082).
+    const base = snapshot(before);
+    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
+    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+  }
   assert.ok(actual.commentLines > 0 && actual.commentLines < 385,
     "comment lines must decrease from the pre-compression source");
   assert.ok(actual.commentBytes > 0 && actual.commentBytes < 30080,

@@ -1,0 +1,46 @@
+- id: W1-T11254
+  title: The triage and plan lanes' relint loops refuse every violation the pre-push plan lint refuses on the filed ids, so a worker redrafts a shard the push would refuse instead of the lane dying at the push with no retry
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the relint loop's lint widens to the push gate's own; the loop, its bound and the verdicts are unchanged
+  origin: operator-session#wreckterra-pr6-lint-recon-2026-11-03
+  plan_refs:
+    - W1-T4423
+    - W1-T4038
+  files:
+    - src/run-task.ts
+    - test/plan/a-relint-refuses-what-the-push-lint-refuses.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A filed shard that lintTask passes but the pre-push changed-task lint refuses (a shared proof, a new src module with no call-site criterion, a new rule-suite basename) is handed back to the worker by the triage lane's relint loop with those violations, and the plan lane's loop does the same
+      proof: "unit test: test/plan/a-relint-refuses-what-the-push-lint-refuses.test.ts"
+    - claim: Both relint wirings in src/run-task.ts read the changed-task lint the review already runs
+      proof: "grep: lintPlanForReview(worktreePath in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-03, in five operator-directed triages run in remudero-daemon:
+    - Two lanes pushed a shard the pre-push hook refused, and each ended in triage.error with no PR.
+      - metered-customer-instance-20261103 filed W1-T11226, refused for [shared-proof, new-shard-rule-suite, call-site].
+      - onboarding-is-a-code-edit-20261103 filed W1-T11233, refused for [shared-proof, call-site].
+    - Each entry stays at status: new, to be fired again later behind a FIFO about 24 days deep (auto_triage.fired about 6.6/day against 8.6 arrivals/day over 7 days).
+    - The relint loop lints with lintFiledTasks (src/lib/relint.ts), which calls lintTask with machineFilingAdmission only and keeps block-severity violations.
+      - sharedProofViolations emits severity warn, so the loop drops it.
+      - callSiteViolations returns nothing without opts.moduleExists.
+      - newShardRuleSuiteViolations returns nothing without a base-task option.
+      - The pre-push lint-plan-precheck runs the changed-task lint against the merge base with those options, and blocks.
+    - The two lints disagree by construction. A worker that passes relint can still be refused at the push, where the lane has no retry.
+    - Over the 7 days before, 3 of the 3 triage.error rows were also pre-push refusals ("Command failed: git ... push origin HEAD / the harness's pre-push gate").
+  design: |
+    In the triage lane's runRelintLoop wiring and the plan lane's (both in src/run-task.ts), the lint callback returns:
+    - lintFiledTasks's violations, as today;
+    - plus every violation lintPlanForReview(worktreePath) reports on a filed id, mapped to RelintViolation with its check name.
+    lintPlanForReview is the review's own child-process run of lint-plan:fast's selection, offline, against the merge base. When it returns ran: false, the loop keeps lintFiledTasks's verdict and ledgers the reason, so an unreadable lint never refuses a filing it could not judge.
+    NOT IN SCOPE: the loop's attempt bound, its stop reasons, the worker prompt, and the pre-push hook.
+  note: |
+    reservation hand-off: run-unfiled-1793728395951 -> run-unfiled-1793728395951
+    Reserved with rmd next-task-id (W1-T11254 on run-unfiled-1793728395951). Found by the operator session's Part B triage runs.
