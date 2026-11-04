@@ -1,0 +1,29 @@
+id: incident-e4afef5f5f9d08f1
+ts: 2026-11-04T00:55:42.698Z
+raw: >-
+  Incident e4afef5f5f9d: intervention
+  plan-proof-unrunnable:plan-repair:plan-only-pr-is-red-on-ci-shard-the-code
+
+  First seen: 2026-11-04T00:52:29.028Z
+
+  Last seen: 2026-11-04T00:52:29.028Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#15000@b88b6f0b3 actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-only-pr-is-red-on-ci-shard-the-code — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#e4afef5f5f9d08f1427cefb0c39dc63f019cdd3cfa4d6fe40e5f8f1e61652d35
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

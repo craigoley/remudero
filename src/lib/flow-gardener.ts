@@ -21,6 +21,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { loadPlan, newTestPath, retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { automergeHoldFromLedger, cappedOverrideFromLedger, decideArmFromLedgerVerdict, priorReviewVerdictFromLedger } from "./review.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 const MIN_MS = 60_000;
@@ -81,7 +82,7 @@ const STAGE_OWNER: Readonly<Record<FlowStage, string>> = {
 
 const READ_STEPS = [
   "pr.opened", "pr.terminal", "sweep.review_eligible", "sweep.review_admitted", "review.posted",
-  "automerge.armed", "sweep.update_branch.updated", "fix.dispatch", "fix.done", "branch.update_requested", "review.plan_only_reviewed",
+  "automerge.armed", "automerge.direct_merge_preflight_refused", "automerge.capped_override_granted", "automerge.hold_engaged", "automerge.hold_released", "sweep.update_branch.updated", "fix.dispatch", "fix.done", "branch.update_requested", "review.plan_only_reviewed",
 ];
 export const ADMISSION_FLOW_STEP = "admission_flow.shadow";
 /** PRIMARY CONTROL: selected terminal evidence is normally limited to eight reads per off-loop pass. */
@@ -275,15 +276,109 @@ export interface FlowLedgerRead {
   unread: string[];
 }
 
-/** The ledger union since `sinceIso`, narrowed to the rows a flow pass reads. */
+/** Standing operator decisions the production merge path honours at any age: a hold has no head binding and is
+ *  retained across compaction so it outlives a push (W1-T1000002), and a capped override stands while its head does. */
+export const FLOW_STANDING_STEPS = ["automerge.hold_engaged", "automerge.hold_released", "automerge.capped_override_granted"] as const;
+
+/** The ledger union since `sinceIso`, narrowed to the rows a flow pass reads, preceded by every standing decision
+ *  older than it, read from the whole union in ledger order (a hold is "last one wins"). */
 export function readFlowLedger(stateDir: string, sinceIso: string): FlowLedgerRead {
   const read = readLedgerUnionRecordsSync(stateDir, { since: sinceIso, pattern: FLOW_LINE, refuseIncomplete: true });
-  return { ok: read.ok, rows: read.rows, unread: read.unread };
+  const standing = readLedgerUnionRecordsSync(stateDir, { step: FLOW_STANDING_STEPS, refuseIncomplete: true });
+  const sinceMs = Date.parse(sinceIso);
+  const older = standing.rows.filter((row) => typeof row.ts === "string" && Date.parse(row.ts) < sinceMs);
+  return { ok: read.ok && standing.ok, rows: [...older, ...read.rows], unread: [...read.unread, ...standing.unread] };
 }
 
 export interface FlowCiReading {
   minutes: number;
   doneMs: number;
+}
+
+/** The last complete UTC day before `nowMs`: consecutive daily passes read adjacent windows at any wall-clock time. */
+export function openQueueWindow(nowMs: number): { fromMs: number; toMs: number } {
+  const toMs = Math.floor(nowMs / DAY_MS) * DAY_MS;
+  return { fromMs: toMs - DAY_MS, toMs };
+}
+
+/** BACKSTOP: GitHub search answers at most this many results, so a larger window cannot be read whole. */
+const GITHUB_SEARCH_RESULT_LIMIT = 1000;
+
+/** The open cohort and the window's arrivals and terminals, paged in batched GraphQL rounds, never one read per PR. */
+export function flowOpenQueueReader(
+  owner: string, repo: string, readJson: (args: string[]) => Promise<unknown> = ghJsonAsync, clock: Clock = systemClock,
+): (window: { fromMs: number; toMs: number }) => Promise<FlowOpenQueueRead> {
+  return async (window) => {
+    const fields = "number createdAt updatedAt headRefOid headRefName isDraft mergeable reviewDecision commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}";
+    const span = `${fixedClock(window.fromMs).iso().slice(0, 19)}Z..${fixedClock(window.toMs - 1000).iso().slice(0, 19)}Z`;
+    const conns = [
+      { key: "open", q: "", after: "", done: false, total: NaN, nodes: [] as unknown[] },
+      { key: "created", q: `repo:${owner}/${repo} is:pr created:${span}`, after: "", done: false, total: NaN, nodes: [] as unknown[] },
+      { key: "closed", q: `repo:${owner}/${repo} is:pr closed:${span}`, after: "", done: false, total: NaN, nodes: [] as unknown[] },
+    ];
+    let reason: string | undefined;
+    let ok = true;
+    while (conns.some((c) => !c.done)) {
+      const parts = conns.filter((c) => !c.done).map((c) => {
+        const after = c.after ? `,after:${JSON.stringify(c.after)}` : "";
+        return c.key === "open"
+          ? `repository(owner:"${owner}",name:"${repo}"){pullRequests(states:OPEN,first:100${after},orderBy:{field:UPDATED_AT,direction:DESC}){totalCount pageInfo{hasNextPage endCursor} nodes{${fields}}}}`
+          : `${c.key}: search(query:${JSON.stringify(c.q)},type:ISSUE,first:100${after}){issueCount pageInfo{hasNextPage endCursor} nodes{... on PullRequest{${fields} mergedAt closedAt}}}`;
+      });
+      const body = await readJson(["api", "graphql", "-f", `query=query{${parts.join(" ")}}`]) as Record<string, unknown> | null;
+      if (Array.isArray(body?.errors) && body!.errors.length > 0) throw new Error("flow: GitHub open-queue GraphQL query failed");
+      if (body === null || typeof body !== "object") { ok = false; break; }
+      const data = object(body.data);
+      for (const c of conns.filter((x) => !x.done)) {
+        const connection = c.key === "open" ? object(object(data.repository).pullRequests) : object(data[c.key]);
+        const page = Array.isArray(connection.nodes) ? connection.nodes : [];
+        const info = object(connection.pageInfo);
+        c.total = Number(c.key === "open" ? connection.totalCount : connection.issueCount);
+        c.nodes.push(...page);
+        if (c.key !== "open" && c.total > GITHUB_SEARCH_RESULT_LIMIT) { reason = "github-search-result-limit"; c.done = true; continue; }
+        if (info.hasNextPage !== true) { c.done = true; continue; }
+        const cursor = typeof info.endCursor === "string" ? info.endCursor : "";
+        if (!cursor || cursor === c.after || page.length === 0) { reason = "census-pagination-stalled"; c.done = true; continue; }
+        c.after = cursor;
+      }
+    }
+    const parse = (value: unknown): FlowOpenQueuePr | undefined => {
+      const pr = object(value), createdAtMs = Date.parse(String(pr.createdAt ?? "")), updatedAtMs = Date.parse(String(pr.updatedAt ?? ""));
+      const number = Number(pr.number), headSha = typeof pr.headRefOid === "string" ? pr.headRefOid : "";
+      if (!Number.isSafeInteger(number) || number <= 0 || !Number.isFinite(createdAtMs) || !Number.isFinite(updatedAtMs) || !headSha) return undefined;
+      const mergedAtMs = typeof pr.mergedAt === "string" ? Date.parse(pr.mergedAt) : undefined;
+      const closedAtMs = typeof pr.closedAt === "string" ? Date.parse(pr.closedAt) : undefined;
+      const commits = object(pr.commits).nodes;
+      const commit = Array.isArray(commits) && commits.length === 1 ? object(object(commits[0]).commit) : {};
+      const rollup = String(object(commit.statusCheckRollup).state);
+      const checksState = commit.oid === headSha && ["SUCCESS", "FAILURE", "PENDING", "ERROR", "EXPECTED"].includes(rollup) ? rollup : "UNKNOWN";
+      // The production arm refuses a draft (attemptArmSteps' isDraft === true) and the sweep never arms a conflicting PR,
+      // so both are read here and kept: readiness below asks the same questions production does.
+      const mergeable = ["MERGEABLE", "CONFLICTING", "UNKNOWN"].includes(String(pr.mergeable)) ? String(pr.mergeable) : "UNKNOWN";
+      return { number, createdAtMs, updatedAtMs, headSha, headRefName: String(pr.headRefName ?? "unknown"), checksState,
+        ...(typeof pr.isDraft === "boolean" ? { isDraft: pr.isDraft } : {}), mergeable,
+        ...(mergedAtMs !== undefined && Number.isFinite(mergedAtMs) ? { mergedAtMs } : {}),
+        ...(closedAtMs !== undefined && Number.isFinite(closedAtMs) ? { closedAtMs } : {}) };
+    };
+    const [openConn, ...searches] = conns;
+    const open = openConn!.nodes.map(parse).filter((pr): pr is FlowOpenQueuePr => pr !== undefined);
+    const byNumber = new Map<number, FlowOpenQueuePr>();
+    let parsedAll = open.length === openConn!.nodes.length;
+    for (const c of searches) {
+      const parsed = c.nodes.map(parse).filter((pr): pr is FlowOpenQueuePr => pr !== undefined);
+      parsedAll &&= parsed.length === c.nodes.length;
+      for (const pr of parsed) byNumber.set(pr.number, { ...byNumber.get(pr.number), ...pr });
+    }
+    // A page repeated or overlapping across cursors can fill `totalCount` while members are missing, so a
+    // connection counts only when its DISTINCT PR numbers equal its total.
+    const distinct = (c: (typeof conns)[number]) => new Set(c.nodes.map((n) => Number(object(n).number))).size;
+    const duplicated = conns.some((c) => distinct(c) !== c.nodes.length);
+    const counted = !duplicated && conns.every((c) => c.total === c.nodes.length);
+    if (duplicated && reason === undefined) reason = "census-duplicate-members";
+    if (!counted && reason === undefined) reason = "census-page-cap-exceeded";
+    return { ok, complete: ok && counted && parsedAll, observedAtMs: clock.now(), windowMs: window, open, window: [...byNumber.values()],
+      ...(reason !== undefined && !(ok && counted && parsedAll) ? { reason } : {}) };
+  };
 }
 
 /** CI wall clock of the newest green `ci.yml` run at a head, or `undefined` when none completed green. */
@@ -307,8 +402,23 @@ export function flowCiReader(
 
 type FlowPlanTask = { id: string; origin?: string; status?: string; retirement?: string; superseded_by?: string };
 
+export interface FlowOpenQueuePr {
+  number: number; createdAtMs: number; updatedAtMs: number; headSha: string; headRefName: string;
+  checksState: string; mergedAtMs?: number; closedAtMs?: number;
+  /** GitHub's draft flag; production refuses to arm only a positive `true` (W1-T3551), so absent is not a draft. */
+  isDraft?: boolean;
+  /** GitHub's mergeability: MERGEABLE, CONFLICTING or UNKNOWN; a conflicting PR is never armed or merged. */
+  mergeable?: string;
+}
+export interface FlowOpenQueueRead {
+  ok: boolean; complete: boolean; observedAtMs: number; open: FlowOpenQueuePr[]; window: FlowOpenQueuePr[]; reason?: string;
+  /** The UTC-day window the census was read for; a census read for another window is never analysed as this one. */
+  windowMs?: { fromMs: number; toMs: number };
+}
 export interface FlowGardenSources {
   readLedger?: (sinceIso: string) => FlowLedgerRead;
+  /** One batched repository census; never one GitHub read per PR. */
+  readOpenQueue?: (window: { fromMs: number; toMs: number }) => Promise<FlowOpenQueueRead>;
   readCi?: (headSha: string) => Promise<FlowCiReading | undefined>;
   planTasks?: () => FlowPlanTask[];
   /** Whether a superseding task has landed (W1-T9729). Absent: its `Remudero-Task:` trailer on the checkout's origin/main. */
@@ -539,11 +649,120 @@ export function renderFlowFollowUp(stat: FlowStageStat, taskId: string, populati
   });
 }
 
+const OPEN_QUEUE_MAX_AGE_MS = 6 * 60 * MIN_MS;
+const medianNumber = (values: number[]): number | null => {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+};
+
+/** Right-censored open work and one complete arrival/drain window; it can only recommend in shadow. */
+export function openQueueShadow(
+  census: FlowOpenQueueRead, rows: readonly Row[], previous: FlowState["openQueue"], nowMs: number,
+  /** Where the ledger read began: an open PR older than it whose stage rows are not in the read has an unread stage. */
+  ledgerFromMs?: number,
+): { mode: "shadow"; permission: "not-granted"; action: "none"; status: "UNKNOWN" | "OBSERVED";
+  reason: string; window: { fromMs: number; toMs: number }; cohort: Record<string, number | null>;
+  producer?: string; recommendation?: string; nextState: NonNullable<FlowState["openQueue"]> } {
+  const window = openQueueWindow(nowMs);
+  const { fromMs, toMs } = window;
+  const windowDay = fixedClock(nowMs).iso().slice(0, 10);
+  const unknown = (reason: string) => ({ mode: "shadow" as const, permission: "not-granted" as const, action: "none" as const,
+    status: "UNKNOWN" as const, reason, window, cohort: { open: null, arrivals: null, merged_or_closed: null, review_waiting: null,
+      merge_preflight_refused: null, ready_to_direct_merge: null, review_wait_p50_ms: null,
+      merge_preflight_refusal_age_p50_ms: null, ready_to_direct_merge_age_p50_ms: null, open_age_p50_ms: null, arrivals_exceed_drain: null },
+    nextState: { observedAtMs: census.observedAtMs, windowDay, window, reviewP50: null, pressure: false, streak: 0 } });
+  if (!census.ok || !census.complete) return unknown(census.reason ?? "incomplete-census");
+  if (census.windowMs !== undefined && (census.windowMs.fromMs !== fromMs || census.windowMs.toMs !== toMs)) return unknown("census-window-mismatch");
+  if (!Number.isFinite(census.observedAtMs) || census.observedAtMs > nowMs || nowMs - census.observedAtMs > OPEN_QUEUE_MAX_AGE_MS) return unknown("stale-census");
+  const inWindow = (ms: number | undefined) => ms !== undefined && ms >= fromMs && ms < toMs;
+  const recent = census.window.filter((pr) => inWindow(pr.createdAtMs));
+  const arrivals = recent.length;
+  const drain = census.window.filter((pr) => inWindow(pr.mergedAtMs) || inWindow(pr.closedAtMs)).length;
+  const holdRows = rows.filter((r) => r.step === "automerge.hold_engaged" || r.step === "automerge.hold_released");
+  const details = census.open.map((pr) => {
+    const matching = rows.filter((r) => prNumberOf(r) === pr.number &&
+      (r.step === "automerge.direct_merge_preflight_refused" ? r.prior_head_sha ?? r.head_sha : r.head_sha) === pr.headSha)
+      .sort((a, b) => tsOf(a) - tsOf(b));
+    const eligible = matching.filter((r) => r.step === "sweep.review_eligible").at(-1);
+    const admitted = matching.filter((r) => r.step === "sweep.review_admitted").at(-1);
+    const reviewed = matching.filter((r) => r.step === "review.posted" && r.state === "success").at(-1);
+    const refused = matching.filter((r) => r.step === "automerge.direct_merge_preflight_refused").at(-1);
+    const reviewWaiting = eligible !== undefined && (admitted === undefined || tsOf(admitted) < tsOf(eligible)) &&
+      (reviewed === undefined || tsOf(reviewed) < tsOf(eligible));
+    const preflightRefused = refused !== undefined && (reviewed === undefined || tsOf(refused) >= tsOf(reviewed));
+    // Ready means the production arm would merge on this head's posted verdict: its own predicates, so a CAPPED success
+    // (zero proofs executed) is never ready unless plan-only or under a head-bound operator override.
+    const ownRows = rows.filter((r) => prNumberOf(r) === pr.number);
+    const prUrl = ownRows.map((r) => r.pr_url).find((u): u is string => typeof u === "string");
+    const taskId = ownRows.filter((r) => r.step === "review.posted").map((r) => r.task_id).findLast((t): t is string => typeof t === "string") ?? "";
+    const prior = priorReviewVerdictFromLedger(ownRows, taskId, prUrl);
+    const override = prior?.capped ? cappedOverrideFromLedger(ownRows, taskId, pr.headSha, prUrl) : undefined;
+    const armable = decideArmFromLedgerVerdict(prior, pr.headSha, override).arm && automergeHoldFromLedger(holdRows, pr.number) === undefined;
+    // A draft (attemptArmSteps refuses `isDraft === true` first) or a conflicting head (never armed) is not ready.
+    const ready = reviewed !== undefined && armable && pr.checksState === "SUCCESS" && !preflightRefused &&
+      pr.isDraft !== true && pr.mergeable !== "CONFLICTING";
+    const reviewAge = reviewWaiting ? Math.max(0, nowMs - tsOf(eligible!)) : null;
+    // Standing decisions are read at any age, so only stage evidence (never an old hold or override) makes a stage known.
+    const standing: readonly unknown[] = FLOW_STANDING_STEPS;
+    const unread = ledgerFromMs !== undefined && pr.createdAtMs < ledgerFromMs &&
+      matching.every((r) => standing.includes(r.step));
+    const stage = reviewWaiting ? "review_waiting" : preflightRefused ? "merge_preflight_refused" : ready ? "ready_to_direct_merge"
+      : unread ? "stage_unread" : "other_open";
+    const stageStart = reviewWaiting ? tsOf(eligible!) : preflightRefused ? tsOf(refused!) : ready ? tsOf(reviewed!) : NaN;
+    return { pr, stage, reviewAge, age: Number.isFinite(stageStart) ? Math.max(0, nowMs - stageStart) : null };
+  });
+  const reviewAges = details.map((d) => d.reviewAge).filter((n): n is number => n !== null);
+  const reviewP50 = medianNumber(reviewAges);
+  const producers = new Map<string, number>();
+  for (const pr of recent) {
+    const producer = pr.headRefName.startsWith("run-W1-") ? "plan-task-workers" : pr.headRefName.split("/")[0] || "unknown";
+    producers.set(producer, (producers.get(producer) ?? 0) + 1);
+  }
+  const producer = [...producers].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+  const previousWindowConsecutive = previous !== undefined && previous.window?.fromMs === fromMs - DAY_MS && previous.window.toMs === fromMs &&
+    previous.observedAtMs < nowMs && nowMs - previous.observedAtMs <= 2 * DAY_MS;
+  // A second pass on the same UTC date re-reads the same window: it never advances the streak, and its pressure is
+  // re-judged on what it reads now against the predecessor window's p50 the first pass compared with.
+  const sameWindow = previous !== undefined && previous.window?.fromMs === fromMs && previous.window.toMs === toMs;
+  const baselineP50 = sameWindow ? previous!.baselineP50 ?? null : previousWindowConsecutive ? previous!.reviewP50 : null;
+  const stageUnread = details.filter((d) => d.stage === "stage_unread").length;
+  const holds = arrivals > drain && reviewP50 !== null && baselineP50 !== null && reviewP50 > baselineP50 && producer !== undefined &&
+    stageUnread === 0;
+  const pressure = sameWindow
+    ? previous!.pressure && holds && producer === previous!.producer
+    : holds && previousWindowConsecutive && producer === previous!.producer;
+  const streak = !pressure ? 0 : sameWindow ? previous!.streak : previous!.pressure ? previous!.streak + 1 : 1;
+  const nextState = { observedAtMs: census.observedAtMs, windowDay, window, reviewP50, baselineP50, pressure, streak, ...(producer ? { producer } : {}) };
+  // Incomplete stage evidence is not an observation: an open PR whose stage the ledger read cannot see is UNKNOWN.
+  return { mode: "shadow", permission: "not-granted", action: "none", status: stageUnread > 0 ? "UNKNOWN" : "OBSERVED", reason: pressure
+    ? `complete-window-inflow-exceeds-drain-review-p50-worsened-streak-${streak}`
+    : stageUnread > 0 ? "stage-evidence-unread-before-ledger-read" : "complete-window-no-confirmed-pressure",
+    window, cohort: { open: details.length, arrivals, merged_or_closed: drain,
+      review_waiting: details.filter((d) => d.stage === "review_waiting").length,
+      merge_preflight_refused: details.filter((d) => d.stage === "merge_preflight_refused").length,
+      ready_to_direct_merge: details.filter((d) => d.stage === "ready_to_direct_merge").length,
+      other_open: details.filter((d) => d.stage === "other_open").length,
+      stage_unread: stageUnread,
+      review_wait_p50_ms: reviewP50,
+      merge_preflight_refusal_age_p50_ms: medianNumber(details.filter((d) => d.stage === "merge_preflight_refused").map((d) => d.age!).filter(Number.isFinite)),
+      ready_to_direct_merge_age_p50_ms: medianNumber(details.filter((d) => d.stage === "ready_to_direct_merge").map((d) => d.age!).filter(Number.isFinite)),
+      other_open_age_p50_ms: medianNumber(details.filter((d) => d.stage === "other_open").map((d) => Math.max(0, nowMs - d.pr.createdAtMs))),
+      producer_arrivals: producer ? producers.get(producer)! : 0,
+      open_age_p50_ms: medianNumber(details.map((d) => Math.max(0, nowMs - d.pr.createdAtMs))),
+      arrivals_exceed_drain: arrivals > drain ? 1 : 0 },
+    ...(producer ? { producer } : {}), ...(streak >= 2 && producer ? { recommendation: `consider-slowing-${producer}` } : {}), nextState };
+}
+
 interface FlowState {
   lastReportDay?: string;
   ci?: Record<string, { headSha: string; mergedMs: number; reading: FlowCiReading | null }>;
   filed?: Record<string, { taskId: string; atMs: number }>;
   filings?: Array<{ day: string; key: string }>;
+  openQueue?: { observedAtMs: number; windowDay?: string; window?: { fromMs: number; toMs: number }; reviewP50: number | null;
+    /** The predecessor window's p50 this window's pressure was judged against, so a same-date re-read re-judges it. */
+    baselineP50?: number | null; pressure: boolean; streak: number; producer?: string };
 }
 
 function readState(stateDir: string): FlowState {
@@ -604,6 +823,11 @@ export async function runFlowGardener(
   const ledger = (sources.readLedger ?? ((iso) => readFlowLedger(deps.stateDir, iso)))(sinceIso);
   if (!ledger.ok) {
     unreadable("ledger", { unread: ledger.unread });
+    deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN",
+      reason: "ledger-incomplete", window: openQueueWindow(nowMs),
+      cohort: { open: null, arrivals: null, merged_or_closed: null, review_waiting: null, merge_preflight_refused: null,
+        ready_to_direct_merge: null, review_wait_p50_ms: null, merge_preflight_refusal_age_p50_ms: null,
+        ready_to_direct_merge_age_p50_ms: null, open_age_p50_ms: null, arrivals_exceed_drain: null } });
     return { ran: false, stats: [], filed: [] };
   }
   const prs = flowPrs(ledger.rows).filter((pr) => pr.mergedMs > nowMs - (FLOW_BASELINE_DAYS + 1) * DAY_MS && pr.mergedMs <= nowMs);
@@ -626,6 +850,21 @@ export async function runFlowGardener(
       cache[pr.number] = { headSha: pr.headSha, mergedMs: pr.mergedMs, reading: (await readCi(pr.headSha)) ?? null };
     } catch (e) {
       errors.push({ pr: pr.number, error: String((e as Error)?.message ?? e) });
+    }
+  }
+  if (sources.readOpenQueue === undefined) {
+    deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN", reason: "census-reader-unavailable" });
+    state.openQueue = { observedAtMs: nowMs, windowDay: day, reviewP50: null, pressure: false, streak: 0 };
+  } else {
+    try {
+      const census = await sources.readOpenQueue(openQueueWindow(nowMs));
+      const shadow = openQueueShadow(census, ledger.rows, state.openQueue, clock.now(), Date.parse(sinceIso));
+      deps.log("flow.open_queue_shadow", shadow);
+      state.openQueue = shadow.nextState;
+    } catch (e) {
+      deps.log("flow.open_queue_shadow", { mode: "shadow", permission: "not-granted", action: "none", status: "UNKNOWN",
+        reason: "census-read-failed", error: String((e as Error)?.message ?? e) });
+      state.openQueue = { observedAtMs: nowMs, windowDay: day, reviewP50: null, pressure: false, streak: 0 };
     }
   }
   if (errors.length > 0) unreadable("github", { count: errors.length, first_error: errors[0]!.error, prs: errors.slice(0, 10).map((e) => e.pr) });
