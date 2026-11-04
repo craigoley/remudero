@@ -1,0 +1,49 @@
+- id: W1-T11257
+  title: "Before a fleet build's PR opens, a cheap judge reads the diff for every new input its tests inject and names the production code that supplies each one, in shadow first, scored against the reviewer's later findings — 4 of 5 review FAILs on 2026-11-03 were tests feeding an input no production code produces"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, a pre-open shadow audit of test-injected inputs; it adds a judge call to the pre-open gate and a gate-row field
+  origin: operator-session#fix-lane-gaps-2026-11-03
+  plan_refs:
+    - W1-T11105
+    - W1-T9602
+    - W1-T11209
+  files:
+    - src/lib/producer-audit.ts
+    - src/lib/preopen-gate.ts
+    - test/ci/gates/a-build-names-the-production-producer-of-every-input-its-tests-inject.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: After the pre-open fast gate, producerAudit sends the build's diff to the cheap judge lane and gets back, for each new optional field, seam, option or ledger field the diff's tests supply, the production file:line that supplies it in this tree, or that none does; an unparseable or failed judge answer is recorded as unaudited with its reason, never as clean
+      proof: "unit test: test/ci/gates/a-build-names-the-production-producer-of-every-input-its-tests-inject.test.ts"
+    - claim: In shadow the audit changes nothing a build sees; implement.preopen_gate gains producer_audit with the unproduced inputs and the judge's provenance, and a scoring read joins each audited head to that head's later review.finding rows, counting a later no-production-producer finding as a hit when the audit named that input and as a miss when it did not
+      proof: "grep: W1-T11257 criterion 2 in test/ci/gates/a-build-names-the-production-producer-of-every-input-its-tests-inject.test.ts"
+    - claim: The pre-open gate calls producerAudit on the production path, so the audit is reached outside its own tests
+      proof: "grep: producerAudit( in src/lib/preopen-gate.ts"
+  rationale: |
+    OBSERVED 2026-11-03: of five review FAILs triaged by hand that afternoon, four were the same shape, a new test supplying an input that no production code produces:
+    - #16412: reviewLoad is supplied only by fixtures.
+    - #16452: runDetachedWork never passes onPhase, so 'review:posted' never reaches status.json.
+    - #16474: setup_ms and proofs_ms are never written, and reviewCpuChildren is never populated.
+    - #16441's first finding: a window join no production timing can satisfy.
+    Each test passed, each feature was dead in production, and each cost the fleet at least one review cycle plus a fix round.
+    MEASURED over the 7-day core ledger union (read-only): 21 of 485 review.finding mechanisms (4%, 17 PRs) state this shape in explicit words such as "no production producer", "only by fixtures" or "never populated". The regex is conservative and misses paraphrases, so the true share is higher. That afternoon's triage reads 4 of 5.
+    WHY BEFORE THE PR, AND WHY SHADOW: the builder still holds its context before the PR opens, and handing it the gap there is a continuation (renderPreopenGatePrompt), not a new fix round. But a judge can be wrong in both directions. So it records first: W1-T11105's shape, a shadow measured against an outcome the operator then decides on. The outcome here is the reviewer's own later finding at the same head.
+    UPSTREAM CAUSE, found the same afternoon: in #16452 and #16474 the producer sat outside the task's own files:, so the builder could not legally wire it, and the fix rounds hit NEEDS_SCOPE. Amendment #16601 fixed both tasks.
+    So the same audit belongs at filing time too: a filing whose design reads an input should declare the input's producer. That is a follow-up, not this task's scope. This task's shadow rows will show how often the unproduced input's producer lies outside the build's files.
+  design: |
+    1. src/lib/producer-audit.ts: producerAudit({ diff, tree, judge }) asks the cheap judge lane (the same mount family the CI-escalation and machine-filing judges use) one bounded question. It names the inputs the diff's tests supply that production must also supply (new optional fields, seams, deps entries, ledger fields read) and the production producer of each, citing file:line in the tree. The answer is parsed into { audited: true, inputs: [{ name, producer: "path:line" | null }] } or { audited: false, reason }.
+    2. src/lib/preopen-gate.ts: after the fast gate settles and before the push gate, when the policy switch is on (default shadow), run producerAudit with the gate's own diff and add producer_audit to the result. preopenGateLedgerFields carries unproduced, inputs_audited and the judge provenance. Nothing is handed to the worker in shadow.
+    3. A pure scoring helper (exported from producer-audit.ts) joins implement.preopen_gate rows to later review.finding rows at the same head, by input name appearing in the mechanism, and returns hits, misses and unflagged audits.
+    4. Promotion (a separate operator-approved change): after about a week, report hit and miss counts and the false-flag rate. Then the operator decides whether an unproduced input becomes a pre-open continuation.
+  falsifier: |
+    At origin/main nothing before review checks whether an input a new test injects has a production producer. The implement.preopen_gate row has no producer_audit field.
+  note: |
+    reservation hand-off: plan-file-1793731942930 -> plan-file-1793731942930
+    Reserved with rmd next-task-id --branch plan-file-1793731942930 from the operator session's ops worktree. Operator 2026-11-03, in chat: "fix the root causes of issues you find". The test path is where rmd test-place put a stub importing src/lib/preopen-gate.ts (test/ci/gates/, high).

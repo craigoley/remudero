@@ -20,7 +20,9 @@ interface StoredManifest { sourceHash?: unknown; entries?: unknown; workers?: un
 interface BuildScript {
   OUT_DIR: string;
   MANIFEST_NAME: string;
+  MAIN_OFF_NAME: string;
   sourceHash(root: string): string;
+  mainEntrySource(root: string): { hash: string; signature: string };
   readChildEntryManifest(root: string, outDir?: string): unknown;
   childEntryIsCurrent(root: string, name: string, opts?: { outDir?: string; treeHash?: string }): Currency;
   workerBundle(root: string, module: string, opts?: { outDir?: string; treeHash?: string }): Currency;
@@ -116,6 +118,22 @@ function publishDir(from: string, to: string, aside: string): void {
 }
 
 export type StoreLookup = { outcome: "hit"; hash: string } | { outcome: "miss"; reason: string; hash?: string };
+
+/** W1-T11152: materialize before bin/rmd starts, carrying the source witness to its own entry judgement. */
+export function materializeMainEntryFromStore(treeRoot: string, storeRoot?: string): {
+  lookup: StoreLookup | { outcome: "current" }; source?: { hash: string; signature: string };
+} {
+  let source: { hash: string; signature: string } | undefined;
+  try {
+    const script = loadBuildScript();
+    source = script.mainEntrySource(treeRoot);
+    if (existsSync(join(treeRoot, script.OUT_DIR, script.MAIN_OFF_NAME))) return { source, lookup: { outcome: "miss", reason: "switched-off" } };
+    if (script.childEntryIsCurrent(treeRoot, "run-task", { treeHash: source.hash }).current) return { source, lookup: { outcome: "current" } };
+    return { source, lookup: materializeFromStore(treeRoot, storeRoot ?? defaultChildEntryStoreRoot(), source.hash) };
+  } catch (err) {
+    return { source, lookup: { outcome: "miss", reason: `store-error: ${errorText(err)}` } };
+  }
+}
 
 /** Whether the store holds any build at all: an empty or absent store misses without hashing the tree. */
 function holdsAnyBuild(storeRoot: string): boolean {

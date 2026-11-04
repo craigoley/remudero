@@ -1,5 +1,5 @@
 - id: W1-T11157
-  title: "A review reuses CI's proof-discrimination result for a head when the PR leaves the proof executor and its workflow untouched, instead of running every proof at head and base again on the loaded host — needs operator trust decision before build: the proof-discrimination check already runs each proof at the head and its merge base on a hosted runner, and the review spends 22.3 lane-hours a week on proofs, 44% slower under CPU pressure"
+  title: "A review reads CI's proof-discrimination result for its head in shadow, when the PR leaves the gate's whole executor and its workflow untouched, and ledgers whether each proof's hosted outcome agrees with the host run it still makes, so reusing the hosted result is decided on measured agreement"
   repo: remudero
   depends_on: []
   priority: 2
@@ -22,10 +22,12 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: The proof-discrimination workflow publishes, per head sha, a result record naming each proof's head and base outcome, the body digest and criteria source it judged, and a digest of the proof executor's source files and its own workflow file at that head
+    - claim: The proof-discrimination workflow publishes, per head sha, a result record naming each proof's head and base outcome, the body digest and criteria source it judged, and a digest of every file in the gate's executor set at that head
       proof: "unit test: test/review/a-review-reuses-cis-proof-discrimination-result.test.ts"
-    - claim: A review whose head's diff touches none of the executor files or the workflow, whose body digest and criteria match the record's, and whose record comes from a successful run of that check at that head, takes each proof's outcome from the record instead of executing it, and ledgers review.proof_reused per proof; any mismatch, missing record or failed fetch executes the proofs exactly as today
+    - claim: A review whose head's diff touches no file in the executor set, whose body digest and criteria match the record's, and whose record is the output of a successful GitHub Actions check run of that workflow at that exact head read through the App, still executes every proof as today and ledgers review.proof_reuse_shadow per proof with the hosted and host outcomes, whether they agree, and the host proof time reuse would have saved; the verdict never reads the record
       proof: "grep: W1-T11157 criterion 2 in test/review/a-review-reuses-cis-proof-discrimination-result.test.ts"
+    - claim: A missing, unauthenticated or mismatched record, or a diff touching the executor set, ledgers review.proof_reuse_shadow with the reason it was not eligible and changes nothing else
+      proof: "grep: W1-T11157 criterion 3 in test/review/a-review-reuses-cis-proof-discrimination-result.test.ts"
   rationale: |
     MEASURED 2026-11-02 over a 7-day ledger union (~/Remudero-notes/review-lane-findings-2026-11-02.md, read-only):
     - Code reviews (n=732), 94.6 lane-hours: proofs took 22.3 h (24%) and ran 44% slower under CPU PSI full >= 20; exec_error reviews
@@ -42,6 +44,10 @@
     files make up "the executor" (at least scripts/proof-discrimination-gate.mjs, src/lib/check-proof.ts and the review's proof
     execution in src/lib/review.ts), how the record is authenticated (a check run of the required workflow at that exact head, read
     through the App), and whether a reused proof may count toward a PASS or only skip re-running a proof CI already failed.
+    OPERATOR TRUST DECISION (2026-11-03, in chat: "agree" to these three answers):
+    - The executor set is the import closure of scripts/proof-discrimination-gate.mjs, the same reach graph the affected-suite selector computes. It also includes package.json, package-lock.json, .nvmrc, test/setup/** and .github/workflows/proof-discrimination-gate.yml. A same-repo PR's workflow runs from its own head, so anything that job executes is in the set, not only the three files first named.
+    - The record is authenticated as the output of a successful check run by GitHub Actions of that workflow at that exact head sha, read through the App. Nothing else counts.
+    - Shadow first. A reused outcome counts toward no verdict, PASS or FAIL. The review runs every proof as today and ledgers agreement. Letting the record replace the host run is a separate operator-approved change, after about a week of review.proof_reuse_shadow rows, measured as the agreement rate and the hours saved.
     NOT COVERED: W1-T11132 (#16266, open) treats a review proof that fails only under host load as inconclusive, and W1-T11133
     (#16269, open) gives the progress judge an off-host-pass signal; both read hosted CI to classify a host result, neither replaces
     the host run. W1-T273 and W1-T1071 built proof discrimination itself.
@@ -51,10 +57,10 @@
        the operator's trust decision picks which).
     2. runReview, before executing proofs, reads the record for its head through the App gateway, recomputes executor_digest and
        workflow_digest from its own head checkout, and checks the head's diff against the executor and workflow paths. All must match.
-    3. On a match each proof's outcome is the record's, labelled reused; on any mismatch the proofs run as today. The executor path
-       list lives in one exported constant both sides read.
-    NEEDS OPERATOR TRUST DECISION BEFORE BUILD (verify: human). The builder does not start until the operator has answered the three
-    questions in the rationale; the answers are recorded in this shard by amendment first.
+    3. On a match, each proof's hosted outcome is compared with the host outcome and ledgered (review.proof_reuse_shadow); on any
+       mismatch the row names why it was not eligible. The executor set is computed by one function exported from scripts/proof-discrimination-gate.mjs, which both sides call.
+    2a. SHADOW: step 3 runs beside today's execution, never instead of it. The verdict is built from the host run alone.
+    The operator's trust decision is recorded in the rationale (2026-11-03).
     Tests go in test/review/a-review-reuses-cis-proof-discrimination-result.test.ts, titled verbatim as in the proofs.
   note: |
     reservation hand-off: plan-file-1793657972812 -> plan-file-1793657972812

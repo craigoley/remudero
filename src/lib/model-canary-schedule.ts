@@ -6,6 +6,8 @@ import { executeCanary, type CanaryPin, type CanaryExecutionPorts } from "./mode
 import { canaryTrialBlockId, type CanaryTrialBlock } from "./model-canary-metrics.js";
 import type { CanaryRetentionContract } from "./model-canary-retention.js";
 import type { CanaryContextContract } from "./model-canary-context.js";
+import { validatePrivateCorpus, privateCorpusCases,
+  type PrivateCanaryBundleV1, type PrivateCorpusTrustAnchors } from "./model-canary-private-corpus.js";
 
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 export interface CanarySlot { id: string; caseId: string; pin: CanaryPin; aaLabel: "A" | "B" | null;
@@ -45,7 +47,15 @@ export interface CanarySchedulePorts {
   terminal(slot: CanarySlot, outcome: Awaited<ReturnType<typeof executeCanary>>): Promise<void>;
 }
 
-export async function executeCanarySchedule(plan: ReturnType<typeof buildCanarySchedule>, cases: readonly CanaryCase[], ports: CanarySchedulePorts) {
+export async function executeCanarySchedule(plan: ReturnType<typeof buildCanarySchedule>,
+  input: readonly CanaryCase[] | PrivateCanaryBundleV1, ports: CanarySchedulePorts,
+  trustAnchors: PrivateCorpusTrustAnchors = {}) {
+  // A native private bundle is data, not execution authority. Validate at this existing entry;
+  // eligibility, durable claim and per-call admission still precede every provider request.
+  const privateCorpus = Array.isArray(input) ? null : validatePrivateCorpus(input, trustAnchors);
+  if (privateCorpus?.state === "unavailable") throw new Error(privateCorpus.reason);
+  const corpus = privateCorpus?.state === "available" ? privateCorpus.corpus : null;
+  const cases = corpus ? privateCorpusCases(corpus)! : input as readonly CanaryCase[];
   if (plan.suiteHash !== canarySuiteDigest(cases) || plan.digest !== digest(JSON.stringify(plan.slots)))
     throw new Error("canary-schedule-changed");
   let completed = 0, skipped = 0;
@@ -67,7 +77,7 @@ export async function executeCanarySchedule(plan: ReturnType<typeof buildCanaryS
     const outcome = await executeCanary(item, slot.pin, { ...execution, save: async (run, grade) => {
       run.trial = structuredClone(trial);
       await execution.save(run, grade);
-    } });
+    } }, undefined, corpus ? { corpus, slotId: slot.id } : undefined);
     await ports.terminal(slot, outcome); completed++;
     if (outcome.state === "unavailable") return { state: "deferred" as const, completed, skipped, nextSlot: null };
   }

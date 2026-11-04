@@ -10,7 +10,7 @@ import { parse } from 'yaml';
 const root = process.cwd();
 const script = join(root, 'scripts/ci-shard-admission.mjs');
 const { requiresSetup } = (existsSync(script) ? await import(pathToFileURL(script).href) : {}) as {
-  requiresSetup: (files: unknown, opts: { event: string; shard: string; live: string }) => boolean;
+  requiresSetup: (files: unknown, opts: { event: string; shard: string }) => boolean;
 };
 type Step = { name?: string; id?: string; uses?: string; if?: string; run?: string };
 const ci = parse(readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8')).jobs.ci as { if?: string; needs?: string | string[]; steps: Step[] };
@@ -25,14 +25,13 @@ function assertProducerAwareCiScheduling(job: { if?: string | boolean; needs?: s
 }
 
 test('CI admission skips setup only on the seven idle source PR shards and fails closed elsewhere', () => {
-  const opts = { event: 'pull_request', shard: '2', live: '0' };
+  const opts = { event: 'pull_request', shard: '2' };
   for (let shard = 2; shard <= 8; shard++) assert.equal(requiresSetup(['src/lib/leaf.ts'], { ...opts, shard: String(shard) }), false);
   for (const files of [undefined, [], [null], [''], ['test/a.test.ts'], ['test/setup/helper.ts'], ['docs/x.md'], ['plan/tasks.yaml']]) {
     assert.equal(requiresSetup(files, opts), true);
   }
   for (const event of ['push', 'merge_group', 'workflow_dispatch', '']) assert.equal(requiresSetup(['src/a.ts'], { ...opts, event }), true);
   for (const shard of ['1', '', '0', '9', 'unknown']) assert.equal(requiresSetup(['src/a.ts'], { ...opts, shard }), true);
-  for (const live of ['1', '', 'unknown']) assert.equal(requiresSetup(['src/a.ts'], { ...opts, live }), true);
 });
 
 function runStep(step: Step, setup: string) {

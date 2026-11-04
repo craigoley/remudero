@@ -105,7 +105,7 @@ usage:
   rmd alert-fix [--repo <name>] [--dry-run]   # The alert-fix lane: policy-decide act-vs-escalate per open security alert.
   rmd issues [--dry-run]   # Issues intake: capture open GitHub issues into the feedback inbox.
   rmd init [--tier <pro|max5x|max20x>] [--yes]   # Headless-safe first-run tier wizard.
-  rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # Fleet-inheritance onboarding: generate the whole gate stack for a target repo.
+  rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n> [--write <abs-dir>]   # Fleet-inheritance onboarding: generate the whole gate stack for a target repo.
   rmd onboard <target-dir> --phase inventory|recon|session|synthesize [--owner <o> --repo <r>]   # The `rmd onboard` family: inventory, recon, session and synthesize phases.
   rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # Durable-inbox async capture: write a plan/feedback/<id>.yaml entry.
   rmd triage <feedback-id>   # The Architect intake worker: ground, research, then report, grill or propose.
@@ -1053,10 +1053,10 @@ headless-safe first-run tier wizard
 Fleet-inheritance onboarding: generate the whole gate stack for a target repo.
 
 ```
-rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>
+rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n> [--write <abs-dir>]
 ```
 
-fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself
+fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps; --write <abs-dir> also writes every file (and .remudero/branch-protection.json) into that checkout, refusing before any write if one already exists; does not push/PR/arm protection itself
 
 ### `rmd onboard`
 

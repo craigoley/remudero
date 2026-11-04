@@ -1,0 +1,50 @@
+- id: W1-T11209
+  title: "A reviewer's FAIL clause reaches the criterion's reason, the fix prompt and the progress judge whole, cut only at a sentence or word boundary inside the budget the reviewer is told about — 456 of 470 unmet reasons in 7 days were cut mid-sentence at 160 chars, so fix rounds chased half a finding"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, how much of the reviewer's FAIL clause survives the parse; review.ts's clause bound, its contract text and the reason it feeds every consumer of a criterion row
+  origin: operator-session#review-truncation-2026-11-03
+  plan_refs:
+    - W1-T2263
+    - W1-T2930
+    - W1-T1254
+  files:
+    - src/lib/review.ts
+    - test/downgrade-names-the-remedy.test.ts
+    - test/review/a-reviewers-fail-clause-reaches-the-fix-lane-whole.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A FAIL clause within the reviewer budget reaches judgeCriterion's reason verbatim, with no ellipsis, so the reason the fix prompt and the progress judge read carries the reviewer's whole finding
+      proof: "unit test: test/review/a-reviewers-fail-clause-reaches-the-fix-lane-whole.test.ts"
+    - claim: A clause over the budget is cut at its last sentence end inside the budget, else its last word boundary, never mid-word, and the cut is marked with the clause's full length; the criterion row records clauseChars (the full length) whenever a cut happened
+      proof: "grep: W1-T11209 criterion 2 in test/review/a-reviewers-fail-clause-reaches-the-fix-lane-whole.test.ts"
+    - claim: reviewerVerdictContract tells the reviewer the budget, rendered from the same constant the parse cuts at, so the clause is written to fit rather than cut afterwards
+      proof: "grep: W1-T11209 criterion 3 in test/review/a-reviewers-fail-clause-reaches-the-fix-lane-whole.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 over the 7-day core ledger union (303 rotated files plus live, read-only):
+    - 318 review.posted rows at state failure, across 125 PRs, carried 470 unmet criteria. 456 of those reasons (97%) end in "…": the semantic-downgrade clause cut at REVIEWER_CLAUSE_MAX_CHARS = 160 (src/lib/review.ts, extractBoundedClause). That covers 121 PRs.
+    - Samples cut mid-sentence: "…conflicts with approximately 66.6–69 minutes from its 64 admitted heads. Th…", "…Also, the clai…", "…statusCommand in report-commands.ts still calls the s…".
+    - Semantic downgrades are 93% of review FAILs (254 of 273 in the 2026-11-02 review-lane findings), and 197 of 210 reviewer-unmet fix rounds followed one, 29.6 worker-hours a week.
+    - #16275 (W1-T10354): three fix rounds produced no diff, and the hand fix found the two defects the clause named past its cut.
+    THE CONTRACT ALREADY PROMISES THE WHOLE CLAUSE. reviewerVerdictContract tells the reviewer: "It is recorded verbatim on that criterion's row and is the ONLY thing an author or operator ever sees about your judgment". The parse then cuts it at 160 characters before any consumer reads it. The fix prompt (prompt-render.ts, "reviewer verdict: UNMET — ${c.reason}") and the progress judge both read that cut reason.
+    WHY THE BOUND EXISTS, AND WHAT KEEPS IT. W1-T2263 bounded the clause so "a runaway line cannot reach the ledger whole". That holds: the clause stays bounded, and acceptance 8's "an overlong or multi-line clause is bounded, never carried whole" stays true for a runaway line. What changes is where the cut lands: inside a budget the reviewer is told, and at a boundary.
+    - The budget is 500 characters, the same bound the structured finding channel already gives a finding's mechanism and remedy (review-findings.ts, verifiedReviewFindingsForFix in fix.ts). It is not a new number.
+    - GitHub's 140-character status description is bounded separately (STATUS_DESC_MAX, clipTo) and is unchanged.
+    SELF-MEASURING. A cut records clauseChars on the criterion row, so review.posted's decision_verdict shows how often the budget binds and by how much. The budget can be re-derived from that distribution later, instead of guessed again.
+    NOT COVERED: W1-T1254 (the fix rung hands the reviewer worker narrative). The structured finding channel is unchanged. The PR comment and status renderers keep their own display bounds.
+  design: |
+    1. src/lib/review.ts: REVIEWER_CLAUSE_MAX_CHARS becomes 500, documented as the structured finding channel's mechanism budget. extractBoundedClause keeps a clause that fits whole. Over the budget it cuts at the last ". ", "; " or "! " / "? " inside it, else the last whitespace, never mid-word, and appends " […clause cut at <kept> of <full> chars]".
+    2. parseReviewerVerdictClauses returns the clause and, when cut, its full length. judgeCriterion carries clauseChars on the CriterionVerdict only when a cut happened, so review.posted's decision_verdict records it with no ledger change.
+    3. reviewerVerdictContract renders the budget from REVIEWER_CLAUSE_MAX_CHARS ("at most N characters"), so the reviewer writes inside it.
+    4. test/downgrade-names-the-remedy.test.ts acceptance 8 is updated to the new bound: a 500-character clause now reaches whole, and a runaway (several thousand characters) or multi-line clause is still bounded. Its multi-line assertions are unchanged.
+  falsifier: |
+    At origin/main a 300-character FAIL clause reaches the reason cut at 160 characters, mid-word, with "…". The contract names no budget. No criterion row records how long the clause was.
+  note: |
+    reservation hand-off: plan-file-1793714117167 -> plan-file-1793714117167
+    Reserved with rmd next-task-id --branch plan-file-1793714117167 from the operator checkout. Operator 2026-11-03, in chat: "file the review truncation fix and build it". The test path is where rmd test-place put a stub importing src/lib/review.ts (test/review/, high). W1-T2263 acceptance 8's numeric bound is superseded, named here: the test file it lives in is in files:.

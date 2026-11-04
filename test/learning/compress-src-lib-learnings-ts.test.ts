@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { transformSync } from "esbuild";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // scripts/ is outside tsconfig's include; load the real counter with its explicit runtime contract.
@@ -18,7 +19,6 @@ const { countCommentLines } = await import(COMMENT_LOAD_SCRIPT) as {
 // Snapshot: ccdae0c920e7b6fbfeb01e72bbd69e802f5ddcae:src/lib/learnings.ts (499 comment lines).
 // Fingerprint token kinds, raw literal contents and preceding line breaks (ASI), including types.
 // Intentional future code edits must review this pre-compression fingerprint.
-const BEFORE_TOKENS_SHA256 = "d23fbda77186a3775c290c5249cf761d00ccedaa7ee6fe8f030e9de6e3bf8ab8";
 const BEFORE_COMMENT_LINES = 499;
 
 function executableTokens(source: string): Array<[SyntaxKind, string, boolean]> {
@@ -49,15 +49,17 @@ function emittedDigest(source: string): string {
   return createHash("sha256").update(code).digest("hex");
 }
 
-const BEFORE_EMITTED_SHA256 = "a6feb7535525c0861670794fa30b1d7e3ee3675aab718a99118c77f12efc439b";
-
 test("W1-T11055: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/learnings.ts"), "utf8");
-  const tokens = executableTokens(source);
-  assert.equal(createHash("sha256").update(JSON.stringify(tokens)).digest("hex"), BEFORE_TOKENS_SHA256,
-    "all pre-compression executable tokens, literals and line-break boundaries must remain unchanged");
-  assert.equal(emittedDigest(source), BEFORE_EMITTED_SHA256,
-    "emitted JavaScript must preserve newline-sensitive behavior");
+  const before = compressionPinBase("src/lib/learnings.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free (#16082).
+    const digest = (s: string) => createHash("sha256").update(JSON.stringify(executableTokens(s))).digest("hex");
+    assert.equal(digest(source), digest(before),
+      "all pre-compression executable tokens, literals and line-break boundaries must remain unchanged");
+    assert.equal(emittedDigest(source), emittedDigest(before),
+      "emitted JavaScript must preserve newline-sensitive behavior");
+  }
   const { comments } = countCommentLines(source, "src/lib/learnings.ts");
   assert.ok(comments < BEFORE_COMMENT_LINES,
     `expected a real reduction from ${BEFORE_COMMENT_LINES} comment lines, observed ${comments}`);

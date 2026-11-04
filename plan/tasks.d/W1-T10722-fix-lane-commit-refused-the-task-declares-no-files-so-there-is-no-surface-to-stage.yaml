@@ -3,11 +3,12 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: high # Rule 19 span: widened to run-task, test-tier-manifest by a scope amendment for #15602
   band_meaning: span
   priority: 1.04
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-03T12:27:12.568Z
   attempts: 0
   author_class: machine
   origin: "fix-lane:commit-refused:the task declares no files, so there is no surface to stage#r2"

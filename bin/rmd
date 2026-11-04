@@ -17,6 +17,11 @@ while [ -h "$SOURCE" ]; do
   [[ "$SOURCE" != /* ]] && SOURCE="$LINK_DIR/$SOURCE"
 done
 DIR="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+RMD_MAIN_SOURCE=""
+if [ "${1:-}" = "--main-entry-source" ]; then
+  RMD_MAIN_SOURCE="${2:-}"
+  shift 2
+fi
 
 # R-49 (docs/audits/recon-2026-09-05.md): `.nvmrc`, package.json#engines and deploy/Dockerfile all
 # pin an exact Node version, but `npm ci` only WARNS (EBADENGINE) on a mismatch and lets a stale
@@ -65,13 +70,25 @@ process.stdout.write(kept.join(" "));
     export NODE_OPTIONS="$RMD_LEARNED_NODE_OPTIONS"
   fi
   unset RMD_LEARNED_NODE_OPTIONS
-  RMD_MAIN_CHOICE="$(node "$DIR/scripts/build-child-entries.mjs" --root "$DIR" --main-entry "$1" 2>/dev/null || true)"
+fi
+
+if [ "${1:-}" = "daemon" ] || [ "${1:-}" = "review" ]; then
+  RMD_MAIN_CHOICE="$(node "$DIR/scripts/build-child-entries.mjs" --root "$DIR" --main-entry "$1" --main-entry-source "$RMD_MAIN_SOURCE" 2>/dev/null || true)"
   RMD_MAIN_KIND="$(printf '%s' "$RMD_MAIN_CHOICE" | cut -f1)"
   RMD_MAIN_REASON="$(printf '%s' "$RMD_MAIN_CHOICE" | cut -f2)"
   RMD_MAIN_BUNDLE="$(printf '%s' "$RMD_MAIN_CHOICE" | cut -f3)"
   if [ "$RMD_MAIN_KIND" = "bundle" ] && [ -f "$RMD_MAIN_BUNDLE" ]; then
+    if [ "${1:-}" = "review" ]; then
+      printf 'bundle\t%s\n' "$RMD_MAIN_REASON" 2>/dev/null >&3 || true
+    fi
     export RMD_MAIN_ENTRY="bundle:$RMD_MAIN_REASON"
     exec node --enable-source-maps "$RMD_MAIN_BUNDLE" "$@"
+  fi
+  if [ "$RMD_MAIN_KIND" = "bundle" ]; then
+    RMD_MAIN_REASON="bundle-missing"
+  fi
+  if [ "${1:-}" = "review" ]; then
+    printf 'tsx\t%s\n' "${RMD_MAIN_REASON:-resolver-gave-no-answer}" 2>/dev/null >&3 || true
   fi
   export RMD_MAIN_ENTRY="tsx:${RMD_MAIN_REASON:-resolver-gave-no-answer}"
   unset RMD_MAIN_CHOICE RMD_MAIN_KIND RMD_MAIN_REASON RMD_MAIN_BUNDLE

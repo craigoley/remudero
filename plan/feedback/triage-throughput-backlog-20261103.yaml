@@ -1,0 +1,37 @@
+id: triage-throughput-backlog-20261103
+ts: 2026-11-03T13:20:00.000Z
+raw: >-
+  Agent finding, 2026-11-03, filed under the operator's direction to route
+  filings through the fleet. Not an operator ruling.
+
+  OBSERVED at core f15de9f: plan/feedback holds 611 entries. By status: 157 new,
+  166 accepted, 250 rejected, 19 answered, 16 grilling, 2 proposed. The oldest
+  new entry is dated 2026-10-22. Of the 60 entries dated 10-27 or later, 53 are
+  still new.
+
+  OBSERVED in git, status changes to a non-new value per day (feedback diffs on main;
+  a change from grilling to accepted also counts):
+  10-27 about 8, 10-28 12, 10-29 9, 10-30 11, 10-31 0, 11-01 6, 11-02 8, 11-03 5.
+  plan/policy.yaml autoTriage allows minIntervalMinutes 15 and maxPerDay 24, so
+  the measured rate is roughly a third of the cap, and one day had none.
+
+  INFERRED, not measured: the cap is not what binds. Candidates are lock-held
+  refusals, triage.error rows, a lane budget the governor withholds, or fires
+  whose outcome never lands. Only the host ledger can separate them.
+
+  ASK: (1) count autoTriage decisions by reason over 10-27..11-03 from the
+  ledger union (decideAutoTriage reasons are already named strings), with a
+  positive control that the window's newest ts is current. (2) Fix the
+  dominant refusal class. (3) Reconsider strict oldest-first once the backlog
+  exceeds a bound: an operator-directed entry currently waits behind about 12
+  days of backlog. Do not raise maxPerDay without the operator; it is a spend
+  bound.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: operator-direction:triage-throughput-backlog:20261103
+thread_id: null
