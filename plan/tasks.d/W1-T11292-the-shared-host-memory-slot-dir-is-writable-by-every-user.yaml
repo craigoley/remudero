@@ -1,0 +1,37 @@
+- id: W1-T11292
+  title: "The shared host-memory slot directory under the test-slot dir is created world-writable, like the test-slot dir itself, so a second OS user's test and review runs register their memory slots instead of failing EACCES and silently dropping out of the shared memory guard"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, the mode of the shared host-memory slot directories; it changes who can write the host-wide memory ledger
+  origin: operator-session#host-memory-eacces-2026-11-03
+  plan_refs:
+    - W1-T10279
+  files:
+    - src/lib/host-memory-ledger.ts
+    - src/lib/host-memory-priority.ts
+    - test/ci/suites/the-shared-host-memory-slot-dir-is-writable-by-every-user.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: host-memory-ledger.ts and host-memory-priority.ts create their shared host-memory directory with mode 0o777 and, when the caller owns it, chmod it to 0o777 regardless of umask, exactly as test-slot.ts does for the test-slot directory, so a directory first created by one OS user stays writable by another
+      proof: "unit test: test/ci/suites/the-shared-host-memory-slot-dir-is-writable-by-every-user.test.ts"
+    - claim: A directory already left at 0o755 by its owner is widened on that owner's next write, and a non-owner's EACCES stays a diagnostic that never fails the run
+      proof: "grep: W1-T11292 criterion 2 in test/ci/suites/the-shared-host-memory-slot-dir-is-writable-by-every-user.test.ts"
+  rationale: |
+    OBSERVED 2026-11-03T23:55Z on the operator's Mac, which has two OS users (craigoley and craigoleyagent).
+    /tmp/rmd-test-slots is drwxrwxrwx, because src/lib/test-slot.ts:1304-1306 creates it 0o777 and re-chmods when the owner. But /tmp/rmd-test-slots/host-memory is drwxr-xr-x, owned by craigoley.
+    The reason is that src/lib/host-memory-ledger.ts:408 and src/lib/host-memory-priority.ts:190 call a bare mkdirSync({ recursive: true }), so the umask leaves 755.
+    Every craigoleyagent run (the operator's rmd review 16634) then logged host_memory_ledger.diagnostic open-write, bind and release EACCES. Its memory slot was never registered, so the shared memory guard on a 16 GB Mac (thin headroom, kernel panic 10-27) could not see those processes.
+  design: |
+    In both write paths, use mkdirSync(dir, { recursive: true, mode: 0o777 }), followed by the same owner-only chmod test-slot.ts applies. The cleanest form is one exported helper in test-slot.ts reused by both files, which is in neither task's files, so inline the two lines.
+    Test with a umask of 0o022 and a tmp slot dir: the created dir must be mode 0o777, and an existing 0o755 dir must be widened on the owner's write.
+  falsifier: |
+    At origin/main a host-memory directory created under umask 022 is 0o755, and another user's write to it fails with EACCES.
+  note: |
+    reservation hand-off: plan-file-1793750079000 -> plan-file-1793750079000
+    Reserved with rmd next-task-id --branch plan-file-1793750079000 from the operator session's ops worktree.
