@@ -15,6 +15,7 @@ import {
   resetChildWork, resetReviewProviderBound, reviewAdmissionBound, reviewPhaseSplit, reviewProviderBound,
   seedReviewProviderBound, settleChildWork, sustainedReviewJudgeConcurrency,
 } from "#src/lib/sweep.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function unexpected(): never { throw new Error("unexpected review fixture dependency"); }
@@ -74,6 +75,7 @@ test("W1-T11149 criterion 1: a real review reports setup, proofs, judge and post
   const oldPath = process.env.PATH;
   const oldClaude = process.env[CLAUDE_BIN_ENV_OVERRIDE];
   const oldToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  let shim: ReturnType<typeof ghShim> | undefined;
   try {
     writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
     // Never a real secret: the injected query function means nothing is spawned or sent.
@@ -82,20 +84,15 @@ test("W1-T11149 criterion 1: a real review reports setup, proofs, judge and post
     writeFileSync(fakeClaude, "#!/bin/sh\nexit 0\n");
     chmodSync(fakeClaude, 0o755);
     process.env[CLAUDE_BIN_ENV_OVERRIDE] = fakeClaude;
-    writeFileSync(join(binDir, "gh"), `#!/bin/sh
-case "$1 $2" in
-  "api "*)
-    case "$*" in
-      *commits/*/status*) echo '{"statuses":[]}' ;;
-      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"}}' ;;
-      *) echo '{}' ;;
-    esac ;;
-  "pr view") case "$*" in *headRefOid*) echo '{"headRefOid":"${HEAD}"}' ;; *state*) echo '{"state":"OPEN"}' ;; *) echo '{}' ;; esac ;;
-  "pr diff") echo "" ;;
-  *) exit 0 ;;
-esac
-`, { mode: 0o755 });
-    process.env.PATH = `${binDir}:${oldPath}`;
+    shim = ghShim([
+      { when: "/commits/", stdout: '{"statuses":[]}' },
+      { when: "/pulls/", stdout: JSON.stringify({ number: 1, html_url: "https://github.com/o/r/pull/1", updated_at: "t", body: "", head: { ref: "b", sha: HEAD } }) },
+      { when: "headRefOid", stdout: JSON.stringify({ headRefOid: HEAD }) },
+      { when: "pr view", stdout: '{"state":"OPEN"}' },
+      { when: "pr diff", stdout: "" },
+      { when: "api ", stdout: "{}" },
+    ]);
+    process.env.PATH = `${shim.dir}:${binDir}:${oldPath}`;
     const phases: string[] = [];
     let atSpawn: string[] | undefined;
     const reviewerQueryFn = (() => (async function* () {
@@ -127,6 +124,7 @@ esac
     else process.env.CLAUDE_CODE_OAUTH_TOKEN = oldToken;
     rmSync(root, { recursive: true, force: true });
     rmSync(binDir, { recursive: true, force: true });
+    if (shim) rmSync(shim.dir, { recursive: true, force: true });
   }
 });
 
