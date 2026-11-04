@@ -378,8 +378,8 @@ export async function replayPrivateCli(argv: readonly string[], internal: OwnedC
       return { state: "deferred" as const, completed: 0, reason: "coding-native-profile-unavailable" };
     const runtime = internal.workerRuntime ? await internal.workerRuntime() : await (async () => {
       const { loadConfig } = await import("./config.js");
-      const { spawnWorker } = await import("./worker.js");
-      return { config: loadConfig(), worker: spawnWorker };
+      const { benchmarkNonDispatchSpawn } = await import("./benchmark-run.js");
+      return { config: loadConfig(), worker: benchmarkNonDispatchSpawn("model-canary-coding") };
     })();
     const { config, worker } = runtime, owner = new CanarySlotOwner(ownerDir);
     try {
