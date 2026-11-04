@@ -27,7 +27,7 @@ import { appendThreadEvent, captureInboxInput, verifiedInboxInput, type InboxCau
 import { inboxKind, isAgeOnlyInboxInformation } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
+import { defaultGetProcessStartTime, isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
 import { fitConventionalTitle } from "./commit-message.js";
@@ -3266,22 +3266,15 @@ function defaultRegistryLockSleep(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
 }
 
-/** Supply the existing staleness predicate with epoch ms without its default synchronous `ps`.
- *  Linux stat field 22 uses USER_HZ (100); comm can contain spaces and parentheses.
- *  Missing /proc (including non-Linux) is unknown identity, never evidence for reclamation. */
-function registryProcessStartTime(pid: number): number | null {
-  try {
-    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-    const close = stat.lastIndexOf(") ");
-    const ticks = stat.slice(close + 2).trim().split(/\s+/)[19];
-    const boot = /^btime ([0-9]+)$/m.exec(fs.readFileSync("/proc/stat", "utf8"))?.[1];
-    if (close < 0 || !/^[0-9]+$/.test(ticks ?? "") || boot === undefined) return null;
-    const start = Number(boot) * 1000 + Number(ticks) * 10;
-    return Number.isFinite(start) ? start : null;
-  } catch (error) {
-    void error; // Unreadable kernel identity preserves isHolderStale's indeterminate result.
-    return null;
-  }
+/** Read the portable identity probe off the loop, retaining its existing parsing and unknown result. */
+async function registryProcessStartTimeAsync(pid: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    execFile("ps", ["-o", "etime=", "-p", String(pid)], { encoding: "utf8" }, (error, stdout) => {
+      resolve(error ? null : defaultGetProcessStartTime(pid, {
+        execFileSync: (() => stdout) as unknown as typeof execFileSync,
+      }));
+    });
+  });
 }
 
 const ownedAsyncRegistryLocks = new Set<string>();
@@ -3360,7 +3353,7 @@ export function updateProposalRegistry(
       // alone, and the reclaim's delete is conditioned on the lock's on-disk identity.
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseRegistryLockInfo,
-        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime ?? registryProcessStartTime }),
+        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
         onLostReclaim: opts.onLostReclaim,
         beforeDelete: opts.__beforeReclaimDelete,
       });
@@ -3572,9 +3565,18 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      // The shared reclamation predicate stays synchronous; collect its portable identity inputs off the loop.
+      const starts = new Map<number, number | null>();
+      const getStart = opts.getProcessStartTime ?? ((pid: number) => starts.get(pid) ?? null);
+      if (!opts.getProcessStartTime) {
+        const held = parseRegistryLockInfo(await readFileIfExistsAsync(lockPath) ?? "");
+        for (const pid of new Set([1, ...(held ? [held.pid] : [])])) {
+          starts.set(pid, await registryProcessStartTimeAsync(pid));
+        }
+      }
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseRegistryLockInfo,
-        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime ?? registryProcessStartTime }),
+        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: getStart }),
         onLostReclaim: opts.onLostReclaim,
         beforeDelete: opts.__beforeReclaimDelete,
       });

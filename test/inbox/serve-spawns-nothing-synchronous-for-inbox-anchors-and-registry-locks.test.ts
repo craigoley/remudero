@@ -14,7 +14,7 @@ import type { Config } from "#src/lib/config.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type SpawnRecord = { calls: string[]; asyncCalls: string[] };
-const recording = globalThis as typeof globalThis & { inboxSpawnRecord?: SpawnRecord };
+const recording = globalThis as typeof globalThis & { inboxSpawnRecord?: SpawnRecord; inboxPsProbe?: (pid: number) => string | Error };
 
 if (!process.argv.includes("--inbox-preimport-probe")) {
   test("the inbox spawn proofs run in a fresh process instrumented before all dependency imports", async (t) => {
@@ -29,6 +29,16 @@ if (!process.argv.includes("--inbox-preimport-probe")) {
           const record = globalThis.inboxSpawnRecord;
           if (record) (name === 'execFile' ? record.asyncCalls : record.calls)
             .push(name + ':' + String(args[0]) + ' ' + JSON.stringify(args[1]));
+          if (args[0] === 'ps' && globalThis.inboxPsProbe) {
+            const answer = globalThis.inboxPsProbe(Number(args[1].at(-1)));
+            if (name === 'execFile') {
+              queueMicrotask(() => args.at(-1)(answer instanceof Error ? answer : null,
+                answer instanceof Error ? '' : answer));
+              return {};
+            }
+            if (answer instanceof Error) throw answer;
+            return answer;
+          }
           return real.apply(this, args);
         };
       }
@@ -108,7 +118,8 @@ function holdLock(lockPath: string, pid: number): void {
   writeFileSync(lockPath, JSON.stringify({ pid, host: hostname(), startedAt: new Date().toISOString() }));
 }
 
-test("a served inbox render reaches no synchronous child_process call: the registry prune awaits updateProposalRegistryAsync", async (t) => {
+for (const resolvedMain of [true, false]) {
+test(`a served inbox render reaches no synchronous child_process call: the registry prune awaits updateProposalRegistryAsync (${resolvedMain ? "resolved" : "unresolved"} main sha)`, async (t) => {
   const shim = ghShim([{ when: "pulls?state=", stdout: "[]" }, { when: "issues?", stdout: "[]" }]);
   const path = process.env.PATH;
   process.env.PATH = `${shim.dir}:${path}`;
@@ -121,6 +132,7 @@ test("a served inbox render reaches no synchronous child_process call: the regis
   repo.git("add", "anchor.txt");
   repo.git("commit", "--quiet", "-m", "anchor");
   const mainSha = repo.git("rev-parse", "HEAD");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   const root = repo.dir;
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
@@ -136,7 +148,7 @@ test("a served inbox render reaches no synchronous child_process call: the regis
     github: { prView: () => null },
     statusGithub: fakeGitHub(),
     ratify: { approve: () => undefined, reframe: () => undefined },
-    inboxMainSha: () => mainSha,
+    inboxMainSha: () => resolvedMain ? mainSha : undefined,
   };
   // A live foreign holder of the registry lock. The release is driven by the loop itself, not a wall clock: the lock
   // lets go only once the prune has been REFUSED the lock at least once and the loop has then ticked 3 times. A
@@ -173,6 +185,7 @@ test("a served inbox render reaches no synchronous child_process call: the regis
   assert.ok(refusals >= 1, "the prune met the held lock and waited rather than finding it free");
   assert.ok(ticks >= 3, `the event loop kept turning while the lock was held (ticks: ${ticks})`);
 });
+}
 
 const PLAN_YAML = `
 - id: W1-T910
@@ -275,7 +288,7 @@ test("a served status board rethrows a failed anchor grep where the sync board w
   );
 });
 
-test("W1-T11128 criterion 2: the synchronous registry lock's poll starts no process and keeps its deadline", (t) => {
+test("W1-T11128 criterion 2: the synchronous registry lock polls without a sleep process and keeps its deadline", (t) => {
   const root = tempRoot(t);
   const registry = join(root, "state", "inbox-proposals.json");
   writeFileSync(registry, JSON.stringify({ proposals: [] }));
@@ -289,7 +302,9 @@ test("W1-T11128 criterion 2: the synchronous registry lock's poll starts no proc
   );
   const elapsed = Date.now() - started;
 
-  assert.deepEqual(spawns.calls, [], "no synchronous child_process call in the complete contention loop");
+  assert.deepEqual(spawns.calls.filter((call) => !call.startsWith("execFileSync:ps ")), [],
+    "polling starts no child except the preserved portable identity probe");
+  assert.ok(spawns.calls.some((call) => call.startsWith("execFileSync:ps ")), "the CLI retains its portable probe");
   assert.ok(elapsed >= 140, `the bounded wait still waits (elapsed ${elapsed}ms)`);
 });
 
@@ -301,63 +316,86 @@ test("W1-T11128 criterion 2: the synchronous writer still updates an uncontended
   assert.deepEqual(result?.map((p) => p.id), ["A", "B"]);
 });
 
-test("both registry writers preserve boot and pid-reuse reclamation without subprocesses", async (t) => {
+test("both registry writers reclaim stale locks with /proc absent through the portable identity probe", async (t) => {
   for (const writer of [updateProposalRegistry, updateProposalRegistryAsync]) {
     for (const cause of ["reused-pid", "previous-boot", "dead-pid"] as const) {
       await t.test(`${writer.name}: ${cause}`, async (t) => {
         const root = tempRoot(t);
         const registry = join(root, "state", "inbox-proposals.json");
-        const boot = Math.floor(Date.now() / 1000) - 60;
-        const pid = cause === "dead-pid" ? 999_999_999 : process.pid;
-        writeFileSync(`${registry}.lock`, JSON.stringify({ pid, host: hostname(), startedAt: new Date((boot + 20) * 1000).toISOString() }));
+        const pid = 123456;
+        const now = Date.now();
+        writeFileSync(`${registry}.lock`, JSON.stringify({ pid, host: hostname(), startedAt: new Date(now - 60_000).toISOString() }));
         const read = fs.readFileSync.bind(fs) as (...args: unknown[]) => unknown;
         t.mock.method(fs, "readFileSync", (...args: unknown[]) => {
-          if (args[0] === "/proc/stat") return `btime ${boot}\n`;
-          if (args[0] === "/proc/1/stat" || args[0] === `/proc/${pid}/stat`) {
-            if (cause === "dead-pid") throw Object.assign(new Error("process gone"), { code: "ENOENT" });
-            const fields = Array<string>(20).fill("0");
-            fields[19] = args[0] === "/proc/1/stat" ? (cause === "previous-boot" ? "4000" : "100") : "5000";
-            return `${pid} (holder with ) parentheses) ${fields.join(" ")}\n`;
+          if (typeof args[0] === "string" && args[0].startsWith("/proc/")) {
+            throw Object.assign(new Error("proc absent"), { code: "ENOENT" });
           }
           return read(...args);
         });
+        assert.throws(() => fs.readFileSync("/proc/stat"), { code: "ENOENT" });
+        recording.inboxPsProbe = (p) => p === 1 ? (cause === "previous-boot" ? "00:10" : "10:00") : "00:10";
+        t.after(() => { delete recording.inboxPsProbe; });
         const spawns = recordSyncSpawns(t);
-        const result = await writer(registry, () => [{ id: "landed", summary: "landed", evidenceAnchors: [] }], { maxWaitMs: 2000 });
+        const result = await writer(registry, () => [{ id: "landed", summary: "landed", evidenceAnchors: [] }], {
+          maxWaitMs: 2000, isPidAlive: () => cause !== "dead-pid",
+        });
         assert.deepEqual(result?.map((p) => p.id), ["landed"]);
         assert.deepEqual(JSON.parse(readFileSync(registry, "utf8")).proposals.map((p: Proposal) => p.id), ["landed"]);
         assert.equal(fs.existsSync(`${registry}.lock`), false, "the reclaimed lock is released after the update");
-        assert.deepEqual(spawns.calls, []);
+        if (writer === updateProposalRegistryAsync) assert.deepEqual(spawns.calls, [], "the served writer never probes synchronously");
+        const probes = writer === updateProposalRegistryAsync ? spawns.asyncCalls : spawns.calls;
+        assert.ok(probes.some((call) => call.includes(":ps ")), "portable identity was actually probed");
       });
     }
   }
 });
 
-test("unavailable kernel identity never reclaims a live holder or falls back to ps", async (t) => {
+test("an unavailable portable identity preserves a live holder", async (t) => {
   for (const writer of [updateProposalRegistry, updateProposalRegistryAsync]) {
-    for (const failure of ["unreadable", "malformed-stat", "missing-comm", "missing-boot", "overflow"] as const) {
-      await t.test(`${writer.name}: ${failure}`, async (t) => {
+    for (const answer of [new Error("ps unavailable"), "unrecognized elapsed time"]) {
+      await t.test(`${writer.name}: ${String(answer)}`, async (t) => {
         const root = tempRoot(t);
         const registry = join(root, "state", "inbox-proposals.json");
         holdLock(`${registry}.lock`, process.pid);
         const original = readFileSync(`${registry}.lock`, "utf8");
-        const read = fs.readFileSync.bind(fs) as (...args: unknown[]) => unknown;
-        t.mock.method(fs, "readFileSync", (...args: unknown[]) => {
-          if (typeof args[0] === "string" && args[0].startsWith("/proc/")) {
-            if (failure === "unreadable") throw Object.assign(new Error("proc unavailable"), { code: "EACCES" });
-            if (args[0] === "/proc/stat") return failure === "missing-boot" ? "cpu 1 2 3\n" : "btime 1\n";
-            if (failure === "missing-comm") return "no process fields";
-            const fields = Array<string>(20).fill("0");
-            fields[19] = failure === "malformed-stat" ? "not-ticks" : failure === "overflow" ? "9".repeat(400) : "100";
-            return `1 (holder) ${fields.join(" ")}\n`;
-          }
-          return read(...args);
-        });
+        recording.inboxPsProbe = () => answer;
+        t.after(() => { delete recording.inboxPsProbe; });
         const spawns = recordSyncSpawns(t);
         let updates = 0;
         await assert.rejects(async () => writer(registry, () => { updates += 1; return []; }, { maxWaitMs: 40, pollIntervalMs: 5 }), /timed out after 40ms/);
-        assert.equal(updates, 0, "an indeterminate start time cannot authorize a write");
+        assert.equal(updates, 0, "unknown identity cannot authorize a write");
         assert.equal(readFileSync(`${registry}.lock`, "utf8"), original, "the live lock stays intact");
-        assert.deepEqual(spawns.calls, [], "there is no ps fallback when /proc cannot answer");
+        if (writer === updateProposalRegistryAsync) assert.deepEqual(spawns.calls, []);
+      });
+    }
+  }
+});
+
+test("W1-T11128 criterion 2: served INBOX anchors make no execFileSync or execFile calls at a cold and reset 20,000-entry cache", async (t) => {
+  for (const count of [19_999, 20_000, 20_001]) {
+    for (const present of [true, false]) {
+      await t.test(`${count} distinct anchors: ${present ? "present" : "drifted"}`, async (t) => {
+        const root = tempRoot(t);
+        const proposals: Proposal[] = [{ id: "many", summary: "many", evidenceAnchors: Array.from({ length: count }, (_, i) => ({
+          description: `anchor ${i}`, pattern: `anchor-${i}`, path: "anchors.txt",
+        })) }];
+        const deps = boardDeps(root, proposals);
+        const expected = buildStatusBoard(root, join(root, "none.ndjson"), {
+          ...deps, grepAnchorTrue: (anchor) => present || anchor !== proposals[0].evidenceAnchors.at(-1),
+        }).inbox;
+        const visited = new Set<string>();
+        const spawns = recordSyncSpawns(t);
+        const board = await buildStatusBoardAsync(root, join(root, "none.ndjson"), {
+          ...deps, grepAnchorTrueAsync: async (anchor) => {
+            visited.add(anchor.pattern);
+            return present || anchor !== proposals[0].evidenceAnchors.at(-1);
+          },
+        });
+        assert.equal(visited.size, count, "every distinct anchor was read asynchronously before classification");
+        assert.deepEqual(board.inbox, expected, "cache reset and overflow preserve the sync board's results");
+        assert.deepEqual(spawns.calls, [], "W1-T11128 criterion 2: no synchronous child_process call on the served path");
+        assert.deepEqual(spawns.asyncCalls, [], "classification never falls back to an execFile call");
+        if (!present) assert.match(board.inbox.headNotReadyReason ?? "", /evidence-drifted/);
       });
     }
   }

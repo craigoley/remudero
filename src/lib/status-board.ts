@@ -648,6 +648,8 @@ export interface StatusBoardDeps {
   /** Local (no-network) evidence-anchor grep for INBOX; defaults to inbox.ts's `gitGrepAnchorTrue(repoDir,
    *  "origin/main", anchor)`. */
   grepAnchorTrue?: (anchor: EvidenceAnchor) => boolean;
+  /** Async INBOX reader used by served renders; defaults to gitGrepAnchorTrueAsync. */
+  grepAnchorTrueAsync?: (anchor: EvidenceAnchor) => Promise<boolean>;
   /** `state/inbox-proposals.json` reader; defaults to the real file under `root`, parsed by inbox.ts's own
    *  fail-soft-to-empty `parseProposalRegistry`. */
   readProposalRegistry?: () => Proposal[];
@@ -2343,15 +2345,21 @@ export async function buildStatusBoardAsync(root: string, ledgerPath: string, de
     snapshot = { error };
   }
   const anchors: EvidenceAnchor[] = "proposals" in snapshot ? snapshot.proposals.flatMap((p) => p.evidenceAnchors) : [];
-  const failures = await warmAnchorGrepCache(cache, ref, anchors, (r, anchor) => gitGrepAnchorTrueAsync(deps.repoDir, r, anchor));
+  const answers = new Map<string, boolean>();
+  const failures = await warmAnchorGrepCache(cache, ref, anchors, async (r, anchor) => {
+    const answer = await (deps.grepAnchorTrueAsync?.(anchor) ?? gitGrepAnchorTrueAsync(deps.repoDir, r, anchor));
+    answers.set(JSON.stringify([anchor.pattern, anchor.path ?? null]), answer);
+    return answer;
+  });
   return buildStatusBoard(root, ledgerPath, {
     ...deps,
     readProposalRegistry: () => {
       if ("error" in snapshot) throw snapshot.error;
       return snapshot.proposals;
     },
-    // Past the cache's backstop bound an anchor stays a miss and takes the sync grep, as the uncached board does.
-    grepAnchorTrue: (anchor) => warmedAnchorGrep(cache, ref, failures, anchor, (r, a) => gitGrepAnchorTrue(deps.repoDir, r, a)),
+    // Classification may reset a full cache; this render's async answers survive that reset and overflow.
+    grepAnchorTrue: (anchor) => warmedAnchorGrep(cache, ref, failures, anchor,
+      (_r, a) => answers.get(JSON.stringify([a.pattern, a.path ?? null]))!),
   });
 }
 
