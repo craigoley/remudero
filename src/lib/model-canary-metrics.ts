@@ -4,6 +4,7 @@ import { fixedClock } from "./clock.js";
 import type { WorkspaceUsageEvidence } from "./workspace-usage.js";
 import type { WorkerExecutionEvidenceV1 } from "./worker-execution-evidence.js";
 import type { CodingConfiguredBounds, CodingObservedResources } from "./model-canary-coding.js";
+import { validCodingBounds, validCodingReadback, validCodingObserved } from "./model-canary-coding.js";
 
 export type CanaryBilling = "api" | "subscription";
 export type CanaryExecutionSource = "native-provider-execution" | "synthetic-control-replay";
@@ -450,9 +451,12 @@ function inspectCodingExecution(value: unknown, attempt: CanaryAttempt, run: Can
     || !(value.closure === "proven" || value.closure === "unavailable")
     || !(value.configured === null || record(value.configured))
     || !(value.observed === null || record(value.observed))) return invalid("coding-execution-identity-invalid");
+  if (value.configured !== null && !validCodingBounds(value.configured)
+    || value.observed !== null && !validCodingReadback(value.observed)) return invalid("coding-execution-resources-invalid");
   if (value.state === "scored" && (value.closure !== "proven" || value.hostExecutionId === null
     || value.workerSpawnAttemptId === null || value.codingExecutionAttemptId === null || value.sourceDigest === null
-    || value.configured === null || value.observed === null)) return invalid("coding-execution-score-unqualified");
+    || !validCodingBounds(value.configured) || !validCodingReadback(value.observed)
+    || !validCodingObserved(value.observed, value.configured))) return invalid("coding-execution-score-unqualified");
   return { state: "observed", evidence: value as unknown as CodingExecutionObservationV1 };
 }
 

@@ -197,18 +197,24 @@ function validBinding(b: CodingControlBindingV1): boolean {
     && new Set([b.runId, b.canaryAttemptId, b.workerSpawnAttemptId, b.codingExecutionAttemptId]).size === 4
     && hex64.test(b.slotId) && hex64.test(b.sourceDigest);
 }
-function validBounds(b: CodingConfiguredBounds): boolean {
-  return !!b && typeof b.profileId === "string" && b.profileId.length > 0 && b.profileId.length <= 128
-    && hex64.test(b.profileDigest) && hex64.test(b.binaryDigest) && b.runtimeId === CODING_RUNTIME_PROTOCOL
+export function validCodingBounds(b: unknown): b is CodingConfiguredBounds {
+  return record(b) && typeof b.profileId === "string" && b.profileId.length > 0 && b.profileId.length <= 128
+    && typeof b.profileDigest === "string" && hex64.test(b.profileDigest)
+    && typeof b.binaryDigest === "string" && hex64.test(b.binaryDigest) && b.runtimeId === CODING_RUNTIME_PROTOCOL
     && [b.cpuQuotaMicros, b.memoryMaxBytes, b.tasksMax, b.scratchMaxBytes, b.wallMaxMs,
-      b.stdoutMaxBytes, b.stderrMaxBytes, b.heapMaxBytes].every(n => Number.isSafeInteger(n) && n > 0)
-    && Number.isSafeInteger(b.swapMaxBytes) && b.swapMaxBytes >= 0
-    && b.stdoutMaxBytes <= CODING_STDOUT_MAX_BYTES && b.stderrMaxBytes <= CODING_STDERR_MAX_BYTES;
+      b.stdoutMaxBytes, b.stderrMaxBytes, b.heapMaxBytes].every(n => typeof n === "number" && Number.isSafeInteger(n) && n > 0)
+    && typeof b.swapMaxBytes === "number" && Number.isSafeInteger(b.swapMaxBytes) && b.swapMaxBytes >= 0
+    && typeof b.stdoutMaxBytes === "number" && b.stdoutMaxBytes <= CODING_STDOUT_MAX_BYTES
+    && typeof b.stderrMaxBytes === "number" && b.stderrMaxBytes <= CODING_STDERR_MAX_BYTES;
 }
-function validObserved(o: CodingObservedResources, b: CodingConfiguredBounds): boolean {
-  const values = [o.cpuUsec, o.memoryPeakBytes, o.swapPeakBytes, o.pidsPeak, o.scratchPeakBytes,
-    o.wallMs, o.stdoutBytes, o.stderrBytes, o.heapPeakBytes];
-  return values.every(n => n !== null && Number.isSafeInteger(n) && n >= 0)
+export function validCodingReadback(o: unknown): o is CodingObservedResources {
+  return record(o) && [o.cpuUsec, o.memoryPeakBytes, o.swapPeakBytes, o.pidsPeak, o.scratchPeakBytes,
+    o.wallMs, o.stdoutBytes, o.stderrBytes, o.heapPeakBytes]
+    .every(n => n === null || typeof n === "number" && Number.isSafeInteger(n) && n >= 0);
+}
+export function validCodingObserved(o: CodingObservedResources, b: CodingConfiguredBounds): boolean {
+  return validCodingReadback(o) && [o.cpuUsec, o.memoryPeakBytes, o.swapPeakBytes, o.pidsPeak, o.scratchPeakBytes,
+    o.wallMs, o.stdoutBytes, o.stderrBytes, o.heapPeakBytes].every(n => n !== null)
     // cpuQuotaMicros is a configured rate control, not a cumulative CPU budget. Preserve the native
     // cpuUsec observation without inventing a total-CPU cap from a quota percentage/period guess.
     && o.memoryPeakBytes! <= b.memoryMaxBytes && o.swapPeakBytes! <= b.swapMaxBytes
@@ -230,7 +236,7 @@ function unavailable(binding: CodingControlBindingV1, reason: CodingExecutionRea
     && execution.hostStarted === "yes" && execution.closure === "proven"
     && partial.candidateClosedBeforeMetrics && partial.metricsCapturedBeforeCollection && partial.unitEmptyAfterStop
     && Number.isSafeInteger(partial.exitCode) && typeof partial.stdout === "string" && typeof partial.stderr === "string"
-    && configured !== null && validBounds(configured)
+    && configured !== null && validCodingBounds(configured)
     && Buffer.byteLength(partial.stdout, "utf8") <= Math.min(configured.stdoutMaxBytes, CODING_STDOUT_MAX_BYTES)
     && Buffer.byteLength(partial.stderr, "utf8") <= Math.min(configured.stderrMaxBytes, CODING_STDERR_MAX_BYTES)
     ? Object.freeze({ sourceDigest: partial.candidateDigest, exitCode: partial.exitCode, stdout: partial.stdout,
@@ -277,7 +283,7 @@ export async function executeCodingCandidate(input: { binding: CodingControlBind
       { hostStarted: "unknown", closure: "unavailable", hostExecutionId: null });
   usedAuthorities.add(input.authority as object);
   if (input.signal.aborted) return refused(binding, "candidate-cancelled");
-  if (!validBounds(state.configured)) return unavailable(binding, "owner-profile-unavailable", null, undefined,
+  if (!validCodingBounds(state.configured)) return unavailable(binding, "owner-profile-unavailable", null, undefined,
     { hostStarted: "no", closure: "proven", hostExecutionId: null });
   let backend: CodingBackendResult;
   try { backend = await state.execute({ binding, source: candidate.source,
@@ -290,10 +296,10 @@ export async function executeCodingCandidate(input: { binding: CodingControlBind
     backend.configured ?? state.configured, backend.partial, backend.execution);
   const raw = backend.raw;
   if (!sameBinding(raw.binding, binding) || raw.candidateDigest !== candidate.sourceDigest
-    || !raw.hostExecutionId || raw.hostExecutionId.length > 256 || !validBounds(raw.configured)
+    || !raw.hostExecutionId || raw.hostExecutionId.length > 256 || !validCodingBounds(raw.configured)
     || raw.configured.profileDigest !== state.configured.profileDigest
     || raw.configured.binaryDigest !== state.configured.binaryDigest
-    || !validObserved(raw.observed, raw.configured)
+    || !validCodingObserved(raw.observed, raw.configured)
     || !raw.restrictions.privateNonGitRoot || !raw.restrictions.networkNamespaceIsolated
     || !raw.restrictions.noHostDataMounts || !raw.restrictions.noCredentialMounts
     || !raw.restrictions.noPackageInstall || !raw.restrictions.oracleNotMounted

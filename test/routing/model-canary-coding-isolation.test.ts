@@ -34,6 +34,91 @@ function privateTestRoot(): string {
   return mkdtempSync(join(parent, "rmd-coding-authority-"));
 }
 
+function assertImportedCodingMetrics(run: CanaryRun): void {
+  // Import private JSON through the public projection, without relying on executor validation.
+  const imported: CanaryRun = JSON.parse(JSON.stringify(run));
+  const importedProjection = () => projectCanaryRuns([imported]).groups[0]!.codingExecution!;
+  assert.equal(importedProjection().observed, 1, "complete imported native measurements qualify");
+  const receipt = imported.attempts[0]!.codingExecution!;
+  const original = structuredClone(receipt);
+  const configured = original.configured!;
+  const rejectImport = (reason: string, label: string) => {
+    const projected = importedProjection();
+    assert.equal(projected.observed, 0, label);
+    assert.equal(projected.invalid, 1, label);
+    assert.equal(projected.rows[0]!.state, "invalid", label);
+    assert.equal(projected.rows[0]!.reason, reason, label);
+    Object.assign(receipt, structuredClone(original));
+  };
+  for (const field of Object.keys(original.observed!)) Reflect.set(receipt.observed!, field, null);
+  rejectImport("coding-execution-score-unqualified", "all nine null counters cannot qualify an imported score");
+  for (const field of Object.keys(original.observed!)) {
+    for (const value of [null, undefined, -1, 0.5, "0", true, {}, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity]) {
+      Reflect.set(receipt.observed!, field, value);
+      rejectImport(value === null ? "coding-execution-score-unqualified" : "coding-execution-resources-invalid",
+        `${field}=${String(value)}`);
+    }
+  }
+  for (const field of Object.keys(original.configured!)) {
+    for (const value of [null, undefined, -1, 0.5, "", "x".repeat(129), true, {}, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity]) {
+      Reflect.set(receipt.configured!, field, value);
+      rejectImport("coding-execution-resources-invalid", `configured ${field}=${String(value)}`);
+    }
+  }
+  for (const field of ["cpuQuotaMicros", "memoryMaxBytes", "tasksMax", "scratchMaxBytes", "wallMaxMs",
+    "stdoutMaxBytes", "stderrMaxBytes", "heapMaxBytes"]) {
+    Reflect.set(receipt.configured!, field, 0);
+    rejectImport("coding-execution-resources-invalid", `configured ${field} must be positive`);
+  }
+  for (const field of ["stdoutMaxBytes", "stderrMaxBytes"]) {
+    Reflect.set(receipt.configured!, field, 4097);
+    rejectImport("coding-execution-resources-invalid", `configured ${field} exceeds the protocol bound`);
+  }
+  for (const [field, cap] of Object.entries({ memoryPeakBytes: configured.memoryMaxBytes,
+    swapPeakBytes: configured.swapMaxBytes, pidsPeak: configured.tasksMax, scratchPeakBytes: configured.scratchMaxBytes,
+    wallMs: configured.wallMaxMs, stdoutBytes: configured.stdoutMaxBytes, stderrBytes: configured.stderrMaxBytes,
+    heapPeakBytes: configured.heapMaxBytes })) {
+    Reflect.set(receipt.observed!, field, cap + 1);
+    rejectImport("coding-execution-score-unqualified", `${field} exceeds its configured bound`);
+  }
+  receipt.observed!.cpuUsec = configured.cpuQuotaMicros + 1;
+  assert.equal(importedProjection().observed, 1, "cumulative cpu use is not the configured quota rate");
+  Object.assign(receipt, structuredClone(original));
+  receipt.state = "unavailable";
+  receipt.reason = "resource-readback-incomplete";
+  receipt.observed!.scratchPeakBytes = null;
+  assert.equal(importedProjection().unavailable, 1);
+  assert.equal(importedProjection().rows[0]!.observedResources!.scratchPeakBytes, null);
+  for (const field of Object.keys(original.observed!)) Reflect.set(receipt.observed!, field, null);
+  assert.equal(importedProjection().unavailable, 1, "absent measurements remain explicitly unavailable");
+  assert.equal(importedProjection().observed, 0);
+  Object.assign(receipt.observed!, original.observed);
+  receipt.observed!.scratchPeakBytes = null;
+  receipt.observed!.cpuUsec = -1;
+  rejectImport("coding-execution-resources-invalid", "unavailable receipts still reject malformed observations");
+}
+
+test("imported coding scores require complete bounded native resource receipts", () => {
+  const runId = randomUUID(), canaryAttemptId = randomUUID(), workerSpawnAttemptId = randomUUID();
+  const run: CanaryRun = { id: runId, caseId: "coding-sum-four-v1", suiteHash: "a".repeat(64),
+    model: "coder-a", route: "subscription", effort: "low", family: "coding", verified: true,
+    totalDurationMs: 7, attempts: [{ id: canaryAttemptId, durationMs: 7, firstTextMs: 2, generationMs: 5,
+      inputTokens: 10, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: null,
+      usageRatedUsd: null, billing: "subscription", servedModel: null, terminal: "complete",
+      workerExecutionJoin: { version: "canary-worker-execution-join-v1", runId, canaryAttemptId,
+        workerSpawnAttemptId, unit: "worker-spawn", measurementScope: "returned-terminal-result" },
+      codingExecution: { version: "canary-coding-execution-observation-v1", canaryAttemptId, workerSpawnAttemptId,
+        codingExecutionAttemptId: randomUUID(), hostExecutionId: "rmd-coding-import-control.service",
+        sourceDigest: "b".repeat(64), fixtureDigest: "c".repeat(64), state: "scored", reason: "scored",
+        closure: "proven", configured: { profileId: "import-control", profileDigest: "1".repeat(64),
+          binaryDigest: "2".repeat(64), runtimeId: "node-source-stdin-stdout-v1", cpuQuotaMicros: 100_000,
+          memoryMaxBytes: 32 * 1024 * 1024, swapMaxBytes: 0, tasksMax: 8, scratchMaxBytes: 1024 * 1024,
+          wallMaxMs: 1000, stdoutMaxBytes: 4096, stderrMaxBytes: 4096, heapMaxBytes: 8 * 1024 * 1024 },
+        observed: { cpuUsec: 23, memoryPeakBytes: 4096, swapPeakBytes: 0, pidsPeak: 2,
+          scratchPeakBytes: 128, wallMs: 4, stdoutBytes: 2, stderrBytes: 0, heapPeakBytes: 512 } } }] };
+  assertImportedCodingMetrics(run);
+});
+
 test("W1-T10957: paired trial results retain correctness, native resource and missing-identity evidence without changing schedules", async () => {
   const root = privateTestRoot(), ownerDir = join(root, "owner");
   mkdirSync(ownerDir, { mode: 0o700 });
@@ -125,6 +210,7 @@ test("W1-T10957: paired trial results retain correctness, native resource and mi
       assert.notEqual(observation.configured!.memoryMaxBytes, observation.observed!.memoryPeakBytes);
     }
     const projection = projectCanaryRuns(runs);
+    assertImportedCodingMetrics(pairedRuns.find(run => run.model === "coder-a")!);
     const unknown = projection.groups.find(group => group.model === "coder-b")!;
     assert.equal(unknown.identityComparable, false);
     assert.equal(unknown.servedIdentityKnown, 0);
