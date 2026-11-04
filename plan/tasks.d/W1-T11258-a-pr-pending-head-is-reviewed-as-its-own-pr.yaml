@@ -1,0 +1,40 @@
+- id: W1-T11258
+  title: A PR whose head carries the "Remudero-Task PR-pending" placeholder on its own run-PR-pending branch is reviewed with untasked defaults instead of refusing setup and being re-admitted every pass with no status
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which derived task ids the review treats as untasked; a real task id whose shard does not resolve still refuses
+  origin: operator-session#review-throughput-2026-11-03
+  plan_refs:
+    - W1-T3387
+    - W1-T453
+  files:
+    - src/lib/tick-read-worker.ts
+    - test/review/a-pr-pending-head-is-reviewed-as-its-own-pr.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: usesUntaskedReviewMetadata returns true for task id PR-pending exactly when the head ref is run-PR-pending-<digits>, so the review applies its untasked risk and budget defaults and posts a verdict; PR-pending on any other head ref, and a W1-T id whose shard does not resolve, still refuse as head-task-metadata-unavailable
+      proof: "unit test: test/review/a-pr-pending-head-is-reviewed-as-its-own-pr.test.ts"
+    - claim: The placeholder rule names this task
+      proof: "grep: W1-T11258 in src/lib/tick-read-worker.ts"
+  rationale: |
+    OBSERVED 2026-11-03, 12:45-18:45Z, Azure host:
+    - 21 review.reviewer.skipped rows with reason head-task-metadata-unavailable (missing ["risk","budget_usd"]) and 19 review.semantic_setup_refused rows, all on task_id PR-pending except 2 on W1-T11206.
+    - By run id: #16499 x14, #16501 x12, #16513 x8, #16541 x4, #16527 x2. Each run logs "rmd review: semantic review unavailable (head task metadata); no pending status, verdict or merge effect" and returns 2 (src/cli/commands/review.ts, after review.semantic_setup_refused).
+    - Nothing terminal is written, so the sweep re-admits the head the next pass. These PRs were the longest awaiting-review waiters, up to 222 min. A loop held a review slot for 2-7 min each time (#16513 18:48:53 -> 18:56:25Z).
+    - #16499, #16501, #16513 and #16541 are hand PRs on heads run-PR-pending-<epoch> whose trailer is the placeholder "Remudero-Task: PR-pending", written before the PR had a number. Two merged commits since 10-25 carried the same trailer.
+    - usesUntaskedReviewMetadata (src/lib/tick-read-worker.ts) accepts only PR-<n> with a numeric n, so PR-pending reads as a real task id whose shard does not resolve.
+  design: |
+    In usesUntaskedReviewMetadata (src/lib/tick-read-worker.ts), also return true when taskId is "PR-pending" and headRefName matches ^run-PR-pending-[0-9]+$, the shape the placeholder only takes on its own branch. Mark the rule with a comment naming W1-T11258.
+    Both review.ts call sites and the tick read's unfiled flag already read this predicate, so a placeholder head gets DEFAULT_RISK and UNTASKED_REVIEW_BUDGET_USD and a normal semantic review.
+    NOT IN SCOPE:
+    - a terminal status or re-admission backoff for other head-task-metadata refusals (a separate defect: a real task id whose shard does not resolve);
+    - the head-identity gate, which admits the placeholder at push.
+  note: |
+    reservation hand-off: run-unfiled-1793732872741 -> run-unfiled-1793732872741
+    Reserved with rmd next-task-id (W1-T11258 on run-unfiled-1793732872741). Content replaced on the filing branch before review: the first draft's premise (one-PR light-pass batches) did not hold, because sweep.pass enumerated is logged per PR inside a multi-PR batch.

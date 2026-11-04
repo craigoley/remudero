@@ -1,0 +1,31 @@
+id: incident-45f511d0ca5a0f05
+ts: 2026-11-03T22:40:18.497Z
+raw: >-
+  Incident 45f511d0ca5a: intervention
+  review-failed:fix-lane:operator-answered-the-clarification-ques
+
+  First seen: 2026-11-03T22:40:15.935Z
+
+  Last seen: 2026-11-03T22:40:15.935Z
+
+  Count: 3, burn: 3.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#16452@74241dbe0 actor=cao825 cause=review-failed:fix-lane:operator-answered-the-clarification-ques — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#16452@59aa0f8ab actor=cao825 cause=review-failed:fix-lane:operator-answered-the-clarification-ques — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#16452@4cb4b37c5 actor=cao825 cause=review-failed:fix-lane:operator-answered-the-clarification-ques — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#45f511d0ca5a0f054f850cc98a5f535b24c317f498cc9f81d1d07359fc20e7e8
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

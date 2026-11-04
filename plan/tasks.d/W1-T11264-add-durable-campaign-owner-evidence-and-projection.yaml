@@ -23,6 +23,7 @@
     - src/lib/model-canary-command.ts
     - test/routing/model-canary-campaign-owner.test.ts
     - test/routing/model-canary-campaign-projection.test.ts
+    - test/model-canary-owner.test.ts
   status: queued
   priority: 2
   attempts: 0
