@@ -29,8 +29,8 @@
   origin: feedback#fb-1789365327024-d9c74b
   plan_refs: ["§7B"]
   files: [src/run-task.ts, src/lib/auto-triage.ts, test/triage-post-pr-handoff-crash-safe.test.ts]
-  priority: 2
+  priority: 3
   status: queued
-  # backlog gardener: band=2 evidence=ad2d3df260caf737
-  # backlog gardener: placed=2026-11-02T21:43:23.136Z
+  # backlog gardener: band=3 evidence=abc2b7325f7883fc
+  # backlog gardener: placed=2026-11-03T22:32:06.183Z
   attempts: 0

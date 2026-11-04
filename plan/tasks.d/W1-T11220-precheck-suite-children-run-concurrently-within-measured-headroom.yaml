@@ -1,0 +1,48 @@
+- id: W1-T11220
+  title: census-precheck runs its separate census suite children concurrently, at a width derived each time from the host's measured CPU load and memory headroom, so an idle machine stops running them one at a time and a saturated host still runs one; each measured runtime records the width it ran under
+  repo: remudero
+  depends_on: [W1-T11100]
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one script, one concern: how many census suite children census-precheck runs at once
+  origin: operator-session#preflight-throughput-2026-11-03
+  plan_refs:
+    - W1-T5693
+    - W1-T11100
+    - W1-T11099
+  files:
+    - scripts/census-precheck.mjs
+    - test/ci/gates/precheck-suite-children-run-concurrently-within-measured-headroom.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The census suite groups census-precheck runs (the shared group and each structural suite's own child) are started up to a width derived at the start of the run from the host's measured load and memory headroom through test-slot.ts's existing readHostLoad and testRunConcurrency, never a fixed number; at width 1 the run order, verdicts and output are identical to today
+      proof: "unit test: test/ci/gates/precheck-suite-children-run-concurrently-within-measured-headroom.test.ts"
+    - claim: Each group's verdict, failing suites and unmeasured reason are exactly what the same group returns run alone; one group's time bound or failure never changes another's, and the joined violations are reported in today's order
+      proof: "grep: W1-T11220 criterion 2 in test/ci/gates/precheck-suite-children-run-concurrently-within-measured-headroom.test.ts"
+    - claim: Every census-reader-runtime line and W1-T11100 history entry records the width the reader ran under, and a history budget is derived only from measurements taken at the same width, so concurrency never makes a reader look like a runaway
+      proof: "grep: W1-T11220 criterion 3 in test/ci/gates/precheck-suite-children-run-concurrently-within-measured-headroom.test.ts"
+  rationale: |
+    MEASURED 2026-11-03 on the Mac (10 cores), four full rmd preflight runs (476-535 s each):
+    - census-precheck took 344-399 s (about 72%).
+    - One profiled run (422 s, 63 suites) spent 222 s calibrating and 181 s qualifying. Every census suite child ran one after another while most cores sat idle.
+    READ at origin/main: evaluateAdmittedCensusSuites (scripts/census-precheck.mjs) builds groups of [the shared non-structural group, …each structural suite alone] (W1-T5693, so one time-bounded suite cannot mask the others) and runs them in a synchronous for-loop. runCensusSuitesViaChild spawns each child synchronously.
+    The width is derived, never fixed (operator ruling: no hard thresholds):
+    - test-slot.ts already derives a test run's concurrency from the 1-minute load and core count (readHostLoad, defaultTestSlots, testRunConcurrency). The width reuses that.
+    - Memory headroom bounds it the same way the coverage gate's reserve does.
+    - On the CPU-saturated Azure host (load 34-47 on 8 cores) the derived width is 1, so the fleet host is never made worse. On an idle Mac it is several.
+    WHY AFTER W1-T11100: W1-T11100 budgets a reader from its own measured history. Readers measured while others run concurrently run slower than readers measured alone, so a history mixing widths would read concurrency as a runaway. Recording the width beside every measurement, and pricing from same-width history only, keeps both changes honest.
+    NOT COVERED: W1-T11099 (census suite children record, in shadow, the host admission they would have waited for). That is admission telemetry, not concurrency. The calibration itself is W1-T11100's.
+  design: |
+    1. At the start of a run, width = testRunConcurrency(readHostLoad(), defaultTestSlots(cores)), further bounded by available memory over the measured peak of one census child (the pool's existing peak estimate, or 1 when unreadable). Print census-precheck-width: {width, load1, cores, memoryHeadroomMiB}.
+    2. Run the groups through a bounded pool of async child spawns (spawn, not spawnSync, with the same argv, env, priority wrap, judged-run handling and time bounds). Collect each group's result and fold them in today's group order, so violations and unmeasured reasons print exactly as today.
+    3. A reader's calibration and qualification stay sequential inside its own group, so W1-T11100's single-reader contract holds.
+    4. census-reader-runtime gains width; W1-T11100's history key gains the width, and its median reads only same-width entries.
+  falsifier: |
+    At origin/main the census suite groups run one after another whatever the host's load, and no census-reader-runtime line names the concurrency it was measured under.
+  note: |
+    reservation hand-off: plan-file-1793722362468 -> plan-file-1793722362468
+    Reserved with rmd next-task-id --branch plan-file-1793722362468 from the operator checkout. Operator 2026-11-03, in chat: "go with all of your recommendations". The test path is where rmd test-place put a stub importing scripts/census-precheck.mjs (test/ci/gates/, high).

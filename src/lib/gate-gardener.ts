@@ -735,6 +735,7 @@ export function renderCommentCompressionShard(finding: CommentCompressionFinding
       "Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.",
       "Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.",
       `Add the named regression in ${testFile}; compare executable tokens against the pre-compression source and verify a real comment-count reduction.`,
+      "Read the pre-compression source with compressionPinBase from #test/helpers/compression-pin.js, never a frozen digest or token count: a frozen pin fails every later feature edit to the module (#16082).",
       "Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.",
       "Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.",
     ],

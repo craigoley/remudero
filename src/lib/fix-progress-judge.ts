@@ -38,6 +38,7 @@ export interface FixProgressRound {
   reviewerFailures?: ReviewerProofFailure[];
   /** The same, read from the first `review.posted` row after this round completed. */
   reviewAfter?: ReviewerProofFailure[];
+  workerProofResults?: FixProgressWorkerProofResult[];
   /** The scope amendment this round opened instead of a commit, and where it stands now. */
   scopeAmendment?: ScopeAmendmentState;
 }
@@ -46,7 +47,20 @@ export interface FixProgressRound {
 export interface ScopeAmendmentState { number?: number; state: "pending" | "merged" | "closed" | "refused" }
 
 /** One reviewer `executed_fail` proof, identified by its claim and a digest of its recorded output. */
-export interface ReviewerProofFailure { claim: string; digest: string; excerpt?: string }
+export interface ReviewerProofFailure { claim: string; digest: string; excerpt?: string; proof?: string; reviewLoad?: string }
+
+export interface FixProgressWorkerProofResult {
+  proof: string; headSha: string; result: "pass" | "fail"; output: string;
+}
+
+export interface FixProgressHostedProofResult {
+  headSha: string; testFile: string; check: string; result: "pass" | "fail"; output: string;
+}
+
+export interface FixProgressOffHostPassEvidence {
+  claim: string; proof: string; reviewerOutput: string; reviewLoad?: string;
+  worker: FixProgressWorkerProofResult; ci: FixProgressHostedProofResult[];
+}
 
 /** One failing check's evidence, in the `ciFailureLedgerEntry` shape (ci-friction-gardener.ts, which this module
  *  cannot import: it reaches sweep.ts, which imports this module). `unavailable` names why `excerpt` is null. */
@@ -66,6 +80,7 @@ export type FixProgressFailureEvidence =
 export interface FixProgressReviewFailure {
   claim: string; proof: string; met: boolean; reason: string; proof_exec: string;
   proofFailureOutput?: string; failureTail?: string; loadError?: string; holdout?: boolean;
+  reviewLoad?: string;
 }
 
 export interface FixProgressReviewEvidence {
@@ -127,6 +142,8 @@ export interface FixProgressInput {
   failureEvidence?: FixProgressFailureEvidence;
   /** Current semantic/proof findings, independent of the presence of CI logs. */
   reviewFailureEvidence?: FixProgressReviewEvidence[];
+  offHostPassEvidence?: FixProgressOffHostPassEvidence[];
+  harnessGuidance?: string;
   rounds: FixProgressRound[];
   remedyHistory?: readonly Record<string, unknown>[];
   operatorAnswer?: string;
@@ -137,6 +154,7 @@ export interface FixProgressInput {
     /** Rounds whose worker reported FIXED, after which the reviewer failed the same proof with the same output.
      *  Another identical fix round cannot help; a fresh-sandbox re-review or an escalation carrying the excerpt can. */
     reviewerOnlyFailurePersists: number;
+    offHostPass?: true;
     /** W1-T7762: rounds dispatched against a red of a DIFFERENT class than the current one. They are context,
      *  not failed attempts at this red; the judge rules whether they still apply. Present only when non-zero. */
     otherClassRounds?: number;
@@ -157,7 +175,8 @@ export type FixProgressVerdict =
   | { verdict: "continue"; reason: string }
   | { verdict: "change-approach"; approach: string; reason: string }
   | { verdict: "escalate"; loop: string; reason: string };
-export type FixProgressJudge = (input: FixProgressInput) => Promise<FixProgressVerdict | undefined>;
+export type FixProgressJudge = (input: FixProgressInput) => Promise<FixProgressVerdict |
+  { verdict: "harness"; reason: string } | undefined>;
 export type FixProgressResult = FixProgressVerdict | { verdict: "unavailable"; reason: string };
 
 const sorted = (values: string[]) => [...new Set(values)].sort();
@@ -183,27 +202,83 @@ export function reviewerFailureDigest(output: string): string {
 
 /** The `fix.dispatch` row's record of the reviewer-side failures a round was sent to fix. */
 export function reviewerProofFailures(
-  criteria: readonly { claim: string; proof_exec?: string; proofFailureOutput?: string }[],
+  criteria: readonly { claim: string; proof?: string; proof_exec?: string; proofFailureOutput?: string }[],
 ): ReviewerProofFailure[] {
   return criteria.flatMap((c) => c.proof_exec === "executed_fail" && typeof c.proofFailureOutput === "string"
-    ? [{ claim: c.claim, digest: reviewerFailureDigest(c.proofFailureOutput) }] : []);
+    ? [{ claim: c.claim, digest: reviewerFailureDigest(c.proofFailureOutput),
+      ...(c.proof !== undefined ? { proof: c.proof } : {}) }] : []);
 }
 
 function failuresOfDispatch(row: Record<string, unknown>): ReviewerProofFailure[] | undefined {
   if (!Array.isArray(row.reviewer_proof_failures)) return undefined;
   return row.reviewer_proof_failures.flatMap((f: unknown) => {
     const r = f && typeof f === "object" ? f as Record<string, unknown> : {};
-    return typeof r.claim === "string" && typeof r.digest === "string" ? [{ claim: r.claim, digest: r.digest }] : [];
+    return typeof r.claim === "string" && typeof r.digest === "string" ? [{ claim: r.claim, digest: r.digest,
+      ...(typeof r.proof === "string" ? { proof: r.proof } : {}) }] : [];
   });
 }
 
-function failuresOfReview(row: Record<string, unknown>): ReviewerProofFailure[] {
+/**
+ * W1-T11133: the host pressure a review's proofs ran under, from the newest `review.capacity` reading the sweep wrote at
+ * or before the review posted. A criterion's own recorded load (W1-T11132) wins; with no reading, none is claimed.
+ */
+export function reviewLoadFromCapacity(capacity: Record<string, unknown> | undefined, postedAt: unknown): string | undefined {
+  if (!capacity || typeof capacity.ts !== "string" || typeof postedAt !== "string") return undefined;
+  const ageMs = Date.parse(postedAt) - Date.parse(capacity.ts);
+  if (!Number.isFinite(ageMs) || ageMs < 0) return undefined;
+  const pct = (key: string) => typeof capacity[key] === "number" ? `${capacity[key]}%` : "unread";
+  const mib = typeof capacity.mem_available_mib === "number" ? `${Math.round(capacity.mem_available_mib)} MiB` : "unread";
+  return `cpu PSI full ${pct("cpu_psi_full_avg10_pct")}, some ${pct("cpu_psi_some_avg10_pct")} (avg10); memory PSI some ` +
+    `${pct("memory_psi_some_avg10_pct")}; ${mib} available; review.capacity at ${capacity.ts}, ${Math.round(ageMs / 1000)} s before the review posted`;
+}
+
+function failuresOfReview(row: Record<string, unknown>, capacityLoad?: string): ReviewerProofFailure[] {
   const criteria = (row.decision_verdict as { criteria?: unknown } | null | undefined)?.criteria;
   if (!Array.isArray(criteria)) return [];
   return criteria.flatMap((c: unknown) => {
     const v = c && typeof c === "object" ? c as Record<string, unknown> : {};
+    const reviewLoad = typeof v.reviewLoad === "string" ? v.reviewLoad : capacityLoad;
     return typeof v.claim === "string" && v.proof_exec === "executed_fail" && typeof v.proofFailureOutput === "string"
-      ? [{ claim: v.claim, digest: reviewerFailureDigest(v.proofFailureOutput), excerpt: v.proofFailureOutput }] : [];
+      ? [{ claim: v.claim, digest: reviewerFailureDigest(v.proofFailureOutput), excerpt: v.proofFailureOutput,
+        ...(reviewLoad !== undefined ? { reviewLoad } : {}),
+        ...(typeof v.proof === "string" ? { proof: v.proof } : {}) }] : [];
+  });
+}
+
+function workerProofResultsOf(value: unknown): FixProgressWorkerProofResult[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry: unknown) => {
+    const r = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+    return typeof r.proof === "string" && typeof r.headSha === "string" && typeof r.output === "string" &&
+      (r.result === "pass" || r.result === "fail")
+      ? [{ proof: r.proof, headSha: r.headSha, output: r.output, result: r.result }] : [];
+  });
+}
+
+function offHostPassEvidenceOf(facts: {
+  headSha: string; currentRed: string[]; reviewFailures?: readonly FixProgressReviewFailure[];
+  hostedProofResults?: readonly FixProgressHostedProofResult[];
+}, rounds: FixProgressRound[], pendingChecks: string[]): FixProgressOffHostPassEvidence[] {
+  if (pendingChecks.length > 0 || facts.currentRed.length === 0 ||
+      facts.currentRed.some(red => !red.startsWith("review:"))) return [];
+  const round = rounds.at(-1);
+  if (!round || !round.completed || round.pushedHead !== facts.headSha ||
+      round.fixOutcome !== "FIXED" || round.subtype === "push_failed" ||
+      round.reviewerFailures === undefined || round.reviewAfter === undefined) return [];
+  return (facts.reviewFailures ?? []).flatMap(c => {
+    if (c.met || c.holdout || c.proof_exec !== "executed_fail" || typeof c.proofFailureOutput !== "string") return [];
+    const digest = reviewerFailureDigest(c.proofFailureOutput);
+    const matches = (f: ReviewerProofFailure) => f.claim === c.claim && f.proof === c.proof && f.digest === digest;
+    if (!round.reviewerFailures!.some(matches) || !round.reviewAfter!.some(matches)) return [];
+    const file = /^unit test:\s*(test\/[\w./-]+\.test\.[mc]?[jt]s)\s*$/.exec(c.proof)?.[1];
+    if (!file) return [];
+    const workers = (round.workerProofResults ?? []).filter(r => r.headSha === facts.headSha && r.proof === c.proof);
+    const ci = (facts.hostedProofResults ?? []).filter(r => r.headSha === facts.headSha && r.testFile === file);
+    if (workers.length === 0 || workers.some(r => r.result !== "pass") || ci.length === 0 ||
+        ci.some(r => r.result !== "pass" || !r.check.trim())) return [];
+    const reviewLoad = c.reviewLoad ?? round.reviewAfter!.find(matches)?.reviewLoad;
+    return [{ claim: c.claim, proof: c.proof, reviewerOutput: c.proofFailureOutput, worker: workers.at(-1)!, ci,
+      ...(reviewLoad !== undefined ? { reviewLoad } : {}) }];
   });
 }
 const stringValue = (value: unknown): string | undefined => typeof value === "string" ? value : undefined;
@@ -323,6 +398,7 @@ export function buildFixProgressInput(facts: {
   /** W1-T9297: the head's failing CI checks with their log tails; recorded as absent, with why, when not given. */
   ciFailures?: readonly FixProgressCiFailure[];
   reviewFailures?: readonly FixProgressReviewFailure[];
+  hostedProofResults?: readonly FixProgressHostedProofResult[];
 }): FixProgressInput {
   const rounds: FixProgressRound[] = [];
   const byId = new Map<string, FixProgressRound>();
@@ -331,7 +407,9 @@ export function buildFixProgressInput(facts: {
   for (const row of facts.ledger) {
     if (row.step === PR_TERMINAL_STEP && typeof row.state === "string") terminal.set(Number(row.pr_number), row.state);
   }
+  let capacity: Record<string, unknown> | undefined;
   for (const [index, row] of facts.ledger.entries()) {
+    if (row.step === "review.capacity") capacity = row;
     const rowPr = rowPrNumber(row);
     if (facts.taskId !== undefined ? row.task_id !== facts.taskId : rowPr !== facts.prNumber) continue;
     if (rowPr !== undefined && facts.prNumber !== undefined && rowPr !== facts.prNumber) continue;
@@ -356,7 +434,7 @@ export function buildFixProgressInput(facts: {
       else if (number !== undefined && ["created", "resumed", "branch_update_requested", "scope_amendment"].includes(String(row.outcome ?? row.kind)))
         round.scopeAmendment = { number, state: "pending" };
     } else if (row.step === "review.posted") {
-      const failures = failuresOfReview(row);
+      const failures = failuresOfReview(row, reviewLoadFromCapacity(capacity, row.ts));
       for (const round of rounds) if (round.completed && round.reviewAfter === undefined) round.reviewAfter = failures;
     } else if (row.step === "fix.done" || row.step === "fix.commit_refused") {
       const round = id ? byId.get(id) : rounds.findLast(r => !r.completed &&
@@ -368,6 +446,8 @@ export function buildFixProgressInput(facts: {
         round.pushedHead = stringValue(row.pushed_head_sha);
         round.fixOutcome = stringValue(row.fix_outcome);
         round.subtype = stringValue(row.subtype);
+        const workerProofResults = workerProofResultsOf(row.worker_proof_results);
+        if (workerProofResults.length > 0) round.workerProofResults = workerProofResults;
         round.diffStat = row.diff_stat ?? row.diffstat ?? round.diffStat;
         round.diffDigest = stringValue(row.diff_digest) ?? round.diffDigest;
         if (Array.isArray(row.red_after)) round.redAfter = sorted(row.red_after.filter((r): r is string => typeof r === "string"));
@@ -432,7 +512,12 @@ export function buildFixProgressInput(facts: {
       ...(output ? { output: output.slice(-FIX_PROGRESS_EVIDENCE_EXCERPT_CAP) } : {}),
       ...(c.loadError ? { loadError: c.loadError.slice(0, FIX_PROGRESS_EVIDENCE_EXCERPT_CAP) } : {}) };
   });
+  const offHostPassEvidence = signals.reviewerOnlyFailurePersists > 0
+    ? offHostPassEvidenceOf(facts, rounds, pendingChecks) : [];
+  if (offHostPassEvidence.length > 0) signals.offHostPass = true;
   return { ...(reviewFailureEvidence?.length ? { reviewFailureEvidence } : {}),
+    ...(offHostPassEvidence.length > 0 ? { offHostPassEvidence,
+      harnessGuidance: "A harness verdict escalates this review-only failure with both off-host passes and the recorded review load; it never dispatches a fix round." } : {}),
     taskId: facts.taskId, prNumber: facts.prNumber, headSha: facts.headSha,
     strikesSpent: facts.strikesSpent ?? 0, currentRed, ...(pendingChecks.length > 0 ? { pendingChecks } : {}), redClass: fixRedClass(facts.redClassNames ?? currentRed), failureEvidence: failureEvidenceOf(facts.ciFailures), rounds,
     operatorAnswer: facts.operatorAnswer, formerCeiling: facts.formerCeiling, parkedReason: facts.parkedReason, signals,
@@ -448,6 +533,7 @@ export function parseFixProgressVerdict(text: string): FixProgressVerdict | unde
   const v = value as Record<string, unknown>;
   if (typeof v.reason !== "string" || !v.reason.trim()) return undefined;
   if (v.verdict === "continue") return { verdict: "continue", reason: v.reason };
+  if (v.verdict === "harness") return { verdict: "escalate", loop: "harness", reason: v.reason };
   if (v.verdict === "change-approach" && typeof v.approach === "string" && v.approach.trim())
     return { verdict: "change-approach", approach: v.approach, reason: v.reason };
   if (v.verdict === "escalate" && typeof v.loop === "string" && v.loop.trim())
@@ -471,10 +557,21 @@ export function firstFixRoundVerdict(input: FixProgressInput):
 }
 
 export async function judgeFixProgress(input: FixProgressInput, judge?: FixProgressJudge): Promise<FixProgressResult> {
-  if (!judge) return { verdict: "unavailable", reason: "fix progress judge is not wired" };
+  if (!judge && !input.signals.offHostPass) return { verdict: "unavailable", reason: "fix progress judge is not wired" };
   try {
-    const verdict = await judge(input);
+    const verdict = judge ? await judge(input) : { verdict: "harness", reason: "the persisted proof passes off-host" };
     const parsed = verdict && parseFixProgressVerdict(JSON.stringify(verdict));
+    if (parsed?.verdict === "escalate" && parsed.loop === "harness") {
+      if (!input.signals.offHostPass || input.offHostPassEvidence === undefined || input.offHostPassEvidence.length === 0)
+        return { verdict: "unavailable", reason: "harness judgment lacks corroborating off-host proof results" };
+      const evidence = input.offHostPassEvidence.map(e => [
+        `Proof: ${e.proof} (${e.claim})`, `Reviewer failure: ${e.reviewerOutput}`,
+        `Review load: ${e.reviewLoad ?? "not recorded"}`,
+        `Worker ${e.worker.result} at ${e.worker.headSha}: ${e.worker.output}`,
+        ...e.ci.map(c => `CI ${c.check} ${c.result} at ${c.headSha} (${c.testFile}): ${c.output}`),
+      ].join("\n")).join("\n\n");
+      return { ...parsed, reason: `${parsed.reason}\n${evidence}` };
+    }
     return parsed ?? { verdict: "unavailable", reason: "absent or unparseable fix progress verdict; re-ask next pass" };
   } catch (error) {
     return { verdict: "unavailable", reason: `fix progress judgment failed: ${String(error)}` };

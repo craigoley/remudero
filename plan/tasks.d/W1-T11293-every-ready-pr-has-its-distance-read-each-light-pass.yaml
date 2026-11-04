@@ -1,0 +1,43 @@
+- id: W1-T11293
+  title: "Every ready PR (checks green, review success) has its distance to main read on each light pass, instead of sharing the three-PR rotation the stale-distance refresh uses, so a reviewed, green plan PR is no longer held 'ready PR distance is unreadable' for an hour while it waits its turn"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, which PRs the light pass's compare reads; it decides whether a ready PR may merge this pass
+  origin: operator-session#ready-pr-distance-starvation-2026-11-04
+  plan_refs:
+    - W1-T3277
+    - W1-T7214
+    - W1-T5901
+  files:
+    - src/lib/light-pass-compare.ts
+    - src/run-task.ts
+    - test/github/every-ready-pr-has-its-distance-read-each-light-pass.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The light pass's compare reader reads the distance of every ready PR it is handed on each pass (memoized per head and main sha as today), so no ready PR is left unmeasured and held with "ready PR distance is unreadable"; the three-per-window rotation (distanceRefreshProbeTargets) still bounds only the stale-distance refresh of PRs that are not ready
+      proof: "unit test: test/github/every-ready-pr-has-its-distance-read-each-light-pass.test.ts"
+    - claim: With more ready PRs than the old rotation slice, a single pass yields a measured distance for each one, and a failed compare still holds only that PR
+      proof: "grep: W1-T11293 criterion 2 in test/github/every-ready-pr-has-its-distance-read-each-light-pass.test.ts"
+    - claim: The sweep's light hook builds its compare reader with createReadyPrCompareReader from the extracted module on the production path
+      proof: "grep: createReadyPrCompareReader( in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-03T23:25Z..11-04T01:00Z. Plan PRs #16546 and #16548 sat ready for about 90 minutes: review PASS at 23:33, checks green, REST mergeable=true and clean. Neither merged.
+    Their sweep.disposed rows read "mergeable … merging directly" with acted=false and stand_down_reason "ready PR distance is unreadable — held until its compare succeeds" (23:56 and 00:42).
+    The cause is in createLightPassCompareReader (src/run-task.ts:33239). It sends the ready PRs through distanceRefreshProbeTargets (src/lib/tick-read-worker.ts:503), which returns at most DISTANCE_REFRESH_PROBE_LIMIT = 3 per window. Any ready PR outside that slice gets no distance, so src/cli/commands/sweep.ts:1264 runs it in the distanceKnown=false batch, where "mergeable" is not actionable.
+    MEASURED over the ledger union, 23:25Z..01:00Z: 4 light passes logged compare_reads, 3 compares each, across 8 distinct PRs, each compared once. #16546 was compared once, in a pass where its single plan direct-merge slot went to another PR. #16548 was never compared.
+    The rotation exists for W1-T3277's stale-PR refresh, where probing every open PR would spend GitHub capacity on PRs that cannot merge. Ready PRs are the only ones that can merge, and they are few, so starving them buys nothing.
+  design: |
+    1. Move createLightPassCompareReader from src/run-task.ts into src/lib/light-pass-compare.ts as createReadyPrCompareReader, unchanged except one line: read() maps over every PR it is given, not over distanceRefreshProbeTargets(prs, …). The caller already passes only ready PRs (src/cli/commands/sweep.ts readyPrs), and the (head, main) memo is kept.
+    2. src/run-task.ts imports createReadyPrCompareReader from the new module and calls it where createLightPassCompareReader was built (keeping the old name as an alias only if a caller still needs it), so the test never imports src/run-task.ts (reach ratchet).
+    3. Test with five ready PRs and a stub compare reader: one read yields behindMainByPr for all five, a stub failure for one leaves only that one unmeasured, and a second read at the same main is all cache hits.
+  falsifier: |
+    At origin/main, a light pass handed more than three ready PRs measures only three, and the rest are held "ready PR distance is unreadable" until a later window reaches them.
+  note: |
+    reservation hand-off: plan-file-1793754173000 -> plan-file-1793754173000
+    Reserved with rmd next-task-id --branch plan-file-1793754173000 from the operator session's ops worktree. Not a raised limit: the operator rules out fixed thresholds, and ready PRs are measured because they are ready, not because a number grew.
