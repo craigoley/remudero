@@ -865,13 +865,23 @@ export interface RankedHolder extends CensusMeasurement {
   proposed_task?: ProposedHolderTask;
 }
 
+/** A live-series proposal can be filed even when the offline census has no measurement for its holder. */
+export interface GrowthProposalHolder extends Partial<RankedHolder> {
+  name: string;
+  holder: string;
+  files: readonly string[];
+  share: number;
+  source: "daemon.memory";
+  proposed_task: ProposedHolderTask;
+}
+
 export interface HeapCensusRanking {
   census_sha: string;
   census_date: string;
   live_set_bytes: number;
   threshold_bytes: number;
   measured_bytes: number;
-  holders: RankedHolder[];
+  holders: (RankedHolder | GrowthProposalHolder)[];
   growth?: DaemonMemoryGrowth;
 }
 
@@ -882,7 +892,7 @@ export function rankHeapCensus(measurements: readonly CensusMeasurement[], opts:
 }): HeapCensusRanking {
   const threshold = censusFilingThreshold(opts.liveSetBytes, opts.share, opts.filingBytes);
   const sorted = [...measurements].sort((a, b) => b.retained_bytes - a.retained_bytes);
-  const holders = sorted.map((measurement, index): RankedHolder => {
+  const holders: HeapCensusRanking["holders"] = sorted.map((measurement, index): RankedHolder => {
     const share = opts.liveSetBytes > 0 ? measurement.retained_bytes / opts.liveSetBytes : 0;
     const perEntry = measurement.entries > 0 ? Math.round(measurement.retained_bytes / measurement.entries) : 0;
     const ranked: RankedHolder = { ...measurement, rank: index + 1, share, per_entry_bytes: perEntry };
@@ -920,6 +930,12 @@ export function rankHeapCensus(measurements: readonly CensusMeasurement[], opts:
     };
     const holder = holders.find((h) => h.holder === rise.holder);
     if (holder) holder.proposed_task = growth.proposed_task;
+    else holders.push({
+      name: "generation median (offline unmeasured)", holder: rise.holder, source: "daemon.memory",
+      files: growth.proposed_task.files,
+      share: opts.liveSetBytes > 0 ? rise.after_bytes / opts.liveSetBytes : 0,
+      proposed_task: growth.proposed_task,
+    });
   }
   return {
     census_sha: opts.censusSha, census_date: opts.censusDate, live_set_bytes: opts.liveSetBytes, threshold_bytes: Math.round(threshold),
@@ -938,6 +954,10 @@ export function renderHeapCensus(ranking: HeapCensusRanking): string {
     "|---:|---|---|---:|---:|---:|---:|:---:|",
   ];
   for (const row of ranking.holders) {
+    if ("source" in row) {
+      lines.push(`| — | ${row.holder} | ${row.name} | — | — | — | — | **file** |`);
+      continue;
+    }
     lines.push(`| ${row.rank} | ${row.holder} | ${row.name}${row.error ? ` (error: ${row.error})` : ""} | ${row.entries} | ${mib(row.retained_bytes)} | ` +
       `${(row.share * 100).toFixed(1)}% | ${row.per_entry_bytes} | ${row.proposed_task ? "**file**" : ""} |`);
   }
@@ -952,6 +972,7 @@ export function renderHeapCensus(ranking: HeapCensusRanking): string {
 export function calibrationFrom(ranking: HeapCensusRanking): Record<string, CensusCalibration> {
   const table: Record<string, CensusCalibration> = {};
   for (const row of ranking.holders) {
+    if ("source" in row) continue;
     if (!row.calibrationKey || row.error !== undefined || row.entries === 0) continue;
     table[row.calibrationKey] = { per_entry_bytes: row.per_entry_bytes, entries: row.entries, census_sha: ranking.census_sha.slice(0, 12), census_date: ranking.census_date };
   }

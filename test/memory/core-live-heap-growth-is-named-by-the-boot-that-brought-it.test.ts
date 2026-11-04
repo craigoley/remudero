@@ -5,7 +5,7 @@ import * as census from "#src/lib/daemon-memory-census.js";
 import type { DaemonMemoryGrowthRow } from "#src/lib/daemon-memory-census.js";
 
 const {
-  compareDaemonMemoryGenerations, DAEMON_MEMORY_STEP, rankHeapCensus, readCgroupMemoryEvents,
+  calibrationFrom, compareDaemonMemoryGenerations, DAEMON_MEMORY_STEP, rankHeapCensus, readCgroupMemoryEvents,
   renderHeapCensus, sampleDaemonMemoryCensus, startDaemonMemoryCensus,
 } = census;
 
@@ -140,7 +140,10 @@ test("W1-T11134 criterion 2: a named rise enters census proposals and each row c
   const ranking = rankHeapCensus([], {
     liveSetBytes: 500, censusSha: "offline", censusDate: "fixture", memoryRows: history(),
   });
-  const proposal = ranking.growth!.proposed_task!;
+  const proposals = ranking.holders.flatMap((holder) => holder.proposed_task ? [holder.proposed_task] : []);
+  assert.equal(proposals.length, 1, "an unmatched live holder must reach the existing filing collection");
+  const proposal = proposals[0]!;
+  assert.equal(proposal, ranking.growth!.proposed_task);
   assert.equal(proposal.holder, "memo:board");
   assert.match(proposal.subject, /memo:board.*old-b.*new-c/);
   assert.match(proposal.evidence.join("\n"), /400.*27.5.*5/);
@@ -150,6 +153,7 @@ test("W1-T11134 criterion 2: a named rise enters census proposals and each row c
     name: "board memo", holder: "memo:board", entries: 1, retained_bytes: 1, grown_bytes: 1,
     files: ["src/lib/board.ts"],
   }], { liveSetBytes: 500, censusSha: "offline", censusDate: "fixture", memoryRows: history() });
+  assert.equal(known.holders.length, 1, "a matched holder must carry one proposal without a duplicate row");
   assert.equal(known.holders[0]!.proposed_task, known.growth!.proposed_task);
   assert.deepEqual(known.holders[0]!.proposed_task!.files, ["src/lib/board.ts"]);
   const sparse = rankHeapCensus([], {
@@ -157,10 +161,14 @@ test("W1-T11134 criterion 2: a named rise enters census proposals and each row c
     memoryRows: [...generation("a", [100, 100]), ...generation("sparse", [10000])],
   });
   assert.match(renderHeapCensus(sparse), /sparse.*unmeasured/);
-  const unattributed = rankHeapCensus([], {
+  const unattributedRanking = rankHeapCensus([], {
     liveSetBytes: 101, censusSha: "offline", censusDate: "fixture",
     memoryRows: [...generation("a", [100]), ...generation("b", [101])],
-  }).growth!.proposed_task!;
+  });
+  const unattributedProposals = unattributedRanking.holders.flatMap((holder) => holder.proposed_task ? [holder.proposed_task] : []);
+  assert.equal(unattributedProposals.length, 1, "unattributed growth must reach the existing filing collection");
+  const unattributed = unattributedProposals[0]!;
+  assert.equal(unattributed, unattributedRanking.growth!.proposed_task);
   assert.equal(unattributed.holder, "unattributed_live_bytes");
   assert.match(unattributed.subject, /a.*b/);
   assert.match(unattributed.evidence.join("\n"), /live_after_gc_bytes median/);
@@ -182,6 +190,46 @@ test("W1-T11134 criterion 2: a named rise enters census proposals and each row c
     assert.deepEqual(written!.row.cgroup_memory_events, { oom: 12, oom_kill: 7 });
   } finally { stop(); }
 });
+
+for (const holder of ["memo:board", "unattributed_live_bytes"]) {
+  test(`the existing filing collection includes ${holder} growth without an offline match`, () => {
+    const measurements = [{
+      name: "other holder", holder: "memo:other", entries: 10, retained_bytes: 300, grown_bytes: 310,
+      calibrationKey: "other", files: ["src/lib/other.ts"],
+    }];
+    const memoryRows = holder === "memo:board" ? history()
+      : [...generation("old-b", [100, 100]), ...generation("new-c", [500, 500])];
+    const ranking = rankHeapCensus(measurements, {
+      liveSetBytes: 500, censusSha: "offline", censusDate: "fixture", memoryRows,
+    });
+    // This is the census's existing filing route, including the ordinary offline proposal.
+    const proposals = ranking.holders.flatMap((row) => row.proposed_task ? [row.proposed_task] : []);
+    assert.deepEqual(proposals.map((proposal) => proposal.holder), ["memo:other", holder]);
+    const proposal = proposals[1]!;
+    assert.match(proposal.subject, /old-b.*new-c/);
+    assert.ok(proposal.subject.includes(holder));
+    assert.match(proposal.evidence.join("\n"), /old-b\.\.new-c/);
+    assert.match(proposal.acceptance, /boot_head_sha/);
+    assert.deepEqual(proposal.files, []);
+    const row = ranking.holders.find((candidate) => candidate.holder === holder)!;
+    assert.equal(row.proposed_task, proposal);
+    assert.equal(row.retained_bytes, undefined, "a live-series proposal must not invent an offline measurement");
+    assert.equal(row.entries, undefined);
+    assert.equal(row.rank, undefined);
+    assert.equal(row.per_entry_bytes, undefined);
+    assert.equal(ranking.measured_bytes, 300, "growth proposals must not inflate the offline measured total");
+    assert.deepEqual(calibrationFrom(ranking), {
+      other: { per_entry_bytes: 30, entries: 10, census_sha: "offline", census_date: "fixture" },
+    });
+    const rendered = renderHeapCensus(ranking);
+    assert.ok(rendered.includes(`| — | ${holder} | generation median (offline unmeasured)`));
+    assert.equal(rendered.match(/\*\*file\*\*/g)?.length, 2);
+    const withoutRise = rankHeapCensus(measurements, {
+      liveSetBytes: 500, censusSha: "offline", censusDate: "fixture", memoryRows: generation("a", [100]),
+    });
+    assert.deepEqual(withoutRise.holders.map((candidate) => candidate.holder), ["memo:other"]);
+  });
+}
 
 test("cgroup events preserve measured zero and leave missing or unreadable counters absent", async () => {
   assert.deepEqual(readCgroupMemoryEvents(() => "low 9\noom 0\noom_kill 0\n"), { oom: 0, oom_kill: 0 });
