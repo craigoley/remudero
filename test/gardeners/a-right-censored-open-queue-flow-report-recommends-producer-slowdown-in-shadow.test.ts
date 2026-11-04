@@ -9,8 +9,9 @@ import { logArmAttribution } from "#src/lib/arm-auto-merge.js";
 import { flowGardenPass } from "#src/lib/garden-registry.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
-  FLOW_STATE_FILE, flowOpenQueueReader, openQueueShadow, openQueueWindow, runFlowGardener, type FlowOpenQueuePr, type FlowOpenQueueRead,
+  FLOW_STATE_FILE, flowOpenQueueReader, openQueueShadow, openQueueWindow, readFlowLedger, runFlowGardener, type FlowOpenQueuePr, type FlowOpenQueueRead,
 } from "#src/lib/flow-gardener.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
@@ -563,4 +564,61 @@ test("W1-T11111 criterion 1: an open PR older than the ledger read with no stage
     previous, now, ledgerFromMs);
   assert.equal(seen.cohort.stage_unread, 0, "a row at its current head inside the read makes its stage known");
   assert.equal(seen.status, "OBSERVED", "once every stage is read the report observes again");
+});
+
+test("W1-T11111 criterion 1: a merge hold engaged before the nine-day ledger read still blocks readiness, archived or carried live", (t) => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const sinceIso = at(now - 9 * DAY);
+  const ledgerFromMs = Date.parse(sinceIso);
+  const hold = { ts: at(now - 10 * DAY), step: "automerge.hold_engaged", pr_number: 16186, by: "operator", reason: "hold for review",
+    authority: "interactive-cli" };
+  // Positive control: #16186's current head is reviewed and green, so with no hold it is ready.
+  assert.equal(openQueueShadow(census(now), rows(now), undefined, now, ledgerFromMs).cohort.ready_to_direct_merge, 1);
+  // The hold sits in a rotation cut before the read window (the windowed read skips that archive) ...
+  const archived = writeLedger(rows(now), { scope: t, rotations: [{ at: at(now - 10 * DAY + HOUR), rows: [hold], gz: true }] });
+  // ... or in the live file, where compaction carries a retained step with its original timestamp.
+  const carried = writeLedger([hold, ...rows(now)], { scope: t });
+  for (const [form, dir] of [["archived", archived.dir], ["carried live", carried.dir]] as const) {
+    const read = readFlowLedger(dir, sinceIso);
+    assert.equal(read.ok, true, form);
+    assert.ok(read.rows.some((r) => r.step === "automerge.hold_engaged"), `${form}: the standing hold is read at any age`);
+    const held = openQueueShadow(census(now), read.rows, undefined, now, ledgerFromMs);
+    assert.equal(held.cohort.ready_to_direct_merge, 0, `${form}: a 10-day-old active hold keeps a reviewed, green PR from being ready`);
+    assert.equal(held.cohort.stage_unread, 0, `${form}: an old hold is never mistaken for stage evidence`);
+  }
+  // An old standing row at a PR's head is not stage evidence: a 14-day-old PR whose only row is a capped override
+  // granted before the read keeps an unread stage, so the report stays UNKNOWN.
+  const old = census(now);
+  old.open.push({ number: 15000, createdAtMs: now - 14 * DAY, updatedAtMs: now, headSha: "head-15000", headRefName: "run-W1-T15000-1", checksState: "SUCCESS" });
+  const override = writeLedger([{ ts: at(now - 12 * DAY), step: "automerge.capped_override_granted", pr_number: 15000, head_sha: "head-15000",
+    task_id: "W1-T15000", by: "operator", reason: "override" }, ...rows(now)], { scope: t });
+  const overrideRead = readFlowLedger(override.dir, sinceIso);
+  assert.ok(overrideRead.rows.some((r) => r.step === "automerge.capped_override_granted"), "the standing override is read at any age");
+  const overrideShadow = openQueueShadow(old, overrideRead.rows, undefined, now, ledgerFromMs);
+  assert.equal(overrideShadow.cohort.stage_unread, 1, "an old override at its head never makes an unread stage known");
+  assert.equal(overrideShadow.status, "UNKNOWN");
+  // A later release, inside the window, lifts it again: the standing rows keep ledger order (last one wins).
+  archived.append([{ ts: at(now - HOUR), step: "automerge.hold_released", pr_number: 16186, by: "operator", authority: "interactive-cli" }]);
+  const released = readFlowLedger(archived.dir, sinceIso);
+  assert.equal(openQueueShadow(census(now), released.rows, undefined, now, ledgerFromMs).cohort.ready_to_direct_merge, 1);
+});
+
+test("W1-T11111 criterion 1: a census whose pages repeat a PR is incomplete even when its node count reaches totalCount", async () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const body = censusResponse(census(now), windowOf(now));
+  // Positive control: three distinct open PRs against a totalCount of three is complete.
+  const whole = await flowOpenQueueReader("acme", "remudero", async () => body, fixedClock(now))(openQueueWindow(now));
+  assert.equal(whole.complete, true);
+  // #17000 is missing and #16147 appears twice: the node count still equals totalCount.
+  const nodes = body.data.repository.pullRequests.nodes;
+  const repeated = { ...body, data: { ...body.data, repository: { pullRequests: { ...body.data.repository.pullRequests,
+    nodes: [nodes[0]!, nodes[1]!, nodes[0]!] } } } };
+  assert.equal(repeated.data.repository.pullRequests.nodes.length, repeated.data.repository.pullRequests.totalCount);
+  const read = await flowOpenQueueReader("acme", "remudero", async () => repeated, fixedClock(now))(openQueueWindow(now));
+  assert.equal(read.complete, false, "a duplicated member never counts toward totalCount");
+  assert.equal(read.reason, "census-duplicate-members");
+  const shadow = openQueueShadow(read, rows(now), undefined, now);
+  assert.equal(shadow.status, "UNKNOWN");
+  assert.equal(shadow.reason, "census-duplicate-members");
+  assert.equal(shadow.recommendation, undefined);
 });

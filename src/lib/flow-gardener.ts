@@ -276,10 +276,18 @@ export interface FlowLedgerRead {
   unread: string[];
 }
 
-/** The ledger union since `sinceIso`, narrowed to the rows a flow pass reads. */
+/** Standing operator decisions the production merge path honours at any age: a hold has no head binding and is
+ *  retained across compaction so it outlives a push (W1-T1000002), and a capped override stands while its head does. */
+export const FLOW_STANDING_STEPS = ["automerge.hold_engaged", "automerge.hold_released", "automerge.capped_override_granted"] as const;
+
+/** The ledger union since `sinceIso`, narrowed to the rows a flow pass reads, preceded by every standing decision
+ *  older than it, read from the whole union in ledger order (a hold is "last one wins"). */
 export function readFlowLedger(stateDir: string, sinceIso: string): FlowLedgerRead {
   const read = readLedgerUnionRecordsSync(stateDir, { since: sinceIso, pattern: FLOW_LINE, refuseIncomplete: true });
-  return { ok: read.ok, rows: read.rows, unread: read.unread };
+  const standing = readLedgerUnionRecordsSync(stateDir, { step: FLOW_STANDING_STEPS, refuseIncomplete: true });
+  const sinceMs = Date.parse(sinceIso);
+  const older = standing.rows.filter((row) => typeof row.ts === "string" && Date.parse(row.ts) < sinceMs);
+  return { ok: read.ok && standing.ok, rows: [...older, ...read.rows], unread: [...read.unread, ...standing.unread] };
 }
 
 export interface FlowCiReading {
@@ -361,7 +369,12 @@ export function flowOpenQueueReader(
       parsedAll &&= parsed.length === c.nodes.length;
       for (const pr of parsed) byNumber.set(pr.number, { ...byNumber.get(pr.number), ...pr });
     }
-    const counted = conns.every((c) => c.total === c.nodes.length);
+    // A page repeated or overlapping across cursors can fill `totalCount` while members are missing, so a
+    // connection counts only when its DISTINCT PR numbers equal its total.
+    const distinct = (c: (typeof conns)[number]) => new Set(c.nodes.map((n) => Number(object(n).number))).size;
+    const duplicated = conns.some((c) => distinct(c) !== c.nodes.length);
+    const counted = !duplicated && conns.every((c) => c.total === c.nodes.length);
+    if (duplicated && reason === undefined) reason = "census-duplicate-members";
     if (!counted && reason === undefined) reason = "census-page-cap-exceeded";
     return { ok, complete: ok && counted && parsedAll, observedAtMs: clock.now(), windowMs: window, open, window: [...byNumber.values()],
       ...(reason !== undefined && !(ok && counted && parsedAll) ? { reason } : {}) };
@@ -691,7 +704,10 @@ export function openQueueShadow(
     const ready = reviewed !== undefined && armable && pr.checksState === "SUCCESS" && !preflightRefused &&
       pr.isDraft !== true && pr.mergeable !== "CONFLICTING";
     const reviewAge = reviewWaiting ? Math.max(0, nowMs - tsOf(eligible!)) : null;
-    const unread = ledgerFromMs !== undefined && pr.createdAtMs < ledgerFromMs && matching.length === 0;
+    // Standing decisions are read at any age, so only stage evidence (never an old hold or override) makes a stage known.
+    const standing: readonly unknown[] = FLOW_STANDING_STEPS;
+    const unread = ledgerFromMs !== undefined && pr.createdAtMs < ledgerFromMs &&
+      matching.every((r) => standing.includes(r.step));
     const stage = reviewWaiting ? "review_waiting" : preflightRefused ? "merge_preflight_refused" : ready ? "ready_to_direct_merge"
       : unread ? "stage_unread" : "other_open";
     const stageStart = reviewWaiting ? tsOf(eligible!) : preflightRefused ? tsOf(refused!) : ready ? tsOf(reviewed!) : NaN;
