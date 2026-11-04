@@ -11407,7 +11407,7 @@ export async function acquireReviewStatusLock(
 
 /** The issue transport this posting path uses. Keep it structural so review's module graph
  * does not load the worker/escalation graph merely to judge or post a status. */
-interface ReviewIssueGateway {
+export interface ReviewIssueGateway {
   create(title: string, body: string, labels: string[]): string;
   listOpen?(label: string): Array<{ number: number; url: string; title?: string; body?: string }>;
   closeWithComment?(url: string, comment: string): void;
@@ -11415,13 +11415,19 @@ interface ReviewIssueGateway {
   ensureLabel?(label: string): boolean;
 }
 
-/** escalate.ts's two functions as the cannot-evaluate escalation uses them, typed here so review.ts never imports it.
- *  Method syntax keeps the parameters bivariant, so escalate.ts's own Escalation and EscalateDeps types satisfy it. */
-export interface CannotEvaluateEscalationPort {
-  tryEscalate(e: { class: "MANUAL"; taskId: string; runId: string; headSha: string; cause: "review"; summary: string;
-    detail: string; options: { label: string; detail: string }[]; recommendation: string; consequence: string },
-    deps: { issues: unknown; ledgerPath: string; runId: string }): string | null;
-  ghIssueGateway(owner: string, repo: string): unknown;
+/** The one cannot-evaluate escalation this module asks for, as escalate.ts's Escalation reads it. Declared locally:
+ *  escalate.ts's graph reaches this module, and dependency-cruiser counts a type-only import as a cycle edge. */
+export interface CannotEvaluateEscalation {
+  class: "MANUAL";
+  taskId: string;
+  runId: string;
+  headSha: string;
+  cause: "review";
+  summary: string;
+  detail: string;
+  options: { label: string; detail: string }[];
+  recommendation: string;
+  consequence: string;
 }
 
 /** The shape of status.ts's readRequiredStatusCheckContextsAsync, typed here so review.ts never imports status.ts. */
@@ -11480,9 +11486,10 @@ export interface PostReviewStatusGuardedOpts {
   }) => void | Promise<void>;
   /** Injectable issue transport for the one cannot-evaluate escalation per head. */
   issues?: ReviewIssueGateway;
-  /** escalate.ts's tryEscalate and ghIssueGateway, for the one cannot-evaluate escalation per head. Injected because
-   *  escalate.ts's graph reaches this module; every terminal-posting caller passes them. */
-  cannotEvaluateEscalation?: CannotEvaluateEscalationPort;
+  /** Files the one cannot-evaluate escalation per head and returns its issue URL. Injected because escalate.ts's graph
+   *  reaches this module; every terminal-posting caller binds tryEscalate to its own ledger, run and gateway. `issues`
+   *  is this call's injected transport, when it has one. Unwired, no escalation is filed and the pending status stands. */
+  cannotEvaluateEscalation?: (escalation: CannotEvaluateEscalation, issues: ReviewIssueGateway | undefined) => string | null;
   lockOpts?: AcquireReviewStatusLockOpts;
 }
 
@@ -11715,8 +11722,8 @@ export async function postReviewStatusGuarded(
       // escalate.ts's worker graph reaches review through eval-card, so its two functions are injected by the caller
       // (which already imports escalate.ts) rather than loaded here: a computed import() is a runtime-relative
       // specifier no child-entry bundle carries. Unwired, the escalation is skipped and the pending status stands.
-      const escalation = opts.cannotEvaluateEscalation;
-      const issueUrl = escalation && escalation.tryEscalate({
+      const escalate = opts.cannotEvaluateEscalation;
+      const issueUrl = escalate && escalate({
         class: "MANUAL",
         taskId: opts.taskId,
         runId: opts.runId,
@@ -11727,11 +11734,7 @@ export async function postReviewStatusGuarded(
         options: [{ label: "Repair reviewer toolchain", detail: "Refresh the canonical install, then rerun this head's review." }],
         recommendation: "Repair reviewer toolchain",
         consequence: "The required review remains pending and the PR cannot merge.",
-      }, {
-        issues: opts.issues ?? escalation.ghIssueGateway(opts.owner, opts.repo),
-        ledgerPath: opts.ledgerPath,
-        runId: opts.runId,
-      });
+      }, opts.issues);
       if (issueUrl) appendLedger(opts.ledgerPath, {
         run_id: opts.runId, task_id: opts.taskId, step: "review.cannot_evaluate_escalated",
         pr_url: opts.prUrl, head_sha: opts.sha, issue_url: issueUrl,

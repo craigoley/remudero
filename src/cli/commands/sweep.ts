@@ -394,7 +394,7 @@ export function buildSweepEffects(
                 reviewEngineRevision: REVIEW_ENGINE_REVISION,
                 fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
                 readRequiredContexts: readRequiredStatusCheckContextsAsync,
-                cannotEvaluateEscalation: { tryEscalate, ghIssueGateway },
+                cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(deps.owner, deps.repo), ledgerPath: deps.ledgerPath, runId: reuseRunId }),
               });
               if (!discriminationPosted.posted && !discriminationPosted.replayed) {
                 exitCode = 1;
@@ -472,7 +472,7 @@ export function buildSweepEffects(
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
       readRequiredContexts: readRequiredStatusCheckContextsAsync,
-      cannotEvaluateEscalation: { tryEscalate, ghIssueGateway },
+      cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(deps.owner, deps.repo), ledgerPath: deps.ledgerPath, runId: reuseRunId }),
     });
     if (!reusedStatus.posted && !reusedStatus.replayed) return 1;
     appendLedger(deps.ledgerPath, {
