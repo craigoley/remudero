@@ -20,6 +20,8 @@
     - "src/lib/inbox.ts"
     - "src/lib/relint.ts"
     - "src/lib/risk-judge.ts"
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
   status: queued
   attempts: 0
   rationale: |
@@ -70,3 +72,6 @@
     - Default an unmapped lane to a category: the explicit-mapping case fails on a fixture lane.
     - Count fires over all attempts, including pre-request refusals: the attributable-only case fails.
     - Add a class outside the contract list: the closed-list case fails.
+  note: |
+    Amended 2026-11-04 (scope for #16240): src/lib/worker.ts and src/lib/worker-provider.ts join files. A length-truncated open-weight reply does not throw: the adapter returns subtype "openweight_error" and leaves the error only in stderr. Free text is never matched, so attributeAttemptOutcome never sees reply-OpenWeightTruncatedReplyError, and review measured 2 opportunities and 0 truncation fires through the real spawnOpenWeightWorker -> benchmarkNonDispatchSpawn path.
+    The fix adds a typed error identity to WorkerResult (worker.ts) and OpenWeightWorkerResult (worker-provider.ts), set from the error's class. benchmarkWorkerAttemptResources maps it to error_class on the receipt, as it already maps openWeightCapacityShortfall to capacity_shortfall.

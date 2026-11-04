@@ -33,10 +33,6 @@
     - src/lib/model-canary-coding-adapter.ts
     - src/lib/model-canary-coding-capabilities.ts
     - src/lib/model-canary-coding-port-capability.ts
-    - src/lib/model-canary-host-bridge.ts
-    - src/lib/model-canary-linux-profile-preflight-capabilities.ts
-    - src/lib/model-canary-native-profile-probe.ts
-    - src/lib/model-canary-systemd-bwrap-backend.ts
     - test/model-canary-command.test.ts
     - test/model-canary-suite.test.ts
     - test/model-canary-schedule.test.ts
@@ -45,12 +41,6 @@
     - test/routing/model-canary-private-corpus.test.ts
     - test/routing/model-canary-trace-grader.test.ts
     - test/routing/model-canary-coding-isolation.test.ts
-    - test/routing/model-canary-native-session.test.ts
-    - test/routing/model-canary-linux-profile-preflight-capability.test.ts
-    - test/routing/model-canary-host-bridge.test.ts
-    - test/routing/model-canary-systemd-runtime-readback.test.ts
-    - test/routing/model-canary-service-wrapper-protocol.test.ts
-    - test/routing/model-canary-profile-observation.test.ts
     - src/lib/model-canary-replay-private.ts
     - test/ci/gates/model-canary-config-inventory.test.ts
     - test/model-canary-adoption.test.ts
@@ -122,10 +112,13 @@
     private mode-stat fixtures using the established host-capability fixture metadata. It
     does not change census enforcement, thresholds or runtime permissions. Changed profile-source
     bindings require one targeted zero-provider host probe; ordinary SOURCE CI owns the full suite.
+  amendment: |
+    2026-11-04, operator ruling on #16606 (AskUserQuestion, "Split the native backend"): the native systemd/bwrap backend, its profile probe and preflight capabilities, the native coding execution port (createCodingCanaryExecutionPort, which builds the backend's executor from a backend-issued profile), and the host bridge move to W1-T11313. The worker request port (codingWorkerRequestPorts) in the same adapter file stays, because it needs no native host. Their criterion, "the existing private coding executor contains filesystem and credential effects and closes its real descendants", moves with them.
+    MEASURED at #16606 head 7a883fd1c5: diff-coverage listed 842 added lines with no covering test. 760 of them are native-only: systemd-bwrap-backend 587, native-profile-probe 174, plus the coding adapter and host bridge that need a backend-issued profile. GitHub's runners have neither systemd for the user nor bwrap, so the one real-path test skips ("native Linux profile prerequisites unavailable"). The gate exempts no spawned external binary.
+    W1-T10957 keeps the coding canary contract (suite, schedule, runner, scorer, metrics, owner, ledger, private corpus and replay) and proves it refuses cleanly with no native profile. W1-T11313 wires the native profile source and the real execution path.
   acceptance:
-    - claim: the existing private coding executor contains filesystem and credential effects and closes
-        its real descendants
-      proof: 'grep: test("W1-T10957: the existing private coding executor contains filesystem and credential effects and closes its real descendants" in test/routing/model-canary-native-session.test.ts'
+    - claim: Without a native coding profile source, the default coding composition defers with coding-native-profile-unavailable before eligibility, claim, admission or request; it never runs, scores or reports a coding case as passed
+      proof: 'grep: W1-T10957: default coding composition defers before eligibility in test/routing/model-canary-coding-command.test.ts'
     - claim: paired trial results retain correctness, native resource and missing-identity evidence
         without changing schedules
       proof: 'grep: test("W1-T10957: paired trial results retain correctness, native resource and
@@ -138,9 +131,9 @@
         re-export is insufficient.
       proof: "grep: codingLedgerSave( in src/lib/model-canary-command.ts"
     - claim: First-class coding cases retain their identity through full census validation
-      proof: 'unit test: coding cases retain first class identity through matrix census validation'
+      proof: 'grep: coding cases retain first class identity through matrix census validation in test/ci/gates/model-canary-config-inventory.test.ts'
     - claim: The raw coding ledger sender resolves through the declared producer identity registry
-      proof: 'unit test: coding ledger producer resolves to its declared identity'
+      proof: 'grep: coding ledger producer resolves to its declared identity in test/routing/model-canary-coding-command.test.ts'
     - claim: Native private replay reaches the app-owned control runner without asserting model execution
       proof: 'grep: replayPrivateControl( in src/lib/model-canary-command.ts'
   falsifier: "Add the exact named real-path controls in the computed test folders using package
