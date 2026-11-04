@@ -193,8 +193,8 @@ export async function runRelintLoop<D>(opts: {
   filedIds: ReadonlyArray<string>;
   initialPrompt: string;
   maxAttempts?: number;
-  /** Spawn the worker with this prompt and reduce its output to the lane's own decision. */
-  run: (prompt: string, attempt: number) => Promise<D>;
+  /** Reduce the worker output, with the preceding decision available to validate a repair. */
+  run: (prompt: string, attempt: number, previous: D | undefined) => Promise<D>;
   /** Did this decision actually file tasks? A CLEAR/GRILL has nothing to lint. */
   filed: (decision: D) => boolean;
   lint: () => RelintViolation[];
@@ -210,7 +210,8 @@ export async function runRelintLoop<D>(opts: {
 
   while (attempt < maxAttempts) {
     attempt++;
-    decision = await withGuardrailAttempt("relint-used", attempt, () => opts.run(prompt, attempt));
+    decision = await withGuardrailAttempt("relint-used", attempt, () =>
+      opts.run(prompt, attempt, attempt === 1 ? undefined : decision));
     if (!opts.filed(decision)) {
       violations = [];
       stop = "not-filed";
