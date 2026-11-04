@@ -5,7 +5,10 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=fc0bc6cfa583190e
+  # backlog gardener: placed=2026-11-04T18:42:37.506Z
   attempts: 0
   files:
     - docs/forensics/retro.md
