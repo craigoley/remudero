@@ -25,7 +25,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
-import { readSelectedInstanceRegistry, type RegistrySelectionInput, type RegistryFileIO } from "./instance-registry-selection.js";
+import { captureInstanceRegistryRuntimeProjection, InstanceRegistryRuntimeError,
+  readSelectedInstanceRegistry, type RegistrySelectionInput, type RegistryFileIO } from "./instance-registry-selection.js";
 import { createSelectedRegistryObserver, observeSelectedRegistry, type SelectedRegistryConsumerOptions, type SelectedRegistryObserver, type RegistryConsumerTarget } from "./selected-registry-consumers.js";
 import {
   assertWriteTiersComplete,
@@ -150,6 +151,7 @@ import {
   type GatewayCheckoutState,
 } from "./daemon-health.js";
 import {
+  INCIDENT_LONGEST_WINDOW_MS,
   evaluateIncidentInvariants,
   eventLoopLagLedgerLine,
   invariantFindingLedgerLine,
@@ -185,7 +187,7 @@ import {
 import type { LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
 import { createLiveAnalyticsSnapshotCache, type LiveAnalyticsSnapshotCacheOptions } from "./live-analytics-snapshot-cache.js";
 import { inboxDigestsPath } from "./digest.js";
-import { readLedgerLines } from "./status.js";
+import { createLiveLedgerTail } from "./live-ledger-tail.js";
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./ledger-replay.js";
 import { createLatestMeasurementReader, latestMeasurementDetail, latestMeasurementRows, summarizeMeasurementValue, type LatestMeasurementRowsResult } from "./measurement-cadence.js";
 import type { LedgerUnionResult } from "./ledger-grep.js";
@@ -1916,6 +1918,7 @@ export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegi
   selectedRegistryObserver?: SelectedRegistryObserver; selectedRegistryTarget?: RegistryConsumerTarget };
 
 export function buildRegistryRoute(deps: RegistryRouteInput): Route {
+  const runtimeProjection = captureInstanceRegistryRuntimeProjection();
   const selectedRegistryObserver = deps.selectedRegistryObserver;
   const selectedRegistryTarget = deps.selectedRegistryTarget && { ...deps.selectedRegistryTarget };
   const selectedInput = deps.selectedRegistry === undefined ? undefined : {
@@ -1938,6 +1941,17 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
     path: "/v1/registry",
     scope: "read",
     handler: (_req, res) => observeSelectedRegistry(selectedRegistryObserver, "serve-registry", selectedRegistryTarget ?? {}, async () => {
+      if (runtimeProjection !== undefined) {
+        try {
+          const projection = await runtimeProjection();
+          sendJson(res, 200, { ...projection, source: "selected", publicationPermission: "not-granted", generatedAt: clock.iso() });
+        } catch (error) {
+          // Only typed binding refusals are response data; unexpected faults remain server failures.
+          if (!(error instanceof InstanceRegistryRuntimeError)) throw error;
+          sendJson(res, 503, { error: "selected_registry_unavailable", reason: error.details?.reason });
+        }
+        return;
+      }
       if (selectedInput !== undefined) {
         const selected = await readSelectedInstanceRegistry(selectedInput, deps.selectedRegistryIO);
         if (selected.kind === "unknown" || selected.kind === "refused") {
@@ -3223,7 +3237,8 @@ export function startIncidentInvariantsMonitor(
   ledgerPath: string,
   deps: NonNullable<ServeDeps["incidentInvariants"]> & { log?: ServiceOptions["log"] } = {},
 ): (() => void) & { stallProfiler: LoopStallProfiler } {
-  const readLedger = deps.readLedger ?? readLedgerLines;
+  const readLedger = deps.readLedger;
+  const liveRows = readLedger ? () => readLedger(ledgerPath) : createLiveLedgerTail(ledgerPath, 2 * INCIDENT_LONGEST_WINDOW_MS);
   const writeLedger = deps.writeLedger ?? appendLedger;
   const eventLoopLag = deps.eventLoopLag
     ?? createEventLoopLagMonitor(systemClock, () => monitorEventLoopDelay({ resolution: SERVE_LOOP_LAG_RESOLUTION_MS }));
@@ -3249,7 +3264,7 @@ export function startIncidentInvariantsMonitor(
       deps.log?.("serve.incident_invariants.loop_lag_failed", { reason: String((e as Error)?.message ?? e) });
     }
     try {
-      const rows = readLedger(ledgerPath);
+      const rows = liveRows(nowMs);
       for (const finding of evaluateIncidentInvariants(rows, nowMs)) {
         writeLedger(ledgerPath, invariantFindingLedgerLine(finding, nowMs));
       }

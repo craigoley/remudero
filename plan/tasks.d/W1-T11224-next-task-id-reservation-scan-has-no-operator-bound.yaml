@@ -1,0 +1,50 @@
+- id: W1-T11224
+  title: "Let operators choose a larger bounded task ID scan"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # A larger bound can issue more remote ref attempts; keep the option explicit and capped.
+  band_meaning: span
+  plan_refs: [W1-T1055, W1-T9683]
+  files:
+    - src/run-task.ts
+    - test/plan/a-next-task-id-can-request-a-larger-bounded-range.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  origin: "operator request 2026-11-03 after the official allocator exhausted its fixed scan"
+  rationale: |
+    A live operator checkout at origin/main 0e4d3c70 on 2026-11-03 reported that the official
+    `rmd next-task-id --reserve` exhausted its fixed 50-candidate scan. A fresh non-reserving read
+    from the same checkout reported task and open-PR records through 11221 and reservation refs
+    through 11223; the first unreserved candidate was 11224. The public atomic function already
+    accepts a bounded `maxScan`, so one call reserved the first free candidate in one attempt with
+    maxScan 200 and a named filing branch. The public CLI has no way to request that larger bound.
+
+    SUBJECT SWEEP 2026-11-03: compared all 40 open PR heads with their exact advertised origin
+    branch SHAs; every PR targets main. Searched each changed plan-task record and each changed
+    `src/run-task.ts` hunk for this allocator subject. No competing task or CLI change was found.
+    Positive controls: main contains the bounded allocator contract in W1-T1055/W1-T9683, and
+    PR #16557 changes the separate GitHub read-cadence waiter. The only other open heads touching
+    `src/run-task.ts` are #15532 and #15638; their changed hunks are registry pause/deploy wiring.
+
+    Keep the default scan at 50. `--max-scan` accepts an integer from 1 through 200 only with
+    `--reserve`; forward it to the existing `reserveTaskIdRemote` call for each ID in a `--count`
+    request. Keep the atomic push, exact held-ID output, reserved-floor seeding, open-PR outage
+    refusal and every current claim gate. Reject malformed or over-cap values before reading or
+    writing GitHub. Name the requested bound in the result and refusal so the operator can see the
+    search that was attempted.
+
+    Do not change the default, add retries, reclaim reservations, alter another repository's
+    prefix allocator, or change the separate GitHub read cadence policy. The next cadence task will
+    keep ordinary reads at 180 seconds and consider a separately bounded search-only interval.
+  acceptance:
+    - claim: "the default remains 50 while an explicit request can search up to 200"
+      proof: "grep: maxScan: requestedMaxScan [?][?] 50 in src/run-task.ts"
+    - claim: "invalid or over-cap values are refused before reservation work"
+      proof: "grep: max-scan must be an integer between 1 and 200 in src/run-task.ts"
+    - claim: "the selected bound reaches the existing atomic reservation function"
+      proof: "grep: reserveTaskIdRemote(from, reserver, { maxScan in src/run-task.ts"

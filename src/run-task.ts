@@ -636,6 +636,7 @@ import { readPlanBase } from "./lib/plan-base-reader.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
+import { assertInstanceRegistryRuntimeCurrent, InstanceRegistryRuntimeError, instanceRegistryRuntimePresent, runtimeInstanceRegistryText, withInstanceRegistryRuntime } from "./lib/instance-registry-selection.js";
 import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
@@ -17307,10 +17308,29 @@ export async function nextTaskIdCommand(
   overlapDeps: OverlapWarningDeps = {},
   deps: NextTaskIdReserveDeps = {},
 ): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch", "--count"], ["--offline", "--reserve", "--no-reserve", "--audit", "--reap", "--apply", "--reconcile"]);
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch", "--count", "--max-scan"], ["--offline", "--reserve", "--no-reserve", "--audit", "--reap", "--apply", "--reconcile"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
+  }
+  const maxScanFlagCount = rest.filter((arg) => arg === "--max-scan").length;
+  let requestedMaxScan: number | undefined;
+  if (maxScanFlagCount > 0) {
+    const rawMaxScan = flagValue(rest, "--max-scan");
+    const parsedMaxScan = rawMaxScan !== undefined && /^\d+$/.test(rawMaxScan) ? Number(rawMaxScan) : NaN;
+    if (maxScanFlagCount !== 1 || !Number.isSafeInteger(parsedMaxScan) || parsedMaxScan < 1 || parsedMaxScan > 200) {
+      console.error("### rmd next-task-id: --max-scan must be an integer between 1 and 200\n" + USAGE);
+      return 2;
+    }
+    if (!rest.includes("--reserve")) {
+      console.error("### rmd next-task-id: --max-scan requires explicit --reserve\n" + USAGE);
+      return 2;
+    }
+    if (rest.includes("--prefix") || rest.includes("--repo")) {
+      console.error("### rmd next-task-id: --max-scan applies only to W1 task reservations, not --prefix\n" + USAGE);
+      return 2;
+    }
+    requestedMaxScan = parsedMaxScan;
   }
   const reap = rest.includes("--reap");
   if ((reap && (!rest.includes("--audit") || rest.some(a => ["--offline", "--audit-age-days", "--prefix", "--repo"].includes(a))))
@@ -17464,7 +17484,7 @@ export async function nextTaskIdCommand(
           "other source can yet see, so claiming atomically on it while it is unreadable risks " +
           "reissuing a live id (the W1-T2316 reissue, #2965/#2970). Nothing was claimed. Printing " +
           "(without --reserve) still works — only the ATOMIC claim refuses. Retry once the surface " +
-          "is reachable.",
+          `is reachable.${requestedMaxScan === undefined ? "" : ` Max scan: ${requestedMaxScan} candidate(s).`}`,
       );
       return 2;
     }
@@ -17506,7 +17526,7 @@ export async function nextTaskIdCommand(
       // reserveTaskIdBlockRemote, a failure keeps the ids already held, so only those are printed.
       const contestedAt: number[] = [];
       const { held, error } = reserveTaskIdsKeepingHeld(mint.n, countArg.count, (from) => {
-        const handle = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(from, reserver));
+        const handle = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(from, reserver, { maxScan: requestedMaxScan ?? 50 }));
         contestedAt.push(contested.length);
         return handle;
       });
@@ -17515,7 +17535,7 @@ export async function nextTaskIdCommand(
         for (const line of contested.slice(contestedAt[i - 1] ?? 0, contestedAt[i])) console.log(line);
         // W1-T6026: a takeover rides the RESERVED line itself, and leaves one durable row.
         const takeover = handle.takenOver ? ` — ${describeReservationTakeover(handle.takenOver)}` : "";
-        console.log(`RESERVED ${handle.taskId} on origin (${handle.ref}) after ${handle.attempts} attempt(s)${takeover}`);
+        console.log(`RESERVED ${handle.taskId} on origin (${handle.ref}) after ${handle.attempts} attempt(s)${requestedMaxScan === undefined ? "" : ` (max-scan: ${requestedMaxScan})`}${takeover}`);
         if (handle.takenOver) logRow("next_task_id.reclaimed", reservationTakeoverFields(handle, handle.takenOver));
         if (i === 0 && handle.taskId !== mint.id) console.log(`(note: the reservation walk advanced from ${mint.id}; ${handle.taskId} is the id actually HELD)`);
       });
@@ -17528,7 +17548,7 @@ export async function nextTaskIdCommand(
         (overlapDeps.say ?? console.log)(line);
     } catch (e) {
       const err = e as TaskIdReservationError;
-      console.error(describeReservationRefusal(err.outcome, err.message));
+      console.error(describeReservationRefusal(err.outcome, `${err.message}${requestedMaxScan === undefined ? "" : ` (max-scan: ${requestedMaxScan})`}`));
       return 2;
     }
   }
@@ -33528,26 +33548,35 @@ async function stopCommand(rest: string[]): Promise<number> {
  * through the checkout's instance registry and this process's `config.root` (pause-target.ts),
  * never the cwd, the repository, the hostname or a pid. A refusal returns before anything is written.
  */
-function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], config: Config): PauseTarget | undefined {
-  // `RMD_INSTANCE_REGISTRY` is the override the shell readers already honor (install-host-units.sh,
-  // host-update.sh, recycle-container.sh); otherwise the checkout's own registry.
-  const override = process.env.RMD_INSTANCE_REGISTRY?.trim();
-  const registryPath = override ? override : daemonInstanceRegistryPath(repoRoot);
-  let registryText: string | undefined;
+async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], config: Config): Promise<PauseTarget | undefined> {
+  const explicit = process.env.RMD_INSTANCE_REGISTRY !== undefined;
+  const resolveTarget = async (): Promise<PauseTarget | undefined> => {
+    const registryPath = explicit ? "selected registry" : daemonInstanceRegistryPath(repoRoot);
+    let registryText: string | undefined;
+    if (explicit) {
+      await assertInstanceRegistryRuntimeCurrent();
+      registryText = runtimeInstanceRegistryText();
+    } else {
+      try {
+        registryText = readFileSync(registryPath, "utf8");
+      } catch {
+        registryText = undefined; // The legacy resolver retains its existing unreadable-target refusal.
+      }
+    }
+    const resolution = resolvePauseTarget({ configRoot: config.root, instance: flagValue(rest, "--instance"), registryText, registryPath });
+    if (resolution.ok) return resolution.target;
+    // Selected target diagnostics can contain private state directories and instance names.
+    console.error(`### rmd ${verb} — REFUSED: ${explicit ? "selected registry target unavailable — nothing was changed" : resolution.refusal}.`);
+    return undefined;
+  };
   try {
-    registryText = readFileSync(registryPath, "utf8");
-  } catch {
-    registryText = undefined; // resolvePauseTarget refuses on an unreadable registry, naming the path.
+    return explicit && !instanceRegistryRuntimePresent()
+      ? await withInstanceRegistryRuntime(resolveTarget) : await resolveTarget();
+  } catch (error) {
+    if (!(error instanceof InstanceRegistryRuntimeError)) throw error;
+    console.error(`### rmd ${verb} — REFUSED: selected registry unavailable — nothing was changed.`);
+    return undefined;
   }
-  const resolution = resolvePauseTarget({
-    configRoot: config.root,
-    instance: flagValue(rest, "--instance"),
-    registryText,
-    registryPath,
-  });
-  if (resolution.ok) return resolution.target;
-  console.error(`### rmd ${verb} — REFUSED: ${resolution.refusal}.`);
-  return undefined;
 }
 
 /**
@@ -33592,7 +33621,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     );
     return 0;
   }
-  const target = pauseTargetOrRefuse("pause", rest, config);
+  const target = await pauseTargetOrRefuse("pause", rest, config);
   if (!target) return 2;
   const info = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "pause", {
     instanceName: target.instance, stateRoot: target.root, namespace: "host",
@@ -33612,7 +33641,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     requested_by_pid: info.pid,
   });
   console.log(
-    `### rmd pause — instance '${target.instance}' (${target.root}) is PAUSED (drain-and-hold). Its in-flight task still ` +
+    `### rmd pause — instance '${target.instance}'${process.env.RMD_INSTANCE_REGISTRY === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
       `reaches merge; it spawns nothing new until \`rmd resume --instance ${target.instance}\`. No other instance is held.`,
   );
   return 0;
@@ -33646,7 +33675,7 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
     console.log(`### rmd resume --fleet — ${sharedPauseRef()} ${cleared ? "deleted" : "NOT deleted (the push did not land)"}; no instance flag was touched.`);
     return cleared ? 0 : 1;
   }
-  const target = pauseTargetOrRefuse("resume", rest, config);
+  const target = await pauseTargetOrRefuse("resume", rest, config);
   if (!target) return 2;
   const result = observeSelectedRegistrySync(selectedRegistryObserverInContext(), "resume", {
     instanceName: target.instance, stateRoot: target.root, namespace: "host",
@@ -34501,12 +34530,12 @@ async function triageCommandLocked(
         { name: "feedback_raw", value: triageFeedbackBlock, external: true },
       ]),
     });
-    const loop = await runRelintLoop({
+    const loop = await runRelintLoop<{ decision: ReturnType<typeof decideTriage>; changedFiles: string[] }>({
       lane: "triage",
       filedIds: reservedIds,
       initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1), triageFeedbackBlock),
       log,
-      run: async (prompt, attempt) => {
+      run: async (prompt, attempt, previous) => {
         worker = await spawn({
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
@@ -34534,11 +34563,19 @@ async function triageCommandLocked(
         const changedFiles = worktreeChangedFiles(worktreePath);
         const verdict = parseTriageVerdict(workerTranscript(worker));
         const citation = verdict?.kind === "already_decided" ? unresolvedCitationReferents(verdict.citation, worktreeCitationEvidence(worktreePath)) : undefined;
-        return { decision: decideTriage({ verdict, changedFiles, citation }), changedFiles };
+        const decision = decideTriage({ verdict, changedFiles, citation });
+        // A verdictless repair may retain only the proposal whose complete file scope it preserves.
+        if (decision.action === "error" && decision.cause === "unparseable_verdict" &&
+            previous?.decision.action === "propose" && changedFiles.length === previous.changedFiles.length &&
+            changedFiles.every(file => previous.changedFiles.includes(file))) {
+          return { decision: { ...previous.decision, files: changedFiles }, changedFiles };
+        }
+        return { decision, changedFiles };
       },
       filed: (r) => r.decision.action === "propose",
       lint: () =>
         lintFiledTasks(worktreePath, reservedIds, {
+          taskRepoOwner: owner,
           newMonolithIds: newMonolithIdsAgainstBase(worktreePath),
         }),
     });
@@ -41469,9 +41506,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "next-task-id",
-    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit [--reap [--apply | --reconcile]]] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>]",
+    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit [--reap [--apply | --reconcile]]] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>] [--max-scan <1..200>]",
     summary: "Claim the next task id, or preview orphan cleanup with --audit --reap; --apply deletes under leases.",
-    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. --audit --reap previews only CANDIDATE rows past a freshly measured bar: the largest HELD-anchor-to-first-PR delay, floored at RESERVATION_PUSH_GRACE_MS, with n/max/p50 and population reported. It reads anchors with one private-namespace fetch; any unread surface or empty measured population refuses deletion. --reap alone writes one planned summary; --apply verifies a PENDING intent per id before one batched, guarded, leased push, then verifies confirmed released/skipped outcomes. Missing push results or outcome writes report UNKNOWN and return nonzero with recoverable intents. Unresolved batches block further deletion at that repository/state root. --audit --reap --reconcile reads the complete compressed, rotated-plain and live ledger union and freshly reads each pending exact ref; it records observed_absent with actor UNKNOWN, foreign or unchanged without deleting. Unread or torn history refuses action; reconciliation never retries a deletion. A later deletion requires another complete audit and explicit --reap --apply. Neither apply nor reconciliation runs automatically. --offline refuses --reap; --audit-age-days applies only to audit alone. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and --audit alone never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder. W1-T9683 --count <n> reserves n ids from ONE open-PR read and one history scan, each walk starting above the last id held (contention advances and is reported exactly as for one id), all under the same holder; it prints a RESERVED line per id it holds and a final `HELD k of n:` line, and a partial result (k < n) prints only the ids it holds and exits 2. --count is refused beside --offline, --no-reserve, --audit and --prefix.",
+    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. --audit --reap previews only CANDIDATE rows past a freshly measured bar: the largest HELD-anchor-to-first-PR delay, floored at RESERVATION_PUSH_GRACE_MS, with n/max/p50 and population reported. It reads anchors with one private-namespace fetch; any unread surface or empty measured population refuses deletion. --reap alone writes one planned summary; --apply verifies a PENDING intent per id before one batched, guarded, leased push, then verifies confirmed released/skipped outcomes. Missing push results or outcome writes report UNKNOWN and return nonzero with recoverable intents. Unresolved batches block further deletion at that repository/state root. --audit --reap --reconcile reads the complete compressed, rotated-plain and live ledger union and freshly reads each pending exact ref; it records observed_absent with actor UNKNOWN, foreign or unchanged without deleting. Unread or torn history refuses action; reconciliation never retries a deletion. A later deletion requires another complete audit and explicit --reap --apply. Neither apply nor reconciliation runs automatically. --offline refuses --reap; --audit-age-days applies only to audit alone. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and --audit alone never pushes or deletes a ref. --max-scan N widens the W1 reservation walk from its default 50 candidates to N (1..200); it requires explicit --reserve and does not apply to --prefix. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder. W1-T9683 --count <n> reserves n ids from ONE open-PR read and one history scan, each walk starting above the last id held (contention advances and is reported exactly as for one id), all under the same holder; it prints a RESERVED line per id it holds and a final `HELD k of n:` line, and a partial result (k < n) prints only the ids it holds and exits 2. --count is refused beside --offline, --no-reserve, --audit and --prefix.",
   },
   {
     name: "emissions",
@@ -42991,6 +43028,12 @@ export async function main(
   if (inspectionArgv[0] === "authority" && inspectionArgv[1] === "inspect") {
     await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
     return;
+  }
+  // Recovery controls keep their existing authority and target checks even if selection is broken.
+  // PAUSE validates its target locally; --fleet retains its independent authenticated Git path.
+  if (inspectionArgv[0] !== "stop" && inspectionArgv[0] !== "pause"
+    && process.env.RMD_INSTANCE_REGISTRY !== undefined && !instanceRegistryRuntimePresent()) {
+    return withInstanceRegistryRuntime(() => main(deps));
   }
   // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's
   // own spawns included) must reach a ledger row and a named exit code, not Node's default crash.
