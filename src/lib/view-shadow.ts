@@ -897,6 +897,47 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
     const generation = qualifications[view], key = qualifiedStateKey(view, generation);
     return states.get(key) ?? states.set(key, { ...emptyState(), ...(generation === undefined ? {} : { view, qualificationGeneration: generation }) }).get(key)!;
   };
+  /** An archive of `view` under qualification `required`, carrying a well-formed population (W1-T11329); an
+   * archive with no qualification generation belongs to no qualification. */
+  const archivedPopulationOf = (archived: ViewShadowState, view: string, required: string | undefined): archived is ViewShadowState & { population: ShadowPopulationEvidence } =>
+    archived.view === view && required !== undefined && typeof archived.qualificationGeneration === "string" && archived.qualificationGeneration.startsWith(`${required}:retired:`)
+    && archived.population !== undefined && populationEvidenceShape(archived.population);
+  /** Archived population records of this view's current qualification, newest life first per logical page (W1-T11329). */
+  const retiredPages = (view: string, required: string | undefined): Map<string, ShadowPopulationEvidence["pages"][number]> => {
+    const byKey = new Map<string, ShadowPopulationEvidence["pages"][number]>();
+    if (required === undefined) return byKey;
+    for (const archived of states.values()) {
+      if (!archivedPopulationOf(archived, view, required)) continue;
+      for (const page of archived.population.pages) {
+        if (page.samples === 0 || page.lastSampleMs === null) continue;
+        const seen = byKey.get(page.logicalKey);
+        if (!seen || (seen.lastSampleMs ?? -Infinity) < page.lastSampleMs) byKey.set(page.logicalKey, page);
+      }
+    }
+    return byKey;
+  };
+  /** The evidence a returning page left with, when it is the same incarnation, left under a day ago, and no real diff landed since. */
+  const retiredPageEvidence = (view: string, required: string | undefined, logicalKey: string, incarnation: string, now: number,
+    lastRealMs: number | null): ShadowPopulationEvidence["pages"][number] | undefined => {
+    const left = retiredPages(view, required).get(logicalKey);
+    if (!left || left.incarnation !== incarnation || left.lastSampleMs === null || now - left.lastSampleMs >= DAY_MS) return undefined;
+    if (lastRealMs !== null && lastRealMs >= left.lastSampleMs) return undefined;
+    return { ...left };
+  };
+  /** Paged views: current pages younger than a day, and how many of those had lived before (W1-T11329 criterion 2). A page
+   * re-appeared when an archived population holds it and a later archived population lacks it: it left and came back. */
+  const youngPages = (view: string, state: ViewShadowState, now: number): { pages_young: number; pages_young_reappeared: number } | undefined => {
+    if (!state.population) return undefined;
+    const lives: Array<{ atMs: number; keys: Set<string> }> = [];
+    for (const archived of states.values()) {
+      if (!archivedPopulationOf(archived, view, state.qualificationGeneration)) continue;
+      const atMs = Math.max(...archived.population.pages.map(page => page.lastSampleMs ?? -Infinity), archived.streakSinceMs ?? -Infinity);
+      if (Number.isFinite(atMs)) lives.push({ atMs, keys: new Set(archived.population.pages.map(page => page.logicalKey)) });
+    }
+    const reappeared = (key: string) => lives.some(held => held.keys.has(key) && lives.some(left => !left.keys.has(key) && left.atMs > held.atMs));
+    const young = state.population.pages.filter(page => page.sinceMs === null || now - page.sinceMs < DAY_MS);
+    return { pages_young: young.length, pages_young_reappeared: young.filter(page => reappeared(page.logicalKey)).length };
+  };
   /** Adds one sample to the view's summary window, and writes the window's row once it spans an hour. */
   const summarize = (view: string, state: ViewShadowState, now: number, sample: { skipped?: boolean; diffs?: ReadonlyArray<{ classification: ShadowClassification }> }): void => {
     const w = state.summary ??= { sinceMs: now, samples: 0, skipped: 0, diffs: noDiffs() };
@@ -905,7 +946,8 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
     for (const d of sample.diffs ?? []) w.diffs[d.classification]++;
     if (now - w.sinceMs < VIEW_SHADOW_SUMMARY_MS) return;
     const { streakSamples, streakSinceMs, lastRealMs, ready } = shadowReadiness(view, state, now, undefined, populationOf(view));
-    opts.log(VIEW_SHADOW_SUMMARY_STEP, { view, ...(state.qualificationGeneration === undefined ? {} : { qualificationGeneration: state.qualificationGeneration }), ...w, streakSamples, streakSinceMs, lastRealMs, ready });
+    opts.log(VIEW_SHADOW_SUMMARY_STEP, { view, ...(state.qualificationGeneration === undefined ? {} : { qualificationGeneration: state.qualificationGeneration }), ...w, streakSamples, streakSinceMs, lastRealMs, ready,
+      ...youngPages(view, state, now) });
     state.summary = { sinceMs: now, samples: 0, skipped: 0, diffs: noDiffs() };
   };
   return {
@@ -956,7 +998,11 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         const old = new Map(previous?.pages.map(page => [page.logicalKey, page]) ?? []);
         state.population = { generation: population.generation, scope: { ...population.scope }, pages: population.pages.map(page => {
           const kept = old.get(page.logicalKey);
-          return kept?.incarnation === page.incarnation ? { ...kept } : { logicalKey: page.logicalKey, incarnation: page.incarnation, samples: 0, sinceMs: null, lastSampleMs: null };
+          if (kept?.incarnation === page.incarnation) return { ...kept };
+          // W1-T11329: a page absent from the previous population that returns with its own incarnation gets back the
+          // evidence it measured before it left, unless a real diff landed since or it has been gone a day.
+          const returned = kept === undefined ? retiredPageEvidence(view, required, page.logicalKey, page.incarnation, now, state.lastRealMs) : undefined;
+          return returned ?? { logicalKey: page.logicalKey, incarnation: page.incarnation, samples: 0, sinceMs: null, lastSampleMs: null };
         }) };
         state.streakKeys = population.pages.map(page => page.logicalKey);
         populationChanged = true;
