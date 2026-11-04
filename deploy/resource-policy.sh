@@ -392,13 +392,14 @@ resource_policy_overcommit_row() {
 # Container $1's memory.max in MiB: the shared-budget formula (host MemTotal - RMD_HOST_RESERVE_MIB - the
 # sum of every OTHER fleet container's learned peak) when it covers $1's own peak (learned, else its
 # floor); otherwise the larger of that own peak and the memory.max $1 runs with now. Sets RP_MAX (MiB),
-# RP_MAX_UNLIMITED (1 when it keeps a running "max", RP_MAX then empty), RP_MAX_FORMULA (the formula's
+# RP_MAX_UNLIMITED (1 when it keeps a running "max", RP_MAX then empty), RP_MAX_OWN (the container's own
+# learned peak or floor; empty when it has neither), RP_MAX_FORMULA (the formula's
 # own value, possibly small or negative), RP_MAX_DEFICIT (own peak - formula when overcommitted, else
 # empty) and RP_MAX_NOTE, which names every term. Status 1 (RP_MAX empty, RP_MAX_UNLIMITED empty) only
 # when MemTotal is unreadable: the caller keeps today's arithmetic.
 resource_policy_shared_memory_max() {
   local container="$1" total budget others=0 entry name terms="" own="" own_from="" running_state kept kept_from
-  RP_MAX="" RP_MAX_UNLIMITED="" RP_MAX_FORMULA="" RP_MAX_DEFICIT="" RP_MAX_NOTE=""
+  RP_MAX="" RP_MAX_UNLIMITED="" RP_MAX_FORMULA="" RP_MAX_DEFICIT="" RP_MAX_NOTE="" RP_MAX_OWN=""
   if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
     RP_MAX_NOTE="host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
     return 1
@@ -417,6 +418,7 @@ resource_policy_shared_memory_max() {
   # This container's OWN peak: what it learned, else its floor (criterion 2).
   resource_policy_learned_peak "${container}"
   own="${RP_PEAK}" own_from="${RP_PEAK_FROM}"
+  RP_MAX_OWN="${own}"
   RP_MAX_FORMULA=$((budget - others))
   local formula_note="shared budget: host ${total} - reserve ${RMD_HOST_RESERVE_MIB}${terms}"
   if [ -z "${own}" ] || [ "${RP_MAX_FORMULA}" -ge "${own}" ]; then
@@ -499,23 +501,27 @@ resource_policy_serve_args() {
   # W1-T11130: serve's memory.max is its share of the shared budget, like every build daemon's. An
   # explicit RMD_SERVE_MEMORY_LIMIT_MIB is an operator override and the note names it. Only a host
   # whose MemTotal is unreadable keeps today's fixed ceiling (#8569, 10-02).
-  local serve_container="${RMD_SERVE_CONTAINER_NAME:-remudero-serve}" today=7680 limit from
+  local serve_container="${RMD_SERVE_CONTAINER_NAME:-remudero-serve}" today=7680 limit from budgeted=""
   if [ -n "${RMD_SERVE_MEMORY_LIMIT_MIB}" ]; then
     limit="${RMD_SERVE_MEMORY_LIMIT_MIB}" from="operator override RMD_SERVE_MEMORY_LIMIT_MIB=${RMD_SERVE_MEMORY_LIMIT_MIB}"
   elif resource_policy_shared_memory_max "${serve_container}"; then
-    limit="${RP_MAX:-0}" from="${RP_MAX_NOTE}"
+    limit="${RP_MAX:-0}" from="${RP_MAX_NOTE}" budgeted=1
   else
     limit="${today}" from="today's fixed ${today} MiB, ${RP_MAX_NOTE}"
   fi
-  local serve_max=""
-  if [ "${limit}" -gt "${RMD_SERVE_MEMORY_RESERVE_MIB}" ]; then
+  # A shared-budget limit is measured against serve's own peak (or floor): it governs at any size
+  # above zero, even under the old reserve line. The reserve stands in only when serve has neither a
+  # learned peak nor a floor, and still bounds the operator override and the unreadable-host value.
+  local serve_max="" floor="${RMD_SERVE_MEMORY_RESERVE_MIB}"
+  if [ -n "${budgeted}" ] && [ -n "${RP_MAX_OWN:-}" ]; then floor=0; fi
+  if [ "${limit}" -gt "${floor}" ]; then
     serve_max="${limit}"
     RESOURCE_POLICY_SERVE_ARGS+=("--memory=${limit}m" "--memory-swap=$((limit + RMD_SERVE_SWAP_MIB))m")
     RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, memory ceiling ${limit} MiB (+${RMD_SERVE_SWAP_MIB} MiB swap) from ${from}"
   elif [ -n "${RP_MAX_UNLIMITED:-}" ] && [ -z "${RMD_SERVE_MEMORY_LIMIT_MIB}" ]; then
     RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, ${from}"
   else
-    RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, NO memory ceiling — ${limit} MiB (${from}) is not above the ${RMD_SERVE_MEMORY_RESERVE_MIB} MiB reserve"
+    RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}, NO memory ceiling — ${limit} MiB (${from}) is not above the ${floor} MiB reserve"
   fi
   resource_policy_memory_high "${serve_container}" "${serve_max}"
   RESOURCE_POLICY_SERVE_HIGH_MIB="${RP_HIGH}"
@@ -542,9 +548,10 @@ resource_policy_build_args() {
     return 0
   fi
   # W1-T11130: this container's memory.max from resource_policy_shared_memory_max: the formula, or today's
-  # limit while the host is overcommitted. A kept "max" is no ceiling. A formula under the build floor
-  # (only a container with no floor and nothing learned can get one) is no ceiling too; memory.high is
-  # still sized then (it has no memory.max to stay under).
+  # limit while the host is overcommitted. A kept "max" is no ceiling. A limit measured against the
+  # container's own peak or floor governs at any size above zero, even under the build floor; the build
+  # floor stands in only for a container with neither, whose formula under it is no ceiling. memory.high
+  # is still sized then (it has no memory.max to stay under).
   resource_policy_shared_memory_max "${container}"
   if [ -n "${RP_MAX_UNLIMITED:-}" ]; then
     RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; ${RP_MAX_NOTE}"
@@ -554,8 +561,10 @@ resource_policy_build_args() {
     return 0
   fi
   ceiling="${RP_MAX}"
-  if [ "${ceiling}" -lt "${RMD_MIN_BUILD_CEILING_MIB}" ]; then
-    RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; NO memory ceiling — ${RP_MAX_NOTE}, under the ${RMD_MIN_BUILD_CEILING_MIB} MiB floor"
+  local build_floor="${RMD_MIN_BUILD_CEILING_MIB}"
+  [ -z "${RP_MAX_OWN:-}" ] || build_floor=1
+  if [ "${ceiling}" -lt "${build_floor}" ]; then
+    RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; NO memory ceiling — ${RP_MAX_NOTE}, under the ${build_floor} MiB floor"
     resource_policy_memory_high "${container}" ""
     [ -n "${RP_HIGH}" ] && RESOURCE_POLICY_BUILD_ARGS+=("$(resource_policy_memory_high_arg "${RP_HIGH}")")
     RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}; ${container} ${RP_HIGH_NOTE}"

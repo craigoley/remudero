@@ -470,3 +470,26 @@ test("W1-T11130 criterion 3: each peer's peak is read from its own root the same
   assert.equal(blind.mib, budget - FLOORS[CONSOLE]! - FLOORS[SITE]! - 6144, blind.out);
   assert.notEqual(blind.mib, coreWant);
 });
+
+test("W1-T11130 criterion 1: a formula that covers serve's own peak governs even below the old 5120 MiB reserve line", (t) => {
+  // The reviewer's probe: host 15988 MiB, reserve 2048, peaks core 8192 / serve 1024 / console 2048 / site 2304.
+  const dir = host(t, `MemTotal:       ${15988 * 1024} kB\n`);
+  for (const [container, peak] of [[CORE, 8192], [SERVE, 1024], [CONSOLE, 2048], [SITE, 2304]] as const) learn(dir, container, { peak });
+  const serve = memoryMax(dir, SERVE);
+  assert.equal(serve.mib, 15988 - RESERVE_MIB - 8192 - 2048 - 2304, `serve's 1396 MiB formula covers its 1024 MiB peak, so it applies: ${serve.out}`);
+  assert.doesNotMatch(serve.note, /NO memory ceiling/);
+  // The operator override keeps its own meaning (0 = none), untouched by the shared-budget rule.
+  assert.equal(memoryMax(dir, SERVE, { RMD_SERVE_MEMORY_LIMIT_MIB: "0" }).mib, undefined);
+});
+
+test("W1-T11130 criterion 1: a build daemon's formula that covers its own peak governs even below the old 2048 MiB build floor", (t) => {
+  // Console learned only 1000 MiB; the formula left for it is 1800 MiB, under the old build floor.
+  const hostMib = 1800 + RESERVE_MIB + 8192 + 1024 + 2304;
+  const dir = host(t, `MemTotal:       ${hostMib * 1024} kB\n`);
+  for (const [container, peak] of [[CORE, 8192], [SERVE, 1024], [CONSOLE, 1000], [SITE, 2304]] as const) learn(dir, container, { peak });
+  const console = memoryMax(dir, CONSOLE);
+  assert.equal(console.mib, 1800, `the 1800 MiB formula covers console's 1000 MiB peak, so it applies: ${console.out}`);
+  // Only a container with neither a learned peak nor a floor keeps the build floor as its stand-in.
+  const unknown = memoryMax(dir, "remudero-unknown-daemon", { RMD_MEMORY_HIGH_FLOORS: "", RMD_MEMORY_WEIGHTS: `${CORE}=4 ${SERVE}=2 ${CONSOLE}=1 ${SITE}=1 remudero-unknown-daemon=1` });
+  assert.ok(unknown.mib === undefined || unknown.mib >= 2048, `nothing known: no ceiling under the build floor: ${unknown.out}`);
+});

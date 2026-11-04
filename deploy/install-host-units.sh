@@ -1086,7 +1086,7 @@ EDGE_HEAL
 render_serve_memory_tuning() {
   case "${INSTANCE_NAME:-core}" in core) : ;; *) return 0 ;; esac
   cat <<'SERVE_MEMORY_TUNING'
-    ${MHT_TMO[@]+"${MHT_TMO[@]}"} bash "$CHECKOUT/deploy/memory-high-tuner.sh" \
+    ${MHT_TMO[@]+"${MHT_TMO[@]}"} env ${POLICY_ENV[@]+"${POLICY_ENV[@]}"} bash "$CHECKOUT/deploy/memory-high-tuner.sh" \
       --container 'remudero-serve' --state-dir "$STATE_DIR" || true
 SERVE_MEMORY_TUNING
 }
@@ -1188,6 +1188,11 @@ CHECKOUT=${STATE_DIR}/daemon-install
 UNITS_HEAP_MB=${MAX_OLD_SPACE_MB}
 INSTANCE_NAME=${INSTANCE_NAME:-}
 INSTANCE_REGISTRY=${REGISTRY_FILE:-}
+# W1-T11130: the memory policy reads each peer's learned peak from that peer's own root, found through
+# the registry this unit was installed from. Passed only to the tuner and the revival policy, never
+# exported: recycle-container.sh reads RMD_INSTANCE_REGISTRY as an active selection (W1-T10573).
+POLICY_ENV=()
+if [ -n "\$INSTANCE_REGISTRY" ]; then POLICY_ENV=(RMD_INSTANCE_REGISTRY="\$INSTANCE_REGISTRY"); fi
 HOST_ALERT_INSTANCE=${CONTAINER_NAME}
 BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
@@ -1450,7 +1455,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # moves while the code does not. Bounded, and never fatal to the tick.
   if [ "\$BOOT" -eq 0 ] && [ -f "\$CHECKOUT/deploy/memory-high-tuner.sh" ]; then
     MHT_TMO=(); command -v timeout >/dev/null 2>&1 && MHT_TMO=(timeout 60)
-    \${MHT_TMO[@]+"\${MHT_TMO[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
+    \${MHT_TMO[@]+"\${MHT_TMO[@]}"} env \${POLICY_ENV[@]+"\${POLICY_ENV[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
       --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
 $(render_serve_memory_tuning)
   fi
@@ -1556,7 +1561,12 @@ if [ ! -r "\$RESOURCE_POLICY_LIB" ]; then
   exit 1
 fi
 . "\$RESOURCE_POLICY_LIB"
+# W1-T11130: the installed registry names each peer's root for this one policy call, then the
+# watchdog's own RMD_INSTANCE_REGISTRY (set or unset) is restored, so nothing later inherits it.
+RP_REGISTRY_WAS_SET="\${RMD_INSTANCE_REGISTRY+x}" RP_REGISTRY_WAS="\${RMD_INSTANCE_REGISTRY:-}"
+if [ -n "\$INSTANCE_REGISTRY" ]; then RMD_INSTANCE_REGISTRY="\$INSTANCE_REGISTRY"; fi
 resource_policy_build_args '${CONTAINER_NAME}'
+if [ -n "\$RP_REGISTRY_WAS_SET" ]; then RMD_INSTANCE_REGISTRY="\$RP_REGISTRY_WAS"; else unset RMD_INSTANCE_REGISTRY; fi
 echo "rmd-relaunch: resource policy from \$RESOURCE_POLICY_LIB -- \$RESOURCE_POLICY_NOTE"
 
 # W1-T9627 -- THE DEAD CONTAINER'S LAST WORDS ARE KEPT BEFORE \`docker rm -f\` DELETES THEM. On
