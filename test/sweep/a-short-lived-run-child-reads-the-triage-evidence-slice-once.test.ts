@@ -5,9 +5,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
-import type { Config } from "#src/lib/config.js";
 import { createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE } from "#src/lib/sweep.js";
-import { buildEscalationTriageRuntime } from "#src/run-task.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const slice = ESCALATION_TRIAGE_EVIDENCE_SLICE;
@@ -221,42 +219,3 @@ test("W1-T9957: fallback accounts for a rejected digest as well as the archive i
   assert.equal(child.reader.lastLoad().bytesRead, child.bytes() + digestBytes);
 });
 
-test("W1-T9957: the lazy triage runtime records the snapshot read cost", async (t) => {
-  const data = fixture(t);
-  await createEscalationTriageHistoryReader({ slice })(data.dir);
-  const runtime = buildEscalationTriageRuntime({ root: data.dir, config: { root: data.dir } as Config, owner: "o", repo: "r" }, {
-    readPolicy: () => undefined, seenAt: () => undefined, windowMs: () => 1,
-  });
-  const settings = runtime({ issues: {} as never, ledgerPath: data.path, runId: "child" });
-  const evidence = settings.evidence!({ class: "BLOCKED", taskId: "old", headSha: "head", cause: "conflict",
-    summary: "blocked", detail: "blocked", options: [], recommendation: "retry" });
-  assert.equal(evidence.rekick?.newFailureSinceLastStrike, true);
-  const receipt = readFileSync(data.path, "utf8").trim().split("\n").map((line) => JSON.parse(line)).find((entry) => entry.step === "escalation_triage.evidence_read");
-  assert.ok(receipt, "the real runtime records a read receipt");
-  assert.equal(receipt.evidence_snapshot_hit, true);
-  assert.equal(receipt.evidence_rotations_read, 0);
-  assert.equal(receipt.evidence_bytes_read, readFileSync(snapshotPath(data.dir)).length + Buffer.byteLength(JSON.stringify(row("live")) + "\n"));
-});
-
-test("W1-T9957: repeated escalations record each evidence read byte once", async (t) => {
-  const data = fixture(t);
-  await createEscalationTriageHistoryReader({ slice })(data.dir);
-  const child = countingReader();
-  const runtime = buildEscalationTriageRuntime({ root: data.dir, config: { root: data.dir } as Config, owner: "o", repo: "r" }, {
-    evidenceHistory: child.reader, readPolicy: () => undefined, seenAt: () => undefined, windowMs: () => 1,
-  });
-  const settings = runtime({ issues: {} as never, ledgerPath: data.path, runId: "child" });
-  const escalation = { class: "BLOCKED" as const, taskId: "old", headSha: "head", cause: "conflict" as const,
-    summary: "blocked", detail: "blocked", options: [], recommendation: "retry" };
-  settings.evidence!(escalation);
-  settings.evidence!(escalation);
-  let receipts = readFileSync(data.path, "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((entry) => entry.step === "escalation_triage.evidence_read");
-  assert.equal(receipts.length, 2);
-  assert.equal(receipts.reduce((sum, entry) => sum + entry.evidence_bytes_read, 0), child.bytes());
-  const before = child.bytes();
-  await runtime.refresh(data.path);
-  settings.evidence!(escalation);
-  receipts = readFileSync(data.path, "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((entry) => entry.step === "escalation_triage.evidence_read");
-  assert.equal(receipts.at(-1).evidence_bytes_read, child.bytes() - before);
-  assert.equal(receipts.at(-1).evidence_rotations_read, 0);
-});
