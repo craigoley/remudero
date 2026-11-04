@@ -1,0 +1,42 @@
+- id: W1-T11318
+  title: A recycle never starts while another recycle's live writer owns state/PAUSE; it refuses before touching PAUSE, naming that writer, so two recycles never stack and restart the drain wait
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # deploy/recycle-container.sh is a deploy path every recycle runs; this adds one refusal before the PAUSE write and loosens nothing
+  band_meaning: blast-radius
+  origin: operator-session#recycle-efficiency-2026-11-04
+  plan_refs:
+    - W1-T9409
+    - W1-T4197
+    - W1-T5804
+  files:
+    - deploy/recycle-container.sh
+    - test/deploy/a-recycle-never-starts-on-a-live-recycles-pause.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When state/PAUSE holds a recycle body whose pid is alive on this host with the recorded writerStart, recycle-container.sh exits non-zero before writing, rewriting or removing PAUSE and before any docker stop, printing that writer's pid and start; a recycle body whose writer is dead or reused, an absent PAUSE, and an operator PAUSE keep today's behaviour
+      proof: "unit test: test/deploy/a-recycle-never-starts-on-a-live-recycles-pause.test.ts"
+    - claim: The live-writer refusal names this task
+      proof: "grep: W1-T11318 in deploy/recycle-container.sh"
+  rationale: |
+    OBSERVED 2026-11-04, Azure host:
+    - recycle.invoked RECYCLE-3315651 at 12:26:41Z (caller unattributed, a human SSH session with a pty) wrote state/PAUSE.
+    - The fleet watchdog then logged "release-orphan-recycle-pause: keep — the recycle writing it (pid 3315651, started Wed Nov 4 12:26:41 2026) is still running" on every 5-min tick, 12:28:43 through 13:03:51Z.
+    - At 13:04:08Z, 17 s after the last "keep", the progress watchdog started recycle.invoked RECYCLE-3864750 (caller watchdog:progress-watchdog, verdict "STALLED progressAgeMs=2595011").
+    - recycle-container.sh overwrote the live writer's body: when PAUSE's reason equals RECYCLE_PAUSE_REASON it writes its own body without checking the writer is gone.
+    - The second recycle started a fresh 3,000 s wait and refused at 14:00:25Z ("watchdog-recycle result=refused rc=1"). The fleet was paused 12:26:41 → 14:00:25Z, 94 min, and no recycle happened.
+    - deploy/release-orphan-recycle-pause.sh already proves a writer alive or dead: pid, host, writerStart in C-locale UTC, ps plus kill -0 (W1-T9409). Nothing calls that judgement before a recycle takes PAUSE.
+  design: |
+    Before the PAUSE write in deploy/recycle-container.sh, when PAUSE exists and carries the exact RECYCLE_PAUSE_REASON, read its pid, host and writerStart. If host is this host and the pid is alive with the same normalised start (the same predicate release-orphan-recycle-pause.sh uses; source its helpers or share them), refuse.
+    The refusal exits non-zero with "recycle-container: REFUSING — recycle pid <pid> (started <start>) is still running and owns PAUSE", leaves PAUSE untouched, and ledgers recycle.refused with reason live-recycle-owns-pause.
+    Unreadable or old-shape bodies keep today's behaviour. Mark the check with a comment naming W1-T11318.
+    NOT IN SCOPE: the watchdog's verdict (a separate task) and the release script's own rules.
+  note: |
+    reservation hand-off: run-unfiled-1793801339784 -> run-unfiled-1793801339784
+    Reserved with rmd next-task-id (W1-T11318 on run-unfiled-1793801339784). From the operator session's recycle-efficiency research.

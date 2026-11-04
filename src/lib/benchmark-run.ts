@@ -4,6 +4,7 @@ import { importedModuleOf, type ImportedModuleEvidence } from "./prevention-sour
 import { loadConfig } from "./config.js";
 import { deriveTaskClass } from "./task-class.js";
 import { execFileSync } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "./worker.js";
+import { OPENWEIGHT_TEMPERATURE } from "./worker-provider.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
 
@@ -440,10 +442,31 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
     ? !(codexPlaceholder && result.tokens.input === 0 && result.tokens.output === 0
       && result.tokens.cacheRead === 0 && result.tokens.cacheCreation === 0)
     : fields.token_usage_state === "observed");
+  // Retain only stream states: file reasons and result text are not attempt metadata.
+  const retention = fields.output_retention;
+  const outputRetention = retention ? Object.fromEntries(
+    (["text", "blocks", "stdout", "stderr", "completion"] as const).flatMap((channel) => {
+      const state = retention[channel]?.state;
+      return state === undefined ? [] : [[channel, { state }]];
+    })) : undefined;
   return {
     // The private ledger row owns attempt identity; the public-safe benchmark envelope below does not.
     ...(fields.execution_evidence === undefined ? {} : { execution_evidence: fields.execution_evidence }),
     served_model: fields.served_model,
+    ...(outputRetention === undefined ? {} : { output_retention: outputRetention }),
+    // W1-T10877: the sampling pin the cash request carried, from the table openWeightTemperatureField reads.
+    ...(result.provider === "cash" && Object.hasOwn(OPENWEIGHT_TEMPERATURE, fields.model)
+      ? { sampling_pin: { deployment: fields.model, temperature: OPENWEIGHT_TEMPERATURE[fields.model] ?? null } } : {}),
+    ...(result.openWeightCapacityShortfall ? { capacity_shortfall: true } : {}),
+    // W1-T10877: every producer (implement/fix via recordBenchmarkWorkerAttempt, dispatch fallbacks, non-dispatch
+    // spawns) carries the terminal evidence the snapshot's budget-refusal and per-minute-fit cells read.
+    terminal_evidence: nonDispatchTerminalEvidence(result),
+    // W1-T10877: the typed class of a returned model failure, so attribution reads reply-<class> without parsing stderr.
+    ...(result.openWeightErrorClass ? { error_class: result.openWeightErrorClass } : {}),
+    // W1-T10877: a signal-killed call is an infrastructure kill, not attributable; its exit must reach the receipt.
+    ...(fields.worker_exit === undefined ? {} : { worker_exit: fields.worker_exit }),
+    ...(fields.worker_exit_signal === undefined ? {} : { worker_exit_signal: fields.worker_exit_signal }),
+
     // W1-T4650: the reason rides beside the null it explains; dropping it left every row generic.
     ...(fields.served_model_reason !== undefined ? { served_model_reason: fields.served_model_reason } : {}),
     worker_duration_ms: fields.worker_duration_ms,
@@ -498,12 +521,22 @@ export function callerOwnsBenchmarkReceipt(args: SpawnWorkerArgs): boolean {
  *  model or effort that serves it. */
 export const BENCHMARK_RECEIPT_IDENTITY: unique symbol = Symbol("rmd.benchmarkReceiptIdentity");
 
-export function withReceiptIdentity(args: SpawnWorkerArgs, identity: { taskId: string; runId: string }): SpawnWorkerArgs {
+type ReceiptIdentity = { taskId: string; runId: string; guardrailLane?: string };
+
+export function withReceiptIdentity(args: SpawnWorkerArgs, identity: ReceiptIdentity): SpawnWorkerArgs {
   return { ...args, [BENCHMARK_RECEIPT_IDENTITY]: { ...identity } } as SpawnWorkerArgs;
 }
 
-export function receiptIdentity(args: SpawnWorkerArgs): { taskId?: string; runId?: string } {
-  return (args as { [BENCHMARK_RECEIPT_IDENTITY]?: { taskId: string; runId: string } })[BENCHMARK_RECEIPT_IDENTITY] ?? {};
+export function receiptIdentity(args: SpawnWorkerArgs): Partial<ReceiptIdentity> {
+  return (args as { [BENCHMARK_RECEIPT_IDENTITY]?: ReceiptIdentity })[BENCHMARK_RECEIPT_IDENTITY] ?? {};
+}
+
+type GuardrailAttempt = { signal: "relint-used" | "judge-retry"; attempt: number };
+const guardrailAttemptContext = new AsyncLocalStorage<GuardrailAttempt>();
+
+/** Receipt-only loop position, scoped across async callbacks without changing the routed request. */
+export function withGuardrailAttempt<T>(signal: GuardrailAttempt["signal"], attempt: number, run: () => T): T {
+  return guardrailAttemptContext.run({ signal, attempt }, run);
 }
 
 /** W1-T4616: where a worker-call receipt may be written. MEASURED 2026-09-27: most of the ~105/h
@@ -584,6 +617,7 @@ export function benchmarkNonDispatchSpawn(
     const terminalAssignmentIds = new Set<string>();
     const terminalResults = new WeakSet<WorkerResult>();
     const named = receiptIdentity(args);
+    const guardrailAttempt = guardrailAttemptContext.getStore();
     const write = (step: string, fields: Record<string, unknown>): void => {
       const path = benchmarkEvidenceLedgerPath(args.config);
       if (path === undefined) return;
@@ -591,7 +625,8 @@ export function benchmarkNonDispatchSpawn(
         ? (fields.worker_assignment as WorkerSelectionAssignment).id : fields.selection_assignment_id;
       appendLedger(path, {
         run_id: args.runId ?? named.runId ?? `${lane}-${typeof assignmentId === "string" ? assignmentId : "unassigned"}`,
-        task_id: args.taskId ?? named.taskId ?? lane.toUpperCase(), step, lane, ...fields,
+        task_id: args.taskId ?? named.taskId ?? lane.toUpperCase(), step, lane,
+        ...(named.guardrailLane === undefined ? {} : { guardrail_lane: named.guardrailLane }), ...fields,
       });
     };
     const recordAttempt = (fields: Record<string, unknown>, result?: WorkerResult): void => {
@@ -601,7 +636,8 @@ export function benchmarkNonDispatchSpawn(
         if (id ? terminalAssignmentIds.has(id) : result !== undefined && terminalResults.has(result)) return;
         const row = { step: "worker.attempt", ...fields,
           assignment_observed: id !== undefined && observedAssignmentIds.has(id) };
-        write("worker.attempt", { ...fields, benchmark_run: benchmarkRunAttemptReceipt(row) });
+        write("worker.attempt", { ...fields, ...(guardrailAttempt ? { guardrail_attempt: guardrailAttempt } : {}),
+          benchmark_run: benchmarkRunAttemptReceipt(row) });
         if (id) terminalAssignmentIds.add(id);
         if (result !== undefined) terminalResults.add(result);
       } catch {
