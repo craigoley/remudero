@@ -369,6 +369,9 @@ export interface WorkerResult {
   /** W1-T4079: set when a cash attempt found its deployment absent (HTTP 404), so the ladder walks. */
   openWeightDeploymentAbsent?: string;
   openWeightCapacityShortfall?: CapacityShortfall;
+  /** W1-T10877: the class name of a model-attributable cash failure (a truncated reply or a request timeout). A returned
+   *  result carries the error only as stderr text, which attribution never parses, so the class rides here instead. */
+  openWeightErrorClass?: string;
   /** Opaque join key for the immutable, pre-execution routing assignment. A terminal worker row
    * carries this only after its assignment event was emitted; the ID does NOT imply that a provider
    * reported serving the selected model. */

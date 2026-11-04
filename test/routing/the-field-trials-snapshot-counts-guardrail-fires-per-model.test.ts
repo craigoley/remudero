@@ -23,7 +23,8 @@ import { inboxDraftExampleFragmentYaml, runDraftRung } from "#src/lib/inbox.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { laneMappedExplicitly, PUBLIC_CATEGORIES, PUBLIC_GUARDRAIL_CLASSES, GUARDRAIL_SIGNALS, publicCategoryOfLane,
   publicGuardrailClassOf } from "#src/lib/public-model-vocabulary.js";
-import { CODEX_SERVED_MODEL_REASON, OpenWeightRequestTooLargeError, OpenWeightTruncatedReplyError } from "#src/lib/worker-provider.js";
+import { CODEX_SERVED_MODEL_REASON, OpenWeightRequestTooLargeError, OpenWeightTruncatedReplyError, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const T = (day: number, hour = 0) => new Date(Date.UTC(2026, 9, day, hour)).toISOString();
@@ -553,4 +554,45 @@ test("W1-T10877: a signal-killed attempt with usage is excluded through the prod
   assert.equal(killed[0]!.worker_exit_signal, "SIGKILL", "the producer keeps the signal on the receipt");
   assert.deepEqual(snapshotOf(read()).families.guardrails[key]?.cells, { modelId: "gpt-6.1-sol", category: "short-judgment",
     guardrailClass: "output-cap-truncation-check", opportunities: 1, fires: 1 }, "the signal-killed call adds neither a fire nor an opportunity");
+});
+
+// The production producer end to end: the REAL cash adapter (spawnOpenWeightWorker, a stubbed endpoint) feeds
+// benchmarkNonDispatchSpawn's receipt. A length-truncated reply is RETURNED as openweight_error with the error only in
+// stderr, so the class must ride the result typed (openWeightErrorClass) for attribution to name reply-<class>.
+test("W1-T10877: a truncated cash reply is a truncation fire through the real adapter and receipt", async t => {
+  const root = ownedFixtureDir(t, "cash-truncation-receipts").dir;
+  const model = "gpt-oss-120b";
+  const finishes = ["stop", "length"];
+  let calls = 0;
+  const config = { root, claudeBin: "/unused/claude", dailyCapUsd: 5,
+    workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } } as unknown as Config;
+  const spawn = benchmarkNonDispatchSpawn("risk-judge", async args => {
+    const finish = finishes[calls++]!;
+    const id = `cash-${calls}`;
+    args.onSelectionAssignment?.({ version: 1, id, phase: "pre-execution", requested: { model, effort: "low", maxTurns: 1 },
+      selected: { provider: "cash", model, effort: "low" },
+      routing: { mode: "mount-affinity", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } }, candidates: [] });
+    const result = await spawnOpenWeightWorker({
+      cwd: root, workerHome: join(root, `worker-home-${calls}`), prompt: "judge",
+      env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" }, clock: fixedClock(Date.parse("2026-10-10T08:00:00.000Z")),
+      fetchImpl: async () => new Response(JSON.stringify({ id, model, usage: { prompt_tokens: 10, completion_tokens: 5 },
+        choices: [{ message: { content: "LOW" }, finish_reason: finish }] }), { status: 200, headers: { "content-type": "application/json" } }),
+    }, config, { model, effort: "low" });
+    return { ...result, selectionAssignmentId: id } as unknown as WorkerResult;
+  });
+  for (const _ of finishes) {
+    await spawn({ cwd: root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "judge",
+      model: MOUNT.model, effort: MOUNT.effort, maxTurns: 1, config });
+  }
+  const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+    .map(line => ({ ...JSON.parse(line), ts: T(10) }) as Record<string, unknown>);
+  const attempts = rows.filter(row => row.step === "worker.attempt");
+  assert.equal(attempts.length, 2, "both real cash calls wrote a receipt");
+  // Positive control: the complete reply is a plain success with no error class.
+  assert.equal(attempts[0]!.error_class, undefined, "a finished reply carries no error class");
+  assert.equal(attempts[1]!.error_class, OpenWeightTruncatedReplyError.name, "the producer keeps the truncation class on the receipt");
+  const key = `${model}|short-judgment|output-cap-truncation-check`;
+  assert.deepEqual(snapshotOf(rows).families.guardrails[key]?.cells, { modelId: model, category: "short-judgment",
+    guardrailClass: "output-cap-truncation-check", opportunities: 2, fires: 1 },
+    "a complete and a length-truncated cash reply are two opportunities and one truncation fire");
 });
