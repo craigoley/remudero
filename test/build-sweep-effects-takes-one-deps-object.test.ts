@@ -180,6 +180,7 @@ test("W1-T4032: a review-reuse fallback forwards the plan-only flag", async () =
   const root = mkdtempSync(join(tmpdir(), "rmd-review-reuse-plan-fallback-"));
   try {
     const calls: Array<{ pr: string; args: string[]; opts: Record<string, unknown> }> = [];
+    const phases: string[] = [];
     const effects = buildSweepEffects({
       owner: "craigoley",
       repo: "remudero",
@@ -191,7 +192,10 @@ test("W1-T4032: a review-reuse fallback forwards the plan-only flag", async () =
       policy: DEFAULT_SWEEP_POLICY,
       reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: "abc", originMainSha: "abc", advance: "none" }),
       reviewCommandImpl: async (pr, args, opts) => {
-        calls.push({ pr, args, opts });
+        const { onPhase, ...named } = opts;
+        assert.equal(typeof onPhase, "function");
+        calls.push({ pr, args, opts: named });
+        onPhase?.("posted");
         return 0;
       },
     } as BuildSweepEffectsDeps);
@@ -199,8 +203,11 @@ test("W1-T4032: a review-reuse fallback forwards the plan-only flag", async () =
     await effects.postReview?.(
       { prNumber: 807, headSha: "head", isPlanFiling: true } as never,
       { kind: "discriminate-only", judgedHeadSha: "old" },
+      undefined,
+      (phase) => phases.push(phase),
     );
 
+    assert.deepEqual(phases, ["posted"]);
     assert.deepEqual(calls, [
       {
         pr: "807",
@@ -217,6 +224,7 @@ test("W1-T4032: an implementation fallback forwards false", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-review-reuse-implementation-fallback-"));
   try {
     const calls: Array<Record<string, unknown>> = [];
+    const phases: string[] = [];
     const effects = buildSweepEffects({
       owner: "craigoley",
       repo: "remudero",
@@ -228,7 +236,10 @@ test("W1-T4032: an implementation fallback forwards false", async () => {
       policy: DEFAULT_SWEEP_POLICY,
       reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: "abc", originMainSha: "abc", advance: "none" }),
       reviewCommandImpl: async (_pr, _args, opts) => {
-        calls.push(opts);
+        const { onPhase, ...named } = opts;
+        assert.equal(typeof onPhase, "function");
+        calls.push(named);
+        onPhase?.("posted");
         return 0;
       },
     } as BuildSweepEffectsDeps);
@@ -236,8 +247,11 @@ test("W1-T4032: an implementation fallback forwards false", async () => {
     await effects.postReview?.(
       { prNumber: 808, headSha: "head", isPlanFiling: false } as never,
       { kind: "discriminate-only", judgedHeadSha: "old" },
+      undefined,
+      (phase) => phases.push(phase),
     );
 
+    assert.deepEqual(phases, ["posted"]);
     assert.deepEqual(calls, [{ executionMode: "semantic", planOnlyFiling: false }]);
   } finally {
     rmSync(root, { recursive: true, force: true });

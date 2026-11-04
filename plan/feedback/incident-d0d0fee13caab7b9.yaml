@@ -1,0 +1,29 @@
+id: incident-d0d0fee13caab7b9
+ts: 2026-11-04T10:02:53.237Z
+raw: >-
+  Incident d0d0fee13caa: flow pr-stage-stall:awaiting-review:checks green,
+  remudero-review owner proven dead — re-running the review lane on #<pr>
+
+  First seen: 2026-11-04T10:00:19.958Z
+
+  Last seen: 2026-11-04T10:00:19.958Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15638 awaiting-review: repeat: "checks green, remudero-review owner proven dead — re-running the review lane on #<pr>" x3
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#d0d0fee13caab7b9910c4240e8b026ef968e5407ba9bebe6aa1d0a17299d30e5
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
