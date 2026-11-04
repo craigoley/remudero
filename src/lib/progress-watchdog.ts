@@ -24,9 +24,17 @@ export const PROGRESS_STEPS: ReadonlySet<string> = new Set(["sweep.pass", "revie
 export const PASS_MARKER_STEPS: readonly string[] = ["daemon.sweep.started", "daemon.sweep.settled", "daemon.sweep.abandoned", "daemon.pulse"];
 /** W1-T9516: the row the daemon's loop writes on the first tick after a block clears (daemon.ts reportLoopLag). */
 export const LOOP_RESUME_STEP = "daemon.loop_lag";
+/** W1-T11327: the row `rmd progress-watchdog --request-restart` writes beside the daemon's RESTART_REQUESTED marker. */
+export const RESTART_REQUESTED_STEP = "watchdog.restart_requested";
+/** W1-T11327: a stall whose loop is alive is asked to leave through the daemon's own freshness exit before a recycle. */
+export const RESTART_IN_PLACE_ACTION = "restart-in-place";
+export type ProgressWatchdogVerdictAction = ProgressWatchdogAction | typeof RESTART_IN_PLACE_ACTION;
+/** bound kind: calibrated — a restart request with no newer generation boot this long after it is recycled
+ *  (the shard's starting value; a request consumed mid full pass exits when that pass settles). */
+export const RESTART_REQUEST_GRACE_MS = 15 * 60_000;
 /** Steps the verb must read from the ledger union to feed the verdict. */
 export const PROGRESS_WATCHDOG_READ_STEPS: readonly string[] =
-  [...PROGRESS_STEPS, "daemon.paths", "daemon.boot", ...PASS_MARKER_STEPS, LOOP_RESUME_STEP];
+  [...PROGRESS_STEPS, "daemon.paths", "daemon.boot", ...PASS_MARKER_STEPS, LOOP_RESUME_STEP, RESTART_REQUESTED_STEP];
 
 /** bound kind: calibrated — progress older than this captures a diagnostics bundle (the 45-min and 51-min gaps all pass it). */
 export const STALL_DIAGNOSE_AFTER_MS = 15 * 60_000;
@@ -47,13 +55,15 @@ export const REVIVAL_LOG_TAIL_BYTES = 256 * 1024;
 
 export interface ProgressWatchdogVerdict {
   state: ProgressWatchdogState;
-  action: ProgressWatchdogAction;
+  action: ProgressWatchdogVerdictAction;
   /** Age of the newest progress row, or null when none was read. */
   progressAgeMs: number | null;
   /** W1-T6598: the boot that started the current generation, when it is newer than every progress row. */
   generationBootMs?: number | null;
   /** W1-T9516: the current generation's newest loop resume, when it is newer than every progress row. */
   loopResumedMs?: number | null;
+  /** W1-T11327: the newest restart request a recycle verdict read, and the generation boot that answered it. */
+  restartRequest?: { requestedMs: number; answeredByBootMs: number | null };
   failedBoots15m: number;
   /** W1-T9627: the trailing run of revived containers that died before node wrote `daemon.paths`. */
   preNodeDeaths?: number;
@@ -326,7 +336,9 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
     // Bounded startup allowance: the existing STALL_* bounds, run from this generation's own boot.
     const bootAgeMs = Math.max(0, nowMs - generationBootMs);
     const said = `this generation booted ${Math.floor(bootAgeMs / 60_000)} min ago and has written no progress row`;
-    if (bootAgeMs > STALL_RECYCLE_AFTER_MS) return verdict("STALLED", "recycle", `${said}, with ${openPrCount} open PR(s)${counted}`);
+    if (bootAgeMs > STALL_RECYCLE_AFTER_MS) {
+      return restartBeforeRecycle(verdict("STALLED", "recycle", `${said}, with ${openPrCount} open PR(s)${counted}`), rows, nowMs, newestProgressMs);
+    }
     if (bootAgeMs > STALL_DIAGNOSE_AFTER_MS) return verdict("STALLED", "capture-diagnostics", `${said}, with ${openPrCount} open PR(s)${counted}`);
     return verdict("PROGRESSING", "none", `${said} yet; its first pass is owed ${STALL_RECYCLE_AFTER_MS / 60_000} min after boot`);
   }
@@ -346,12 +358,61 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
         `${Math.floor((nowMs - pass.startedMs) / 60_000)} min ago is in flight inside its own learned bound ` +
         `(${Math.floor(pass.boundMs / 60_000)} min) and its daemon is pulsing; not recycled`);
     }
-    return verdict("STALLED", "recycle", `newest progress row is ${minutes} min old with ${openPrCount} open PR(s)${counted}; daemon.* rows are not progress`);
+    return restartBeforeRecycle(verdict("STALLED", "recycle",
+      `newest progress row is ${minutes} min old with ${openPrCount} open PR(s)${counted}; daemon.* rows are not progress`), rows, nowMs, newestProgressMs);
   }
   if (progressAgeMs > STALL_DIAGNOSE_AFTER_MS) {
     return verdict("STALLED", "capture-diagnostics", `newest progress row is ${minutes} min old with ${openPrCount} open PR(s)${counted}; daemon.* rows are not progress`);
   }
   return verdict("PROGRESSING", "none", `newest progress row is ${minutes} min old`);
+}
+
+/**
+ * W1-T11327 — 2026-11-04 13:04:08Z, a recycle replaced nothing while the daemon it judged stalled still wrote rows. Run
+ * children are adopted at boot (W1-T9086), so a live loop is first asked to restart in place. Live: this generation
+ * (the newest `daemon.boot`'s numeric actor_pid, and host when stamped) wrote a LOOP_RESUME_STEP or `daemon.pulse` row
+ * within STALL_DIAGNOSE_AFTER_MS. The recycle stands for a frozen loop, a request with no newer boot past
+ * RESTART_REQUEST_GRACE_MS, or an answering boot with no progress since; a request inside its grace is waited on.
+ */
+function restartBeforeRecycle(recycle: ProgressWatchdogVerdict, rows: ReadonlyArray<Record<string, unknown>>, nowMs: number,
+  newestProgressMs: number | undefined): ProgressWatchdogVerdict {
+  let generation: Record<string, unknown> | undefined;
+  let generationMs = -Infinity;
+  let requestedMs: number | undefined;
+  for (const row of rows) {
+    const ms = rowMs(row);
+    if (ms === undefined) continue;
+    if (row.step === "daemon.boot" && ms >= generationMs) [generation, generationMs] = [row, ms];
+    if (row.step === RESTART_REQUESTED_STEP && (requestedMs === undefined || ms > requestedMs)) requestedMs = ms;
+  }
+  let live: { ms: number; step: unknown } | undefined;
+  for (const row of rows) {
+    const ms = row.step === LOOP_RESUME_STEP || row.step === "daemon.pulse" ? rowMs(row) : undefined;
+    if (ms === undefined || typeof generation?.actor_pid !== "number" || ms < generationMs || nowMs - ms > STALL_DIAGNOSE_AFTER_MS) continue;
+    if (row.actor_pid !== generation.actor_pid || (typeof generation.host === "string" && row.host !== generation.host)) continue;
+    if (live === undefined || ms > live.ms) live = { ms, step: row.step };
+  }
+  const answeredByBootMs = requestedMs !== undefined && generationMs > requestedMs ? generationMs : null;
+  const restartRequest = requestedMs === undefined ? undefined : { requestedMs, answeredByBootMs };
+  const as = (action: ProgressWatchdogVerdictAction, why: string): ProgressWatchdogVerdict =>
+    ({ ...recycle, action, reason: `${recycle.reason}; ${why}`, ...(restartRequest ? { restartRequest } : {}) });
+  const graceMin = RESTART_REQUEST_GRACE_MS / 60_000;
+  if (live === undefined) {
+    return as("recycle", `its loop is frozen (no ${LOOP_RESUME_STEP} or daemon.pulse row from this generation in ` +
+      `${STALL_DIAGNOSE_AFTER_MS / 60_000} min), so it is recycled, not restarted in place`);
+  }
+  const alive = `its loop is alive (${String(live.step)} at ${fixedClock(live.ms).iso()})`;
+  if (requestedMs !== undefined && answeredByBootMs === null) {
+    const ageMs = Math.max(0, nowMs - requestedMs);
+    const said = `a restart in place was requested ${Math.floor(ageMs / 60_000)} min ago (${fixedClock(requestedMs).iso()})`;
+    if (ageMs > RESTART_REQUEST_GRACE_MS) return as("recycle", `${said} and has no newer boot past its ${graceMin}-min grace`);
+    return as("capture-diagnostics", `${alive}, and ${said}; its boot is awaited ${graceMin} min before a recycle`);
+  }
+  if (answeredByBootMs !== null && (newestProgressMs === undefined || newestProgressMs < answeredByBootMs)) {
+    return as("recycle", `the restart in place requested at ${fixedClock(requestedMs!).iso()} was answered by the boot at ` +
+      `${fixedClock(answeredByBootMs).iso()} (${Math.round((answeredByBootMs - requestedMs!) / 1_000)} s later), which has written no progress row`);
+  }
+  return as(RESTART_IN_PLACE_ACTION, `${alive}, so it is asked to restart in place before a recycle`);
 }
 
 export interface DiagnosticsExec {

@@ -1137,7 +1137,9 @@ export type DaemonFreshness =
   | { stale: false; notStale?: DaemonFreshnessNotStale }
   | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[];
       /** The tree was behind before this reading could say so (a live edit held it, live-edit-ladder.ts). */
-      staleSinceMs?: number };
+      staleSinceMs?: number;
+      /** W1-T11327: a requested restart in place, whose sha pair is this process's own boot sha twice. */
+      restartRequest?: { origin: string; requestedAt: string } };
 
 /** W1-T5282 — the real wiring's reading is awaited, its `git fetch` off the loop; a sync reading stays sync. */
 /** W1-T5723: start, adopt, restart or discard the cadence child; only its settle is detached. */
@@ -1589,6 +1591,9 @@ export interface DaemonDeps {
   /** Read and delete the "drain now" marker, consumed once; a defined return means the operator
    *  asked for one immediate dispatch cycle. */
   consumeDrainNow?: () => { origin: string } | null;
+  /** W1-T11327: read and delete the `RESTART_REQUESTED` marker, consumed once. A defined return asks this process to
+   *  leave through its freshness exit (DAEMON_EXIT_STALE), leaving run children for the next boot to adopt. */
+  consumeRestartRequest?: () => { origin: string; requestedAt: string; codeSha?: string } | null;
   /** Pending bounded PR repair/review requests recorded by the authenticated console. The daemon
    * consumes at most one per poll and keeps final fix/review authority in its established command
    * path; the HTTP writer never starts a process. */
@@ -4831,15 +4836,35 @@ export async function runDaemon(
     freshness: Extract<DaemonFreshness, { stale: true }>, dispatchLatchAtMs?: number,
   ): Promise<DaemonSummary> => {
     const preExitPass = await (preparedFreshnessExit ?? prepareFreshnessExit(freshness, dispatchLatchAtMs));
-    const detail =
-      `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
-      `past this process's boot sha`;
+    const requested = freshness.restartRequest;
+    const detail = requested
+      ? `restart in place requested by ${requested.origin} at ${requested.requestedAt}`
+      : `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
+        `past this process's boot sha`;
     log("daemon.freshness_exit", { children_left_running: [...children.values()].map((child) => child.runId),
       phases_ms: { ...freshnessPhases, ...(freshnessDecidedAtMs === undefined ? {} : {
         total: Math.max(0, daemonClock.now() - freshnessDecidedAtMs),
-      }) } });
+      }) },
+      // W1-T11327: the request-to-exit time; the next `daemon.boot` row closes the request-to-boot span.
+      ...(requested ? { restart_request: { origin: requested.origin, requested_at: requested.requestedAt,
+        request_to_exit_ms: Math.max(0, daemonClock.now() - Date.parse(requested.requestedAt)) } } : {}) });
     log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass });
     return summary("stale", detail);
+  };
+  // W1-T11327: a RESTART_REQUESTED marker is a freshness decision with no advance, so it skips scoring, coalescing and
+  // the minimum-lifetime hold. One written before this loop started was answered by this boot and is only ledgered.
+  const takeRestartRequest = (at: "cycle_top" | "dispatch_tick"): Extract<DaemonFreshness, { stale: true }> | undefined => {
+    const request = deps.consumeRestartRequest?.();
+    if (!request) return undefined;
+    const nowMs = daemonClock.now();
+    const requestedAtMs = Date.parse(request.requestedAt);
+    const answeredByBoot = requestedAtMs < bootGateStartedAtMs;
+    log("daemon.restart_request_consumed", { origin: request.origin, requested_at: request.requestedAt, at,
+      request_age_ms: Math.max(0, nowMs - requestedAtMs), ...(answeredByBoot ? { answered_by_boot: true } : {}) });
+    if (answeredByBoot) return undefined;
+    freshnessDecidedAtMs ??= nowMs;
+    const sha = request.codeSha ?? "unknown";
+    return { stale: true, oldSha: sha, newSha: sha, restartRequest: { origin: request.origin, requestedAt: request.requestedAt } };
   };
 
   // One per-task block-reasoning processor, shared by the single-task tick and the multi-lane batch, so how a solo
@@ -6064,6 +6089,9 @@ export async function runDaemon(
       const drain = deps.consumeDrainNow();
       if (drain) log("console.drain_consumed", { origin: drain.origin });
     }
+    // W1-T11327: a requested restart in place, read once here where the holds above already outrank it.
+    const requestedRestart = takeRestartRequest("cycle_top");
+    if (requestedRestart) return stopForFreshness(requestedRestart);
 
     const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     for (const taskId of pendingMergedCredit) {
@@ -7532,6 +7560,9 @@ export async function runDaemon(
     const onDispatchTick = checkFreshness || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
       wakeParkedLanes();
       if (inFlightTasks.size === 0 || deps.checkPause?.()) return;
+      // W1-T11327: a requested restart releases child lanes and awaits in-process ones, as a decided restart does.
+      const requestedRestart = restartDecided || deps.checkStop?.() ? undefined : takeRestartRequest("dispatch_tick");
+      if (requestedRestart) decideRestart(requestedRestart);
       // The light sweep reads this live binding; admitted workers retain their captured planForBatch.
       const reload = (): void | Promise<void> => deps.reloadPlan ? reloadPlanBinding() : undefined;
       if (restartDecided || !checkFreshness) return reload();
