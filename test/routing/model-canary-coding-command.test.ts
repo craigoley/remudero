@@ -307,6 +307,8 @@ test("W1-T10957: default coding composition defers before eligibility, claim, ad
           request: async () => { requested++; throw new Error("unarmed coding cannot request"); } }; },
       } }, data.plan, [CODING_ITEM]);
     assert.equal(result.state, "deferred");
+    assert.equal("reason" in result ? result.reason : undefined, "coding-native-profile-unavailable",
+      "the composition itself names why it deferred, not only the CLI wrapper");
     assert.deepEqual({ eligible, ports, admitted, requested }, { eligible: 0, ports: 0, admitted: 0, requested: 0 });
     assert.equal(data.owner.claim(data.slot), "claimed", "preflight did not consume the real owner slot");
   } finally { data.owner.close(); rmSync(root, { recursive: true, force: true }); }

@@ -299,10 +299,13 @@ export async function executeOwnedCodingCanarySchedule(input: OwnedCodingCanaryP
   const hasCoding = cases.some(item => item.family === "coding");
   const firstCodingSlot = plan.slots.find(slot => cases.some(item => item.id === slot.caseId && item.family === "coding"));
   // No native profile issuer exists in this build (W1-T11313), so a coding schedule runs only through
-  // the source-unit port factory and otherwise defers before it can claim, admit or request.
-  if (!input.ledgerPath || !isRegisteredCanarySlotOwner(input.owner)
-    || (hasCoding && !internal.codingPortFactory))
-    return { state: "deferred" as const, completed: 0, skipped: 0, nextSlot: firstCodingSlot?.id ?? null };
+  // the source-unit port factory and otherwise defers, naming why, before it can claim, admit or request.
+  if (hasCoding && !internal.codingPortFactory)
+    return { state: "deferred" as const, completed: 0, skipped: 0, nextSlot: firstCodingSlot?.id ?? null,
+      reason: "coding-native-profile-unavailable" as const };
+  if (!input.ledgerPath || !isRegisteredCanarySlotOwner(input.owner))
+    return { state: "deferred" as const, completed: 0, skipped: 0, nextSlot: firstCodingSlot?.id ?? null,
+      reason: "canary-owner-unavailable" as const };
 
   const ports: CanarySchedulePorts = {
     eligibility: input.schedulePorts.eligibility,
