@@ -1,0 +1,59 @@
+- id: W1-T11313
+  title: "The native systemd/bwrap coding backend, its profile probe and the backend-bound coding adapter run and are coverage-measured on a real systemd+bwrap host, split from W1-T10957 because CI's runners cannot execute them"
+  repo: remudero
+  depends_on:
+    - W1-T10957
+  type: implement
+  verify: human
+  principles:
+    tdd: strict
+  risk: high # one concern, executing and measuring the native coding sandbox on a real host; it edits ci.yml, touches runner security settings, and is the isolation boundary
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-11-04 on #16606: Split the native backend"
+  plan_refs:
+    - W1-T10957
+    - W1-T10875
+  files:
+    - src/lib/model-canary-systemd-bwrap-backend.ts
+    - src/lib/model-canary-native-profile-probe.ts
+    - src/lib/model-canary-linux-profile-preflight-capabilities.ts
+    - src/lib/model-canary-coding-adapter.ts
+    - src/lib/model-canary-host-bridge.ts
+    - src/lib/model-canary-command.ts
+    - src/lib/config-schema.ts
+    - .github/workflows/ci.yml
+    - test/host-capability-fixtures.test.ts
+    - test/routing/model-canary-native-session.test.ts
+    - test/routing/model-canary-linux-profile-preflight-capability.test.ts
+    - test/routing/model-canary-host-bridge.test.ts
+    - test/routing/model-canary-systemd-runtime-readback.test.ts
+    - test/routing/model-canary-service-wrapper-protocol.test.ts
+    - test/routing/model-canary-profile-observation.test.ts
+    - test/routing/model-canary-coding-command.test.ts
+  status: queued
+  attempts: 0
+  priority: 2
+  acceptance:
+    - claim: the existing private coding executor contains filesystem and credential effects and closes its real descendants
+      proof: 'grep: test("W1-T10957: the existing private coding executor contains filesystem and credential effects and closes its real descendants" in test/routing/model-canary-native-session.test.ts'
+    - claim: The coding command's default native profile source is the real probe, qualifiedLinuxCodingProfileForCurrentHost, so a qualified host runs the coding schedule through the backend-bound adapter while an unqualified host still defers with coding-native-profile-unavailable
+      proof: "grep: qualifiedLinuxCodingProfileForCurrentHost( in src/lib/model-canary-command.ts"
+    - claim: The coverage job runs the native suite on a runner prepared with bubblewrap, unprivileged user namespaces and a user systemd session, so the native tests execute instead of skipping and diff-coverage measures the backend's real lines
+      proof: "grep: bubblewrap in .github/workflows/ci.yml"
+  rationale: |
+    SPLIT from W1-T10957 on 2026-11-04 by operator ruling ("Split the native backend"). MEASURED at #16606 head 7a883fd1c5: diff-coverage listed 842 added lines with no covering test.
+    - About 760 of them are native-only: model-canary-systemd-bwrap-backend.ts 587, model-canary-native-profile-probe.ts 174, plus the coding adapter (34) and host bridge (24).
+    - GitHub's runners provide no user systemd session and no bwrap, so the one real-path test skips ("native Linux profile prerequisites unavailable") and nothing downstream executes: unit lifecycle, cgroup and namespace readback, control runs.
+    - The probe reads /usr/bin/systemd-run, /usr/bin/systemctl and /usr/bin/bwrap at fixed paths, and only the real backend may issue a qualified coding profile. So fake tools or a test-issued profile would either be impossible or open a test-only door into the sandbox boundary.
+    - Fakes cannot prove isolation: the claim is that the kernel and systemd contain filesystem and credential effects and reap descendants, which only a real host can show.
+  design: |
+    1. Coverage route: first PROVE, in a throwaway workflow run on a scratch branch, that an ubuntu-24.04 runner can run bwrap unprivileged (sysctl kernel.apparmor_restrict_unprivileged_userns=0) and a user systemd session (loginctl enable-linger plus XDG_RUNTIME_DIR), and that test/routing/model-canary-native-session.test.ts then executes instead of skipping.
+       - Only then add those preparation steps to the coverage job in .github/workflows/ci.yml (verify: human, because it edits a workflow and runner security settings).
+       - If GitHub's runners cannot, fall back to a host-run coverage lane on the Azure host whose receipts the coverage gate accepts, which is itself an operator decision. Record the throwaway run's result in the PR either way.
+    2. Restore the native modules removed from W1-T10957's build (#16606) and wire qualifiedLinuxCodingProfileForCurrentHost as the command's default native profile source. W1-T10957 ships with no native source, so it always defers.
+    3. Move the native-only tests listed in files, plus the host-bridge chmod declaration in test/host-capability-fixtures.test.ts and the RMD_CODING_* and RMD_PROFILE_PARENT_SENTINEL envEntries in config-schema.ts, which name the backend.
+  falsifier: |
+    At origin/main after W1-T10957, no native coding backend is wired, the coding command always defers with coding-native-profile-unavailable, and no CI job executes a systemd/bwrap sandbox.
+  note: |
+    reservation hand-off: plan-file-1793796329000 -> plan-file-1793796329000
+    Reserved with rmd next-task-id --branch plan-file-1793796329000 from the operator session's ops worktree. The code for these modules exists at #16606 head 7a883fd1c5. Rebuild it from there rather than rewriting it.
