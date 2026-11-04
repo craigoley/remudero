@@ -203,6 +203,7 @@ import {
   recordedLoad1,
   sampleHostLoad,
   reviewLedgerKeyFor,
+  reviewLaneCancellation,
   reviewTaskNarrative,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
@@ -16890,7 +16891,8 @@ export function detachedSweepActionCount(): number {
  *  review started by a light pass the exit never awaits was killed mid-judgement (PR 6993, 2026-09-24). */
 interface ReviewRegistration { taskId?: string; prNumber?: number; admittedAtMs: number; kind?: string }
 const inFlightReviewRuns = new Map<Promise<void>, ReviewRegistration>();
-const reviewCancellation = new AsyncLocalStorage<AbortSignal>();
+// W1-T11340: review.ts owns the store, so a lookup inside a review (priorPostedReviewRow) honors the lane's abort too.
+const reviewCancellation = reviewLaneCancellation;
 const inFlightReviewStops = new Map<Promise<void>, AbortController>();
 
 /** The cancellation owned by the admitting review lane, carried through reviewCommand's awaits. */
@@ -16944,6 +16946,26 @@ export function trackInFlightReview(start: Promise<void> | (() => Promise<void>)
 
 export function inFlightReviewCount(): number {
   return inFlightReviewRuns.size;
+}
+
+/** W1-T11340: abort this process's in-process review of `prNumber` once it has run `ceilingMs` or longer, returning its
+ *  settlement and age. `undefined` when none is registered (a child review, or none) or it is under the ceiling. */
+export function abortInProcessReviewPastCeiling(prNumber: number, ceilingMs: number, now: number):
+  { settled: Promise<void>; ageMs: number } | undefined {
+  for (const [settled, review] of inFlightReviewRuns) {
+    if (review.prNumber !== prNumber) continue;
+    const ageMs = now - review.admittedAtMs;
+    if (ageMs < ceilingMs) return undefined;
+    inFlightReviewStops.get(settled)?.abort();
+    return { settled, ageMs };
+  }
+  return undefined;
+}
+
+/** W1-T11340: forget an aborted review that never settled, so a restart drain and the review count stop waiting on it. */
+export function abandonInProcessReview(settled: Promise<void>): void {
+  inFlightReviewRuns.delete(settled);
+  inFlightReviewStops.delete(settled);
 }
 
 export function inFlightReviewRunsNow(): Promise<void>[] {
@@ -24527,6 +24549,53 @@ const lightPassReservedHeads = new Set<string>();
 // overlapping pass's ready plan PR (#11367, #11368, #11371 waited 16-22 min, all green).
 let lightPassPlanMergeOwner: symbol | undefined;
 const lightPassHeadKey = (pr: OpenPrView): string => `${pr.prNumber}@${pr.headSha}`;
+// W1-T11340: each reserved head's release (its pass's `releases` entry), and the in-process reviews a pass aborted.
+const lightPassHeadReleases = new Map<string, () => void>();
+const reclaimedInProcessReviews = new Map<string, Promise<void>>();
+export const REVIEW_IN_PROCESS_RECLAIMED_STEP = "review.in_process_reclaimed";
+
+/**
+ * W1-T11340 — A STALE PENDING HELD BY THIS PROCESS IS RECLAIMED, NOT STOOD DOWN. On 2026-11-04 the stale-pending rule
+ * re-ran #16763 and #16764 at 107 and 129 minutes, and each re-run stood down as "already in flight" (W1-T7955): the
+ * head stayed reserved until a review that never settled did. W1-T8088's dead-owner takeover could not fire, since the
+ * owner was this live process. Runs before the pass reads its reservations, so a freed head is admitted as usual.
+ */
+async function reclaimStuckInProcessReviews(openPrs: OpenPrView[], deps: SweepDeps, policy: SweepPolicy, now: number): Promise<void> {
+  const ceilingMs = policy.pendingCeilingMinutes * 60_000;
+  const record = (pr: OpenPrView, fields: Record<string, unknown>): void => {
+    if (!deps.dryRun) (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+      step: REVIEW_IN_PROCESS_RECLAIMED_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+      ceiling_minutes: policy.pendingCeilingMinutes, ...fields });
+  };
+  const freeHead = (key: string): void => {
+    reclaimedInProcessReviews.delete(key);
+    lightPassHeadReleases.get(key)?.();
+    lightPassReservedHeads.delete(key); // also a reservation with no release registered
+  };
+  for (const pr of openPrs) {
+    const key = lightPassHeadKey(pr);
+    if (!lightPassReservedHeads.has(key)) { reclaimedInProcessReviews.delete(key); continue; }
+    const aborted = reclaimedInProcessReviews.get(key);
+    if (aborted !== undefined) {
+      // Aborted a pass ago and still unsettled: free the head now. Its late post meets the pending-owner guard.
+      abandonInProcessReview(aborted);
+      // W1-T513's review-key mutex releases only when an attempt settles; this one never did.
+      inFlightReviewKeys.delete(reviewOutcomeKeyForPr(pr));
+      freeHead(key);
+      record(pr, { outcome: "released-unsettled" });
+      continue;
+    }
+    if (pr.reviewState !== "pending" || !reviewPendingIsStale(pr, policy, now)) continue;
+    const stuck = abortInProcessReviewPastCeiling(pr.prNumber, ceilingMs, now);
+    if (stuck === undefined) continue;
+    reclaimedInProcessReviews.set(key, stuck.settled);
+    record(pr, { outcome: "aborted", run_age_ms: stuck.ageMs });
+    // The head frees when the REVIEW settles, not when its admitting pass finishes disposing of it.
+    void stuck.settled.then(() => { if (reclaimedInProcessReviews.get(key) === stuck.settled) freeHead(key); });
+    // One loop turn for an abort that settles at once, so this pass admits the freed head itself.
+    await Promise.race([stuck.settled, new Promise<void>((resolve) => setImmediate(resolve))]);
+  }
+}
 // W1-T5931: full-pass reviews in flight; with the light reservations, one process-wide review count.
 let fullPassReviewsInFlight = 0;
 const reviewPhaseObserver = new AsyncLocalStorage<(phase: string) => void>();
@@ -24811,6 +24880,8 @@ export async function runSweepLightPass(
   observeReviewEligibility(openPrs, deps, policy, now, selectionLedgerLines, outcomes, "light");
   await resolveUnreadPlanLanes(openPrs.filter((pr) => !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)), deps, policy, now);
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
+  // W1-T11340: free a head whose in-process review outlived its pending ceiling before reading the reservations.
+  await reclaimStuckInProcessReviews(openPrs, deps, policy, now);
   // W1-T7095: candidates for the host-memory demand row, read BEFORE this pass reserves its own spawning heads.
   const demandCandidates = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
   // W1-T7955: the heads an OVERLAPPING pass already holds, keyed by head (`<pr>@<head>`), never by PR number
@@ -24908,17 +24979,22 @@ export async function runSweepLightPass(
   let unsettledSpawning = spawning.length;
   for (const pr of [...spawning, ...planFilings]) {
     let released = false;
-    releases.set(pr.prNumber, () => {
+    const headKey = lightPassHeadKey(pr);
+    const release = (): void => {
       if (released) return;
       released = true;
+      if (lightPassHeadReleases.get(headKey) === release) lightPassHeadReleases.delete(headKey);
       if (spawningNumbers.has(pr.prNumber)) {
         lightPassSpawningReservations--;
         unsettledSpawning--;
       } else planLaneReviewsInFlight--;
-      lightPassReservedHeads.delete(lightPassHeadKey(pr));
+      lightPassReservedHeads.delete(headKey);
       releaseReviewSlot();
       if (spawningNumbers.has(pr.prNumber)) onOwnLaneFreed();
-    });
+    };
+    releases.set(pr.prNumber, release);
+    // W1-T11340: a later pass that reclaims this head's stuck review releases it through the same, once-only path.
+    lightPassHeadReleases.set(headKey, release);
   }
   try {
   // W1-T2931 — one host budget, with review/merge work served before new repair work. The light

@@ -10,6 +10,7 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { basenameResolutionNote, resolveTestPath, type TestPathResolution } from "./test-path-resolver.js";
 // Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
 export { resolveTestPath };
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -28,7 +29,7 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
+import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, rotationStampIso, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { formatTail } from "./proofExecutor.js";
@@ -5484,7 +5485,10 @@ export async function preparePromisedReviewDecision(args: {
     prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt,
   });
   const defaultProofExecutor = memoizeAsyncProofExecutor(execWhitelistedProofAsync);
-  const priorRow = existsSync(ledgerPath) ? await priorPostedReviewRow(ledgerPath, task.id, prUrl) : undefined;
+  // W1-T11340: the PR's own lifetime bounds a first review's archive scan; created_at is read only on a live miss.
+  const priorRow = existsSync(ledgerPath) ? await priorPostedReviewRow(ledgerPath, task.id, prUrl, {
+    prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt ?? fetchPrCreatedAtRest,
+  }) : undefined;
   const priorVerdict = priorRow?.decision_verdict as ReviewVerdict | undefined;
   const priorInconclusiveLoads = new Map<string, number>();
   if (priorRow?.head_sha === input.headSha && priorRow?.state === "pending") {
@@ -6331,27 +6335,62 @@ export function reviewRowNamesPr(line: Record<string, unknown>, key: string | un
   return typeof line.pr_url === "string" ? line.pr_url === prUrl : key !== undefined && line.task_id === key;
 }
 
+/** W1-T11340: the admitting review lane's cancellation, carried through a review's awaits. sweep.ts runs each in-process
+ *  review inside it; review.ts reads it here, so a lookup this module owns stops when the lane aborts the review. */
+export const reviewLaneCancellation = new AsyncLocalStorage<AbortSignal>();
+
+/** W1-T11340: where a prior-verdict lookup learns its PR's lifetime, and the cancellation it honors. */
+export interface PriorPostedReviewLookup {
+  /** The PR's GitHub `created_at`. No review.posted row for the PR can be older, so no archive cut before it can hold one. */
+  prCreatedAt?: string;
+  /** Read `created_at` only when the live file missed AND archives exist to bound; a failure keeps the full read. */
+  fetchPrCreatedAt?: (prUrl: string) => Promise<string | undefined>;
+  signal?: AbortSignal;
+}
+
+/** The PR's `created_at`, read once over REST — the same single-PR read the promise harvest uses. */
+export async function fetchPrCreatedAtRest(prUrl: string): Promise<string | undefined> {
+  const target = prLifecycleUrlTarget(prUrl);
+  if (!target) return undefined;
+  const row = await ghJsonAsync(singlePrRestArgs(target.owner, target.repo, target.number)) as { created_at?: string };
+  return row.created_at;
+}
+
 /** W1-T9681: the newest `review.posted` row {@link reviewRowNamesPr} matches with a verdict — by URL, so a plan filing or
- *  hand PR with no task id finds its own. The live file answers first; on a miss the archive union does. */
+ *  hand PR with no task id finds its own. The live file answers first; on a miss the archive union does.
+ *  W1-T11340: a known `created_at` bounds that union to the archives cut at or after it, as
+ *  {@link recoverPromisedFollowUpReports} bounds its harvest; on 2026-11-04 a never-reviewed plan PR's lookup gunzipped
+ *  all ~391 archives on core's loop and its review hung for hours. An unknown `created_at` keeps the full read. */
 export async function priorPostedReviewRow(
   ledgerPath: string,
   taskId: string | undefined,
   prUrl: string,
+  lookup: PriorPostedReviewLookup = {},
 ): Promise<Record<string, unknown> | undefined> {
   const names = (line: Record<string, unknown>): boolean =>
     line.step === "review.posted" && reviewRowNamesPr(line, taskId, prUrl) && Boolean(line.decision_verdict);
   const live = readLiveLedgerRecords(ledgerPath).filter(names).at(-1);
   if (live) return live;
-  const patterns = [`"pr_url":${JSON.stringify(prUrl)}`, ...(taskId === undefined ? [] : [`"task_id":${JSON.stringify(taskId)}`])];
-  const pattern = new RegExp(patterns.map(value => value.replace(/[.*+?^${}()[\]\\]/g, "\\$&")).join("|"));
-  const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { pattern, step: "review.posted", requireArchives: true, refuseIncomplete: true });
-  return union.rawLines.flatMap((raw) => {
-    try {
-      return [JSON.parse(raw) as Record<string, unknown>];
-    } catch {
-      return []; // a torn archived row names no verdict; the union reports it, this lookup skips it
-    }
-  }).filter(names).at(-1);
+  const stateDir = dirname(ledgerPath);
+  const signal = lookup.signal ?? reviewLaneCancellation.getStore();
+  signal?.throwIfAborted();
+  const fileNames = existsSync(stateDir) ? readdirSync(stateDir) : [];
+  const archived = fileNames.some((name) => rotationStampIso(name) !== undefined);
+  if (!archived) return undefined; // nothing rotated: the live miss is the whole answer
+  let createdAt = lookup.prCreatedAt;
+  if (createdAt === undefined && lookup.fetchPrCreatedAt) {
+    try { createdAt = await lookup.fetchPrCreatedAt(prUrl); } catch { createdAt = undefined; } // unread: today's full read
+  }
+  const bounded = createdAt !== undefined && Number.isFinite(Date.parse(createdAt));
+  let newest: Record<string, unknown> | undefined;
+  for await (const row of openLedgerUnion(stateDir, {
+    step: "review.posted", dedupe: false, ...(signal ? { signal } : {}),
+    // The live file was read above; a bounded read opens only the PR's own lifetime of rotations.
+    ...(bounded ? { afterRotation: rotationBeforeTime(fileNames, createdAt!), includeLive: false } : {}),
+  })) {
+    if (names(row)) newest = row; // a torn archived row never reaches here; the union skips it
+  }
+  return newest;
 }
 
 /** W1-T9681: the one reuse fact a discriminate-only review could not read, so each fallback row names its cause. */
