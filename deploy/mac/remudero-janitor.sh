@@ -953,10 +953,13 @@ clean_scratch_directory() {
 # (notes, logs, probe scripts left at ~/Remudero's top level). The same 6-hour,
 # owner, process and open-file guards apply; state, keys and keep-marked names stay.
 clean_scratch_file() {
-  local path="$1" root="$2" parent modified changed metadata kb open_out open_rc
+  local path="$1" root="$2" parent modified changed metadata kb open_out open_rc seed_reason
   local RMD_DECISION_KNOWN_BYTES=unknown
   [ -f "$path" ] && [ ! -L "$path" ] || return 0
   case "$root" in "$USER_HOME"/*) ;; *) return 0 ;; esac
+  if seed_reason=$(rmd_dependency_seed_risk "$path"); then
+    log "SKIP scratch-file $path ($seed_reason)"; return
+  fi
   parent="$root"
   while [ "$parent" != / ] && [ -n "$parent" ]; do
     [ ! -e "$parent/.git" ] && [ ! -L "$parent/.git" ] || return 0
