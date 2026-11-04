@@ -76,7 +76,7 @@ W1-T10992 criterion 1 (amended in #16494) asks for a manifest instead of the ori
 
 ## Criterion 1: Refill jumps
 
-Criterion 1 marker
+"Criterion 1 marker": every stale-tail refill jump in the 7-day window, with totals, the added-wait distribution and the 194-row appendix.
 
 **What counts as a jump.** A `sweep.review_refilled` row R admitted PR A at time tR. Its snapshot was taken at tR − `snapshot_age_ms`. R jumps PR J when all of these hold:
 
@@ -127,7 +127,7 @@ The appendix numbers all 194 jump rows, accounting for the 103 refills that jump
 
 ## Criterion 2: Width per light pass, and the head of the queue
 
-Criterion 2 marker
+"Criterion 2 marker": the semantic review width per light pass, and how often the oldest-first queue head could not merge without a person.
 
 ### Width
 
@@ -177,7 +177,7 @@ By day, unmergeable-head passes were: 10-26 10, 10-27 15, 10-28 76, 10-29 66, 10
 
 ## Criterion 3: Positive control: 2026-10-29, #15538
 
-Criterion 3 marker
+"Criterion 3 marker": the 2026-10-29 positive control, #15538 jumped by the refills of #15543, #15551 and #15553; section 4 lists what the ledger does not record.
 
 The previously recorded replay and corpus re-read reproduced this control from the ledger as written:
 
@@ -216,7 +216,7 @@ The previously recorded replay and corpus re-read reproduced this control from t
 
 ## Criterion 4: Recommendation
 
-Criterion 4 marker
+"Criterion 4 marker": one recommendation with its evidence; this report changes no code, configuration or ledger.
 
 **Change the queue-head rule first, and make refills re-read the queue.** Both, as one follow-up filing. Leave the width to its own filing. The evidence for the head rule is the frequency of blocked heads, not a measured causal effect on admissions.
 
