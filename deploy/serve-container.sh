@@ -842,6 +842,7 @@ RUN_ARGS=(
 SERVE_IMAGE_ARG_INDEX="${#RUN_ARGS[@]}"
 RUN_ARGS+=("${REF}" "${SERVE_CMD[@]}")
 SELECTED_REGISTRY_BROAD_MOUNT_ARGS=("${RUN_ARGS[@]}")
+{ ! declare -F registry_shadow_mount_args >/dev/null 2>&1 || registry_shadow_mount_args "${RUN_ARGS[@]}"; }
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_mounts "${RUN_ARGS[@]}"; fi
 
 if [ "${DRY_RUN}" -eq 1 ]; then

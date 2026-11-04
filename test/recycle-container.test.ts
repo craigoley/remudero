@@ -1002,20 +1002,35 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers throu
   const root = mkdtempSync(join(tmpdir(), "rmd-selected-recycle-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const selected = join(root, "private.yaml"), session = join(root, "session.json");
+  const scratch = join(root, "scratch"), mounts = join(root, "mounts");
+  mkdirSync(scratch);
+  writeFileSync(mounts, `/dev/fixture ${scratch} ext4 rw 0 0\n`);
+  const scratchEnv = { RMD_SCRATCH: "on", RMD_SCRATCH_ROOT: scratch, RMD_SCRATCH_MOUNTS_FILE: mounts, RMD_SCRATCH_CHECKOUTS: "off" };
+  const plan = spawnSync("bash", ["-c", '. "$1"; scratch_plan "$2" remudero-daemon || exit; printf "%s\\n" "$SCRATCH_BINDS"',
+    "fixture", join(REPO_ROOT, "deploy/scratch-mounts.sh"), join(root, "state-root")], {
+    env: { ...process.env, ...scratchEnv }, encoding: "utf8",
+  });
+  assert.equal(plan.status, 0, plan.stderr);
+  const mounted = plan.stdout.trim().split("\n").map(line => line + "\ttrue").join("\n");
   writeFileSync(selected, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
   // The shadow candidate is captured explicitly; RMD_INSTANCE_REGISTRY is W1-T10573's active selection, left absent.
   const captured = spawnSync(process.execPath, ["--import", join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"),
     join(REPO_ROOT, "src/lib/child-entry-argv.ts"), "--selected-registry-shadow", REPO_ROOT, "--shadow", "--capture",
     "--session", session, "--registry", selected], { env: { ...process.env, RMD_INSTANCE_REGISTRY: undefined }, encoding: "utf8" });
   assert.equal(captured.status, 0, captured.stderr);
-  const run = runRecycle("good", { stateDir: root, args: ["--selected-registry-shadow", session], unselectedRegistry: true,
-    extraEnv: { HOME: root, RMD_RECYCLE_HOST_LOCK: join(root, "host.lock") } });
+  const run = runRecycle("good", { stateDir: join(root, "state-root"), args: ["--selected-registry-shadow", session], unselectedRegistry: true,
+    extraEnv: { HOME: root, RMD_RECYCLE_HOST_LOCK: join(root, "host.lock"), ...scratchEnv, STUB_EXTRA_MOUNTS: mounted } });
   t.after(() => {
     rmSync(run.fixtureRecordingDir, { recursive: true, force: true });
     rmSync(run.fixtureStubDir, { recursive: true, force: true });
   });
   assert.equal(run.status, 0, run.stderr);
   assert.equal(run.calls.filter(isRun).length, 1, "the real unchanged docker launch reaches the recorder");
+  assert.doesNotMatch(run.stderr, /instance_registry\.shell_shadow_unrecorded/);
+  const launch = run.calls.find(isRun)!;
+  assert.ok(launch.argv.includes(`${join(root, "state-root")}:/home/node/Remudero`), "the actual state mount excludes the private session");
+  assert.ok(launch.argv.includes(`${scratch}/rmd/state-root/worker-homes:/home/node/rmd-scratch/worker-homes`),
+    "the real scratch plan also reaches the unchanged Docker launch");
   const rows = readFileSync(session + ".observations", "utf8").trim().split("\n").map(line => JSON.parse(line));
   assert.equal(rows.at(-1).action, "recycle");
   assert.equal(rows.at(-1).selected_outcome, "would-refuse", "missing actual selected identity cannot borrow fixture authority");

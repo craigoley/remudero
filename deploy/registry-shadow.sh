@@ -30,6 +30,20 @@ registry_shadow_mount_root() {
   done
 }
 
+# Maintained launch arrays express scratch binds as -v source:destination. Record their actual
+# sources, including plans derived before an environment/default changes, without changing the plan.
+registry_shadow_mount_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -v|--volume)
+        shift
+        [ "$#" -gt 0 ] || return 0
+        registry_shadow_mount_root "${1%%:*}" ;;
+    esac
+    shift
+  done
+}
+
 # Design constraint 3: the private session must never sit in a directory a fleet launcher mounts into
 # workers. These are the roots every consumer derives its mounts from, from the same variables and
 # HOME defaults (recycle-container.sh, host-update.sh, serve-container.sh, install-host-units.sh),
@@ -38,6 +52,7 @@ registry_shadow_root_args() {
   local home="${HOME:-/root}" root
   for root in "${RMD_STATE_DIR:-}" "${DAEMON_STATE_DIR:-}" "${INSTANCE_STATE_DIR:-}" "${RMD_CLAUDE_DIR:-}" \
     "${RMD_CODEX_DIR:-}" "${RMD_CONTAINER_CONFIG_DIR:-}" "${RMD_SERVE_REPO_DIR:-}" "${SERVE_GENS_DIR_OVERRIDE:-}" \
+    "${RMD_SCRATCH_ROOT:-/mnt/scratch}" \
     "$home/rmd-state" "$home/rmd-state2" "$home/.claude" "$home/.codex" "$home/.config/remudero-container" \
     "$home/rmd-serve-repo" "$home/rmd-serve-gens" ${registry_shadow_mounted_roots[@]+"${registry_shadow_mounted_roots[@]}"}; do
     case "$root" in /*) printf '%s\0' --mounted-root "$root" ;; esac

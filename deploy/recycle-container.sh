@@ -2873,6 +2873,7 @@ if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then LAUNCH_IMAGE="${PULLED_IMAGE_ID}"
 DOCKER_RUN_ARGS+=("${LAUNCH_IMAGE}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
 selected_registry_recheck
 selected_registry_mounts "${DOCKER_RUN_ARGS[@]}"
+{ ! declare -F registry_shadow_mount_args >/dev/null 2>&1 || registry_shadow_mount_args "${DOCKER_RUN_ARGS[@]}"; }
 registry_shadow_observe recycle "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
 

@@ -21,7 +21,7 @@ export function registryShellFixture(t: { after(fn: () => void): void }) {
   const text = "instances:\n  core:\n    github_repo: craigoley/remudero\n    mode: shadow\n    state_dir: /private-material-sentinel\n";
   writeFileSync(selected, text);
   const legacy = join(root, "legacy.yaml");
-  writeFileSync(legacy, `instances:\n  core:\n    state_dir: ${state}\n    container_name: remudero-daemon\n`);
+  writeFileSync(legacy, `instances:\n  core:\n    github_repo: craigoley/remudero\n    state_dir: ${state}\n    container_name: remudero-daemon\n`);
   const callsPath = join(root, "calls.ndjson"), payload = join(root, "published.txt");
   writeFileSync(callsPath, "");
   const transport = `#!${process.execPath}\n` + String.raw`

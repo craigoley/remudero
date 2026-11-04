@@ -1171,6 +1171,7 @@ render_registry_shadow() {
 
 render_registry_shadow_boundary() {
   [ -n "$registry_shadow_session" ] || return 0
+  printf '{ ! declare -F registry_shadow_mount_args >/dev/null 2>&1 || registry_shadow_mount_args "${SCRATCH_ARGS[@]+"${SCRATCH_ARGS[@]}"}" "${CODEX_SESSIONS_ARGS[@]+"${CODEX_SESSIONS_ARGS[@]}"}"; }\n'
   printf 'registry_shadow_observe launcher "$INSTANCE_NAME" %q host "$STATE_DIR|%s"; ' "${github_repo:-}" "$CONTAINER_NAME"
 }
 

@@ -348,11 +348,18 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers", asy
   assert.ok(refresh.rows().some(row => row.action === "field-trials"));
   // W1-T10573 (#15532) makes RMD_INSTANCE_REGISTRY serve's ACTIVE selection; the legacy control is its genuine absence.
   const unselected = { RMD_INSTANCE_REGISTRY: undefined };
+  const scratch = f.env.RMD_SCRATCH_ROOT!, mounts = join(f.root, "mounts");
+  mkdirSync(scratch);
+  writeFileSync(mounts, `/dev/fixture ${scratch} ext4 rw 0 0\n`);
+  f.env.RMD_SCRATCH = "on"; f.env.RMD_SCRATCH_MOUNTS_FILE = mounts;
   const serve = f.run(join(REPO_ROOT, "deploy/serve-container.sh"), ["--replace"], unselected);
   assert.equal(serve.status, 0, serve.stdout + serve.stderr);
   const selectedServe = f.run(join(REPO_ROOT, "deploy/serve-container.sh"), ["--replace", "--selected-registry-shadow", f.session], unselected);
   assert.equal(selectedServe.status, 0, selectedServe.stdout + selectedServe.stderr);
   assert.ok(f.rows().some(row => row.action === "serve"));
+  const serveLaunch = f.receipts().filter(c => c.bin === "docker" && c.args[0] === "run" && c.args.includes("remudero-serve")).at(-1);
+  assert.ok(serveLaunch && mountSources(serveLaunch.args).some(source => within(source, scratch)),
+    "the actual serve launcher mounts its real scratch plan during qualification");
   const host = f.run(join(REPO_ROOT, "deploy/host-update.sh"), ["--print-daemon-run", "--selected-registry-shadow", f.session]);
   assert.equal(host.status, 0, host.stdout + host.stderr);
   assert.ok(f.rows().some(row => row.action === "host-update"));
@@ -505,10 +512,49 @@ test("selected shell revisions invalidate generated child and heartbeat observat
   const emptyIdentity = createHash("sha256").update("").digest("hex");
   const measurements = f.rows().slice(start).filter(r => r.action === "heartbeat" && r.target_digest !== emptyIdentity);
   assert.equal(measurements.length, 2, "each independently measured child rechecks after Docker returns");
+  assert.ok(measurements.every(r => r.target_instance === "core" && r.target_repo === "craigoley/remudero"),
+    "each measurement retains the actual owner/name target alongside its Docker identity");
   assert.ok(measurements.every(r => r.reason === "digest_mismatch" && r.selected_outcome === "would-refuse"));
   assert.notEqual(measurements[0]!.target_digest, measurements[1]!.target_digest, "same-named containers retain different actual identities");
   assert.equal(readFileSync(f.payload, "utf8").split("mem_remudero-daemon_current_mib=1").length - 1, 2);
   assert.equal(createHash("sha256").update(readFileSync(f.session)).digest("hex"), pin, "later children cannot recapture");
+});
+
+test("selected shell heartbeat binds owner/name targets without borrowing a same-named instance", t => {
+  const f = registryShellFixture(t);
+  f.capture();
+  const heartbeat = join(REPO_ROOT, "scripts/fleet-heartbeat.sh");
+  for (const repo of ["craigoley/remudero", "different-owner/remudero"]) {
+    writeFileSync(f.legacy, `instances:\n  core:\n    github_repo: ${repo}\n    state_dir: ${f.state}\n    container_name: remudero-daemon\n`);
+    const offset = existsSync(f.session + ".observations") ? f.rows().length : 0;
+    writeFileSync(join(f.state, "state/heartbeat-count.txt"), "1\n");
+    const callsBefore = f.receipts().length;
+    const legacy = f.run(heartbeat, [], { FIXTURE_SAME_NAME: "1" });
+    const legacyDocker = f.receipts().slice(callsBefore).filter(c => c.bin === "docker");
+    writeFileSync(join(f.state, "state/heartbeat-count.txt"), "1\n");
+    const callsAfter = f.receipts().length;
+    const qualified = f.run(heartbeat, ["--selected-registry-shadow", f.session], { FIXTURE_SAME_NAME: "1" });
+    assert.equal(legacy.status, 0, legacy.stderr);
+    assert.equal(qualified.status, legacy.status, qualified.stderr);
+    const empty = createHash("sha256").update("").digest("hex");
+    const measured = f.rows().slice(offset).filter(r => r.action === "heartbeat" && r.target_digest !== empty);
+    assert.equal(measured.length, 2);
+    assert.ok(measured.every(r => r.target_instance === "core" && r.target_repo === repo));
+    assert.notEqual(measured[0]!.target_digest, measured[1]!.target_digest);
+    assert.ok(measured.every(r => r.selected_outcome === "would-refuse" && r.reason === "namespace_unmapped"),
+      "owner/name does not certify a host/container mapping");
+    assert.deepEqual(f.receipts().slice(callsAfter).filter(c => c.bin === "docker"), legacyDocker,
+      "qualification preserves every actual Docker measurement argument");
+    assert.equal(readFileSync(f.payload, "utf8").split("mem_remudero-daemon_current_mib=1").length - 1, 2);
+    assert.ok(!readFileSync(f.payload, "utf8").includes(f.session));
+  }
+  writeFileSync(f.legacy, readFileSync(f.legacy, "utf8") +
+    `  other:\n    github_repo: another-owner/remudero\n    state_dir: ${f.state}\n    container_name: remudero-daemon\n`);
+  const offset = f.rows().length;
+  const ambiguous = f.run(heartbeat, ["--selected-registry-shadow", f.session], { FIXTURE_SAME_NAME: "1" });
+  assert.equal(ambiguous.status, 0, ambiguous.stderr);
+  assert.ok(f.rows().slice(offset).every(r => r.target_instance === undefined && r.target_repo === undefined),
+    "two registry rows for one measured name leave its target unknown");
 });
 
 test("selected shell revisions invalidate generated child and heartbeat observations: host update launch and measurement", t => {
@@ -885,7 +931,7 @@ test("selected shell qualification does not disclose private inputs: a session i
   assert.equal(legacy.status, 0, legacy.stderr);
   // The state root and an explicit credential directory (both mounted by the generated launcher), and a HOME default
   // a consumer mounts when its variable is unset: an owned 0700 directory inside any is still readable by workers.
-  for (const mounted of [f.state, f.env.RMD_CLAUDE_DIR!, join(f.env.HOME!, ".config/remudero-container")]) {
+  for (const mounted of [f.state, f.env.RMD_CLAUDE_DIR!, join(f.env.HOME!, ".config/remudero-container"), f.env.RMD_SCRATCH_ROOT!]) {
     const dir = join(mounted, "shadow-private");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
@@ -904,8 +950,48 @@ test("selected shell qualification does not disclose private inputs: a session i
   assert.ok(f.rows().some(row => row.action === "install"));
 });
 
+test("selected shell qualification does not disclose private inputs: actual scratch plan sources survive changed defaults", async t => {
+  await eachInterpreter(t, (st, interpreter) => {
+    const f = registryShellFixture(st), scratch = f.env.RMD_SCRATCH_ROOT!;
+    const mounts = join(f.root, "mounts");
+    mkdirSync(scratch);
+    writeFileSync(mounts, `/dev/fixture ${scratch} ext4 rw 0 0\n`);
+    const dir = join(scratch, "rmd", "state-root", "worker-homes", "private-session");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const session = join(dir, "session.json");
+    const pin = f.cli(["--shadow", "--capture", "--session", session, "--registry", f.selected], { RMD_INSTANCE_REGISTRY: undefined });
+    const run = (register: boolean) => spawnSync(interpreter.shell, ["-uc", `
+      . "$1/deploy/registry-shadow.sh"
+      . "$1/deploy/scratch-mounts.sh"
+      scratch_plan "$2" remudero-daemon || exit 91
+      ${register ? 'registry_shadow_mount_args "${SCRATCH_ARGS[@]}"' : ':'}
+      unset RMD_SCRATCH_ROOT
+      registry_shadow_session="$3"; registry_shadow_pin="$4"
+      registry_shadow_observe launcher core craigoley/remudero host
+    `, "fixture", REPO_ROOT, f.state, session, pin], {
+      env: { ...f.env, ...interpreter.env, RMD_SCRATCH: "on", RMD_SCRATCH_MOUNTS_FILE: mounts },
+      encoding: "utf8", timeout: 30_000,
+    });
+    const refused = run(true);
+    assert.equal(refused.status, 0, refused.stderr);
+    assert.match(refused.stderr, /instance_registry\.shell_shadow_unrecorded/);
+    assert.equal(existsSync(session + ".observations"), false, "the actual scratch source remains forbidden after defaults change");
+    const removed = run(false);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(JSON.parse(readFileSync(session + ".observations", "utf8")).selected_outcome, "would-observe",
+      "deleting registration exposes the sink inside the real scratch bind");
+    rmSync(session + ".observations");
+    assert.equal(run(true).status, 0);
+    assert.equal(existsSync(session + ".observations"), false, "exact restoration refuses it again");
+  });
+});
+
 test("selected shell qualification does not disclose private inputs: the generated launcher's own mounts never hold the session", t => {
   const f = registryShellFixture(t);
+  const scratch = f.env.RMD_SCRATCH_ROOT!, mounts = join(f.root, "mounts");
+  mkdirSync(scratch);
+  writeFileSync(mounts, `/dev/fixture ${scratch} ext4 rw 0 0\n`);
+  f.env.RMD_SCRATCH = "on"; f.env.RMD_SCRATCH_MOUNTS_FILE = mounts;
   f.capture();
   assert.equal(f.install().status, 0);
   const launched = f.run(join(f.output, "launcher"), ["--boot"]);
@@ -913,6 +999,7 @@ test("selected shell qualification does not disclose private inputs: the generat
   const daemon = f.receipts().filter(c => c.bin === "docker" && c.args[0] === "run" && c.args.includes("-d")).at(-1);
   assert.ok(daemon, "positive control: the generated launcher's daemon docker run was recorded");
   const sources = mountSources(daemon!.args);
+  assert.ok(sources.some(source => within(source, scratch)), "positive control: generated launcher binds the real scratch plan");
   assert.ok(sources.some(source => within(f.state, source) && within(source, f.state)),
     "positive control: the launcher bind-mounts the state root into its UID-1000 workers");
   for (const source of sources) {
