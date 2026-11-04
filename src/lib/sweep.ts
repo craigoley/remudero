@@ -16073,6 +16073,32 @@ export function fixRungInputsUnchanged(row: Record<string, unknown>, current: Fi
     row.read_body_sha256 !== current.bodySha256);
 }
 
+/** W1-T10653 — WHEN DID THIS HEAD'S RUNG FIRST STAND DOWN ON AN ALREADY-OPEN ESCALATION, and has nothing dispatched since?
+ *  {@link fixRungInputsUnchanged} refuses to call that stand-down a hold (the issue closing must release it), so the held
+ *  SLO never aged it: PR #14195 waited 4.5h on a question no one answered. The age starts at the FIRST consecutive row. */
+export function openEscalationStandDownSince(
+  lines: ReadonlyArray<Record<string, unknown>>, taskId: string | undefined, headSha: string, prNumber?: number,
+): string | undefined {
+  if (taskId === undefined) return undefined;
+  let since: string | undefined;
+  for (const row of lines) {
+    if (row.task_id !== taskId) continue;
+    if (row.step === "sweep.disposed" && row.pr_number === prNumber && row.head_sha === headSha &&
+        typeof row.open_escalation_hold_since === "string") {
+      since ??= row.open_escalation_hold_since;
+      continue;
+    }
+    if (!String(row.step).startsWith("fix.")) continue;
+    const open = row.step === "fix.stood_down" && row.site === "rung.strike" && row.read_head_sha === headSha &&
+      typeof row.ts === "string" && typeof row.reason === "string" &&
+      row.reason.startsWith("a needs-human escalation for this exact (task, PR, head ") &&
+      row.reason.includes(", cause) is ALREADY OPEN and ");
+    if (open) since ??= row.ts as string;
+    else if (row.step === "fix.dispatch" || row.step === "fix.done") since = undefined;
+  }
+  return since;
+}
+
 /** Operator ruling 2026-10-30: how long a PR may wait on an unanswered fix-lane escalation before the ladder acts. */
 export const HELD_ESCALATION_SLO_MS = 6 * 60 * 60_000;
 
@@ -18454,6 +18480,31 @@ export async function runSweep(
   deps.markPrelude?.("armed_body_guard");
   // W1-T11260: the live tail's rows are shared and read-only; this pass appends its own receipts, so it copies them.
   const ledgerLines = [...readLedger(deps.ledgerPath)];
+  const openEscalationHistory = new Map<string, ReadonlyArray<Record<string, unknown>>>();
+  const openEscalationSince = (pr: OpenPrView): string | undefined => {
+    const taskId = fixLedgerTaskIdFor(pr);
+    const key = `${pr.prNumber}@${pr.headSha}`;
+    let history = openEscalationHistory.get(key);
+    if (history === undefined) {
+      history = ledgerLines;
+      // Rotation prefers an older acted receipt to a newer hold. Recover that head's hold and
+      // subsequent dispatch/done resets together, in timestamp order, from the archived history.
+      const checkpoint = ledgerLines.findLast(row => row.step === "sweep.disposed" && row.acted === true &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.task_id === taskId);
+      if (taskId !== undefined && checkpoint !== undefined && !deps.readLedger && !deps.dryRun) {
+        const union = readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
+          step: ["sweep.disposed", "fix.stood_down", "fix.dispatch", "fix.done"],
+          since: typeof checkpoint.ts === "string" ? checkpoint.ts : undefined,
+          pattern: new RegExp(JSON.stringify(taskId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+          refuseIncomplete: true,
+        });
+        if (union.ok) history = [...union.rows, ...ledgerLines.filter(row => row.task_id === taskId)].sort((a, b) =>
+          String(a.ts ?? "").localeCompare(String(b.ts ?? "")));
+      }
+      openEscalationHistory.set(key, history);
+    }
+    return openEscalationStandDownSince(history, taskId, pr.headSha, pr.prNumber);
+  };
   let contractHoldRefreshSpent = false;
   // W1-T10608: at most one design-hold main adoption per pass, so a main fix never fans out update-branch.
   let designMainAdoptionSpent = false;
@@ -21048,6 +21099,26 @@ export async function runSweep(
         ruleBlockerByIndex.set(prIndex, "escalated");
       }
     }
+    // W1-T10653: an already-open-escalation stand-down is not a hold, so it never reached the SLO below; once it has aged past
+    // the SLO it is read as one, so the ladder's rebuild clears it instead of the fix lane standing down for good.
+    if (heldEscalationAt === undefined && disposition === "blocked-fixable" && !deps.dryRun) {
+      const openSince = openEscalationSince(pr);
+      if (openSince !== undefined && now - Date.parse(openSince) >= HELD_ESCALATION_SLO_MS) {
+        const issues = await readOpenEscalations();
+        const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
+          pr.mergeConflict !== undefined, isBlockedCi(pr), deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
+        const stillOpen = openEscalationStandDownReason(pr.headSha, matchDuplicateEscalation(key, issues),
+          key.contractRevision, { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+          isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer) !== undefined;
+        if (stillOpen) {
+          heldEscalationAt = openSince;
+          disposition = "refused-escalate";
+          reason = `fix stood down on an already-open needs-human escalation since ${openSince} (head ${pr.headSha.slice(0, 7)}) — ` +
+            "unanswered past the held-escalation SLO, so the ladder's rebuild acts";
+          ruleBlockerByIndex.set(prIndex, "escalated");
+        }
+      }
+    }
     // Operator ruling 2026-10-30: a fix lane that escalated to a person and got no answer for HELD_ESCALATION_SLO_MS takes the
     // ladder's rebuild rung (the fix-progress judge, then close and requeue with the findings as a note, or a digest) instead
     // of re-escalating. The age is read off the hold's own row, so neither blocker bookkeeping nor a re-escalation resets it.
@@ -21832,7 +21903,14 @@ export async function runSweep(
                 const openHold = openEscalationStandDownReason(pr.headSha, candidate, escalationKey.contractRevision,
                   { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
                   isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer);
-                if (openHold) { acted = false; spent = false; standDownReason = openHold.reason; break; }
+                if (openHold) {
+                  acted = false;
+                  spent = false;
+                  standDownReason = openHold.reason;
+                  extraDisposedFields = { ...extraDisposedFields,
+                    open_escalation_hold_since: openEscalationSince(pr) ?? clockFromMillisFn(() => now).iso() };
+                  break;
+                }
               }
               if (terminalDesignHold?.amended) {
                 const amended = await refreshAmendedContract([{ progress_contract_revision: terminalDesignHold.revision }], undefined, terminalDesignHold.observedRevision, terminalDesignHold.semantic);
