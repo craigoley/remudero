@@ -96,20 +96,29 @@ export interface ViewBody<T = unknown> {
   data: T;
 }
 
+/** One view's body with no entity tag: what a caller that never reads the tag computes (W1-T11328). */
+export function computeViewBody<T>(
+  view: ViewDefinition<T>,
+  clock: Clock = systemClock,
+  params: URLSearchParams = new URLSearchParams(),
+): { body: ViewBody<T> } | ViewRequestFailure {
+  const computed = view.compute(params);
+  if ("error" in computed) return computed;
+  const { data, sources } = computed;
+  const stale = sources.some((source) => source.state !== "fresh");
+  return { body: { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data } };
+}
+
 /** The body and entity tag {@link buildViewRoutes} serves for one view. */
 export function renderView<T>(
   view: ViewDefinition<T>,
   clock: Clock = systemClock,
   params: URLSearchParams = new URLSearchParams(),
 ): { body: ViewBody<T>; etag: string } | ViewRequestFailure {
-  const computed = view.compute(params);
+  const computed = computeViewBody(view, clock, params);
   if ("error" in computed) return computed;
-  const { data, sources } = computed;
-  const stale = sources.some((source) => source.state !== "fresh");
-  return {
-    body: { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data },
-    etag: viewEtag(view.name, view.version, stale, data),
-  };
+  const { body } = computed;
+  return { body, etag: viewEtag(view.name, view.version, body.stale, body.data) };
 }
 
 /** The weak entity tag over `{version, stale, data}`: the times never change it. */

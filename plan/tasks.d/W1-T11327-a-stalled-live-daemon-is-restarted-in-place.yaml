@@ -1,0 +1,81 @@
+- id: W1-T11327
+  title: A STALLED daemon whose loop is still alive is restarted in place — the watchdog leaves a consumed-once restart request the daemon honours through its freshness exit, keeping its run children for the next boot to adopt — and only a request that produces no new boot within a bounded grace, or a frozen loop, falls back to a container recycle and its drain wait
+  repo: remudero
+  depends_on: []
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the daemon lifecycle (a new restart trigger into the existing freshness exit) and the host watchdog's action ladder; a refused or unanswered request still ends in today's recycle
+  band_meaning: span
+  origin: operator-session#recycle-and-status-2026-11-04
+  plan_refs:
+    - W1-T9086
+    - W1-T9089
+    - W1-T490
+    - W1-T5688
+    - W1-T6598
+  files:
+    - src/lib/fleet-control.ts
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
+    - src/lib/progress-watchdog.ts
+    - src/run-task.ts
+    - deploy/install-host-units.sh
+    - test/daemon/a-requested-restart-exits-in-container-and-keeps-its-children.test.ts
+    - test/daemon/a-stalled-live-daemon-is-restarted-in-place-before-a-recycle.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A state/RESTART_REQUESTED marker is consumed once, at the top of a cycle or on a dispatch tick. The daemon then returns its stale summary (DAEMON_EXIT_STALE) through the freshness exit with no coalescing or minimum-lifetime hold, ledgers the request's origin, leaves child runs running (daemon.freshness_exit children_left_running) and awaits in-process lanes as a freshness restart does. A STOP or PAUSE still outranks the request, and a garbage marker is deleted and never acted on.
+      proof: "unit test: test/daemon/a-requested-restart-exits-in-container-and-keeps-its-children.test.ts"
+    - claim: decideProgressWatchdog answers restart-in-place for a stall it would recycle when the daemon's loop shows a fresh LOOP_RESUME_STEP row and no request is pending. It answers recycle only once a pending request is older than the grace with no generation boot after it, or at once when the loop is frozen. A request followed by a newer boot reads as answered.
+      proof: "unit test: test/daemon/a-stalled-live-daemon-is-restarted-in-place-before-a-recycle.test.ts"
+    - claim: The fleet-control module owns the restart request marker
+      proof: "grep: RESTART_REQUESTED in src/lib/fleet-control.ts"
+    - claim: The launcher acts on the restart-in-place verdict by writing the request instead of running recycle-container.sh on that tick
+      proof: "grep: restart-in-place in deploy/install-host-units.sh"
+  rationale: |
+    OBSERVED 2026-11-04 on the Azure host (core instance):
+    - The fleet stayed paused from 12:26:41Z to 14:00:25Z (94 min) and no container was replaced.
+      - RECYCLE-3315651 started at 12:26:41Z from a terminal, held PAUSE through its 3,000 s no-history wait, and ended without a recycle.
+      - The progress watchdog (verdict "STALLED progressAgeMs=2595011") started RECYCLE-3864750 at 13:04:08Z. It refused at 14:00:25Z: "0 lane-holding and 2 lane-less worker(s) still in flight after 3000s" (~/rmd-revivals.log: watchdog-recycle result=refused rc=1).
+    - What the drain waited on was live work, not a frozen daemon.
+      - A retro (PID 2031531, 6,929 s old) whose child ran a prepublish test pool.
+      - A codex review admitted at 13:56:11Z.
+      - The daemon wrote rows from PID 1684607 at 13:04:09Z and 13:34:13Z, so its loop was alive.
+    - Every recycle path waits for such work by construction. docker stop kills every process in the container, run children included, so recycle-container.sh refuses rather than lose unrecorded spend.
+    - An in-place path already exists for freshness, but nothing on the host can ask for it.
+      - The daemon's freshness exit returns DAEMON_EXIT_STALE (75).
+      - deploy/entrypoint.sh restarts in-container on 75: it re-runs sync_tree and loops without docker counting a failure.
+      - stopForFreshness ledgers children_left_running.
+      - W1-T9086 / W1-T9089 adopt live run children at the next boot, and a restart decided mid-dispatch releases child lanes and awaits only in-process ones.
+    - The only host lever for a stall is recycle-container.sh (watchdog_recycle in deploy/install-host-units.sh). A SIGTERM goes through the daemon's signal handler and exits the container.
+    - The repo already has a consumed-once request marker of this shape: requestDrainNow / consumeDrainNow in src/lib/fleet-control.ts (state/DRAIN_REQUESTED), consumed at the top of a cycle.
+  design: |
+    1. src/lib/fleet-control.ts: requestRestartInPlace(root, origin) writes state/RESTART_REQUESTED ({origin, requestedAt}). consumeRestartInPlace(root) reads it and deletes it, consumed once whether or not it parses, mirroring consumeDrainNow. peekRestartInPlace(root) is for the watchdog and status.
+    2. src/lib/daemon.ts: a new optional dep, consumeRestartRequest.
+       - At the top of a cycle, beside the drain-now consume and below the STOP/PAUSE holds, a consumed request ledgers daemon.restart_request_consumed and returns stopForFreshness with a same-sha stale reading ({stale: true, oldSha: boot sha, newSha: boot sha}), bypassing decideFreshness's coalescing and minimum-lifetime hold.
+       - The dispatch tick (onDispatchTick) consumes it too and calls decideRestart, so a long dispatch phase releases its child lanes and ends at the phase boundary as a freshness restart does.
+       - src/cli/commands/daemon.ts wires the dep to consumeRestartInPlace(config.root).
+    3. src/lib/progress-watchdog.ts adds the restart-in-place action:
+       - decideProgressWatchdog takes the pending request (its requestedAt) and the newest LOOP_RESUME_STEP row.
+       - A stall that would recycle answers restart-in-place when the loop is live and no request is pending.
+       - It answers recycle when the request is older than RESTART_REQUEST_GRACE_MS with no generation boot after it, or when the loop is frozen (no LOOP_RESUME_STEP since the progress age began).
+       - src/run-task.ts's progressWatchdogCommand reads the marker (peekRestartInPlace) into that input.
+    4. deploy/install-host-units.sh, the generated launcher: on action restart-in-place, write the request (through the CLI, never a hand-rolled JSON), log it to the revival log, and end the tick without running recycle-container.sh. A later tick's verdict either reads the newer boot (answered) or falls back to recycle through today's watchdog_recycle.
+    RESTART_REQUEST_GRACE_MS starts at 15 min (three 5-min launcher ticks). Report observed request-to-boot times in the ledger so the bound can be re-derived from evidence later.
+    Mark each change with a comment naming W1-T11327.
+    NOT IN SCOPE:
+    - image changes, which still recycle;
+    - recycle-container.sh itself (siblings filed beside this: single-flight PAUSE, the stall clock under a recycle PAUSE, the derived wait, the light-pass refill under PAUSE, recycle outcome rows);
+    - judging a retro as hung.
+  note: |
+    Build after W1-T11318, W1-T11319 and W1-T11320 if they are still open: they share progress-watchdog.ts, run-task.ts and install-host-units.sh.
+    reservation hand-off: run-unfiled-1793801339784 -> run-unfiled-1793801339784
+    Reserved with rmd next-task-id (W1-T11327 on run-unfiled-1793801339784). Operator ruling 2026-11-04: "File, build after the 9".
+    Build after the sibling recycle tasks filed with it, which also edit src/lib/progress-watchdog.ts, src/run-task.ts and deploy/install-host-units.sh: the single-flight PAUSE, the stall clock under a recycle PAUSE, and the watchdog's derived wait. That ordering is the operator's, not a hard dependency, so it is not depends_on.
+    Open questions for the builder, to settle in code before claiming:
+    - Does the daemon reach a consume point during the full-sweep prelude? Those ran 23-72 min on 11-03. If not, the 15-min grace falls back to recycle, today's behaviour, and the builder should say so.
+    - Is run-child mode on in production (deps.adoptRunChildren set, childMode true)? If not, in-process lanes are awaited and the in-place restart waits for them.
