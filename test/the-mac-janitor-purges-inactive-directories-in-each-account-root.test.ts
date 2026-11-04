@@ -27,7 +27,7 @@ exec '${stat}' "$@"
   writeFileSync(join(fx.root, "bin/lsof"), `#!/bin/bash
 [ "\${FAIL_LSOF:-0}" != 1 ] || exit 2
 case " $* " in
-  *" +D "*) target="\${@: -1}"; rc=1
+  *" +D "*|*" -- "*) target="\${@: -1}"; rc=1
     while IFS= read -r p; do case "$p" in "$target"|"$target"/*) printf 'p1\\nn%s\\n' "$p"; rc=0 ;; esac; done < '${fx.lsofList}'
     exit "$rc" ;;
 esac
@@ -88,7 +88,7 @@ test("the default account policy includes Remudero, lanes-wt, the canonical chec
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("each Mac account's default operator-worktrees root retains young, active and evidence-bearing children", () => {
+test("each Mac account's default operator-worktrees root retains young, active and state-bearing children", () => {
   // This source-policy control is discriminating on Linux too: do not broaden
   // production's Mac-only default merely to satisfy a cross-platform fixture.
   assert.match(readFileSync(SCRIPT, "utf8"), /if \[ "\$OS_NAME" = "Darwin" \]; then\n(?:[^\n]*\n){0,4}  DIRECTORY_SCAN_ROOTS\+=\("\$USER_HOME\/Developer\/remudero-operator-worktrees"\)/);
@@ -101,8 +101,8 @@ test("each Mac account's default operator-worktrees root retains young, active a
       const old = data(root, "old-idle-data");
       const young = data(root, "five-hour-data", 5);
       const held = data(root, "active-data");
-      const evidence = data(root, "uncommitted-evidence");
-      writeFileSync(join(evidence, "repair.patch"), "keep original work\n"); age(evidence, 8);
+      const evidence = data(root, "state-bearing");
+      writeFileSync(join(evidence, "ledger.ndjson"), "{}\n"); age(evidence, 8);
       writeFileSync(fx.lsofList, held + "\n");
       const r = sweep(fx, true, { REMUDERO_JANITOR_DIRECTORY_ROOTS: "" });
       assert.equal(r.status, 0, r.stderr + r.stdout);
@@ -114,16 +114,33 @@ test("each Mac account's default operator-worktrees root retains young, active a
   }
 });
 
-test("unversioned source, reports, history, credentials and dependency seeds survive a recent idle period", () => {
+test("history, keys, keep markers and dependency seeds survive any age while reports and saved work retire after six idle hours", () => {
   const fx = setup();
   try {
-    const base = roots(fx)[3]!;
-    const names = ["fix.py", "report.md", "summary.txt", "report.json", ".rmd-janitor-keep", "package.json", "ledger.ndjson", "backup.bundle", "source.tar", "source.zip", "credentials.pem", ".rmd-dependency-seed-root.json", "repair.patch", "repair.diff", "failed.rej", "backup.orig"];
-    const held = names.map((file, i) => { const p = data(base, `held-${i}`); writeFileSync(join(p, file), "retain\n"); age(p, 8); return p; });
-    const idle = data(base, "idle-sibling"); const r = sweep(fx);
+    const base = roots(fx)[4]!;
+    const keep = [".rmd-janitor-keep", "ledger.ndjson", "credentials.pem", ".rmd-dependency-seed-root.json"];
+    const expire = ["fix.py", "report.md", "summary.txt", "report.json", "package.json", "backup.bundle", "source.tar", "source.zip", "repair.patch", "repair.diff", "failed.rej", "backup.orig"];
+    const folder = (file: string, i: number, tag: string) => { const p = data(base, `${tag}-${i}`); writeFileSync(join(p, file), "retain\n"); age(p, 8); return p; };
+    const held = keep.map((file, i) => folder(file, i, "held"));
+    const retired = expire.map((file, i) => folder(file, i, "expired"));
+    const young = data(base, "young-report", 5); writeFileSync(join(young, "report.md"), "fresh\n"); age(young, 5);
+    const seedRoot = join(fx.home, "rmd-work");
+    const seedMarker = join(seedRoot, ".rmd-dependency-seed-root.json");
+    const seedMetadata = join(seedRoot, "generation-index.json");
+    writeFileSync(seedMarker, '{"version":1}\n');
+    writeFileSync(seedMetadata, '{"generation":"immutable"}\n');
+    const generation = data(seedRoot, "immutable-generation", 72);
+    age(seedMarker, 72); age(seedMetadata, 72);
+    const looseReport = join(base, "old-report.md");
+    writeFileSync(looseReport, "finished report\n"); age(looseReport, 8);
+    const r = sweep(fx);
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.equal(existsSync(idle), false, r.stdout);
-    for (const path of held) assert.equal(existsSync(path), true, path + r.stdout);
+    for (const path of [...held, young]) assert.equal(existsSync(path), true, path + r.stdout);
+    for (const path of retired) assert.equal(existsSync(path), false, path + r.stdout);
+    assert.equal(existsSync(looseReport), false, r.stdout);
+    assert.equal(existsSync(generation), true, r.stdout);
+    assert.equal(readFileSync(seedMarker, "utf8"), '{"version":1}\n', r.stdout);
+    assert.equal(readFileSync(seedMetadata, "utf8"), '{"generation":"immutable"}\n', r.stdout);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 

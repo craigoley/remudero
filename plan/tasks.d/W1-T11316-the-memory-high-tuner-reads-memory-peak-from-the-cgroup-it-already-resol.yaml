@@ -6,7 +6,10 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=3fe5bae3fd97df4e
+  # backlog gardener: placed=2026-11-04T18:42:37.506Z
   attempts: 0
   files:
     - deploy/memory-high-tuner.sh
