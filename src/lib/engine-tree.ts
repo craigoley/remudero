@@ -396,7 +396,27 @@ async function advanceEngine(
     return kept;
   }
   try {
-    return await advancePinned(stateRoot, final, present, sha, deps, git, clock, row, kept);
+    // The record read above predates the pin: another process may have advanced the tree since. Every decision that
+    // gates the move (ancestry, the census, the restore target, the record written) is taken again from the record
+    // as it stands under the pin, so two overlapping advances can never move the tree back (A→C, then C→B).
+    const current = readRecord(final);
+    if (current === undefined || current.sourceHash !== present.sourceHash) {
+      log("engine.advance_deferred", { ...row, reason: "the engine record changed under the pin" });
+      return kept;
+    }
+    if (current.sha === sha) return kept;
+    let stillForward: boolean;
+    try {
+      stillForward = await isAncestor(git, deps.repoDir, current.sha, sha);
+    } catch (err) {
+      log("engine.advance_deferred", { ...row, from_sha: current.sha, reason: `ancestry unreadable: ${reasonOf(err)}` });
+      return kept;
+    }
+    if (!stillForward) {
+      log("engine.advance_deferred", { ...row, from_sha: current.sha, reason: "superseded" });
+      return kept;
+    }
+    return await advancePinned(stateRoot, final, current, sha, deps, git, clock, { ...row, from_sha: current.sha }, kept);
   } finally {
     pin.release();
   }

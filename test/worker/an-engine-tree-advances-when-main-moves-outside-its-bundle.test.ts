@@ -165,3 +165,33 @@ test("an engine a launch is pinning is not advanced until the pin is released", 
   await ensureEngineTree(state, shas[2]!, hash, base);
   assert.deepEqual(engineAt(state, hash), { head: shas[2], recorded: shas[2] }, "positive control: an unpinned engine advances");
 });
+
+test("two overlapping advances never move an engine back: the later caller re-reads the record under the pin", async () => {
+  const { dir, shas } = seedCommits(3);
+  const state = tmp();
+  const hash = hashOf(96);
+  const rows: Row[] = [];
+  const log = (step: string, extra?: Record<string, unknown>) => void rows.push({ step, extra });
+  const base = { repoDir: dir, storeRoot: join(state, "store"), probe, log, linkNodeModules: () => "linked" as const,
+    materialize: () => ({ outcome: "hit" as const, hash }) };
+  assert.equal((await ensureEngineTree(state, shas[0]!, hash, base)).kind, "built");
+
+  // Caller X (target B) has read the record at A and passed its pre-pin ancestry check; before it takes the pin,
+  // caller Y (another process: a distinct state-root spelling, so it does not join X's in-process pass) advances A→C.
+  let overlapped = false;
+  const gitX: EngineGit = async (repoDir, args) => {
+    if (args[0] === "merge-base" && !overlapped) {
+      overlapped = true;
+      const result = await hardenedEngineGit(repoDir, args);
+      await ensureEngineTree(`${state}/.`, shas[2]!, hash, base);
+      assert.deepEqual(engineAt(state, hash), { head: shas[2], recorded: shas[2] }, "positive control: caller Y advanced to C");
+      return result;
+    }
+    return hardenedEngineGit(repoDir, args);
+  };
+  await ensureEngineTree(state, shas[1]!, hash, { ...base, git: gitX });
+  assert.ok(overlapped, "the overlap really happened");
+  assert.deepEqual(engineAt(state, hash), { head: shas[2], recorded: shas[2] }, "the engine stays at the newest descendant");
+  assert.ok(rows.some((r) => r.step === "engine.advance_deferred" && r.extra?.reason === "superseded" && r.extra?.from_sha === shas[2]),
+    "the superseded caller defers, naming the revision it found under the pin");
+});
