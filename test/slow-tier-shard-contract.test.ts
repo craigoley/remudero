@@ -12,6 +12,7 @@ const tier = (await import(pathToFileURL(join(root, "scripts/test-tier-manifest.
   listTestFiles: (root: string) => string[];
   loadManifest: (path: string) => { thresholdMs: number; files: Record<string, number> };
   tierFiles: (files: string[], manifest: { thresholdMs: number; files: Record<string, number> }) => { slow: string[] };
+  slowTierShardCount: (manifest: { thresholdMs: number; files: Record<string, number> }, options?: { testFiles?: string[] }) => number;
   main: (args: string[], opts: {
     spawn: (file: string, args: string[], opts?: unknown) => { status: number };
     env: Record<string, string>;
@@ -22,27 +23,33 @@ const workflow = parse(readFileSync(join(root, ".github/workflows/ci.yml"), "utf
     name?: string;
     needs?: string[];
     if?: string;
-    strategy?: { "fail-fast"?: boolean; matrix?: { shard?: number[] } };
+    strategy?: { "fail-fast"?: boolean; matrix?: { shard?: number[] | string } };
     steps?: Array<{ name?: string; run?: string }>;
   }>;
 };
 
-test("W1-T4756 criterion 1: both balanced slow shards cover the slow tier exactly once", () => {
+test("W1-T4756 criterion 1: the derived balanced slow shards cover the slow tier exactly once", () => {
   const shard = workflow.jobs["test-slow-shard"];
-  assert.deepEqual(shard.strategy?.matrix?.shard, [1, 2]);
+  // W1-T11206: the matrix and its total come from test-slow-plan's derived count.
+  assert.equal(shard.strategy?.matrix?.shard, "${{ fromJSON(needs.test-slow-plan.outputs.shards) }}");
+  assert.equal(shard.name, "test-slow-shard (${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }})");
+  assert.deepEqual(shard.needs, ["test-slow-plan"]);
   assert.equal(shard.strategy?.["fail-fast"], false);
   assert.equal(shard.if, undefined, "push and merge_group must enter the shard job");
   const run = shard.steps?.find((step) => step.name?.startsWith("Run the slow tier"))?.run ?? "";
-  assert.match(run, /--run slow --shard \$\{\{ matrix\.shard \}\}\/2 --base HEAD/);
-  assert.match(run, /test:slow -- --shard \$\{\{ matrix\.shard \}\}\/2 --base/);
+  assert.match(run, /--run slow --shard \$\{\{ matrix\.shard \}\}\/\$\{\{ needs\.test-slow-plan\.outputs\.count \}\} --base HEAD/);
+  assert.match(run, /test:slow -- --shard \$\{\{ matrix\.shard \}\}\/\$\{\{ needs\.test-slow-plan\.outputs\.count \}\} --base/);
 
   const manifest = tier.loadManifest(join(root, "scripts/test-tier-manifest.json"));
-  const slow = tier.tierFiles(tier.listTestFiles(root), manifest).slow;
-  assert.ok(slow.length >= 2, "the control population must fill both shards");
+  const testFiles = tier.listTestFiles(root);
+  const slow = tier.tierFiles(testFiles, manifest).slow;
+  const count = tier.slowTierShardCount(manifest, { testFiles });
+  assert.ok(count >= 2, `derived ${count}`);
+  assert.ok(slow.length >= count, "the control population must fill every derived shard");
   const selected: string[][] = [];
-  for (const index of shard.strategy?.matrix?.shard ?? []) {
+  for (let index = 1; index <= count; index += 1) {
     const calls: string[][] = [];
-    const status = tier.main(["--root", root, "--run", "slow", "--shard", `${index}/2`], {
+    const status = tier.main(["--root", root, "--run", "slow", "--shard", `${index}/${count}`], {
       spawn: (_file: string, args: string[], opts?: unknown) => {
         calls.push(args);
         return finishJudgedRun(args, opts);
@@ -54,7 +61,7 @@ test("W1-T4756 criterion 1: both balanced slow shards cover the slow tier exactl
     selected.push(calls[0]!.filter((arg) => arg.endsWith(".test.ts")));
   }
   assert.ok(selected.every((files) => files.length > 0));
-  assert.equal(new Set(selected.flat()).size, selected.flat().length, "no slow file runs in both shards");
+  assert.equal(new Set(selected.flat()).size, selected.flat().length, "no slow file runs in two shards");
   assert.deepEqual(selected.flat().sort(), slow.sort(), "no slow file is omitted");
 });
 
