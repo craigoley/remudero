@@ -27,7 +27,7 @@ raw: >-
   backlog. Do not raise maxPerDay without the operator; it is a spend bound.
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/16562
 summary:
