@@ -1,0 +1,28 @@
+- id: W1-T11276
+  title: "Recon: RMD_INSTANCE_REGISTRY means a legacy registry to heartbeat, host-update and the installer but an active selection to recycle, serve and deploy-run since #15532 — map every reader and recommend one meaning"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: recon
+  verify: human
+  risk: low
+  origin: operator-session#registry-followups-2026-11-03
+  plan_refs:
+    - W1-T10573
+    - W1-T9795
+  files:
+    - docs/recon/rmd-instance-registry-has-two-meanings.md
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The report lists every reader of RMD_INSTANCE_REGISTRY in deploy/, scripts/ and src/ with file:line, which meaning each applies (legacy registry or active selection), and what each does when the variable names an instance it does not hold
+      proof: "demonstration: the operator reads the report and sees one row per reader with its meaning and its behaviour on a missing instance"
+    - claim: The report recommends one meaning (or a split into two named variables) with the migration order that keeps the live fleet unbroken, and says which readers change
+      proof: "demonstration: the operator reads the report and sees one recommendation, its migration order, and the readers it changes"
+  rationale: |
+    FOUND 2026-11-03 by the #15638 rebuild. #15532 (W1-T10573) made RMD_INSTANCE_REGISTRY an active selection in recycle-container.sh, serve-container.sh and deploy-run. heartbeat (MEM_REGISTRY), host-update (SR_REGISTRY) and install-host-units.sh still read it as a legacy registry path.
+    W1-T9795's fixtures broke on exactly this. A default install made with the variable set would also produce watchdog recycles that #15532 refuses with instance_missing.
+    Not live today: the fleet sets no RMD_INSTANCE_REGISTRY. Deciding the meaning is an operator call, so this is a recon.
+  note: |
+    reservation hand-off: plan-file-1793744859465 -> plan-file-1793744859465
+    Reserved with rmd next-task-id --branch plan-file-1793744859465 from the operator session's ops worktree. Found 2026-11-03 by the hand rebuild of #15638 (W1-T9795) onto #15532's active selection. Operator, in chat: "fix the root causes of issues you find".
