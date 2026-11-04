@@ -12,6 +12,7 @@
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fixedClock } from "./clock.js";
+import { LEDGER_FUTURE_STAMP_TOLERANCE_MS } from "./ledger.js";
 
 export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "IN_PASS" | "RECOVERING" | "CRASH_LOOP" | "UNKNOWN";
 export type ProgressWatchdogAction = "none" | "capture-diagnostics" | "recycle" | "hold-revive";
@@ -58,6 +59,8 @@ export interface ProgressWatchdogVerdict {
   /** W1-T9627: the trailing run of revived containers that died before node wrote `daemon.paths`. */
   preNodeDeaths?: number;
   openPrCountSource?: OpenPrCountSource;
+  /** W1-T11324: progress, boot and loop-resume rows skipped as stamped past the future-stamp tolerance. */
+  futureStampedSkipped?: number;
   reason: string;
 }
 
@@ -77,6 +80,9 @@ function rowMs(row: Record<string, unknown>): number | undefined {
   const ms = Date.parse(row.ts);
   return Number.isNaN(ms) ? undefined : ms;
 }
+
+// W1-T11324: a row stamped past the tolerance (a clock-shifted writer) can neither be progress nor age a generation.
+const futureStamped = (ms: number, nowMs: number): boolean => ms - nowMs > LEDGER_FUTURE_STAMP_TOLERANCE_MS;
 
 /**
  * W1-T9702: the newest FULL pass's `enumerated`, raised by any newer pass that saw more. With no full row
@@ -142,7 +148,7 @@ export function generationBootMsFromRows(
   let newest: number | undefined;
   for (const row of rows) {
     const ms = rowMs(row);
-    if (ms === undefined) continue;
+    if (ms === undefined || futureStamped(ms, nowMs)) continue;
     const runId = typeof row.run_id === "string" ? row.run_id : "";
     const starts = row.step === "daemon.boot"
       || (row.step === "daemon.paths" && !booted.has(runId) && nowMs - ms <= BOOT_GRACE_MS);
@@ -266,21 +272,22 @@ export function inFlightPass(rows: ReadonlyArray<Record<string, unknown>>, nowMs
  * does not affect eligibility: even a block that began after progress was stale has now ended. The existing
  * STALL_* bounds run from the newest resume, so a second silence still exhausts the allowance. No new bound.
  */
-export function loopResumeFromRows(rows: ReadonlyArray<Record<string, unknown>>, newestProgressMs: number | undefined):
-  { resumedMs: number; lagMs: number } | undefined {
+export function loopResumeFromRows(rows: ReadonlyArray<Record<string, unknown>>, newestProgressMs: number | undefined,
+  nowMs = Infinity): { resumedMs: number; lagMs: number } | undefined {
   if (newestProgressMs === undefined) return undefined;
   let boot: Record<string, unknown> | undefined;
   let bootMs = -Infinity;
   for (const row of rows) {
     const ms = row.step === "daemon.boot" ? rowMs(row) : undefined;
-    if (ms !== undefined && ms >= bootMs) [boot, bootMs] = [row, ms];
+    if (ms !== undefined && !futureStamped(ms, nowMs) && ms >= bootMs) [boot, bootMs] = [row, ms];
   }
   if (boot === undefined || typeof boot.actor_pid !== "number") return undefined;
   let resume: { resumedMs: number; lagMs: number } | undefined;
   for (const row of rows) {
     const ms = row.step === LOOP_RESUME_STEP ? rowMs(row) : undefined;
     const lagMs = row.lag_ms;
-    if (ms === undefined || ms <= newestProgressMs || ms < bootMs || typeof lagMs !== "number" || !(lagMs > 0)) continue;
+    if (ms === undefined || futureStamped(ms, nowMs) || ms <= newestProgressMs || ms < bootMs || typeof lagMs !== "number" ||
+      !(lagMs > 0)) continue;
     if (row.actor_pid !== boot.actor_pid || (typeof boot.host === "string" && row.host !== boot.host)) continue;
     if (resume === undefined || ms > resume.resumedMs) resume = { resumedMs: ms, lagMs };
   }
@@ -291,21 +298,25 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
   const { rows, nowMs, openPrCount, openPrCountSource } = input;
   const failedBoots15m = failedBootTimes(rows, nowMs).filter((ms) => nowMs - ms <= CRASH_LOOP_WINDOW_MS).length;
   let newestProgressMs: number | undefined;
+  let futureStampedSkipped = 0;
   for (const row of rows) {
-    if (typeof row.step !== "string" || !PROGRESS_STEPS.has(row.step)) continue;
-    const ms = rowMs(row);
-    if (ms !== undefined && (newestProgressMs === undefined || ms > newestProgressMs)) newestProgressMs = ms;
+    const ms = typeof row.step === "string" ? rowMs(row) : undefined;
+    if (ms === undefined) continue;
+    const counted = PROGRESS_STEPS.has(row.step as string) || row.step === "daemon.boot" || row.step === LOOP_RESUME_STEP;
+    if (counted && futureStamped(ms, nowMs)) { futureStampedSkipped += 1; continue; }
+    if (!PROGRESS_STEPS.has(row.step as string)) continue;
+    if (newestProgressMs === undefined || ms > newestProgressMs) newestProgressMs = ms;
   }
   const progressAgeMs = newestProgressMs === undefined ? null : Math.max(0, nowMs - newestProgressMs);
   // A generation's stall is aged from its OWN boot, never from the dead generation's last progress row.
   const generationBootMs = generationBootMsFromRows(rows, nowMs, newestProgressMs);
   // W1-T9516: a resumed loop's stall is aged from its resume, as a generation's is from its boot.
-  const resume = loopResumeFromRows(rows, newestProgressMs);
+  const resume = loopResumeFromRows(rows, newestProgressMs, nowMs);
   const loopResumedMs = resume?.resumedMs ?? null;
   const preNode = preNodeDeathRun(input.revivalLog ?? readRevivalLogTail(process.env[REVIVAL_LOG_ENV]), rows);
   const verdict = (state: ProgressWatchdogState, action: ProgressWatchdogAction, reason: string): ProgressWatchdogVerdict =>
     ({ state, action, progressAgeMs, generationBootMs, loopResumedMs, failedBoots15m, preNodeDeaths: preNode.count,
-      ...(openPrCountSource ? { openPrCountSource } : {}), reason });
+      ...(openPrCountSource ? { openPrCountSource } : {}), futureStampedSkipped, reason });
 
   if (failedBoots15m >= CRASH_LOOP_BOOTS) {
     return verdict("CRASH_LOOP", "hold-revive", `${failedBoots15m} boots in 15 min logged daemon.paths and never reached daemon.boot`);
