@@ -301,7 +301,7 @@ export function flowOpenQueueReader(
   owner: string, repo: string, readJson: (args: string[]) => Promise<unknown> = ghJsonAsync, clock: Clock = systemClock,
 ): (window: { fromMs: number; toMs: number }) => Promise<FlowOpenQueueRead> {
   return async (window) => {
-    const fields = "number createdAt updatedAt headRefOid headRefName reviewDecision commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}";
+    const fields = "number createdAt updatedAt headRefOid headRefName isDraft mergeable reviewDecision commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}";
     const span = `${fixedClock(window.fromMs).iso().slice(0, 19)}Z..${fixedClock(window.toMs - 1000).iso().slice(0, 19)}Z`;
     const conns = [
       { key: "open", q: "", after: "", done: false, total: NaN, nodes: [] as unknown[] },
@@ -344,7 +344,11 @@ export function flowOpenQueueReader(
       const commit = Array.isArray(commits) && commits.length === 1 ? object(object(commits[0]).commit) : {};
       const rollup = String(object(commit.statusCheckRollup).state);
       const checksState = commit.oid === headSha && ["SUCCESS", "FAILURE", "PENDING", "ERROR", "EXPECTED"].includes(rollup) ? rollup : "UNKNOWN";
+      // The production arm refuses a draft (attemptArmSteps' isDraft === true) and the sweep never arms a conflicting PR,
+      // so both are read here and kept: readiness below asks the same questions production does.
+      const mergeable = ["MERGEABLE", "CONFLICTING", "UNKNOWN"].includes(String(pr.mergeable)) ? String(pr.mergeable) : "UNKNOWN";
       return { number, createdAtMs, updatedAtMs, headSha, headRefName: String(pr.headRefName ?? "unknown"), checksState,
+        ...(typeof pr.isDraft === "boolean" ? { isDraft: pr.isDraft } : {}), mergeable,
         ...(mergedAtMs !== undefined && Number.isFinite(mergedAtMs) ? { mergedAtMs } : {}),
         ...(closedAtMs !== undefined && Number.isFinite(closedAtMs) ? { closedAtMs } : {}) };
     };
@@ -388,6 +392,10 @@ type FlowPlanTask = { id: string; origin?: string; status?: string; retirement?:
 export interface FlowOpenQueuePr {
   number: number; createdAtMs: number; updatedAtMs: number; headSha: string; headRefName: string;
   checksState: string; mergedAtMs?: number; closedAtMs?: number;
+  /** GitHub's draft flag; production refuses to arm only a positive `true` (W1-T3551), so absent is not a draft. */
+  isDraft?: boolean;
+  /** GitHub's mergeability: MERGEABLE, CONFLICTING or UNKNOWN; a conflicting PR is never armed or merged. */
+  mergeable?: string;
 }
 export interface FlowOpenQueueRead {
   ok: boolean; complete: boolean; observedAtMs: number; open: FlowOpenQueuePr[]; window: FlowOpenQueuePr[]; reason?: string;
@@ -679,7 +687,9 @@ export function openQueueShadow(
     const prior = priorReviewVerdictFromLedger(ownRows, taskId, prUrl);
     const override = prior?.capped ? cappedOverrideFromLedger(ownRows, taskId, pr.headSha, prUrl) : undefined;
     const armable = decideArmFromLedgerVerdict(prior, pr.headSha, override).arm && automergeHoldFromLedger(holdRows, pr.number) === undefined;
-    const ready = reviewed !== undefined && armable && pr.checksState === "SUCCESS" && !preflightRefused;
+    // A draft (attemptArmSteps refuses `isDraft === true` first) or a conflicting head (never armed) is not ready.
+    const ready = reviewed !== undefined && armable && pr.checksState === "SUCCESS" && !preflightRefused &&
+      pr.isDraft !== true && pr.mergeable !== "CONFLICTING";
     const reviewAge = reviewWaiting ? Math.max(0, nowMs - tsOf(eligible!)) : null;
     const unread = ledgerFromMs !== undefined && pr.createdAtMs < ledgerFromMs && matching.length === 0;
     const stage = reviewWaiting ? "review_waiting" : preflightRefused ? "merge_preflight_refused" : ready ? "ready_to_direct_merge"

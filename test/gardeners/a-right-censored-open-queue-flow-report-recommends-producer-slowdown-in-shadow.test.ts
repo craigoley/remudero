@@ -24,6 +24,7 @@ const previousWindow = (now: number) => ({ fromMs: dayStart(now) - 2 * DAY, toMs
 function prNode(pr: FlowOpenQueuePr) {
   return { number: pr.number, createdAt: at(pr.createdAtMs), updatedAt: at(pr.updatedAtMs),
     headRefOid: pr.headSha, headRefName: pr.headRefName,
+    ...(pr.isDraft === undefined ? {} : { isDraft: pr.isDraft }), ...(pr.mergeable === undefined ? {} : { mergeable: pr.mergeable }),
     commits: { nodes: [{ commit: { oid: pr.headSha, statusCheckRollup: { state: pr.checksState } } }] },
     ...(pr.mergedAtMs === undefined ? {} : { mergedAt: at(pr.mergedAtMs) }),
     ...(pr.closedAtMs === undefined ? {} : { closedAt: at(pr.closedAtMs) }) };
@@ -437,6 +438,31 @@ test("the production reader never credits a missing or different-head commit rol
     assert.equal(report.cohort.ready_to_direct_merge, 0, "a current-head review also needs current-head green checks");
     assert.equal(report.cohort.open, 3, "unknown checks do not remove right-censored open PRs");
   }
+});
+
+test("W1-T11111 criterion 1: a draft or conflicting head read by the production census is never ready to direct merge", async () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const readiness = async (updates: Record<string, unknown>) => {
+    const body = censusResponse(census(now), windowOf(now));
+    Object.assign(body.data.repository.pullRequests.nodes.find((pr) => pr.number === 16186)!, updates);
+    const read = await flowOpenQueueReader("acme", "remudero", async () => body, fixedClock(now))(openQueueWindow(now));
+    return { pr: read.open.find((pr) => pr.number === 16186)!, cohort: openQueueShadow(read, rows(now), undefined, now).cohort };
+  };
+  // Positive control: #16186's current head is reviewed and green, so the same census marks it ready.
+  const control = await readiness({ isDraft: false, mergeable: "MERGEABLE" });
+  assert.equal(control.pr.isDraft, false, "the reader preserves GitHub's draft flag");
+  assert.equal(control.cohort.ready_to_direct_merge, 1, "a reviewed, green, non-draft, mergeable head is ready");
+  // attemptArmSteps refuses `isDraft === true` before anything else (draft-refused), so a draft is never ready.
+  const draft = await readiness({ isDraft: true, mergeable: "MERGEABLE" });
+  assert.equal(draft.pr.isDraft, true, "the reader preserves GitHub's draft flag");
+  assert.equal(draft.cohort.ready_to_direct_merge, 0, "a reviewed, green draft is not ready: production refuses to arm it");
+  assert.equal(draft.cohort.open, 3, "a draft stays in the right-censored open cohort");
+  // The sweep never arms or merges a conflicting head, so it is not ready either.
+  const conflicting = await readiness({ isDraft: false, mergeable: "CONFLICTING" });
+  assert.equal(conflicting.pr.mergeable, "CONFLICTING", "the reader preserves GitHub's mergeability");
+  assert.equal(conflicting.cohort.ready_to_direct_merge, 0, "a conflicting head is not ready to direct merge");
+  // GitHub still computing mergeability is not a refusal: production arms it and GitHub merges once it settles.
+  assert.equal((await readiness({ isDraft: false, mergeable: "UNKNOWN" })).cohort.ready_to_direct_merge, 1);
 });
 
 test("the registered production flow pass wires one batched queue read in shadow mode", async (t) => {
