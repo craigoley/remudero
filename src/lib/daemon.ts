@@ -14,6 +14,8 @@ import { startRecommendationBackfill, type RecommendationBackfill } from "./inbo
 import { startFleetLane, triageFleetLaneAsync, type FleetLaneDeps } from "./fleet-lane.js";
 import type { Escalation } from "./escalate.js";
 import { governorIncidentFromLedgerRow, governorTiersFromLedger, sreGovernorVerdict, SRE_GOVERNOR_STEP, type SreGovernorControls, type SreGovernorIncident, type SreGovernorVerdict } from "./sre-governor.js";
+import { CONFLICT_GARDEN_TIERS, conflictGardenGovernorVerdict, type ConflictGardenRow, type ConflictGardenControls } from "./conflict-gardener-governor.js";
+import { conflictGardenLedgerReader } from "./conflict-gardener.js";
 import { runSreLanePass, sreLaneOffPath, type SreLaneInput } from "./sre-lane.js";
 import { daemonSreGovernorEnforcer, receiptFromLedgerRow, type SreGovernorEnforcer, type SreRunbookReceipt } from "./sre-runbooks.js";
 import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
@@ -2523,6 +2525,17 @@ export function stepSreGovernor(
   return verdicts;
 }
 
+export function stepConflictGardenGovernor(rows: readonly ConflictGardenRow[], controls: ConflictGardenControls,
+  log: (step: string, extra?: Record<string, unknown>) => void, nowMs: number) {
+  return Object.fromEntries(CONFLICT_GARDEN_TIERS.map(tier => {
+    const verdict = conflictGardenGovernorVerdict(tier, rows, controls, nowMs);
+    const previous = rows.findLast(r => r.step === "conflict_garden.governor" && r.tier === tier);
+    if (previous?.mode !== verdict.tier) log("conflict_garden.governor", { tier, mode: verdict.tier,
+      paused: verdict.tier === "stopped", reason: verdict.reason });
+    return [tier, verdict];
+  }));
+}
+
 /** The needs-human issue for a governor stop — one per runbook, whatever incident was burning. */
 function sreGovernorEscalation(runbook: string, verdict: SreGovernorVerdict): Escalation {
   return {
@@ -4179,6 +4192,7 @@ export async function runDaemon(
   const sreFallbackRoot = deps.fleetLane;
   const sreGovernor: SreGovernorEnforcer | undefined =
     deps.sreGovernor ?? (sreFallbackRoot ? daemonSreGovernorEnforcer({ ledgerPath: sreFallbackRoot.ledgerPath, laneOffPath: sreLaneOffPath(sreFallbackRoot.stateDir) }) : undefined);
+  const conflictGovernorLedger = deps.fleetLane ? conflictGardenLedgerReader(deps.fleetLane.stateDir, true) : undefined;
   // One sampler state shared by the main loop and every in-flight ticker, so the two can never
   // double-read and staleness is measured against whichever read last. Seeded to 0 so the first long
   // phase after boot samples immediately (W1-T2565).
@@ -5893,6 +5907,20 @@ export async function runDaemon(
         stepSreGovernor(sreGovernor, controls, log, daemonClock.now());
       } catch (e) {
         log("sre.governor.failed", { reason: String((e as Error)?.message ?? e) });
+      }
+    }
+
+    if (deps.readLedgerLines) {
+      try {
+        const rows: ConflictGardenRow[] = conflictGovernorLedger ? await conflictGovernorLedger() : [];
+        if (!conflictGovernorLedger) for (const raw of deps.readLedgerLines()) {
+          try { rows.push(JSON.parse(raw)); }
+          catch (error) { throw new Error(`conflict governor ledger row unreadable: ${String(error)}`); }
+        }
+        const quiet = deps.checkQuietHours?.();
+        stepConflictGardenGovernor(rows, { pause: deps.checkPause?.(), quietHours: quiet ? quiet.detail ?? "quiet hours" : undefined }, log, daemonClock.now());
+      } catch (error) {
+        log("conflict_garden.governor_failed", { reason: String(error) });
       }
     }
 

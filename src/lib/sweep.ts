@@ -323,6 +323,7 @@ import type {
 } from "./supersession.js";
 export type { SupersessionDiffFinding, SupersessionEvidence, SupersessionStatus, SupersessionVerdict };
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
+import type { ConflictGardenAct, ConflictGardenTier } from "./conflict-gardener-governor.js";
 import type { WorkflowRunJobObservation, WorkflowRunObservation } from "./workflow-run.js";
 import type { ReviewCapacityPolicy } from "./review-capacity.js";
 import {
@@ -1993,7 +1994,7 @@ function writeRegisteredArtifact(worktree: string, path: string, bytes: Buffer):
 export async function regenerateConflictViaGit(
   repoDir: string,
   worktreePath: string,
-  pr: Pick<OpenPrView, "prNumber" | "headRefName" | "headSha" | "taskId">,
+  pr: Pick<OpenPrView, "prNumber" | "headRefName" | "headSha" | "taskId"> & Pick<Partial<OpenPrView>, "mergeConflict">,
   mainSha: string,
   deps: Pick<BuildSweepEffectsDeps, "worktreeRemoveImpl"> & {
     git?: (cwd: string, args: readonly string[]) => string | Promise<string>;
@@ -2022,19 +2023,20 @@ export async function regenerateConflictViaGit(
       await run(repoDir, ["worktree", "add", "--detach", worktreePath, pr.headSha]);
       created = true;
       let mergeError: string | undefined;
-      try { await run(worktreePath, ["merge", "--no-edit", "--no-commit", mainSha]); }
+      try { await run(worktreePath, ["merge", "--no-edit", "--no-commit", "--no-ff", mainSha]); }
       catch (error) {
         const reason = spawnFailureText(error);
         mergeError = reason;
       }
       const unmerged = [...new Set((await run(worktreePath, ["ls-files", "-u", "-z"])).split("\0")
         .filter(Boolean).map(entry => entry.slice(entry.indexOf("\t") + 1)))];
-      if (unmerged.length === 0) {
-        return { outcome: "error", paths, reason: mergeError === undefined
-          ? "probe conflict no longer has unmerged paths" : mergeError };
-      }
+      if (unmerged.length === 0 && mergeError !== undefined) return { outcome: "error", paths, reason: mergeError };
+      if (unmerged.length === 0 && !(await run(worktreePath, ["rev-parse", "--verify", "-q", "MERGE_HEAD"])).trim())
+        return { outcome: "fell-through", paths, reason: "main is already present" };
       const outside = unmerged.filter(path => !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
-      if (outside.length > 0) {
+      const redundant = isRedundantRefixConflict(pr.mergeConflict) &&
+        unmerged.every(path => pr.mergeConflict!.redundantRefix!.comparedPaths.includes(path));
+      if (outside.length > 0 && !redundant) {
         await run(worktreePath, ["merge", "--abort"]);
         return { outcome: "fell-through", paths, reason: `unmerged paths outside the registry: ${outside.join(", ")}` };
       }
@@ -2045,7 +2047,8 @@ export async function regenerateConflictViaGit(
           paths.push({ path, action: "deleted-on-main" });
         } else {
           await run(worktreePath, ["checkout", mainSha, "--", path]);
-          paths.push({ path, action: REGENERABLE_ARTIFACT_GENERATORS[path]! });
+          if (Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path)) paths.push({ path, action: REGENERABLE_ARTIFACT_GENERATORS[path]! });
+          else await run(worktreePath, ["add", "--", path]);
         }
       }
       const generated = paths.filter(({ action }) => action !== "deleted-on-main");
@@ -13178,7 +13181,7 @@ export interface FixDispatchEvidence {
   progressApproach?: string;
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict fix mode's input — populated for a `conflicted` dispatch only. */
-  mergeConflict?: MergeConflictEvidence;
+  mergeConflict?: MergeConflictEvidence & { intent?: string };
   /** W1-T5908: the main tip this `conflicted` dispatch was derived against. */
   baseSha?: string;
   /** W1-T2236: see this interface's own doc, above. Populated ONLY when `unmetCriteria` is empty. */
@@ -16420,6 +16423,78 @@ const inFlightReviewKeys = new Set<string>();
  *  {@link claimFixDispatch} RE-READS the ledger the instant the claim is taken. A SEPARATE Set from
  *  the review mutex. // Why: 13 dispatches across two PRs against a cap of 2. */
 const inFlightFixKeys = new Set<string>();
+
+/** The gardener reads the sweep's own keys; a detached action is never stolen. */
+export function conflictGardenSweepHold(pr: OpenPrView, rows: readonly Record<string, unknown>[], runId: string): string | undefined {
+  const key = `${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`;
+  if (inFlightFixKeys.has(key)) return "live fix claim";
+  if ([...childWork.values()].some(work => work.prNumber === pr.prNumber &&
+    (work.headSha === undefined || work.headSha === pr.headSha))) return "in-flight sweep action";
+  if ([...detachedSweepActions.values()].some(a => a.taskId === fixLedgerTaskIdFor(pr))) return "in-flight sweep action";
+  const hold = automergeHoldFromLedger(rows, pr.prNumber);
+  if (hold) return `operator merge hold: ${hold.reason}`;
+  if (fixSeedRead(rows, pr, runId)?.kind === "live") return "live fix seed";
+  return undefined;
+}
+
+/** Shared with the conflicted arm below: the ordinary dispatch owns the checkout claim and fence. */
+function dispatchConflictedRepair(pr: OpenPrView, deps: Pick<SweepDeps, "dispatchFix">,
+  evidence: FixDispatchEvidence, onPhase?: DetachedFixPhaseObserver, control?: DetachedFixControl) {
+  return deps.dispatchFix(pr, evidence, onPhase, control);
+}
+
+export async function runConflictGardenTier(
+  pr: OpenPrView, tier: ConflictGardenTier, mainSha: string,
+  deps: Pick<SweepDeps, "dispatchFix" | "regenerateConflict" | "readLiveState" | "terminalFixStandDown" |
+    "workerAdmissionHold" | "claimFixAdmission" | "ledgerPath" | "runId" | "readLedger" | "appendLine" | "fixOwnerReclaimableAtHold" | "readTaskContractRevision">,
+  approach?: string, intent?: string,
+): Promise<ConflictGardenAct> {
+  const read = () => (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+  const rows = read();
+  const hold = conflictGardenSweepHold(pr, rows, deps.runId) ?? deps.workerAdmissionHold?.() ?? deps.terminalFixStandDown?.(pr);
+  if (hold) return { outcome: "held", reason: hold };
+  const live = await deps.readLiveState?.(pr);
+  if (live && (!live.ok || terminalStateReason(live.state) || live.headSha !== undefined && live.headSha !== pr.headSha))
+    return { outcome: "held", reason: "PR state unreadable, terminal or head moved" };
+  if (tier === "deterministic") {
+    const result = await deps.regenerateConflict?.(pr, mainSha);
+    return { outcome: result?.outcome ?? "unchanged", newHeadSha: result?.newHeadSha, reason: result?.reason };
+  }
+  const current = { headSha: pr.headSha, bodySha256: prBodyDigest(pr.body),
+    contractRevision: pr.taskId ? deps.readTaskContractRevision?.(pr.taskId) : undefined };
+  const seed = fixSeedRead(rows, pr, deps.runId, current);
+  const dispatchHold = fixDispatchHoldAtHead(pr, rows, existsSync, deps.fixOwnerReclaimableAtHold);
+  if (dispatchHold || seed?.kind === "held") return { outcome: "held", reason: dispatchHold?.reason ?? seed?.hold?.reason };
+  const stale = seed?.kind === "orphaned" || seed?.kind === "ended" ||
+    rows.some(r => r.step === "sweep.disposed" && r.pr_number === pr.prNumber && r.head_sha === pr.headSha && r.dispatch_held);
+  if (tier === "round" && stale) return { outcome: "unchanged", reason: "stale seed or released hold belongs to wedge clearing" };
+  if (tier === "wedge" && !stale) return { outcome: "unchanged", reason: "no stale seed or released hold" };
+  if (!hasCapturedMergeConflictEvidence(pr.mergeConflict)) return { outcome: "held", reason: "merge-conflict file evidence unavailable" };
+  if (seed?.kind === "orphaned") settleOrphanedConflictSeed(pr, deps, seed);
+  const key = `${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`;
+  if (inFlightFixKeys.has(key)) return { outcome: "held", reason: "live fix claim" };
+  inFlightFixKeys.add(key);
+  let release: (() => void) | undefined;
+  try {
+    const admission = deps.claimFixAdmission?.(pr);
+    if (admission && !admission.admitted) return { outcome: "held", reason: admission.reason };
+    release = admission?.release;
+    const outcome = await dispatchConflictedRepair(pr, deps, { unmetCriteria: [], baseSha: mainSha,
+      mergeConflict: pr.mergeConflict && { ...pr.mergeConflict, ...(intent ? { intent } : {}) }, progressApproach: approach });
+    const declined = fixClaimDeclinedReason(outcome);
+    return { outcome: declined ? "held" : "dispatched", reason: declined };
+  } finally {
+    try { release?.(); }
+    finally { inFlightFixKeys.delete(key); }
+  }
+}
+
+function settleOrphanedConflictSeed(pr: OpenPrView,
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "appendLine">, seed: FixSeedRead): void {
+  (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+    step: FIX_SEED_ORPHANED_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+    seed_ts: seed.seed.ts, seed_run_id: seed.seed.runId, reason: seed.orphanReason ?? "earlier-run-without-rung" });
+}
 
 /** W1-T5032 — a proof amendment's `fix.dispatch` identity row is an idempotency record, never a strike;
  *  hidden from the strike tally here, while `lookupIdentity` still reads it. */
@@ -21141,9 +21216,7 @@ export async function runSweep(
           ? false
           : dispatchedThisHead && (seedRead?.kind ?? "live") === "live"; // no read: a taskless PR's key (W1-T9955)
         if (seedRead?.kind === "orphaned" && !deps.dryRun) {
-          appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: FIX_SEED_ORPHANED_STEP,
-            pr_number: pr.prNumber, head_sha: pr.headSha, seed_ts: seedRead.seed.ts, seed_run_id: seedRead.seed.runId,
-            reason: seedRead.orphanReason ?? "earlier-run-without-rung" });
+          settleOrphanedConflictSeed(pr, { ...deps, appendLine }, seedRead);
         }
         if (alreadyDone) {
           const seed = seedRead?.seed;
@@ -22770,10 +22843,10 @@ export async function runSweep(
               }
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
               if (deps.detachFixWait) {
-                await detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence, onPhase, conflictedFixClaim.control)), conflictedFixClaim, undefined, conflictedEvidence);
+                await detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(() => dispatchConflictedRepair(pr, deps, conflictedEvidence, onPhase, conflictedFixClaim.control)), conflictedFixClaim, undefined, conflictedEvidence);
                 break;
               }
-              const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
+              const conflictedDispatchOutcome = await conflictedFixClaim.run(() => dispatchConflictedRepair(pr, deps, conflictedEvidence));
               if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
               const conflictedDeclinedReason = fixClaimDeclinedReason(conflictedDispatchOutcome);
               if (conflictedDeclinedReason) [acted, standDownReason] = [false, conflictedDeclinedReason];

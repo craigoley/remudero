@@ -135,7 +135,7 @@ export interface FixEvidence {
   review?: { unmetCriteria: (CriterionVerdict & { criterionIndex?: number })[]; summary: string; findings?: FixReviewFinding[] };
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict mode's ONLY input — conflicting files + both sides' log since merge-base. */
-  mergeConflict?: MergeConflictEvidence;
+  mergeConflict?: MergeConflictEvidence & { intent?: string };
   /** W1-T2236: the `gate-fix` mode's ONLY input — see this interface's own doc, above. */
   actionableGateFailures?: ActionableGateFailure[];
   /** W1-T3306: exact stale or non-executable proof rows from a capped green verdict. */
@@ -618,6 +618,9 @@ export function renderFixPrompt(opts: {
           "",
           `log since merge-base — THEIR side (origin/main):`,
           neutralizeFenceMarkers(mc?.theirsLog || "(not captured)"),
+          "",
+          "Both sides' intent (PR body and main commit subjects and bodies per conflicted file):",
+          neutralizeFenceMarkers(mc?.intent || "(not captured — inspect the PR body and main's commits touching each conflicted file)"),
         ].join("\n"),
         "ci-log",
       ),

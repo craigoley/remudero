@@ -27,6 +27,8 @@ import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { runFlakeIncidentGardener } from "./flake-incident-gardener.js";
 import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener, type AdmissionFlowInput } from "./flow-gardener.js";
+import { runConflictGarden, type ConflictGardenPorts } from "./conflict-gardener.js";
+import { CONFLICT_GARDEN_TIERS, conflictGardenGovernorVerdict } from "./conflict-gardener-governor.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "./gardener-overseer.js";
 import {
@@ -66,6 +68,7 @@ export const REGISTERED_GARDEN_NAMES = [
   "scout",
   // W1-T5904: the daily flow report, which files a PR stage that slowed past its baseline.
   "flow",
+  "conflict",
   "flow-remedy",
   // W1-T7421: the fix lane's own defects, clustered once a UTC day and drafted as one remedy per class.
   "fix-lane",
@@ -837,6 +840,18 @@ export function flowGardenPass(
     }
   };
   return Object.assign(pass, { due: () => flowPassDue(d.stateDir, d.clock) });
+}
+
+export function conflictGardenPass(stateDir: string, ports: ConflictGardenPorts): (() => Promise<void>) & { due: () => Promise<boolean> } {
+  const pass = async () => {
+    await runConflictGarden(ports);
+    recordGardenPacing(stateDir, "conflict", false);
+  };
+  return Object.assign(pass, { due: async () => {
+    const rows = await ports.ledger();
+    if (CONFLICT_GARDEN_TIERS.some(tier => conflictGardenGovernorVerdict(tier, rows, ports.controls?.() ?? {}, ports.now()).tier === "stopped")) return false;
+    return gardenPacingDueAsync(stateDir, "conflict");
+  } });
 }
 
 /** W1-T8864: one issue-revalidation pass as the daemon builds it. Paced: a pass whose verdicts all match

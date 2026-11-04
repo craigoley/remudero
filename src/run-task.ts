@@ -2872,6 +2872,11 @@ import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
 import { hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError, type HostWorktreeGitOptions } from "./lib/worktree-git.js";
+import { conflictGardenPass } from "./lib/garden-registry.js";
+import { conflictGardenIntent, conflictGardenLedgerReader, type ConflictGardenPorts } from "./lib/conflict-gardener.js";
+import { conflictGardenSweepHold, runConflictGardenTier, regenerateConflictViaGit, fixRoundClaimEnded } from "./lib/sweep.js";
+import { readWorkSpec } from "./lib/run-child.js";
+import { classifyRunDir, runDir } from "./lib/run-child-contract.js";
 import {
   defaultGitCapture,
   defaultGitCaptureAsync,
@@ -27510,6 +27515,111 @@ export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
 export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean | Promise<boolean> };
 
+export function conflictGardenRunTaskPorts(ctx: GardenBuildContext, overrides: Partial<ConflictGardenPorts> = {},
+  io: { readJson?: typeof ghJsonAsync; readRequired?: typeof readRequiredStatusCheckContextsAsync } = {}): ConflictGardenPorts {
+  const { config, owner, repo, repoRoot: checkout, log } = ctx;
+  const stateDir = join(config.root, "state"), ledgerPath = join(stateDir, LEDGER_FILENAME);
+  const runId = `conflict-garden-${randomUUID()}`;
+  const readJson = io.readJson ?? ghJsonAsync;
+  const planNow = () => loadPlan(ctx.planPath ?? join(checkout, "plan", "tasks.yaml"));
+  const effects = () => buildSweepEffects({ config, owner, repo, ledgerPath, runId, plan: planNow(), log,
+    productionProgressJudge: true, policy: DEFAULT_SWEEP_POLICY });
+  const ledger = conflictGardenLedgerReader(stateDir);
+  const git = (args: readonly string[]) => hostWorktreeGitAsync(checkout, args, { maxBuffer: 1 << 24 });
+  const branchKey = (pr: OpenPrView) => fixBranchClaimKey(owner, repo, pr.headRefName ?? "");
+  const controls = overrides.controls ?? (() => ({ emergencyStop: stopDetail(config.root),
+    pause: checkSharedPause(config.root, realDeps().sharedPauseGit), quietHours: isQuietHours(config.root) ? "quiet hours" : undefined }));
+  const skip: ConflictGardenPorts["skip"] = async (pr, rows) => {
+    if (!pr.headRefName) return "PR branch is unreadable";
+    const reading = controls();
+    const control = reading.emergencyStop ?? reading.pause ?? reading.quietHours;
+    if (control) return control;
+    const held = readInflightLock(join(stateDir, "inflight"), branchKey(pr));
+    if (held && !isHolderStale(held, { isPidAlive: defaultIsPidAlive }) && !fixRoundClaimEnded(ledgerPath, held.run_id))
+      return "live fix claim";
+    for (const row of rows) {
+      if (row.step !== "run_child.spawned" || row.task_id !== escalationTaskIdFor(pr) || typeof row.run_id !== "string") continue;
+      const dir = runDir(stateDir, row.run_id);
+      if (!existsSync(dir)) continue;
+      const child = classifyRunDir(dir);
+      if (child.kind !== "live" && child.kind !== "unreadable") continue;
+      const work = readWorkSpec(dir);
+      if (work === "malformed") return "sweep action identity unreadable";
+      if (work?.prNumber === pr.prNumber && (work.headSha === undefined || work.headSha === pr.headSha))
+        return child.kind === "live" ? "in-flight sweep action" : "sweep action liveness unreadable";
+    }
+    return conflictGardenSweepHold(pr, rows, runId);
+  };
+  const verify: ConflictGardenPorts["verify"] = async (pr, act) => {
+    const raw = await readJson(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as
+      { head?: { sha?: string }; mergeable?: boolean | null; mergeable_state?: string };
+    const headSha = raw.head?.sha;
+    if (!headSha) throw new Error(`PR #${pr.prNumber} has no readable head`);
+    const [required, rollup] = await Promise.all([
+      (io.readRequired ?? readRequiredStatusCheckContextsAsync)(owner, repo), rollupForAsync(owner, repo, headSha, args => readJson(args)),
+    ]);
+    const names = new Set(required.kind === "contexts" ? required.contexts : []);
+    const gate = dedupeRollupByLatestAttempt(rollup).filter(check => names.size === 0 ||
+      names.has(check.name ?? "") || names.has(check.context ?? ""));
+    const missing = [...names].some(name => !gate.some(check => check.name === name || check.context === name));
+    const states = gate.map(check => (check.state ?? check.conclusion ?? check.status ?? "").toUpperCase());
+    const checksState: OpenPrView["checksState"] = required.kind === "unreadable" || missing ? "pending"
+      : states.length === 0 ? "none" : states.some(state => REQUIRED_CHECK_FAIL.has(state)) ? "red"
+        : states.every(state => REQUIRED_CHECK_OK.has(state)) ? "green" : "pending";
+    let reverted = false;
+    if (typeof act?.new_head_sha === "string" && act.new_head_sha !== headSha) {
+      const comparison = await readJson(["api", `repos/${owner}/${repo}/compare/${act.new_head_sha}...${headSha}`]) as
+        { commits?: { commit?: { message?: string } }[] };
+      reverted = comparison.commits?.some(c => c.commit?.message?.includes(`This reverts commit ${act.new_head_sha}.`)) === true;
+    }
+    return { headSha, mergeableState: typeof raw.mergeable !== "boolean" ? "unknown" :
+      raw.mergeable === false ? "dirty" : raw.mergeable_state, checksState, reverted };
+  };
+  return {
+    now: Date.now, runId, log, ledger, skip, verify, controls,
+    snapshot: async () => {
+      const prs = await buildOpenPrViewsAsync(owner, repo, ledgerPath);
+      const mainSha = await effects().readMainTip?.();
+      if (!mainSha) throw new Error("conflict garden could not read main tip");
+      return { prs, mainSha };
+    },
+    dependents: pr => pr.taskId ? planNow().tasks.filter(t => t.status === "queued" && t.depends_on.includes(pr.taskId!)).length : 0,
+    judge: input => effects().fixProgressJudge!(input),
+    act: async (pr, tier, mainSha, approach) => {
+      const current = effects();
+      const rows = await ledger();
+      const intent = tier === "deterministic" ? undefined : await conflictGardenIntent(pr, mainSha, git);
+      const result = await runConflictGardenTier(pr, tier, mainSha, {
+        ...current, ledgerPath, runId, readLedger: () => rows,
+        claimFixAdmission: pr => createSweepFixAdmissionController({
+          surface: "full", queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
+          activeWorkers: activeWorkerCount(), readActiveWorkers: activeWorkerCount, reviewReservations: 0,
+          readPressure: () => productionFixPressure(DEFAULT_SWEEP_POLICY.memoryFloorMib, ledgerPath, classEstimate("fix").estimateMib),
+          readEstimate: classEstimate, readTypical: classTypical, readResidents: () => productionFixAdmissionResidents(config.root), log,
+        }).claim(pr),
+        regenerateConflict: async (target, main) => {
+          const claim = acquireInflightLock(join(stateDir, "inflight"), branchKey(target), { run_id: runId });
+          try {
+            return await regenerateConflictViaGit(checkout,
+              join(worktreesDir(config), `conflict-garden-${target.prNumber}-${randomUUID()}`), target, main);
+          } finally { claim.release(); }
+        },
+      }, approach, intent);
+      if (tier !== "deterministic" && result.outcome === "dispatched") {
+        const observed = await current.readLiveState?.(pr);
+        if (observed?.ok && observed.headSha && observed.headSha !== pr.headSha) return { ...result, newHeadSha: observed.headSha };
+      }
+      return result;
+    },
+    escalate: async (pr, reason) => ctx.raiseDuplicate({ class: "BLOCKED", taskId: escalationTaskIdFor(pr),
+      runId, headSha: pr.headSha, cause: "conflict", summary: `Conflict repair needs intent for #${pr.prNumber}`,
+      detail: `${pr.prUrl}\n${reason}`, consequence: "The conflicted PR remains unable to run CI or merge.",
+      options: [{ label: "clarify intent", detail: "State the intended resolution of the conflicting behavior." },
+        { label: "withdraw", detail: "Close the PR if its intended change is no longer wanted." }], recommendation: "clarify intent" }),
+    ...overrides,
+  };
+}
+
 /** W1-T8864: the issue-revalidation garden's ports that live here: the plan, the reconciler's referent
  *  derivation over the garden's own issue list, and the judge on the escalation judge's mount. Each loads
  *  on first use, never at build time. `seams` stand in for the plan, the reconciler's GitHub reads and the
@@ -27804,6 +27914,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "flow":
       return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         { admission: { owner, repo, settings: config.contributorAdmission } });
+    case "conflict":
+      return conflictGardenPass(stateDir, conflictGardenRunTaskPorts(ctx));
     // W1-T8864: every open issue re-checked against current evidence. Shadow until the operator flips
     // `issueRevalidation.mode` to act; the plan and the judge's mount load on the first pass, not here.
     // Operator 2026-11-01: on a non-self managed target it reads THAT repository's issues, plan and checkout,
