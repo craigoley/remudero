@@ -14,6 +14,9 @@
     - W1-T9904
   files:
     - docs/recon/light-pass-review-admission-order-and-width.md
+  # refusal-amendment (W1-T10992, run DAEMON-1793737148911@8d6c7e8267095411522797f627a587f028ecedc2, 2026-11-03T23:25:18.183Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The core ledger at `/mnt/rmd/state2/state` is outside this worktree and I have no shell. I can't count the plain `ledger.<ts>.ndjson` rotations or replay any that exist.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
