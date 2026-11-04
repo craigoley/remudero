@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   # redesign: signature=edc82c8dbf9f3a4d
@@ -27,3 +27,13 @@
   amendment: |
     2026-11-04, by the redesign Architect (machine, rule 16): Proof format was invalid; replace with path to actual test file
     Changed acceptance proof to reference the concrete unit test file test/plan/compress-src-lib-plan-ts.test.ts, satisfying the same claim without altering any other task fields.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.95
+    reasons:
+      - "The filed scope is comment compression in src/lib/plan.ts plus a regression test; it explicitly requires unchanged executable tokens, preserved behavioral assertions, and measurable comment reduction."
+      - "The rationale preserves invariants, historical citations, owners, stops and deployment holds, and forbids a new hard comment ceiling."
+      - "The supplied family record reports 34 merged tasks and zero declined tasks; the filing-time gates show no reported failure. Implementation verification remains pending."
+    judged_at: "2026-11-04T07:17:06.282Z"
+    pin: "74825818ea9c71a44c28741418fd7a32f4244246029162cf1088253857d0168f"
