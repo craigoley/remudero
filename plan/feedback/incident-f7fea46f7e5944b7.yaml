@@ -1,0 +1,29 @@
+id: incident-f7fea46f7e5944b7
+ts: 2026-11-04T12:35:12.138Z
+raw: >-
+  Incident f7fea46f7e59: intervention
+  escalated:none:fix-needs-design-at-this-exact-head-merg
+
+  First seen: 2026-11-04T12:34:02.340Z
+
+  Last seen: 2026-11-04T12:35:03.602Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=close target=pr#15034@2026-10-28T12:30:07Z actor=cao825 cause=escalated:none:fix-needs-design-at-this-exact-head-merg — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#f7fea46f7e5944b772e4459bada8e9087692bf80f32891e6534cced179ebe8f0
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
