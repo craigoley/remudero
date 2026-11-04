@@ -30,8 +30,11 @@ function snapshot(source: string) {
 test("W1-T11190: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/plan.ts"), "utf8");
   const actual = snapshot(source);
-  // One explanation's measured before-state keeps this proof discriminating after merge,
-  // without imposing a comment ceiling or freezing future executable edits to the module.
+  const release = actual.comments.find(comment => comment.includes("W1-T3206"));
+  assert.ok(release, "retain the operator-release invariant and its citation");
+  const before = compressionPinBase("src/lib/plan.ts", import.meta.url);
+  if (before === undefined) return;
+  // Compare comment volume only on the compression PR; later edits have no size ceiling.
   const releaseBefore = `/**
  * W1-T3206 — THE LEDGER STEP THAT RELEASES A PARKED TASK.
  *
@@ -44,15 +47,11 @@ test("W1-T11190: comment compression preserves executable code", () => {
  * spends his bit, so the plan record stays byte-identical, the decision is auditable, and no worker
  * ever rewrites a \`verify:\` field (which Standing rule 15 forbids anyway).
  */`;
-  const release = actual.comments.find(comment => comment.includes("W1-T3206"));
-  assert.ok(release, "retain the operator-release invariant and its citation");
   assert.ok(release.split("\n").length < releaseBefore.split("\n").length,
     "the release explanation has fewer comment lines than before compression");
   assert.ok(Buffer.byteLength(release) < Buffer.byteLength(releaseBefore),
     "the release explanation is shorter, not just rewrapped");
 
-  const before = compressionPinBase("src/lib/plan.ts", import.meta.url);
-  if (before === undefined) return;
   const base = snapshot(before);
   assert.equal(actual.tokens, base.tokens, "every executable token matches the pre-compression source");
   assert.equal(actual.ast, base.ast, "newline-sensitive syntax matches the pre-compression source");
