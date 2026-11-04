@@ -1,0 +1,26 @@
+- id: W1-T11279
+  title: "The status board resolves origin/main from the ref files instead of spawning git rev-parse"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/status-board.ts
+    - test/status-board.test.ts
+  design: "readOriginMainSha in src/lib/inbox.ts is already spawn-free: it reads the loose ref and packed-refs files, so the follow-up's claim that it stays synchronous is stale. The status board's own defaultResolveOriginMainSha (src/lib/status-board.ts) is the real synchronous read: it runs execFileSync git rev-parse origin/main. Point that default at readOriginMainSha and keep it returning undefined, never throwing, when the layout is unrecognised. The three ls-remote reads in the same file (defaultReadPushedRunBranches, defaultReadSharedPauseState, defaultReadDispatchClaims) need the network and a synchronous buildStatusBoard, so they are out of scope here and need their own async design."
+  acceptance:
+    - claim: "defaultResolveOriginMainSha resolves origin/main through readOriginMainSha and no longer spawns git rev-parse"
+      proof: "unit test: status board resolves origin/main without spawning git"
+    - claim: "an unrecognised ref layout still yields undefined rather than a throw"
+      proof: "unit test: status board origin/main resolution is undefined for an unrecognised layout"
+  origin: "followup:DAEMON-1793696481274:2026-11-03T10:47:11.989Z:2"
+  rationale: >-
+    From the 2026-11-03 follow-up on https://github.com/craigoley/remudero/pull/16432, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: `readOriginMainSha` and the status board's `ls-remote` and
+    `rev-parse` reads remain synchronous on other serve paths. They are not this task's subject. —
+    from W1-T11128 (run DAEMON-1793696481274, https://github.com/craigoley/remudero/pull/16432)

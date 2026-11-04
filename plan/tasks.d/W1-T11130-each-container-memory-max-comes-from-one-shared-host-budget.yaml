@@ -20,10 +20,12 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: For each fleet container, memory.max is the host's MemTotal less the host reserve less the sum of the OTHER containers' learned peaks, so the four limits cannot together exceed the host; serve is sized the same way
+    - claim: For each fleet container, serve included, memory.max is the LARGER of the shared-budget formula (the host's MemTotal less the host reserve less the sum of the OTHER containers' learned peaks) and that container's own learned peak, so one container at its limit beside the rest at their peaks fits the host whenever the peaks fit, and no container is ever capped below what it has been measured to need; the four limits are not disjoint shares and are not meant to sum to the host
       proof: "unit test: test/deploy/each-container-memory-max-comes-from-one-shared-host-budget.test.ts"
     - claim: A container with no learned peak yet counts its policy floor as its peak, a learned peak is re-read at every recycle so the budget follows measured use, an unreadable host total keeps today's arithmetic (never fatal), and an explicit RMD_SERVE_MEMORY_LIMIT_MIB remains an operator override that is named in the policy note
       proof: "grep: W1-T11130 criterion 2 in test/deploy/each-container-memory-max-comes-from-one-shared-host-budget.test.ts"
+    - claim: Each peer's learned peak is read from that peer's own state root (serve's from the root where core's tuner records it), the same whether RMD_INSTANCE_REGISTRY is unset, names a legacy registry, or names an active selection (W1-T11276); and when the formula falls below a container's own peak, the policy appends one host.memory_max.overcommitted ledger row naming the container, the formula value, the own peak and the deficit in MiB, and the policy note names the deficit
+      proof: "grep: W1-T11130 criterion 3 in test/deploy/each-container-memory-max-comes-from-one-shared-host-budget.test.ts"
   rationale: |
     OPERATOR RULING R1 (2026-10-27): memory.max is derived from the host as ONE SHARED BUDGET, superseding 10-10's "never raise core memory.max". Each container's limit is host − reserve − the other containers' learned peaks, so they cannot jointly overcommit. Reducing usage is still required.
     MEASURED (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
@@ -32,6 +34,12 @@
     - 10-27 02:31Z: core 12.0 / 21.2 GB now/peak (learned memory.high 20.9 GiB); serve 6.9 / 7.66 GB under a fixed 7.5 GiB max (20,129 memory.high events, refaulting about 14.5 MB/s); console 1.8 / 4.66 GB. Host MemAvailable since the resize: min 10.7 GB, p50 17.4 GB.
     READ at origin/main d04469fa2: deploy/resource-policy.sh sizes every build daemon at `total − RMD_SERVE_MEMORY_RESERVE_MIB − RMD_HOST_OVERHEAD_MIB` (:263) and serve at the fixed `RMD_SERVE_MEMORY_LIMIT_MIB=7680` (:27, :231-232). memory.high is already budgeted by weight (#10371) and self-tuned per container (deploy/memory-high-tuner.sh, <state>/memory-high-tuned-<container>.json), but memory.max is not.
     NOT COVERED: W1-T8889 (queued) sizes the satellites from their own peaks within fixed bounds; R2 re-scopes it to sit inside this budget, so it now depends on this task.
+    AMENDED 2026-11-03 (operator, AskUserQuestion on #16468: "Never below own peak"): the strict formula, built as bb9dafcbec, would cap each container below its own measured peak on today's host. Live 2026-11-03T23:00Z on the 32,086 MiB host:
+    - Peaks: core 17,027, serve 7,309, console 4,977, site 2,051 MiB. Together that is 31,364 MiB, already more than the budget.
+    - With a 2,048 MiB reserve, the formula gives core about 15,700 MiB, below its 17,027 peak, and serve about 5,980 MiB, below its current 6,749.
+    So the next recycle would OOM core on its next spike and squeeze serve at once. A restart costs about a quarter of fleet capacity.
+    The old criterion's "the four limits cannot together exceed the host" was also not satisfiable: per-container limits that are each the budget less the others' peaks sum past the host whenever the peaks are below it.
+    Overcommit is now RECORDED, not enforced by OOM: W1-T11286 turns the row into one alert issue, and reducing usage stays required (R1).
   design: |
     Add one function in resource-policy.sh that returns a container's memory.max from: the host's MemTotal (resource_policy_mem_total_mib), RMD_HOST_RESERVE_MIB, and each OTHER fleet container's learned peak. A learned peak is the larger of its recorded cgroup memory.peak (written beside memory-high-tuned-<container>.json by the tuner each healthy tick) and its learned memory.high; with neither, its RMD_MEMORY_HIGH_FLOORS entry. The build ceiling and serve's memory.max both call it. The value is recomputed at every recycle and by the W1-T4267 drift check, so as peaks are learned the split self-adjusts, and a container that grows takes headroom only from measured slack. memory.high stays under its own memory.max as today. The policy note names every term. No new constant.
   note: |
