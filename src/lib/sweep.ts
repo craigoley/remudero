@@ -23599,7 +23599,15 @@ export async function runSweep(
     const job = takeNextReview(planLane);
     if (job === undefined) return;
     if (!lightAdmitted) planLaneReviewsInFlight++;
-    const work = startReview(job).finally(() => { if (!lightAdmitted) planLaneReviewsInFlight--; });
+    // W1-T11151 design 3: an in-process plan review frees its own lane count at its posted phase, once; settlement
+    // releases only a review that never posted. A light pass's reservation is released by its own `releases` map.
+    let released = false;
+    const release = (): void => {
+      if (lightAdmitted || released) return;
+      released = true;
+      planLaneReviewsInFlight--;
+    };
+    const work = startReview(job, (phase) => { if (phase === "posted") release(); }).finally(release);
     if (deps.detachReviewWait) deps.detachReviewWait(work);
     else await work;
   });

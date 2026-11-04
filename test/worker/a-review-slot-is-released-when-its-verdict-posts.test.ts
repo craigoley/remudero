@@ -382,6 +382,54 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
   }
 
   for (const surface of ["full", "light"] as const) {
+    test(`${surface} in-process plan-lane review frees its plan-lane count at post, once`, async () => {
+      const held = gate();
+      const started: number[] = [];
+      let posted: ((phase: string) => void) | undefined;
+      const sweepDeps = deps(async (p, _mode, _attempt, onPhase) => {
+        started.push(p.prNumber);
+        if (p.prNumber === 21) { posted = onPhase; await held.promise; }
+      });
+      sweepDeps.detachReviewWait = () => {};
+      sweepDeps.repairAdmissionSurface = surface;
+      // No capacity reading: the plan-lane bound is the review width, so one plan review fills the lane.
+      const policy = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 1 };
+      const run = surface === "full" ? runSweep : runSweepLightPass;
+      const plan = (n: number): OpenPrView => ({ ...pr(n), isPlanFiling: true });
+      try {
+        await run([plan(21)], sweepDeps, policy);
+        await eventually(() => started.length === 1);
+        // Positive control: the lane is full, so a second plan review waits.
+        await run([plan(22)], sweepDeps, policy);
+        assert.deepEqual(started, [21], "one plan review in flight fills a one-review plan lane");
+        assert.equal(typeof posted, "function", "the plan lane's review receives the posted-phase callback");
+        posted!("posted");
+        await run([plan(22)], sweepDeps, policy);
+        await eventually(() => started.includes(22));
+        assert.deepEqual(started, [21, 22], "a posted plan review frees its lane before it settles");
+      } finally {
+        held.resolve();
+        await drainInFlightReviews({ boundMs: 1000 });
+      }
+      // Settlement after post never releases a second time: the lane admits exactly one of two plan reviews again.
+      const second = gate();
+      started.length = 0;
+      const after = deps(async (p) => { started.push(p.prNumber); await second.promise; });
+      after.detachReviewWait = () => {};
+      after.repairAdmissionSurface = surface;
+      try {
+        await run([plan(23), plan(24)], after, policy);
+        await eventually(() => started.length >= 1);
+        await turn();
+        assert.equal(started.length, 1, "the plan-lane count was released once, not twice");
+      } finally {
+        second.resolve();
+        await drainInFlightReviews({ boundMs: 1000 });
+      }
+    });
+  }
+
+  for (const surface of ["full", "light"] as const) {
     test(`${surface} in-process review frees admission at post and holds its key through cleanup`, async () => {
       const held = gate();
       const started: number[] = [];
