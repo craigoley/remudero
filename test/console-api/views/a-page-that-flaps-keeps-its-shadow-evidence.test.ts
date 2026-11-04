@@ -25,11 +25,11 @@ function steppedClock(): Clock & { advance(ms: number): void } {
   return { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString(), advance: (by) => void (ms += by) };
 }
 
-/** The production Inbox producer's population for `needsYou` pages, carried forward from the previous one as serve does. */
-function produce(clock: Clock, needsYou: number, previous?: ShadowPopulation): ShadowPopulation {
+/** The production Inbox producer's population for `needsYou` and `ready` pages, carried forward from the previous one as serve does. */
+function produce(clock: Clock, needsYou: number, previous?: ShadowPopulation, ready = 1): ShadowPopulation {
   const asOf = clock.iso();
   const bodies = INBOX_VIEW_SECTIONS.flatMap(section => {
-    const of = section === "needsYou" ? needsYou : 1;
+    const of = section === "needsYou" ? needsYou : section === "ready" ? ready : 1;
     return Array.from({ length: of }, (_, index) => {
       const cursor = (offset: number) => snapshotCursor({ snapshotKey: SNAPSHOT, section, offset });
       return { key: viewKey(new URLSearchParams({ section, ...(index > 0 ? { cursor: cursor(index) } : {}) })),
@@ -40,9 +40,9 @@ function produce(clock: Clock, needsYou: number, previous?: ShadowPopulation): S
   return inboxShadowPopulation(bodies, SCOPE, clock.now(), previous);
 }
 
-/** The real comparator over a saved store, fed by the real producer; `needsYou(n)` is a population change. */
+/** The real comparator over a saved store, fed by the real producer; `needsYou(n)` and `ready(n)` are population changes. */
 function flappingInbox(clock: Clock & { advance(ms: number): void }) {
-  let population = produce(clock, 2);
+  let population = produce(clock, 2), readyPages = 1, needsYouPages = 2;
   const saved: Record<string, ViewShadowState> = {};
   const rows: Array<Record<string, unknown>> = [];
   const shadow = createViewShadow({ clock, evidence: () => NONE, qualifications: { [INBOX_VIEW_NAME]: POLICY },
@@ -68,9 +68,11 @@ function flappingInbox(clock: Clock & { advance(ms: number): void }) {
   return { shadow, rows, compare, minute, needsYouPage, evidence, current,
     /** `incarnations` overrides a needs-you page's producer incarnation, as a page minted before W1-T11329 carries. */
     needsYou: (n: number, incarnations: Record<number, string> = {}) => {
-      const next = produce(clock, n, population);
+      needsYouPages = n;
+      const next = produce(clock, n, population, readyPages);
       population = { ...next, pages: next.pages.map(page => page.section === "needsYou" && incarnations[page.index] ? { ...page, incarnation: incarnations[page.index]! } : page) };
     },
+    ready: (n: number) => { readyPages = n; population = produce(clock, needsYouPages, population, n); },
     readiness: () => shadow.readiness().find(row => row.view === INBOX_VIEW_NAME)! };
 }
 
@@ -84,7 +86,7 @@ test("W1-T11329: a needs-you page that returns gets the same incarnation from th
   assert.match(second(back)!.incarnation, /^[a-f0-9-]{36}$/, "it is still the UUID shape the population parser accepts");
 });
 
-test("W1-T11329: a page that leaves and returns within the hour keeps its samples and sinceMs, and so still qualifies", () => {
+test("W1-T11329: a page that leaves, waits out two population changes and returns within the hour keeps its samples and sinceMs, and so still qualifies", () => {
   const clock = steppedClock(), f = flappingInbox(clock);
   for (let m = 0; m < 20 * 60; m++) f.minute();
   const before = f.evidence(1);
@@ -92,6 +94,10 @@ test("W1-T11329: a page that leaves and returns within the hour keeps its sample
   f.needsYou(1);
   for (let m = 0; m < 10; m++) f.minute();
   assert.equal(f.needsYouPage(1), undefined, "the second page is out of the population");
+  f.ready(2);
+  for (let m = 0; m < 10; m++) f.minute();
+  f.ready(1);
+  for (let m = 0; m < 10; m++) f.minute();
   f.needsYou(2);
   f.minute();
   const back = f.evidence(1);
@@ -100,7 +106,7 @@ test("W1-T11329: a page that leaves and returns within the hour keeps its sample
   assert.equal(back.samples, before.samples + 1, "it keeps every sample it measured before it left");
   for (let m = 0; m < 5 * 60; m++) f.minute();
   const ready = f.readiness();
-  assert.equal(ready.ready, true, `a page away ten minutes still finishes its day: ${ready.reason}`);
+  assert.equal(ready.ready, true, `a page away half an hour still finishes its day: ${ready.reason}`);
   assert.ok(f.evidence(1).samples >= 1440 && clock.now() - f.evidence(1).sinceMs! >= DAY, "it earned its full day and cadence under the unchanged rule");
 });
 
