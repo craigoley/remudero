@@ -45,13 +45,6 @@ function gate() {
   return { promise, resolve };
 }
 const turn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
-/** A head checkout git cannot read (no origin), holding the shard so the verdict would pass but for its reservation. */
-function withheldCheckout(root: string): string {
-  const dir = join(root, "head");
-  mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
-  writeFileSync(join(dir, "plan", "tasks.d", "a.yaml"), "- id: W1-T99991\n  status: queued\n");
-  return dir;
-}
 async function eventually(check: () => boolean): Promise<void> {
   for (let i = 0; i < 100; i++) {
     if (check()) return;
@@ -331,6 +324,11 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
         { when: "pulls/", stdout: JSON.stringify({ number: 1, html_url: prUrl,
           state: "open", head: { ref: "branch", sha } }) },
       ]);
+      if (publication === "withheld") {
+        // A head directory git cannot read (no origin), holding the shard so the verdict would pass but for its reservation.
+        mkdirSync(join(root, "head", "plan", "tasks.d"), { recursive: true });
+        writeFileSync(join(root, "head", "plan", "tasks.d", "a.yaml"), "- id: W1-T99991\n  status: queued\n");
+      }
       const oldPath = process.env.PATH;
       process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
       const events: string[] = [];
@@ -348,7 +346,7 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
           ...(publication === "refused" ? { reviewerCodeFreshness: () => ({
             status: "stale" as const, codeSha: sha, originMainSha: "b".repeat(40),
           }) } : {}),
-          ...(publication === "withheld" ? { headRefName: "branch", headCheckoutDir: withheldCheckout(root) } : {}),
+          ...(publication === "withheld" ? { headRefName: "branch", headCheckoutDir: join(root, "head") } : {}),
           ledgerPath: join(root, "ledger.ndjson"), runId: `terminal-${publication}`,
           lintPlanForReviewFn: async () => ({ ran: true, label: "fixture", checked: 1, violations: [] }),
           disarm: () => "not-armed", arm: () => { events.push("arm"); return "armed"; },
