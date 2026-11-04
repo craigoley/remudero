@@ -109,11 +109,15 @@ export function slowTierHangBoundArgs() {
  *  this ceiling prints nothing, so the shard count below keeps every shard well inside it. */
 export const SLOW_TIER_JOB_CEILING_MS = 35 * 60_000;
 
-/** W1-T11206 — a slow-tier shard runs node's default file concurrency, availableParallelism() - 1 =
- *  3 on ubuntu-latest's 4 vCPUs. CALIBRATION: on the 2026-11-03 manifest the 2-way split predicts a
- *  27.7 min slowest makespan at 3 workers; the 10-30 hosted shard-2 runs measured 27.6, 31.6, 32.1
- *  and 32.2 min of test time (jobs 124066725187, 124081712339, 124117235536, 124104582175), so the
- *  prediction is within 15% low. The headroom absorbs that. */
+/** W1-T11206 — CALIBRATION: 3 workers, matching ubuntu-latest's default file concurrency.
+ *  2026-10-30 job 124081712339 (run 41059481182), shard 2: 297 file durations from the
+ *  test-duration-slow evidence retained by proposal artifact 12981014507 predict 31.6133 min;
+ *  the runner's measured # duration_ms is 1896788.608482 (31.6131 min).
+ *  2026-11-03 job 125907116846 (run 41632922598), shard 1: 300 file durations in
+ *  test-duration-slow-1 artifact 13231715859 predict 32.0083 min; measured 1920495.516399 ms
+ *  (32.0083 min). Both errors are below 0.01%, within the required 15%; 2 and 4 workers fail.
+ *  The calibration test preserves both ordered duration samples. Cancelled shard 2 has an empty
+ *  artifact, not a completed wall-time measurement. Install and retry time are outside these walls. */
 export const SLOW_TIER_WORKERS = 3;
 
 /** W1-T11206 — the largest predicted shard makespan may use this share of the job ceiling. */
@@ -166,20 +170,33 @@ export const FAILING_TESTS_REPORTER_SOURCE = `export default async function* fai
 `;
 
 /** W1-T11206 — the `node --test` reporter flags that write {@link FAILING_TESTS_REPORTER_SOURCE}'s lines to `destination`. */
-export function failingTestsReporterArgs(destination) {
-  const url = `data:text/javascript;base64,${Buffer.from(FAILING_TESTS_REPORTER_SOURCE).toString("base64")}`;
-  return [`--test-reporter=${url}`, `--test-reporter-destination=${destination}`];
+export function failingTestsReporterArgs(destination, { append = false } = {}) {
+  // A scoped retry keeps these reporter flags. Append each attempt's events to one private file
+  // instead of letting Node truncate pass one's evidence when pass two opens its destination.
+  const source = append
+    ? `import { appendFileSync } from "node:fs";
+${FAILING_TESTS_REPORTER_SOURCE.replace("export default ", "")}
+export default async function* collect(source) {
+  for await (const line of failingTests(source)) appendFileSync(${JSON.stringify(destination)}, line);
+}`
+    : FAILING_TESTS_REPORTER_SOURCE;
+  const url = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+  return [`--test-reporter=${url}`, `--test-reporter-destination=${append ? "stdout" : destination}`];
 }
 
 /** W1-T11206 — the failures that reporter wrote, with each file made relative to `root`. */
 export function readFailingTests(text, root = ".") {
   const failures = [];
+  const seen = new Set();
   for (const line of String(text).split("\n")) {
     if (!line.trim()) continue;
     try {
       const { file, name } = JSON.parse(line);
       const shown = typeof file === "string" ? relative(resolve(root), file.replace(/^file:\/\//, "")).split(sep).join("/") : "(no file)";
-      failures.push({ file: shown, name: String(name) });
+      const failure = { file: shown, name: String(name) };
+      const key = JSON.stringify(failure);
+      if (!seen.has(key)) failures.push(failure);
+      seen.add(key);
     } catch {
       failures.push({ file: "(unreadable reporter line)", name: line.slice(0, 200) });
     }
@@ -189,7 +206,8 @@ export function readFailingTests(text, root = ".") {
 
 /** W1-T11206 — the block a slow-tier run prints LAST, so the job log's tail always names its failures. */
 export function formatFailingTests(failures) {
-  return [`FAILING TESTS (${failures.length})`, ...failures.map(({ file, name }) => `  ${file} > ${name}`)];
+  const oneLine = (text) => String(text).replaceAll("\r", "\\r").replaceAll("\n", "\\n");
+  return [`FAILING TESTS (${failures.length})`, ...failures.map(({ file, name }) => `  ${oneLine(file)} > ${oneLine(name)}`)];
 }
 
 /** A materially different observation is worth naming before it is applied to the next proposal.
@@ -1037,10 +1055,21 @@ export function main(argv, { spawn = spawnSync, env = process.env, log = (line) 
       const resolved = resolve(root, durationOutputRaw);
       const durationOutput = role === "rest" ? resolved : resolved.replace(/(\.[^./\\]*)?$/, (ext) => `.${role}${ext}`);
       mkdirSync(dirname(durationOutput), { recursive: true });
-      testArgs.push(
-        `--test-reporter=${resolve(root, "scripts/test-duration-reporter.mjs")}`,
-        `--test-reporter-destination=${durationOutput}`,
-      );
+      if (bounded === "slow" && argv.includes("--retry")) {
+        // Each retry is a separate Node process. Keep both attempts' duration artifacts, so a
+        // one-file retry cannot replace the first attempt's complete shard measurement.
+        const source = `import report from ${JSON.stringify(new URL("./test-duration-reporter.mjs", import.meta.url).href)};
+import { writeFileSync } from "node:fs";
+export default async function* perAttempt(source) {
+  for await (const text of report(source)) writeFileSync(${JSON.stringify(durationOutput)} + "." + process.pid + ".json", text);
+}`;
+        testArgs.push(`--test-reporter=data:text/javascript;base64,${Buffer.from(source).toString("base64")}`, "--test-reporter-destination=stdout");
+      } else {
+        testArgs.push(
+          `--test-reporter=${resolve(root, "scripts/test-duration-reporter.mjs")}`,
+          `--test-reporter-destination=${durationOutput}`,
+        );
+      }
     }
     // EVERY run passes only with a complete summary from every file it was given: exit 0 alone let a
     // test's real process.exit(0) end shard 1's pool 92 files in and read green, and an isolated
@@ -1054,11 +1083,19 @@ export function main(argv, { spawn = spawnSync, env = process.env, log = (line) 
     const failuresDir = mkdtempSync(join(tmpdir(), "rmd-failing-tests-"));
     const failuresPath = join(failuresDir, "failures.ndjson");
     try {
-      const status = spawnJudgedRun(files, { spawn, cwd: root, args: [...testArgs, ...failingTestsReporterArgs(failuresPath)], pool, quiet, role, prefix, log, deadlineMs });
+      const retry = argv.includes("--retry");
+      const args = [...testArgs, ...failingTestsReporterArgs(failuresPath, { append: retry })];
+      // The retry wrapper owns judging each attempt. Keeping it inside this runner makes this
+      // summary follow ALL its output, including scoped retries and tracked-tree diagnostics.
+      const status = retry
+        ? spawn(process.execPath, [resolve(root, "scripts/test-with-retry.mjs"), process.execPath, ...args, ...files],
+          { cwd: root, stdio: "inherit", env }).status ?? 1
+        : spawnJudgedRun(files, { spawn, cwd: root, args, pool, quiet, role, prefix, log, deadlineMs });
       let text = "";
       try {
         text = readFileSync(failuresPath, "utf8");
-      } catch {
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
         // No reporter output means no test:fail event reached it.
       }
       for (const line of formatFailingTests(readFailingTests(text, root))) log(line);
@@ -1336,7 +1373,7 @@ export function main(argv, { spawn = spawnSync, env = process.env, log = (line) 
 
   if (argv.includes("--print-slow-shards")) {
     // W1-T11206: ci.yml's test-slow-plan job appends these two lines to $GITHUB_OUTPUT.
-    const plan = slowTierShardPlan(manifest, { testFiles });
+    const plan = slowTierShardPlan(manifest);
     console.error(
       `test-tier-manifest: slow tier ${plan.slowFiles} file(s) in ${plan.count} shard(s); slowest predicted makespan ` +
         `${(plan.makespanMs / 60_000).toFixed(1)} min against a ${(plan.budgetMs / 60_000).toFixed(1)} min budget ` +
@@ -1369,6 +1406,7 @@ export function main(argv, { spawn = spawnSync, env = process.env, log = (line) 
     const files = shard ? balanceFilesByDuration(tier, manifest, shard.count)[shard.index - 1] : tier;
     if (files.length === 0) {
       console.log(`test-tier-manifest: no ${runTier}-tier test files recorded yet — nothing to run.`);
+      if (runTier === "slow") for (const line of formatFailingTests([])) log(line);
       return 0;
     }
     // W1-T6085: only the fast tier shares processes; a slow file keeps its own child.

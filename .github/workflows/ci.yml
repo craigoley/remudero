@@ -802,7 +802,6 @@ jobs:
         with:
           sparse-checkout: |
             scripts
-            test
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
@@ -952,7 +951,7 @@ jobs:
           if [ "${{ steps.plan-reading.outputs.class }}" = "PUSH" ]; then
             # W1-T4396: main's push lane. One bounded failed-file retry, as the fast shards get.
             echo "W1-T4396: push to main — running the slow tier."
-            node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base HEAD
+            node scripts/test-tier-manifest.mjs --run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base HEAD --retry
           else
             npm run --silent test:slow -- --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base "origin/${GITHUB_BASE_REF}"
           fi

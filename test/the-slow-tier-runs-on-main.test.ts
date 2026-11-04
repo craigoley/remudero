@@ -82,7 +82,7 @@ test("W1-T4396: the push lane runs the slow tier", () => {
   assert.deepEqual(push.outputs, { class: "PUSH", established: "false" });
   assert.equal(
     push.calls.trim(),
-    "node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --shard 1/2 --base HEAD",
+    "node scripts/test-tier-manifest.mjs --run slow --shard 1/2 --base HEAD --retry",
     "a push runs exactly the slow tier, once, behind the failed-file retry — and no PR-only tier check",
   );
   assert.match(push.out, /W1-T4396: push to main — running the slow tier/);

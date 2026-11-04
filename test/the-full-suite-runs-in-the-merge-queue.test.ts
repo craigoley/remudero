@@ -159,7 +159,7 @@ test("W1-T4406: the merge group runs the full instrumented suite", () => {
   assert.equal(slow.status, 0, slow.out);
   assert.equal(
     slow.calls.trim(),
-    "node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --shard 1/2 --base HEAD",
+    "node scripts/test-tier-manifest.mjs --run slow --shard 1/2 --base HEAD --retry",
     "the merge queue's own commit must run the full slow tier through the failed-file retry, exactly like a push",
   );
 });
