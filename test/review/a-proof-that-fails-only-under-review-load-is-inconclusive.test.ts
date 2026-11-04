@@ -7,7 +7,7 @@ import { after, test } from "node:test";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { judgeReview, judgeReviewAsync, memoizeAsyncProofExecutor, preparePromisedReviewDecision, recordedLoad1,
   sampleHostLoad, type ReviewEvidence, type ReviewVerdict } from "#src/lib/review.js";
-import { DEFAULT_SWEEP_POLICY, inconclusiveLoadLowered, INCONCLUSIVE_LOAD_MAX_RERUNS, runSweep, runSweepLightPass,
+import { DEFAULT_SWEEP_POLICY, inconclusiveLoadLowered, INCONCLUSIVE_LOAD_MAX_RERUNS, observeLightPassReviewEligibility, runSweep, runSweepLightPass,
   type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 
 const PROOF_FILE = "test/load-shaped.test.ts";
@@ -173,6 +173,32 @@ test("W1-T11132 criterion 2: the sweep re-reviews once its own load sample is be
   assert.equal(inconclusiveLoadLowered(pr(), [inconclusive(41)], at(41)), false, "equal is not lower");
   assert.equal(inconclusiveLoadLowered(pr(), [inconclusive(41)], at(60)), false, "still loaded: wait");
   assert.equal(inconclusiveLoadLowered(pr(), [inconclusive(41)], at(undefined)), false, "an unreadable sample is not a guess");
+});
+
+test("W1-T11132 criterion 2: light-pass eligibility reuses the ledger tail and observes the injected load", t => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}load-retry-eligibility-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledgerPath = join(dir, "ledger.ndjson"), now = Date.now();
+  writeFileSync(ledgerPath, JSON.stringify({ ...inconclusive(41), ts: new Date(now).toISOString() }) + "\n");
+  const view = pr({ reviewPendingSince: new Date(now).toISOString() });
+  const emitted: Record<string, unknown>[] = [];
+  let load = 60;
+  const deps: SweepDeps = { ledgerPath, runId: "load-retry-eligibility", now: () => now,
+    sampleLoad: () => ({ load1: load }), appendLine: (_path, row) => { emitted.push(row); },
+    arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, postReview: () => {},
+  };
+  const first = observeLightPassReviewEligibility([view], deps);
+  assert.equal(first.length, 1, "the default reader saw the pending verdict");
+  assert.equal(emitted.length, 0, "high load keeps the delivered verdict pending");
+  load = 41;
+  assert.equal(observeLightPassReviewEligibility([view], deps), first, "unchanged ledger bytes reuse the tail snapshot");
+  assert.equal(emitted.length, 0, "equal load does not publish retry eligibility");
+  load = 0;
+  assert.equal(observeLightPassReviewEligibility([view], deps), first);
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].step, "sweep.review_eligible");
+  assert.equal(emitted[0].head_sha, HEAD);
+  assert.equal(emitted[0].surface, "light");
 });
 
 test("W1-T11132 criterion 2: no retry unless inconclusive_load is the ONLY pending cause", () => {

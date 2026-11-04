@@ -1,0 +1,22 @@
+id: incident-dc7e81c66d3fc2b9
+ts: 2026-11-04T02:09:15.977Z
+raw: |-
+  Incident dc7e81c66d3f: flow pr-stage-stall:own-red:review loop
+  First seen: 2026-11-04T02:02:48.514Z
+  Last seen: 2026-11-04T02:02:48.514Z
+  Count: 1, burn: 1.00/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=16240 own-red: review loop
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#dc7e81c66d3fc2b9778756be942200a863eceed67030903eaf9e3a88689e339f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

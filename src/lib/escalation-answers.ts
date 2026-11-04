@@ -552,6 +552,25 @@ export const ESCALATION_ANSWER_HISTORY_SLICE: EscalationTriageSlice = {
   steps: ["escalation_answer.ignored", "escalation_answer.refusal_alarm", "panel.question_answered"],
 };
 
+/**
+ * W1-T10335: the bot comments this process has ledgered as ignored, by origin, oldest first. A bot's refusal is read by
+ * no decision ({@link observeRefusal} drops it), so it is ledgered once per origin, not on every pass. OBSERVED
+ * 2026-10-17..21: 7,460 rows for 147 bot comments, one re-ignored 193 times. Bounded; an evicted origin is
+ * ledgered once more at most. Held per ledger path.
+ */
+const BOT_IGNORED_ORIGINS_MAX = 10_000;
+const botIgnoredByLedger = new Map<string, Set<string>>();
+function botIgnoredOrigins(ledgerPath: string): Set<string> {
+  let origins = botIgnoredByLedger.get(ledgerPath);
+  if (!origins) botIgnoredByLedger.set(ledgerPath, origins = new Set());
+  return origins;
+}
+function rememberBotIgnored(origins: Set<string>, origin: string): void {
+  origins.delete(origin);
+  origins.add(origin);
+  if (origins.size > BOT_IGNORED_ORIGINS_MAX) origins.delete(origins.values().next().value as string);
+}
+
 let escalationAnswerHistoryReader: EscalationTriageHistoryReader | undefined;
 /** Created on first use: sweep.ts and this module import each other, so nothing of sweep.ts runs at load. */
 export function escalationAnswerHistory(): EscalationTriageHistoryReader {
@@ -591,11 +610,15 @@ export async function readEscalationAnswers(
     return { accepted, ignored, unreadable: 1 }; // the list itself was unreadable this pass
   }
   const history: Record<string, unknown>[] = [];
+  const botIgnored = botIgnoredOrigins(deps.ledgerPath);
   let historyReadable = true;
   if (gateway.refusalIssues) {
     const read = await (deps.history ?? escalationAnswerHistory())(dirname(deps.ledgerPath));
     historyReadable = read.ok;
     if (historyReadable) history.push(...read.rows);
+    for (const row of history) {
+      if (row.step === "escalation_answer.ignored" && row.reason === "bot" && typeof row.origin === "string") rememberBotIgnored(botIgnored, row.origin);
+    }
     if (!historyReadable) {
       unreadable++;
       writeLedger(deps.ledgerPath, { step: "escalation_answer.refusal_alarm_unreadable", run_id: runId, task_id: "ESCALATION-ANSWERS",
@@ -658,6 +681,10 @@ export async function readEscalationAnswers(
       }
       if (refusal !== undefined) {
         ignored++;
+        if (refusal === "bot") {
+          if (botIgnored.has(origin)) continue; // W1-T10335: already ledgered; still counted in `ignored`
+          rememberBotIgnored(botIgnored, origin);
+        }
         writeLedger(deps.ledgerPath, {
           run_id: runId,
           task_id: taskId,
