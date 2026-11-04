@@ -20,6 +20,8 @@
     - "src/lib/inbox.ts"
     - "src/lib/relint.ts"
     - "src/lib/risk-judge.ts"
+    - "src/lib/worker-provider.ts"
+    - "src/lib/worker.ts"
   status: queued
   attempts: 0
   rationale: |
