@@ -146,7 +146,7 @@ export function elfInterpreter(path: string): string | null {
   } finally { closeSync(fd); }
 }
 
-function runtimeFileManifest(nodePath: string): LinuxCodingProfilePreflightV1["runtimeFiles"] {
+export function runtimeFileManifest(nodePath: string): LinuxCodingProfilePreflightV1["runtimeFiles"] {
   const report = (process as NodeJS.Process & { report?: { getReport(): unknown } }).report;
   if (!report || typeof report.getReport !== "function") throw new Error("native-profile-preflight-node-report-unavailable");
   const reportValue: unknown = report.getReport();
