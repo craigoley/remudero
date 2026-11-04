@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, realpathSync, rmSync, symlinkSync, lutimesSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { ghFailing } from "#test/helpers/gh-stub.js";
@@ -122,22 +122,52 @@ test("an orphaned worktree whose repository was deleted has its node_modules rec
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("a run folder's reports retire after seven idle days and its saved work after thirty while keys and state stay", () => {
+test("an idle published lane worktree retires with its ignored tmp/ scratch while a lane holding state/ stays", () => {
+  const fx = setup();
+  try {
+    const bare = origin(fx);
+    const main = join(fx.home, "Remudero/remudero-ops");
+    git(fx.root, "clone", "-q", bare, main);
+    file(join(main, ".gitignore"), "node_modules\ncoverage\ntmp/\nstate/\n");
+    git(main, "commit", "-q", "-am", "ignore lane scratch"); git(main, "push", "-q", "origin", "HEAD:main");
+    const lane = join(fx.home, "Remudero/lanes-wt/fix-1");
+    git(main, "worktree", "add", "-q", "--detach", lane, "main");
+    file(join(lane, "tmp/openweight-loop/out.json"), "{}\n");
+    const held = join(fx.home, "Remudero/lanes-wt/fix-2");
+    git(main, "worktree", "add", "-q", "--detach", held, "main");
+    const reservation = file(join(held, "state/openweight-allowance.json"), '{"reservations":{"r1":{"settledUsd":null}}}\n');
+    age(join(fx.home, "Remudero"), 7);
+    const out = run(fx);
+    assert.equal(existsSync(lane), false, out);
+    assert.match(out, /REMOVED-WORKTREE .*lanes-wt\/fix-1/);
+    assert.ok(existsSync(reservation), out);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a run folder idle six hours retires with its reports, saved work, links and ledger-named tests while keys and state stay", () => {
   const fx = setup();
   try {
     const base = join(fx.home, "Remudero");
-    const folder = (name: string, entry: string, days: number) => {
-      const dir = join(base, name); file(join(dir, entry), "kept for review\n"); age(dir, days * 24); return dir;
+    const outside = file(join(fx.root, "outside/target.txt"), "never followed\n");
+    const folder = (name: string, entry: string, hours: number, link = false) => {
+      const dir = join(base, name); file(join(dir, entry), "kept for review\n");
+      if (link) symlinkSync(outside, join(dir, "linked"));
+      age(dir, hours);
+      // age() sets times through links; an old link's own times are old too.
+      if (link) { const t = new Date(Date.now() - hours * 3600_000); lutimesSync(join(dir, "linked"), t, t); utimesSync(dir, t, t); }
+      return dir;
     };
-    const gone = [folder("old-report", "summary.md", 8), folder("old-script", "probe.mjs", 8),
-      folder("old-bundle", "work.bundle", 31), folder("old-patch", "fix.patch", 31)];
-    const kept = [folder("recent-report", "summary.md", 5), folder("recent-bundle", "work.bundle", 20),
-      folder("old-key", "deploy.pem", 60), folder("old-ledger", "ledger.ndjson", 60), folder("marked", ".rmd-janitor-keep", 60)];
+    const gone = [folder("old-report", "summary.md", 7), folder("old-script", "probe.mjs", 7),
+      folder("old-bundle", "work.bundle", 7), folder("old-patch", "fix.patch", 7),
+      folder("old-linked-home", ".gitconfig", 7, true),
+      folder("old-source-copy", "test/ledger-read-intent.test.ts", 7), folder("old-controls", "ledger-rewrite-control/x.json", 7)];
+    const kept = [folder("recent-report", "summary.md", 5), folder("recent-bundle", "work.bundle", 5),
+      folder("old-key", "deploy.pem", 60), folder("old-ledger", "ledger.ndjson", 60), folder("old-ledger-file", "state/ledger", 60),
+      folder("marked", ".rmd-janitor-keep", 60)];
     const out = run(fx, { REMUDERO_JANITOR_DIRECTORY_ROOTS: base });
     for (const dir of gone) assert.equal(existsSync(dir), false, dir + out);
     for (const dir of kept) assert.ok(existsSync(dir), dir + out);
-    assert.match(out, /recent-report \(unversioned source, manifest or report idle \d+h < 7d\)/);
-    assert.match(out, /recent-bundle \(saved work or evidence idle \d+h < 30d\)/);
+    assert.ok(existsSync(outside), "removing a folder never follows its symlinks");
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
@@ -172,11 +202,11 @@ test("GitHub proves publication when the remote advanced and none of its adverti
     assert.notEqual(spawnSync("git", ["-C", work, "cat-file", "-e", `${advanced}^{commit}`]).status, 0, "advanced tip must be absent locally");
     const probe = publicationProbe(fx, work, shim);
     assert.equal(probe("1"), "published");
-    assert.equal(probe("0"), "held not-proven-published");
+    assert.equal(probe(""), "held not-proven-published");
   } finally { rmSync(fx.root, { recursive: true, force: true }); rmSync(shim.dir, { recursive: true, force: true }); }
 });
 
-test("a commit GitHub lists in a pull request counts as published even after the PR head moved on", () => {
+test("a commit GitHub has received counts as published even when no branch or pull request still names it", () => {
   const fx = setup();
   const shim = ghShim();
   try {
@@ -186,10 +216,11 @@ test("a commit GitHub lists in a pull request counts as published even after the
     // The configured URL names GitHub; insteadOf keeps ls-remote on the local fixture.
     git(work, "remote", "set-url", "origin", "https://github.com/craigoley/remudero.git");
     git(work, "config", `url.file://${bare}.insteadOf`, "https://github.com/craigoley/remudero.git");
-    git(work, "commit", "-q", "--allow-empty", "-m", "pushed to a PR, then superseded");
+    git(work, "commit", "-q", "--allow-empty", "-m", "pushed, then force-pushed past and its branch deleted");
     const probe = publicationProbe(fx, work, shim);
     assert.equal(probe("1"), "published");
-    assert.equal(probe("0"), "held not-proven-published");
+    assert.equal(probe("0"), "published", "GitHub knows the commit even with no pull request naming it");
+    assert.equal(probe(""), "held not-proven-published", "a commit GitHub never received is not published");
     git(work, "remote", "set-url", "origin", bare);
     const asked = shim.calls().length;
     assert.ok(asked > 0, "the GitHub-origin probes asked gh");

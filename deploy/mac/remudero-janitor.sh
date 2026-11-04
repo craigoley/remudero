@@ -13,8 +13,8 @@
 # Also removes inactive non-Git scratch directories in the account's explicit
 # Remudero/rmd-work and Mac operator-worktree roots (and Craig's /private/tmp).
 # Every descendant must be
-# idle for six hours. Unversioned source/reports are retained for 7 idle days and
-# saved work (bundles, archives, patches) for 30; persistent data is retained.
+# idle for six hours, including unversioned reports and saved work (bundles,
+# archives, patches); repositories, state, keys and keep-marked data are retained.
 #
 # WHAT IT NEVER DOES: it never removes unpushed commits or uncommitted source, never
 # follows an artifact symlink, and never touches protected, dirty, or open
@@ -64,10 +64,11 @@ AGE_EXPLICIT=0
 WORKTREE_AGE_HOURS="${REMUDERO_JANITOR_WORKTREE_AGE_HOURS:-6}"
 MINIMUM_AGE_HOURS=6
 MIN_FREE_GIB="${REMUDERO_JANITOR_MIN_FREE_GIB:-20}"
-# Idle days before an unversioned run folder's reports/scripts, and its saved
-# work (bundles, archives, patches), stop protecting it.
-REPORT_RETENTION_DAYS="${REMUDERO_JANITOR_REPORT_RETENTION_DAYS:-7}"
-EVIDENCE_RETENTION_DAYS="${REMUDERO_JANITOR_EVIDENCE_RETENTION_DAYS:-30}"
+# Idle hours before an unversioned run folder's reports/scripts, and its saved
+# work (bundles, archives, patches), stop protecting it. The operator's policy
+# is the same six hours as everything else; longer holds are opt-in.
+REPORT_RETENTION_HOURS="${REMUDERO_JANITOR_REPORT_RETENTION_HOURS:-6}"
+EVIDENCE_RETENTION_HOURS="${REMUDERO_JANITOR_EVIDENCE_RETENTION_HOURS:-6}"
 APPLY=0
 LOG="${REMUDERO_JANITOR_LOG:-$HOME/Library/Logs/remudero/janitor.log}"
 
@@ -80,11 +81,11 @@ for a in "$@"; do
   esac
 done
 
-for age_value in "$AGE_HOURS" "$WORKTREE_AGE_HOURS" "$REPORT_RETENTION_DAYS" "$EVIDENCE_RETENTION_DAYS"; do
+for age_value in "$AGE_HOURS" "$WORKTREE_AGE_HOURS" "$REPORT_RETENTION_HOURS" "$EVIDENCE_RETENTION_HOURS"; do
   case "$age_value" in ''|*[!0-9]*) printf 'invalid age threshold: %s\n' "$age_value" >&2; exit 2 ;; esac
 done
-if [ "$REPORT_RETENTION_DAYS" -lt 1 ] || [ "$EVIDENCE_RETENTION_DAYS" -lt "$REPORT_RETENTION_DAYS" ]; then
-  printf 'retention days must be at least 1, with evidence at least the report retention\n' >&2
+if [ "$REPORT_RETENTION_HOURS" -lt "$MINIMUM_AGE_HOURS" ] || [ "$EVIDENCE_RETENTION_HOURS" -lt "$REPORT_RETENTION_HOURS" ]; then
+  printf 'retention must be at least %sh, with evidence at least the report retention\n' "$MINIMUM_AGE_HOURS" >&2
   exit 2
 fi
 if [ "$AGE_HOURS" -lt "$MINIMUM_AGE_HOURS" ] || [ "$WORKTREE_AGE_HOURS" -lt "$MINIMUM_AGE_HOURS" ]; then
@@ -745,7 +746,9 @@ is_remudero_origin() {
   esac
 }
 
-# Permit only ignored regenerable dependency/coverage entries or their symlinks.
+# Permit only ignored regenerable dependency/coverage entries or their symlinks,
+# plus a lane's ignored run scratch (`tmp/`), which dies with the lane. A lane's
+# `state/` can hold unsettled spend reservations, so it still holds the lane.
 # Whole retirement independently requires publication, age and process guards.
 ignored_only_dependency_symlinks() {
   local repo="$1" listing="$2" line rel tracked found
@@ -754,10 +757,12 @@ ignored_only_dependency_symlinks() {
     case "$line" in
       "Would remove node_modules"|"Would remove node_modules/") rel="node_modules" ;;
       "Would remove coverage"|"Would remove coverage/") rel="coverage" ;;
+      "Would remove tmp/") rel="tmp" ;;
       *) return 1 ;;
     esac
     [ -L "$repo/$rel" ] && continue
-    [ -d "$repo/$rel" ] && [ -f "$repo/package.json" ] || return 1
+    [ -d "$repo/$rel" ] || return 1
+    case "$rel" in node_modules|coverage) [ -f "$repo/package.json" ] || return 1 ;; esac
     tracked=$(rmd_retirement_git "$repo" ls-files -- "$rel" 2>/dev/null) || return 1
     [ -z "$tracked" ] || return 1
     found=$(find "$repo/$rel" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null) || return 1
@@ -818,7 +823,7 @@ scratch_directory_risk() {
   # Always preserve repositories, bare object lenders, state/history, keys and
   # coordination files, and anything marked .rmd-janitor-keep. Do not follow links.
   found=$(find -P "$path" -xdev \( -name .git -o -name HEAD -o -name objects \
-    -o -name '.rmd-janitor-keep' -o -name 'ledger*' -o -name '*.ndjson' -o -name '*.jsonl' -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' \
+    -o -name '.rmd-janitor-keep' -o \( -type f \( -name ledger -o -name 'ledger.*' \) \) -o -name '*.ndjson' -o -name '*.jsonl' -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' \
     -o -name '.env' -o -name '.env.*' -o -iname '*keychain*' -o -name '*.pem' -o -name '*.p12' -o -name '*.pfx' \
     -o -name '*.keytab' -o -name 'id_rsa*' -o -name 'id_ed25519*' \) -print -quit 2>/dev/null) || {
     printf 'repository/state scan unavailable'; return 0;
@@ -829,23 +834,25 @@ scratch_directory_risk() {
   # file or metadata change anywhere in the folder.
   idle_hours=0
   stamp=$(artifact_mtime "$path") && idle_hours=$(( ($(date +%s) - stamp) / 3600 ))
-  if [ "$idle_hours" -lt "$((EVIDENCE_RETENTION_DAYS * 24))" ]; then
+  if [ "$idle_hours" -lt "$EVIDENCE_RETENTION_HOURS" ]; then
     found=$(find -P "$path" -xdev \( -name '*.bundle' -o -name '*.tar' -o -name '*.tgz' -o -name '*.zip' -o -name '*.gz' \
       -o -iname '*.patch' -o -iname '*.diff' -o -iname '*.rej' -o -iname '*.orig' \
       -o -iname '*password*' -o -iname '*secret*' -o -iname '*token*' -o -iname '*credential*' \) -print -quit 2>/dev/null) || {
       printf 'evidence scan unavailable'; return 0;
     }
-    [ -z "$found" ] || { printf 'saved work or evidence idle %sh < %sd' "$idle_hours" "$EVIDENCE_RETENTION_DAYS"; return 0; }
+    [ -z "$found" ] || { printf 'saved work or evidence idle %sh < %sh' "$idle_hours" "$EVIDENCE_RETENTION_HOURS"; return 0; }
   fi
-  found=$(find -P "$path" -xdev ! -type d ! -type f -print -quit 2>/dev/null) || {
+  # rm -rf removes a symlink itself and never follows it, so links are fine;
+  # sockets, FIFOs and devices still hold the folder.
+  found=$(find -P "$path" -xdev ! -type d ! -type f ! -type l -print -quit 2>/dev/null) || {
     printf 'file-type scan unavailable'; return 0;
   }
-  [ -z "$found" ] || { printf 'symlink, mount boundary or special file'; return 0; }
-  if [ "$idle_hours" -lt "$((REPORT_RETENTION_DAYS * 24))" ]; then
+  [ -z "$found" ] || { printf 'socket, FIFO or device file'; return 0; }
+  if [ "$idle_hours" -lt "$REPORT_RETENTION_HOURS" ]; then
   found=$(find -P "$path" -xdev -type f \( -perm -100 -o -perm -010 -o -perm -001 \) -print -quit 2>/dev/null) || {
     printf 'executable-source scan unavailable'; return 0;
   }
-  [ -z "$found" ] || { printf 'unversioned executable or script idle %sh < %sd' "$idle_hours" "$REPORT_RETENTION_DAYS"; return 0; }
+  [ -z "$found" ] || { printf 'unversioned executable or script idle %sh < %sh' "$idle_hours" "$REPORT_RETENTION_HOURS"; return 0; }
   # Recently used non-Git scripts, manifests and reports are not disposable data.
   found=$(find -P "$path" -xdev -type f \( -iname '*.sh' -o -iname '*.bash' -o -iname '*.zsh' \
     -o -iname '*.py' -o -iname '*.js' -o -iname '*.mjs' -o -iname '*.cjs' -o -iname '*.ts' \
@@ -857,7 +864,7 @@ scratch_directory_risk() {
     -o -iname 'README*' -o -iname 'LICENSE*' -o -name Makefile -o -name Dockerfile \) -print -quit 2>/dev/null) || {
     printf 'unversioned source/report scan unavailable'; return 0;
   }
-  [ -z "$found" ] || { printf 'unversioned source, manifest or report idle %sh < %sd' "$idle_hours" "$REPORT_RETENTION_DAYS"; return 0; }
+  [ -z "$found" ] || { printf 'unversioned source, manifest or report idle %sh < %sh' "$idle_hours" "$REPORT_RETENTION_HOURS"; return 0; }
   fi
   # An ignored scratch child in a canonical repository may be cleaned, but a
   # tracked or merely untracked source child cannot. No Git state is changed.
