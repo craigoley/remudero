@@ -909,8 +909,16 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       try {
         single = once();
       } catch (e) {
-        if (e?.readerBudgetOverrun !== true) throw e;
+        // A history budget capped at the backstop stops as a census time bound; that is still an overrun of the history budget.
+        if (e?.readerBudgetOverrun !== true && e?.censusTimeBound !== true) throw e;
         console.log(`census-reader-history-fallback: ${JSON.stringify({ file: files[0], historyBudgetMs, reason: e.message })}`);
+      }
+      if (single !== undefined && !(single.elapsedMs <= historyBudgetMs)) {
+        // A run that finished past its history budget overran it too: never accepted, it falls back like a stopped one.
+        const reason = `took ${Math.ceil(single.elapsedMs)}ms against its ${historyBudgetMs}ms history budget`;
+        finish(single, false, reason);
+        console.log(`census-reader-history-fallback: ${JSON.stringify({ file: files[0], historyBudgetMs, reason })}`);
+        single = undefined;
       }
       if (single !== undefined) {
         if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during the history run");

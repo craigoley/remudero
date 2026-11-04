@@ -113,3 +113,31 @@ test("W1-T11100 criterion 3: shadow leaves the verdict and budgets byte-identica
   assert.ok(fallback.lines.some((l) => l.startsWith("census-reader-history-fallback: ")));
   assert.equal(JSON.parse(readFileSync(path, "utf8")).runs[KEY].at(-1), 9000, "the fallback's qualification is recorded");
 });
+
+test("W1-T11100 criterion 3: in act a history run that completes past its budget is not accepted and falls back to calibrate then qualify", (t) => {
+  const { repo, path } = fixture(t);
+  seed(path, [1000]);
+  // The history run finishes, passing, in 5000 ms against its 4000 ms history budget.
+  const late = drive(t, repo.dir, [0, 5000, 5001, 14001, 14002, 14003, 23003], { path, mode: "act", runtime: RUNTIME });
+  assert.deepEqual(late.failing, [], "an overrun is never a refusal");
+  assert.deepEqual(late.bounds, [4000, 120000, 36000], "the late run is followed by calibration, then qualification");
+  assert.ok(!late.lines.some((l) => l.includes('"budgetSource":"history"')), "the late history run is never accepted");
+  const fallback = late.lines.find((l) => l.startsWith("census-reader-history-fallback: "));
+  assert.ok(fallback, "the fallback is named");
+  assert.match(fallback, /took 5000ms against its 4000ms history budget/);
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).runs[KEY], [1000, 9000], "only the qualification's runtime is recorded");
+});
+
+test("W1-T11100 criterion 3: in act a history run stopped at the backstop cap falls back instead of refusing as a census time bound", (t) => {
+  const { repo, path } = fixture(t);
+  seed(path, [40000]);
+  assert.equal(censusReaderHistoryBudget([40000], POLICY), 120000, "this history budget is capped at the backstop");
+  let calls = 0;
+  const capped = Object.assign(new Error("spawnSync node ETIMEDOUT"), { code: "ETIMEDOUT" });
+  const stopped = drive(t, repo.dir, [0, 120000, 120001, 129001, 129002, 129003, 138003], { path, mode: "act", runtime: RUNTIME },
+    () => (calls++ === 0 ? { status: null, stdout: "", error: capped } : { status: 0, stdout: PASS }));
+  assert.deepEqual(stopped.failing, [], "the capped overrun is not a refusal");
+  assert.deepEqual(stopped.bounds, [120000, 120000, 36000], "it falls back to calibrate then qualify");
+  assert.ok(stopped.lines.some((l) => l.startsWith("census-reader-history-fallback: ")), "the fallback is named");
+  assert.equal(JSON.parse(readFileSync(path, "utf8")).runs[KEY].at(-1), 9000, "the fallback's qualification is recorded");
+});
