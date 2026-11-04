@@ -3,7 +3,11 @@
 selected_registry_refuse() {
   local reason="${1:-reader_unavailable}"
   case "$reason" in ""|*[!a-z_]*) reason=reader_unavailable ;; esac
-  echo "${SELECTED_REGISTRY_CALLER:-launcher}: REFUSING -- selected registry unavailable (${reason})." >&2
+  if [ "${SELECTED_REGISTRY_CALLER:-}" = recycle-container ] && declare -F recycle_reason >/dev/null; then
+    recycle_reason "recycle-container: REFUSING -- selected registry unavailable (${reason})." >&2
+  else
+    echo "${SELECTED_REGISTRY_CALLER:-launcher}: REFUSING -- selected registry unavailable (${reason})." >&2
+  fi
   return 2
 }
 selected_registry_packet() (
@@ -180,9 +184,9 @@ selected_registry_cleanup_diagnostics() {
   local status="${1:-$?}" failed=0
   [ "${SELECTED_REGISTRY_ACTIVE:-0}" = 1 ] || return 0
   [ "${BASH_SUBSHELL}" = "${SELECTED_REGISTRY_DIAGNOSTIC_OWNER}" ] || return 0
-  if [ "${SELECTED_REGISTRY_CALLER}" = recycle-container ] && declare -F commission_on_exit >/dev/null; then
-    if [ "${SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED:-0}" = 1 ]; then commission_on_exit;
-    else commission_on_exit >/dev/null 2>&1; fi
+  if [ "${SELECTED_REGISTRY_CALLER}" = recycle-container ] && declare -F recycle_exit_receipts >/dev/null; then
+    if [ "${SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED:-0}" = 1 ]; then recycle_exit_receipts "$status";
+    else recycle_exit_receipts "$status" >/dev/null 2>&1; fi
   fi
   if [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_PID:-}" ]; then
     if [ "${SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED:-0}" = 1 ]; then
@@ -523,6 +527,7 @@ RECYCLE_STDOUT_TTY=false
 RECYCLE_ACTOR_EVIDENCE="$(recycle_actor_evidence)"
 RECYCLE_WRITER_START="$(LC_ALL=C TZ=UTC ps -o lstart= -p $$ 2>/dev/null | tr -s ' \t' '  ' | sed 's/^ *//; s/ *$//' | tr -d '"\\' || true)"
 RECYCLE_INVOCATION_RECORDED=0
+RECYCLE_LEDGER_FILE=""
 record_recycle_invocation() {
   [ "$RECYCLE_INVOCATION_RECORDED" = 0 ] || return 0
   local ledger="${RMD_STATE_DIR:-${HOME:-/root}/rmd-state}/state/ledger.ndjson"
@@ -534,9 +539,56 @@ record_recycle_invocation() {
     "$(recycle_json_string "$RECYCLE_WRITER_START")" "$(recycle_json_string "$CONTAINER_NAME")" \
     "$(recycle_json_string "$INSTANCE_NAME")" "$(recycle_json_string "${RMD_RECYCLE_VERDICT:-}")" >> "$ledger"; then
     RECYCLE_INVOCATION_RECORDED=1
+    RECYCLE_LEDGER_FILE="$ledger"
   else
     echo "recycle-container: could not record invocation in $ledger" >&2
   fi
+}
+
+# W1-T11322: preserve the exit decision before cleanup prints its own diagnostics.
+RECYCLE_ENDED_RECORDED=0
+RECYCLE_OUTCOME=aborted
+RECYCLE_FINAL_REASON=""
+RECYCLE_BLOCKERS_JSON=""
+RECYCLE_WAITED_S=0
+recycle_reason() {
+  RECYCLE_FINAL_REASON="$1"
+  case "$1" in
+    'recycle-container: REFUSING'*|'  REFUSING'*|'recycle-container: unknown argument '*) RECYCLE_OUTCOME=refused ;;
+    'recycle-container: ABORTED '*|'recycle-container: FAILED '*) RECYCLE_OUTCOME=aborted ;;
+    'recycle-container: OK '*) RECYCLE_OUTCOME=replaced ;;
+  esac
+  echo "$@"
+}
+record_recycle_ended() {
+  local status="$1" ledger wait_s wait_source reason blockers=""
+  [ "$RECYCLE_INVOCATION_RECORDED" = 1 ] && [ "$RECYCLE_ENDED_RECORDED" = 0 ] || return 0
+  RECYCLE_ENDED_RECORDED=1
+  ledger="${LEDGER_FILE:-$RECYCLE_LEDGER_FILE}"
+  wait_s="${WAIT_SECONDS:-${RMD_RECYCLE_WAIT_S:-3000}}"
+  wait_source="${WAIT_SOURCE:-no-history fallback (nothing supplied RMD_RECYCLE_WAIT_S)}"
+  if [ -z "${WAIT_SOURCE:-}" ] && [ -n "${RMD_RECYCLE_WAIT_S:-}" ]; then
+    wait_source="caller-supplied RMD_RECYCLE_WAIT_S"
+  fi
+  # Keep malformed caller input from making the best-effort receipt invalid JSON.
+  case "$wait_s" in
+    ''|*[!0-9]*) wait_s=null ;;
+    *) wait_s="${wait_s#"${wait_s%%[!0]*}"}"; wait_s="${wait_s:-0}" ;;
+  esac
+  reason="${RECYCLE_FINAL_REASON:-recycle-container: exited with status $status}"
+  if [ "$RECYCLE_OUTCOME" = refused ] && [ -n "$RECYCLE_BLOCKERS_JSON" ]; then
+    blockers=",\"blockers\":$RECYCLE_BLOCKERS_JSON"
+  fi
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.ended","lane":"deploy","outcome":"%s","rc":%s,"reason":%s,"wait_s":%s,"wait_source":%s,"waited_s":%s%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "$RECYCLE_OUTCOME" "$status" \
+    "$(recycle_json_string "$reason")" "$wait_s" "$(recycle_json_string "$wait_source")" "$RECYCLE_WAITED_S" "$blockers" \
+    >> "$ledger" 2>/dev/null || true
+}
+recycle_exit_receipts() {
+  local status="$1"
+  record_recycle_invocation exit
+  record_recycle_ended "$status"
+  commission_on_exit
 }
 
 # ── W1-T6160: EXPLICIT GIT AUTHOR COMMISSIONING — ONE NAMED TARGET, VERIFIED, WITH A RECEIPT ──────
@@ -582,7 +634,15 @@ commission_on_exit() {
     *) commission_receipt failed ;;
   esac
 }
-trap 'record_recycle_invocation exit; commission_on_exit' EXIT
+trap 'recycle_exit_receipts "$?"' EXIT
+recycle_early_signal() {
+  trap - HUP INT TERM
+  recycle_reason "recycle-container: ABORTED by SIG$1 before the drain — no replacement was started." >&2
+  exit "$2"
+}
+trap 'recycle_early_signal HUP 129' HUP
+trap 'recycle_early_signal INT 130' INT
+trap 'recycle_early_signal TERM 143' TERM
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 DEFAULT_INSTANCE_REGISTRY="${SCRIPT_DIR%/deploy}/.remudero/daemon-instances.yaml"
@@ -592,7 +652,7 @@ selected_registry_diagnostics
 validate_instance_name() {
   case "$1" in
     ""|*[!a-zA-Z0-9_-]*)
-      echo "recycle-container: REFUSING -- invalid instance name '$1'." >&2
+      recycle_reason "recycle-container: REFUSING -- invalid instance name '$1'." >&2
       echo "  Use only letters, digits, '_' and '-'." >&2
       exit 2
       ;;
@@ -640,7 +700,7 @@ if [ -n "$INSTANCE_NAME" ]; then
   COMMISSION_TARGET="$INSTANCE_NAME"
   INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY-$DEFAULT_INSTANCE_REGISTRY}"
   if [ ! -r "$INSTANCE_REGISTRY" ]; then
-    echo "recycle-container: REFUSING -- instance registry '${INSTANCE_REGISTRY}' is not readable." >&2
+    recycle_reason "recycle-container: REFUSING -- instance registry '${INSTANCE_REGISTRY}' is not readable." >&2
     exit 2
   fi
   if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
@@ -649,7 +709,7 @@ if [ -n "$INSTANCE_NAME" ]; then
     record="$(read_instance_registry "$INSTANCE_REGISTRY" "$INSTANCE_NAME")"
   fi
   if [ -z "$record" ]; then
-    echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' is not declared in ${INSTANCE_REGISTRY}." >&2
+    recycle_reason "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' is not declared in ${INSTANCE_REGISTRY}." >&2
     exit 2
   fi
   repo=""; github_repo=""; state_dir=""; container_name=""; image_ref=""; claude_dir=""; codex_dir=""; container_config_dir=""
@@ -660,9 +720,9 @@ if [ -n "$INSTANCE_NAME" ]; then
     [ "$key" = github_repo ] && github_repo="$value"
     case "$key" in
       mode)
-        [ "$instance_mode_seen" = 0 ] || { echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' declares duplicate mode." >&2; exit 2; }
+        [ "$instance_mode_seen" = 0 ] || { recycle_reason "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' declares duplicate mode." >&2; exit 2; }
         instance_mode_seen=1
-        [ "$value" = shadow ] || [ "$value" = live ] || [ "$value" = '"shadow"' ] || [ "$value" = '"live"' ] || { echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' mode must be shadow or live." >&2; exit 2; }
+        [ "$value" = shadow ] || [ "$value" = live ] || [ "$value" = '"shadow"' ] || [ "$value" = '"live"' ] || { recycle_reason "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' mode must be shadow or live." >&2; exit 2; }
         ;;
       repo) repo="$value" ;;
       state_dir) state_dir="$value" ;;
@@ -680,25 +740,25 @@ if [ -n "$INSTANCE_NAME" ]; then
       service_user|service_name|watchdog_service_name|watchdog_timer_name|launcher_path|revival_log) : ;;
       # W1-T4227: the fleet registry's project layer, read by `rmd serve`'s GET /v1/registry.
       project|github_repo|retired|primary) : ;;
-      *) echo "recycle-container: REFUSING -- unknown field '${key}' in instance '${INSTANCE_NAME}'." >&2; exit 2 ;;
+      *) recycle_reason "recycle-container: REFUSING -- unknown field '${key}' in instance '${INSTANCE_NAME}'." >&2; exit 2 ;;
     esac
   done <<EOF
 $record
 EOF
   for pair in "repo:$repo" "state_dir:$state_dir" "container_name:$container_name" "image:$image_ref" "claude_dir:$claude_dir" "codex_dir:$codex_dir" "container_config_dir:$container_config_dir"; do
     name="${pair%%:*}"; val="${pair#*:}"
-    [ -n "$val" ] || { echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' missing required field '${name}'." >&2; exit 2; }
+    [ -n "$val" ] || { recycle_reason "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' missing required field '${name}'." >&2; exit 2; }
   done
   case "$max_old_space_mb" in
     "") : ;;
-    *[!0-9]*|0*) echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' has a malformed max_old_space_mb '${max_old_space_mb}'." >&2; exit 2 ;;
+    *[!0-9]*|0*) recycle_reason "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' has a malformed max_old_space_mb '${max_old_space_mb}'." >&2; exit 2 ;;
   esac
-  case "$container_name" in *[!a-zA-Z0-9_.-]*|"") echo "recycle-container: REFUSING -- malformed container_name '${container_name}'." >&2; exit 2 ;; esac
-  case "$image_ref" in */*:*) : ;; *) echo "recycle-container: REFUSING -- image must be a registry/name:tag reference for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
-  case "$state_dir" in /*) : ;; *) echo "recycle-container: REFUSING -- state_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
-  case "$claude_dir" in /*) : ;; *) echo "recycle-container: REFUSING -- claude_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
-  case "$codex_dir" in /*) : ;; *) echo "recycle-container: REFUSING -- codex_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
-  case "$container_config_dir" in /*) : ;; *) echo "recycle-container: REFUSING -- container_config_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
+  case "$container_name" in *[!a-zA-Z0-9_.-]*|"") recycle_reason "recycle-container: REFUSING -- malformed container_name '${container_name}'." >&2; exit 2 ;; esac
+  case "$image_ref" in */*:*) : ;; *) recycle_reason "recycle-container: REFUSING -- image must be a registry/name:tag reference for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
+  case "$state_dir" in /*) : ;; *) recycle_reason "recycle-container: REFUSING -- state_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
+  case "$claude_dir" in /*) : ;; *) recycle_reason "recycle-container: REFUSING -- claude_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
+  case "$codex_dir" in /*) : ;; *) recycle_reason "recycle-container: REFUSING -- codex_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
+  case "$container_config_dir" in /*) : ;; *) recycle_reason "recycle-container: REFUSING -- container_config_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
   image_without_tag="${image_ref%:*}"
   image_tag="${image_ref##*:}"
   registry_host="${image_without_tag%%/*}"
@@ -732,7 +792,7 @@ else
   if [ -r "$_unscoped_registry" ] && [ -z "${RMD_STATE_DIR:-}" ]; then
     _declared="$(list_instance_names "$_unscoped_registry" | tr '\n' ' ')"
     if [ -n "${_declared// /}" ]; then
-      echo "recycle-container: REFUSING -- no --instance given while ${_unscoped_registry} declares instances." >&2
+      recycle_reason "recycle-container: REFUSING -- no --instance given while ${_unscoped_registry} declares instances." >&2
       echo "  Declared: ${_declared}" >&2
       echo "  Pass one explicitly, e.g. --instance core (the unscoped default would target" >&2
       echo "  container 'remudero-daemon' with STATE_DIR '${HOME:-/root}/rmd-state')." >&2
@@ -796,7 +856,7 @@ if [ ! -x "${RUNTIME_CONTRACT_FILE:-}" ] && [ -x "${PWD}/deploy/container-runtim
   RUNTIME_CONTRACT_FILE="${PWD}/deploy/container-runtime-contract.sh"
 fi
 if [ ! -x "${RUNTIME_CONTRACT_FILE:-}" ]; then
-  echo "recycle-container: REFUSING — provider-runtime verifier is missing or not executable." >&2
+  recycle_reason "recycle-container: REFUSING — provider-runtime verifier is missing or not executable." >&2
   echo "  Expected deploy/container-runtime-contract.sh beside this script or under the current checkout." >&2
   exit 1
 fi
@@ -901,7 +961,7 @@ LEDGER_FILE="${STATE_DIR}/state/ledger.ndjson"
 DOCKER_CONTROL_TIMEOUT_S="${RMD_RECYCLE_DOCKER_TIMEOUT_S:-120}"
 case "${DOCKER_CONTROL_TIMEOUT_S}" in
   ''|*[!0-9]*)
-    echo "recycle-container: REFUSING — RMD_RECYCLE_DOCKER_TIMEOUT_S must be a non-negative integer." >&2
+    recycle_reason "recycle-container: REFUSING — RMD_RECYCLE_DOCKER_TIMEOUT_S must be a non-negative integer." >&2
     exit 2
     ;;
 esac
@@ -921,7 +981,7 @@ run_docker_control() {
         printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.control_timeout","lane":"deploy","operation":"%s","timeout_s":%s,"container":"%s","pause":"retained — no replacement started"}\n' \
           "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "${operation}" "${DOCKER_CONTROL_TIMEOUT_S}" "${CONTAINER_NAME}" >> "${LEDGER_FILE}" || true
       fi
-      echo "recycle-container: REFUSING — docker ${operation} did not finish within ${DOCKER_CONTROL_TIMEOUT_S}s." >&2
+      recycle_reason "recycle-container: REFUSING — docker ${operation} did not finish within ${DOCKER_CONTROL_TIMEOUT_S}s." >&2
       echo "  ${CONTAINER_NAME} may be stopped but is not confirmed removed; PAUSE remains engaged and no replacement was started." >&2
       exit 1
     fi
@@ -948,7 +1008,7 @@ while [ $# -gt 0 ]; do
     --first-boot)  FIRST_BOOT=1; shift ;;
     --commission-git-author) shift ;;
     -h|--help)     COMMISSION_GIT_AUTHOR=0; sed -n '1,72p' "$0"; exit 0 ;;
-    *) echo "recycle-container: unknown argument '$1' (try --help)" >&2; exit 2 ;;
+    *) recycle_reason "recycle-container: unknown argument '$1' (try --help)" >&2; exit 2 ;;
   esac
 done
 
@@ -964,7 +1024,7 @@ echo "recycle-container: container ${CONTAINER_NAME}, target image ${REF}"
 # test. Unset, this is byte-for-byte the real check.
 DOCKERENV_PATH="${RMD_RECYCLE_DOCKERENV_PATH:-/.dockerenv}"
 if [ -f "${DOCKERENV_PATH}" ]; then
-  echo "recycle-container: REFUSING — this is running INSIDE a container." >&2
+  recycle_reason "recycle-container: REFUSING — this is running INSIDE a container." >&2
   echo "  This script recycles the container it runs from a HOST shell; running it from inside the" >&2
   echo "  image it is about to remove cannot outlive the 'docker rm' it would issue on itself." >&2
   exit 1
@@ -976,7 +1036,7 @@ if [ -f /.dockerenv ] && [ "${DOCKERENV_PATH}" != "/.dockerenv" ]; then
   DOCKER_BIN="$(command -v docker 2>/dev/null || true)"
   case "${DOCKER_BIN}" in
     /tmp/*|/private/tmp/*|/mnt/rmd/tmp/*) : ;;
-    *) echo "recycle-container: REFUSING — an in-container marker override requires a temporary Docker fixture stub." >&2; exit 1 ;;
+    *) recycle_reason "recycle-container: REFUSING — an in-container marker override requires a temporary Docker fixture stub." >&2; exit 1 ;;
   esac
 fi
 
@@ -1025,7 +1085,7 @@ if [ ! -e "${STATE_DIR_REPO_MARKER}" ] && [ "${DAEMON_CHECKOUT}" != "${STATE_DIR
 fi
 if [ "${FIRST_BOOT}" != "1" ]; then
   if [ ! -d "${STATE_DIR}" ] || [ ! -d "${STATE_DIR_CHECKOUT_MARKER}" ] || [ ! -e "${STATE_DIR_REPO_MARKER}" ]; then
-    echo "recycle-container: REFUSING — STATE_DIR resolved to ${STATE_DIR} (${STATE_DIR_RESOLUTION})," >&2
+    recycle_reason "recycle-container: REFUSING — STATE_DIR resolved to ${STATE_DIR} (${STATE_DIR_RESOLUTION})," >&2
     echo "  and this does not look like a real checkout:" >&2
     if [ -d "${STATE_DIR}" ]; then
       echo "    - the directory exists" >&2
@@ -1060,7 +1120,7 @@ record_recycle_invocation ready
 # ambiguous in the registry, or disagreeing with the live container's mounts) or an unsound pair is
 # refused HERE. The refusal names WHICH input failed, never its value.
 commission_refuse() {
-  echo "recycle-container: REFUSING git author commissioning — $1" >&2
+  recycle_reason "recycle-container: REFUSING git author commissioning — $1" >&2
   echo "  NOTHING has been touched: no pause, pull, stop, removal or identity write." >&2
   COMMISSION_RECOVERY="$2"
   exit 2
@@ -1201,7 +1261,7 @@ if [ -e "${DAEMON_TREE}/.git" ]; then
         fi
       done
       if [ "${#BLOCKING_PATHS[@]}" -gt 0 ]; then
-        echo "recycle-container: REFUSING — ${DAEMON_TREE} has local changes that origin/main's own" >&2
+        recycle_reason "recycle-container: REFUSING — ${DAEMON_TREE} has local changes that origin/main's own" >&2
         echo "  checkout (deploy/entrypoint.sh, inside the container this run is about to start)" >&2
         echo "  would be overwritten by:" >&2
         for blocking_path in "${BLOCKING_PATHS[@]}"; do
@@ -1352,7 +1412,7 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   fi
 
   if [ -n "${UNDECLARED_RUNTIME_VARS}" ]; then
-    echo "recycle-container: REFUSING — ${CONTAINER_NAME} carries a runtime variable this recycle does not declare: ${UNDECLARED_RUNTIME_VARS}" >&2
+    recycle_reason "recycle-container: REFUSING — ${CONTAINER_NAME} carries a runtime variable this recycle does not declare: ${UNDECLARED_RUNTIME_VARS}" >&2
     echo "  Add it to RMD_DAEMON_RUNTIME_ENV_VARS in deploy/runtime-env-vars.sh, or the recycle would" >&2
     echo "  silently drop it on the next replacement — the exact defect W1-T1069 closes. NOTHING has" >&2
     echo "  been touched." >&2
@@ -1471,7 +1531,7 @@ const cashEnabled = enabled.includes("cash") || enabled.includes("openweight");
 process.stdout.write(workers.cashFallbackWhenBlocked === true && cashEnabled ? "required" : "not-required");
 ' "${CASH_CONFIG_PATH}" 2>/dev/null)"; then :
   else
-    echo "recycle-container: REFUSING — could not read the mounted provider configuration." >&2
+    recycle_reason "recycle-container: REFUSING — could not read the mounted provider configuration." >&2
     echo "  ${CASH_CONFIG_PATH} is present but not parseable; ${CONTAINER_NAME} is untouched." >&2
     exit 1
   fi
@@ -1484,7 +1544,7 @@ if [ "${CASH_KEY_REQUIRED}" -eq 1 ]; then
   CASH_KEY_PATH="${RMD_OPENWEIGHT_API_KEY_PATH}"
   CASH_KEY_MODE=""
   if [ -L "${CASH_KEY_PATH}" ] || [ ! -f "${CASH_KEY_PATH}" ] || [ ! -r "${CASH_KEY_PATH}" ]; then
-    echo "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
+    recycle_reason "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
     echo "  Expected one readable, regular, mode-0600 line at ${CASH_KEY_PATH}; ${CONTAINER_NAME} is untouched." >&2
     exit 1
   fi
@@ -1494,13 +1554,13 @@ if [ "${CASH_KEY_REQUIRED}" -eq 1 ]; then
     CASH_KEY_MODE=""
   fi
   if [ "${CASH_KEY_MODE}" != "600" ]; then
-    echo "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
+    recycle_reason "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
     echo "  Expected one readable, regular, mode-0600 line at ${CASH_KEY_PATH}; ${CONTAINER_NAME} is untouched." >&2
     exit 1
   fi
   CASH_KEY_LINES="$(awk 'NF { count++; last=$0 } END { if (count == 1) print last; else exit 1 }' "${CASH_KEY_PATH}" 2>/dev/null || true)"
   if [ -z "${CASH_KEY_LINES}" ]; then
-    echo "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
+    recycle_reason "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
     echo "  Expected one readable, regular, mode-0600 line at ${CASH_KEY_PATH}; ${CONTAINER_NAME} is untouched." >&2
     exit 1
   fi
@@ -1580,7 +1640,7 @@ app_auth_note() { APP_AUTH_MISSING="${APP_AUTH_MISSING}${APP_AUTH_MISSING:+; }$1
 CAPTURED_APP_KEY_PATH="$(CAPTURED_get GH_APP_PRIVATE_KEY_PATH)"
 if [ -n "${RMD_GH_APP_PRIVATE_KEY_HOST_PATH:-}" ]; then
   if [ ! -r "${SCRIPT_DIR}/app-private-key-mount.sh" ]; then
-    echo "recycle-container: REFUSING -- explicit App key mount helper is unavailable." >&2
+    recycle_reason "recycle-container: REFUSING -- explicit App key mount helper is unavailable." >&2
     exit 1
   fi
   . "${SCRIPT_DIR}/app-private-key-mount.sh"
@@ -1611,7 +1671,7 @@ else
   # either" from the container branch, which had never read the shell at all — an unfalsifiable
   # claim in a refusal, and the reason an operator who DID export GH_TOKEN was told the export had
   # not worked. Both sources are now genuinely read above, and this names each one's own result.
-  echo "recycle-container: REFUSING — no GH_TOKEN could be captured, and App auth is not usable either." >&2
+  recycle_reason "recycle-container: REFUSING — no GH_TOKEN could be captured, and App auth is not usable either." >&2
   if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
     echo "  Consulted ${CONTAINER_NAME}'s own environment: no GH_TOKEN (or empty)." >&2
     echo "  Consulted this shell: $([ -n "${GH_TOKEN-}" ] && echo "GH_TOKEN is set but empty" || echo "GH_TOKEN is not set")." >&2
@@ -1728,6 +1788,7 @@ RECYCLE_TMPDIR="${TMPDIR:-/tmp}"
 PULL_LOG=""
 recycle_cleanup_tmp() {
   local exit_status=$?
+  record_recycle_ended "${exit_status}"
   # W1-T9409: an ERROR exit while nothing has been stopped takes this run's own PAUSE with it, as a
   # signal already does (W1-T5281). On 2026-10-14 a `set -e` abort (rc=2) in the wait left the PAUSE
   # holding core dispatch for ~2h45m. A no-op unless the file still holds the exact body this run wrote.
@@ -1738,7 +1799,7 @@ recycle_cleanup_tmp() {
   [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
   [ -n "${COMMISSION_PROBE_FILE}" ] && rm -f "${COMMISSION_PROBE_FILE}"
   release_host_recycle_lock
-  commission_on_exit
+  recycle_exit_receipts "${exit_status}"
   selected_registry_cleanup_diagnostics "${exit_status}"
   return 0
 }
@@ -1767,7 +1828,7 @@ if [ -n "${HOST_RECYCLE_LOCK}" ]; then
       continue
     fi
     if [ "${lock_waited_s}" -ge "${HOST_RECYCLE_LOCK_WAIT_S}" ]; then
-      echo "recycle-container: REFUSING — another image recycle (${holder_instance:-unknown}, pid ${holder_pid:-unknown}) still holds the host recycle lock after ${lock_waited_s}s." >&2
+      recycle_reason "recycle-container: REFUSING — another image recycle (${holder_instance:-unknown}, pid ${holder_pid:-unknown}) still holds the host recycle lock after ${lock_waited_s}s." >&2
       echo "  ${CONTAINER_NAME} is untouched and nothing was pulled or paused; a later tick retries." >&2
       exit 1
     fi
@@ -1781,14 +1842,14 @@ if command -v az >/dev/null 2>&1; then
   echo "recycle-container: az acr login -n ${REGISTRY}"
   source "${SCRIPT_DIR}/acr-login.sh"
   if ! rmd_acr_login "${REGISTRY}"; then
-    echo "recycle-container: REFUSING — FAILED to authenticate to ${REGISTRY}." >&2
+    recycle_reason "recycle-container: REFUSING — FAILED to authenticate to ${REGISTRY}." >&2
     echo "  ${CONTAINER_NAME} is untouched. Run 'az login' if this is a fresh shell, then re-run." >&2
     exit 1
   fi
 else
   echo "recycle-container: the Azure CLI is NOT installed on this host." >&2
   echo "  Authenticate docker by hand and re-run: docker login ${REGISTRY}.azurecr.io" >&2
-  echo "  REFUSING — an unauthenticated pull would leave the OLD image in place and this script" >&2
+  recycle_reason "  REFUSING — an unauthenticated pull would leave the OLD image in place and this script" >&2
   echo "  would go on to interrogate that one instead." >&2
   exit 1
 fi
@@ -1810,7 +1871,7 @@ fi
 # fresh permanent leak. The trap is the primary cleanup; the prefix catches the run that dies
 # before it fires, and it is INSTALLED BEFORE the mktemp so a failed allocation still cleans up.
 if ! PULL_LOG="$(mktemp "${RECYCLE_TMPDIR%/}/rmd-recycle-container-pull-log.XXXXXX" 2>/dev/null)"; then
-  echo "recycle-container: REFUSING — could not create a scratch pull log under ${RECYCLE_TMPDIR}." >&2
+  recycle_reason "recycle-container: REFUSING — could not create a scratch pull log under ${RECYCLE_TMPDIR}." >&2
   echo "  Without it the credential-failure check below cannot run, and a pull that failed on auth" >&2
   echo "  would read as a success. ${CONTAINER_NAME} is untouched." >&2
   exit 1
@@ -1826,7 +1887,7 @@ docker pull "${REF}" 2>&1 | tee "${PULL_LOG}" | sed 's/^/  /'
 PULL_RC="${PIPESTATUS[0]}"
 set -e
 if [ "${PULL_RC}" -ne 0 ] || grep -qiE 'authentication required|unauthorized|denied' "${PULL_LOG}" 2>/dev/null; then
-  echo "recycle-container: REFUSING — the pull FAILED (exit ${PULL_RC})." >&2
+  recycle_reason "recycle-container: REFUSING — the pull FAILED (exit ${PULL_RC})." >&2
   echo "  ${CONTAINER_NAME} is untouched and STILL RUNNING on its current image." >&2
   echo "  NOT starting anything — a fresh image was requested and not obtained, and the last known" >&2
   echo "  failure of this exact kind silently relaunched the STALE cached image instead." >&2
@@ -1834,7 +1895,7 @@ if [ "${PULL_RC}" -ne 0 ] || grep -qiE 'authentication required|unauthorized|den
 fi
 PULLED_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${REF}" 2>/dev/null || true)"
 if [ -z "${PULLED_IMAGE_ID}" ]; then
-  echo "recycle-container: REFUSING — pulled ${REF} but could not read an image id back." >&2
+  recycle_reason "recycle-container: REFUSING — pulled ${REF} but could not read an image id back." >&2
   echo "  ${CONTAINER_NAME} is untouched." >&2
   exit 1
 fi
@@ -1888,9 +1949,9 @@ recycle_on_signal() {
   trap - HUP INT TERM
   if [ "${RECYCLE_SIGNAL_PHASE}" = "waiting" ]; then
     clear_own_pause "recycle-container: pause removed — a recycle that dies before stopping ${CONTAINER_NAME} must not leave the fleet paused"
-    echo "recycle-container: ABORTED by SIG${sig} before ${CONTAINER_NAME} was stopped — it is untouched and still running. Re-run detached (nohup/setsid) if this was an SSH session." >&2
+    recycle_reason "recycle-container: ABORTED by SIG${sig} before ${CONTAINER_NAME} was stopped — it is untouched and still running. Re-run detached (nohup/setsid) if this was an SSH session." >&2
   else
-    echo "recycle-container: ABORTED by SIG${sig} after docker stop ${CONTAINER_NAME} — PAUSE (if still on disk) is left engaged because no replacement is confirmed running; re-run the recycle to finish." >&2
+    recycle_reason "recycle-container: ABORTED by SIG${sig} after docker stop ${CONTAINER_NAME} — PAUSE (if still on disk) is left engaged because no replacement is confirmed running; re-run the recycle to finish." >&2
   fi
   exit "${status}"
 }
@@ -2520,12 +2581,13 @@ WORKERS
   fi
   if [ "${waited}" -ge "${WAIT_SECONDS}" ]; then
     OLDEST_AGE_S="$(oldest_inflight_age_s)"
-    echo "recycle-container: REFUSING — ${n} lane-holding and ${lane_less_busy} lane-less worker(s) still in flight after ${WAIT_SECONDS}s." >&2
+    recycle_reason "recycle-container: REFUSING — ${n} lane-holding and ${lane_less_busy} lane-less worker(s) still in flight after ${WAIT_SECONDS}s." >&2
     echo "  WAIT_SECONDS=${WAIT_SECONDS} — source: ${WAIT_SOURCE}." >&2
     case "${WAIT_SOURCE}" in
       no-history*) echo "  the no-history fallback was sized against ${RECYCLE_WAIT_DISTRIBUTION_NOTE}." >&2 ;;
     esac
-    echo "  recycle-blockers-json: $(drain_blockers_json)" >&2
+    RECYCLE_BLOCKERS_JSON="$(drain_blockers_json)"
+    echo "  recycle-blockers-json: ${RECYCLE_BLOCKERS_JSON}" >&2
     [ -z "${STALL_PROOF_FAILED}" ] || echo "  STALLED verdict, but frozen-daemon ownership was not proven — ${STALL_PROOF_FAILED} (W1-T6597)." >&2
     if [ -n "${OLDEST_AGE_S}" ] && [ "${OLDEST_AGE_S}" -gt 0 ] 2>/dev/null; then
       echo "  the oldest in-flight work this run observed was ${OLDEST_AGE_S}s old — a wait of at" >&2
@@ -2550,6 +2612,7 @@ WORKERS
   echo "recycle-container: ${n} lane-holding + ${lane_less_busy} lane-less worker(s) still in flight, waited ${waited}s/${WAIT_SECONDS}s — polling"
   sleep "${POLL_INTERVAL_S}"
   waited=$((waited + POLL_INTERVAL_S))
+  RECYCLE_WAITED_S="$waited"
   evaluate_frozen_daemon_proof
 done
 
@@ -2579,7 +2642,7 @@ cleanup_leftover_smoke() {
     [ -n "${smoke_id}" ] && [ "${smoke_names}" = "${SMOKE_NAME}" ] || continue
     if [ -z "${smoke_state}" ] || [ "${smoke_state}" = "running" ]; then
       if [ "${phase}" = "before the smoke" ]; then
-        echo "recycle-container: REFUSING — leftover ${SMOKE_NAME} (${smoke_state:-unknown}) blocks the smoke; it was not removed." >&2
+        recycle_reason "recycle-container: REFUSING — leftover ${SMOKE_NAME} (${smoke_state:-unknown}) blocks the smoke; it was not removed." >&2
         echo "  Wait for that smoke to finish, then remove the leftover with docker rm ${SMOKE_NAME} and re-run." >&2
         return 1
       fi
@@ -2588,7 +2651,7 @@ cleanup_leftover_smoke() {
     if docker container rm "${smoke_id}" >/dev/null 2>&1; then
       echo "recycle-container: removed leftover ${SMOKE_NAME} (${smoke_state}) ${phase}"
     elif [ "${phase}" = "before the smoke" ]; then
-      echo "recycle-container: REFUSING — could not remove leftover ${SMOKE_NAME} (${smoke_state}) before the smoke." >&2
+      recycle_reason "recycle-container: REFUSING — could not remove leftover ${SMOKE_NAME} (${smoke_state}) before the smoke." >&2
       echo "  Resolve the removal failure with docker rm ${SMOKE_NAME} and re-run." >&2
       return 1
     else
@@ -2666,7 +2729,7 @@ if ! docker image inspect "${PULLED_IMAGE_ID}" >/dev/null 2>&1; then
     REPULLED_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${REF}" 2>/dev/null || true)"
   fi
   if [ -z "${REPULLED_IMAGE_ID}" ]; then
-    echo "recycle-container: REFUSING — the pulled image ${PULLED_IMAGE_ID} was removed during the drain" >&2
+    recycle_reason "recycle-container: REFUSING — the pulled image ${PULLED_IMAGE_ID} was removed during the drain" >&2
     echo "  (another instance's image reclaim, or an operator prune) and the re-pull of ${REF} failed." >&2
     echo "  ${CONTAINER_NAME} is untouched and STILL RUNNING on its current image." >&2
     clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
@@ -2686,7 +2749,7 @@ set -e
 SMOKE_LINE="$(printf '%s\n' "${SMOKE_OUTPUT}" | grep -E '^WORKER-SMOKE ' | tail -1 || true)"
 if [ "${SMOKE_RC}" -ne 0 ]; then
   docker container rm -f "${SMOKE_NAME}" >/dev/null 2>&1 || true
-  echo "recycle-container: REFUSING — the real worker smoke FAILED (exit ${SMOKE_RC}) on ${PULLED_IMAGE_ID}." >&2
+  recycle_reason "recycle-container: REFUSING — the real worker smoke FAILED (exit ${SMOKE_RC}) on ${PULLED_IMAGE_ID}." >&2
   echo "  ${SMOKE_LINE:-no WORKER-SMOKE verdict line was printed (hang, crash or timeout)}" >&2
   if [ -z "${SMOKE_OUTPUT}" ]; then
     echo "  smoke-output| (the smoke printed nothing)" >&2
@@ -2884,7 +2947,7 @@ docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
 # than a probe container: never report a verdict on an image you have not confirmed you just got.
 STARTED_IMAGE_ID="$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
 if [ -z "${STARTED_IMAGE_ID}" ] || [ "${STARTED_IMAGE_ID}" != "${PULLED_IMAGE_ID}" ]; then
-  echo "recycle-container: FAILED RECYCLE — ${CONTAINER_NAME} is running image ${STARTED_IMAGE_ID:-<none>}," >&2
+  recycle_reason "recycle-container: FAILED RECYCLE — ${CONTAINER_NAME} is running image ${STARTED_IMAGE_ID:-<none>}," >&2
   echo "  which does NOT match the digest this run pulled (${PULLED_IMAGE_ID})." >&2
   echo "  A container came up, but not on the image this run obtained — investigate before trusting it." >&2
   exit 1
@@ -2909,7 +2972,7 @@ if RUNTIME_CONTRACT_VERDICT="$("${RUNTIME_CONTRACT_FILE}" --container "${CONTAIN
   echo "recycle-container: runtime contract healthy — ${RUNTIME_CONTRACT_VERDICT}"
 else
   RUNTIME_CONTRACT_STATUS=$?
-  echo "recycle-container: FAILED RUNTIME CONTRACT — ${RUNTIME_CONTRACT_VERDICT}" >&2
+  recycle_reason "recycle-container: FAILED RUNTIME CONTRACT — ${RUNTIME_CONTRACT_VERDICT}" >&2
   echo "  The new container remains running for investigation; no stop, remove, retry or rollback was attempted." >&2
   exit "${RUNTIME_CONTRACT_STATUS}"
 fi
@@ -2919,7 +2982,7 @@ fi
 # `git var GIT_AUTHOR_IDENT` as the worker user in the target checkout resolves to it — a global match
 # proves nothing under a local or GIT_AUTHOR_* mask. Bounded and polled; any miss is a FAILURE.
 commission_fail() {
-  echo "recycle-container: FAILED git author commissioning ($1) — $2" >&2
+  recycle_reason "recycle-container: FAILED git author commissioning ($1) — $2" >&2
   echo "  The replacement ${CONTAINER_NAME} remains running for diagnosis; no rollback was attempted." >&2
   COMMISSION_PHASE="$1"
   COMMISSION_RECOVERY="$3"
@@ -3023,7 +3086,7 @@ EOF_REPLACEMENT_ENV
   commission_receipt verified
 fi
 
-echo "recycle-container: OK — ${CONTAINER_NAME} recycled onto ${PULLED_IMAGE_ID}"
+recycle_reason "recycle-container: OK — ${CONTAINER_NAME} recycled onto ${PULLED_IMAGE_ID}"
 
 # W1-T9071: the post-start actions run once the replacement has proved itself above.
 if command -v recycle_actions_run >/dev/null 2>&1; then
@@ -3107,7 +3170,7 @@ ${PROTECTED_IMAGE_IDS}
 EOF_PROTECTED
 
   if [ -n "${RECLAIM_TOOK_A_PROTECTED_IMAGE}" ]; then
-    echo "recycle-container: FAILED RECLAIM — the prune removed ${RECLAIM_TOOK_A_PROTECTED_IMAGE}," >&2
+    recycle_reason "recycle-container: FAILED RECLAIM — the prune removed ${RECLAIM_TOOK_A_PROTECTED_IMAGE}," >&2
     echo "  which a container references (or is the digest this run just pulled). The recycle itself" >&2
     echo "  SUCCEEDED and ${CONTAINER_NAME} is running; do not re-run the reclaim until this is understood." >&2
     exit 1
