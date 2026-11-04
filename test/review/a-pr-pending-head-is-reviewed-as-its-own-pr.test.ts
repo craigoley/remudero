@@ -17,9 +17,11 @@ const BRANCH = "run-PR-pending-1793751990458";
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
 const ACCEPTANCE = "## Acceptance\n- the change works | grep: review in src/lib/review.ts\n";
 
-async function review(taskId: string, headRefName: string) {
+async function review(taskId: string, headRefName: string, replayed = false) {
   const root = mkdtempSync(join(tmpdir(), "rmd-pr-pending-review-"));
   let captured: Parameters<NonNullable<ReviewCommandDeps["runReview"]>>[0] | undefined;
+  let pending: Parameters<NonNullable<ReviewCommandDeps["postReviewPending"]>>[0] | undefined;
+  let posted: Parameters<NonNullable<ReviewCommandDeps["postStatus"]>>[0] | undefined;
   const effects: string[] = [];
   try {
     const code = await reviewCommand(headRefName, ["--repo", "craigoley/remudero"], {
@@ -32,7 +34,9 @@ async function review(taskId: string, headRefName: string) {
       loadConfig: () => ({ root, installRoot: REPO_ROOT, claudeBin: "/bin/true" }) as Config,
       executionMode: "semantic",
       fetchHead: () => {},
-      postReviewPending: async () => { effects.push("pending"); return { posted: true }; },
+      postReviewPending: async (args) => { pending = args; effects.push("pending"); return { posted: true }; },
+      postStatus: async (args) => { posted = args; effects.push("status"); return { posted: true }; },
+      reviewerCodeFreshness: () => ({ status: "fresh", codeSha: HEAD, originMainSha: HEAD, advance: "none" }),
       materialize: () => {
         effects.push("materialize");
         return { worktreePath: undefined, failure: { errorClass: "other", message: "fixture" } };
@@ -44,12 +48,13 @@ async function review(taskId: string, headRefName: string) {
           state: "success", headSha: HEAD, reviewerOutcome: "success", criteria: [],
           testTheater: false, summary: "fixture review complete", floorDegraded: false,
           capped: false, keywordOnly: false, planOnly: false,
+          ...(replayed ? { decisionDisposition: "replayed" as const, reviewDecisionDigest: "a".repeat(64) } : {}),
         };
       },
     });
     const rows: Array<Record<string, unknown>> = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
       .trim().split("\n").map(line => JSON.parse(line));
-    return { code, captured, effects, rows };
+    return { code, captured, pending, posted, effects, rows };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -72,7 +77,7 @@ test(`${PROOF}: the placeholder qualifies only on its exact numeric run branch`,
 });
 
 test(`${PROOF}: semantic review receives untasked risk and budget and reaches a verdict`, async () => {
-  const { code, captured, effects, rows } = await review("PR-pending", BRANCH);
+  const { code, captured, pending, posted, effects, rows } = await review("PR-pending", BRANCH);
   assert.equal(code, 0);
   assert.ok(captured, "the placeholder must reach the normal review path");
   assert.equal(captured.task.id, "PR-pending");
@@ -84,9 +89,31 @@ test(`${PROOF}: semantic review receives untasked risk and budget and reaches a 
   assert.equal(captured.requireSemanticReview, true);
   assert.ok(captured.reviewerMount);
   assert.equal(captured.reviewReplaySetupInput?.untasked, true);
+  assert.equal(pending?.sha, HEAD);
+  assert.equal(pending?.taskId, "PR-pending");
+  assert.equal(pending?.prUrl, "https://github.com/craigoley/remudero/pull/16499");
+  assert.equal(posted, undefined);
   assert.deepEqual(effects, ["pending", "materialize", "review"]);
-  assert.equal(rows.filter(row => row.step === "review.reviewer.untasked_defaults").length, 1);
+  const defaults = rows.filter(row => row.step === "review.reviewer.untasked_defaults");
+  assert.deepEqual(defaults.map(row => [row.task_risk, row.hard_cap_usd]),
+    [[DEFAULT_RISK, UNTASKED_REVIEW_BUDGET_USD]]);
   assert.ok(!rows.some(row => row.step === "review.semantic_setup_refused"));
+});
+
+test(`${PROOF}: a replayed placeholder verdict restores a terminal status for its own head`, async () => {
+  const { code, captured, posted, effects, rows } = await review("PR-pending", BRANCH, true);
+  assert.equal(code, 0);
+  assert.equal(captured?.requireSemanticReview, true);
+  assert.equal(posted?.state, "success");
+  assert.equal(posted?.sha, HEAD);
+  assert.equal(posted?.taskId, "PR-pending");
+  assert.equal(posted?.prUrl, "https://github.com/craigoley/remudero/pull/16499");
+  assert.deepEqual(effects, ["pending", "materialize", "review", "status"]);
+  const terminal = rows.filter(row => row.step === "review.posted");
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0].state, "success");
+  assert.equal(terminal[0].head_sha, HEAD);
+  assert.equal(terminal[0].status_recovered, true);
 });
 
 test(`${PROOF}: foreign placeholder heads and unresolved filed tasks still refuse metadata`, async () => {
@@ -94,9 +121,11 @@ test(`${PROOF}: foreign placeholder heads and unresolved filed tasks still refus
     ["PR-pending", "codex/foreign"],
     ["W1-T999999", "run-W1-T999999-1"],
   ]) {
-    const { code, captured, effects, rows } = await review(id, branch);
+    const { code, captured, pending, posted, effects, rows } = await review(id, branch);
     assert.equal(code, 2, `${id} on ${branch}`);
     assert.equal(captured, undefined);
+    assert.equal(pending, undefined);
+    assert.equal(posted, undefined);
     assert.deepEqual(effects, []);
     assert.equal(rows.find(row => row.step === "review.reviewer.skipped")?.reason,
       "head-task-metadata-unavailable");
