@@ -14795,10 +14795,6 @@ function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray
     /^promise harvest (?:unavailable:|corpus is unreadable)/.test(observation.reason));
 }
 
-/** PRIMARY CONTROL (W1-T11132): cap a head's `inconclusive_load` re-reviews, so a proof that keeps
- *  timing out as the host quietens cannot be re-run forever. */
-export const INCONCLUSIVE_LOAD_MAX_RERUNS = 3;
-
 /** W1-T11132 criterion 2. True when the head's latest review is pending for NO cause but `inconclusive_load` proofs and
  *  this pass's own host load sample is strictly below the load the proof failed under (read from the recorded load,
  *  no fixed threshold). An unreadable sample or recording compares as "not lower": no retry on a guess. */
@@ -14817,9 +14813,6 @@ export function inconclusiveLoadLowered(
   const inconclusive = verdict?.criteria?.filter(criterion => criterion.proof_exec === "inconclusive_load") ?? [];
   if (inconclusive.length === 0 || verdict?.cannotEvaluate === true || verdict?.promisedFollowUpObservation?.state === "unknown") return false;
   if (verdict?.criteria.some(c => !c.met && c.proof_exec !== "inconclusive_load") || verdict?.testTheater || verdict?.criteriaTampered) return false;
-  const priorRuns = rows.filter(r => r.step === "review.posted" && r.state === "pending" &&
-    ((r.decision_verdict as ReviewVerdict | undefined)?.criteria ?? []).some(c => c.proof_exec === "inconclusive_load")).length;
-  if (priorRuns > INCONCLUSIVE_LOAD_MAX_RERUNS) return false;
   const recorded = inconclusive.map(criterion => recordedLoad1(criterion.load)).filter((n): n is number => n !== undefined);
   if (recorded.length !== inconclusive.length) return false;
   const now = sample().load1;

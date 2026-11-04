@@ -2994,6 +2994,19 @@ function purePathTestFiles(whitelisted: WhitelistedProof): string[] {
   return [whitelisted.label];
 }
 
+/** Hosted CI must cover every file a named proof can run; a title is never a CI file key. */
+function hostedCiPassedProofFiles(
+  proof: WhitelistedProof, cwd: string, hosted: ReviewEvidence["hostedCiFilePassed"],
+): boolean {
+  if (proof.kind !== "test" || !hosted) return false;
+  if (!proof.nameFiltered) return hosted.get(proof.label) === "passed";
+  const resolution = proof.runner === "vitest"
+    ? { status: "resolved" as const, files: vitestNameFilterScope(proof, cwd) }
+    : resolveNameFilteredCandidates(cwd, proof.label);
+  return resolution.status === "resolved" && resolution.files.length > 0 &&
+    resolution.files.every(file => hosted.get(file) === "passed");
+}
+
 /** The checkout's OWN Playwright CLI entry. Deliberately not `npx playwright`: `npx` resolves a name and on a cache
  *  miss will FETCH a different Playwright than the one pinned here, installing a browser revision the tests do not
  *  want — the exact drift this preflight exists to end. Running it with the live `node` binary pins both halves. */
@@ -4459,8 +4472,7 @@ export function judgeCriterion(
             proofSkip = "forward-reference";
             reason = filingForwardReason(reason, whitelisted, filingTarget);
           } else if (
-            whitelisted.kind === "test" && !whitelisted.nameFiltered &&
-            execCtx.hostedCiFilePassed?.get(whitelisted.label) === "passed" &&
+            hostedCiPassedProofFiles(whitelisted, execCtx.cwd, execCtx.hostedCiFilePassed) &&
             // A failure that REPRODUCES with the proof starting below the load the prior review recorded is conclusive.
             !(priorLoad !== undefined && (proofLoad?.start.load1 ?? Infinity) < priorLoad)
           ) {

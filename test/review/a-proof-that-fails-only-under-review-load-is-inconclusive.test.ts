@@ -9,7 +9,7 @@ import { defaultAsyncProofSpawner, defaultProofSpawner, execWhitelistedProof, ju
   preparePromisedReviewDecision, ProofSandboxUnavailableError, recordedLoad1, setProofSandboxForTests,
   reviewLedgerReasons, sampleHostLoad, type ProofExecutor, type ReviewEvidence, type ReviewVerdict } from "#src/lib/review.js";
 import { reviewUnmetFields } from "#src/cli/commands/review.js";
-import { DEFAULT_SWEEP_POLICY, inconclusiveLoadLowered, INCONCLUSIVE_LOAD_MAX_RERUNS, observeLightPassReviewEligibility, runSweep, runSweepLightPass,
+import { DEFAULT_SWEEP_POLICY, inconclusiveLoadLowered, observeLightPassReviewEligibility, runSweep, runSweepLightPass,
   type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 
 const PROOF_FILE = "test/load-shaped.test.ts";
@@ -182,6 +182,75 @@ test("a failure while hosted CI passed the same file at the head is inconclusive
   assert.equal(verdict.state, "pending");
 });
 
+test("named unit-test failures use hosted CI for their resolved files in both judges", async () => {
+  const named = [{ claim: "the behaviour holds", proof: "unit test: x" }];
+  for (const asynchronous of [false, true]) {
+    for (const [hostedFile, ciState, priorLoad, expected] of [
+      [PROOF_FILE, "passed", undefined, "inconclusive_load"],
+      [PROOF_FILE, "failed", undefined, "executed_fail"],
+      ["test/other.test.ts", "passed", undefined, "executed_fail"],
+      [PROOF_FILE, "passed", 50, "executed_fail"],
+    ] as const) {
+      const evidence: ReviewEvidence = { diff: DIFF, report: "the behaviour holds", headCheckoutDir: checkout,
+        sampleLoad: samples(30, 41), hostedCiFilePassed: new Map([[hostedFile, ciState]]),
+        priorInconclusiveLoad1: priorLoad,
+        ...(asynchronous ? { asyncExecProof: async () => "fail" as const } : { execProof: () => "fail" as const }),
+      };
+      const verdict = asynchronous ? await judgeReviewAsync(named, evidence) : judgeReview(named, evidence);
+      assert.equal(verdict.criteria[0].proof_exec, expected);
+      if (expected === "inconclusive_load") assertPendingLoad(verdict);
+      else {
+        assert.equal(verdict.state, "failure");
+        assert.deepEqual(reviewUnmetFields(verdict).unmetClaims, [named[0].claim]);
+      }
+    }
+  }
+});
+
+test("a named proof needs passed hosted CI for every candidate file, with no guess for an unresolved title", t => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}named-proof-ci-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "test"));
+  const files = ["test/first.test.ts", "test/second.test.ts"];
+  for (const file of files) writeFileSync(join(dir, file), "test('shared title', () => {});\n");
+  for (const [title, statuses, expected] of [
+    ["shared title", ["passed", "passed"], "inconclusive_load"],
+    ["shared title", ["passed", "failed"], "executed_fail"],
+    ["shared title", ["passed"], "executed_fail"],
+    ["absent title", ["passed", "passed"], "executed_fail"],
+  ] as const) {
+    const verdict = judgeReview([{ claim: "the behaviour holds", proof: `unit test: ${title}` }], {
+      diff: DIFF, report: "the behaviour holds", headCheckoutDir: dir, sampleLoad: samples(30, 41),
+      hostedCiFilePassed: new Map(statuses.map((status, index) => [files[index], status])), execProof: () => "fail",
+    });
+    assert.equal(verdict.criteria[0].proof_exec, expected);
+    if (expected === "inconclusive_load") assertPendingLoad(verdict);
+    else assert.equal(verdict.state, "failure");
+  }
+});
+
+test("named Vitest proofs use hosted CI for their scoped files in both judges", async t => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}vitest-proof-ci-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "tests"));
+  const file = "tests/load.test.ts";
+  writeFileSync(join(dir, file), "test('load shaped', () => {});\n");
+  const named = [{ claim: "the behaviour holds", proof: "unit test: load shaped" }];
+  for (const asynchronous of [false, true]) {
+    for (const passed of [false, true]) {
+      const evidence: ReviewEvidence = { diff: DIFF, report: "the behaviour holds", headCheckoutDir: dir,
+        target: { owner: "craigoley", repo: "remudero-site" }, sampleLoad: samples(30, 41),
+        hostedCiFilePassed: new Map([[file, passed ? "passed" : "failed"]]),
+        ...(asynchronous ? { asyncExecProof: async () => "fail" as const } : { execProof: () => "fail" as const }),
+      };
+      const verdict = asynchronous ? await judgeReviewAsync(named, evidence) : judgeReview(named, evidence);
+      assert.equal(verdict.criteria[0].proof_exec, passed ? "inconclusive_load" : "executed_fail");
+      if (passed) assertPendingLoad(verdict);
+      else assert.equal(verdict.state, "failure");
+    }
+  }
+});
+
 test("hosted CI that failed the file or never ran it leaves the failure executed_fail", () => {
   for (const hosted of [new Map([[PROOF_FILE, "failed" as const]]), new Map([["test/other.test.ts", "passed" as const]])]) {
     const verdict = judge({ execProof: () => "fail", hostedCiFilePassed: hosted });
@@ -326,10 +395,14 @@ test("W1-T11132 criterion 2: no retry unless inconclusive_load is the ONLY pendi
   assert.equal(inconclusiveLoadLowered(pr(), [mixed], at(1)), false);
 });
 
-test("W1-T11132 criterion 2: a head re-run more than the cap is left to the operator", () => {
-  const rows = Array.from({ length: INCONCLUSIVE_LOAD_MAX_RERUNS + 1 }, () => inconclusive(41));
-  assert.equal(inconclusiveLoadLowered(pr(), rows.slice(0, INCONCLUSIVE_LOAD_MAX_RERUNS), at(1)), true);
-  assert.equal(inconclusiveLoadLowered(pr(), rows, at(1)), false);
+test("W1-T11132 criterion 2: successive inconclusive reviews retry on the first quieter pass without a count cap", () => {
+  const rows: Record<string, unknown>[] = [];
+  for (const load1 of [40, 30, 20, 10, 5, 2]) {
+    rows.push(posted({ proof_exec: "inconclusive_load", load: { start: { load1 }, end: { load1 } } }));
+    assert.equal(inconclusiveLoadLowered(pr(), rows, at(load1 + 1)), false);
+    assert.equal(inconclusiveLoadLowered(pr(), rows, at(load1)), false);
+    assert.equal(inconclusiveLoadLowered(pr(), rows, at(1)), true);
+  }
 });
 
 test("W1-T11132 criterion 2: production decision preparation recovers prior load by head and exact proof", async t => {
@@ -374,7 +447,8 @@ test("W1-T11132 criterion 2: full and light sweeps release delivered pending rev
     const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}load-retry-sweep-`));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const ledgerPath = join(dir, "ledger.ndjson"), now = Date.now();
-    writeFileSync(ledgerPath, JSON.stringify({ ...inconclusive(41), ts: new Date(now).toISOString() }) + "\n");
+    writeFileSync(ledgerPath, [80, 70, 60, 50, 41].map(load1 =>
+      JSON.stringify({ ...inconclusive(load1), ts: new Date(now).toISOString() })).join("\n") + "\n");
     const view = pr({ reviewPendingSince: new Date(now).toISOString() });
     let reviews = 0, load = 60;
     const deps: SweepDeps = { ledgerPath, runId: "load-retry", now: () => now, sampleLoad: () => ({ load1: load }),
