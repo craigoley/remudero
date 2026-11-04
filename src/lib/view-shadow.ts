@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { READ_MODEL_DIRNAME, openShadowCounterDb, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
-import { renderView, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewBody, type ViewDefinition, type ViewSource } from "./views.js";
+import { computeViewBody, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewBody, type ViewDefinition, type ViewSource } from "./views.js";
 import { readShadowCounters, saveShadowCounter, shadowCounterPath, type ShadowClassification, type ShadowKeyChange, type ShadowPopulation, type ShadowPopulationEvidence, type ViewShadowState } from "./view-shadow-store.js";
 
 export type { ShadowClassification, ShadowPopulation, ShadowPopulationEvidence, ViewShadowState } from "./view-shadow-store.js";
@@ -1082,7 +1082,8 @@ export function legacyViewSampler(opts: { legacy: readonly ViewDefinition[]; pos
     clock, ...(opts.defer ? { defer: opts.defer } : {}), ...(opts.identity ? { identity: opts.identity } : {}),
     send: ({ view, key, params, requests }) => {
       const definition = legacy.get(view);
-      const rendered = definition ? renderView(definition, clock, params) : undefined;
+      // The comparator reads only the body, so the legacy side never pays for an entity tag (W1-T11328).
+      const rendered = definition ? computeViewBody(definition, clock, params) : undefined;
       if (rendered === undefined || "error" in rendered) return opts.post({ view, key, requests });
       const asOf = rendered.body.asOf === null ? Number.NaN : Date.parse(rendered.body.asOf);
       const unready = unreadySources(rendered.body.sources);
