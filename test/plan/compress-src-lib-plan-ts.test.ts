@@ -33,8 +33,6 @@ test("W1-T11190: comment compression preserves executable code", () => {
   const release = actual.comments.find(comment => comment.includes("W1-T3206"));
   assert.ok(release, "retain the operator-release invariant and its citation");
   const before = compressionPinBase("src/lib/plan.ts", import.meta.url);
-  if (before === undefined) return;
-  // Compare comment volume only on the compression PR; later edits have no size ceiling.
   const releaseBefore = `/**
  * W1-T3206 — THE LEDGER STEP THAT RELEASES A PARKED TASK.
  *
@@ -52,6 +50,8 @@ test("W1-T11190: comment compression preserves executable code", () => {
   assert.ok(Buffer.byteLength(release) < Buffer.byteLength(releaseBefore),
     "the release explanation is shorter, not just rewrapped");
 
+  if (before === undefined) return;
+  // Compare whole-module comment volume only on the compression PR; later edits have no size ceiling.
   const base = snapshot(before);
   assert.equal(actual.tokens, base.tokens, "every executable token matches the pre-compression source");
   assert.equal(actual.ast, base.ast, "newline-sensitive syntax matches the pre-compression source");
