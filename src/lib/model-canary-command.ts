@@ -20,13 +20,10 @@ import { replayPrivateControl } from "./model-canary-replay-private.js";
 import { buildCanarySchedule, executeCanarySchedule, type CanarySchedulePorts, type CanarySlot } from "./model-canary-schedule.js";
 import type { CanaryExecutionPorts } from "./model-canary-runner.js";
 import { isRegisteredCanarySlotOwner } from "./model-canary-coding-capabilities.js";
-import { createCodingCanaryExecutionPort, codingWorkerRequestPorts, type CodingWorker } from "./model-canary-coding-adapter.js";
+import { codingWorkerRequestPorts, type CodingWorker } from "./model-canary-coding-adapter.js";
 import type { Config } from "./config.js";
-import { qualifiedLinuxCodingProfileForCurrentHost } from "./model-canary-native-profile-probe.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { registerQualifiedCodingExecutionPort } from "./model-canary-coding-port-capability.js";
-import { getQualifiedLinuxCodingBounds, isQualifiedLinuxCodingProfile,
-  type QualifiedLinuxCodingProfile } from "./model-canary-systemd-bwrap-backend.js";
 import { codingLedgerSave, type CodingLedgerWriter } from "./model-canary-ledger.js";
 import type { ValidatedPrivateCorpus } from "./model-canary-private-corpus.js";
 
@@ -265,9 +262,16 @@ export function canaryCommand(argv: readonly string[]) {
   return { state: "private-projection", runs: projection.uniqueRuns };
 }
 
+/**
+ * The opaque host profile only the native systemd/bwrap backend may issue (W1-T11313). This build has
+ * no issuer, so no value of this type is ever qualified here: coding defers with
+ * coding-native-profile-unavailable before eligibility, claim, admission or request.
+ */
+export interface NativeCodingProfile { readonly kind: "qualified-linux-coding-profile-v1" }
+
 export interface OwnedCodingCanaryPorts {
   owner: CanarySlotOwner;
-  profile: QualifiedLinuxCodingProfile | null;
+  profile: NativeCodingProfile | null;
   privateCorpus: ValidatedPrivateCorpus;
   ledgerPath: string;
   schedulePorts: Pick<CanarySchedulePorts, "eligibility"> & {
@@ -280,7 +284,7 @@ export interface OwnedCodingCanaryPorts {
 export interface OwnedCodingCanaryTestDependencies {
   workerRuntime?: () => Promise<{ config: Config; worker: CodingWorker }>;
   codingPortFactory?: (slot: CanarySlot, owner: CanarySlotOwner,
-    profile: QualifiedLinuxCodingProfile | null) => NonNullable<CanaryExecutionPorts["executeCoding"]> | null;
+    profile: NativeCodingProfile | null) => NonNullable<CanaryExecutionPorts["executeCoding"]> | null;
 }
 
 /**
@@ -294,10 +298,10 @@ export async function executeOwnedCodingCanarySchedule(input: OwnedCodingCanaryP
   internal: OwnedCodingCanaryTestDependencies = {}) {
   const hasCoding = cases.some(item => item.family === "coding");
   const firstCodingSlot = plan.slots.find(slot => cases.some(item => item.id === slot.caseId && item.family === "coding"));
-  const hasQualifiedProfile = isQualifiedLinuxCodingProfile(input.profile)
-    && getQualifiedLinuxCodingBounds(input.profile) !== null;
+  // No native profile issuer exists in this build (W1-T11313), so a coding schedule runs only through
+  // the source-unit port factory and otherwise defers before it can claim, admit or request.
   if (!input.ledgerPath || !isRegisteredCanarySlotOwner(input.owner)
-    || (hasCoding && (!hasQualifiedProfile && !internal.codingPortFactory)))
+    || (hasCoding && !internal.codingPortFactory))
     return { state: "deferred" as const, completed: 0, skipped: 0, nextSlot: firstCodingSlot?.id ?? null };
 
   const ports: CanarySchedulePorts = {
@@ -307,12 +311,10 @@ export async function executeOwnedCodingCanarySchedule(input: OwnedCodingCanaryP
       const base = input.schedulePorts.ports(slot);
       const { executeCoding: _callerExecutor, ...trustedPorts } = base;
       const executeCoding = cases.some(item => item.id === slot.caseId && item.family === "coding")
-        ? (internal.codingPortFactory
-          ? (() => {
-            const injected = internal.codingPortFactory!(slot, input.owner, input.profile);
-            return injected ? registerQualifiedCodingExecutionPort(injected) : null;
-          })()
-          : createCodingCanaryExecutionPort({ slot, owner: input.owner, profile: input.profile })) ?? undefined
+        ? (() => {
+          const injected = internal.codingPortFactory!(slot, input.owner, input.profile);
+          return injected ? registerQualifiedCodingExecutionPort(injected) : null;
+        })() ?? undefined
         : undefined;
       const save = trustedPorts.save;
       return { ...trustedPorts, ...(executeCoding ? { executeCoding } : {}), save: async (run, grade) => {
@@ -373,9 +375,10 @@ export async function replayPrivateCli(argv: readonly string[], internal: OwnedC
     // a ledger, executable, profile, worker settings, credential or provider endpoint.
     const { assertExistingCanaryOwnerV1 } = await import("./model-canary-owner.js");
     assertExistingCanaryOwnerV1(ownerDir);
-    const profile = internal.codingPortFactory ? null : await qualifiedLinuxCodingProfileForCurrentHost();
-    if (!profile && !internal.codingPortFactory)
+    // The native profile source is W1-T11313; until it is wired every host is unqualified here.
+    if (!internal.codingPortFactory)
       return { state: "deferred" as const, completed: 0, reason: "coding-native-profile-unavailable" };
+    const profile: NativeCodingProfile | null = null;
     const runtime = internal.workerRuntime ? await internal.workerRuntime() : await (async () => {
       const { loadConfig } = await import("./config.js");
       const { benchmarkNonDispatchSpawn } = await import("./benchmark-run.js");
