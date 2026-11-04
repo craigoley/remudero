@@ -1,0 +1,34 @@
+id: incident-53aedf7982f2655b
+ts: 2026-11-03T22:07:52.473Z
+raw: >-
+  Incident 53aedf7982f2: flow pr-stage-stall:conflict:merge conflict (mergeState
+  dirty) — rmd-owned branch has captured deletion evidence on
+  src/lib/review-capacity.ts (ours -<n>, theirs -<n>) — would dispatch the
+  bounded merge-conflict fix worker to inspect actual hunks and preserve both
+  sides' intended behavior; a fresh review and CI gate the new head — NOT
+  DISPATCHED this pass: review-only pause pass: repair lanes closed until the
+  PAUSE lifts
+
+  First seen: 2026-11-03T20:47:39.094Z
+
+  Last seen: 2026-11-03T20:47:39.094Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16523 conflict: repeat: "merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on src/lib/review-capacity.ts (ours -<n>, theirs -<n>) — would dispatch the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head — NOT DISPATCHED this pass: review-only pause pass: repair lanes closed until the PAUSE lifts" x2
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#53aedf7982f2655bff7aeb9aee11654d983a049a4d88c0fd9d6cb640e42e9ef7
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
