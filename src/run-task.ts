@@ -631,6 +631,7 @@ import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, spoolingStarvationAlert } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { testPlaceOutcome } from "./lib/test-placement.js";
+import { selectedRegistryShadowMain } from "./selected-registry-shadow-main.js";
 import { readPlanBase } from "./lib/plan-base-reader.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
@@ -1321,7 +1322,7 @@ import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhR
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, observeSelectedRegistrySync,
-  selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+  selectedRegistryLifecycleExec, selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -28454,7 +28455,7 @@ async function deployCommand(rest: string[]): Promise<number> {
  */
 async function deployRunCommand(rest: string[]): Promise<number> {
   markLedgerProcessActor("host_automation");
-  const badArg = unknownArgError("deploy-run", rest, ["--state-root"], ["--dry-run", "--image-drift-only"]);
+  const badArg = unknownArgError("deploy-run", rest, ["--state-root", "--selected-registry-shadow", "--selected-registry-pin"], ["--dry-run", "--image-drift-only"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -28489,8 +28490,12 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     return 0;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const lifecycleExec = selectedRegistryLifecycleExec(assessment.installRoot, {
+    session: flagValue(rest, "--selected-registry-shadow"), pin: flagValue(rest, "--selected-registry-pin"),
+  });
   const deps = {
     ...realDeps().deployFor({
+      execFile: lifecycleExec,
       installPath: assessment.installRoot,
       stateRoot: effectiveConfig.root,
       daemonLabel: DAEMON_LABEL,
@@ -28534,7 +28539,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
       record: (step, fields) => deps.log(step, fields),
     } : undefined,
-  }) }, {
+  }, lifecycleExec) }, {
     dryRun: rest.includes("--dry-run"),
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
@@ -42735,7 +42740,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-proof", (rest) => withSyncChildReservation("check-proof", () => checkProofCommand(rest, {}, USAGE), { bindSelf: true })],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
-  ["inspect", (rest) => readOnlyInspectionCommand(rest)],
+  ["inspect", (rest) => rest[0] === "selected-registry-shadow"
+    ? selectedRegistryShadowMain(rest.slice(1)) : readOnlyInspectionCommand(rest)],
   ["gh", async (rest) => await ghCommand(rest)],
   ["gh-broker", async (rest) => await ghBrokerCommand(
     rest,
@@ -42960,6 +42966,9 @@ export async function main(
   } = {},
 ): Promise<void> {
   const inspectionArgv = stripRepoRootFlag(process.argv.slice(2));
+  if (inspectionArgv[0] === "inspect" && inspectionArgv[1] === "selected-registry-shadow") {
+    return await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
+  }
   if (inspectionArgv[0] === "pr-state") {
     if (inspectionArgv.includes("--help") || inspectionArgv.includes("-h")) {
       console.log(commandHelp(commandSpec("pr-state")));

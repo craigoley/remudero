@@ -1,0 +1,42 @@
+- id: W1-T11319
+  title: The progress watchdog reads a fleet held by a live recycle's own PAUSE as IN_RECYCLE with action none, not STALLED, so the time a recycle pauses the fleet never asks for another recycle
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one verdict branch plus the verb that assembles its input; the stall bounds and every other branch are unchanged
+  band_meaning: span
+  origin: operator-session#recycle-efficiency-2026-11-04
+  plan_refs:
+    - W1-T5687
+    - W1-T5688
+    - W1-T9433
+  files:
+    - src/lib/progress-watchdog.ts
+    - src/run-task.ts
+    - test/daemon/a-fleet-paused-by-a-live-recycle-is-not-stalled.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: decideProgressWatchdog returns state IN_RECYCLE, action none, when its input reports a recycle PAUSE whose writer is live, even with progress older than STALL_RECYCLE_AFTER_MS; with no PAUSE, an operator PAUSE, or a recycle PAUSE whose writer is gone, the verdict is today's
+      proof: "unit test: test/daemon/a-fleet-paused-by-a-live-recycle-is-not-stalled.test.ts"
+    - claim: The recycle-pause verdict names this task
+      proof: "grep: W1-T11319 in src/lib/progress-watchdog.ts"
+  rationale: |
+    OBSERVED 2026-11-04:
+    - From 12:26:41Z a recycle (RECYCLE-3315651) held state/PAUSE. Its own drain logic keeps the full pass running with worker spawns closed (W1-T5804), so no sweep.pass, review.posted or verdict.merged progress row appears while it waits.
+    - The verdict climbed through RECOVERING (12:38, 12:44Z) to STALLED action=capture-diagnostics (12:49, 12:54, 12:59Z) to STALLED action=recycle at 13:04:08Z, progressAgeMs 2,595,011 (43 min).
+    - The recycle it started proved the daemon was not frozen: "frozen-daemon ownership NOT proven, clause (b): pid 1684607 wrote a ledger row at 2026-11-04T13:04:09.938Z, inside the 1800s stall bound".
+    - decideProgressWatchdog (src/lib/progress-watchdog.ts) has no input for PAUSE. Paused time counts as stall time, the same defect class W1-T9433 fixed for the stalled-stage backstop.
+  design: |
+    Add an optional input field to ProgressWatchdogInput: the recycle PAUSE writer's liveness, read by progressWatchdogCommand (src/run-task.ts, where the input is assembled today) from <state-root>/PAUSE with the pid, host and writerStart predicate W1-T9409 uses.
+    In decideProgressWatchdog, when that input says a live recycle owns PAUSE, return verdict("IN_RECYCLE", "none", "a live recycle (pid …) owns PAUSE; its pause is not a stall") ahead of the STALLED branches.
+    Add IN_RECYCLE to ProgressWatchdogState. The launcher ladder already treats any action other than recycle, hold-revive or capture-diagnostics as none.
+    Mark it with a comment naming W1-T11319.
+    NOT IN SCOPE: recycle-container.sh's own refusal (a separate task), and operator PAUSEs.
+  note: |
+    reservation hand-off: run-unfiled-1793801339784 -> run-unfiled-1793801339784
+    Reserved with rmd next-task-id (W1-T11319 on run-unfiled-1793801339784). From the operator session's recycle-efficiency research.

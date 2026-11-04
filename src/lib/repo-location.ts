@@ -66,6 +66,7 @@ export function resolveRepoRoot(
 ): string {
   const flagIdx = argv.indexOf("--repo-root");
   if (flagIdx >= 0 && argv[flagIdx + 1] !== undefined) return resolve(argv[flagIdx + 1]);
+  if (argv[0] === "inspect" && argv[1] === "selected-registry-shadow") return dirname(dirname(dirname(fileURLToPath(import.meta.url))));
   try {
     return showToplevel(cwd);
   } catch (e) {

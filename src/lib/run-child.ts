@@ -14,7 +14,7 @@ import { isDeepStrictEqual } from "node:util";
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
 import { systemClock } from "./clock.js";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
-import { type EngineRef, listEngines, newestCurrentEngine, type NewestEngineOptions } from "./engine-tree.js";
+import { type EnginePinOptions, type EngineRef, listEngines, newestCurrentEngine, type NewestEngineOptions, pinEngineForRun } from "./engine-tree.js";
 import { defaultInstance, type HostMemoryLedgerOptions } from "./host-memory-ledger.js";
 import {
   createTreePeakSampler, openLearnedReservation, type LearnedReservation, type PeakStoreOptions, type TreePeakSampler,
@@ -280,6 +280,8 @@ export interface RunChildProbePorts {
   /** main's tip, for `newestCurrentEngine`; default {@link mainTipSha}. */
   mainSha?: (repoDir: string) => Promise<string>;
   engine?: Pick<NewestEngineOptions, "git" | "isCurrent">;
+  /** The pin lock's wait and clock seams (engine-tree.ts pinEngineForRun); default the real ones. */
+  enginePin?: EnginePinOptions;
   /** The launch argv for the probe; the default resolves a bundle in the engine tree, else tsx from it. */
   launch?: (engine: EngineRef, args: readonly string[], log: Log) => EngineChildLaunch;
   spawn?: (command: string, args: readonly string[], options: { cwd: string }) => ChildProcess;
@@ -405,7 +407,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
       // Not erased: the skip row carries the reason. A tip that cannot be read is never answered with HEAD.
       return skip(reasonOf(error));
     }
-    const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...seams.engine });
+    let engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...seams.engine });
     if (!engine) return skip("no current engine tree for main");
     const entry = (seams.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(engine, [], log);
     if (input.work) await requireDetachedWorkEntry(entry, input.work.kind);
@@ -424,12 +426,20 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
       { workerClass: "run-child-probe", root: input.root, entryKind },
       { sampler: s, ...(seams.ledger ? { ledger: seams.ledger } : {}), ...(seams.store ? { store: seams.store } : {}) },
     )))(launch.kind, sampler);
-    writeSpec(dir, {
+    // The spec names the revision the engine's record holds under the pin, never the one resolved before the wait.
+    const probeReservation = reservation;
+    const pinnedProbe = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (pinned) => writeSpec(dir, {
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
-      engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
-      reservationId: reservation.id ?? "", options,
+      engine: pinned, planSnapshotPath: snapshot.path,
+      reservationId: probeReservation.id ?? "", options,
       ...(input.work ? { work: input.work } : {}),
-    } as RunChildSpec);
+    } as RunChildSpec), seams.enginePin);
+    if ("unavailable" in pinnedProbe) {
+      reservation.releaseOccupancy();
+      reservation = undefined;
+      return skip(pinnedProbe.unavailable);
+    }
+    engine = { ...engine, sha: pinnedProbe.sha };
     inFlightRunDirs.add(dir);
     const child = probeChild = (seams.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], { cwd: options.cwd, stdio: ["ignore", "ignore", "pipe"] })))(
       process.execPath, launch.argv, { cwd: launch.cwd },
@@ -634,6 +644,8 @@ export interface RunChildPending {
 export interface SpawnRunChildPorts {
   mainSha?: (repoDir: string) => Promise<string>;
   engine?: Pick<NewestEngineOptions, "git" | "isCurrent">;
+  /** The pin lock's wait and clock seams (engine-tree.ts pinEngineForRun); default the real ones. */
+  enginePin?: EnginePinOptions;
   launch?: (engine: EngineRef, args: readonly string[], log: Log) => EngineChildLaunch;
   spawn?: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; stderrFd: number }) => ChildProcess;
   /** Admission and the reservation, in the daemon, before the spawn. The default is {@link reserveRunChild}. */
@@ -841,12 +853,16 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     // The snapshot and the spec are written back to back, so a prune between them cannot take a snapshot a spec is about to name.
     const snapshot = writePlanSnapshot(input.stateRoot, admitted.plan.tasks);
     inFlightRunDirs.add(dir);
-    writeSpec(dir, {
+    // The spec names the revision the engine's record holds under the pin, never the one resolved before the wait.
+    const runReservation = reservation;
+    const pinned = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (current) => writeSpec(dir, {
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
-      engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
-      reservationId: reservation.id ?? "", options,
+      engine: current, planSnapshotPath: snapshot.path,
+      reservationId: runReservation.id ?? "", options,
       ...(input.work ? { work: input.work } : {}),
-    } as RunChildSpec);
+    } as RunChildSpec), ports.enginePin);
+    if ("unavailable" in pinned) throw new Error(pinned.unavailable);
+    engineSha = pinned.sha;
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
     spawnedAt = clock();

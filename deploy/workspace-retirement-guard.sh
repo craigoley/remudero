@@ -69,16 +69,17 @@ rmd_commit_published() {
     fi
   fi
   if [ -n "$RMD_PUB_GRAPH_KEY" ] && printf '%s\n' "$RMD_PUB_GRAPH" | awk -v c="$commit" '$0 == c { yes=1 } END { exit !yes }'; then return 0; fi
-  if rmd_commit_in_github_pull "$repo" "$commit"; then return 0; fi
+  if rmd_commit_on_github "$repo" "$commit"; then return 0; fi
   RMD_PUB_REASON="not-proven-published"
   return 1
 }
-# A commit pushed to a pull request stays on GitHub through refs/pull/<n>/head
-# even after the PR is squash-merged and later commits replace the head. The
-# advertised refs only show the final head, so ask GitHub which pull requests
-# contain this exact commit. Any failure (no gh, no auth, not GitHub) is "no".
+# A commit pushed to GitHub stays there after its branch is deleted on squash
+# merge or force-pushed past (PR timelines keep it). Advertised refs only show
+# current tips, so ask GitHub whether it has this exact commit: the endpoint
+# answers 422 for a commit GitHub has never received. Any failure (no gh, no
+# auth, not GitHub) is "no".
 RMD_GH_KNOWN=" "
-rmd_commit_in_github_pull() {
+rmd_commit_on_github() {
   local repo="$1" commit="$2" url slug gh count
   case "$RMD_GH_KNOWN" in *" $commit "*) return 0 ;; esac
   # The configured URL names the GitHub repository; `remote get-url` would
@@ -97,7 +98,7 @@ rmd_commit_in_github_pull() {
   else
     count=$(GH_PROMPT_DISABLED=1 perl -e 'alarm 20; exec @ARGV' "$gh" api "repos/$slug/commits/$commit/pulls" --jq length 2>/dev/null) || return 1
   fi
-  case "$count" in ''|*[!0-9]*|0) return 1 ;; esac
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
   RMD_GH_KNOWN="$RMD_GH_KNOWN$commit "
 }
 rmd_workspace_published() {
