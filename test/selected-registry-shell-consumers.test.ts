@@ -950,6 +950,90 @@ test("selected shell qualification does not disclose private inputs: a session i
   assert.ok(f.rows().some(row => row.action === "install"));
 });
 
+test("selected shell qualification does not disclose private inputs: registry-derived mounts precede capture", t => {
+  const f = registryShellFixture(t);
+  const roots = [f.state, f.env.RMD_CLAUDE_DIR!, f.env.RMD_CODEX_DIR!, f.env.RMD_CONTAINER_CONFIG_DIR!,
+    join(f.root, "credential-owner"), join(f.root, "codex-session-store")];
+  for (const root of roots) mkdirSync(root, { recursive: true });
+  writeFileSync(join(roots[4]!, ".credentials.json"), "fixture credential\n");
+  writeFileSync(join(f.state, "codex-sessions.ready"), roots[5]! + "\n");
+  const fields = {
+    repo: "remudero", github_repo: "craigoley/remudero", mode: "shadow", state_dir: roots[0],
+    container_name: "remudero-daemon", service_user: "fixture", image: "fixture.azurecr.io/remudero:latest",
+    max_old_space_mb: "8192", service_name: "rmd-fleet.service", watchdog_service_name: "rmd-fleet-watchdog.service",
+    watchdog_timer_name: "rmd-fleet-watchdog.timer", launcher_path: join(f.output, "launcher"),
+    revival_log: join(f.output, "revivals.log"), gh_app_id: "123", gh_app_installation_id: "456",
+    gh_app_private_key_path: "/home/node/.claude/fixture.pem", claude_dir: roots[1], codex_dir: roots[2],
+    container_config_dir: roots[3],
+  };
+  writeFileSync(f.legacy, "instances:\n  core:\n" + Object.entries(fields).map(([key, value]) =>
+    `    ${key}: ${value}\n`).join("") + `  owner:\n    primary: true\n    claude_dir: ${roots[4]}\n`);
+  for (const key of ["RMD_STATE_DIR", "RMD_CLAUDE_DIR", "RMD_CODEX_DIR", "RMD_CONTAINER_CONFIG_DIR"])
+    delete f.env[key];
+  const installer = join(REPO_ROOT, "deploy/install-host-units.sh"), launcher = join(f.output, "launcher");
+  const install = (session?: string, pin?: string) => f.run(installer, ["--install", "--instance", "core",
+    ...(session ? ["--selected-registry-shadow", session] : []), ...(pin ? ["--selected-registry-pin", pin] : [])]);
+  assert.equal(install().status, 0);
+  const legacy = f.run(launcher, ["--boot"]);
+  assert.equal(legacy.status, 0, legacy.stdout + legacy.stderr);
+  const legacyLaunch = f.receipts().filter(c => c.bin === "docker" && c.args[0] === "run" && c.args.includes("-d")).at(-1);
+  assert.ok(legacyLaunch, "the no-option launcher starts the controlled instance");
+  for (const root of roots) {
+    const dir = join(root, "registry-private");
+    mkdirSync(dir, { mode: 0o700 });
+    const session = join(dir, "session.json");
+    const qualified = install(session);
+    assert.equal(qualified.status, 0, qualified.stdout + qualified.stderr);
+    assert.equal(existsSync(session), false, `${root}: capture must not leave private input in a registry mount`);
+    assert.match(qualified.stderr, /instance_registry\.shell_shadow_unrecorded/);
+    const launched = f.run(launcher, ["--boot"]);
+    assert.equal(launched.status, legacy.status, launched.stdout + launched.stderr);
+    assert.equal(existsSync(session), false, `${root}: independent children must not recapture in a registry mount`);
+    assert.equal(existsSync(session + ".observations"), false);
+    const daemon = f.receipts().filter(c => c.bin === "docker" && c.args[0] === "run" && c.args.includes("-d")).at(-1);
+    assert.ok(daemon && mountSources(daemon.args).some(source => within(source, root)),
+      `${root}: positive control, the generated launcher really mounts this registry source`);
+    assert.deepEqual(daemon.args, legacyLaunch.args, "qualification preserves the actual launch including sessions binds");
+    // A session captured by an older caller must also be refused by the later launcher itself.
+    const pin = f.cli(["--shadow", "--capture", "--session", session, "--registry", f.selected],
+      { RMD_INSTANCE_REGISTRY: undefined });
+    const saved = readFileSync(session, "utf8");
+    assert.equal(install(session, pin).status, 0);
+    assert.equal(existsSync(session + ".observations"), false, `${root}: the pinned installer rechecks resolved sources`);
+    assert.equal(f.run(launcher, ["--boot"]).status, legacy.status);
+    assert.equal(readFileSync(session, "utf8"), saved, "observation never rewrites the private session");
+    assert.equal(existsSync(session + ".observations"), false, `${root}: the rendered launcher rechecks its own sources`);
+  }
+  assert.equal(install(f.session).status, 0);
+  assert.ok(existsSync(f.session), "the identical reader captures outside the resolved mounts");
+  assert.equal(f.run(launcher, ["--boot"]).status, 0);
+  assert.ok(f.rows().some(row => row.action === "launcher"));
+  const olderLibrary = join(f.root, "older-registry-shadow.sh"), olderLauncher = join(f.root, "older-library-launcher");
+  writeFileSync(olderLibrary, '. "$FIXTURE_SHADOW_LIB"\nunset -f registry_shadow_codex_mount_root\n');
+  writeFileSync(olderLauncher, readFileSync(launcher, "utf8").replaceAll(join(REPO_ROOT, "deploy/registry-shadow.sh"), olderLibrary));
+  const before = readFileSync(f.session + ".observations", "utf8");
+  const older = f.run(olderLauncher, ["--boot"], { FIXTURE_SHADOW_LIB: join(REPO_ROOT, "deploy/registry-shadow.sh") });
+  assert.equal(older.status, 0, older.stdout + older.stderr);
+  assert.match(older.stderr, /instance_registry\.shell_shadow_unrecorded/);
+  const olderLaunch = f.receipts().filter(c => c.bin === "docker" && c.args[0] === "run" && c.args.includes("-d")).at(-1);
+  assert.deepEqual(olderLaunch?.args, legacyLaunch.args, "the unavailable-reader arm preserves the actual launch");
+  assert.equal(readFileSync(f.session + ".observations", "utf8"), before,
+    "a library without the maintained mount reader leaves qualification unknown and the launch unchanged");
+  // An incomplete checkout cannot determine that later launcher's sessions bind, so it records nothing.
+  const checkout = join(f.root, "incomplete-checkout"), deploy = join(checkout, "deploy");
+  mkdirSync(deploy, { recursive: true });
+  for (const name of readdirSync(join(REPO_ROOT, "deploy"))) {
+    if (name !== "codex-sessions-mount.sh") symlinkSync(join(REPO_ROOT, "deploy", name), join(deploy, name));
+  }
+  for (const name of ["src", "node_modules"]) symlinkSync(join(REPO_ROOT, name), join(checkout, name));
+  const unavailable = join(f.root, "unavailable-session.json");
+  const incomplete = f.run(join(deploy, "install-host-units.sh"),
+    ["--install", "--instance", "core", "--selected-registry-shadow", unavailable]);
+  assert.equal(incomplete.status, 0, incomplete.stdout + incomplete.stderr);
+  assert.match(incomplete.stderr, /instance_registry\.shell_shadow_unrecorded/);
+  assert.equal(existsSync(unavailable), false, "unknown mount sources refuse capture without blocking the install");
+});
+
 test("selected shell qualification does not disclose private inputs: actual scratch plan sources survive changed defaults", async t => {
   await eachInterpreter(t, (st, interpreter) => {
     const f = registryShellFixture(st), scratch = f.env.RMD_SCRATCH_ROOT!;

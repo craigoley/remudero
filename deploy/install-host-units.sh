@@ -75,17 +75,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
-if [ -n "$registry_shadow_session" ]; then
-  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
-  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
-  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
-    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
-    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
-  else
-    registry_shadow_observe() { :; }
-    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
-  fi
-fi
 
 MODE="check"
 INSTANCE_NAME=""
@@ -1165,12 +1154,13 @@ render_registry_shadow() {
   printf 'registry_shadow_pin=%q\n' "$registry_shadow_pin"
   printf 'registry_shadow_forward=(--selected-registry-shadow %q --selected-registry-pin %q)\n' "$registry_shadow_session" "$registry_shadow_pin"
   # The launcher's own docker run mounts these; its observation re-checks the session against them.
-  printf '{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root %q %q %q %q; }\n' \
-    "$STATE_DIR" "$CLAUDE_DIR" "$CODEX_DIR" "$CONTAINER_CONFIG_DIR"
+  printf '{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root %q %q %q %q %q %q; }\n' \
+    "$STATE_DIR" "$CLAUDE_DIR" "$CODEX_DIR" "$CONTAINER_CONFIG_DIR" "$CREDENTIAL_OWNER_DIR" "$GH_APP_KEY_HOST_V"
 }
 
 render_registry_shadow_boundary() {
   [ -n "$registry_shadow_session" ] || return 0
+  printf 'registry_shadow_codex_mount_root "$CHECKOUT/deploy/codex-sessions-mount.sh" "$STATE_DIR" 2>/dev/null || { registry_shadow_session=""; printf "%%s\\n" instance_registry.shell_shadow_unrecorded >&2 || :; }\n'
   printf '{ ! declare -F registry_shadow_mount_args >/dev/null 2>&1 || registry_shadow_mount_args "${SCRATCH_ARGS[@]+"${SCRATCH_ARGS[@]}"}" "${CODEX_SESSIONS_ARGS[@]+"${CODEX_SESSIONS_ARGS[@]}"}"; }\n'
   printf 'registry_shadow_observe launcher "$INSTANCE_NAME" %q host "$STATE_DIR|%s"; ' "${github_repo:-}" "$CONTAINER_NAME"
 }
@@ -2031,7 +2021,22 @@ unit_file_changes() { # $1 = installed path, $2 = rendered text
 }
 
 drift=0
-{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "$STATE_DIR" "$CLAUDE_DIR" "$CODEX_DIR" "$CONTAINER_CONFIG_DIR"; }
+# Resolve registry/default mount sources before capture can write private bytes, not only before observation.
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="${SCRIPT_DIR}/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_mount_root "$STATE_DIR" "$CLAUDE_DIR" "$CODEX_DIR" "$CONTAINER_CONFIG_DIR" \
+      "$CREDENTIAL_OWNER_DIR" "$GH_APP_KEY_HOST_V"
+    if registry_shadow_codex_mount_root "${SCRIPT_DIR}/codex-sessions-mount.sh" "$STATE_DIR"; then
+      registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    fi
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
 registry_shadow_observe install "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
 converge_host_node
 for row in $UNITS; do

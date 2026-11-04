@@ -44,6 +44,19 @@ registry_shadow_mount_args() {
   done
 }
 
+# Use the maintained readiness reader in a subshell so qualification never changes the launch arrays.
+registry_shadow_codex_mount_root() {
+  local source
+  if source="$(
+    . "$1" && { codex_sessions_plan "$2" || :; } && printf '%s' "$CODEX_SESSIONS_SRC"
+  )" 2>/dev/null; then
+    registry_shadow_mount_root "$source"
+  else
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+    return 1
+  fi
+}
+
 # Design constraint 3: the private session must never sit in a directory a fleet launcher mounts into
 # workers. These are the roots every consumer derives its mounts from, from the same variables and
 # HOME defaults (recycle-container.sh, host-update.sh, serve-container.sh, install-host-units.sh),
