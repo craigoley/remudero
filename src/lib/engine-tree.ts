@@ -326,7 +326,7 @@ export interface EnginePinOptions {
   waitMs?: number;
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
-  now?: () => number;
+  clock?: Clock;
 }
 
 /**
@@ -341,9 +341,9 @@ export async function pinEngineForRun(
   publish: (engine: { sourceHash: string; sha: string }) => void,
   opts: EnginePinOptions = {},
 ): Promise<{ sourceHash: string; sha: string } | { unavailable: string }> {
-  const now = opts.now ?? Date.now;
+  const clock = opts.clock ?? systemClock;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const deadline = now() + (opts.waitMs ?? ENGINE_PIN_WAIT_MS);
+  const deadline = clock.now() + (opts.waitMs ?? ENGINE_PIN_WAIT_MS);
   for (;;) {
     const held = tryAcquirePin(stateRoot, sourceHash, runId);
     if (!(held instanceof InflightLockError)) {
@@ -357,7 +357,7 @@ export async function pinEngineForRun(
         held.release();
       }
     }
-    if (now() >= deadline) return { unavailable: `engine ${sourceHash.slice(0, 12)} pin busy: ${held.message}` };
+    if (clock.now() >= deadline) return { unavailable: `engine ${sourceHash.slice(0, 12)} pin busy: ${held.message}` };
     await sleep(opts.pollMs ?? 100);
   }
 }
