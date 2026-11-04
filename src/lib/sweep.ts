@@ -24186,7 +24186,7 @@ const liveLedgerTails = new Map<string, LiveLedgerTail>();
  */
 export function readLiveLedgerRows(path: string): Array<Readonly<Record<string, unknown>>> {
   let tail = liveLedgerTails.get(path);
-  if (!tail) liveLedgerTails.set(path, tail = createLiveLedgerTail(path, Number.POSITIVE_INFINITY));
+  if (!tail) liveLedgerTails.set(path, tail = createLiveLedgerTail(path, Number.POSITIVE_INFINITY, { keepUntimed: true }));
   return [...tail(0)];
 }
 

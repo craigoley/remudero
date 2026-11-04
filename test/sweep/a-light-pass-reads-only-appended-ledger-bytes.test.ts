@@ -31,6 +31,13 @@ const pr: OpenPrView = {
   autoMergeArmed: false, mergeState: "clean", changedFiles: ["src/subject.ts"],
 };
 
+test("light pass ledger tail: a row written without a ts is kept, as readLedgerLines keeps it", (t) => {
+  const path = fixturePath(t, 2);
+  appendFileSync(path, `${JSON.stringify({ step: "fix.dispatch", task_id: "PR-7" })}\n`);
+  assert.deepEqual(readLiveLedgerRows(path), [...readLedgerLines(path)]);
+  assert.equal(readLiveLedgerRows(path).length, 3);
+});
+
 test("light pass ledger tail: the default reader returns readLedgerLines' rows, after appends and a rotation", (t) => {
   const path = fixturePath(t, 5);
   assert.deepEqual(readLiveLedgerRows(path), [...readLedgerLines(path)]);

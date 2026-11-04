@@ -12,6 +12,8 @@ import { closeSync, fstatSync, openSync, readSync } from "node:fs";
  * A trailing line with no newline yet is parsed for this call but not consumed. A missing file reads as no
  * rows. Any other read error clears the state and is rethrown, so the next call starts over.
  * Rows timed before `nowMs - retainMs`, or with no parseable `ts`, are dropped: no window can reach them.
+ * W1-T11260: `keepUntimed` keeps a row with no parseable `ts`, so a tail with an infinite `retainMs` returns
+ * every row `readLedgerLines` returns. The sweep's light pass folds rows such as `fix.dispatch` written without one.
  */
 export type LiveLedgerTail = (nowMs: number) => ReadonlyArray<Record<string, unknown>>;
 
@@ -23,9 +25,9 @@ function rowMs(row: Record<string, unknown>): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function retained(row: Record<string, unknown>, cutoff: number): boolean {
+function retained(row: Record<string, unknown>, cutoff: number, keepUntimed: boolean): boolean {
   const t = rowMs(row);
-  return t !== undefined && t > cutoff;
+  return t === undefined ? keepUntimed : t > cutoff;
 }
 
 function parseLines(path: string, text: string, out: Array<Record<string, unknown>>): void {
@@ -51,7 +53,8 @@ function tentativeRow(text: string): Record<string, unknown> | undefined {
   }
 }
 
-export function createLiveLedgerTail(path: string, retainMs: number): LiveLedgerTail {
+export function createLiveLedgerTail(path: string, retainMs: number, opts: { keepUntimed?: boolean } = {}): LiveLedgerTail {
+  const keepUntimed = opts.keepUntimed === true;
   let identity: string | undefined;
   let offset = 0;
   let head: Buffer = Buffer.alloc(0);
@@ -98,9 +101,9 @@ export function createLiveLedgerTail(path: string, retainMs: number): LiveLedger
         anchor = bytesAt(fd, offset - Math.min(ANCHOR_BYTES, offset), Math.min(ANCHOR_BYTES, offset));
       }
       const cutoff = nowMs - retainMs;
-      rows = rows.filter((row) => retained(row, cutoff));
+      rows = rows.filter((row) => retained(row, cutoff, keepUntimed));
       const pending = tentativeRow(chunk.subarray(end).toString("utf8"));
-      return pending && retained(pending, cutoff) ? [...rows, pending] : rows;
+      return pending && retained(pending, cutoff, keepUntimed) ? [...rows, pending] : rows;
     } catch (error) {
       reset();
       throw error;
