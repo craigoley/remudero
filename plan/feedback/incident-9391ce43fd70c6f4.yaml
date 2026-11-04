@@ -1,0 +1,28 @@
+id: incident-9391ce43fd70c6f4
+ts: 2026-11-04T02:08:10.788Z
+raw: >-
+  Incident 9391ce43fd70: intervention hand-recycle:remote non-interactive
+
+  First seen: 2026-11-04T02:08:04.965Z
+
+  Last seen: 2026-11-04T02:08:04.965Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=control action=recycle.invoked target=core actor=unknown cause=hand-recycle:remote non-interactive — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#9391ce43fd70c6f458fa42f3787dab5ee5ab39a60500c52f5f21ef94a2f77f65
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -246,9 +246,12 @@ function withoutAuthorCensusAnswer<T>(operation: () => T): T {
   }
 }
 
-test("runPreflightFast: mocked end-to-end over all fourteen FAST_GATE_STEPS, no spawn call ever names test:ci, a bare npm test, or the test/**/*.test.ts glob", () => {
+test("runPreflightFast: mocked end-to-end over all fourteen FAST_GATE_STEPS, no spawn call ever names test:ci, a bare npm test, or the test/**/*.test.ts glob", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-fast-gate-steps-"));
+  mkdirSync(join(root, "plan/tasks.d"), { recursive: true });
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   const { spawn, calls } = recordingSpawn();
-  withoutAuthorCensusAnswer(() => runPreflightFast(REPO_ROOT, { spawn, packageJsonText: REAL_PACKAGE_JSON }));
+  withoutAuthorCensusAnswer(() => runPreflightFast(root, { spawn, packageJsonText: REAL_PACKAGE_JSON }));
   assert.equal(calls.length, FAST_GATE_STEPS.length, "exactly one spawn per curated step, no extras");
   for (const [index, call] of calls.entries()) {
     const key = [call.file, ...call.args].join(" ");

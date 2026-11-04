@@ -1,0 +1,30 @@
+id: incident-7f4341ef753bf43a
+ts: 2026-11-04T00:04:53.675Z
+raw: >-
+  Incident 7f4341ef753b: intervention
+  own-red:fix-lane:test-slow-shard-failed-on-ci-log-fix-fix
+
+  First seen: 2026-11-04T00:02:22.347Z
+
+  Last seen: 2026-11-04T00:04:43.376Z
+
+  Count: 5, burn: 5.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#14817@2d0b15ed4 actor=claude cause=own-red:fix-lane:test-slow-shard-failed-on-ci-log-fix-fix — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#14817@2ba51cf86 actor=claude cause=own-red:fix-lane:test-slow-shard-failed-on-ci-log-fix-fix — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#7f4341ef753bf43a325c81d118a3da05907715a06b9016a795b1c7a0d9d7f6a4
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
