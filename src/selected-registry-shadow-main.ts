@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readSelectedInstanceRegistry, type RegistrySelectionInput } from "./lib/instance-registry-selection.js";
 import { copySelectedRegistryIntent } from "./lib/selected-registry-consumers.js";
@@ -13,7 +13,29 @@ interface Session {
   initial: "ready" | "absent" | "unknown";
 }
 const flags = new Set(["--session", "--consumer", "--instance", "--repository", "--namespace", "--identity",
-  "--registry", "--contract-version", "--require-capability", "--pin"]);
+  "--registry", "--contract-version", "--require-capability", "--pin", "--worker-root"]);
+
+async function isolatedSession(path: string, env: NodeJS.ProcessEnv, workerRoot?: string): Promise<void> {
+  const parent = await realpath(dirname(path));
+  const home = env.HOME || "/root";
+  const roots = [workerRoot, env.RMD_STATE_DIR, env.RMD_ROOT, `${home}/rmd-state`,
+    "/home/craigoleyagent/rmd-state2"];
+  const contains = (root: string) => {
+    const tail = relative(root, parent);
+    return tail === "" || (tail !== ".." && !tail.startsWith(".." + sep) && !isAbsolute(tail));
+  };
+  for (const root of roots) {
+    if (!root) continue;
+    if (!isAbsolute(root) || contains(resolve(root))) throw new Error("unsafe_session");
+    let physical: string;
+    try { physical = await realpath(root); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    if (contains(physical)) throw new Error("unsafe_session");
+  }
+}
 
 async function privateParent(path: string): Promise<void> {
   if (!isAbsolute(path) || path.includes("\0")) throw new Error("invalid_session");
@@ -72,6 +94,9 @@ export async function selectedRegistryShadowMain(argv: readonly string[], env: N
   if (!shadow || !path || (!capture && !consumers.has(consumer ?? ""))) return 2;
   if (!capture && !/^[a-f0-9]{64}$/.test(pin ?? "")) return 2;
   try {
+    // 0700/0600 do not hide a same-uid file beneath a worker's broad state bind.
+    // Check before capture (including EEXIST reuse), and again for every later observer.
+    await isolatedSession(path, env, options.get("--worker-root"));
     if (capture) {
       const envPath = env.RMD_INSTANCE_REGISTRY;
       const input: RegistrySelectionInput = {

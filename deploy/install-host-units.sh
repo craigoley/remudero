@@ -75,17 +75,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
-if [ -n "$registry_shadow_session" ]; then
-  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
-  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
-  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
-    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
-    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
-  else
-    registry_shadow_observe() { :; }
-    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
-  fi
-fi
 
 MODE="check"
 INSTANCE_NAME=""
@@ -314,6 +303,19 @@ for pair in "STATE_DIR:$STATE_DIR" "IMAGE:$IMAGE" "SERVICE_USER:$SERVICE_USER" "
 done
 case "$MAX_OLD_SPACE_MB" in ''|*[!0-9]*) echo "install-host-units: FATAL — RMD_NODE_MAX_OLD_SPACE_MB must be an integer, got '${MAX_OLD_SPACE_MB}'." >&2; exit 2 ;; esac
 case "$STATE_DIR" in /*) : ;; *) echo "install-host-units: FATAL — RMD_STATE_DIR must be absolute, got '${STATE_DIR}'." >&2; exit 2 ;; esac
+
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+
 
 # OPERATOR RULING 2026-10-19: the daemon's NODE_OPTIONS carries the ruled memory flags beside its heap
 # ceiling, merged by the same deploy/resource-policy.sh function a recycle applies to the NODE_OPTIONS

@@ -43,7 +43,7 @@ registry_shadow_call() (
       fi
       exec ${observer_user[@]+"${observer_user[@]}"} node --import "$registry_shadow_root/node_modules/tsx/dist/loader.mjs" \
         "$registry_shadow_root/src/lib/child-entry-argv.ts" --selected-registry-shadow "$registry_shadow_root" --shadow \
-        --session "$registry_shadow_session" "$@"
+        --session "$registry_shadow_session" --worker-root "${STATE_DIR:-${RMD_STATE_DIR:-${RMD_ROOT:-${HOME:-/root}/rmd-state}}}" "$@"
     ) &
     observer_pid=$!
     (sleep "$registry_shadow_deadline_s"; kill -KILL -- "-$observer_pid" 2>/dev/null || :) >/dev/null 2>&1 &

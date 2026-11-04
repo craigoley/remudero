@@ -111,6 +111,7 @@ function bash32(): { shell: string; env: NodeJS.ProcessEnv; version: string } | 
   return undefined;
 }
 const CURRENT_BASH = { shell: "bash", env: {} as NodeJS.ProcessEnv };
+const shellCases = () => [["current bash", CURRENT_BASH], ["bash 3.2", bash32()]] as const;
 
 test("selected shell capability probe reads the whole trusted child script", t => {
   const root = mkdtempSync(join(tmpdir(), "rmd-shadow-supports-"));
@@ -347,10 +348,10 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers", asy
   assert.ok(f.rows().some(row => row.action === "host-update"));
 });
 
-test("selected shell shadow reaches real lifecycle and heartbeat consumers: installed field trials command", t => {
-  const historical = bash32();
-  if (!historical) t.diagnostic(`bash 3.2 leg not run: ${BASH32_SKIP}`);
-  for (const interpreter of [CURRENT_BASH, ...(historical ? [historical] : [])]) {
+test("selected shell shadow reaches real lifecycle and heartbeat consumers: installed field trials command", async t => {
+  for (const [name, interpreter] of shellCases()) {
+    await t.test(name, { skip: interpreter ? false : BASH32_SKIP }, t => {
+      assert.ok(interpreter);
     const f = refreshFixture(t);
     const installer = join(REPO_ROOT, "deploy/install-field-trials-refresh.sh");
     const installed = join(f.root, ".local/bin/rmd-field-trials-refresh");
@@ -381,6 +382,7 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers: inst
       assert.equal(f.rows().length, rows.length, "missing or unsupported trusted checkout stays unrecorded");
       assert.equal(existsSync(trap), false);
     }
+    });
   }
 });
 
@@ -406,10 +408,10 @@ test("selected shell qualification preserves mixed version legacy effects: a hea
 });
 
 for (const phase of ["capture", "observation"] as const) {
-test(`selected shell defaults and failures remain shadow only without live effects: observer deadlines (${phase})`, t => {
-  const historical = bash32();
-  if (!historical) t.diagnostic(`bash 3.2 leg not run: ${BASH32_SKIP}`);
-  for (const base of [CURRENT_BASH, ...(historical ? [historical] : [])]) {
+test(`selected shell defaults and failures remain shadow only without live effects: observer deadlines (${phase})`, async t => {
+  for (const [name, base] of shellCases()) {
+    await t.test(name, { skip: base ? false : BASH32_SKIP }, t => {
+      assert.ok(base);
       // The production backstop is 20 s; pinning 5 s keeps this hung-observer proof fast.
       const interpreter = { ...base, env: { ...base.env, RMD_REGISTRY_SHADOW_DEADLINE_S: "5" } };
       const f = registryShellFixture(t);
@@ -453,6 +455,7 @@ if (phase === ${JSON.stringify(phase)}) {
         assert.ok(f.receipts().some(c => c.bin === "docker" && c.args[0] === "run"),
           "a hung observer cannot prevent the generated launcher's actual legacy child effect");
       }
+    });
   }
 });
 }
@@ -822,28 +825,70 @@ test("bash 3.2 runs the old and maintained shell consumers and launchers with un
 });
 
 test("selected shell qualification does not disclose private inputs", async t => {
-  const f = registryShellFixture(t);
-  f.capture();
-  // Also cover Docker's name-only -e forwarding: a trusted host environment may
-  // contain the private input, but only explicitly admitted values reach workers.
-  f.env.RMD_INSTANCE_REGISTRY = f.selected;
-  assert.equal(f.install().status, 0);
-  const launcher = f.run(join(f.output, "launcher"), ["--boot"]);
-  assert.equal(launcher.status, 0, launcher.stderr);
-  const beat = f.run(join(REPO_ROOT, "scripts/fleet-heartbeat.sh"), ["--selected-registry-shadow", f.session]);
-  assert.equal(beat.status, 0, beat.stderr);
-  const publicBytes = readFileSync(f.payload, "utf8");
-  assert.match(publicBytes, /beat_host=fixture-host/);
-  const workerCalls = f.receipts().filter(c => c.bin === "docker" && ["run", "exec"].includes(c.args[0]!));
-  assert.ok(workerCalls.some(c => c.args[0] === "run"), "a real worker launch is the positive control");
-  const workerInputs = workerCalls.map(({ bin, args, workerEnv }) => ({ bin, args, workerEnv }));
-  assert.ok(workerCalls.some(c => c.workerEnv?.NODE_OPTIONS), "name/value environment transport was actually captured");
-  for (const bytes of [publicBytes, JSON.stringify(workerInputs), launcher.stdout + launcher.stderr + beat.stdout + beat.stderr,
-    JSON.stringify(f.rows())]) {
-    for (const secret of [f.selected, f.session, "private-material-sentinel", f.text.trim()]) assert.ok(!bytes.includes(secret), secret);
+  for (const sessionInState of [false, true]) {
+    await t.test(sessionInState ? "owned 0700 session directory inside STATE_DIR" : "isolated private session", async t => {
+      const f = registryShellFixture(t, sessionInState);
+      if (sessionInState) {
+        assert.equal(fs.statSync(join(f.state, "qualification-private")).mode & 0o777, 0o700);
+        assert.equal(fs.statSync(join(f.state, "qualification-private")).uid, process.getuid?.());
+        const errors: string[] = [], original = console.error;
+        console.error = (...args: unknown[]) => { errors.push(args.join(" ")); };
+        try {
+          assert.equal(await selectedRegistryShadowMain(["--shadow", "--capture", "--session", f.session,
+            "--registry", f.selected], f.env), 1, "capture refuses storage under the worker mount before writing private input");
+        } finally { console.error = original; }
+        assert.deepEqual(errors, ["instance_registry.shell_shadow_unrecorded observer_or_sink_failed"]);
+        assert.equal(existsSync(f.session), false);
+      } else f.capture();
+      // Exercise name-only -e forwarding as well as actual mounted file contents.
+      f.env.RMD_INSTANCE_REGISTRY = f.selected;
+      assert.equal(f.install().status, 0);
+      const launcher = f.run(join(f.output, "launcher"), ["--boot"]);
+      assert.equal(launcher.status, 0, launcher.stderr);
+      const beat = f.run(join(REPO_ROOT, "scripts/fleet-heartbeat.sh"), ["--selected-registry-shadow", f.session]);
+      assert.equal(beat.status, 0, beat.stderr);
+      const publicBytes = readFileSync(f.payload, "utf8");
+      assert.match(publicBytes, /beat_host=fixture-host/);
+      const workerCalls = f.receipts().filter(c => c.bin === "docker" && ["run", "exec"].includes(c.args[0]!));
+      assert.ok(workerCalls.some(c => c.args[0] === "run"), "a real worker launch is the positive control");
+      const workerInputs = workerCalls.map(({ bin, args, workerEnv }) => ({ bin, args, workerEnv }));
+      assert.ok(workerCalls.some(c => c.workerEnv?.NODE_OPTIONS), "name/value environment transport was actually captured");
+      const mountedFiles = new Map<string, string>();
+      const inspectMount = (path: string) => {
+        // A host-absolute checkout symlink is not a container-visible file at that host path.
+        const stat = fs.lstatSync(path);
+        if (stat.isDirectory()) for (const name of readdirSync(path)) inspectMount(join(path, name));
+        else if (stat.isFile()) mountedFiles.set(path, readFileSync(path, "utf8"));
+      };
+      const sources: string[] = [];
+      for (const { args } of workerCalls) {
+        for (let i = 1; i < args.length; i++) {
+          if (args[i] === "-v" || args[i] === "--volume") sources.push(args[++i]!.split(":")[0]!);
+          else if (args[i] === "--mount") {
+            const source = args[++i]!.split(",").find(v => v.startsWith("src=") || v.startsWith("source="));
+            if (source) sources.push(source.slice(source.indexOf("=") + 1));
+          }
+        }
+      }
+      assert.ok(sources.includes(f.state), "the actual generated Docker argv mounts all of STATE_DIR");
+      for (const source of sources) {
+        assert.ok(source.startsWith(f.root + "/"), "only disposable fixture mounts may be inspected");
+        if (existsSync(source)) inspectMount(source);
+      }
+      assert.ok(mountedFiles.has(join(f.state, "state/ledger.ndjson")), "the mount-content scan actually saw the worker state");
+      const rows = sessionInState ? [] : f.rows();
+      for (const bytes of [publicBytes, JSON.stringify(workerInputs), JSON.stringify([...mountedFiles.values()]),
+        launcher.stdout + launcher.stderr + beat.stdout + beat.stderr, JSON.stringify(rows)]) {
+        for (const secret of [f.selected, f.session, "private-material-sentinel", f.text.trim()]) assert.ok(!bytes.includes(secret), secret);
+      }
+      if (sessionInState) {
+        assert.equal(existsSync(f.session), false, "shell capture also leaves the worker-visible directory empty");
+        assert.equal(existsSync(f.session + ".observations"), false);
+        assert.match(launcher.stderr + beat.stderr, /shell_shadow_unrecorded/);
+      } else assert.ok(rows.every(r => r.publication_permission === "not-granted"));
+      assert.ok(!publicBytes.includes("binding_digest="), "a digest grants no public publication field");
+    });
   }
-  assert.ok(f.rows().every(r => r.publication_permission === "not-granted"));
-  assert.ok(!publicBytes.includes("binding_digest="), "a digest grants no public publication field");
 });
 
 function qualifyPackageTransports(t: { after(fn: () => void): void }, shell: string,
@@ -892,18 +937,19 @@ exec '${process.execPath.replaceAll("'", "'\\''")}' "$@"
   assert.ok(f.rows().some(row => row.action === "install"), "the default observer really executed");
 }
 
-test("selected shell installer package failures use disposable recording transports", t => {
-  const historical = bash32();
-  if (!historical) t.diagnostic(`bash 3.2 leg not run: ${BASH32_SKIP}`);
-  for (const interpreter of [CURRENT_BASH, ...(historical ? [historical] : [])]) {
+test("selected shell installer package failures use disposable recording transports", async t => {
+  for (const [name, interpreter] of shellCases()) {
+    await t.test(name, { skip: interpreter ? false : BASH32_SKIP }, t => {
+      assert.ok(interpreter);
     for (const failure of ["none", "update", "madison", "install"]) {
       qualifyPackageTransports(t, interpreter.shell, interpreter.env, failure);
     }
+    });
   }
 });
 
 test("selected shell defaults and failures remain shadow only without live effects", async t => {
-  const interpreter = bash32() ?? CURRENT_BASH;
+  const interpreter = CURRENT_BASH;
   const absent = fixture(t);
   const absentPin = await capture(absent.session);
   assert.equal(await observe(absent.session, absentPin, "install"), 0);

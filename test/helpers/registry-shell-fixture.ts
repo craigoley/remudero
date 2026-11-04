@@ -8,7 +8,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 export interface Receipt { bin: string; args: string[]; selected?: string; workerEnv?: Record<string, string> }
 
 /** Real shell programs, disposable namespaces, recording external transports. */
-export function registryShellFixture(t: { after(fn: () => void): void }) {
+export function registryShellFixture(t: { after(fn: () => void): void }, sessionInState = false) {
   const root = mkdtempSync(join(tmpdir(), "rmd-registry-lifecycle-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const bin = join(root, "transports"), state = join(root, "state-root"), output = join(root, "output");
@@ -17,7 +17,9 @@ export function registryShellFixture(t: { after(fn: () => void): void }) {
   // The maintained script directory is used verbatim. No production state or real git is reachable.
   symlinkSync(join(REPO_ROOT, "deploy"), join(state, "daemon-install", "deploy"));
   writeFileSync(join(state, "state", "ledger.ndjson"), '{"step":"daemon.idle","ts":"2026-10-29T00:00:00Z"}\n');
-  const selected = join(root, "selected-private.yaml"), session = join(root, "session.json");
+  const sessionDir = sessionInState ? join(state, "qualification-private") : root;
+  if (sessionInState) mkdirSync(sessionDir, { mode: 0o700 });
+  const selected = join(root, "selected-private.yaml"), session = join(sessionDir, "session.json");
   const text = "instances:\n  core:\n    github_repo: craigoley/remudero\n    mode: shadow\n    state_dir: /private-material-sentinel\n";
   writeFileSync(selected, text);
   const legacy = join(root, "legacy.yaml");

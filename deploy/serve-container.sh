@@ -129,17 +129,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
-if [ -n "$registry_shadow_session" ]; then
-  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
-  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
-  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
-    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
-    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
-  else
-    registry_shadow_observe() { :; }
-    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
-  fi
-fi
 
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
@@ -378,6 +367,19 @@ if docker inspect "${DAEMON_CONTAINER}" >/dev/null 2>&1; then
     --format "{{range .Mounts}}{{if eq .Destination \"${STATE_MOUNT_DEST}\"}}{{.Source}}{{end}}{{end}}" 2>/dev/null || true)"
 fi
 STATE_DIR="${RMD_STATE_DIR:-${DAEMON_STATE_DIR:-${INSTANCE_STATE_DIR:-${HOME:-/root}/rmd-state}}}"
+
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] && [ "${STATE_DIR}" != "${INSTANCE_STATE_DIR}" ]; then
   selected_registry_refuse target_missing_or_mismatched
   exit 2

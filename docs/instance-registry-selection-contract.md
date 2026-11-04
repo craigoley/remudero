@@ -342,7 +342,12 @@ Never clear another owner's hold or reclaim a contested claim.
 W1-T9795 adds the explicit `--selected-registry-shadow /absolute/private/session.json`
 option to install-host-units, recycle-container, serve-container, host-update,
 field-trials-refresh and fleet-heartbeat. The session's existing parent must be an
-owned mode-0700 directory. The session and its `.observations` sibling are mode 0600,
+owned mode-0700 directory outside worker state mounts. Capture and every observation
+reject storage beneath the resolved worker state root, `RMD_STATE_DIR`, `RMD_ROOT`
+or the maintained default state roots, including aliases through symlinks. Shell
+capture waits for state-root resolution and passes that root through the trusted
+observer's `--worker-root` argument. An unsafe location leaves qualification
+unrecorded; the existing launch and heartbeat still proceed. The session and its `.observations` sibling are mode 0600,
 regular single-link files opened without following symlinks. Observations stop at
 64 KiB; failure records a fixed diagnostic and the original shell effect continues.
 Shell capture and each observation have a process deadline, including observer

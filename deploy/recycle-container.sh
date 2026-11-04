@@ -391,17 +391,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
-if [ -n "$registry_shadow_session" ]; then
-  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
-  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
-  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
-    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
-    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
-  else
-    registry_shadow_observe() { :; }
-    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
-  fi
-fi
 
 # ── BASH 3.2 PORTABILITY (W1-T3595) ─────────────────────────────────────────────────────────────
 # The macOS worker host's `/bin/bash` is 3.2 (Apple has shipped nothing newer since the GPLv3
@@ -746,6 +735,19 @@ record_recycle_invocation
 # The HOST side of the state bind mount — same derivation and same default as deploy/host-update.sh,
 # so the two scripts agree on where the fleet's locks and control flags actually live.
 STATE_DIR="${RMD_STATE_DIR:-${HOME:-/root}/rmd-state}"
+
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+
 # W1-T2555: HOW STATE_DIR WAS RESOLVED, NAMED — every refusal below that mentions STATE_DIR says
 # both the resolved path AND whether it came from an explicit RMD_STATE_DIR or the bare default, so
 # an operator reading the refusal never has to re-derive it by hand.

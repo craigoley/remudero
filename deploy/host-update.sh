@@ -79,17 +79,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
-if [ -n "$registry_shadow_session" ]; then
-  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
-  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
-  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
-    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
-    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
-  else
-    registry_shadow_observe() { :; }
-    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
-  fi
-fi
 
 # ── SUDO GUARD (W1-T3682) — an accidental `sudo` silently redirects every path to /root ─────────
 # MEASURED 2026-09-16, hit by hand on the Azure host: running this script under `sudo` resolves
@@ -160,6 +149,19 @@ RELOCATE_DEST=""
 # derives from HOME — see REQ 10 in deploy/Dockerfile), and the measured invocation binds
 # ~/rmd-state to it. Only ever read.
 STATE_DIR="${RMD_STATE_DIR:-${HOME:-/root}/rmd-state}"
+
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+
 # W1-T3677: where section 3a's nightly snapshots land — beside `state/`, never inside it (the
 # snapshot would recurse into its own prior copies), and on the same persistent disk as the ledger
 # rather than on the root disk that fills.
