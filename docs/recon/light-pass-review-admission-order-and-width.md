@@ -5,6 +5,9 @@ Recon only. This report changes no code, configuration or ledger. Any change it 
 The criterion sections below preserve the previously computed results for the window in the corpus
 manifest. This repair adds the amended acceptance markers and clarifies measurement limits; it does
 not claim a fresh ledger replay. The underlying host ledger is unavailable in this repair checkout.
+The semantic width per light pass cannot be reconstructed for every observable pass. As the task's
+falsifier directs, the report says so and recommends the missing record rather than a behavior
+change (Criterion 2 and Criterion 4).
 
 ## Corpus
 
@@ -127,11 +130,11 @@ The appendix numbers all 194 jump rows, accounting for the 103 refills that jump
 
 ## Criterion 2: Width per light pass, and the head of the queue
 
-"Criterion 2 marker": the semantic review width per light pass, and how often the oldest-first queue head could not merge without a person.
+"Criterion 2 marker": the semantic review width per light pass, and how often the oldest-first queue head could not merge without a person. The width can be reconstructed for only 462 of 727 observable passes, so the task's falsifier applies and the report recommends the missing per-pass record.
 
 ### Width
 
-`policySemanticBound` (the width before in-flight is subtracted) is **not written per light pass**. I reconstructed it three ways, and they agree:
+`policySemanticBound` (the width before in-flight is subtracted) is **not written per light pass**. Three partial reconstructions follow. They point the same way, but none of them covers every pass:
 
 - **(a) Selector state at the pass.** `review.capacity` is written on every change of `width:reason` (`src/lib/review-capacity.ts:458`) and at least every 5 min, so the selector's width at any instant can be read back. The state resets to base on a daemon boot.
 - **(b) Stand-down text at the same pass.** "bound N, in-flight M" gives width = N + M. This is exact when N > 0; when N is 0 it is only an upper bound, because the bound is clamped at zero.
@@ -146,11 +149,37 @@ The appendix numbers all 194 jump rows, accounting for the 103 refills that jump
 
 Of the 727 observable light passes, 462 admitted a review and have a reconstructed width: 257 at width 1, 24 at width 2, 40 at width 3, and 141 at width 4. The remaining 265 have no exact per-pass width; the 197 bound rows are overlapping evidence, not 197 additional passes. The selector time share is a duration measure, not a substitute for those unresolved pass counts.
 
-The missing per-pass `policySemanticBound` and missing records for silent light passes prevent an
-exact semantic-width distribution over every light pass. A refill's `width` describes that refill,
-not necessarily the initial width of its pass. Queue-head counts below additionally rely on the
-prior GitHub review and issue timelines: ledger rows do not record human review dismissal/approval
-times or escalation issue closure by a person. They therefore cannot supply those intervals alone.
+**Falsifier applied: the semantic width per light pass cannot be reconstructed for every pass.**
+The task's falsifier says: if the width per pass is not recorded and cannot be reconstructed from
+stand-down reasons and `sweep.review_refilled` rows, the report says so and recommends the missing
+record rather than a behavior change. That condition holds:
+
+- **Not recorded.** No ledger row carries `policySemanticBound` (`effectiveReviewWidth`) for a light
+  pass. `review.capacity` records the selector's state when it changes, not the bound a given pass
+  used.
+- **Stand-down reasons cannot fill it.** Only 197 of the 727 passes left a "bound N, in-flight M"
+  row, and only 112 of those are exact (N > 0). When N is 0 the row gives only an upper bound,
+  because the bound is clamped at zero, and these are the passes where width matters most.
+- **Refill rows cannot fill it.** A refill's `width` is read again when a lane frees
+  (`admitOneRefill`). It describes that refill, not the width at the start of its pass, and a pass
+  that admits nothing writes no refill row.
+- **Selector state is a proxy.** Reading `review.capacity` at a pass's timestamp gives the
+  selector's last recorded state, not the bound the pass computed. A daemon boot resets that state
+  without a row at the pass. The preserved results apply this proxy only to the 462 admitting
+  passes. The host ledger cannot be reached from this repair checkout, so it was not re-run for the
+  other 265.
+- **Silent passes are missing.** `sweep.disposed` rows are deduplicated and backed off, so a pass
+  that admits nothing may leave no row. The real number of light passes is more than 727 and is not
+  known.
+
+So this report gives no full per-light-pass distribution of the semantic width. It gives a partial
+one for 462 of the 727 observable passes, which leans toward admitting passes, plus the time share.
+As the falsifier directs, the Criterion 4 recommendation asks for the missing record. It also
+re-evaluates the other findings against this gap.
+
+Queue-head counts below also rely on the earlier GitHub review and issue timelines. Ledger rows do
+not record when a human review was dismissed or approved, or when a person closed an escalation
+issue, so the ledger alone cannot give those intervals.
 
 Width 1 comes from the `cpu-pressure` arm, or from the 5–20 PSI hold band after it. In the last 24 h of the window it was 75% of the time, and every `cpu-pressure` row in that span had `pressure_source: host-load`.
 
@@ -204,7 +233,7 @@ The previously recorded replay and corpus re-read reproduced this control from t
 
 | Measure | How I handled it |
 |---|---|
-| Per-pass semantic width (`policySemanticBound`) | Reconstructed from `review.capacity` (written on every width change), stand-down "bound N, in-flight M", and refill `width`. Not written per pass. |
+| Per-pass semantic width (`policySemanticBound`) | Not written per pass. Partly reconstructed (462 of 727 observable passes) from `review.capacity`, stand-down "bound N, in-flight M" and refill `width`. It cannot be reconstructed for the other 265 or for silent passes, so the falsifier applies and the Criterion 4 recommendation asks for the missing record. |
 | Every light pass | Not recorded. `sweep.disposed` rows are deduplicated and backed off, so a pass that admits nothing may leave no row. Per-pass counts here cover the 727 observable passes only. |
 | The pass's pick (`spawning[0]`) | Not recorded when it does not produce `sweep.review_admitted`. Reconstructed as the oldest waiting spawning-lane PR by `createdAt`. |
 | `reviewAdmissionKey` | Not in ledger rows. Read as GitHub `createdAt`, available for PRs created from 2026-10-10. Older PRs (before #13717) are not in the queue reconstruction. |
@@ -216,23 +245,56 @@ The previously recorded replay and corpus re-read reproduced this control from t
 
 ## Criterion 4: Recommendation
 
-"Criterion 4 marker": one recommendation with its evidence; this report changes no code, configuration or ledger.
+"Criterion 4 marker": one recommendation with its evidence (record the per-pass width; no behavior change yet); this report changes no code, configuration or ledger.
 
-**Change the queue-head rule first, and make refills re-read the queue.** Both, as one follow-up filing. Leave the width to its own filing. The evidence for the head rule is the frequency of blocked heads, not a measured causal effect on admissions.
+**Record the semantic width of every light pass first. On this evidence, make no behavior change to
+refill ordering, the width or the queue-head rule.** This follows the task's falsifier. The width
+per pass is not recorded, and the stand-down reasons and `sweep.review_refilled` rows cannot
+reconstruct it for 265 of the 727 observable passes, or for silent passes (see Criterion 2,
+"Falsifier applied"). In that case the falsifier says to recommend the missing record rather than a
+behavior change.
 
-**Evidence:**
+**The missing record.** One ledger row per light selection pass, written even when the pass admits
+nothing, so it is not deduplicated or backed off like `sweep.disposed`. It should carry:
 
-- **The head rule.** In 47.0% of observable light passes with a non-empty spawning queue (333 of 709), the oldest-first head could not merge without a person. In 40 passes a blocked head coincided with a positive-bound refusal and no observed admission; causation is unresolved. #14793 alone held the head for 94 passes across 10-27 to 10-29.
-  - A rule that sets aside heads blocked on a person sends the slot to a PR that can actually land.
-  - "Blocked on a person" means a human CHANGES_REQUESTED in force, or an open needs-human escalation at that head that is not only a stage-stall raised by the wait itself.
-  - The rule must still refresh the set-aside PR when its blocker clears; it must not drop it.
-- **The refill tail.** 34% of refills (103 of 301) jumped an older PR that had become eligible after the refill's snapshot. Snapshots were a median 16 min old and up to 155 min. Jumped heads then waited up to 41 h in total (upper bound; median 36 min each).
-  - Re-reading eligibility at refill time removes the class. It reuses the live head read `admitOneRefill` already makes.
-- **The width is not this task's lever.** It was 1 in 64% of the window, from `cpu-pressure` on a host whose load is mostly outside the fleet (`pressure_source: host-load`).
-  - The fix belongs in how CPU admission is scoped: proofs, not the LLM phase.
-  - It is ranked in the operator's 2026-11-02 review-lane research notes, together with plan-only reviews being held at the code lane's CPU bound.
+- the pass ts and refill snapshot ts
+- `policySemanticBound` from `effectiveReviewWidth`, with the selector reason
+- reviews in flight, by kind
+- the value `reviewAdmissionBound` returned
+- the spawning-lane and plan-lane queue lengths
+- the pick (`spawning[0]`) and whether it was admitted
 
-**What is filed or built from this:** only this report (W1-T10992). The head-rule, refill and width proposals above are not filed by this PR; each needs its own filing and the operator's call.
+With this row, a later replay can give the width distribution over every light pass. It can also
+show whether a blocked head took the slot on a given pass.
+
+**Re-evaluating the other findings against the gap:**
+
+- **The refill tail does not depend on the missing width.** Each jump comes from a refill row,
+  which records its own `width`, in-flight count and `snapshot_age_ms`. A lane was free at that
+  moment and went to a younger PR. 34% of refills (103 of 301) jumped an older PR that became
+  eligible after the refill's snapshot. Snapshots were a median 16 min old and up to 155 min. The
+  added wait is still only an upper bound (41.2 h in total; median 36 min per head), because the
+  counterfactual is not recorded. This finding is the strongest candidate for a later
+  refill-re-read filing. On the falsifier's terms it is not recommended here.
+- **The queue-head frequency stands, but its effect does not.** The oldest-first head could not
+  merge without a person at 333 of 709 observable passes with a non-empty spawning queue (47.0%).
+  #14793 alone held the head for 94 passes, 10-27 to 10-29. That count comes from eligibility rows,
+  `createdAt` and the GitHub timelines, not from the width. But whether a blocked head took the
+  width needs the pass's bound and pick, and neither is recorded. 40 blocked-head passes coincided
+  with a positive-bound refusal and no admission, and that link stays unresolved until the record
+  exists. If the record shows blocked heads taking the slot, a head-rule filing would set aside a
+  head that is blocked on a person and bring it back when the blocker clears. "Blocked on a person"
+  means a human CHANGES_REQUESTED review in force, or an open needs-human escalation at that head
+  that is not only a stage-stall.
+- **The width is not changed here.** The selector was at width 1 for 64% of the window's time.
+  Width 1 comes from `cpu-pressure` or its hold band, and every `cpu-pressure` row in the last 24 h
+  had `pressure_source: host-load`. Without per-pass
+  bounds the report cannot say how often a pass ran at width 1, so it recommends no change to the
+  width.
+
+**What is filed or built from this:** only this report (W1-T10992). The missing-record proposal
+above, and any later refill, head-rule or width change, are not filed by this PR. Each needs its own
+filing and the operator's call.
 
 ## Appendix: every refill jump (194 rows)
 
