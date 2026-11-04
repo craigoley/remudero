@@ -13,9 +13,9 @@
   files:
     - src/lib/sweep.ts
     - src/run-task.ts
-    - test/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts
+    - test/sweep/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts
   status: queued
-  priority: 2
+  priority: 0.7 # operator 2026-11-03: efficiency and throughput first
   attempts: 0
   rationale: |
     OBSERVED (logs-8864/rootio-analysis-1.txt, 2026-10-16 ~16:37-16:41Z, a 240 s window, /proc io and fd samples,
@@ -54,13 +54,13 @@
     4. ALTERNATIVE, named and not taken: the daemon serves the slice over its existing client. That couples a run
        child to a live daemon. An OPERATOR DECISION.
     No new constant. Build after W1-T9710, which reshapes the same reader.
-    Tests go in test/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts, titled verbatim as in the
+    Tests go in test/sweep/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts, titled verbatim as in the
     proofs. Use real gzipped rotations, a counting fs seam, and two readers standing in for the daemon and a child.
   acceptance:
     - claim: "a fresh evidence reader whose rotations match the shared snapshot reads no rotation and no per-rotation digest"
-      proof: 'grep: test("W1-T9957: a fresh triage evidence reader answers from the shared slice snapshot" in test/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts'
+      proof: 'grep: test("W1-T9957: a fresh triage evidence reader answers from the shared slice snapshot" in test/sweep/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts'
     - claim: "a stale or damaged snapshot falls back to the per-rotation load and the same rows"
-      proof: 'grep: test("W1-T9957: a stale triage slice snapshot falls back to the per-rotation load" in test/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts'
+      proof: 'grep: test("W1-T9957: a stale triage slice snapshot falls back to the per-rotation load" in test/sweep/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts'
   falsifier: |
     On origin/main, a second createEscalationTriageHistoryReader over the same state dir (standing in for a fresh run
     child) reads every rotation's digest file again, so the counting fs sees one digest read per rotation and the
