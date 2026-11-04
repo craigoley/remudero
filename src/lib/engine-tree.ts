@@ -170,6 +170,8 @@ export interface EngineBuildOptions {
   /** Links `<treeRoot>/node_modules` to `target`, the resolved install. */
   linkNodeModules?: (target: string, treeRoot: string) => NodeModulesLinkOutcome;
   materialize?: (treeRoot: string, storeRoot: string) => StoreLookup;
+  /** Whether a run directory's child is live, for the advance's "named by a live run" check; default the real probe. */
+  probe?: RunChildProbe;
 }
 
 export type EngineBuildResult =
@@ -237,7 +239,9 @@ async function buildEngine(stateRoot: string, sha: string, sourceHash: string, d
   let replacedUnsafeReason: string | undefined;
   if (present?.sourceHash === sourceHash) {
     const existing = engineModules(final, present.nodeModulesTarget, roots);
-    if (!modulesUnsafe(existing)) return { kind: "present", root: final };
+    if (!modulesUnsafe(existing)) {
+      return present.sha === sha ? { kind: "present", root: final } : advanceEngine(stateRoot, final, present, sha, deps, git, clock);
+    }
     const reason = `node-modules-${existing.kind}: ${existing.detail}`;
     let named: ReturnType<typeof namedByLiveRuns>;
     try {
@@ -283,6 +287,72 @@ async function buildEngine(stateRoot: string, sha: string, sourceHash: string, d
   } finally {
     if (existsSync(temp)) await removeEngineDir(temp, deps.repoDir, git);
   }
+}
+
+/**
+ * An engine is keyed by its bundle's source hash, so main advancing only OUTSIDE that closure (workflows, plan, scripts,
+ * docs) would leave the tree at the revision it was first cut at: a run child reads those files from its engine tree,
+ * and the reviewer then rightly withholds every terminal verdict as stale (#15638, 2026-11-04: 67 commits behind).
+ * Advance the published tree to `sha` in place when `sha` descends from the tree's revision, no live run names the
+ * engine, and the advanced tree still hashes to the same source. Any other case keeps the tree where it is.
+ */
+async function advanceEngine(
+  stateRoot: string,
+  final: string,
+  present: EngineRecord,
+  sha: string,
+  deps: EngineBuildOptions,
+  git: EngineGit,
+  clock: Clock,
+): Promise<BuildOutcome> {
+  const log = deps.log ?? (() => {});
+  const kept: BuildOutcome = { kind: "present", root: final };
+  const row = { source_hash: present.sourceHash, from_sha: present.sha, to_sha: sha };
+  let forward: boolean;
+  try {
+    forward = await isAncestor(git, deps.repoDir, present.sha, sha);
+  } catch (err) {
+    log("engine.advance_deferred", { ...row, reason: `ancestry unreadable: ${reasonOf(err)}` });
+    return kept;
+  }
+  if (!forward) return kept; // never sideways or back: the tree holds a revision `sha` does not contain
+  let named: ReturnType<typeof namedByLiveRuns>;
+  try {
+    named = namedByLiveRuns(stateRoot, deps.probe ?? realRunChildProbe);
+  } catch (err) {
+    log("engine.advance_deferred", { ...row, reason: `live runs unreadable: ${reasonOf(err)}` });
+    return kept;
+  }
+  if ("undecidable" in named) {
+    log("engine.advance_deferred", { ...row, reason: named.undecidable });
+    return kept;
+  }
+  if (named.hashes.has(present.sourceHash) || named.shas.has(present.sha)) {
+    log("engine.advance_deferred", { ...row, reason: "named by a live run" });
+    return kept;
+  }
+  const started = clock.now();
+  try {
+    await git(final, ["checkout", "--detach", "--quiet", sha]);
+    // The advance keeps the stored bundle only while the tree's own source still hashes to it.
+    const lookup = (deps.materialize ?? materializeFromStore)(final, deps.storeRoot);
+    if (lookup.outcome !== "hit" || lookup.hash !== present.sourceHash) {
+      throw new Error(lookup.outcome !== "hit" ? `store-${lookup.reason}` : `source-moved: tree hashes to ${lookup.hash}`);
+    }
+  } catch (err) {
+    try {
+      await git(final, ["checkout", "--detach", "--quiet", present.sha]);
+    } catch (restore) {
+      log("engine.advance_failed", { ...row, reason: `${reasonOf(err)}; restore failed: ${reasonOf(restore)}` });
+      return { kind: "failed", reason: `advance-failed: ${reasonOf(err)}` };
+    }
+    log("engine.advance_failed", { ...row, reason: reasonOf(err) });
+    return kept;
+  }
+  const record: EngineRecord = { ...present, sha, builtAt: clock.now() };
+  writeAtomic(join(final, ENGINE_RECORD), `${JSON.stringify(record)}\n`);
+  log("engine.advanced", { ...row, ms: clock.now() - started });
+  return kept;
 }
 
 // ── currency ─────────────────────────────────────────────────────────────────────────────────

@@ -1172,6 +1172,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     evaluatorProvenance,
     reviewerCodeFreshness,
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
+    readRequiredContexts: readRequiredStatusCheckContextsAsync,
+    cannotEvaluateEscalation: { tryEscalate, ghIssueGateway },
   });
   phases.post = systemClock.now();
   if (posted.conflict) {
@@ -2244,6 +2246,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       fetchCurrentStatus: () => reviewStatusEntryFromCombined(fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)))?.state,
       fetchCurrentStatusEntry: () => readReviewStatusEntry(owner, repo, view.headRefOid, deps.fetchView),
       fetchPublisher: deps.fetchView,
+      readRequiredContexts: readRequiredStatusCheckContextsAsync,
+      cannotEvaluateEscalation: { tryEscalate, ghIssueGateway },
     });
     if (restored.posted) {
       replayStatusAction = "restored";

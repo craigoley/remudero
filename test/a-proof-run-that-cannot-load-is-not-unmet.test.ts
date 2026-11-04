@@ -15,6 +15,7 @@ import {
   registerReviewerCheckout,
   vitestNameFilteredOutcome,
 } from "#src/lib/review.js";
+import { ghIssueGateway, tryEscalate } from "#src/lib/escalate.js";
 
 const loadError = "Error: Cannot find package '@vercel/functions' imported from tests/unit/example.test.ts";
 const vitestLoadFailure = `TAP version 13\n1..1\nnot ok 1 - tests/unit/example.test.ts # time=1ms {\n` +
@@ -265,6 +266,8 @@ test("cannot-evaluate posts pending and escalates once for the same head", async
         listOpen: () => [],
         create: () => { issues++; return "https://github.com/craigoley/remudero-console/issues/1"; },
       },
+      // Every terminal-posting caller injects escalate.ts's two functions (review.ts cannot import it: a cycle).
+      cannotEvaluateEscalation: { tryEscalate, ghIssueGateway },
     };
     assert.equal((await postReviewStatusGuarded(opts)).posted, true);
     assert.equal((await postReviewStatusGuarded(opts)).posted, true);
@@ -295,6 +298,7 @@ test("a real proof load failure still escalates when a promise harvest is incomp
       state: verdict.state, description: verdict.summary, evidence: "no_evidence",
       fetchLifecycle: () => ({ merged: false, closed: false }), post: () => {},
       issues: { listOpen: () => [], create: (_title, body) => { recommendation = body; return "https://github.com/o/r/issues/1"; } },
+      cannotEvaluateEscalation: { tryEscalate, ghIssueGateway },
     });
     assert.equal(result.posted, true);
     assert.match(recommendation ?? "", /Repair reviewer toolchain/);

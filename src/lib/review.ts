@@ -6915,10 +6915,11 @@ async function replayPublisher(
 ): Promise<{ trusted: boolean; canPublish: boolean; evidence: ReviewReplayPublisherEvidence }> {
   const fetch = opts.fetchPublisher ?? ghJsonAsync;
   let snapshot: RequiredStatusChecksSnapshot | undefined;
-  // status.ts's graph reaches review; load its existing reader only after both modules initialized.
-  const statusModule = "./status.js";
-  const { readRequiredStatusCheckContextsAsync } = await import(statusModule);
-  const binding = await readRequiredStatusCheckContextsAsync(opts.owner, opts.repo, encodeURIComponent(lifecycle.baseRef ?? "main"), async (args: string[]) => {
+  // status.ts's graph reaches review, so its reader is injected by the caller (which already imports status.ts)
+  // rather than loaded here: a computed import() was a runtime-relative specifier no child-entry bundle carries.
+  const readRequiredContexts = opts.readRequiredContexts;
+  if (!readRequiredContexts) throw new Error("no required-status-contexts reader is wired for this replay");
+  const binding = await readRequiredContexts(opts.owner, opts.repo, encodeURIComponent(lifecycle.baseRef ?? "main"), async (args: string[]) => {
     const raw = await fetch(args);
     snapshot = raw as RequiredStatusChecksSnapshot;
     return JSON.stringify(raw);
@@ -11414,6 +11415,23 @@ interface ReviewIssueGateway {
   ensureLabel?(label: string): boolean;
 }
 
+/** escalate.ts's two functions as the cannot-evaluate escalation uses them, typed here so review.ts never imports it.
+ *  Method syntax keeps the parameters bivariant, so escalate.ts's own Escalation and EscalateDeps types satisfy it. */
+export interface CannotEvaluateEscalationPort {
+  tryEscalate(e: { class: "MANUAL"; taskId: string; runId: string; headSha: string; cause: "review"; summary: string;
+    detail: string; options: { label: string; detail: string }[]; recommendation: string; consequence: string },
+    deps: { issues: unknown; ledgerPath: string; runId: string }): string | null;
+  ghIssueGateway(owner: string, repo: string): unknown;
+}
+
+/** The shape of status.ts's readRequiredStatusCheckContextsAsync, typed here so review.ts never imports status.ts. */
+export type RequiredStatusContextsReader = (
+  owner: string,
+  repo: string,
+  branch: string,
+  readText: (args: string[]) => Promise<string>,
+) => Promise<{ kind: string; reason?: string }>;
+
 export interface PostReviewStatusGuardedOpts {
   owner: string;
   repo: string;
@@ -11447,6 +11465,10 @@ export interface PostReviewStatusGuardedOpts {
   fetchCurrentStatus?: () => PostableReviewState | ReviewStatusEntry | undefined;
   fetchCurrentStatusEntry?: () => ReviewStatusEntry | undefined | Promise<ReviewStatusEntry | undefined>;
   fetchPublisher?: GhApiFetcher;
+  /** status.ts's readRequiredStatusCheckContextsAsync, which a decision replay needs to name the required publisher.
+   *  Injected because status.ts's graph reaches this module; every terminal-posting caller passes it. Absent, a replay
+   *  is withheld with a named reason rather than guessing a publisher. */
+  readRequiredContexts?: RequiredStatusContextsReader;
   /** Injected raw poster for tests. Defaults to {@link postReviewStatus}, which already retries a TRANSIENT gh error
    *  internally (rule (iv) above). May return a Promise, as the default does, or `void`. */
   post?: (o: {
@@ -11458,6 +11480,9 @@ export interface PostReviewStatusGuardedOpts {
   }) => void | Promise<void>;
   /** Injectable issue transport for the one cannot-evaluate escalation per head. */
   issues?: ReviewIssueGateway;
+  /** escalate.ts's tryEscalate and ghIssueGateway, for the one cannot-evaluate escalation per head. Injected because
+   *  escalate.ts's graph reaches this module; every terminal-posting caller passes them. */
+  cannotEvaluateEscalation?: CannotEvaluateEscalationPort;
   lockOpts?: AcquireReviewStatusLockOpts;
 }
 
@@ -11687,11 +11712,11 @@ export async function postReviewStatusGuarded(
     if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") &&
         !/^remudero-review: cannot-evaluate — promise harvest (?:unavailable:|corpus is unreadable)/.test(opts.description) && opts.prUrl &&
         !lines.some((line) => line.step === "review.cannot_evaluate_escalated" && line.task_id === opts.taskId && line.head_sha === opts.sha)) {
-      // Load escalation only for this exceptional pending path. Its worker graph reaches review
-      // through eval-card; a top-level import closes a cycle and fails the dependency gate.
-      const escalationModule = "./escalate.js";
-      const { ghIssueGateway, tryEscalate } = await import(escalationModule);
-      const issueUrl = tryEscalate({
+      // escalate.ts's worker graph reaches review through eval-card, so its two functions are injected by the caller
+      // (which already imports escalate.ts) rather than loaded here: a computed import() is a runtime-relative
+      // specifier no child-entry bundle carries. Unwired, the escalation is skipped and the pending status stands.
+      const escalation = opts.cannotEvaluateEscalation;
+      const issueUrl = escalation && escalation.tryEscalate({
         class: "MANUAL",
         taskId: opts.taskId,
         runId: opts.runId,
@@ -11703,7 +11728,7 @@ export async function postReviewStatusGuarded(
         recommendation: "Repair reviewer toolchain",
         consequence: "The required review remains pending and the PR cannot merge.",
       }, {
-        issues: opts.issues ?? ghIssueGateway(opts.owner, opts.repo),
+        issues: opts.issues ?? escalation.ghIssueGateway(opts.owner, opts.repo),
         ledgerPath: opts.ledgerPath,
         runId: opts.runId,
       });
