@@ -22,7 +22,8 @@
  *     enclosing tree's peak leaves the runner's members out, so no process is counted in two classes.
  *
  * BEST-EFFORT: nothing here throws to a caller. A failed read is no samples (the prior, named unmeasured), a failed
- * write loses one sample. Nothing here delays, refuses or alters work.
+ * write loses one sample. Nothing here delays, refuses or alters work; a TrackHooks.onMember owner may (W1-T11344:
+ * learnedHandle's descendant-memory-bound.ts stops a descendant over its bound).
  */
 
 import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -31,6 +32,7 @@ import { basename, join, normalize } from "node:path";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readBoundedFileTail } from "./bounded-file-tail.js";
+import { descendantBoundPorts, descendantMemoryBoundHook, type DescendantBoundPorts, type MemberFacts } from "./descendant-memory-bound.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import {
   DEFAULT_ESTIMATE_MIB,
@@ -483,6 +485,8 @@ export interface TrackHooks {
   onTestFilePeak?: (path: string, peakMib: number) => void;
   /** W1-T9762: when the tree's reservation opened, the origin of the age its peak is recorded at. */
   openedAtMs?: number;
+  /** W1-T11344: each member's VmRSS as it is read. The sampler ignores what it does; its owner may stop the member. */
+  onMember?: (pid: number, start: string, rssKb: number, facts: MemberFacts) => void;
 }
 
 interface Tracked {
@@ -593,6 +597,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         const hwm = Number(/^VmHWM:\s+(\d+)/m.exec(status)?.[1] ?? 0);
         legacyKb += hwm;
         const member = rows.get(pid)!;
+        if (rss !== undefined && entry.hooks?.onMember) memberHook(entry, member, Number(rss), rows);
         if (hwm > 0 && argvOf(`${pid}:${member.start}`, pid).cli) cliKb += hwm;
         if (hwm === 0) legacyComplete = false;
         if (hwm > 0 && entry.hooks?.onTestFilePeak) {
@@ -616,6 +621,20 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
     if (cliKb > 0) entry.cliPeakMib = Math.max(entry.cliPeakMib ?? 0, cliKb / 1024);
     if (legacyComplete && legacyKb > 0) entry.legacyPeakMib = Math.max(entry.legacyPeakMib ?? 0, legacyKb / 1024);
     return complete ? kb / 1024 : undefined;
+  };
+
+  /** W1-T11344: hand one read member, with whether it is a root and its test file, to its tree's owner. */
+  const memberHook = (entry: Tracked, member: ProcessListing["rows"][number], rssKb: number,
+    rows: ReadonlyMap<number, ProcessListing["rows"][number]>): void => {
+    try {
+      const parent = rows.get(member.parent);
+      const testFile = parent && argvOf(`${parent.pid}:${parent.start}`, parent.pid).runner
+        ? argvOf(`${member.pid}:${member.start}`, member.pid).file : undefined;
+      const root = entry.roots.some((r) => r.pid === member.pid && r.start === member.start);
+      entry.hooks!.onMember!(member.pid, member.start, rssKb, { root, ...(testFile ? { testFile } : {}) });
+    } catch (error) {
+      void error; // A throwing owner loses its own decision, never the sample.
+    }
   };
 
   const stopIfIdle = (): void => {
@@ -655,7 +674,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         if (!run) continue;
         const nestedId = `${id}>test:${key}`;
         tracked.set(nestedId, { roots: [{ pid, start }], peakMib: 0, observed: false, nested: run,
-          hooks: { onTestFilePeak: entry.hooks?.onTestFilePeak, openedAtMs: ports.clock.now() } });
+          hooks: { onTestFilePeak: entry.hooks?.onTestFilePeak, onMember: entry.hooks?.onMember, openedAtMs: ports.clock.now() } });
         rootOwner.set(key, nestedId);
       }
     }
@@ -797,6 +816,8 @@ export interface LearnedReservationOptions {
   ledger?: HostMemoryLedgerOptions;
   store?: PeakStoreOptions;
   sampler?: TreePeakSampler;
+  /** W1-T11344: the descendant memory bound's read, kill and ledger ports. */
+  descendantBound?: Partial<DescendantBoundPorts>;
 }
 
 /** The ledger reservation and learned peak of one test runner found inside a tracked tree. NEVER throws. */
@@ -865,8 +886,12 @@ function learnedHandle(
   const sampler = deps.sampler ?? sharedSampler();
   const key = handle.id ?? `untracked-${Math.random().toString(36).slice(2)}`;
   let finished = false;
+  // W1-T11344: every learned reservation's trees, nested test runs included, carry the descendant memory bound.
+  const bound = descendantMemoryBoundHook({ workerClass, reservationId: handle.id }, {
+    ...descendantBoundPorts({ root: root ?? deps.ledger?.root, daemonOwned: daemonOwnedProcess }), ...deps.descendantBound });
   const hooks: TrackHooks = {
     openedAtMs,
+    onMember: (pid, start, rssKb, facts) => bound.onMember(pid, start, rssKb, facts),
     ...(workerClass === "test" ? {} : {
       onTestRunner: (pid: number) => openNestedTestRun(pid, { ...(root ? { root } : {}),
         ledger: deps.ledger, store: { ...store, entryKind: undefined } }),
@@ -901,6 +926,7 @@ function learnedHandle(
         } catch (error) {
           recordError(store, "finish", error);
         }
+        bound.release();
       }
       handle.releaseOccupancy();
     },
