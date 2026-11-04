@@ -1,0 +1,29 @@
+id: incident-d7c725ebdef09712
+ts: 2026-11-04T11:18:20.818Z
+raw: >-
+  Incident d7c725ebdef0: flow pr-stage-stall:other:checks green, review never
+  posted — running the review lane on #<pr>
+
+  First seen: 2026-11-04T11:03:40.054Z
+
+  Last seen: 2026-11-04T11:03:40.054Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16658 other: repeat: "checks green, review never posted — running the review lane on #<pr>" x2; duplicate build
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#d7c725ebdef097128fc81bebe8695c1231cd2b56e3e54fb7935c5385bd9210f2
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

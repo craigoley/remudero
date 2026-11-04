@@ -1,0 +1,29 @@
+id: incident-a06bb288ef1c65bc
+ts: 2026-11-04T13:05:33.966Z
+raw: >-
+  Incident a06bb288ef1c: intervention
+  plan-proof-unrunnable:plan-repair:plan-only-pr-is-red-on-proof-discriminat
+
+  First seen: 2026-11-04T13:05:29.784Z
+
+  Last seen: 2026-11-04T13:05:29.784Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=close target=pr#16627@2026-11-04T12:26:48Z actor=cao825 cause=plan-proof-unrunnable:plan-repair:plan-only-pr-is-red-on-proof-discriminat — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#a06bb288ef1c65bc8e98d048802044371c0ce14bdcac85d7b19efcab273654dd
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
