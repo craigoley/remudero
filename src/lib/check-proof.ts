@@ -319,8 +319,6 @@ export function buildBaseProofDir(
   return blobFallbackProof(baseCriteria, base, dir, (rev: string, rel: string) => showBlob(headCheckoutDir, rev, rel), worktreeFailure);
 }
 
-/** W1-T11341: the one git leaf {@link buildBaseProofDirAsync} runs, awaited. */
-export type AwaitedBaseGit = (cwd: string, args: readonly string[], opts?: HostWorktreeGitOptions) => Promise<string>;
 
 /** An awaited git failure in the shape a sync one has: a nonzero exit is `status`, so `baseBlobErrorIsAbsence` reads it. */
 function asSyncGitError(error: unknown): unknown {
@@ -357,6 +355,7 @@ async function overAwaitedReads<R>(
       try {
         answers.set(key, { value: await fetch() });
       } catch (error) {
+        // Kept as its own error and rethrown to the step on the next pass, so the step reads it exactly as a sync failure.
         answers.set(key, { error: asSyncGitError(error) });
       }
     }
@@ -373,16 +372,17 @@ async function overAwaitedReads<R>(
 export async function buildBaseProofDirAsync(
   criteria: ReadonlyArray<{ proof?: string }>,
   headCheckoutDir: string,
-  deps: { git?: AwaitedBaseGit; makeDir?: () => string; copyFile?: (src: string, dest: string) => void } = {},
+  deps: Pick<NonNullable<Parameters<typeof buildBaseProofDir>[2]>, "makeDir" | "copyFile"> = {},
 ): Promise<BaseProofDir> {
-  const git = deps.git ?? hostWorktreeGitAsync;
+  // The one git leaf this builder runs, awaited: the tests drive it through a PATH-fronted git, so it takes no seam.
+  const git = hostWorktreeGitAsync;
   const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
   if (!wantsBaseProof(criteria)) return noBaseProof();
   let base: string;
   try {
     base = (await git(headCheckoutDir, MERGE_BASE_ARGS, BASE_PROOF_HERMETIC)).trim();
   } catch {
-    return noBaseProof();
+    return noBaseProof(); // unresolvable base ⇒ no staleness signal, never a false positive, exactly as the sync builder reads it
   }
   if (!base) return noBaseProof();
   const at = headCheckoutDir;
@@ -439,6 +439,7 @@ export async function buildBaseProofDirAsync(
     }
     return checkedOutBaseProof(dir, copyAddedTests(at, dir, added, deps.copyFile ?? copyBaseFile));
   } catch (e) {
+    // Not erased: the reason rides out on `baseWorktreeFailure`, as the sync builder's does (R-11).
     worktreeFailure = String((e as Error)?.message ?? e);
   }
   return await overAwaitedReads((read, final) => {
