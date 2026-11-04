@@ -1,6 +1,6 @@
 # `RMD_INSTANCE_REGISTRY` has two meanings
 
-**Snapshot:** `origin/main` at `b7e7ee07d44e5c5e78e2715ecbca62c25621252d` (2026-11-04). This is a source inventory, not proof of the environment loaded by any running container. The deployment task must read each target container and generated unit before claiming adoption.
+**Snapshot:** `origin/main` at `b238444b32e7611e862d64e9e6fdf86eb7a890b5` (2026-11-04). This is a source inventory, not proof of the environment loaded by any running container. The deployment task must read each target container and generated unit before claiming adoption.
 
 ## Finding
 
