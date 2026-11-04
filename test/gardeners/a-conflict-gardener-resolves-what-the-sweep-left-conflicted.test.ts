@@ -360,3 +360,41 @@ test("production detection names a live sweep child and distinguishes terminal a
     assert.equal(await ports.skip(pr(1), rows), "sweep action liveness unreadable");
   });
 });
+
+
+test("W1-T11172 criterion 3: every live act reads mergeability and required checks even without a returned head", async () => {
+  const f = fixture();
+  const reads: string[] = [];
+  f.ports.verify = async (p, act) => {
+    reads.push(String(act?.tier));
+    return { headSha: p.headSha, mergeableState: "dirty", checksState: "none" };
+  };
+  await runConflictGarden(f.ports);
+  assert.deepEqual(reads, ["deterministic", "round", "wedge"]);
+  assert.deepEqual(f.rows.filter(r => r.step === "conflict_garden.verified").map(r => r.outcome),
+    ["still-dirty", "still-dirty", "still-dirty"]);
+});
+
+test("W1-T11172 criterion 3: a dispatched round without a returned head is verified on the next pass", async () => {
+  const f = fixture();
+  let head = "head-1";
+  let checksState: "pending" | "green" = "pending";
+  f.ports.act = async (_p, tier) => {
+    f.calls.push(tier);
+    return { outcome: tier === "round" ? "dispatched" : "unchanged" };
+  };
+  f.ports.verify = async () => ({ headSha: head, mergeableState: head === "head-1" ? "dirty" : "clean", checksState });
+  await runConflictGarden(f.ports);
+  assert.deepEqual(f.calls, ["deterministic", "round"]);
+  const act = f.rows.findLast(r => r.step === "conflict_garden.act" && r.tier === "round")!;
+  head = "repaired";
+  f.ports.snapshot = async () => ({ prs: [pr(1, { headSha: head, mergeableState: "clean" })], mainSha: "main" });
+  await runConflictGarden(f.ports);
+  assert.equal(f.rows.findLast(r => r.step === "conflict_garden.verified" && r.act_id === act.act_id)?.outcome, "pending");
+  checksState = "green";
+  await runConflictGarden(f.ports);
+  const verified = f.rows.findLast(r => r.step === "conflict_garden.verified" && r.act_id === act.act_id)!;
+  assert.equal(verified.outcome, "verified");
+  assert.equal(verified.new_head_sha, "repaired");
+  assert.deepEqual(f.calls, ["deterministic", "round"]);
+});
