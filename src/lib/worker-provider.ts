@@ -1,4 +1,6 @@
 import { recordCashAccounting, validCashIdentity, cashIdentityMatches, cashEndpointIdentity, type CashRequestIdentity, type CashReservation, type CashAccountingEvidence } from "./cash-accounting.js";
+import { assertCurrentCanaryPilotReservation, assertCurrentCanaryPilotSettlement,
+  reserveCurrentCanaryPilotRequest, settleCurrentCanaryPilotRequest } from "./model-canary-pilot-budget.js";
 import { setTimeout as abortableDelay } from "node:timers/promises";
 import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-request-effort.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
@@ -4312,6 +4314,11 @@ export function reserveOpenWeightBudget(
   if (input.identity && (!validCashIdentity(input.identity) || input.identity.requestId !== input.requestId || input.identity.deployment !== input.deployment)) {
     throw new Error("cash reservation identity does not match its request/deployment");
   }
+  const sharedPath = sharedCashAllowancePath(config);
+  assertCurrentCanaryPilotReservation({ sharedAllowancePath: sharedPath, identity: input.identity,
+    requestId: input.requestId, deployment: input.deployment, squeezed: input.squeezed === true });
+  // One nonce is shared by this helper's bounded CAS retries; a later helper invocation can never reuse it.
+  const invocationNonce = randomUUID();
   const configuredCapUsd = configuredCashCap(config, input.squeezed);
   const utcDay = openWeightUtcDay(input.atIso);
   const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes, input.extraInputTokens ?? 0);
@@ -4325,6 +4332,8 @@ export function reserveOpenWeightBudget(
       if (limit.committedUsd + wantUsd > limit.capUsd)
         throw new OpenWeightAllowanceExhaustedError({ ...limit, wantUsd, utcDay, squeezed: input.squeezed === true });
     }
+    reserveCurrentCanaryPilotRequest({ sharedAllowancePath: sharedPath, requestId: input.requestId,
+      identity: input.identity, reservedUsd: wantUsd, invocationNonce });
     return {
       next: { ...state, reservations: { ...state.reservations, [input.requestId]: { reservedUsd: wantUsd, settledUsd: null, deployment: input.deployment,
         ...(input.identity ? { identity: input.identity, accountingState: "held-unknown" as const,
@@ -4339,14 +4348,19 @@ export function settleOpenWeightBudget(
   config: Config,
   input: CashAccountingEvidence & { requestId: string; atIso: string },
 ): CashReservation | undefined {
+  const sharedPath = sharedCashAllowancePath(config);
+  assertCurrentCanaryPilotSettlement({ sharedAllowancePath: sharedPath, requestId: input.requestId, identity: input.identity });
   const utcDay = openWeightUtcDay(input.atIso);
-  return mutateOpenWeightAllowance<CashReservation | undefined>(openWeightAllowancePath(config), utcDay, (state) => {
+  const settled = mutateOpenWeightAllowance<CashReservation | undefined>(openWeightAllowancePath(config), utcDay, (state) => {
     const row = state.reservations[input.requestId];
     if (state.utcDay !== utcDay || row === undefined || !row.identity || !cashIdentityMatches(row.identity, input.identity))
       return { next: state, result: undefined };
     const recorded = recordCashAccounting(row, input);
     return { next: { ...state, reservations: { ...state.reservations, [input.requestId]: recorded } }, result: recorded };
   }, undefined, sharedCashAllowancePath(config) !== undefined, false, true);
+  settleCurrentCanaryPilotRequest({ sharedAllowancePath: sharedPath, requestId: input.requestId, identity: input.identity,
+    originalActualUsd: input.actualUsd, globalSettlement: settled });
+  return settled;
 }
 
 type CashBudgetAttempt = {

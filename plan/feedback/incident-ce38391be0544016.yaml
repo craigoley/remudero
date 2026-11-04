@@ -1,0 +1,30 @@
+id: incident-ce38391be0544016
+ts: 2026-11-03T22:03:57.902Z
+raw: >-
+  Incident ce38391be054: flow pr-stage-stall:awaiting-review:own diff unchanged
+  since head <sha> but the merge base moved — re-running discrimination alone,
+  not the whole review (W1-T3704)
+
+  First seen: 2026-11-03T17:25:44.635Z
+
+  Last seen: 2026-11-03T17:25:44.635Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16240 awaiting-review: repeat: "own diff unchanged since head <sha> but the merge base moved — re-running discrimination alone, not the whole review (W1-T3704)" x3; review loop
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#ce38391be0544016c92ecdf0a1ba9e5a8862d1629e62e5c929668c045365c302
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
