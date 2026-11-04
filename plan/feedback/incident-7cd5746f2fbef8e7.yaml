@@ -1,0 +1,30 @@
+id: incident-7cd5746f2fbef8e7
+ts: 2026-11-04T02:55:50.023Z
+raw: >-
+  Incident 7cd5746f2fbe: flow pr-stage-stall:own-red:required checks red —
+  ci-log fix, fix round <n> — judge: continue (The latest round fixed the prior
+  review findings, and the remaining CI failur...)
+
+  First seen: 2026-11-04T02:36:40.316Z
+
+  Last seen: 2026-11-04T02:36:40.316Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16468 own-red: repeat: "required checks red — ci-log fix, fix round <n> — judge: continue (The latest round fixed the prior review findings, and the remaining CI failur...)" x2
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#7cd5746f2fbef8e7527415a280b57addb14ef129efed374c73e8955f36d350f0
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

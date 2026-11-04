@@ -242,13 +242,15 @@ test("test-with-retry: ci's SOURCE shard reaches the wrapper with its option bef
     new RegExp(String.raw`node scripts\/test-with-retry\.mjs\s+\\\s+node scripts\/test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/${shardCount} --base "\$TIER_BASE"`),
     "the SOURCE matrix must invoke the retry wrapper around the duration-balanced fast-tier shard",
   );
-  // W1-T4396 added the slow tier's push lane and W1-T4398 the coverage lane as direct callers.
+  // W1-T11206 moved the slow push lane's wrapper inside the tier runner so its failure
+  // summary follows retry output. Fast SOURCE and coverage remain direct callers.
   assert.equal(
     executable.match(/node scripts\/test-with-retry\.mjs/g)?.length,
-    3,
-    "only ci's SOURCE lane, test-slow's push lane and the coverage lane may name the wrapper directly",
+    2,
+    "only ci's SOURCE lane and the coverage lane may name the wrapper directly",
   );
-  assert.match(executable, /node scripts\/test-with-retry\.mjs node scripts\/test-tier-manifest\.mjs --run slow --shard \$\{\{ matrix\.shard \}\}\/2 --base HEAD/);
+  assert.match(executable, /node scripts\/test-tier-manifest\.mjs --run slow --shard \$\{\{ matrix\.shard \}\}\/\$\{\{ needs\.test-slow-plan\.outputs\.count \}\} --base HEAD --retry(?:\r?\n|$)/,
+    "the slow push lane must request the tier runner's internal retry with the derived shard count");
   // W1-T4398: the coverage lane's call is the uninstrumented-retry mode — never a whole-suite
   // re-run of the instrumented command (the 2026-08-28 ruling).
   const coverageJob = executable.slice(executable.indexOf("\n  coverage-ratchet:\n"), executable.indexOf("\n  coverage-ratchet-required:\n"));

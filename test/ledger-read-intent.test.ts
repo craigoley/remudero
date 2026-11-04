@@ -167,9 +167,10 @@ test("PROPERTY src/lib/status.ts — the narrowing point readLedgerLines is defi
 test("PROPERTY sweep.ts's three value-bound readLedger call sites declare the live intent, not union", () => {
   const text = readFileSync(join(REPO_ROOT, "src/lib/sweep.ts"), "utf8");
   const lines = text.split("\n");
-  const bindingLine = "  const readLedger = deps.readLedger ?? readLedgerLines;";
+  // W1-T11260: runSweep and runSweepLightPass bind the live file's incremental tail; both still read it alone.
+  const bindingLines = new Set(["  const readLedger = deps.readLedger ?? readLedgerLines;", "  const readLedger = deps.readLedger ?? readLiveLedgerRows;"]);
   const bindingLineIndexes = lines
-    .map((line, i) => (line === bindingLine ? i : -1))
+    .map((line, i) => (bindingLines.has(line) ? i : -1))
     .filter((i) => i >= 0);
   assert.equal(
     bindingLineIndexes.length,
@@ -254,9 +255,9 @@ test("PROPERTY sweep.ts's new markers are documentation only — nothing paces, 
     );
     // Immediately after the comment block, the pre-existing alias binding must be untouched — no
     // call was inserted between the new marker and the line it documents.
-    assert.equal(
+    assert.match(
       lines[end + 1],
-      "  const readLedger = deps.readLedger ?? readLedgerLines;",
+      /^ {2}const readLedger = deps\.readLedger \?\? (readLedgerLines|readLiveLedgerRows);$/,
       "the marker must sit directly above the unchanged alias binding, nothing inserted between them",
     );
   }
