@@ -33,26 +33,16 @@ test("W1-T11190: comment compression preserves executable code", () => {
   const release = actual.comments.find(comment => comment.includes("W1-T3206"));
   assert.ok(release, "retain the operator-release invariant and its citation");
   const before = compressionPinBase("src/lib/plan.ts", import.meta.url);
-  const releaseBefore = `/**
- * W1-T3206 — THE LEDGER STEP THAT RELEASES A PARKED TASK.
- *
- * \`verify: human\` was a ONE-WAY PARK: \`isDispatchEligible\` refuses it (drain.ts) and
- * {@link assertRunnable} throws, and NOTHING converted an operator's decision back into dispatch.
- * MEASURED 2026-09-08: 45 such shards queued, the oldest filed 2026-07-21 — seven weeks — and a
- * grep across src/ for any approve/release/unblock path keyed on \`verify: human\` returned zero.
- *
- * THE RELEASE IS NOT A PLAN EDIT. It is the row \`rmd approve\` ALREADY writes when an operator
- * spends his bit, so the plan record stays byte-identical, the decision is auditable, and no worker
- * ever rewrites a \`verify:\` field (which Standing rule 15 forbids anyway).
- */`;
+
+  if (before === undefined) return;
+  // Compare comment volume only on the compression PR; later edits have no size ceiling.
+  const base = snapshot(before);
+  const releaseBefore = base.comments.find(comment => comment.includes("W1-T3206"));
+  assert.ok(releaseBefore, "the pre-compression source carries the release explanation");
   assert.ok(release.split("\n").length < releaseBefore.split("\n").length,
     "the release explanation has fewer comment lines than before compression");
   assert.ok(Buffer.byteLength(release) < Buffer.byteLength(releaseBefore),
     "the release explanation is shorter, not just rewrapped");
-
-  if (before === undefined) return;
-  // Compare whole-module comment volume only on the compression PR; later edits have no size ceiling.
-  const base = snapshot(before);
   assert.equal(actual.tokens, base.tokens, "every executable token matches the pre-compression source");
   assert.equal(actual.ast, base.ast, "newline-sensitive syntax matches the pre-compression source");
   assert.ok(base.commentLines > 0 && actual.commentLines > 0, "both measurements see comments");
