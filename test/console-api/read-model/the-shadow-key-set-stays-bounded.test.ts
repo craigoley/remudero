@@ -7,7 +7,7 @@ import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { acquireLease, flushReadModelTransactions, openShadowCounterDb } from "#src/lib/read-model-db.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { createViewShadow, fileShadowStore, viewShadowPath } from "#src/lib/view-shadow.js";
-import { readShadowCounters, SHADOW_KEY_COUNT_SQL, SHADOW_KEY_RETIRE_MS, shadowCounterPath } from "#src/lib/view-shadow-store.js";
+import { readShadowCounters, SHADOW_KEY_COUNT_SQL, SHADOW_KEY_RETIRE_MS, shadowCounterPath, shadowKeyRetireBatch } from "#src/lib/view-shadow-store.js";
 
 const START = Date.parse("2026-11-01T00:00:00Z");
 const DAY = SHADOW_KEY_RETIRE_MS;
@@ -23,7 +23,7 @@ function fixture(t: TestContext) {
   const path = viewShadowPath(dir);
   const stores: ReturnType<typeof fileShadowStore>[] = [];
   const shadow = () => {
-    const store = fileShadowStore(path, db, got.lease);
+    const store = fileShadowStore(path, db, got.lease, undefined, clock);
     stores.push(store);
     return createViewShadow({ clock, log: () => {}, evidence: () => evidence, store });
   };
@@ -37,7 +37,15 @@ function fixture(t: TestContext) {
     s.compare({ view: "counter", key, requests: 1, legacy: { data: 1, asOfMs: null }, body: { data, asOf: null } });
   const stored = () => readShadowCounters(path, false)!.keyCounts.get("counter") ?? 0;
   const storedKeys = () => readShadowCounters(path, true)!.states.counter!.streakKeys!;
-  return { path, shadow, sample, stored, storedKeys, at: (ms: number) => { now = ms; } };
+  /** The stored keys of `counter` that are expired, and live, at `atMs`, read straight from the file. */
+  const split = (atMs: number) => {
+    const raw = new DatabaseSync(shadowCounterPath(path), { readOnly: true });
+    try {
+      const n = (sql: string) => Number(raw.prepare(sql).get("counter", atMs - DAY)?.n ?? 0);
+      return { expired: n("SELECT count(*) AS n FROM shadow_key WHERE view = ? AND last_ms <= ?"), live: n("SELECT count(*) AS n FROM shadow_key WHERE view = ? AND last_ms > ?") };
+    } finally { raw.close(); }
+  };
+  return { path, shadow, sample, stored, storedKeys, split, at: (ms: number) => { now = ms; } };
 }
 
 test("W1-T11330: 10,000 one-off keys sampled across simulated days stay bounded by the keys sampled within the last day", t => {
@@ -105,37 +113,74 @@ test("W1-T11330 criterion 2: loading counts each view's keys from the maintained
   assert.equal(f.stored(), 3);
 });
 
-test("W1-T11330 criterion 2: the first save after upgrade prunes an existing oversized membership in bounded batches", t => {
-  const f = fixture(t), backlog = 3_000;
-  // A store an older build wrote: membership with no sample times, and no count table.
-  const old = openShadowCounterDb(shadowCounterPath(f.path));
+/** A store an older build wrote: `keys` members with no sample times, and no count table. */
+function seedLegacyStore(path: string, keys: number): void {
+  const old = openShadowCounterDb(shadowCounterPath(path));
   try {
     old.exec("BEGIN IMMEDIATE");
-    const state = { requests: backlog, firstRequestMs: START - DAY, samples: backlog, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 }, streakSamples: backlog, streakSinceMs: START - DAY, lastRealMs: null, streakKeys: [] };
+    const state = { requests: keys, firstRequestMs: START - DAY, samples: keys, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 }, streakSamples: keys, streakSinceMs: START - DAY, lastRealMs: null, streakKeys: [] };
     old.prepare("INSERT INTO shadow_counter(view,state) VALUES('counter',?)").run(JSON.stringify(state));
     const add = old.prepare("INSERT INTO shadow_key(view,key,ordinal) VALUES('counter',?,?)");
-    for (let i = 0; i < backlog; i++) add.run(`cursor-${i}`, i);
+    for (let i = 0; i < keys; i++) add.run(`cursor-${i}`, i);
     old.prepare("INSERT INTO meta(k,v) VALUES('shadow_migrated','1')").run();
     old.exec("COMMIT");
   } finally { old.close(); }
-  assert.equal(f.stored(), backlog, "an unupgraded store still counts its membership");
+}
 
+test("W1-T11330: sparse traffic after a burst drains: 100 keys, then one new key a day for ten days, converges to the live keys", t => {
+  const f = fixture(t), shadow = f.shadow();
+  for (let i = 0; i < 100; i++) { f.at(START + i * 60_000); f.sample(shadow, `burst-${i}`); }
+  assert.equal(f.stored(), 100);
+  let at = START + 99 * 60_000;
+  for (let day = 1; day <= 10; day++) {
+    at += DAY + 60_000;
+    f.at(at);
+    f.sample(shadow, `sparse-${day}`);
+    // Only the key just sampled was sampled within the last day.
+    assert.deepEqual([f.stored(), shadow.readiness()[0]!.keys], [1, 1], `day ${day}: stored and readiness keys`);
+  }
+  assert.deepEqual(f.storedKeys(), ["sparse-10"]);
+});
+
+test("W1-T11330 criterion 2: an older build's keys are stamped at load time, so a save more than a day after the load prunes them", t => {
+  const f = fixture(t);
+  seedLegacyStore(f.path, 100);
+  assert.equal(f.stored(), 100, "an unupgraded store still counts its membership");
   const shadow = f.shadow();
+  f.at(START + DAY + 60_000);
   f.sample(shadow, "first-after-upgrade");
-  assert.equal(f.stored(), backlog + 1, "the upgrade stamps existing keys with its own time, so none retires before a day");
+  assert.deepEqual([f.stored(), shadow.readiness()[0]!.keys], [1, 1]);
+  assert.deepEqual(f.storedKeys(), ["first-after-upgrade"]);
+});
 
-  let previous = f.stored(), saves = 0, live = 1;
-  for (let i = 0; f.stored() > live; i++) {
-    f.at(START + DAY + (i + 1) * 60_000);
-    f.sample(shadow, `fresh-${i}`);
-    live = i + 1;
-    const now = f.stored(), retired = previous + 1 - now;
-    assert(now <= previous, `save ${i}: the stored set never grows while a retired key remains (${previous} -> ${now})`);
-    assert(retired <= Math.max(1, live), `save ${i} retired ${retired}, more than the ${live} live key(s) that bound one batch`);
-    previous = now;
+test("W1-T11330 criterion 2: an upgraded oversized membership drains in bounded batches, shrinking on every save", t => {
+  const f = fixture(t), backlog = 3_000, traffic = 50;
+  seedLegacyStore(f.path, backlog);
+  const shadow = f.shadow();
+  // Live traffic before the legacy keys expire: each key sampled once, a minute apart.
+  for (let i = 0; i < traffic; i++) { f.at(START + DAY - (traffic - i) * 60_000); f.sample(shadow, `live-${i}`); }
+  assert.equal(f.stored(), backlog + traffic, "nothing retires before a day after the load");
+  let saves = 0, drainedAt = START + DAY;
+  for (let i = 0; f.split(START + DAY + (i + 1) * 60_000).expired > 0; i++) {
+    const at = START + DAY + (i + 1) * 60_000, before = f.split(at);
+    drainedAt = at;
+    f.at(at);
+    f.sample(shadow, `live-${i % traffic}`);
+    const after = f.split(at), retired = before.expired - after.expired;
+    assert(retired > 0, `save ${i}: the expired backlog strictly shrinks (${before.expired} -> ${after.expired})`);
+    assert(retired <= shadowKeyRetireBatch(before.live, before.expired, 0), `save ${i} retired ${retired}, above its data-derived batch`);
+    assert(retired <= Math.max(before.live, Math.ceil(before.expired / before.live)), `save ${i}: the batch is bounded by max(live, expired / live)`);
     saves++;
-    assert(saves < backlog, "the backlog drains");
   }
   assert(saves > 1, `the backlog drained over ${saves} saves, not in one unbounded delete`);
-  assert.equal(f.stored(), live);
+  assert(drainedAt - (START + DAY) < DAY, `the backlog drained ${drainedAt - (START + DAY)} ms after it expired, inside a day of the view's own traffic`);
+  assert.equal(f.stored(), traffic);
+});
+
+test("W1-T11330 criterion 2: every save's retirement batch exceeds its own inserts, so a backlog never holds steady", () => {
+  for (const [live, expired, inserted] of [[1, 100, 1], [1, 100, 0], [0, 5, 1], [50, 3000, 1], [3, 2, 7]] as const) {
+    const batch = shadowKeyRetireBatch(live, expired, inserted);
+    assert(batch > inserted, `live ${live}, expired ${expired}, inserted ${inserted}: batch ${batch}`);
+    assert(batch >= Math.ceil(expired / Math.max(1, live)), `batch ${batch} covers the backlog's share of the next day's ${live} save(s)`);
+  }
 });

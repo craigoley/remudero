@@ -57,7 +57,8 @@ const SHADOW_KEY_TIMES = "shadow_key_times";
 export const shadowCounterPath = (legacyPath: string): string => `${legacyPath}.sqlite`;
 
 /** Confirmed absence alone permits legacy migration; corrupt, unreadable and foreign stores throw. */
-export function readShadowCounters(path: string, includeKeys: boolean, activeQualifications?: Readonly<Record<string, string>>): { states: Record<string, ViewShadowState>; keyCounts: Map<string, number>; keyTimes: Map<string, Map<string, number>> } | undefined {
+/** `loadedAtMs` stamps the keys of a store saved before W1-T11330, which carry no sample time: its upgrade uses the same time. */
+export function readShadowCounters(path: string, includeKeys: boolean, activeQualifications?: Readonly<Record<string, string>>, loadedAtMs?: number): { states: Record<string, ViewShadowState>; keyCounts: Map<string, number>; keyTimes: Map<string, Map<string, number>> } | undefined {
   const target = shadowCounterPath(path);
   try { statSync(target); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
@@ -88,6 +89,7 @@ export function readShadowCounters(path: string, includeKeys: boolean, activeQua
       const rows = db.prepare(`SELECT key${timed ? ", last_ms" : ""} FROM shadow_key WHERE view = ? ORDER BY ordinal`).all(view);
       state.streakKeys = rows.map(row => String(row.key));
       if (timed) keyTimes.set(view, new Map(rows.map(row => [String(row.key), Number(row.last_ms)] as const).sort((a, b) => a[1] - b[1])));
+      else if (loadedAtMs !== undefined) keyTimes.set(view, new Map(rows.map(row => [String(row.key), loadedAtMs] as const)));
     }
     return { states, keyCounts, keyTimes };
   } finally { db.close(); }
@@ -99,12 +101,13 @@ function writeCounter(db: ReadModelDb, view: string, state: ViewShadowState): vo
   db.prepare("INSERT INTO shadow_counter(view,state) VALUES(?,?) ON CONFLICT(view) DO UPDATE SET state=excluded.state").run(view, JSON.stringify(value));
 }
 
-/** Stamps `key` as sampled at `atMs`; a key new to the view also raises its maintained count. */
-function addKey(db: ReadModelDb, view: string, key: string, atMs: number): void {
+/** Stamps `key` as sampled at `atMs`; a key new to the view also raises its maintained count. Returns the keys added. */
+function addKey(db: ReadModelDb, view: string, key: string, atMs: number): number {
   const added = db.prepare(`INSERT OR IGNORE INTO shadow_key(view,key,ordinal,last_ms)
     SELECT ?, ?, COALESCE(MAX(ordinal), -1) + 1, ? FROM shadow_key WHERE view = ?`).run(view, key, atMs, view).changes;
   if (added > 0) countKeys(db, view, added);
   else db.prepare("UPDATE shadow_key SET last_ms = ? WHERE view = ? AND key = ? AND last_ms < ?").run(atMs, view, key, atMs);
+  return added;
 }
 
 function countKeys(db: ReadModelDb, view: string, delta: number): void {
@@ -117,8 +120,9 @@ function clearKeys(db: ReadModelDb, view: string): void {
 }
 
 /**
- * W1-T11330: the one-time upgrade of a store whose keys carry no sample time. Existing keys are stamped with the
- * upgrade's own time, so none retires before a full day has passed, and the per-view counts are taken once here.
+ * W1-T11330: the one-time upgrade of a store whose keys carry no sample time. Existing keys are stamped with the time
+ * the store was loaded (the design's load time), so none retires before a day after the load, and a save more than a
+ * day later prunes them. The per-view counts are taken once here.
  */
 function migrateKeyTimes(db: ReadModelDb, atMs: number): void {
   if (db.meta(SHADOW_KEY_TIMES) === "1") return;
@@ -132,39 +136,51 @@ function migrateKeyTimes(db: ReadModelDb, atMs: number): void {
 }
 
 /**
- * Retires keys of `view` unsampled for {@link SHADOW_KEY_RETIRE_MS}. One save retires at most as many as the view
- * still has live, and at least one, so a backlog left by an older build drains in batches sized by the view's own
- * membership: each save adds at most one key, so the stored set never grows while a retired key remains.
+ * Retires keys of `view` unsampled for {@link SHADOW_KEY_RETIRE_MS}, in batches derived from the view's own data.
+ * Every live key was stamped by a save within the last day, so `live` is a floor on the saves the next day brings, and
+ * `expired / live` is the backlog's share of them: the backlog drains within about a day of the view's own traffic,
+ * however sparse. A batch also always exceeds this save's own `inserted` keys, so the backlog strictly shrinks on every
+ * save until the stored set is the keys sampled in the last day. The batch is never larger than max(live, expired/live).
  */
-function retireKeys(db: ReadModelDb, view: string, atMs: number): void {
+export function shadowKeyRetireBatch(live: number, expired: number, inserted: number): number {
+  return Math.max(live, inserted + 1, Math.ceil(expired / Math.max(1, live)));
+}
+
+function retireKeys(db: ReadModelDb, view: string, atMs: number, inserted: number): void {
   const cutoff = atMs - SHADOW_KEY_RETIRE_MS;
-  if (db.prepare("SELECT 1 FROM shadow_key WHERE view = ? AND last_ms <= ? LIMIT 1").get(view, cutoff) === undefined) return;
+  const expired = Number(db.prepare("SELECT count(*) AS n FROM shadow_key WHERE view = ? AND last_ms <= ?").get(view, cutoff)?.n ?? 0);
+  if (expired === 0) return;
   const live = Number(db.prepare("SELECT count(*) AS n FROM shadow_key WHERE view = ? AND last_ms > ?").get(view, cutoff)?.n ?? 0);
   const retired = db.prepare(`DELETE FROM shadow_key WHERE view = ? AND key IN
-    (SELECT key FROM shadow_key WHERE view = ? AND last_ms <= ? ORDER BY last_ms LIMIT ?)`).run(view, view, cutoff, Math.max(1, live)).changes;
+    (SELECT key FROM shadow_key WHERE view = ? AND last_ms <= ? ORDER BY last_ms LIMIT ?)`).run(view, view, cutoff, shadowKeyRetireBatch(live, expired, inserted)).changes;
   if (retired > 0) countKeys(db, view, -retired);
 }
 
-/** Caller holds the home projector's write fence before this opens or changes any persistent file. */
-export function saveShadowCounter(path: string, legacy: Record<string, ViewShadowState>, view: string, state: ViewShadowState, change?: ShadowKeyChange, connection?: ReadModelDb): void {
+/**
+ * Caller holds the home projector's write fence before this opens or changes any persistent file. `keysLoadedAtMs`
+ * is when the caller loaded the store: keys an older build left without a sample time are stamped with it (W1-T11330).
+ */
+export function saveShadowCounter(path: string, legacy: Record<string, ViewShadowState>, view: string, state: ViewShadowState, change?: ShadowKeyChange, connection?: ReadModelDb, keysLoadedAtMs?: number): void {
   const db = connection ?? openShadowCounterDb(shadowCounterPath(path));
   try {
     db.exec("BEGIN IMMEDIATE");
     const atMs = change?.atMs ?? systemClock.now();
-    migrateKeyTimes(db, atMs);
+    const loadedAtMs = keysLoadedAtMs ?? atMs;
+    migrateKeyTimes(db, loadedAtMs);
     if (db.meta("shadow_migrated") !== "1") {
       for (const [key, old] of Object.entries(legacy)) {
         writeCounter(db, key, old);
-        for (const member of old.streakKeys ?? []) addKey(db, key, member, atMs);
+        for (const member of old.streakKeys ?? []) addKey(db, key, member, loadedAtMs);
       }
       db.prepare("INSERT INTO meta(k,v) VALUES('shadow_migrated','1')").run();
     }
     writeCounter(db, view, state);
+    let inserted = 0;
     if (change === undefined || change.reset || change.replace !== undefined || state.streakKeys === undefined) {
       clearKeys(db, view);
-      for (const key of change?.replace ?? (change === undefined ? state.streakKeys ?? [] : change.add === undefined ? [] : [change.add])) addKey(db, view, key, atMs);
-    } else if (change.add !== undefined) addKey(db, view, change.add, atMs);
-    if (change?.atMs !== undefined) retireKeys(db, view, change.atMs);
+      for (const key of change?.replace ?? (change === undefined ? state.streakKeys ?? [] : change.add === undefined ? [] : [change.add])) inserted += addKey(db, view, key, atMs);
+    } else if (change.add !== undefined) inserted += addKey(db, view, change.add, atMs);
+    if (change?.atMs !== undefined) retireKeys(db, view, change.atMs, inserted);
     db.exec("COMMIT");
   } catch (error) {
     if (db.inTransaction()) db.exec("ROLLBACK");

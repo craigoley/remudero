@@ -720,8 +720,10 @@ export function viewShadowPath(stateDir: string): string {
 }
 
 /** Counters survive a restart and a scratch wipe in `path`, written only behind the home read model's lease. */
-export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelLease, activeQualifications?: Readonly<Record<string, string>>): ShadowStore {
-  const counters = readShadowCounters(path, true, activeQualifications);
+export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelLease, activeQualifications?: Readonly<Record<string, string>>, clock: Clock = systemClock): ShadowStore {
+  // W1-T11330: keys an older build stored without a sample time count as sampled when this store loaded them.
+  const loadedAtMs = clock.now();
+  const counters = readShadowCounters(path, true, activeQualifications, loadedAtMs);
   const states = counters?.states ?? storedShadowStates(path, db, activeQualifications);
   const keyTimes = counters?.keyTimes;
   let connection: ReadModelDb | undefined;
@@ -733,7 +735,7 @@ export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelL
       if (closed) throw new Error("shadow store is closed");
       withWriteTransaction(db, lease, () => {
         connection ??= openShadowCounterDb(shadowCounterPath(path));
-        saveShadowCounter(path, states, view, state, keys, connection);
+        saveShadowCounter(path, states, view, state, keys, connection, loadedAtMs);
       });
       states[view] = state;
     },
@@ -895,7 +897,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
   const keysOf = (stateKey: string, state: ViewShadowState, now: number): Map<string, number> => {
     const known = streakKeys.get(stateKey);
     if (known) return known;
-    // A key with no stored time (a store saved before W1-T11330) counts as sampled now, as the store's upgrade stamps it.
+    // The file store times an older build's keys at its load (W1-T11330); a store with no times at all counts them as sampled now.
     const times = opts.store?.keyTimes?.(stateKey);
     const keys = new Map((state.streakKeys ?? []).map(key => [key, times?.get(key) ?? now] as const).sort((a, b) => a[1] - b[1]));
     streakKeys.set(stateKey, keys);
