@@ -518,3 +518,39 @@ test("W1-T10877: fix events consolidate by round and cannot borrow another run's
   assert.equal(repaired.families.guardrails[key], undefined);
   assert.deepEqual(snapshotOf(rows, repaired).families.guardrails[key]?.cells, expected);
 });
+
+// The production producer, not an injected field: benchmarkNonDispatchSpawn writes the worker.attempt receipt from the
+// WorkerResult through benchmarkWorkerAttemptResources. A signal-killed call that still reports usage and truncated
+// output must reach the snapshot carrying its exit, so it is neither a fire nor an opportunity (attributable only).
+test("W1-T10877: a signal-killed attempt with usage is excluded through the production receipt path", async t => {
+  const root = ownedFixtureDir(t, "signal-killed-receipts").dir;
+  const exits: WorkerResult["exit"][] = [{ kind: "exit", code: 0 }, { kind: "signal", signal: "SIGKILL" }];
+  let calls = 0;
+  const spawn = benchmarkNonDispatchSpawn("risk-judge", async args => {
+    const exit = exits[calls++]!;
+    const id = `exit-${calls}`;
+    args.onSelectionAssignment?.({ version: 1, id, phase: "pre-execution",
+      requested: { model: "gpt-6.1-sol", effort: "medium", maxTurns: 2 }, selected: { provider: "codex", model: "gpt-6.1-sol", effort: "medium" },
+      routing: { mode: "mount-affinity", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } }, candidates: [] });
+    return { provider: "codex", sessionId: id, model: "gpt-6.1-sol", effort: "medium", costUsd: 0, numTurns: 1,
+      text: "reply", blocks: [], stderr: "", subtype: "error_during_execution", isError: true, apiError: false, exit,
+      permissionDenials: [], childEnvKeys: [], modelUsage: {}, compactionEvents: [], qualitySuspect: false,
+      tokens: { ...TOKENS, cacheRead: 0, cacheCreation: 0 }, outputRetention: RETAINED, selectionAssignmentId: id } as WorkerResult;
+  });
+  const read = (): Record<string, unknown>[] => readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+    .map(line => ({ ...JSON.parse(line), ts: T(10) }) as Record<string, unknown>);
+  const key = "gpt-6.1-sol|short-judgment|output-cap-truncation-check";
+  await spawn({ cwd: root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "judge",
+    model: MOUNT.model, effort: MOUNT.effort, maxTurns: 2, config: { root } as Config });
+  // Positive control: the same failed call with usage, exiting normally, is a model-attributable truncation fire.
+  assert.deepEqual(snapshotOf(read()).families.guardrails[key]?.cells, { modelId: "gpt-6.1-sol", category: "short-judgment",
+    guardrailClass: "output-cap-truncation-check", opportunities: 1, fires: 1 });
+  await spawn({ cwd: root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "judge",
+    model: MOUNT.model, effort: MOUNT.effort, maxTurns: 2, config: { root } as Config });
+  const killed = read().filter(row => row.step === "worker.attempt" && row.selection_assignment_id === "exit-2");
+  assert.equal(killed.length, 1);
+  assert.equal(killed[0]!.worker_exit, "signal", "the producer keeps the exit kind on the receipt");
+  assert.equal(killed[0]!.worker_exit_signal, "SIGKILL", "the producer keeps the signal on the receipt");
+  assert.deepEqual(snapshotOf(read()).families.guardrails[key]?.cells, { modelId: "gpt-6.1-sol", category: "short-judgment",
+    guardrailClass: "output-cap-truncation-check", opportunities: 1, fires: 1 }, "the signal-killed call adds neither a fire nor an opportunity");
+});

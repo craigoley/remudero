@@ -458,7 +458,10 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
     ...(result.provider === "cash" && Object.hasOwn(OPENWEIGHT_TEMPERATURE, fields.model)
       ? { sampling_pin: { deployment: fields.model, temperature: OPENWEIGHT_TEMPERATURE[fields.model] ?? null } } : {}),
     ...(result.openWeightCapacityShortfall ? { capacity_shortfall: true } : {}),
-    
+    // W1-T10877: a signal-killed call is an infrastructure kill, not attributable; its exit must reach the receipt.
+    ...(fields.worker_exit === undefined ? {} : { worker_exit: fields.worker_exit }),
+    ...(fields.worker_exit_signal === undefined ? {} : { worker_exit_signal: fields.worker_exit_signal }),
+
     // W1-T4650: the reason rides beside the null it explains; dropping it left every row generic.
     ...(fields.served_model_reason !== undefined ? { served_model_reason: fields.served_model_reason } : {}),
     worker_duration_ms: fields.worker_duration_ms,
