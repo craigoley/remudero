@@ -19,6 +19,7 @@
     - src/lib/model-canary-linux-profile-preflight-capabilities.ts
     - src/lib/model-canary-coding-adapter.ts
     - src/lib/model-canary-host-bridge.ts
+    - src/lib/model-canary-runner.ts
     - src/lib/model-canary-command.ts
     - src/lib/model-canary-owner.ts
     - src/lib/model-canary-coding.ts
@@ -42,12 +43,19 @@
       proof: "grep: qualifiedLinuxCodingProfileForCurrentHost( in src/lib/model-canary-command.ts"
     - claim: The coverage job runs the native suite on a runner prepared with bubblewrap, unprivileged user namespaces and a user systemd session, so the native tests execute instead of skipping and diff-coverage measures the backend's real lines
       proof: "grep: bubblewrap in .github/workflows/ci.yml"
+    - claim: The real default production path invokes scoreCodingControl; an unused export, declaration or
+        re-export is insufficient.
+      proof: 'grep: W1-T11313: a qualified host runs the default coding composition through scoreCodingControl in test/routing/model-canary-coding-command.test.ts'
+    - claim: The real default production path invokes codingLedgerSave; an unused export, declaration or
+        re-export is insufficient.
+      proof: 'grep: W1-T11313: a qualified host saves the default coding case through codingLedgerSave in test/routing/model-canary-coding-command.test.ts'
   rationale: |
     SPLIT from W1-T10957 on 2026-11-04 by operator ruling ("Split the native backend"). MEASURED at #16606 head 7a883fd1c5: diff-coverage listed 842 added lines with no covering test.
     - About 760 of them are native-only: model-canary-systemd-bwrap-backend.ts 587, model-canary-native-profile-probe.ts 174, plus the coding adapter (34) and host bridge (24).
     - GitHub's runners provide no user systemd session and no bwrap, so the one real-path test skips ("native Linux profile prerequisites unavailable") and nothing downstream executes: unit lifecycle, cgroup and namespace readback, control runs.
     - The probe reads /usr/bin/systemd-run, /usr/bin/systemctl and /usr/bin/bwrap at fixed paths, and only the real backend may issue a qualified coding profile. So fake tools or a test-issued profile would either be impossible or open a test-only door into the sandbox boundary.
     - Fakes cannot prove isolation: the claim is that the kernel and systemd contain filesystem and credential effects and reap descendants, which only a real host can show.
+    - MOVED HERE 2026-11-04 from W1-T10957 (#16606's 19:05Z review FAILed both): the claims that the real default production path invokes scoreCodingControl and codingLedgerSave. Without a native profile source the default composition defers before it constructs the coding execution port, and that port is this task's (createCodingCanaryExecutionPort). Only this task can make the default path reach the scorer and the ledger save. The claim text is unchanged; the proofs are tests through the real default composition on a qualified host, because a grep for the call site already matches once W1-T10957 merges and so could not miss at this task's base.
   design: |
     1. Coverage route: first PROVE, in a throwaway workflow run on a scratch branch, that an ubuntu-24.04 runner can run bwrap unprivileged (sysctl kernel.apparmor_restrict_unprivileged_userns=0) and a user systemd session (loginctl enable-linger plus XDG_RUNTIME_DIR), and that test/routing/model-canary-native-session.test.ts then executes instead of skipping.
        - Only then add those preparation steps to the coverage job in .github/workflows/ci.yml (verify: human, because it edits a workflow and runner security settings).
