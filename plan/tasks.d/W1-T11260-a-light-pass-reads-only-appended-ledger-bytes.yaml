@@ -16,6 +16,7 @@
     - src/lib/sweep.ts
     - test/sweep/a-light-pass-reads-only-appended-ledger-bytes.test.ts
     - test/ledger-read-intent.test.ts # its census pins the three marked readLedger bindings to readLedgerLines by name
+    - src/lib/live-ledger-tail.ts # keepUntimed: the light pass keeps the rows readLedgerLines keeps, including untimed fix.dispatch rows
   status: queued
   attempts: 0
   acceptance:
