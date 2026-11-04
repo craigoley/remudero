@@ -3502,6 +3502,17 @@ function withoutNodeTestContext<T>(fn: () => T): T {
  */
 export const AUTHOR_CENSUS_ANSWERED_ENV = "RMD_AUTHOR_CENSUS_ANSWERED";
 
+function withoutAuthorCensusAnswer<T>(fn: () => T): T {
+  const savedAnswer = process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+  delete process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+  try {
+    return fn();
+  } finally {
+    if (savedAnswer !== undefined) process.env[AUTHOR_CENSUS_ANSWERED_ENV] = savedAnswer;
+    else delete process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+  }
+}
+
 export function authorCensusAnswer(value: string | undefined, head: string | undefined): { sha: string; outcome: string } | undefined {
   const answer = /^([0-9a-f]{40}):(ok|time-bound)$/.exec(value ?? "");
   return answer && answer[1] === head ? { sha: answer[1], outcome: answer[2]! } : undefined;
@@ -3583,12 +3594,14 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       }
       if (runner === "rule-checks") {
         return withoutNodeTestContext(() =>
-          shellOut(
-            spawn,
-            "node --import tsx scripts/list-rule-suites.mjs --run",
-            process.execPath,
-            ["--import", "tsx", "scripts/list-rule-suites.mjs", "--run"],
-            { cwd: repoRoot },
+          withoutAuthorCensusAnswer(() =>
+            shellOut(
+              spawn,
+              "node --import tsx scripts/list-rule-suites.mjs --run",
+              process.execPath,
+              ["--import", "tsx", "scripts/list-rule-suites.mjs", "--run"],
+              { cwd: repoRoot },
+            ),
           ),
         );
       }

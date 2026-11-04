@@ -3230,7 +3230,7 @@ test("deriveFixMode: THE REGRESSION GUARD survives the table change — an OBSER
   assert.equal(deriveFixMode(evidence), "reviewer-unmet");
 });
 
-test("renderFixPrompt: a PR that is BOTH review-failed AND CI-red renders the ci-log remedy (naming the failing check), never the review's unmet-criteria text, and never falsely claims no review has run", () => {
+test("renderFixPrompt: a PR that is BOTH review-failed AND CI-red renders the ci-log remedy (naming the failing check), carries the same-head review's unmet criteria as current (W1-T11211), and never falsely claims no review has run", () => {
   const prompt = renderFixPrompt({
     task: { id: "W1-TX", title: "T" },
     round: 1,
@@ -3246,7 +3246,11 @@ test("renderFixPrompt: a PR that is BOTH review-failed AND CI-red renders the ci
   assert.match(prompt, /MODE: ci-log/, "reaches a remedy for the failing CHECK, not a criteria-shaped mode");
   assert.match(prompt, /check: commitlint/);
   assert.match(prompt, /header must not exceed 100 characters/);
-  assert.doesNotMatch(prompt, /criterion A merges cleanly/, "the review's unmet-criteria text never rides the ci-log prompt — one remedy, not a mix");
+  // W1-T11211: the fix lane carries a review here only when it judged this exact head, so it is current, not stale.
+  assert.match(prompt, /A review at this exact head also judged these criteria unmet — current, not stale/);
+  assert.match(prompt, /criterion A merges cleanly/, "the same-head review's unmet criterion rides beside the failing check");
+  assert.ok(prompt.indexOf("check: commitlint") < prompt.indexOf("criterion A merges cleanly"), "the failing check, this round's target, comes first");
+  assert.doesNotMatch(prompt, /may simply be STALE/, "a same-head review is never called stale");
   assert.doesNotMatch(prompt, /NO review has run yet/i, "a review verdict DOES exist here beside the red check — the prompt must never claim otherwise");
   assert.match(prompt, /GitHub will not merge past a red required check/, "the prompt still explains WHY the check wins over any review verdict beside it");
 });
