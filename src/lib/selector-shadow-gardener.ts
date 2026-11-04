@@ -851,6 +851,8 @@ export function readSelectorShadowObservations(stateDir: string): { observations
 /** BACKSTOP (W1-T5925): historical runs one pass may replay — one job list, eight log reads and one
  *  recomputed selection each — so a backfill spreads over the gardener's own cadence. */
 export const SELECTOR_SHADOW_REPLAY_RUNS_PER_PASS = 2;
+/** BACKSTOP: stored observations with a charged miss re-attributed per pass, one memoized main read per base. */
+export const SELECTOR_SHADOW_REATTRIBUTE_PER_PASS = 20;
 /** BACKSTOP: replayed observations the store may hold before the backfill stops — half of the
  *  MAX_RETAINED_LINES_PER_STEP rows rotation keeps of the step, so live rows always have room. */
 export const SELECTOR_SHADOW_REPLAY_MAX_OBSERVATIONS = 100;
@@ -1057,7 +1059,7 @@ export interface SelectorShadowSourceReport {
 /** The report a pass ledgers: the whole store folded, with the live window and each source beside it. */
 export interface SelectorShadowAccumulatedReport extends SelectorShadowReport {
   window: Pick<SelectorShadowReport, "runsRequested" | "runsComplete" | "runsSkipped" | "runsIncomplete" | "verdict">;
-  observations: { live: number; replay: number; appended: number; unreadable: number };
+  observations: { live: number; replay: number; appended: number; reattributed: number; unreadable: number };
   live: SelectorShadowSourceReport;
   replay: SelectorShadowSourceReport;
   replayPass?: Partial<SelectorShadowReplayPass> & { error?: string };
@@ -1068,6 +1070,7 @@ export interface SelectorShadowAccumulatedReport extends SelectorShadowReport {
 async function accumulateSelectorShadow(
   deps: GardenerDeps, readings: readonly SelectorShadowReading[], window: SelectorShadowReport, replay: SelectorShadowReplay | undefined,
   attribute: (observation: SelectorShadowObservation) => Promise<SelectorShadowObservation>,
+  reattribute: (observation: SelectorShadowObservation) => Promise<SelectorShadowObservation> = attribute,
 ): Promise<SelectorShadowAccumulatedReport> {
   const stored = readSelectorShadowObservations(deps.stateDir);
   const all = new Map(stored.observations.map((o) => [o.runId, o]));
@@ -1079,6 +1082,18 @@ async function accumulateSelectorShadow(
   };
   for (const reading of readings) {
     if (reading.kind === "complete" && !all.has(reading.observation.runId)) append(reading.observation);
+  }
+  // A stored miss was attributed once, by the reader of its day. Ask again each pass (bounded), so a
+  // corrected base-red reader reaches it; the store keeps its first row, so nothing is re-appended.
+  let reattributed = 0;
+  const charged = [...all.values()].filter((o) => o.failures.some((f) => f.unattributed === undefined &&
+    (f.floor === "missed" || f.narrow === "missed" || f.impact === "missed"))).slice(0, SELECTOR_SHADOW_REATTRIBUTE_PER_PASS);
+  for (const observation of charged) {
+    const again = await reattribute(observation);
+    if (again.failures.some((f, i) => f.unattributed !== observation.failures[i]?.unattributed)) {
+      all.set(observation.runId, again);
+      reattributed += 1;
+    }
   }
   let replayPass: SelectorShadowAccumulatedReport["replayPass"];
   if (replay !== undefined) {
@@ -1106,7 +1121,7 @@ async function accumulateSelectorShadow(
     runsRequested: window.runsRequested, runsSkipped: window.runsSkipped, runsIncomplete: window.runsIncomplete,
     fullSuiteSize: window.fullSuiteSize, ...fold, ...selectorShadowVerdict(fold),
     window: { runsRequested: window.runsRequested, runsComplete: window.runsComplete, runsSkipped: window.runsSkipped, runsIncomplete: window.runsIncomplete, verdict: window.verdict },
-    observations: { live: live.runs, replay: replayed.runs, appended, unreadable: stored.unreadable },
+    observations: { live: live.runs, replay: replayed.runs, appended, reattributed, unreadable: stored.unreadable },
     live, replay: replayed,
     ...(replayPass === undefined ? {} : { replayPass }),
   };
@@ -1437,7 +1452,10 @@ export async function runSelectorShadowGardener(
   const report = selectorShadowWindowReport(readings,
     await selectorShadowFullSuiteSizeAsync(deps.repoRoot, join(deps.stateDir, "selector-shadow-suite-size.json")));
   // W1-T5925: the verdict folds every stored observation; filing below still reads this window's misses.
-  const accumulated = await accumulateSelectorShadow(deps, readings, report, options.replay, attribute);
+  // A stored run is re-asked only about main at its base: this window's retry recoveries are not its evidence.
+  const reattribute = (observation: SelectorShadowObservation) => attributeSelectorShadowObservation(observation,
+    { recoveredInWindow: new Set(), ...(main === undefined ? {} : { mainFailures: main }) });
+  const accumulated = await accumulateSelectorShadow(deps, readings, report, options.replay, attribute, reattribute);
   deps.log("selector-shadow.report", {
     ...accumulated, misses: accumulated.misses.slice(0, 20),
     unattributed: { ...accumulated.unattributed, misses: accumulated.unattributed.misses.slice(0, 20) },
