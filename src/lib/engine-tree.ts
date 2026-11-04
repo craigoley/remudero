@@ -170,7 +170,8 @@ export interface EngineBuildOptions {
   git?: EngineGit;
   /** Links `<treeRoot>/node_modules` to `target`, the resolved install. */
   linkNodeModules?: (target: string, treeRoot: string) => NodeModulesLinkOutcome;
-  materialize?: (treeRoot: string, storeRoot: string) => StoreLookup;
+  /** `expectedHash`, when given, refuses before publishing a tree that hashes elsewhere; default {@link materializeFromStore}. */
+  materialize?: (treeRoot: string, storeRoot: string, expectedHash?: string) => StoreLookup;
   /** Whether a run directory's child is live, for the advance's "named by a live run" check; default the real probe. */
   probe?: RunChildProbe;
 }
@@ -198,6 +199,11 @@ async function removeEngineDir(path: string, repoDir: string, git: EngineGit): P
 }
 
 const inFlight = new Map<string, Promise<EngineBuildResult>>();
+
+/** The store materializer with the engine's expected hash, never the tree-hash override, in third place. */
+function storeMaterialize(treeRoot: string, storeRoot: string, expectedHash?: string): StoreLookup {
+  return materializeFromStore(treeRoot, storeRoot, undefined, undefined, expectedHash);
+}
 
 /**
  * Build `<state>/engines/<sourceHash>/` for `sha`: a detached worktree cut into a temporary sibling, its node_modules
@@ -271,7 +277,7 @@ async function buildEngine(stateRoot: string, sha: string, sourceHash: string, d
     const link = deps.linkNodeModules ?? ((target, tree) => linkWorktreeNodeModules(target, tree, { resolveSource: () => target }));
     const linked = link(modules.target, temp);
     if (linked !== "linked") return { kind: "failed", reason: `node-modules-${linked}` };
-    const lookup = (deps.materialize ?? materializeFromStore)(temp, deps.storeRoot);
+    const lookup = (deps.materialize ?? storeMaterialize)(temp, deps.storeRoot);
     if (lookup.outcome !== "hit") return { kind: "failed", reason: `store-${lookup.reason}` };
     // The stored key is the tree's own source hash: a checkout that moved between the build and this cut keys elsewhere.
     if (lookup.hash !== sourceHash) return { kind: "failed", reason: `source-moved: tree hashes to ${lookup.hash}` };
@@ -450,16 +456,32 @@ async function advancePinned(
     return kept;
   }
   const started = clock.now();
+  const materialize = deps.materialize ?? storeMaterialize;
+  // Every mutation an advance makes, in order: the checkout (HEAD and tracked files), the bundle publish
+  // (dist/child-entries and its manifest), the record. Each is either refused before it happens or undone on the way
+  // out, so a failed advance leaves the engine at its own revision AND its own bundle, still current (#16735 review).
+  let published = false;
   try {
     await git(final, ["checkout", "--detach", "--quiet", sha]);
-    // The advance keeps the stored bundle only while the tree's own source still hashes to it.
-    const lookup = (deps.materialize ?? materializeFromStore)(final, deps.storeRoot);
+    // The advance keeps the stored bundle only while the tree's own source still hashes to it. The expected hash is
+    // checked BEFORE the publish, so another hash's stored build never replaces this engine's bundle.
+    const lookup = materialize(final, deps.storeRoot, present.sourceHash);
+    published = lookup.outcome === "hit";
     if (lookup.outcome !== "hit" || lookup.hash !== present.sourceHash) {
       throw new Error(lookup.outcome !== "hit" ? `store-${lookup.reason}` : `source-moved: tree hashes to ${lookup.hash}`);
     }
+    const record: EngineRecord = { ...present, sha, builtAt: clock.now() };
+    writeAtomic(join(final, ENGINE_RECORD), `${JSON.stringify(record)}\n`);
   } catch (err) {
     try {
       await git(final, ["checkout", "--detach", "--quiet", present.sha]);
+      if (published) {
+        // A publish happened: put the engine's own stored bundle back, judged against its own source again.
+        const restored = materialize(final, deps.storeRoot, present.sourceHash);
+        if (restored.outcome !== "hit" || restored.hash !== present.sourceHash) {
+          throw new Error(restored.outcome !== "hit" ? `bundle store-${restored.reason}` : `bundle hashes to ${restored.hash}`);
+        }
+      }
     } catch (restore) {
       log("engine.advance_failed", { ...row, reason: `${reasonOf(err)}; restore failed: ${reasonOf(restore)}` });
       return { kind: "failed", reason: `advance-failed: ${reasonOf(err)}` };
@@ -467,8 +489,6 @@ async function advancePinned(
     log("engine.advance_failed", { ...row, reason: reasonOf(err) });
     return kept;
   }
-  const record: EngineRecord = { ...present, sha, builtAt: clock.now() };
-  writeAtomic(join(final, ENGINE_RECORD), `${JSON.stringify(record)}\n`);
   log("engine.advanced", { ...row, ms: clock.now() - started });
   return kept;
 }
