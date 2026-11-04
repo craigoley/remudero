@@ -15511,7 +15511,7 @@ async function codeScanningGateForHead(
 }
 
 function priorActionsFromLedger(
-  lines: Array<Record<string, unknown>>,
+  lines: ReadonlyArray<Record<string, unknown>>,
   openPrs?: ReadonlyArray<OpenPrView>,
 ): PriorActions {
   const armed = new Set<string>();
@@ -16459,7 +16459,7 @@ export function isProofAmendmentIdentityRow(line: Record<string, unknown>): bool
  *  trustworthy observation for this task at the current head, so an incomplete history fails closed
  *  rather than manufacturing strike budget. Legacy `fix.review` rows may carry no head. */
 export function fixLedgerRowsForHead(
-  lines: Array<Record<string, unknown>>,
+  lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string | undefined,
   currentHeadSha?: string,
 ): Array<Record<string, unknown>> {
@@ -16510,7 +16510,7 @@ export function fixLedgerRowsForHead(
 
 /** W1-T5542: count outcomes; legacy dispatches without receipts retain the historical cap. */
 export function fixRoundTally(
-  lines: Array<Record<string, unknown>>,
+  lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string | undefined,
   currentHeadSha?: string,
   regime?: "executed" | "keyword_only",
@@ -18326,7 +18326,8 @@ export async function runSweep(
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   deps.markPrelude?.("armed_body_guard");
-  const ledgerLines = readLedger(deps.ledgerPath);
+  // W1-T11260: the live tail's rows are shared and read-only; this pass appends its own receipts, so it copies them.
+  const ledgerLines = [...readLedger(deps.ledgerPath)];
   let contractHoldRefreshSpent = false;
   // W1-T10608: at most one design-hold main adoption per pass, so a main fix never fans out update-branch.
   let designMainAdoptionSpent = false;
@@ -18403,7 +18404,7 @@ export async function runSweep(
       return;
     }
     const since = Date.parse(fields.blocker_since);
-    let currentRows = ledgerLines;
+    let currentRows: ReadonlyArray<Readonly<Record<string, unknown>>> = ledgerLines;
     let stageHistoryError: string | undefined;
     try { currentRows = readLedger(deps.ledgerPath); }
     catch (error) {
@@ -24181,13 +24182,13 @@ const liveLedgerTails = new Map<string, LiveLedgerTail>();
 /**
  * W1-T11260: the live file's rows, as {@link readLedgerLines} returns them, without re-reading and re-parsing
  * the whole 15 MB file on the daemon's thread for each pass and each PR. A rotation renames the file, which
- * resets its tail, so every row is kept. The rows are shared between calls; the array is a fresh copy, because
- * runSweep appends its own receipts to it.
+ * resets its tail, so every row is kept. The array is shared between calls and read-only: a read over no new
+ * bytes returns the same array, and an append yields a new one. A caller that mutates it copies it first.
  */
-export function readLiveLedgerRows(path: string): Array<Readonly<Record<string, unknown>>> {
+export function readLiveLedgerRows(path: string): ReadonlyArray<Readonly<Record<string, unknown>>> {
   let tail = liveLedgerTails.get(path);
   if (!tail) liveLedgerTails.set(path, tail = createLiveLedgerTail(path, Number.POSITIVE_INFINITY, { keepUntimed: true }));
-  return [...tail(0)];
+  return tail(0);
 }
 
 /** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */

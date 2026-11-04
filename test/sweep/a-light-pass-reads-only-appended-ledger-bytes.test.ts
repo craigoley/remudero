@@ -49,10 +49,30 @@ test("light pass ledger tail: the default reader returns readLedgerLines' rows, 
   assert.equal(readLiveLedgerRows(path).length, 1);
 });
 
-test("light pass ledger tail: each call returns its own array, so a caller's receipt never enters the next read", (t) => {
+test("light pass ledger tail: callers share one read-only array, and an append never changes an earlier one", (t) => {
   const path = fixturePath(t, 2);
-  readLiveLedgerRows(path).push({ ts: new Date().toISOString(), step: "caller.receipt" });
-  assert.deepEqual(readLiveLedgerRows(path), [...readLedgerLines(path)]);
+  const first = readLiveLedgerRows(path);
+  assert.equal(readLiveLedgerRows(path), first, "a read over no new bytes returns the same array, not a copy");
+  appendFileSync(path, `${row(2)}\n`);
+  const second = readLiveLedgerRows(path);
+  assert.notEqual(second, first);
+  assert.equal(first.length, 2, "the earlier snapshot is unchanged");
+  assert.deepEqual(second, [...readLedgerLines(path)]);
+});
+
+test("light pass ledger tail: a final row with no newline is returned, and is not parsed again while unchanged", (t) => {
+  const path = fixturePath(t, 3);
+  appendFileSync(path, row(3));
+  const parses = countFixtureRowParses(t);
+  const first = readLiveLedgerRows(path);
+  assert.deepEqual(first, [...readLedgerLines(path)], "readLedgerLines also returns the unterminated row");
+  assert.equal(first.length, 4);
+  const before = parses.count;
+  assert.ok(before >= 1, `positive control: the first read parsed the unterminated row (saw ${before})`);
+  assert.equal(readLiveLedgerRows(path), first, "the same array is returned");
+  assert.equal(parses.count - before, 0, "the unchanged unterminated row is not parsed again");
+  appendFileSync(path, "\n");
+  assert.deepEqual(readLiveLedgerRows(path), [...readLedgerLines(path)], "once its newline lands the row is consumed");
 });
 
 test("light pass ledger tail: a second light pass over a file with no new bytes parses no line", (t) => {
