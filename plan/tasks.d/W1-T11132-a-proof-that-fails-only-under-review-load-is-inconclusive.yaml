@@ -17,6 +17,7 @@
     - src/lib/review.ts
     - src/lib/sweep.ts
     - test/review/a-proof-that-fails-only-under-review-load-is-inconclusive.test.ts
+    - "src/cli/commands/review.ts"
   status: queued
   attempts: 0
   acceptance:

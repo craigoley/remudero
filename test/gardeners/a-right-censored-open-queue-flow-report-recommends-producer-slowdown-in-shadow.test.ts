@@ -1,0 +1,624 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+
+import { fixedClock } from "#src/lib/clock.js";
+import { logArmAttribution } from "#src/lib/arm-auto-merge.js";
+import { flowGardenPass } from "#src/lib/garden-registry.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import {
+  FLOW_STATE_FILE, flowOpenQueueReader, openQueueShadow, openQueueWindow, readFlowLedger, runFlowGardener, type FlowOpenQueuePr, type FlowOpenQueueRead,
+} from "#src/lib/flow-gardener.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+
+const HOUR = 60 * 60_000;
+const DAY = 24 * HOUR;
+const at = (ms: number) => new Date(ms).toISOString();
+
+const dayStart = (ms: number) => Math.floor(ms / DAY) * DAY;
+/** The window a pass at `now` reads, and the one the pass before it on the previous UTC date read. */
+const windowOf = (now: number) => ({ fromMs: dayStart(now) - DAY, toMs: dayStart(now) });
+const previousWindow = (now: number) => ({ fromMs: dayStart(now) - 2 * DAY, toMs: dayStart(now) - DAY });
+
+function prNode(pr: FlowOpenQueuePr) {
+  return { number: pr.number, createdAt: at(pr.createdAtMs), updatedAt: at(pr.updatedAtMs),
+    headRefOid: pr.headSha, headRefName: pr.headRefName,
+    ...(pr.isDraft === undefined ? {} : { isDraft: pr.isDraft }), ...(pr.mergeable === undefined ? {} : { mergeable: pr.mergeable }),
+    commits: { nodes: [{ commit: { oid: pr.headSha, statusCheckRollup: { state: pr.checksState } } }] },
+    ...(pr.mergedAtMs === undefined ? {} : { mergedAt: at(pr.mergedAtMs) }),
+    ...(pr.closedAtMs === undefined ? {} : { closedAt: at(pr.closedAtMs) }) };
+}
+
+/** One GraphQL round answering every connection the reader asks for: the open queue and the window's created and closed searches. */
+function censusResponse(cohort: FlowOpenQueueRead, window: { fromMs: number; toMs: number }) {
+  const inWindow = (ms: number | undefined) => ms !== undefined && ms >= window.fromMs && ms < window.toMs;
+  const created = cohort.window.filter((pr) => inWindow(pr.createdAtMs));
+  const closed = cohort.window.filter((pr) => inWindow(pr.mergedAtMs) || inWindow(pr.closedAtMs));
+  return { data: {
+    repository: { pullRequests: { totalCount: cohort.open.length, pageInfo: { hasNextPage: false, endCursor: null }, nodes: cohort.open.map(prNode) } },
+    created: { issueCount: created.length, pageInfo: { hasNextPage: false, endCursor: null }, nodes: created.map(prNode) },
+    closed: { issueCount: closed.length, pageInfo: { hasNextPage: false, endCursor: null }, nodes: closed.map(prNode) },
+  } };
+}
+
+function assertCommitRollupQuery(args: string[]) {
+  const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+  const connections = (query.match(/pageInfo\{/g) ?? []).length;
+  assert.ok(connections > 0, "the query selects at least one PR connection");
+  assert.equal(query.match(/commits\(last:1\)\{nodes\{commit\{oid statusCheckRollup\{state\}\}\}\}/g)?.length, connections,
+    "every PR selection requests the rollup on Commit");
+  assert.equal(query.match(/statusCheckRollup/g)?.length, connections, "no rollup may be requested directly on PullRequest");
+}
+
+function census(now: number): FlowOpenQueueRead {
+  const open: FlowOpenQueuePr[] = [
+    { number: 16147, createdAtMs: now - 8 * HOUR, updatedAtMs: now, headSha: "head-16147", headRefName: "run-W1-T16147-1", checksState: "PENDING" },
+    { number: 16186, createdAtMs: now - 6 * HOUR, updatedAtMs: now, headSha: "head-16186", headRefName: "run-W1-T16186-1", checksState: "SUCCESS" },
+    { number: 17000, createdAtMs: now - 4 * HOUR, updatedAtMs: now, headSha: "head-17000", headRefName: "codex/operator", checksState: "SUCCESS" },
+  ];
+  const w = windowOf(now).fromMs;
+  const window = [
+    { number: 18001, createdAtMs: w + 20 * HOUR, updatedAtMs: now, headSha: "h1", headRefName: "run-W1-T18001-1", checksState: "PENDING" },
+    { number: 18002, createdAtMs: w + 21 * HOUR, updatedAtMs: now, headSha: "h2", headRefName: "run-W1-T18002-1", checksState: "PENDING" },
+    { number: 18003, createdAtMs: w - DAY, updatedAtMs: now, headSha: "h3", headRefName: "old", checksState: "SUCCESS", mergedAtMs: w + 23 * HOUR },
+  ];
+  return { ok: true, complete: true, observedAtMs: now, open, window };
+}
+
+function rows(now: number, reviewAge = 2 * HOUR) {
+  return [
+    { ts: at(now - reviewAge), step: "sweep.review_eligible", pr_number: 16147, head_sha: "head-16147", review_key: "k16147" },
+    // A previous-head PASS cannot make #16147 merge-ready at its current head.
+    { ts: at(now - HOUR), step: "review.posted", pr_number: 16147, pr_url: `https://github.com/craigoley/remudero/pull/16147`, head_sha: "old-head", state: "success" },
+    { ts: at(now - 2 * HOUR), step: "review.posted", pr_number: 16186, pr_url: `https://github.com/craigoley/remudero/pull/16186`, head_sha: "head-16186", state: "success" },
+    { ts: at(now - 3 * HOUR), step: "automerge.direct_merge_preflight_refused", pr_number: 17000, head_sha: "head-17000" },
+  ];
+}
+
+function refusalRows(now: number, head = "head-17000") {
+  const events: Record<string, unknown>[] = [];
+  logArmAttribution((step, extra) => events.push({ ts: at(now - 3 * HOUR), step, ...extra }),
+    "direct-merge-preflight-refused", "https://github.com/craigoley/remudero/pull/17000", undefined, "sweep", {}, undefined,
+    { priorHeadSha: head, remedy: "retry-later", reason: "plan_merge_unread" });
+  return [
+    ...rows(now).filter((row) => row.pr_number !== 17000),
+    { ts: at(now - 4 * HOUR), step: "review.posted", pr_number: 17000, pr_url: `https://github.com/craigoley/remudero/pull/17000`, head_sha: "head-17000", state: "success" },
+    ...events,
+  ];
+}
+
+test("production preflight refusals retain their exact head identity and observed stage age", () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const result = openQueueShadow(census(now), refusalRows(now), undefined, now);
+  assert.equal(result.cohort.merge_preflight_refused, 1);
+  assert.equal(result.cohort.merge_preflight_refusal_age_p50_ms, 3 * HOUR);
+  assert.equal(result.cohort.ready_to_direct_merge, 1);
+  assert.equal(result.cohort.ready_to_direct_merge_age_p50_ms, 2 * HOUR);
+  const stale = openQueueShadow(census(now), refusalRows(now, "old-head"), undefined, now);
+  assert.equal(stale.cohort.merge_preflight_refused, 0, "a prior head's refusal cannot block the current head");
+  assert.equal(stale.cohort.ready_to_direct_merge, 2);
+  const noCurrentReview = refusalRows(now).filter((row) => row.pr_number !== 17000 || row.step !== "review.posted");
+  noCurrentReview.push({ ts: at(now - HOUR), step: "review.posted", pr_number: 17000, pr_url: `https://github.com/craigoley/remudero/pull/17000`,
+    head_sha: "old-head", prior_head_sha: "head-17000", state: "success" });
+  const unreviewed = openQueueShadow(census(now), noCurrentReview, undefined, now);
+  assert.equal(unreviewed.cohort.merge_preflight_refused, 1);
+  assert.equal(unreviewed.cohort.ready_to_direct_merge, 1, "only refusal rows may use prior_head_sha");
+});
+
+test("#16147 and #16186 remain in review wait until their current heads are reviewed", () => {
+  const now = Date.parse("2026-11-02T17:42:00.000Z");
+  const cohort = census(now);
+  cohort.open = cohort.open.filter((pr) => pr.number !== 17000).map((pr) => ({ ...pr, checksState: "SUCCESS" }));
+  const replay = [
+    { ts: "2026-11-02T06:13:00.000Z", step: "sweep.review_eligible", pr_number: 16147, head_sha: "head-16147" },
+    { ts: "2026-11-02T13:08:00.000Z", step: "sweep.review_eligible", pr_number: 16186, head_sha: "head-16186" },
+    ...[16147, 16186].map((pr_number) => ({ ts: at(now - HOUR), step: "review.posted", pr_number, pr_url: `https://github.com/craigoley/remudero/pull/${pr_number}`, head_sha: "old-head", state: "success" })),
+  ];
+  const waiting = openQueueShadow(cohort, replay, undefined, now);
+  assert.equal(waiting.cohort.open, 2);
+  assert.equal(waiting.cohort.review_waiting, 2);
+  assert.equal(waiting.cohort.ready_to_direct_merge, 0);
+  for (const pr_number of [16147, 16186]) replay.push({ ts: at(now), step: "review.posted", pr_number, pr_url: `https://github.com/craigoley/remudero/pull/${pr_number}`, head_sha: `head-${pr_number}`, state: "success" });
+  const reviewed = openQueueShadow(cohort, replay, undefined, now);
+  assert.equal(reviewed.cohort.review_waiting, 0);
+  assert.equal(reviewed.cohort.ready_to_direct_merge, 2);
+});
+
+test("right-censors the full open cohort, separates review, preflight refusal and ready waits, then recommends only after repeated pressure", () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const result = openQueueShadow(census(now), rows(now), {
+    observedAtMs: now - DAY, windowDay: "2026-11-01", window: previousWindow(now),
+    reviewP50: HOUR, pressure: true, streak: 1, producer: "plan-task-workers",
+  }, now);
+  assert.equal(result.status, "OBSERVED");
+  assert.equal(result.mode, "shadow");
+  assert.equal(result.permission, "not-granted");
+  assert.equal(result.action, "none");
+  assert.equal(result.cohort.open, 3, "the open PRs stay in the right-censored cohort");
+  assert.equal(result.cohort.review_waiting, 1);
+  assert.equal(result.cohort.merge_preflight_refused, 1);
+  assert.equal(result.cohort.ready_to_direct_merge, 1);
+  assert.equal(result.cohort.arrivals, 2);
+  assert.equal(result.cohort.merged_or_closed, 1);
+  assert.equal(result.cohort.open_age_p50_ms, 6 * HOUR);
+  assert.equal(result.producer, "plan-task-workers");
+  assert.equal(result.recommendation, "consider-slowing-plan-task-workers");
+});
+
+test("recommendation requires consecutive complete UTC-day windows with the same producer", () => {
+  const day1 = Date.parse("2026-11-02T12:00:00.000Z");
+  const first = openQueueShadow(census(day1), rows(day1), {
+    observedAtMs: day1 - DAY, windowDay: "2026-11-01", window: previousWindow(day1),
+    reviewP50: HOUR, pressure: false, streak: 0, producer: "plan-task-workers",
+  }, day1);
+  assert.equal(first.nextState.streak, 1);
+  assert.equal(first.recommendation, undefined);
+  assert.deepEqual(first.window, windowOf(day1), "the window is the last complete UTC day");
+  assert.deepEqual(first.nextState.window, first.window);
+  const day2 = day1 + DAY;
+  const second = openQueueShadow(census(day2), rows(day2, 3 * HOUR), first.nextState, day2);
+  assert.equal(second.nextState.streak, 2);
+  assert.equal(second.recommendation, "consider-slowing-plan-task-workers");
+  assert.equal(first.window.toMs, second.window.fromMs);
+});
+
+test("W1-T11111 criterion 1: daily passes at jittery wall-clock times on consecutive UTC dates join their windows", () => {
+  // The daily pass runs once per UTC date at whatever systemClock time it reaches: minutes apart across midnight, or
+  // well over a day apart. Exact 24 h steps never happen in production, so a rolling window never joined its predecessor.
+  const runs = ["2026-11-01T23:58:41.000Z", "2026-11-02T00:03:12.000Z", "2026-11-03T17:41:09.000Z"].map(Date.parse);
+  let state: Parameters<typeof openQueueShadow>[2] = {
+    observedAtMs: runs[0]! - DAY, windowDay: "2026-10-31", window: previousWindow(runs[0]!),
+    reviewP50: HOUR, pressure: false, streak: 0, producer: "plan-task-workers",
+  };
+  const streaks: number[] = [];
+  const recommendations: Array<string | undefined> = [];
+  runs.forEach((now, i) => {
+    const result = openQueueShadow(census(now), rows(now, (2 + i) * HOUR), state, now);
+    assert.equal(result.status, "OBSERVED");
+    assert.equal(result.cohort.arrivals, 2, `run ${i + 1} counts only its own complete day's arrivals`);
+    streaks.push(result.nextState.streak);
+    recommendations.push(result.recommendation);
+    state = result.nextState;
+  });
+  assert.deepEqual(streaks, [1, 2, 3], "five minutes apart or 41 hours apart, consecutive dates join");
+  assert.deepEqual(recommendations, [undefined, "consider-slowing-plan-task-workers", "consider-slowing-plan-task-workers"]);
+});
+
+test("a second pass on the same UTC date re-reads the same window: the streak neither advances nor resets", () => {
+  const firstDay = Date.parse("2026-10-31T23:00:00.000Z");
+  const first = openQueueShadow(census(firstDay), rows(firstDay), {
+    observedAtMs: firstDay - DAY, windowDay: "2026-10-30", window: previousWindow(firstDay), reviewP50: HOUR,
+    pressure: false, streak: 0, producer: "plan-task-workers",
+  }, firstDay);
+  assert.equal(first.nextState.streak, 1);
+  const retry = firstDay + 40 * 60_000;
+  const again = openQueueShadow({ ...census(firstDay), observedAtMs: retry }, rows(retry), first.nextState, retry);
+  assert.deepEqual(again.window, first.window, "the same date reads the same window");
+  assert.equal(again.cohort.arrivals, 2, "the window's arrivals are counted once, not twice");
+  assert.equal(again.nextState.streak, 1, "a re-read neither advances nor resets the streak");
+  assert.equal(again.recommendation, undefined);
+  const nextDate = Date.parse("2026-11-01T00:30:00.000Z");
+  const control = openQueueShadow(census(nextDate), rows(nextDate, 3 * HOUR), again.nextState, nextDate);
+  assert.equal(control.nextState.streak, 2, "the next date joins, across a month boundary");
+  assert.equal(control.recommendation, "consider-slowing-plan-task-workers");
+});
+
+test("a skipped UTC date breaks the streak, and any time on the next date joins", () => {
+  const firstDay = Date.parse("2026-11-02T01:00:00.000Z");
+  const first = openQueueShadow(census(firstDay), rows(firstDay), {
+    observedAtMs: firstDay - DAY, windowDay: "2026-11-01", window: previousWindow(firstDay),
+    reviewP50: HOUR, pressure: false, streak: 0, producer: "plan-task-workers",
+  }, firstDay);
+  assert.equal(first.nextState.streak, 1);
+  for (const iso of ["2026-11-03T00:00:01.000Z", "2026-11-03T11:59:00.000Z", "2026-11-03T23:59:59.000Z"]) {
+    const now = Date.parse(iso);
+    const result = openQueueShadow(census(now), rows(now, 3 * HOUR), first.nextState, now);
+    assert.equal(result.nextState.streak, 2, `${iso} joins the 2026-11-02 pass`);
+    assert.equal(result.recommendation, "consider-slowing-plan-task-workers");
+  }
+  const skipped = Date.parse("2026-11-04T09:00:00.000Z");
+  const gap = openQueueShadow(census(skipped), rows(skipped, 3 * HOUR), first.nextState, skipped);
+  assert.equal(gap.nextState.streak, 0, "a missing date is a gap");
+  assert.equal(gap.recommendation, undefined);
+});
+
+test("legacy dates or misaligned prior window boundaries cannot supply pressure evidence", () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01", reviewP50: HOUR,
+    pressure: true, streak: 1, producer: "plan-task-workers" };
+  const aligned = previousWindow(now);
+  for (const window of [undefined, { fromMs: aligned.fromMs + HOUR, toMs: aligned.toMs },
+    { fromMs: aligned.fromMs, toMs: aligned.toMs - 1 }]) {
+    const result = openQueueShadow(census(now), rows(now), { ...previous, window }, now);
+    assert.equal(result.nextState.streak, 0);
+    assert.equal(result.recommendation, undefined);
+  }
+  const control = openQueueShadow(census(now), rows(now), { ...previous, observedAtMs: now - DAY - 60_000, window: aligned }, now);
+  assert.equal(control.nextState.streak, 2, "window boundaries control continuity, not census timestamps");
+  assert.equal(control.recommendation, "consider-slowing-plan-task-workers");
+});
+
+test("equal drain, improving review wait, or a changed producer prevents a recommendation", () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01", window: previousWindow(now), reviewP50: HOUR,
+    pressure: true, streak: 1, producer: "plan-task-workers" };
+  const equalDrain = census(now);
+  equalDrain.window.push({ ...equalDrain.window[2]!, number: 18004, mergedAtMs: undefined, closedAtMs: windowOf(now).fromMs + 22 * HOUR });
+  const drained = openQueueShadow(equalDrain, rows(now), previous, now);
+  assert.equal(drained.cohort.merged_or_closed, 2, "closed PRs contribute to drain");
+  assert.equal(drained.nextState.streak, 0);
+  assert.equal(drained.recommendation, undefined);
+  const improving = openQueueShadow(census(now), rows(now, HOUR / 2), previous, now);
+  assert.equal(improving.nextState.streak, 0);
+  assert.equal(improving.recommendation, undefined);
+  const changed = openQueueShadow(census(now), rows(now), { ...previous, producer: "codex" }, now);
+  assert.equal(changed.nextState.streak, 0);
+  assert.equal(changed.recommendation, undefined);
+});
+
+test("incomplete, stale or mismatched census is UNKNOWN and never recommends", () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01", window: previousWindow(now),
+    reviewP50: HOUR, pressure: true, streak: 1, producer: "plan-task-workers" };
+  const incomplete = openQueueShadow({ ...census(now), complete: false }, rows(now), previous, now);
+  assert.equal(incomplete.status, "UNKNOWN");
+  assert.equal(incomplete.nextState.streak, 0);
+  assert.equal(incomplete.nextState.pressure, false);
+  assert.equal(incomplete.recommendation, undefined);
+  const stale = openQueueShadow({ ...census(now), observedAtMs: now - 7 * HOUR }, rows(now), previous, now);
+  assert.equal(stale.status, "UNKNOWN");
+  assert.equal(stale.nextState.streak, 0);
+  assert.equal(stale.recommendation, undefined);
+  const mismatched = openQueueShadow({ ...census(now), windowMs: previousWindow(now) }, rows(now), previous, now);
+  assert.equal(mismatched.status, "UNKNOWN", "a census read for another day is not this day's evidence");
+  assert.equal(mismatched.reason, "census-window-mismatch");
+  const responseObservedAfterPassStart = openQueueShadow({ ...census(now), observedAtMs: now + 1_000 }, rows(now), previous, now + 1_000);
+  assert.equal(responseObservedAfterPassStart.status, "OBSERVED", "freshness is measured at analysis time after the API response");
+  const afterUnknown = now + DAY;
+  const recovered = openQueueShadow(census(afterUnknown), rows(afterUnknown, 3 * HOUR), incomplete.nextState, afterUnknown);
+  assert.equal(recovered.nextState.streak, 0);
+  assert.equal(recovered.recommendation, undefined, "incomplete evidence cannot join the next complete window");
+});
+
+test("the daily flow pass emits a reason-bearing shadow row from one batched census read", async () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}flow-open-queue-`));
+  const events: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let censusReads = 0;
+  let perPrCiReads = 0;
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  try {
+    await runFlowGardener({ stateDir, repoRoot: root, clock: fixedClock(now),
+      openWorkspace: () => ({ root, branch: "test", land: () => "", dispose: () => {} }),
+      log: (step, extra = {}) => events.push({ step, extra }) }, {
+      mintTaskId: () => "W1-T11111",
+      readLedger: () => ({ ok: true, rows: refusalRows(now), unread: [] }),
+      readOpenQueue: flowOpenQueueReader("acme", "remudero", async (args) => {
+        censusReads++;
+        assertCommitRollupQuery(args);
+        return censusResponse(census(now), windowOf(now));
+      }, fixedClock(now)),
+      readCi: async () => { perPrCiReads++; return undefined; },
+      planTasks: () => [],
+    });
+    const row = events.find((event) => event.step === "flow.open_queue_shadow");
+    assert.ok(row);
+    assert.equal(row.extra.mode, "shadow");
+    assert.equal(row.extra.permission, "not-granted");
+    assert.equal(row.extra.action, "none");
+    assert.equal(row.extra.status, "OBSERVED");
+    assert.equal(row.extra.reason, "complete-window-no-confirmed-pressure");
+    assert.deepEqual(row.extra.window, windowOf(now));
+    assert.deepEqual(openQueueWindow(now), windowOf(now));
+    const saved = JSON.parse(readFileSync(join(stateDir, FLOW_STATE_FILE), "utf8"));
+    assert.deepEqual(saved.openQueue.window, row.extra.window, "actual evidence boundaries survive the daily pass");
+    assert.equal(row.extra.producer, "plan-task-workers");
+    const cohort = row.extra.cohort as Record<string, number>;
+    assert.equal(cohort.open, 3);
+    assert.equal(cohort.arrivals, 2);
+    assert.equal(cohort.merged_or_closed, 1);
+    assert.equal(cohort.review_waiting, 1);
+    assert.equal(cohort.review_wait_p50_ms, 2 * HOUR);
+    assert.equal(cohort.merge_preflight_refused, 1);
+    assert.equal(cohort.merge_preflight_refusal_age_p50_ms, 3 * HOUR);
+    assert.equal(cohort.ready_to_direct_merge, 1);
+    assert.equal(cohort.ready_to_direct_merge_age_p50_ms, 2 * HOUR);
+    assert.equal(cohort.open_age_p50_ms, 6 * HOUR);
+    assert.equal(censusReads, 1, "a cohort that fits one page is one batched GraphQL round");
+    assert.equal(perPrCiReads, 0, "open queue evidence adds no per-PR GitHub reads");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the production reader batches the open cohort and the window's created and closed PRs in one round", async () => {
+  const node = (number: number, updates: Record<string, unknown> = {}) => ({ number, createdAt: "2026-11-01T10:00:00.000Z",
+    updatedAt: "2026-11-01T11:00:00.000Z", headRefOid: `head-${number}`, headRefName: "run-W1-T11111-1",
+    commits: { nodes: [{ commit: { oid: `head-${number}`, statusCheckRollup: { state: "SUCCESS" } } }] }, ...updates });
+  const body = { data: {
+    repository: { pullRequests: { totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [node(1)] } },
+    created: { issueCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [node(1)] },
+    closed: { issueCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [node(2, { mergedAt: "2026-11-01T11:00:00.000Z" })] },
+  } };
+  const calls: string[][] = [];
+  const readJson = async (args: string[]) => { calls.push(args); assertCommitRollupQuery(args); return body; };
+  const observedAtMs = Date.parse("2026-11-02T12:00:00.000Z");
+  const window = openQueueWindow(observedAtMs);
+  const read = await flowOpenQueueReader("acme", "remudero", readJson, fixedClock(observedAtMs))(window);
+  assert.equal(read.observedAtMs, observedAtMs);
+  assert.equal(calls.length, 1);
+  const query = calls[0]!.find((arg) => arg.startsWith("query=")) ?? "";
+  assert.match(query, /is:pr created:2026-11-01T00:00:00Z\.\.2026-11-01T23:59:59Z/, "arrivals are searched by the window's exact UTC day");
+  assert.match(query, /is:pr closed:2026-11-01T00:00:00Z\.\.2026-11-01T23:59:59Z/, "terminals are searched by the window's exact UTC day");
+  assert.doesNotMatch(query, /updated:/, "the search is narrowed to what the window counts, not every updated PR");
+  assert.equal(read.complete, true);
+  assert.deepEqual(read.windowMs, window);
+  assert.equal(read.open[0]?.checksState, "SUCCESS");
+  assert.equal(read.window.find((pr) => pr.number === 2)?.mergedAtMs, Date.parse("2026-11-01T11:00:00.000Z"));
+  body.data.repository.pullRequests.totalCount = 101;
+  const truncated = await flowOpenQueueReader("acme", "remudero", readJson, fixedClock(observedAtMs))(window);
+  assert.equal(truncated.complete, false);
+  assert.equal(truncated.reason, "census-page-cap-exceeded");
+});
+
+test("W1-T11111 criterion 2: a cohort past one page is read whole by following each connection's cursor", async () => {
+  const node = (number: number) => ({ number, createdAt: "2026-11-01T10:00:00.000Z", updatedAt: "2026-11-01T11:00:00.000Z",
+    headRefOid: `head-${number}`, headRefName: "run-W1-T11111-1",
+    commits: { nodes: [{ commit: { oid: `head-${number}`, statusCheckRollup: { state: "PENDING" } } }] } });
+  const range = (from: number, n: number) => Array.from({ length: n }, (_, i) => node(from + i));
+  const queries: string[] = [];
+  const readJson = async (args: string[]) => {
+    const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+    queries.push(query);
+    assertCommitRollupQuery(args);
+    const data: Record<string, unknown> = {};
+    if (query.includes("repository(")) {
+      data.repository = { pullRequests: query.includes('after:"open-1"')
+        ? { totalCount: 130, pageInfo: { hasNextPage: false, endCursor: "open-2" }, nodes: range(1100, 30) }
+        : { totalCount: 130, pageInfo: { hasNextPage: true, endCursor: "open-1" }, nodes: range(1000, 100) } };
+    }
+    if (query.includes("created: search")) {
+      data.created = query.includes('after:"created-1"')
+        ? { issueCount: 150, pageInfo: { hasNextPage: false, endCursor: "created-2" }, nodes: range(2100, 50) }
+        : { issueCount: 150, pageInfo: { hasNextPage: true, endCursor: "created-1" }, nodes: range(2000, 100) };
+    }
+    if (query.includes("closed: search")) data.closed = { issueCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
+    return { data };
+  };
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const read = await flowOpenQueueReader("acme", "remudero", readJson, fixedClock(now))(openQueueWindow(now));
+  assert.equal(read.complete, true, "every page was followed, so the census is complete");
+  assert.equal(read.reason, undefined);
+  assert.equal(read.open.length, 130);
+  assert.equal(read.window.length, 150);
+  assert.equal(queries.length, 2, "one batched first round, then one round for the connections still paging");
+  assert.doesNotMatch(queries[1]!, /closed: search/, "a finished connection is not asked again");
+  assert.match(queries[1]!, /after:"open-1"/);
+  assert.match(queries[1]!, /after:"created-1"/);
+
+  const stalled = async (args: string[]) => {
+    const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+    return { data: {
+      ...(query.includes("repository(") ? { repository: { pullRequests: { totalCount: 200, pageInfo: { hasNextPage: true, endCursor: "same" }, nodes: query.includes("after:") ? [] : range(1, 100) } } } : {}),
+      ...(query.includes("created: search") ? { created: { issueCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } : {}),
+      ...(query.includes("closed: search") ? { closed: { issueCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } : {}),
+    } };
+  };
+  const stuck = await flowOpenQueueReader("acme", "remudero", stalled, fixedClock(now))(openQueueWindow(now));
+  assert.equal(stuck.complete, false);
+  assert.equal(stuck.reason, "census-pagination-stalled", "a page that makes no progress ends the read as incomplete, never a loop");
+
+  const huge = async (args: string[]) => {
+    const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+    return { data: {
+      ...(query.includes("repository(") ? { repository: { pullRequests: { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } : {}),
+      ...(query.includes("created: search") ? { created: { issueCount: 1001, pageInfo: { hasNextPage: true, endCursor: "c" }, nodes: range(1, 100) } } : {}),
+      ...(query.includes("closed: search") ? { closed: { issueCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } : {}),
+    } };
+  };
+  const capped = await flowOpenQueueReader("acme", "remudero", huge, fixedClock(now))(openQueueWindow(now));
+  assert.equal(capped.complete, false);
+  assert.equal(capped.reason, "github-search-result-limit", "GitHub's own search ceiling is named, not read as a pass");
+});
+
+test("the production reader never credits a missing or different-head commit rollup as merge-ready", async () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  for (const commits of [undefined, { nodes: [] }, { nodes: [{}, {}] }, { nodes: [{ commit: {
+    oid: "old-head", statusCheckRollup: { state: "SUCCESS" },
+  } }] }, { nodes: [{ commit: { oid: "head-16186", statusCheckRollup: null } }] },
+  { nodes: [{ commit: { oid: "head-16186", statusCheckRollup: { state: "UNRECOGNIZED" } } }] }]) {
+    const body = censusResponse(census(now), windowOf(now));
+    const node = body.data.repository.pullRequests.nodes.find((pr) => pr.number === 16186)!;
+    Object.assign(node, { commits });
+    const read = await flowOpenQueueReader("acme", "remudero", async () => body, fixedClock(now))(openQueueWindow(now));
+    assert.equal(read.open.find((pr) => pr.number === 16186)?.checksState, "UNKNOWN");
+    const report = openQueueShadow(read, rows(now), undefined, now);
+    assert.equal(report.cohort.ready_to_direct_merge, 0, "a current-head review also needs current-head green checks");
+    assert.equal(report.cohort.open, 3, "unknown checks do not remove right-censored open PRs");
+  }
+});
+
+test("W1-T11111 criterion 1: a draft or conflicting head read by the production census is never ready to direct merge", async () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const readiness = async (updates: Record<string, unknown>) => {
+    const body = censusResponse(census(now), windowOf(now));
+    Object.assign(body.data.repository.pullRequests.nodes.find((pr) => pr.number === 16186)!, updates);
+    const read = await flowOpenQueueReader("acme", "remudero", async () => body, fixedClock(now))(openQueueWindow(now));
+    return { pr: read.open.find((pr) => pr.number === 16186)!, cohort: openQueueShadow(read, rows(now), undefined, now).cohort };
+  };
+  // Positive control: #16186's current head is reviewed and green, so the same census marks it ready.
+  const control = await readiness({ isDraft: false, mergeable: "MERGEABLE" });
+  assert.equal(control.pr.isDraft, false, "the reader preserves GitHub's draft flag");
+  assert.equal(control.cohort.ready_to_direct_merge, 1, "a reviewed, green, non-draft, mergeable head is ready");
+  // attemptArmSteps refuses `isDraft === true` before anything else (draft-refused), so a draft is never ready.
+  const draft = await readiness({ isDraft: true, mergeable: "MERGEABLE" });
+  assert.equal(draft.pr.isDraft, true, "the reader preserves GitHub's draft flag");
+  assert.equal(draft.cohort.ready_to_direct_merge, 0, "a reviewed, green draft is not ready: production refuses to arm it");
+  assert.equal(draft.cohort.open, 3, "a draft stays in the right-censored open cohort");
+  // The sweep never arms or merges a conflicting head, so it is not ready either.
+  const conflicting = await readiness({ isDraft: false, mergeable: "CONFLICTING" });
+  assert.equal(conflicting.pr.mergeable, "CONFLICTING", "the reader preserves GitHub's mergeability");
+  assert.equal(conflicting.cohort.ready_to_direct_merge, 0, "a conflicting head is not ready to direct merge");
+  // GitHub still computing mergeability is not a refusal: production arms it and GitHub merges once it settles.
+  assert.equal((await readiness({ isDraft: false, mergeable: "UNKNOWN" })).cohort.ready_to_direct_merge, 1);
+});
+
+test("the registered production flow pass wires one batched queue read in shadow mode", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}flow-open-registry-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const events: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const reads: string[][] = [];
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const empty = { totalCount: 0, issueCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
+  const body = { data: { repository: { pullRequests: empty }, created: empty, closed: empty } };
+  const pass = flowGardenPass({ stateDir, repoRoot: root, clock: fixedClock(now),
+    openWorkspace: () => ({ root, branch: "test", land: () => "", dispose: () => {} }),
+    log: (step, extra = {}) => events.push({ step, extra }),
+  }, "acme", "remudero", () => "W1-T11111", {
+    readJson: async (args) => { reads.push(args); return args[1] === "graphql" ? body : { workflow_runs: [] }; },
+    admission: { owner: "acme", repo: "remudero" },
+  });
+  await pass();
+  assert.equal(reads.filter((args) => args[1] === "graphql").length, 1);
+  const row = events.find((event) => event.step === "flow.open_queue_shadow");
+  assert.ok(row);
+  assert.equal(row.extra.status, "OBSERVED");
+  assert.equal(row.extra.mode, "shadow");
+  assert.equal(row.extra.permission, "not-granted");
+  assert.equal(row.extra.action, "none");
+});
+
+test("W1-T11111 criterion 1: ready to direct merge is the production arm's own verdict, so a capped success is never ready", () => {
+  const now = Date.parse("2026-11-02T17:42:00.000Z");
+  const cohort = census(now);
+  cohort.open = cohort.open.filter((pr) => pr.number === 16186).map((pr) => ({ ...pr, checksState: "SUCCESS" }));
+  const url = "https://github.com/craigoley/remudero/pull/16186";
+  const posted = (extra: Record<string, unknown>) => ({ ts: at(now - HOUR), step: "review.posted", pr_number: 16186, pr_url: url,
+    task_id: "W1-T16186", head_sha: "head-16186", state: "success", ...extra });
+  const ready = (extraRows: Record<string, unknown>[]) => openQueueShadow(cohort, extraRows, undefined, now).cohort.ready_to_direct_merge;
+  assert.equal(ready([posted({ capped: false })]), 1, "an uncapped current-head PASS with green checks is ready");
+  assert.equal(ready([posted({ capped: true, plan_only: false })]), 0, "#16186's capped PASS: production decideAutoMergeArm refuses it");
+  assert.equal(ready([posted({ capped: true, plan_only: true })]), 1, "a plan-only capped PASS arms, so it is ready");
+  const override = (head: string) => ({ ts: at(now - HOUR / 2), step: "automerge.capped_override_granted", pr_url: url,
+    task_id: "W1-T16186", head_sha: head, by: "operator", reason: "reviewed by hand" });
+  assert.equal(ready([posted({ capped: true }), override("head-16186")]), 1, "a head-bound operator override arms a capped PASS");
+  assert.equal(ready([posted({ capped: true }), override("old-head")]), 0, "an override for another head never does");
+  assert.equal(ready([posted({ capped: false }), { ...posted({ capped: false }), ts: at(now - HOUR / 4), state: "failure" }]), 0,
+    "the newest posted verdict at the head decides, as production reads it");
+  const hold = { ts: at(now - HOUR / 2), step: "automerge.hold_engaged", pr_number: 16186, by: "operator", reason: "wait", authority: "interactive-cli" };
+  assert.equal(ready([posted({ capped: false }), hold]), 0, "an operator merge hold is never ready to direct merge");
+  assert.equal(ready([posted({ capped: false }), hold, { ...hold, ts: at(now - HOUR / 4), step: "automerge.hold_released" }]), 1,
+    "a released hold no longer blocks");
+});
+
+test("W1-T11111 criterion 1: a same-date retry re-judges pressure on what it reads now, never advancing the streak", () => {
+  const firstDay = Date.parse("2026-11-02T01:00:00.000Z");
+  const first = openQueueShadow(census(firstDay), rows(firstDay), {
+    observedAtMs: firstDay - DAY, windowDay: "2026-11-01", window: previousWindow(firstDay),
+    reviewP50: HOUR, pressure: true, streak: 1, producer: "plan-task-workers",
+  }, firstDay);
+  assert.equal(first.nextState.streak, 2);
+  assert.equal(first.recommendation, "consider-slowing-plan-task-workers");
+  const retry = firstDay + 3 * HOUR;
+  const cleared = rows(retry).filter((row) => row.step !== "sweep.review_eligible");
+  const after = openQueueShadow({ ...census(firstDay), observedAtMs: retry }, cleared, first.nextState, retry);
+  assert.equal(after.cohort.review_waiting, 0, "review admission cleared every queued wait");
+  assert.equal(after.cohort.review_wait_p50_ms, null);
+  assert.equal(after.nextState.pressure, false, "pressure no longer holds once nothing waits for review");
+  assert.equal(after.nextState.streak, 0);
+  assert.equal(after.recommendation, undefined, "a cleared queue never keeps a recommendation");
+  const stillPressured = openQueueShadow({ ...census(firstDay), observedAtMs: retry }, rows(retry, 4 * HOUR), first.nextState, retry);
+  assert.equal(stillPressured.nextState.streak, 2, "a retry that still shows pressure keeps, and never advances, the streak");
+  assert.equal(stillPressured.recommendation, "consider-slowing-plan-task-workers");
+  const nextDate = Date.parse("2026-11-03T02:00:00.000Z");
+  const resumed = openQueueShadow(census(nextDate), rows(nextDate, 5 * HOUR), after.nextState, nextDate);
+  assert.equal(resumed.nextState.streak, 0, "a cleared window has no review p50, so the next date has no baseline to worsen from");
+  assert.equal(resumed.recommendation, undefined);
+});
+
+test("W1-T11111 criterion 1: an open PR older than the ledger read with no stage rows in it is unread evidence and blocks a recommendation", () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const ledgerFromMs = now - 9 * DAY;
+  const previous = { observedAtMs: now - DAY, windowDay: "2026-11-01", window: previousWindow(now),
+    reviewP50: HOUR, pressure: true, streak: 1, producer: "plan-task-workers" };
+  const control = openQueueShadow(census(now), rows(now), previous, now, ledgerFromMs);
+  assert.equal(control.cohort.stage_unread, 0);
+  assert.equal(control.recommendation, "consider-slowing-plan-task-workers", "every open PR's stage is in the read");
+  assert.equal(control.status, "OBSERVED", "complete stage evidence is an observation");
+  const old = census(now);
+  old.open.push({ number: 15000, createdAtMs: now - 14 * DAY, updatedAtMs: now, headSha: "head-15000", headRefName: "run-W1-T15000-1", checksState: "SUCCESS" });
+  const blocked = openQueueShadow(old, rows(now), previous, now, ledgerFromMs);
+  assert.equal(blocked.cohort.stage_unread, 1, "a 14-day-old PR with no rows in a 9-day read has an unread stage");
+  assert.equal(blocked.cohort.other_open, 0, "it is never counted as plain other-open work");
+  assert.equal(blocked.cohort.open, 4, "it stays in the right-censored open cohort");
+  assert.equal(blocked.nextState.streak, 0);
+  assert.equal(blocked.recommendation, undefined);
+  assert.equal(blocked.reason, "stage-evidence-unread-before-ledger-read");
+  assert.equal(blocked.status, "UNKNOWN", "incomplete stage evidence is UNKNOWN, never OBSERVED (W1-T11111 criterion 1)");
+  const seen = openQueueShadow(old, [...rows(now), { ts: at(now - HOUR), step: "sweep.review_eligible", pr_number: 15000, head_sha: "head-15000" }],
+    previous, now, ledgerFromMs);
+  assert.equal(seen.cohort.stage_unread, 0, "a row at its current head inside the read makes its stage known");
+  assert.equal(seen.status, "OBSERVED", "once every stage is read the report observes again");
+});
+
+test("W1-T11111 criterion 1: a merge hold engaged before the nine-day ledger read still blocks readiness, archived or carried live", (t) => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const sinceIso = at(now - 9 * DAY);
+  const ledgerFromMs = Date.parse(sinceIso);
+  const hold = { ts: at(now - 10 * DAY), step: "automerge.hold_engaged", pr_number: 16186, by: "operator", reason: "hold for review",
+    authority: "interactive-cli" };
+  // Positive control: #16186's current head is reviewed and green, so with no hold it is ready.
+  assert.equal(openQueueShadow(census(now), rows(now), undefined, now, ledgerFromMs).cohort.ready_to_direct_merge, 1);
+  // The hold sits in a rotation cut before the read window (the windowed read skips that archive) ...
+  const archived = writeLedger(rows(now), { scope: t, rotations: [{ at: at(now - 10 * DAY + HOUR), rows: [hold], gz: true }] });
+  // ... or in the live file, where compaction carries a retained step with its original timestamp.
+  const carried = writeLedger([hold, ...rows(now)], { scope: t });
+  for (const [form, dir] of [["archived", archived.dir], ["carried live", carried.dir]] as const) {
+    const read = readFlowLedger(dir, sinceIso);
+    assert.equal(read.ok, true, form);
+    assert.ok(read.rows.some((r) => r.step === "automerge.hold_engaged"), `${form}: the standing hold is read at any age`);
+    const held = openQueueShadow(census(now), read.rows, undefined, now, ledgerFromMs);
+    assert.equal(held.cohort.ready_to_direct_merge, 0, `${form}: a 10-day-old active hold keeps a reviewed, green PR from being ready`);
+    assert.equal(held.cohort.stage_unread, 0, `${form}: an old hold is never mistaken for stage evidence`);
+  }
+  // An old standing row at a PR's head is not stage evidence: a 14-day-old PR whose only row is a capped override
+  // granted before the read keeps an unread stage, so the report stays UNKNOWN.
+  const old = census(now);
+  old.open.push({ number: 15000, createdAtMs: now - 14 * DAY, updatedAtMs: now, headSha: "head-15000", headRefName: "run-W1-T15000-1", checksState: "SUCCESS" });
+  const override = writeLedger([{ ts: at(now - 12 * DAY), step: "automerge.capped_override_granted", pr_number: 15000, head_sha: "head-15000",
+    task_id: "W1-T15000", by: "operator", reason: "override" }, ...rows(now)], { scope: t });
+  const overrideRead = readFlowLedger(override.dir, sinceIso);
+  assert.ok(overrideRead.rows.some((r) => r.step === "automerge.capped_override_granted"), "the standing override is read at any age");
+  const overrideShadow = openQueueShadow(old, overrideRead.rows, undefined, now, ledgerFromMs);
+  assert.equal(overrideShadow.cohort.stage_unread, 1, "an old override at its head never makes an unread stage known");
+  assert.equal(overrideShadow.status, "UNKNOWN");
+  // A later release, inside the window, lifts it again: the standing rows keep ledger order (last one wins).
+  archived.append([{ ts: at(now - HOUR), step: "automerge.hold_released", pr_number: 16186, by: "operator", authority: "interactive-cli" }]);
+  const released = readFlowLedger(archived.dir, sinceIso);
+  assert.equal(openQueueShadow(census(now), released.rows, undefined, now, ledgerFromMs).cohort.ready_to_direct_merge, 1);
+});
+
+test("W1-T11111 criterion 1: a census whose pages repeat a PR is incomplete even when its node count reaches totalCount", async () => {
+  const now = Date.parse("2026-11-02T12:00:00.000Z");
+  const body = censusResponse(census(now), windowOf(now));
+  // Positive control: three distinct open PRs against a totalCount of three is complete.
+  const whole = await flowOpenQueueReader("acme", "remudero", async () => body, fixedClock(now))(openQueueWindow(now));
+  assert.equal(whole.complete, true);
+  // #17000 is missing and #16147 appears twice: the node count still equals totalCount.
+  const nodes = body.data.repository.pullRequests.nodes;
+  const repeated = { ...body, data: { ...body.data, repository: { pullRequests: { ...body.data.repository.pullRequests,
+    nodes: [nodes[0]!, nodes[1]!, nodes[0]!] } } } };
+  assert.equal(repeated.data.repository.pullRequests.nodes.length, repeated.data.repository.pullRequests.totalCount);
+  const read = await flowOpenQueueReader("acme", "remudero", async () => repeated, fixedClock(now))(openQueueWindow(now));
+  assert.equal(read.complete, false, "a duplicated member never counts toward totalCount");
+  assert.equal(read.reason, "census-duplicate-members");
+  const shadow = openQueueShadow(read, rows(now), undefined, now);
+  assert.equal(shadow.status, "UNKNOWN");
+  assert.equal(shadow.reason, "census-duplicate-members");
+  assert.equal(shadow.recommendation, undefined);
+});
