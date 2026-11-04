@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { after, test } from "node:test";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { execWhitelistedProof, judgeReview, judgeReviewAsync, memoizeAsyncProofExecutor, preparePromisedReviewDecision, recordedLoad1,
+import { defaultAsyncProofSpawner, defaultProofSpawner, execWhitelistedProof, judgeReview, judgeReviewAsync, memoizeAsyncProofExecutor,
+  preparePromisedReviewDecision, ProofSandboxUnavailableError, recordedLoad1, setProofSandboxForTests,
   reviewLedgerReasons, sampleHostLoad, type ProofExecutor, type ReviewEvidence, type ReviewVerdict } from "#src/lib/review.js";
 import { reviewUnmetFields } from "#src/cli/commands/review.js";
 import { DEFAULT_SWEEP_POLICY, inconclusiveLoadLowered, INCONCLUSIVE_LOAD_MAX_RERUNS, observeLightPassReviewEligibility, runSweep, runSweepLightPass,
@@ -65,6 +66,72 @@ test("truncated TAP through the real executor stays inconclusive with load throu
     assert.equal(verdict.floorState, "pending");
     assert.deepEqual(reviewUnmetFields(verdict), { visibleUnmet: [], unmetClaims: [], reasons: [] });
     assert.equal(JSON.parse(JSON.stringify({ decision_verdict: verdict })).decision_verdict.criteria[0].load.end.load1, 41);
+  }
+});
+
+function assertPendingLoad(verdict: ReviewVerdict): void {
+  assert.equal(verdict.criteria[0].proof_exec, "inconclusive_load", verdict.criteria[0].reason);
+  assert.equal(verdict.criteria[0].met, false);
+  assert.deepEqual(verdict.criteria[0].load, {
+    start: { load1: 30, cpuPsiSomeAvg10Pct: 60 }, end: { load1: 41, cpuPsiSomeAvg10Pct: 60 },
+  });
+  assert.equal(verdict.state, "pending");
+  assert.equal(verdict.floorState, "pending");
+  assert.deepEqual(reviewUnmetFields(verdict), { visibleUnmet: [], unmetClaims: [], reasons: [] });
+  assert.deepEqual(reviewLedgerReasons(verdict), []);
+}
+
+test("production sandbox startup errors stay pending with load in both judges regardless of keywords", async t => {
+  setProofSandboxForTests({ mode: "bwrap", binary: process.execPath });
+  t.after(() => setProofSandboxForTests());
+  for (const asynchronous of [false, true]) {
+    for (const report of [`the behaviour holds unit test ${PROOF_FILE}`, ""]) {
+      let startupErrors = 0;
+      const evidence: ReviewEvidence = { diff: DIFF, report, headCheckoutDir: checkout, sampleLoad: samples(30, 41) };
+      const checkError = (error: unknown): never => {
+        assert.ok(error instanceof ProofSandboxUnavailableError, "the production start check wraps the failed bwrap exec");
+        assert.match(error.sandboxReason, /bad option/);
+        startupErrors++;
+        throw error;
+      };
+      if (asynchronous) evidence.asyncExecProof = async (proof, cwd) => {
+        try { await defaultAsyncProofSpawner(proof.command, ["--test", PROOF_FILE], cwd, 60_000); }
+        catch (error) { checkError(error); }
+        return assert.fail("the bwrap start check must fail before the proof runs");
+      };
+      else evidence.execProof = (proof, cwd) => execWhitelistedProof(proof, cwd, 60_000, (...args) => {
+        try { return defaultProofSpawner(...args); }
+        catch (error) { return checkError(error); }
+      }, { preparedArgs: ["--test", PROOF_FILE] });
+      const verdict = asynchronous ? await judgeReviewAsync(criteria, evidence) : judgeReview(criteria, evidence);
+      assert.equal(startupErrors, 1);
+      assertPendingLoad(verdict);
+      assert.equal(verdict.criteria[0].proof_skip, "runner-absent");
+      const posted = JSON.parse(JSON.stringify({ decision_verdict: verdict }));
+      assert.deepEqual(posted.decision_verdict.criteria[0].load, verdict.criteria[0].load);
+    }
+  }
+});
+
+test("name-filtered node and Vitest truncation through the executor stays pending in both judges", async () => {
+  for (const runner of ["node", "vitest"] as const) {
+    for (const nonzero of [false, true]) {
+      for (const asynchronous of [false, true]) {
+        const exec: ProofExecutor = (proof, cwd) => execWhitelistedProof({ ...proof, runner: runner === "vitest" ? runner : undefined }, cwd, 60_000, () => {
+          const stdout = runner === "node" ? "TAP version 13\n" : "TAP version 13\n1..2\nok 1 - a.test.ts # time=1ms {\n";
+          if (nonzero) throw Object.assign(new Error("Command failed"), { status: 1, stdout });
+          return stdout;
+        }, { preparedArgs: ["--test", "--test-name-pattern=x", PROOF_FILE], cacheSettled: true });
+        const evidence: ReviewEvidence = { diff: DIFF, report: "the behaviour holds unit test x", headCheckoutDir: checkout,
+          sampleLoad: samples(30, 41),
+          ...(asynchronous ? { asyncExecProof: async (proof, cwd) => exec(proof, cwd) } : { execProof: exec }) };
+        const verdict = asynchronous
+          ? await judgeReviewAsync([{ claim: "the behaviour holds", proof: "unit test: x" }], evidence)
+          : judgeReview([{ claim: "the behaviour holds", proof: "unit test: x" }], evidence);
+        assertPendingLoad(verdict);
+        assert.equal(verdict.criteria[0].proof_skip, "incomplete-run");
+      }
+    }
   }
 });
 

@@ -1932,8 +1932,8 @@ const PROOF_SANDBOX_ETC = [
  *  {@link ReviewVerdict.proofSandboxDegraded} records the degraded reason, never silently claiming containment. */
 export type ProofSandboxStatus = { mode: "bwrap"; binary: string } | { mode: "unsandboxed"; reason: string } | { mode: "unavailable"; reason: string };
 
-/** A sandbox that could not start for THIS proof. {@link judgeCriterion} grades it `not_executable`, never a pass and
- *  never `executed_fail`: the proof's code was not run, so nothing was learned about the criterion. */
+/** A sandbox that could not start for THIS proof. Unit-test proofs are `inconclusive_load`; other proofs remain
+ *  `not_executable`: the proof's code was not run, so nothing was learned about the criterion. */
 export class ProofSandboxUnavailableError extends RmdError {
   constructor(readonly sandboxReason: string) {
     super("usage", GENERIC_EXIT_CODE, `proof sandbox could not start: ${sandboxReason}`, { sandboxReason });
@@ -3737,6 +3737,13 @@ function wrappersCouldNotLoad(failed: number, total: number, stdout: string, std
   return moduleErrors > failed / 2;
 }
 
+/** A name-filtered run stopped before its completion marker, without evidence that the named test is absent. */
+class NameFilteredProofIncompleteRunError extends RmdError {
+  constructor(message: string) {
+    super("usage", GENERIC_EXIT_CODE, message);
+  }
+}
+
 /** Read a name-filtered run's TAP stdout for the verdict of the REAL (non-file-wrapper) subtests it matched,
  * independent of the process exit code. Zero real matches on a COMPLETED run ⇒ "fail" (W1-T72's guard: a named test
  * absent from the head is unmet, never a silent pass via the trivial "0 children ⇒ ok" wrapper). Zero real matches on
@@ -3762,7 +3769,7 @@ export function nameFilteredOutcome(stdout: string, stderr = ""): ProofResult {
   }
   if (!matched) {
     if (!hasFinalSummary(stdout)) {
-      throw new Error(
+      throw new NameFilteredProofIncompleteRunError(
         "name-filtered proof run was truncated before its trailing summary (proof timeout) — " +
           "inconclusive, not evidence the named test is missing",
       );
@@ -3820,7 +3827,7 @@ export function vitestNameFilteredOutcome(stdout: string, stderr = ""): ProofRes
     const planMatch = VITEST_TAP_PLAN_RE.exec(stdout);
     const planned = planMatch ? Number(planMatch[1]) : undefined;
     if (planned === undefined || topLevelSeen < planned) {
-      throw new Error(
+      throw new NameFilteredProofIncompleteRunError(
         "name-filtered Vitest proof run was truncated before its TAP plan count completed — " +
           "inconclusive, not evidence the named test is missing",
       );
@@ -4479,12 +4486,13 @@ export function judgeCriterion(
             proofSkip = "cwd-missing";
             reason = `${reason} — NOTE: ${e.message}; not executed, keyword floor applied`;
           } else if (e instanceof ProofSandboxUnavailableError) {
-            // W1-T6124: the proof's code never ran, so this is a host gap, not an outcome — and never a pass.
-            proofExec = "not_executable";
             proofSkip = "runner-absent";
-            reason =
-              `${reason} — NOTE: the proof sandbox could not start (${e.sandboxReason}); ` +
-              "not executed, keyword floor applied";
+            if (whitelisted.kind === "test") {
+              inconclusiveUnderLoad(`could not start its sandbox (${e.sandboxReason})`);
+            } else {
+              proofExec = "not_executable";
+              reason = `${reason} — NOTE: the proof sandbox could not start (${e.sandboxReason}); not executed, keyword floor applied`;
+            }
           } else if (e instanceof ProofRunnerUnavailableError) {
             proofExec = "not_executable";
             proofSkip = "runner-absent";
@@ -4502,6 +4510,9 @@ export function judgeCriterion(
               `own TAP wrapper reported the failure (a broken runtime: an unresolvable --import ` +
               `loader, an uncaught module-load error, …), not the named test; not executed, keyword ` +
               `floor applied`;
+          } else if (e instanceof NameFilteredProofIncompleteRunError) {
+            proofSkip = "incomplete-run";
+            inconclusiveUnderLoad(e.message);
           } else if (e instanceof PureProofIncompleteRunError) {
             // W1-T2740, the same rule as the sibling arm: record the DISCRIMINATOR, never the stream. The bounded
             // fact is that node's completion signal is absent after N real results.
