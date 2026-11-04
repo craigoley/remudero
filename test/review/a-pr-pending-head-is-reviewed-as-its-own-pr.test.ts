@@ -4,13 +4,32 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { ReviewCommandDeps } from "#src/cli/commands/review.js";
+import { reviewCommand as reviewCommandImpl, type ReviewCommandDeps, type ReviewCommandHost } from "#src/cli/commands/review.js";
 import type { Config } from "#src/lib/config.js";
 import { DEFAULT_RISK } from "#src/lib/plan.js";
 import { parseAcceptanceBlock } from "#src/lib/review.js";
 import { UNTASKED_REVIEW_BUDGET_USD, usesUntaskedReviewMetadata } from "#src/lib/tick-read-worker.js";
-import { reviewCommand } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+function unexpected(): never { throw new Error("unexpected review fixture dependency"); }
+const reviewHost: ReviewCommandHost = {
+  GIT_UNTRACKED_FILES_ALL: "--untracked-files=all",
+  JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+  acceptedReviewAttemptId: (value) => typeof value === "string" ? value : undefined,
+  attributeWorkerStreamEvent: unexpected,
+  ledgeredNonDispatchSpawn: unexpected,
+  lintPlanForReview: unexpected,
+  liveWorkerRunIds: new Set<string>(),
+  materializeReviewWorktree: unexpected,
+  readHeadShaRest: unexpected,
+  readMainPlanTreeSha: unexpected,
+  realDeps: () => ({ reviewWorktree: { fetch: unexpected } }) as unknown as ReturnType<ReviewCommandHost["realDeps"]>,
+  reviewPostedDescription: (verdict) => verdict.summary,
+  reviewWorkerLockId: (runId) => runId,
+  reviewerClockBoundMs: unexpected,
+  reviewSubjectGit: unexpected,
+};
+const reviewCommand = reviewCommandImpl.bind(null, reviewHost);
 
 const PROOF = "test/review/a-pr-pending-head-is-reviewed-as-its-own-pr.test.ts";
 const BRANCH = "run-PR-pending-1793751990458";
