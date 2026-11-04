@@ -22,6 +22,8 @@
     - src/lib/escalate.ts
     - test/worker/a-bundled-review-loads-the-modules-it-defers.test.ts
     - scripts/build-child-entries.mjs
+    - test/a-proof-run-that-cannot-load-is-not-unmet.test.ts
+    - test/review/live-review-publisher-has-server-identity.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -52,6 +54,14 @@
       did not run because the shared stored `run-task.mjs` bundle threw `ERR_MODULE_NOT_FOUND` for package `yaml` from outside the
       Core checkout. The plan-only review remained FAILURE and no semantic model review ran. PR #16584 was diagnostic only and closed
       without merge, so it did not change the dependency-resolution path.
+    SCOPE AMENDMENT 2026-11-03 (PLAN-clarify-1793753156502): two existing tests join files: only so each can carry a one-line
+      import that registers the already-in-scope src/lib/escalate.ts and src/lib/status.ts modules, which their
+      postReviewStatusGuarded cases need once review.ts stops deferring those imports. Cap, acceptance and all gates are unchanged.
+    Settled by lookup: is this already filed or already decided? -> no other task holds either path open; their prior owners
+      are merged (plan/tasks.d/W1-T4934-a-proof-run-that-cannot-load-is-not-unmet.yaml, plan/tasks.d/W1-T9001-a-promise-harvest-reads-only-the-rotations-its-pr-can-be-in.yaml)
+    Settled by lookup: do the two tests already import escalate/status? -> no; both import only #src/lib/review.js (plus ledger.js
+      and gh-shim in the publisher test) and both call postReviewStatusGuarded (test/a-proof-run-that-cannot-load-is-not-unmet.test.ts,
+      test/review/live-review-publisher-has-server-identity.test.ts)
   design: |
     1. Break the cycle instead of hiding it: move readRequiredStatusCheckContextsAsync's dependency for replayPublisher (and the
        escalation calls) behind a seam the composition root passes in, or into a leaf module both graphs can import statically, so
@@ -67,3 +77,7 @@
     findings, item 5b (p2), harness noise; 5a is W1-T11154 and 5c is W1-T11156 (Rule 19). If the builder finds the leaf move needs
     a new leaf module in files:, it amends this record first.
     Approved bounded amendment 2026-11-03: add the bundle builder (the test path was already in scope), exercise shared-store package resolution, and cap this task at $30.
+    Approved bounded amendment 2026-11-03 (second): add test/a-proof-run-that-cannot-load-is-not-unmet.test.ts and
+    test/review/live-review-publisher-has-server-identity.test.ts to files: for one-line registering imports of escalate/status
+    only; no other edits to those tests. The $30 cap, acceptance, filing review, hosted CI, protected merge, ownership and
+    implementation gates are unchanged.
