@@ -28,19 +28,16 @@ function snapshot(source: string) {
 }
 
 test("W1-T11047: comment compression preserves executable code", () => {
-  // Captured from ccdae0c920e7b6fbfeb01e72bbd69e802f5ddcae before compression.
-  // Comparison evidence for this edit, not a new comment-volume ceiling.
+  // Base-relative (test/helpers/compression-pin.ts): compared only on the PR that adds this pin, so later edits stay free.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/prompt-render.ts"), "utf8"));
   const before = compressionPinBase("src/lib/prompt-render.ts", import.meta.url);
   if (before !== undefined) {
-    // Only on the PR that adds this pin: later feature edits to the module stay free (#16082).
     const base = snapshot(before);
     assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
       [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
     assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+    assert.ok(actual.commentBytes < base.commentBytes, "comment bytes must decrease; rewrapping alone is insufficient");
   }
-  assert.ok(actual.commentLines < 531, "comment lines must decrease from the pre-compression source");
-  assert.ok(actual.commentBytes < 38447, "comment bytes must decrease; rewrapping alone is insufficient");
 
   const fixture = 'const re = /https?:\\/\\//; const s = "// kept"; const t = `/* ${`// ${1}`} */`;';
   const original = snapshot(fixture);
