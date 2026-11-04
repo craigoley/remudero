@@ -21,7 +21,7 @@ export type CodingResultBindingV1 = CodingControlBindingV1;
 
 export interface CodingFixtureV1 {
   version: typeof CODING_CONTROL_VERSION;
-  caseId: "coding-sum-four-v1";
+  caseId: string;
   stdin: string;
   digest: string;
   prompt: string;
@@ -39,15 +39,16 @@ export interface CodingExecutionRequestV1 {
 }
 
 /** Fixed synthetic arithmetic task. Seed affects only public fixture data; oracle stays local. */
-export function syntheticCodingFixture(seed: string): CodingFixture {
+export function syntheticCodingFixture(seed: string, caseId = "coding-sum-four-v1"): CodingFixture {
   if (!seed || Buffer.byteLength(seed, "utf8") > 256) throw new Error("coding-seed-invalid");
+  if (typeof caseId !== "string" || !/^[a-zA-Z0-9._-]{1,128}$/.test(caseId)) throw new Error("coding-case-id-invalid");
   const bytes = createHash("sha256").update(`coding-fixture-v1\0${seed}`).digest();
   const values = Array.from({ length: 4 }, (_, i) => (bytes.readUInt16BE(i * 2) % 101) - 50);
   const stdin = `${values.join("\n")}\n`;
   if (Buffer.byteLength(stdin, "utf8") > CODING_FIXTURE_MAX_BYTES) throw new Error("coding-fixture-bound");
   const sum = values.reduce((a, b) => a + b, 0);
   const expectedStdout = `${sum}\n`;
-  return Object.freeze({ version: CODING_CONTROL_VERSION, caseId: "coding-sum-four-v1", stdin, digest: sha256(stdin),
+  return Object.freeze({ version: CODING_CONTROL_VERSION, caseId, stdin, digest: sha256(stdin),
     prompt: `Write JavaScript source that reads four signed decimal integers from stdin and prints their sum followed by a newline. Input:\n${stdin}`,
     expectedStdout });
 }
@@ -350,7 +351,8 @@ export function isQualifiedCodingPair(result: CodingRunnerResult, grade: CodingG
 }
 
 function assertFixture(fixture: CodingFixture): void {
-  if (!fixture || fixture.version !== CODING_CONTROL_VERSION || fixture.caseId !== "coding-sum-four-v1" || typeof fixture.stdin !== "string"
+  if (!fixture || fixture.version !== CODING_CONTROL_VERSION || typeof fixture.caseId !== "string"
+    || !/^[a-zA-Z0-9._-]{1,128}$/.test(fixture.caseId) || typeof fixture.stdin !== "string"
     || Buffer.byteLength(fixture.stdin, "utf8") > CODING_FIXTURE_MAX_BYTES || !hex64.test(fixture.digest)
     || sha256(fixture.stdin) !== fixture.digest || typeof fixture.expectedStdout !== "string"
     || Buffer.byteLength(fixture.expectedStdout, "utf8") > CODING_STDOUT_MAX_BYTES

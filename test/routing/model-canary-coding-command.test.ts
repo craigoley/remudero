@@ -1,37 +1,44 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { canaryCommand, executeOwnedCodingCanarySchedule } from "#src/lib/model-canary-command.js";
+import { canaryCommand, executeOwnedCodingCanarySchedule, replayPrivateCli } from "#src/lib/model-canary-command.js";
 import { codingAttemptConsumptionBinding, CanarySlotOwner } from "#src/lib/model-canary-owner.js";
 import { bindCodingExecutionAuthority, executeCodingCandidate, parseCodingCandidate,
   refuseCodingBeforeHost, scoreCodingControl, syntheticCodingFixture,
   type CodingConfiguredBounds, type CodingRunnerResult } from "#src/lib/model-canary-coding.js";
 import { registerQualifiedCodingExecutionPort } from "#src/lib/model-canary-coding-port-capability.js";
-import { buildCanarySchedule } from "#src/lib/model-canary-schedule.js";
+import { buildCanarySchedule, type CanarySlot } from "#src/lib/model-canary-schedule.js";
 import { commonCanarySuite, canarySuiteDigest } from "#src/lib/model-canary-suite.js";
-import { validatePrivateCorpus, type PrivateCanaryBundleV1,
+import { validatePrivateCorpus, privateCorpusMetadata, type PrivateCanaryBundleV1,
   type PrivateCanaryCaseV1 } from "#src/lib/model-canary-private-corpus.js";
 import { workerExecutionEvidence } from "#src/lib/worker-execution-evidence.js";
 import { codingLedgerSave } from "#src/lib/model-canary-ledger.js";
-import { executeCanary, type CanaryExecutionPorts } from "#src/lib/model-canary-runner.js";
+import { executeCanary, type CanaryExecutionPorts, type CanaryRequest } from "#src/lib/model-canary-runner.js";
 import type { CanaryRun } from "#src/lib/model-canary-metrics.js";
 import { codingProviderRequestState } from "#src/lib/model-canary-coding-capabilities.js";
 import { resolveProducerIdentity } from "#src/lib/producer-identity.js";
+import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { codingWorkerRequestPorts, type CodingWorker } from "#src/lib/model-canary-coding-adapter.js";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const CODING_ITEM = commonCanarySuite().find(item => item.family === "coding")!;
 
-function fixture(root: string) {
+function codingBundle(): PrivateCanaryBundleV1 {
   const privateCase: PrivateCanaryCaseV1 = { item: CODING_ITEM, provenance: {
     sourceFamilyId: "coding-test-family", incidentRootId: "coding-test-root", sourceDigest: sha("coding-test-source"),
     observedAt: "2026-11-03T00:00:00.000Z", splitId: "coding-development-v1", split: "development", role: "coder",
   }, expectedToolTrace: [], scorerVersion: "coding-control-v1" };
-  const bundle: PrivateCanaryBundleV1 = { version: "model-canary-private-bundle-v1", development: {
+  return { version: "model-canary-private-bundle-v1", development: {
     version: "model-canary-private-payload-v1", split: "development", cases: [privateCase] } };
+}
+
+function fixture(root: string) {
+  const bundle = codingBundle();
   const validation = validatePrivateCorpus(bundle);
   assert.equal(validation.state, "available");
   if (validation.state !== "available") throw new Error("private-coding-fixture-unavailable");
@@ -44,14 +51,14 @@ function fixture(root: string) {
 }
 
 /** Source-unit-only fixture backend: its output and finite counters are simulation, never Linux qualification evidence. */
-function simulatedCodingPort(owner: CanarySlotOwner, events: string[]): NonNullable<CanaryExecutionPorts["executeCoding"]> {
+function simulatedCodingPort(owner: CanarySlotOwner, events: string[], preparedSlot?: CanarySlot): NonNullable<CanaryExecutionPorts["executeCoding"]> {
   const configured: CodingConfiguredBounds = { profileId: "source-unit-simulation", profileDigest: "1".repeat(64),
     binaryDigest: "2".repeat(64), runtimeId: "node-source-stdin-stdout-v1", cpuQuotaMicros: 100_000,
     memoryMaxBytes: 1024 * 1024, swapMaxBytes: 0, tasksMax: 4, scratchMaxBytes: 64 * 1024,
     wallMaxMs: 10_000, stdoutMaxBytes: 4096, stderrMaxBytes: 4096, heapMaxBytes: 512 * 1024 };
   const port = async (request: Parameters<NonNullable<CanaryExecutionPorts["executeCoding"]>>[0]): Promise<CodingRunnerResult> => {
     const candidate = parseCodingCandidate(request.responseText);
-    const consumed = owner.consumeCodingAttempt({ id: request.slotId, caseId: request.caseId,
+    const consumed = owner.consumeCodingAttempt(preparedSlot ?? { id: request.slotId, caseId: request.caseId,
       pin: { model: "unit-control-model", route: "subscription", effort: "low",
         suiteHash: request.suiteHash, billing: "subscription" }, aaLabel: null }, {
       runId: request.runId, canaryAttemptId: request.canaryAttemptId,
@@ -109,7 +116,181 @@ test("W1-T10957: prepare-coding emits a prompt request without scorer oracle or 
     assert.equal(joins.execution, "requires-native-owner-and-qualified-linux-profile");
     assert.equal(requestText.includes("expectedStdout"), false);
     assert.equal(requestText.includes("codingExecutionAttemptId"), false);
+    const native = JSON.parse(readFileSync(join(outDir, "model-canary-coding-native.json"), "utf8"));
+    assert.equal(native.released, false);
+    assert.equal(native.plan, null);
+    assert.equal(native.eligibility.sourceAdopted, false);
+    assert.equal(native.eligibility.adapterQualified, false);
   } finally { data.owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("prepared native replay keeps existing controls closed before native qualification or worker runtime", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-canary-native-unreleased-"));
+  try {
+    const bundle = codingBundle(), validation = validatePrivateCorpus(bundle);
+    if (validation.state !== "available") assert.fail("native preparation corpus invalid");
+    const corpusPath = join(root, "corpus.json"), requestPath = join(root, "native.json");
+    writeFileSync(corpusPath, JSON.stringify(bundle), { mode: 0o600 });
+    const eligibility = { sourceAdopted: true, adapterQualified: true, productionBusy: false,
+      squeeze: false, spareSubscription: true, experimentalCashAllowed: false, premium: false };
+    const request = { version: "model-canary-coding-native-v1", corpusDigest: validation.metadata.digest,
+      cases: [CODING_ITEM], plan: null, seed: null, released: false, eligibility };
+    let runtimeCalls = 0;
+    const internal = { workerRuntime: async (): Promise<never> => { runtimeCalls++; throw new Error("must-stay-unarmed"); } };
+    const invoke = async () => {
+      writeFileSync(requestPath, JSON.stringify(request), { mode: 0o600 });
+      return replayPrivateCli(["replay-private", corpusPath, requestPath, join(root, "absent-owner")], internal);
+    };
+    assert.equal((await invoke()).state, "prepared-not-activated");
+    request.released = true;
+    for (const [field, blocked] of Object.entries({ sourceAdopted: false, adapterQualified: false,
+      productionBusy: true, squeeze: true, spareSubscription: false })) {
+      const before = { ...eligibility };
+      Object.assign(eligibility, { [field]: blocked });
+      assert.equal((await invoke()).state, "prepared-not-activated", field);
+      Object.assign(eligibility, before);
+    }
+    assert.equal(runtimeCalls, 0);
+    assert.equal(existsSync(join(root, "absent-owner")), false);
+    request.corpusDigest = "0".repeat(64);
+    await assert.rejects(invoke, /coding-native-prepared-corpus-mismatch/);
+    assert.equal(runtimeCalls, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("coding worker request port retains terminal evidence and only cleans scratch after observed closure", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-canary-request-port-"));
+  const config = { root, installRoot: REPO_ROOT, claudeBin: "unused-unit-worker" };
+  const workerId = "019f5ab2-4420-4ea0-993f-470a56362e04";
+  let workerCalls = 0, workerCwd = "";
+  let exit: Awaited<ReturnType<CodingWorker>>["exit"] = { kind: "exit", code: 0 };
+  const worker: CodingWorker = async args => {
+    workerCalls++; workerCwd = args.cwd;
+    assert.deepEqual(args.tools, []); assert.deepEqual(args.cashTools, []);
+    assert.equal(args.mcpIsolation, "repo-knowledge-only");
+    assert.equal(args.mountProvider, "claude");
+    assert.equal(args.maxTurns, 1); assert.equal(args.permissionMode, "dontAsk");
+    assert.equal(args.runId, "run-control");
+    assert.equal(readFileSync(args.settingsFile, "utf8").includes("${HOOKS_DIR}"), false);
+    return { exit, text: JSON.stringify({ source: "/* transport control */" }), isError: false, apiError: false,
+      workerDurationMs: 7, workerFirstTextMs: 2, tokens: { input: 10, output: 3, cacheRead: 0, cacheCreation: 0 },
+      tokenUsageState: "partial", servedModel: null, executionEvidence: workerExecutionEvidence(workerId, {
+        provider: "claude", childEnvKeys: [], isError: false, servedModel: null,
+        tokens: { input: 10, output: 3, cacheRead: 0, cacheCreation: 0 } }) };
+  };
+  const request: CanaryRequest = { prompt: "synthetic task", pin: { model: "unit-model", route: "claude",
+    effort: "low", billing: "subscription" }, history: [], allowedTools: [],
+    signal: new AbortController().signal, maxOutputBytes: 16_384 };
+  const context = { version: "canary-internal-attempt-context-v1" as const,
+    runId: "run-control", canaryAttemptId: "attempt-control" };
+  const ports = codingWorkerRequestPorts(config, root, worker);
+  try {
+    const response = await ports.request(request, context);
+    assert.equal(response.resources.servedModel, null);
+    assert.equal(response.resources.inputTokens, null, "partial tokens never become exact observations");
+    assert.equal(response.resources.outputTokens, null);
+    assert.equal(response.resources.usageRatedUsd, null);
+    assert.equal(response.resources.durationMs, 7);
+    assert.equal(response.resources.executionEvidence!.attemptId, workerId);
+    assert.equal(response.resources.terminal, "complete");
+    assert.equal(existsSync(workerCwd), false);
+    exit = { kind: "signal", signal: "SIGTERM" };
+    assert.equal((await ports.request(request, context)).resources.terminal, "error");
+    assert.equal(existsSync(workerCwd), false);
+    exit = { kind: "unobserved" };
+    await assert.rejects(() => ports.request(request, context), /coding-worker-closure-unavailable/);
+    assert.equal(existsSync(workerCwd), true, "ambiguous work remains beside the held owner for recovery");
+    assert.equal(workerCalls, 3);
+    await assert.rejects(() => ports.request(request), /coding-worker-request-contract-invalid/);
+    await assert.rejects(() => ports.request({ ...request, allowedTools: ["paid_lookup"] }, context), /contract-invalid/);
+    assert.equal(workerCalls, 3);
+    const pin = { ...request.pin, suiteHash: canarySuiteDigest([CODING_ITEM]) };
+    assert.equal((await ports.admit(pin, request.signal)).state, "admitted");
+    assert.equal((await ports.admit({ ...pin, billing: "api" }, request.signal)).state, "refused");
+    assert.equal((await ports.admit({ ...pin, route: "cash" }, request.signal)).state, "refused");
+    assert.equal((await codingWorkerRequestPorts({ ...config, overflow: "api_key" }, root, worker)
+      .admit(pin, request.signal)).state, "refused");
+    assert.equal(workerCalls, 3);
+    const retained = readdirSync(root);
+    await assert.rejects(() => codingWorkerRequestPorts({ ...config, installRoot: join(root, "missing-install") }, root, worker)
+      .request(request, context), /ENOENT/);
+    assert.deepEqual(readdirSync(root), retained, "a pre-spawn settings failure leaves no disposable workspace");
+    assert.equal(workerCalls, 3);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("native replay entry composes worker identity, coding scorer, existing owner and canonical ledger", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-canary-native-entry-"));
+  const data = fixture(root), events: string[] = [];
+  const config = { root, installRoot: REPO_ROOT, claudeBin: "unused-unit-worker" };
+  const workerId = "019f5ab2-4420-4ea0-993f-470a56362e04";
+  const plan = buildCanarySchedule("2026-11-03", "native-entry-control", [CODING_ITEM],
+    [{ ...data.pin, route: "claude" }]);
+  const before = structuredClone(plan);
+  const corpusPath = join(root, "corpus.json"), requestPath = join(root, "native.json");
+  const request = { version: "model-canary-coding-native-v1", corpusDigest: privateCorpusMetadata(data.corpus)!.digest,
+    cases: [CODING_ITEM], plan, seed: "native-entry-control", released: true,
+    eligibility: { sourceAdopted: true, adapterQualified: true, productionBusy: false,
+      squeeze: false, spareSubscription: true, experimentalCashAllowed: false, premium: false } };
+  writeFileSync(corpusPath, JSON.stringify(data.bundle), { mode: 0o600 });
+  writeFileSync(requestPath, JSON.stringify(request), { mode: 0o600 });
+  mkdirSync(join(root, "state"), { mode: 0o700 });
+  let workerCalls = 0;
+  const worker: CodingWorker = async args => {
+    workerCalls++;
+    assert.deepEqual(args.tools, []); assert.deepEqual(args.cashTools, []);
+    assert.equal(args.permissionMode, "dontAsk"); assert.equal(args.maxTurns, 1);
+    assert.equal(args.mountProvider, "claude");
+    assert.equal(args.model, data.pin.model); assert.equal(args.effort, data.pin.effort);
+    assert.equal(existsSync(join(args.cwd, ".git")), false);
+    assert.ok(args.cwd.startsWith(data.ownerDir + "/coding-request-"));
+    assert.ok(args.settingsFile.startsWith(args.cwd + "/"));
+    assert.equal(args.prompt.includes("expectedStdout"), false);
+    assert.equal(args.prompt.includes(data.ownerDir), false);
+    return { text: JSON.stringify({ source: "/* source-unit worker fixture */" }),
+      isError: false, apiError: false, exit: { kind: "exit", code: 0 },
+      workerDurationMs: 7, workerFirstTextMs: 2, tokens: { input: 10, output: 3, cacheRead: 0, cacheCreation: 0 },
+      tokenUsageState: "observed", servedModel: null,
+      executionEvidence: workerExecutionEvidence(workerId, { provider: "claude", childEnvKeys: [],
+        model: data.pin.model, servedModel: null, isError: false,
+        tokens: { input: 10, output: 3, cacheRead: 0, cacheCreation: 0 } }) };
+  };
+  const internal = { workerRuntime: async () => ({ config, worker }),
+    codingPortFactory: (slot: CanarySlot, owner: CanarySlotOwner) => simulatedCodingPort(owner, events, slot) };
+  data.owner.close();
+  try {
+    const argv = ["replay-private", corpusPath, requestPath, data.ownerDir];
+    const outcome = await replayPrivateCli(argv, internal);
+    assert.equal(outcome.state, "finished");
+    assert.ok("completed" in outcome);
+    assert.equal(outcome.completed, 1);
+    assert.equal(workerCalls, 1);
+    const rows = readFileSync(ledgerPathFor(config), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].task_id, "MODEL-CANARY-CODING");
+    assert.equal(rows[0].passed, true);
+    assert.equal(rows[0].worker_spawn_attempt_id, workerId);
+    assert.notEqual(rows[0].canary_attempt_id, workerId);
+    assert.ok(rows[0].host_execution_id);
+    assert.deepEqual(plan, before);
+    assert.equal(readdirSync(data.ownerDir).some(name => name.startsWith("coding-request-")), false);
+    const db = new DatabaseSync(join(data.ownerDir, "model-canary-slots.sqlite"), { readOnly: true });
+    try {
+      const stored = db.prepare("SELECT phase,receipt FROM canary_slots_v1 WHERE id=?").get(plan.slots[0]!.id);
+      assert.equal(stored!.phase, "terminal");
+      const run = JSON.parse(String(stored!.receipt)).run;
+      assert.equal(run.attempts[0].servedModel, null);
+      assert.equal(run.verified, true);
+    } finally { db.close(); }
+    const duplicate = await replayPrivateCli(argv, internal);
+    assert.ok("completed" in duplicate);
+    assert.equal(duplicate.completed, 0);
+    assert.equal(workerCalls, 1, "existing owner prevents a duplicate worker and native host execution");
+    request.seed = "changed-seed";
+    writeFileSync(requestPath, JSON.stringify(request), { mode: 0o600 });
+    await assert.rejects(() => replayPrivateCli(argv, internal), /coding-native-prepared-schedule-changed/);
+    assert.equal(workerCalls, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("W1-T10957: default coding composition defers before eligibility, claim, admission, or request without a native profile", async () => {

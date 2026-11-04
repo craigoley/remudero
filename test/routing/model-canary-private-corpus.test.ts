@@ -14,6 +14,8 @@ import { buildPrivateCanaryRequest, privateCorpusCaseMatches, privateCorpusCodin
   canonicalPrivateCanaryJson, snapshotPrivateCanaryJson, gradeStoredPrivateCase, type PrivateCanaryBundleV1, type PrivateCanaryCaseV1,
   type PrivateCanaryPayloadV1 } from "#src/lib/model-canary-private-corpus.js";
 import { commonCanarySuite, gradeCanary, weeklyCanarySuite, canaryTools } from "#src/lib/model-canary-suite.js";
+import { rotatingCanarySuite } from "#src/lib/model-canary-rotation.js";
+import { executeCodingCandidate, parseCodingCandidate, scoreCodingControl, syntheticCodingFixture } from "#src/lib/model-canary-coding.js";
 
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 function canonical(value: unknown): string {
@@ -93,6 +95,32 @@ test("private corpus projects coding input while keeping its oracle in app-owned
   assert.equal(privateCorpusCaseMatches(result.corpus, coding), true);
   assert.equal(privateCorpusCodingFixture(result.corpus, coding.id)?.digest.length, 64);
   assert.equal(gradeStoredPrivateCase(result.corpus, coding.id, "{}", [] ).state, "unavailable");
+});
+
+test("validated rotated coding fixtures bind the task instance and reject an anchor result", async () => {
+  const coding = rotatingCanarySuite("2026-11-03", "a".repeat(64)).cases.find(value => value.family === "coding")!;
+  const source: PrivateCanaryCaseV1 = { item: coding,
+    provenance: { sourceFamilyId: "rotated-coding", incidentRootId: "rotated-root", sourceDigest: digest("rotated-source"),
+      observedAt: "2026-11-03T00:00:00.000Z", splitId: "dev-2026w45", split: "development", role: "coder" },
+    expectedToolTrace: [], scorerVersion: "coding-control-v1" };
+  const validated = validatePrivateCorpus(bundle([source]));
+  if (validated.state !== "available") assert.fail("rotated coding corpus unavailable");
+  const fixture = privateCorpusCodingFixture(validated.corpus, coding.id)!;
+  assert.equal(fixture.caseId, coding.id);
+  const anchor = syntheticCodingFixture(coding.codingControl!.seed);
+  assert.notEqual(fixture.caseId, anchor.caseId);
+  assert.equal(fixture.digest, anchor.digest);
+  assert.equal(fixture.expectedStdout, anchor.expectedStdout);
+  const responseText = JSON.stringify({ source: "/* pre-host binding control */" });
+  const binding = { caseId: coding.id, suiteHash: canarySuiteDigest([coding]),
+    runId: "572f08c0-7ed1-4a89-a5ef-40b5cd4e4fbe", canaryAttemptId: "a16d15b1-5644-4a7e-b68a-58d454cc4ab1",
+    workerSpawnAttemptId: "019f5ab2-4420-4ea0-993f-470a56362e04",
+    codingExecutionAttemptId: "74353ef1-5ea2-4a81-930f-cb31399f5e3c", slotId: "e".repeat(64),
+    sourceDigest: parseCodingCandidate(responseText).sourceDigest };
+  const refused = await executeCodingCandidate({ binding, fixture, responseText,
+    authority: null, signal: new AbortController().signal });
+  assert.equal(scoreCodingControl(fixture, refused).reason, "native-backend-unavailable");
+  assert.equal(scoreCodingControl(anchor, refused).reason, "coding-case-binding-mismatch");
 });
 
 test("private corpus preserves family provenance without exposing source material", () => {

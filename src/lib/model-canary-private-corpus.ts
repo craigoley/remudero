@@ -300,7 +300,7 @@ function normalizeCase(raw: unknown, split: PrivateCanarySplit): PrivateScorerCa
       || control.seed.length < 1 || control.seed.length > 256 || Object.keys(itemSnapshot.expected).length !== 0
       || itemSnapshot.tools !== "none" || expectedToolTrace.length !== 0)
       fail("private-corpus-coding-case-invalid");
-    codingFixture = syntheticCodingFixture(control.seed);
+    codingFixture = syntheticCodingFixture(control.seed, itemSnapshot.id);
     if (itemSnapshot.prompt !== codingFixture.prompt) fail("private-corpus-coding-case-invalid");
   } else {
     if (safe.scorerVersion !== "exact-json-and-application-trace-v1" || itemSnapshot.codingControl !== undefined)
