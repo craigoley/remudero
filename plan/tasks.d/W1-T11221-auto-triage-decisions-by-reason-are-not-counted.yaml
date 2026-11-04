@@ -1,0 +1,45 @@
+- id: W1-T11221
+  title: "NOTHING COUNTS AUTO-TRIAGE DECISIONS BY REASON — the measured triage rate (about 8 status changes a day, one day 0) is a third of the maxPerDay 24 cap, and the binding refusal class (lock-held, run_failed, governor withheld lane, fire with no outcome) can only be separated from the host ledger union, so add a read-only report that counts decideAutoTriage outcomes per reason per day with a freshness control"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#triage-throughput-backlog-20261103"
+  plan_refs: [W1-T9853, W1-T4769, W1-T318, W1-T2289, W1-T10046]
+  files: [src/lib/auto-triage-report.ts, src/run-task.ts, test/ledger/auto-triage-decisions-by-reason.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Rule 19 / #588: one CLI-to-ledger-report invariant requires the caller, report and fixture test together; risk is high for span, not dangerous behaviour.
+    Feedback triage-throughput-backlog-20261103 (an agent finding, not an operator ruling) observed 157 new entries of
+    611, the oldest new dated 2026-10-22, and status changes per day 10-27..11-03 of about 8, 12, 9, 11, 0, 6, 8, 5
+    against a cap of 24 a day at a 15 minute floor. What binds is INFERRED, not measured. Ask 2 (fix the dominant
+    refusal class) cannot be chosen without that count, so this task makes the measurement and files nothing else.
+    Ask 3 (reconsider strict oldest-first for operator-directed entries) is a policy change and is left to the
+    operator after the count. Do not raise maxPerDay: it is a spend bound.
+  design: |
+    1. auto-triage-report.ts: a pure function over ledger union rows (readLedgerUnionRecordsSync, step-filtered as
+       W1-T4203 does) that counts auto_triage.* rows and decideAutoTriage refusal reasons by reason string per UTC
+       day over a given window, plus rows for fired runs that have no later pr.opened, grill_opened or verdict row.
+    2. Positive control: the report prints the newest row ts in the window and the count of rotations read, and
+       exits non-zero when the newest ts is older than a stated staleness bound, so a stale read cannot pass as a
+       zero count.
+    3. A read-only CLI verb in src/run-task.ts calls reportAutoTriageDecisions(). It writes nothing to the ledger or plan.
+  acceptance:
+    - claim: "one end-to-end CLI fixture test exercises the real report over a seeded ledger union: distinct per-day refusal counts, unmatched fires and rotation counts reach CLI output, a stale newest timestamp causes non-zero exit, and ledger and plan remain unchanged; neither the CLI nor the report alone satisfies this invariant"
+      proof: "unit test: test/ledger/auto-triage-decisions-by-reason.test.ts"
+    - claim: "the existing CLI entry point calls the new report"
+      proof: "grep: reportAutoTriageDecisions( in src/run-task.ts"
+    - claim: "the report names a freshness control"
+      proof: "grep: newestRowTs in src/lib/auto-triage-report.ts"
+  falsifier: |
+    Feed the report a window whose newest row is days old and it still exits zero with counts, or a window with
+    refusals of two reasons and it merges them into one bucket.
+  note: |
+    EFFECT, measured after merge: run once on the host over 10-27..11-03; the dominant reason becomes a named
+    string and a follow-up task fixes that class.

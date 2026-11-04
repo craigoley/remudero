@@ -1,0 +1,38 @@
+- id: W1-T11274
+  title: Once W1-T11129 makes cpuPsiLowPct the review width's hysteresis band, plan/policy.yaml sets that row for its new meaning so the operator's 2026-11-03 recovery ruling is not silently reread as a 15-point band
+  repo: remudero
+  depends_on:
+    - W1-T11129
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one policy row's value and a test pinning what it means; the governor's logic is W1-T11129's
+  origin: operator-session#review-throughput-2026-11-03
+  plan_refs:
+    - W1-T11129
+  files:
+    - plan/policy.yaml
+    - test/review/the-review-cpu-band-keeps-the-ruled-recovery-point.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: With W1-T11129 merged, the shipped sweep.reviewCapacity rows give a review width that recovers to base when cpu full PSI is at or below the operator's ruled 15 under the learned calm line and still sheds above W1-T11129's shrink point; the row's comment names the ruling and the meaning it now carries
+      proof: "unit test: test/review/the-review-cpu-band-keeps-the-ruled-recovery-point.test.ts"
+    - claim: The policy row cites this task
+      proof: "grep: W1-T11274 in plan/policy.yaml"
+  rationale: |
+    OBSERVED 2026-11-03:
+    - The operator ruled "Raise 5 → 15" for sweep.reviewCapacity.cpuPsiLowPct, the recovery watermark (#16617). At the time, width shed at cpuPsiHighPct 20 and recovered only at or below 5, holding at 1 for 182 of 357 min.
+    - W1-T11129 (code PR #16523, in a fix round) retires cpuPsiHighPct. It makes cpuPsiLowPct both the calm line's floor and the hysteresis band: a shrink only when full > calmLine + cpuPsiLowPct.
+    - If #16523 lands after #16617, the shed point moves to the learned calm line + 15 and the hold band widens, without any record of the change.
+    - Operator ruling 2026-11-03 on that collision: "Keep #16617, flag #16523". This task is that flag.
+  design: |
+    After W1-T11129 merges, read its governor and set sweep.reviewCapacity's rows so the shipped values keep the ruling's intent: recovery when full PSI is <= 15 relative to the learned calm line.
+    Pick the band value W1-T11129's shrink point needs, say both in the row's comment with the ruling, and pin them with a test over the shipped policy and W1-T11129's width function.
+    If W1-T11129's merged design makes the intent unexpressible, stop and escalate with the numbers instead of choosing.
+    NOT IN SCOPE: W1-T11129's governor logic.
+  note: |
+    reservation hand-off: run-unfiled-1793732872741 -> run-unfiled-1793732872741
+    Reserved with rmd next-task-id (W1-T11274 on run-unfiled-1793732872741). Filed on the operator's 2026-11-03 ruling for the #16617 / #16523 collision.

@@ -200,7 +200,11 @@ test("W1-T11172 criterion 2: clean local merge and byte-proven take-main use the
     const main = local.git("rev-parse", "HEAD");
     const p = pr(1, { headSha: head, mergeConflict: redundant ? { files: [{ path: "a.ts", oursDeleted: 1, theirsDeleted: 1 }],
       oursLog: "branch", theirsLog: "main", redundantRefix: { compared: "bytes", verdict: "main-byte-identical", comparedPaths: ["a.ts"] } } : undefined });
-    const result = await withLiveWritesAllowed(() => regenerateConflictViaGit(local.dir, join(local.dir, "resolution"), p, main));
+    const result = await withLiveWritesAllowed(() => runConflictGardenTier(p, "deterministic", main, {
+      runId: "garden", ledgerPath: "unused", readLedger: () => [],
+      dispatchFix: () => assert.fail("deterministic repair must not dispatch a worker"),
+      regenerateConflict: (target, tip) => regenerateConflictViaGit(local.dir, join(local.dir, "resolution"), target, tip),
+    }));
     assert.equal(result.outcome, "pushed", result.reason);
     assert.equal(origin.git("rev-parse", "run-W1-T1-123"), result.newHeadSha);
     assert.equal(origin.git("rev-parse", `${result.newHeadSha}^1`), head);
