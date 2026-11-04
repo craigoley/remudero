@@ -661,7 +661,12 @@ sweep:
     healthyWindowSamples: { value: 3, origin: "net-new", min: 2, max: 12 }
     sampleCadenceMs: { value: 60000, origin: "net-new", min: 10000, max: 600000 }
     telemetryCadenceMs: { value: 300000, origin: "net-new", min: 60000, max: 3600000 }
-    cpuPsiLowPct: { value: 5, origin: "net-new", min: 0, max: 50 }
+    # Operator ruling 2026-11-03: the recovery watermark is 15, not 5. Over 6 h on the Azure host, cpu
+    # `full` avg10 read <=5 in 8 of 43 review.capacity samples, 5-20 in 24 and >=20 in 11, so a width
+    # shed to 1 held there for 182 of 357 min with up to 16 green PRs queued. 15 keeps 5 points of
+    # hysteresis under the 20 shed mark. Read once per process (REVIEW_POLICY in sweep.ts), so it
+    # reaches the daemon when its install carries this commit and the daemon next starts.
+    cpuPsiLowPct: { value: 15, origin: "net-new", min: 0, max: 50 }
     cpuPsiHighPct: { value: 20, origin: "net-new", min: 1, max: 100 }
     memoryPsiLowPct: { value: 5, origin: "net-new", min: 0, max: 50 }
     memoryPsiHighPct: { value: 15, origin: "net-new", min: 1, max: 100 }

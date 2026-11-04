@@ -1,0 +1,42 @@
+- id: W1-T11285
+  title: A push from a managed worktree measures its census suites in the proof sandbox, reader calibration included, instead of every suite reading "source-reader runtime calibration is unavailable" and being skipped until CI
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # hooks/pre-push is an instrument path every push runs; the change only lets an existing check run (adds measurement, loosens nothing)
+  band_meaning: blast-radius
+  origin: operator-session#review-throughput-2026-11-03
+  plan_refs:
+    - W1-T10253
+    - W1-T6138
+    - W1-T3225
+  files:
+    - hooks/pre-push
+    - test/github/a-managed-worktree-push-measures-its-reader-suites.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: In hooks/pre-push's managed-worktree arm (gate root is not the pushed tree), a census suite carrying a readerRuntimePolicy runs its calibration and qualification through createPrePushSandboxRunner's sandboxed child, and its pass or failure reaches census-precheck's verdict; a suite whose sandbox cannot start still reads "skipped, NOT passed (CI runs it)"
+      proof: "unit test: test/github/a-managed-worktree-push-measures-its-reader-suites.test.ts"
+    - claim: The managed-worktree arm no longer refuses every reader-calibrated suite outright, pinned by a test that drives hooks/pre-push's own runSuites body
+      proof: "grep: W1-T11285 criterion 2 in test/github/a-managed-worktree-push-measures-its-reader-suites.test.ts"
+  rationale: |
+    OBSERVED 2026-11-03 on the Azure host, which has bwrap (/usr/bin/bwrap):
+    - Every push from this session's hand-build worktrees printed "census-precheck: census suites NOT MEASURED - <file>: source-reader runtime calibration is unavailable in the managed-worktree proof sandbox". That covers the run-W1-T11210 pushes at 16:26Z (3348849ff) and 22:3xZ (a406bf2c3), and it lists all 64 admitted census suites.
+    - The cause is in hooks/pre-push's managed-worktree arm. runSuites throws that exact error whenever readerRuntimePolicy !== undefined, before it builds the sandbox. scripts/census-precheck.mjs attaches a readerRuntimePolicy to every structural census suite, so no suite is measured at pre-push from a managed worktree.
+    - Their reds surface first in CI, a round later.
+    - W1-T10253's record names this as its SECOND BLOCKER beside bwrap: 13 of 52 push logs, 10-14..10-20. It was retired on 2026-10-21 when bwrap was installed, which addressed only the first blocker.
+  design: |
+    In the managed-worktree arm, pass readerRuntimePolicy through to m.runCensusSuitesViaChild with the same sandboxed run (createPrePushSandboxRunner) the non-reader path uses, so census-precheck's calibration and qualification runs (one file at a time, its readContext check) execute inside the sandbox.
+    If runCensusSuitesViaChild does not accept the policy, extend it in the narrowest way census-precheck.mjs already supports. If that needs scripts/census-precheck.mjs, stop and report so the filing can add it.
+    A sandbox that cannot start keeps today's "skipped, NOT passed (CI runs it)" exit-2 path.
+    Mark the change with a comment naming W1-T11285. The second criterion's test (titled with "W1-T11285 criterion 2") extracts or drives hooks/pre-push's managed-worktree runSuites and asserts a reader-policy suite reaches the sandboxed child.
+    NOT IN SCOPE: the own-tree arm, which already measures, and the census suites themselves.
+  note: |
+    reservation hand-off: run-unfiled-1793745587783 -> run-unfiled-1793745587783
+    Reserved with rmd next-task-id (W1-T11285 on run-unfiled-1793745587783). From the operator session's hand-build pushes.
+    An instrument-path edit: it only enables an existing check, which the 2026-10-30 judged-grant ruling ("purely adds or tightens") is meant to admit.

@@ -288,7 +288,11 @@ test("W1-T7756 production: both registered gardens use the bounded corpus withou
       await pass();
     }
     assert.equal(logs.filter(step => step === flow.ADMISSION_FLOW_STEP).length, 2);
-    assert.equal(shim.calls().length, 2); assert.ok(shim.calls().every(call => call.startsWith("api graphql") && !/mutation|--method|-X/.test(call)));
+    const calls = shim.calls();
+    assert.equal(calls.length, 3, "flow adds one batched open-queue census beside the two admission reads");
+    assert.equal(calls.filter(call => call.includes("pullRequests(states:OPEN,first:100")).length, 1,
+      "the queue census stays one GraphQL read, not one read per PR");
+    assert.ok(calls.every(call => call.startsWith("api graphql") && !/mutation|--method|-X/.test(call)));
     assert.equal(logs.some(step => step === "admission_flow.proposal_shadow"), false);
   } finally { process.env.PATH = prior; }
 });
