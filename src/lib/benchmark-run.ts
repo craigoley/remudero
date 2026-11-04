@@ -458,6 +458,9 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
     ...(result.provider === "cash" && Object.hasOwn(OPENWEIGHT_TEMPERATURE, fields.model)
       ? { sampling_pin: { deployment: fields.model, temperature: OPENWEIGHT_TEMPERATURE[fields.model] ?? null } } : {}),
     ...(result.openWeightCapacityShortfall ? { capacity_shortfall: true } : {}),
+    // W1-T10877: every producer (implement/fix via recordBenchmarkWorkerAttempt, dispatch fallbacks, non-dispatch
+    // spawns) carries the terminal evidence the snapshot's budget-refusal and per-minute-fit cells read.
+    terminal_evidence: nonDispatchTerminalEvidence(result),
     // W1-T10877: the typed class of a returned model failure, so attribution reads reply-<class> without parsing stderr.
     ...(result.openWeightErrorClass ? { error_class: result.openWeightErrorClass } : {}),
     // W1-T10877: a signal-killed call is an infrastructure kill, not attributable; its exit must reach the receipt.

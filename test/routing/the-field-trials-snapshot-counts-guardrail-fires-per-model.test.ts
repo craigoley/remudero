@@ -596,3 +596,29 @@ test("W1-T10877: a truncated cash reply is a truncation fire through the real ad
     guardrailClass: "output-cap-truncation-check", opportunities: 2, fires: 1 },
     "a complete and a length-truncated cash reply are two opportunities and one truncation fire");
 });
+
+test("W1-T10877: a dispatched implement attempt's cash budget refusal is counted from its production receipt fields", () => {
+  // recordBenchmarkWorkerAttempt (src/run-task.ts) writes an implement/fix receipt as the success flag plus
+  // benchmarkWorkerAttemptResources(result) and nothing else; it never adds terminal_evidence itself. So the
+  // budget and per-minute-fit cells exist for that lane only if the shared resource fields carry the evidence.
+  const model = "DeepSeek-V4-Flash";
+  const shortfall = { reason: "capacity_shortfall" as const, deployment: model, estimatedTokens: 90_000, limitTokens: 60_000 };
+  const results: WorkerResult[] = [
+    cashResult("d1", model),
+    cashResult("d2", model, { budgetRefused: true, isError: true, subtype: "cash_allowance_exhausted" }),
+    cashResult("d3", model, { isError: true, subtype: "openweight_error", openWeightCapacityShortfall: shortfall }),
+    cashResult("d4", model, { paid: 0, budgetRefused: true, isError: true, subtype: "cash_allowance_exhausted" }),
+  ];
+  const rows = results.flatMap(result => [dispatched(result.sessionId, model), attempt(result.sessionId, {
+    ...(result.isError || result.apiError || result.usageRefusal ? { success: false } : { success: true }),
+    ...benchmarkWorkerAttemptResources(result) })]);
+  const evidence = rows.filter(row => row.step === "worker.attempt").map(row => (row.terminal_evidence as
+    { allowanceRefused?: { state: string; value?: boolean } } | undefined)?.allowanceRefused);
+  assert.deepEqual(evidence.map(e => e?.value), [false, true, false, true], "every receipt carries the observed allowance");
+  const guardrails = snapshotOf(rows).families.guardrails;
+  const at = (guardrailClass: string) => guardrails[`${model}|repository-change|${guardrailClass}`]?.cells;
+  assert.deepEqual(at("per-lane-budget-cap"), { modelId: model, category: "repository-change",
+    guardrailClass: "per-lane-budget-cap", opportunities: 3, fires: 1 }, "a paid implement call refused by its allowance fires");
+  assert.deepEqual(at("context-and-rate-fit"), { modelId: model, category: "repository-change",
+    guardrailClass: "context-and-rate-fit", opportunities: 3, fires: 1 }, "a per-minute shortfall on an implement call fires");
+});
