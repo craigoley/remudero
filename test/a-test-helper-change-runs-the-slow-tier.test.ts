@@ -116,6 +116,7 @@ function slowShard(files: string[], stubNode?: string) {
     files,
     {
       "${{ matrix.shard }}": "1",
+      "${{ needs.test-slow-plan.outputs.count }}": "2",
       "${{ steps.plan-reading.outputs.established }}": plan.outputs.established ?? "",
       "${{ steps.plan-reading.outputs.class }}": plan.outputs.class ?? "",
     },
