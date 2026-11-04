@@ -1,0 +1,41 @@
+- id: W1-T11325
+  title: The JSON status read takes its four git ref reads at command entry, before local derivation, so a busy host still reports dispatch claims, the shared pause and run branches instead of "deadline" for reads that cost about 200 ms each
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # when four bounded remote-ref reads run inside one command; their results, error recording and the 30 s budget are unchanged
+  origin: operator-session#recycle-and-status-2026-11-04
+  plan_refs:
+    - W1-T11280
+    - W1-T4208
+  files:
+    - src/lib/report-commands.ts
+    - test/deploy/a-status-json-reads-its-refs-before-it-derives.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: In --json mode statusCommand resolves originMainSha, the pushed run branches, the shared pause state and the dispatch claims once at command entry, before buildBoard's local derivation, and buildBoard receives those memoized answers; with local derivation slower than the budget the four reads still report their real values, a failing read still records its own reason, and the non-JSON path is unchanged
+      proof: "unit test: test/deploy/a-status-json-reads-its-refs-before-it-derives.test.ts"
+    - claim: The status ref prefetch names this task
+      proof: "grep: W1-T11325 in src/lib/report-commands.ts"
+  rationale: |
+    OBSERVED 2026-11-04 on the Azure host (load 11-13 on 8 cores), from the daemon install checkout:
+    - `RMD_SELF_SYNC_DONE=1 ./bin/rmd status --json` at 14:02Z reported externalReads lifecycle, originMainSha, dispatchClaims, sharedPause and runBranches all "unavailable: deadline". The queue head read "GitHub gateway unreachable (transport); run-branch lookup unavailable before the status JSON deadline", and the SHARED_PAUSE latch read "cannot reach origin … holding rather than dispatching".
+    - The same reads by hand from that checkout took 213 ms (refs/heads/main), 222 ms (refs/rmd-pause/*), 180 ms (refs/rmd-dispatch/*, 8 refs) and 184 ms (refs/heads/run-*, 469 refs). All 23,147 refs took 215 ms.
+    - A second status run at 14:04Z took 46,454 ms of wall time. lifecycle and originMainSha resolved; dispatchClaims, sharedPause and runBranches again read "deadline", and the first stderr line came at 34,451 ms.
+    - statusCommand starts one shared external-read deadline (STATUS_JSON_DEADLINE_MS 30,000 minus a 5,000 reserve) at command entry. The four readers in jsonRemoteReads are closures that buildBoard calls only after its local ledger and plan derivation, so on a loaded host the cheap ref reads find no budget left.
+    - Operator briefs treat those unavailable reads as UNKNOWN and stop, so a busy host stops the operator's own workflow.
+  design: |
+    In statusCommand's JSON branch:
+    - Call each jsonRemoteReads reader once for repoDir immediately after config load, and cache the result by dir.
+    - Pass buildBoard wrappers that return the cached answer for that dir, or call through for any other dir.
+    - Keep recordError, the "deadline" classification and the 30 s budget exactly as they are.
+    Mark the prefetch with a comment naming W1-T11325. Before building, check W1-T11280's branch for hunks in statusCommand; both edit it.
+    NOT IN SCOPE: the board's GitHub fetch (W1-T11280), the budget's size, the non-JSON path.
+  note: |
+    reservation hand-off: run-unfiled-1793801339784 -> run-unfiled-1793801339784
+    Reserved with rmd next-task-id (W1-T11325 on run-unfiled-1793801339784). From the operator session's 2026-11-04 status recon.
