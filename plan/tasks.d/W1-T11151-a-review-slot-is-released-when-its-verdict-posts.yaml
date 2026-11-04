@@ -20,6 +20,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts
+    - "src/cli/commands/sweep.ts"
   status: queued
   attempts: 0
   acceptance:

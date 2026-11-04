@@ -29,21 +29,21 @@ raw: >-
   risk, and (4) records the draft-to-id mapping on the draft. A draft that fails
   lint returns to the submitter with the linter's own text, never silently
   dropped. Reuse the CiLearningShardDraft landing path in
-  src/lib/feedback-landing.ts (it already mints and lands machine drafts)
-  rather than a second filer.
+  src/lib/feedback-landing.ts (it already mints and lands machine drafts) rather
+  than a second filer.
 
   SUCCESS MEASURE (pre-registered): over the 14 days after merge, the share of
-  commits touching plan/tasks.d authored by the fleet rises from 310 of 442 (70%,
-  10-27..11-03) to at least 90%, with no rise in task-id-existence reds.
-  Rollback: revert the lane; hand filing keeps working throughout.
-  Ground against every open PR head and the feedback landing code before
-  filing.
+  commits touching plan/tasks.d authored by the fleet rises from 310 of 442
+  (70%, 10-27..11-03) to at least 90%, with no rise in task-id-existence reds.
+  Rollback: revert the lane; hand filing keeps working throughout. Ground
+  against every open PR head and the feedback landing code before filing.
 attachments: []
 origin: cli
-status: new
+status: grilling
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: operator-direction:session-draft-filing-lane:20261103
 thread_id: null
+answered_by: null

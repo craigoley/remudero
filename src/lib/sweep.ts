@@ -169,6 +169,7 @@ import {
   TASK_ID_TRAILER_RE,
 } from "./status.js";
 import type { CreditBackfillReceipt, CreditStore } from "./status.js";
+import { createLiveLedgerTail, type LiveLedgerTail } from "./live-ledger-tail.js";
 import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
 import {
   costAnomalyIncidentEvent,
@@ -1903,9 +1904,14 @@ export function rebaseDirtyFleetBranchViaGit(
   }
 }
 
+/** W1-T11167: "regenerable" resolves registry-only conflicts (W1-T9578); "clean-merge" commits git's own clean merge. */
+export type ConflictRegenerationMode = "regenerable" | "clean-merge";
+
 export interface ConflictRegenerationOutcome {
   outcome: "pushed" | "fell-through" | "lease-mismatch" | "error";
   paths: Array<{ path: string; action: string }>;
+  /** W1-T11167: the rename pairs between the merge base and main on paths the head changed. */
+  renames?: Array<{ from: string; to: string }>;
   newHeadSha?: string;
   reason?: string;
   cleanupError?: string;
@@ -1997,13 +2003,16 @@ export async function regenerateConflictViaGit(
   mainSha: string,
   deps: Pick<BuildSweepEffectsDeps, "worktreeRemoveImpl"> & {
     git?: (cwd: string, args: readonly string[]) => string | Promise<string>;
+    mode?: ConflictRegenerationMode;
   } = {},
 ): Promise<ConflictRegenerationOutcome> {
+  const cleanMerge = deps.mode === "clean-merge";
   const run = async (cwd: string, args: readonly string[]) => {
     if (deps.git) return deps.git(cwd, args);
     return hostWorktreeGitAsync(cwd, args, { maxBuffer: 1 << 24 });
   };
   const paths: ConflictRegenerationOutcome["paths"] = [];
+  let followed: ConflictRegenerationOutcome["renames"];
   let created = false;
   const result = await (async (): Promise<ConflictRegenerationOutcome> => {
     try {
@@ -2029,7 +2038,37 @@ export async function regenerateConflictViaGit(
       }
       const unmerged = [...new Set((await run(worktreePath, ["ls-files", "-u", "-z"])).split("\0")
         .filter(Boolean).map(entry => entry.slice(entry.indexOf("\t") + 1)))];
-      if (unmerged.length === 0) {
+      if (cleanMerge) {
+        // W1-T11167: git's own merge must already be the whole resolution: it exited 0, left nothing unmerged and
+        // staged exactly the tree merge-tree computes for this head and main. Anything else is a conflict for a worker.
+        const merged = unmerged.length === 0 && mergeError === undefined
+          ? (await run(worktreePath, ["write-tree"])).trim() : undefined;
+        const expected = merged === undefined ? undefined
+          : (await run(worktreePath, ["merge-tree", "--write-tree", "--name-only", "--no-messages", pr.headSha, mainSha]))
+            .split("\n")[0]!.trim();
+        if (merged === undefined || merged !== expected) {
+          await run(worktreePath, ["merge", "--abort"]);
+          return { outcome: "fell-through", paths, reason: unmerged.length > 0
+            ? `the local merge left unmerged paths: ${unmerged.join(", ")}`
+            : mergeError ?? `the staged merge ${merged} is not git's merge-tree result ${expected}` };
+        }
+        const base = (await run(worktreePath, ["merge-base", pr.headSha, mainSha])).trim();
+        const touched = new Set((await run(worktreePath, ["diff", "--name-only", "-z", base, pr.headSha]))
+          .split("\0").filter(Boolean));
+        const fields = (await run(worktreePath, ["diff", "--name-status", "-M", "-z", base, mainSha])).split("\0");
+        const renames: Array<{ from: string; to: string }> = [];
+        // Walk whole -z records (status, path, and a second path for R/C): a path such as README.md
+        // must never be read as a status, or it consumes the real rename record after it.
+        for (let at = 0; at < fields.length;) {
+          const status = fields[at++]!;
+          if (status === "") continue;
+          const from = fields[at++]!;
+          if (!/^[RC]/.test(status)) continue;
+          const to = fields[at++]!;
+          if (status.startsWith("R") && touched.has(from)) renames.push({ from, to });
+        }
+        followed = renames;
+      } else if (unmerged.length === 0) {
         return { outcome: "error", paths, reason: mergeError === undefined
           ? "probe conflict no longer has unmerged paths" : mergeError };
       }
@@ -2097,8 +2136,9 @@ export async function regenerateConflictViaGit(
       if (unexpected.length > 0) {
         return { outcome: "error", paths, reason: `generator left unstaged edits: ${unexpected.join(", ")}` };
       }
-      await run(worktreePath, ["commit", "-m", "fix(sweep): regenerate merge-conflicted artifacts",
-        "-m", `Remudero-Task: ${pr.taskId}`]);
+      await run(worktreePath, ["commit", "-m", cleanMerge
+        ? "fix(sweep): merge main where GitHub's merge reports a conflict git does not"
+        : "fix(sweep): regenerate merge-conflicted artifacts", "-m", `Remudero-Task: ${pr.taskId}`]);
       const newHeadSha = (await run(worktreePath, ["rev-parse", "HEAD"])).trim();
       const observed = new Map((await run(worktreePath, ["ls-remote", "origin", ref, "refs/heads/main"]))
         .trim().split("\n").map(line => { const [sha, name] = line.split(/\s+/); return [name, sha]; }));
@@ -2134,7 +2174,7 @@ export async function regenerateConflictViaGit(
       result.cleanupError = reason;
     }
   }
-  return result;
+  return followed === undefined ? result : { ...result, renames: followed };
 }
 
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
@@ -4964,9 +5004,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             { worktreeRemoveImpl: worktreeRemoveForBuild },
           ),
 
-    regenerateConflict: (pr, mainSha) => regenerateConflictViaGit(repoDir,
+    regenerateConflict: (pr, mainSha, mode) => regenerateConflictViaGit(repoDir,
       join(worktreesDir(config), `conflict-regenerate-${pr.prNumber}-${nowMsImpl()}`), pr, mainSha,
-      { worktreeRemoveImpl: worktreeRemoveForBuild }),
+      { worktreeRemoveImpl: worktreeRemoveForBuild, ...(mode ? { mode } : {}) }),
 
     // W1-T905 — "repair the instance, FILE THE CLASS". `runSweep` calls this AT MOST ONCE per
     // due surface, best-effort — see `SweepDeps.captureRepairFeedback`'s own doc.
@@ -14522,7 +14562,8 @@ export interface SweepDeps {
    *  through to the existing escalation, preserving human visibility and never clobbering a
    *  branch another writer advanced. */
   rebaseDirtyFleetBranch?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
-  regenerateConflict?: (pr: OpenPrView, mainSha: string) => ConflictRegenerationOutcome | Promise<ConflictRegenerationOutcome>;
+  regenerateConflict?: (pr: OpenPrView, mainSha: string, mode?: ConflictRegenerationMode) =>
+    ConflictRegenerationOutcome | Promise<ConflictRegenerationOutcome>;
   /** W1-T528: task ids with a LIVE in-flight run right now, consulted by
    *  {@link selectUpdateBranchTarget} to skip a head a live worker is still pushing to. Omitted
    *  means an empty set, exactly as if every PR's worker had already finished. */
@@ -14579,7 +14620,7 @@ export interface SweepDeps {
   /** The sweep's run id (e.g. SWEEP-<epochMs> / DAEMON-<epochMs>). */
   runId: string;
   /** Ledger reader (dedup); defaults to readLedgerLines. Injectable for tests. */
-  readLedger?: (path: string) => Array<Record<string, unknown>>;
+  readLedger?: (path: string) => Array<Readonly<Record<string, unknown>>>;
   /** W1-T3471 — bounded archive∪live reader for the arm predicate, consulted only after the
    *  live-file verdict miss. An incomplete result preserves the historical fail-open. */
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined;
@@ -15519,7 +15560,7 @@ async function codeScanningGateForHead(
 }
 
 function priorActionsFromLedger(
-  lines: Array<Record<string, unknown>>,
+  lines: ReadonlyArray<Record<string, unknown>>,
   openPrs?: ReadonlyArray<OpenPrView>,
 ): PriorActions {
   const armed = new Set<string>();
@@ -16467,7 +16508,7 @@ export function isProofAmendmentIdentityRow(line: Record<string, unknown>): bool
  *  trustworthy observation for this task at the current head, so an incomplete history fails closed
  *  rather than manufacturing strike budget. Legacy `fix.review` rows may carry no head. */
 export function fixLedgerRowsForHead(
-  lines: Array<Record<string, unknown>>,
+  lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string | undefined,
   currentHeadSha?: string,
 ): Array<Record<string, unknown>> {
@@ -16518,7 +16559,7 @@ export function fixLedgerRowsForHead(
 
 /** W1-T5542: count outcomes; legacy dispatches without receipts retain the historical cap. */
 export function fixRoundTally(
-  lines: Array<Record<string, unknown>>,
+  lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string | undefined,
   currentHeadSha?: string,
   regime?: "executed" | "keyword_only",
@@ -18301,7 +18342,7 @@ export async function runSweep(
   // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex cannot match a name-bound
   // call, so this marker is documentary only — the enforced corpus and the regex are unchanged.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
-  const readLedger = deps.readLedger ?? readLedgerLines;
+  const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const appendLine = deps.appendLine ?? appendLedger;
   const now = deps.now ? deps.now() : Date.now();
   const repairDemandMark = repairMemoryDemandMark(); // W1-T9706: what this pass did not refuse again, it clears at its end.
@@ -18373,7 +18414,8 @@ export async function runSweep(
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   deps.markPrelude?.("armed_body_guard");
-  const ledgerLines = readLedger(deps.ledgerPath);
+  // W1-T11260: the live tail's rows are shared and read-only; this pass appends its own receipts, so it copies them.
+  const ledgerLines = [...readLedger(deps.ledgerPath)];
   let contractHoldRefreshSpent = false;
   // W1-T10608: at most one design-hold main adoption per pass, so a main fix never fans out update-branch.
   let designMainAdoptionSpent = false;
@@ -18450,7 +18492,7 @@ export async function runSweep(
       return;
     }
     const since = Date.parse(fields.blocker_since);
-    let currentRows = ledgerLines;
+    let currentRows: ReadonlyArray<Readonly<Record<string, unknown>>> = ledgerLines;
     let stageHistoryError: string | undefined;
     try { currentRows = readLedger(deps.ledgerPath); }
     catch (error) {
@@ -22755,8 +22797,15 @@ export async function runSweep(
                 const probe = ledgerLines.findLast(row => row.step === "sweep.merge_probe" &&
                   row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.main_sha === mainTipSha);
                 const conflictPaths = probe?.conflict_paths;
-                if (probe?.verdict === "conflict" && Array.isArray(conflictPaths) && conflictPaths.length > 0 &&
-                    conflictPaths.every(path => typeof path === "string" && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path))) {
+                const regenerable = probe?.verdict === "conflict" && Array.isArray(conflictPaths) && conflictPaths.length > 0 &&
+                  conflictPaths.every(path => typeof path === "string" && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
+                // W1-T11167: GitHub reads this head dirty while git's merge of it is clean. A head this route already
+                // produced is never merged again: GitHub still reading it dirty at the same main is a worker's case.
+                const cleanMerge = !regenerable && probe?.verdict === "clean" && !ledgerLines.some(row =>
+                  row.step === "sweep.conflict_regenerated" && row.mode === "clean-merge" && row.outcome === "pushed" &&
+                  row.pr_number === pr.prNumber && row.new_head_sha === pr.headSha && row.main_sha === mainTipSha);
+                if (regenerable || cleanMerge) {
+                  const mode: ConflictRegenerationMode = cleanMerge ? "clean-merge" : "regenerable";
                   const regenerationKey = `${deps.ledgerPath}:${pr.prNumber}:${pr.headSha}:${mainTipSha}`;
                   if (inFlightConflictRegenerations.has(regenerationKey)) {
                     acted = false;
@@ -22770,10 +22819,12 @@ export async function runSweep(
                     inFlightConflictRegenerations.add(regenerationKey);
                     try {
                       let result: ConflictRegenerationOutcome;
-                      try { result = await deps.regenerateConflict(pr, mainTipSha); }
+                      try { result = await (cleanMerge ? deps.regenerateConflict(pr, mainTipSha, mode) : deps.regenerateConflict(pr, mainTipSha)); }
                       catch (error) { result = { outcome: "error", paths: [], reason: spawnFailureText(error) }; }
                       const written: LedgerLine = { run_id: deps.runId, task_id: pr.taskId, step: "sweep.conflict_regenerated",
-                        pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha,
+                        pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha, mode,
+                        ...(cleanMerge ? { github_mergeable_state: pr.mergeableState ?? pr.mergeState ?? null,
+                          renames: result.renames ?? [] } : {}),
                         new_head_sha: result.newHeadSha ?? null, paths: result.paths, outcome: result.outcome,
                         ...(result.reason ? { reason: result.reason } : {}),
                         ...(result.cleanupError ? { cleanup_error: result.cleanupError } : {}) };
@@ -23980,7 +24031,7 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   try {
     const appendLine = deps.appendLine ?? appendLedger;
     const now = clockFromMillisFn(deps.now).now();
-    const readLedger = () => (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const readLedger = () => (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
     const ledgerLines = timing ? timing.sync("ready_ledger", readLedger) : readLedger();
     const spentHeads = new Set<string>();
     for (const l of ledgerLines) {
@@ -24090,7 +24141,7 @@ export async function runArmedRatchetRejudge(
   const mainTip = await deps.readMainTip();
   if (!mainTip) return [];
   const appendLine = deps.appendLine ?? appendLedger;
-  const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+  const ledgerLines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
   const refreshed: number[] = [];
   let incidentHold: boolean | undefined;
   for (const pr of armedRatchetRejudgeTargets(openPrs, ledgerLines, mainTip)) {
@@ -24144,7 +24195,7 @@ export async function runLightPassRefreshAdmission(
   lightPassRefreshAdmissionInFlight = true;
   try {
     const appendLine = deps.appendLine ?? appendLedger;
-    const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const ledgerLines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
     const last = ledgerLines.findLast((row) => row.step === BASE_RED_REFRESH_ADMISSION_STEP);
     const reading = refreshAdmissionReading(openPrs, ledgerLines);
     const waiting = last !== undefined && Array.isArray(last.waiting) ? last.waiting as Array<Record<string, unknown>> : [];
@@ -24240,6 +24291,21 @@ function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: n
     actions: [{ prNumber: pr.prNumber, prUrl: pr.prUrl, taskId: pr.taskId, disposition: "wait", reason, acted: false }] };
 }
 
+/** W1-T11260: one incremental tail per live ledger path, so a pass parses only bytes appended since the last read. */
+const liveLedgerTails = new Map<string, LiveLedgerTail>();
+
+/**
+ * W1-T11260: the live file's rows, as {@link readLedgerLines} returns them, without re-reading and re-parsing
+ * the whole 15 MB file on the daemon's thread for each pass and each PR. A rotation renames the file, which
+ * resets its tail, so every row is kept. The array is shared between calls and read-only: a read over no new
+ * bytes returns the same array, and an append yields a new one. A caller that mutates it copies it first.
+ */
+export function readLiveLedgerRows(path: string): ReadonlyArray<Readonly<Record<string, unknown>>> {
+  let tail = liveLedgerTails.get(path);
+  if (!tail) liveLedgerTails.set(path, tail = createLiveLedgerTail(path, Number.POSITIVE_INFINITY, { keepUntimed: true }));
+  return tail(0);
+}
+
 /** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
   // W1-T9114: a review child holds its slot while it runs, adopted or not; W1-T11151: its posted phase frees the slot
@@ -24254,7 +24320,7 @@ export function observeLightPassReviewEligibility(
 ): ReadonlyArray<Record<string, unknown>> {
   if (openPrs.length === 0 || deps.dryRun) return [];
   const now = deps.now ? deps.now() : systemClock.now();
-  const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+  const lines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
   const retryViews = openPrs.map(pr => promiseHarvestRetryView(pr, lines));
   const prior = priorActionsFromLedger(lines, retryViews);
   const views = retryViews.map(pr => completedRefusalRetryView(pr, prior));
@@ -24305,7 +24371,7 @@ export async function runSweepLightPass(
   // width, and the non-spawning plan-filing one at its own smaller derived bound. W1-T2583: READ THE
   // LEDGER ONCE FOR SELECTION, BEFORE RANKING; this pass-level fold is only the liveness filter.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
-  const readLedger = deps.readLedger ?? readLedgerLines;
+  const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs);
@@ -26997,7 +27063,7 @@ export interface PostFixReverificationDeps {
   fixInHead?: (pr: OpenPrView, fixClass: FixClass) => boolean | undefined | Promise<boolean | undefined>;
   ledgerPath: string;
   runId: string;
-  readLedger?: (path: string) => Array<Record<string, unknown>>;
+  readLedger?: (path: string) => Array<Readonly<Record<string, unknown>>>;
   appendLine?: typeof appendLedger;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Preview only: derive matches, take no effects, write no ledger lines. */
