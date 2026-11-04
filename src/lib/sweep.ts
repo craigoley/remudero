@@ -148,6 +148,7 @@ import {
   DEFAULT_RISK,
   RETIREMENT_REASONS,
   loadPlan,
+  transitiveDependents,
   unmetDependencies,
   type AcceptanceCriterion,
   type MergedResolver,
@@ -2279,6 +2280,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "draftRefusalAmendments",
   // W1-T5349: the plan-repair rung's fact read and its renumber/retitle effect.
   "readPlanRepairFacts",
+  // W1-T11171: the dependents term of a conflict's blocked cost.
+  "conflictDependents",
   "repairPlanPr",
   "dispatchPlanGateRound",
   "strikeLadder",
@@ -2439,6 +2442,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "repairMissingTaskTrailer"
   | "repairMetadata"
   | "readPlanRepairFacts"
+  | "conflictDependents"
   | "repairPlanPr"
   | "dispatchPlanGateRound"
   | "readMergeQueueMembership"
@@ -5373,6 +5377,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
       }
     },
+    conflictDependents: (pr) => pr.taskId === undefined ? 0 : queuedTransitiveDependents(plan, pr.taskId),
     readPlanRepairFacts: (pr) => {
       const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
       const row = ghJsonForBuild(["api", pulls]) as {
@@ -14364,6 +14369,8 @@ export interface SweepDeps {
   ) => boolean | void | Promise<boolean | void>;
   /** W1-T5349 — the PR's author and live title, read only for a red plan-only PR on a machine-lane head. */
   readPlanRepairFacts?: (pr: OpenPrView) => PlanRepairFacts | Promise<PlanRepairFacts>;
+  /** W1-T11171: the queued plan tasks that wait, transitively, on this PR's task; a conflict's blocked cost reads it. */
+  conflictDependents?: (pr: OpenPrView) => number;
   /** W1-T5349 — renumber a held id or retitle, on the lane's own branch; refresh uses `updateBranch`. */
   repairPlanPr?: (
     pr: OpenPrView,
@@ -18040,6 +18047,73 @@ export function needsPersonPredicate(
   };
 }
 
+/** W1-T11171: the queued plan tasks that wait on `taskId`, transitively; a merged or blocked one waits on nothing. */
+export function queuedTransitiveDependents(plan: Plan, taskId: string): number {
+  let count = 0;
+  for (const id of transitiveDependents(plan, taskId)) if (plan.byId.get(id)?.status === "queued") count++;
+  return count;
+}
+
+/**
+ * W1-T11171: a conflict's blocked cost is how long it has been conflicted at its current head (from the first
+ * `sweep.disposed` row with blocker `conflict` for this PR and head) times one plus the queued tasks behind it.
+ * The first observation at a head reads age 0, so no guess enters the order.
+ */
+export function conflictBlockedCost(
+  pr: Pick<OpenPrView, "prNumber" | "headSha">,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  dependents: number,
+  nowMs: number,
+): { conflict_age_ms: number; dependents: number; blocked_cost: number } {
+  const first = ledgerLines.find((row) => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+    row.head_sha === pr.headSha && row.blocker === "conflict");
+  const since = typeof first?.ts === "string" ? Date.parse(first.ts) : NaN;
+  const age = Number.isFinite(since) ? Math.max(0, nowMs - since) : 0;
+  return { conflict_age_ms: age, dependents, blocked_cost: age * (1 + dependents) };
+}
+
+/**
+ * W1-T11171: a stable reorder of the walk that moves the conflicted PRs, among their own positions, into descending
+ * blocked cost. Every other PR keeps its place, so admission order changes only between conflict rounds; ties keep
+ * the incoming order.
+ */
+export function orderConflictsByBlockedCost(walkOrder: number[], isConflicted: (index: number) => boolean,
+  costOf: (index: number) => number): number[] {
+  const positions = walkOrder.flatMap((index, position) => isConflicted(index) ? [position] : []);
+  const ranked = positions.map((position) => ({ index: walkOrder[position]!, position, cost: costOf(walkOrder[position]!) }))
+    .sort((a, b) => b.cost - a.cost || a.position - b.position);
+  const out = [...walkOrder];
+  positions.forEach((position, i) => { out[position] = ranked[i]!.index; });
+  return out;
+}
+
+/**
+ * W1-T11171: the conflicted arm's NO-WORKER resolution for this head and main, if it has one: the registry
+ * regenerator (W1-T9578) or W1-T11167's clean merge. Neither spawns a worker nor takes fix admission, so a light pass
+ * may run it. One predicate serves the light-pass gate and the arm itself, so the two cannot disagree.
+ */
+export function conflictNoWorkerMode(
+  pr: Pick<OpenPrView, "prNumber" | "headSha" | "headRefName" | "taskId">,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  mainTipSha: string | undefined,
+  regenerateWired: boolean,
+): ConflictRegenerationMode | undefined {
+  if (mainTipSha === undefined || !regenerateWired || pr.taskId === undefined ||
+      !fixHeadAcceptable(pr.headRefName, pr.taskId, false)) return undefined;
+  const probe = ledgerLines.findLast(row => row.step === "sweep.merge_probe" &&
+    row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.main_sha === mainTipSha);
+  const conflictPaths = probe?.conflict_paths;
+  const regenerable = probe?.verdict === "conflict" && Array.isArray(conflictPaths) && conflictPaths.length > 0 &&
+    conflictPaths.every(path => typeof path === "string" && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
+  if (regenerable) return "regenerable";
+  // W1-T11167: GitHub reads this head dirty while git's merge of it is clean. A head this route already
+  // produced is never merged again: GitHub still reading it dirty at the same main is a worker's case.
+  const cleanMerge = probe?.verdict === "clean" && !ledgerLines.some(row =>
+    row.step === "sweep.conflict_regenerated" && row.mode === "clean-merge" && row.outcome === "pushed" &&
+    row.pr_number === pr.prNumber && row.new_head_sha === pr.headSha && row.main_sha === mainTipSha);
+  return cleanMerge ? "clean-merge" : undefined;
+}
+
 export function sweepWalkOrder(prs: readonly Pick<OpenPrView, "createdAt" | "prNumber">[]): number[] {
   return orderPendingReviews(prs.map((pr, index) => ({ pr, index }))).map((job) => job.index);
 }
@@ -20331,6 +20405,13 @@ export async function runSweep(
   const walkOrder = sweepWalkOrder(openPrs);
   // Preserve held-head priority before arrival consumes the pass's refresh slots.
   if (!refreshAdmission.holding()) walkOrder.sort((a, b) => heldSinceMs(openPrs[a]) - heldSinceMs(openPrs[b]));
+  // W1-T11171: conflicted PRs walk, and so take fix admission, in descending blocked cost among their own places.
+  walkOrder.splice(0, walkOrder.length, ...orderConflictsByBlockedCost(walkOrder,
+    (index) => openPrs[index]?.mergeState === "dirty",
+    (index) => conflictBlockedCost(openPrs[index]!, ledgerLines, deps.conflictDependents?.(openPrs[index]!) ?? 0,
+      passClockMs()).blocked_cost));
+  let lightConflictActed = 0;
+  let lightConflictDeferred = 0;
   const rederivedPrs = new Set<number>();
   const admissionFinalizations: Array<() => Promise<void>> = [];
   for (let walkStep = 0; walkStep < walkOrder.length; walkStep++) {
@@ -21530,6 +21611,9 @@ export async function runSweep(
       design_hold_main_adoption_decision: terminalDesignHold.mainAdoptionDecision,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
       ...(terminalDesignHold.semantic === undefined ? {} : { progress_task_semantic_revision: terminalDesignHold.semantic.standingOn }) };
+    // W1-T11171: every conflicted row names its blocked cost, so the order the walk used is readable off the ledger.
+    if (disposition === "conflicted") extraDisposedFields = { ...extraDisposedFields,
+      ...conflictBlockedCost(pr, ledgerLines, deps.conflictDependents?.(pr) ?? 0, passClockMs()) };
     const selectedContractRefresh = async (
       revision: string, action: () => Promise<string | undefined>,
     ): Promise<string | undefined> => {
@@ -21615,11 +21699,18 @@ export async function runSweep(
     // PR's finalize call to the bounded concurrent batch after the loop rather than running inline.
     let deferredReview = false;
 
+    // W1-T11171: a light pass that denies "conflicted" still lets in a conflict whose resolution needs no worker
+    // (and that has not been attempted at this head and main), and only for that route.
+    const conflictGated = disposition === "conflicted" && deps.actionable !== undefined && !deps.actionable(disposition);
+    const conflictNoWorkerOnly = acted && conflictGated && mainTipSha !== undefined &&
+      conflictNoWorkerMode(pr, ledgerLines, mainTipSha, deps.regenerateConflict !== undefined) !== undefined &&
+      !ledgerLines.some((row) => row.step === "sweep.conflict_regenerated" && row.pr_number === pr.prNumber &&
+        row.head_sha === pr.headSha && row.main_sha === mainTipSha);
     if (acted) {
       // W1-T254 — LIGHT-SWEEP RESTRICTION. `actionable` defaults to everything, so `rmd sweep` and
       // the full sweep are unchanged. The light ticker passes `d => d === "post-review"`, so every
       // other lane stands down here and is re-derived on the next full sweep, never dropped.
-      if (deps.actionable && !deps.actionable(disposition)) {
+      if (deps.actionable && !deps.actionable(disposition) && !conflictNoWorkerOnly) {
         acted = false;
         // W1-T2426: the caller may name WHICH mechanism refused; absent, the generic sentence
         // every gated disposition has always recorded, unchanged.
@@ -22908,20 +22999,11 @@ export async function runSweep(
                 standDownReason = terminal;
                 break;
               }
-              if (mainTipSha !== undefined && deps.regenerateConflict && pr.taskId !== undefined &&
-                  fixHeadAcceptable(pr.headRefName, pr.taskId, false)) {
-                const probe = ledgerLines.findLast(row => row.step === "sweep.merge_probe" &&
-                  row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.main_sha === mainTipSha);
-                const conflictPaths = probe?.conflict_paths;
-                const regenerable = probe?.verdict === "conflict" && Array.isArray(conflictPaths) && conflictPaths.length > 0 &&
-                  conflictPaths.every(path => typeof path === "string" && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
-                // W1-T11167: GitHub reads this head dirty while git's merge of it is clean. A head this route already
-                // produced is never merged again: GitHub still reading it dirty at the same main is a worker's case.
-                const cleanMerge = !regenerable && probe?.verdict === "clean" && !ledgerLines.some(row =>
-                  row.step === "sweep.conflict_regenerated" && row.mode === "clean-merge" && row.outcome === "pushed" &&
-                  row.pr_number === pr.prNumber && row.new_head_sha === pr.headSha && row.main_sha === mainTipSha);
-                if (regenerable || cleanMerge) {
-                  const mode: ConflictRegenerationMode = cleanMerge ? "clean-merge" : "regenerable";
+              const noWorkerMode = conflictNoWorkerMode(pr, ledgerLines, mainTipSha, deps.regenerateConflict !== undefined);
+              if (mainTipSha !== undefined && deps.regenerateConflict && pr.taskId !== undefined && noWorkerMode !== undefined) {
+                const cleanMerge = noWorkerMode === "clean-merge";
+                {
+                  const mode: ConflictRegenerationMode = noWorkerMode;
                   const regenerationKey = `${deps.ledgerPath}:${pr.prNumber}:${pr.headSha}:${mainTipSha}`;
                   if (inFlightConflictRegenerations.has(regenerationKey)) {
                     acted = false;
@@ -22959,6 +23041,13 @@ export async function runSweep(
                     break;
                   }
                 }
+              }
+              // W1-T11171: a light pass let this conflicted PR in only for its no-worker route; a worker round still
+              // waits for the full sweep, with the sentence every gated disposition records.
+              if (conflictNoWorkerOnly) {
+                acted = false;
+                standDownReason = deps.standDownReasonFor?.(disposition) ?? "deferred to full sweep (light pass)";
+                break;
               }
               // The "conflicted" row already gated this on the admission predicates, so the
               // dispatch carries merge-conflict evidence and never a mix. W1-T2231: the
@@ -23540,6 +23629,12 @@ export async function runSweep(
       standDownReason = fixHolder.reason;
       extraDisposedFields = { ...extraDisposedFields, ...fixHolder.fields };
     }
+    // W1-T11171: the light pass's conflict shares, for the pass summary.
+    if (conflictGated) {
+      if (acted) lightConflictActed++;
+      else if ((fixHolder?.reason ?? standDownReason) ===
+        (deps.standDownReasonFor?.(disposition) ?? "deferred to full sweep (light pass)")) lightConflictDeferred++;
+    }
     // Pressed heads dispose now; only overflow waits for the admission's final settlement.
     const finalize = () => finalizeDisposition(prIndex, pr, disposition, reason, question, acted, alreadyDone, actionError,
       fixHolder?.reason ?? admissionReasons.get(pr.prNumber) ?? standDownReason, depReviewOutcome, armOutcome, spent, baseCausedMainTipSha, extraDisposedFields);
@@ -23868,6 +23963,8 @@ export async function runSweep(
     total: summary.total,
     actions_taken: actionsTaken,
     actions_failed: actionsFailed,
+    // W1-T11171: only a gated (light) pass has conflict shares to report.
+    ...(deps.actionable !== undefined ? { light_conflict_acted: lightConflictActed, light_conflict_deferred: lightConflictDeferred } : {}),
   });
   // W1-T520 — the stall report. One line PER STALLED PR naming both facts, and NOTHING when the
   // set is empty. Emitted through `appendLine`, the durable sink, because `log` is an optional hook
