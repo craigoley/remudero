@@ -9,11 +9,11 @@ raw: >-
   new entry is dated 2026-10-22. Of the 60 entries dated 10-27 or later, 53 are
   still new.
 
-  OBSERVED in git, status changes to a non-new value per day (feedback diffs on main;
-  a change from grilling to accepted also counts):
-  10-27 about 8, 10-28 12, 10-29 9, 10-30 11, 10-31 0, 11-01 6, 11-02 8, 11-03 5.
-  plan/policy.yaml autoTriage allows minIntervalMinutes 15 and maxPerDay 24, so
-  the measured rate is roughly a third of the cap, and one day had none.
+  OBSERVED in git, status changes to a non-new value per day (feedback diffs on
+  main; a change from grilling to accepted also counts): 10-27 about 8, 10-28
+  12, 10-29 9, 10-30 11, 10-31 0, 11-01 6, 11-02 8, 11-03 5. plan/policy.yaml
+  autoTriage allows minIntervalMinutes 15 and maxPerDay 24, so the measured rate
+  is roughly a third of the cap, and one day had none.
 
   INFERRED, not measured: the cap is not what binds. Candidates are lock-held
   refusals, triage.error rows, a lane budget the governor withholds, or fires
@@ -21,17 +21,39 @@ raw: >-
 
   ASK: (1) count autoTriage decisions by reason over 10-27..11-03 from the
   ledger union (decideAutoTriage reasons are already named strings), with a
-  positive control that the window's newest ts is current. (2) Fix the
-  dominant refusal class. (3) Reconsider strict oldest-first once the backlog
-  exceeds a bound: an operator-directed entry currently waits behind about 12
-  days of backlog. Do not raise maxPerDay without the operator; it is a spend
-  bound.
+  positive control that the window's newest ts is current. (2) Fix the dominant
+  refusal class. (3) Reconsider strict oldest-first once the backlog exceeds a
+  bound: an operator-directed entry currently waits behind about 12 days of
+  backlog. Do not raise maxPerDay without the operator; it is a spend bound.
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/16562
+summary:
+  headline: Auto-triage is processing about a third of its allowed rate; 157
+    entries are stuck new.
+  what_happened: The feedback backlog holds 157 new entries, the oldest from
+    2026-10-22, and an operator-directed entry waits behind about 12 days of it.
+    Actual triage runs about 5–12 status changes per day against a cap of 24,
+    and one day had none; the cause is not yet known.
+  decision: Approve the diagnostic count of autoTriage refusal reasons over 10-27
+    to 11-03 before any code change is made.
+  options:
+    - label: Approve diagnostic only
+      consequence: Count refusal reasons from the host ledger and report which class
+        dominates, with no code changes.
+      intent: approve
+    - label: Approve diagnostic and fix
+      consequence: Count refusal reasons, then fix the dominant class in this worktree
+        for review before merge.
+      intent: approve
+    - label: Decline for now
+      consequence: Leave the backlog as is; the operator-directed entry keeps waiting
+        about 12 days.
+      intent: decline
+  if_nothing_happens: The new backlog keeps growing and the oldest entries stay unprocessed.
 expansion: null
 submission_key: operator-direction:triage-throughput-backlog:20261103
 thread_id: null
+answered_by: null
