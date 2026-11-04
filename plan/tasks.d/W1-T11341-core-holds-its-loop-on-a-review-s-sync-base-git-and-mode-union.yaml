@@ -20,6 +20,9 @@
     - src/lib/check-proof.ts
     - src/lib/run-child.ts
     - src/lib/run-child-mode.ts
+    - src/lib/review.ts
+    - test/preexisting-proof-hits-wiring.test.ts
+    - test/base-blob-read-failure.test.ts
     - test/review/an-in-process-review-builds-its-base-proof-off-the-loop.test.ts
     - test/worker/a-review-spawn-decides-its-mode-without-re-reading-the-union.test.ts
   status: queued
@@ -52,5 +55,6 @@
   falsifier: |
     At origin/main, src/cli/commands/review.ts:2187 calls buildBaseProofDir synchronously (execFileSync git on core's loop for in-process plan-filing reviews), and every spawnReview calls detachedWorkModeNow → readRunChildModeUnion → readLedgerUnionRecordsSync.
   note: |
+    Amended 2026-11-04 (build of W1-T11341, before review): files gain src/lib/review.ts, because resolveProofTestPath resolves a test-citing proof's path in the base tree through the resolver's sync git (rev-parse, ls-tree), and the async builder must hand it awaited answers, so it takes the resolver's git seam through. They also gain test/preexisting-proof-hits-wiring.test.ts and test/base-blob-read-failure.test.ts, whose source-text pins name buildBaseProofDir as the review command's base-proof default; the default becomes the awaited builder, so the pins move with it and keep asserting the same call and the same forwarded facts.
     reservation hand-off: plan-file-1793821303000 -> plan-file-1793821303000
     Reserved with rmd next-task-id --branch plan-file-1793821303000 from the operator session. Test paths from rmd test-place src/lib/check-proof.ts (test/review/) and src/lib/run-child.ts (test/worker/).
