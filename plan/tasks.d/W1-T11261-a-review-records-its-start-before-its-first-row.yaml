@@ -1,0 +1,38 @@
+- id: W1-T11261
+  title: A review records the time it spends before its first ledger row — config load, the whole-ledger read, the PR-head fetch and both plan-criteria resolutions — so the multi-minute silent start of a plan-only review is attributed
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one new timing row on the review command's start path; no decision reads it
+  origin: operator-session#review-throughput-2026-11-03
+  plan_refs:
+    - W1-T11148
+  files:
+    - src/cli/commands/review.ts
+    - test/review/a-review-records-its-start-before-its-first-row.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Before its review.provider_provenance row, the review command ledgers one review.start_phases row with the elapsed milliseconds of its config load, the live-ledger read, the PR-head fetch, the head plan-criteria resolution and the origin/main one, each measured even when that step throws
+      proof: "unit test: test/review/a-review-records-its-start-before-its-first-row.test.ts"
+    - claim: The review command writes the start-phase row under its own step
+      proof: "grep: review\\.start_phases in src/cli/commands/review.ts"
+  rationale: |
+    OBSERVED 2026-11-03 on #16577, a plan-only filing reviewed in the daemon process:
+    - Timeline: sweep.review_admitted 18:15:14Z, sweep.post_review.attempt 18:16:22Z, then no row of that review run until review.provider_provenance at 18:21:30Z. That is 5 min 8 s silent. Then review.pending_posted at 18:21:39Z, lint child_entry.spawned at 18:23:59Z, review.posted at 18:24:18Z.
+    - The lint itself took 19 s.
+    - Over 31 plan-only reviews in 12:45-18:45Z, review.plan_only_phases.total_ms read p50 200 s, p90 430 s. Its phases (materialize, diff, decision, lint, judge, post, arm) begin after this silent start and do not include it.
+    - Before provider_provenance, review.ts runs loadConfig, readLedgerLines(ledgerPath) over the 15 MB live ledger, a synchronous fetchHead, and resolvePlanCriteriaAtHeadAsync twice, at the head and at origin/main.
+    - INFERRED: one of these, or the daemon's main-loop stalls (2,040 s in the same 6 h), holds the start. Nothing records which.
+  design: |
+    In the review command (src/cli/commands/review.ts), time each step before the review.provider_provenance row: config load, readLedgerLines, fetchHead, and both resolvePlanCriteriaAtHeadAsync calls, plus the wall time from command entry. Ledger them as one review.start_phases row, with review_attempt_id and head_sha, before provider_provenance.
+    A step that throws records its elapsed time and the error class; behaviour is unchanged.
+    Register the step wherever ledger steps are declared.
+    NOT IN SCOPE: changing any of those steps. The fix follows from what this row attributes.
+  note: |
+    reservation hand-off: run-unfiled-1793732872741 -> run-unfiled-1793732872741
+    Reserved with rmd next-task-id (W1-T11261 on run-unfiled-1793732872741). From the operator session's review-throughput diagnosis.

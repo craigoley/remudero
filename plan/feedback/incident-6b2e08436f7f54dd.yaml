@@ -1,0 +1,22 @@
+id: incident-6b2e08436f7f54dd
+ts: 2026-11-03T22:05:39.472Z
+raw: |-
+  Incident 6b2e08436f7f: flow pr-stage-stall:awaiting-review:duplicate build
+  First seen: 2026-11-03T17:11:42.780Z
+  Last seen: 2026-11-03T17:11:42.780Z
+  Count: 1, burn: 1.00/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=16545 awaiting-review: duplicate build
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#6b2e08436f7f54dd1c578efaab8630f37002cbb76c5eb98ab76a5a52e93a69f3
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
