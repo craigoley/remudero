@@ -258,14 +258,6 @@ export function refuseCodingBeforeHost(reason: CodingExecutionReason): CodingRun
   return refused(null, reason, { hostStarted: "no", closure: "proven", hostExecutionId: null });
 }
 
-/** An owner reported prior/ambiguous consumption; retain the hold without claiming a binding. */
-export function unavailableCodingAttempt(reason: CodingExecutionReason): CodingRunnerResult {
-  const result: CodingRunnerResult = Object.freeze({ state: "unavailable", reason, binding: null,
-    configured: null, observed: null,
-    execution: { hostStarted: "unknown", closure: "unavailable", hostExecutionId: null } as const });
-  issuedResults.add(result); return result;
-}
-
 /** No default executor exists. Without trusted process-local owner authority this is a refusal. */
 export async function executeCodingCandidate(input: { binding: CodingControlBindingV1; fixture: CodingFixture;
   responseText: string; authority?: CodingExecutionAuthority | null; signal: AbortSignal }): Promise<CodingRunnerResult> {
@@ -374,7 +366,3 @@ function assertFixture(fixture: CodingFixture): void {
     || fixture.prompt !== `Write JavaScript source that reads four signed decimal integers from stdin and prints their sum followed by a newline. Input:\n${fixture.stdin}`)
     throw new Error("coding-fixture-invalid");
 }
-
-/** This is intentionally not a host implementation. Requires the admitted native systemd/bwrap backend. */
-export const codingNativeBackendStatus = () => ({ state: "unavailable" as const,
-  reason: "native-unit-profile-and-readback-adapter-not-wired" as const });

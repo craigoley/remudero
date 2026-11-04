@@ -456,3 +456,17 @@ test("canary owner readonly trace reads never create or repair an owner database
   }).state, "unavailable");
   assert.equal(existsSync(join(absentDir, "model-canary-slots.sqlite")), false);
 }));
+
+test("W1-T10957: canary owner refuses coding evidence on an ordinary slot and keeps its claim", () => fixture(dir => {
+  const [slot] = slots(); const owner = openOwner(dir);
+  try {
+    assert.equal(owner.claim(slot), "claimed");
+    const ordinary = outcome(slot);
+    assert.equal(ordinary.run.family, "structured");
+    for (const extra of [{ codingResult: {} }, { codingGrade: {} }])
+      assert.throws(() => owner.terminal(slot, { ...ordinary, ...extra } as Outcome),
+        /canary-owner-coding-terminal-unexpected/);
+    owner.terminal(slot, ordinary);
+    assert.equal(owner.claim(slot), "already-owned-or-terminal");
+  } finally { owner.close(); }
+}));

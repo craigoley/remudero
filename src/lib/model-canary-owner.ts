@@ -110,15 +110,6 @@ export interface CodingAttemptConsumptionInput {
   workerSpawnAttemptId: string;
   sourceDigest: string;
 }
-export interface ClaimedCodingRequestBinding {
-  caseId: string;
-  suiteHash: string;
-  runId: string;
-  slotId: string;
-  canaryAttemptId: string;
-  workerSpawnAttemptId: string;
-  sourceDigest: string;
-}
 const attemptUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function privateTraceBindingMatches(binding: PrivateTraceBindingV1, slot: CanarySlot, runId: string,
@@ -240,30 +231,6 @@ export class CanarySlotOwner {
     }
     // Neither a busy shared owner nor a full store can be called a completed/skipped slot.
     throw new Error("canary-owner-busy-or-capacity");
-  }
-
-  /** Resolve only a started row owned by this live owner instance; request fields must match stored binding. */
-  resolveClaimedCodingSlot(request: ClaimedCodingRequestBinding): CanarySlot | null {
-    if (!request || Object.keys(request).length !== 7
-      || !attemptUuid.test(request.runId) || !attemptUuid.test(request.canaryAttemptId)
-      || !attemptUuid.test(request.workerSpawnAttemptId) || !privateTraceDigestPattern.test(request.sourceDigest)
-      || !/^[a-f0-9]{64}$/.test(request.slotId) || !/^[a-f0-9]{64}$/.test(request.suiteHash)
-      || typeof request.caseId !== "string" || !request.caseId || request.caseId.length > 128) return null;
-    const row = this.db.prepare("SELECT binding FROM canary_slots_v1 WHERE id=? AND owner=? AND phase='started'")
-      .get(request.slotId, this.owner) as { binding?: unknown } | undefined;
-    if (typeof row?.binding !== "string") return null;
-    let stored: unknown;
-    try { stored = snapshotPrivateCanaryJson(JSON.parse(row.binding), 4096); }
-    catch { // Corrupt persisted binding data cannot resolve a claimed slot.
-      return null; }
-    if (!Array.isArray(stored) || stored.length !== 7) return null;
-    const [caseId, model, route, effort, suiteHash, billing, aaLabel] = stored;
-    if (typeof caseId !== "string" || caseId !== request.caseId || typeof model !== "string"
-      || typeof route !== "string" || typeof effort !== "string" || suiteHash !== request.suiteHash
-      || (billing !== "api" && billing !== "subscription") || !(aaLabel === null || aaLabel === "A" || aaLabel === "B")) return null;
-    const slot: CanarySlot = Object.freeze({ id: request.slotId, caseId, pin: Object.freeze({ model, route, effort,
-      suiteHash, billing }), aaLabel });
-    return binding(slot) === row.binding ? slot : null;
   }
 
   /** One-shot source consumption in the existing started owner row; no second store or lease. */

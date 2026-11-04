@@ -375,16 +375,12 @@ export async function replayPrivateCli(argv: readonly string[], internal: OwnedC
     // a ledger, executable, profile, worker settings, credential or provider endpoint.
     const { assertExistingCanaryOwnerV1 } = await import("./model-canary-owner.js");
     assertExistingCanaryOwnerV1(ownerDir);
-    // The native profile source is W1-T11313; until it is wired every host is unqualified here.
-    if (!internal.codingPortFactory)
+    // The native profile source and the production worker runtime are W1-T11313; until they are
+    // wired every host is unqualified here and the schedule never reaches a worker.
+    if (!internal.codingPortFactory || !internal.workerRuntime)
       return { state: "deferred" as const, completed: 0, reason: "coding-native-profile-unavailable" };
     const profile: NativeCodingProfile | null = null;
-    const runtime = internal.workerRuntime ? await internal.workerRuntime() : await (async () => {
-      const { loadConfig } = await import("./config.js");
-      const { benchmarkNonDispatchSpawn } = await import("./benchmark-run.js");
-      return { config: loadConfig(), worker: benchmarkNonDispatchSpawn("model-canary-coding") };
-    })();
-    const { config, worker } = runtime, owner = new CanarySlotOwner(ownerDir);
+    const { config, worker } = await internal.workerRuntime(), owner = new CanarySlotOwner(ownerDir);
     try {
       const execution = codingWorkerRequestPorts(config, ownerDir, worker);
       return await executeOwnedCodingCanarySchedule({ owner, profile, privateCorpus: validation.corpus,

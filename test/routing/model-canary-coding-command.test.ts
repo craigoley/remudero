@@ -442,3 +442,50 @@ test("W1-T10957: ledger append failure leaves the canonical owner terminal and p
     assert.equal(events.filter(event => event === "request").length, 1);
   } finally { data.owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("W1-T10957: a coding provider request that throws or rejects is uncertain and never terminals the owner", async () => {
+  for (const shape of ["throws", "rejects"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `rmd-canary-coding-provider-${shape}-`));
+    const data = fixture(root); let requests = 0;
+    const executeCoding = registerQualifiedCodingExecutionPort(async () => {
+      throw new Error("host executor must not run without a provider response");
+    });
+    const failure = new Error(`unit-control-provider-${shape}`);
+    const request: CanaryExecutionPorts["request"] = shape === "throws"
+      ? () => { requests++; throw failure; }
+      : () => { requests++; return Promise.reject(failure); };
+    const ports: CanaryExecutionPorts = { admit: async () => ({ state: "admitted" }), monotonicMs: () => 0,
+      executeCoding, save: async () => {}, request };
+    try {
+      assert.equal(data.owner.claim(data.slot), "claimed");
+      const outcome = await executeCanary(CODING_ITEM, data.pin, ports,
+        { maxCalls: 1, wallMs: 10_000, maxOutputBytes: 16_384 }, { corpus: data.corpus, slotId: data.slot.id });
+      assert.equal(requests, 1, shape);
+      assert.equal(outcome.reason, "transport-error", shape);
+      assert.equal(codingProviderRequestState(outcome.codingProviderRequestLifecycle), "uncertain", shape);
+      assert.throws(() => data.owner.terminal(data.slot, outcome), /canary-owner-coding-provider-closure-unproved/, shape);
+    } finally { data.owner.close(); rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("W1-T10957: the owner refuses a coding outcome whose trace cannot be snapshotted and keeps the slot started", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-canary-coding-trace-bound-"));
+  const data = fixture(root), events: string[] = [];
+  const ports: CanaryExecutionPorts = { ...ordinaryPorts(events, "019f5ab2-4420-4ea0-993f-470a56362e05"),
+    executeCoding: registerQualifiedCodingExecutionPort(simulatedCodingPort(data.owner, events, data.slot)) };
+  try {
+    assert.equal(data.owner.claim(data.slot), "claimed");
+    const outcome = await executeCanary(CODING_ITEM, data.pin, ports,
+      { maxCalls: 1, wallMs: 10_000, maxOutputBytes: 16_384 }, { corpus: data.corpus, slotId: data.slot.id });
+    assert.equal(outcome.state, "scored", "positive control: the real simulated composition scores");
+    const oversized = { ...outcome, trace: [{ name: "unit", args: { padding: "x".repeat(40 * 1024) },
+      denied: true, result: null }] };
+    assert.throws(() => data.owner.terminal(data.slot, oversized), /canary-owner-coding-trace-invalid/);
+    const db = new DatabaseSync(join(data.ownerDir, "model-canary-slots.sqlite"), { readOnly: true });
+    try {
+      const row = db.prepare("SELECT phase FROM canary_slots_v1 WHERE id=?").get(data.slot.id) as { phase?: string } | undefined;
+      assert.equal(row?.phase, "started", "a refused terminal record leaves the claim held");
+    } finally { db.close(); }
+    data.owner.terminal(data.slot, outcome);
+  } finally { data.owner.close(); rmSync(root, { recursive: true, force: true }); }
+});

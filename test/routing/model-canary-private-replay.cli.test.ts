@@ -9,6 +9,7 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { CanarySlotOwner } from "#src/lib/model-canary-owner.js";
+import { replayPrivateControl } from "#src/lib/model-canary-replay-private.js";
 import { buildCanarySchedule } from "#src/lib/model-canary-schedule.js";
 import { canarySuiteDigest, commonCanarySuite, type CanaryCase } from "#src/lib/model-canary-suite.js";
 import type { PrivateCanaryBundleV1, PrivateCanaryCaseV1 } from "#src/lib/model-canary-private-corpus.js";
@@ -298,5 +299,19 @@ test("replay CLI uses the existing owner for busy and duplicate-slot refusal", (
     assert.notEqual(duplicate.status, 0, "a terminal schedule slot fails closed before replay output");
     assert.equal(duplicate.stdout, "");
     assert.equal(queryOwner(duplicateOwner).count, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T10957: private replay refuses a corpus that cannot be snapshotted before validating it", async () => {
+  const { item } = fixture();
+  const root = privateTempRoot();
+  try {
+    const ownerDir = join(root, "owner"); seedOwner(ownerDir);
+    const replayInput = script(item, "corpus-snapshot-control", "pass");
+    await assert.rejects(() => replayPrivateControl({ rawCorpus: { cases: [Number.NaN] }, replayInput, ownerDir }),
+      /^Error: private-replay-corpus-invalid$/);
+    await assert.rejects(() => replayPrivateControl({ rawCorpus: {}, replayInput, ownerDir }),
+      (error: Error) => error.message !== "private-replay-corpus-invalid",
+      "positive control: a finite corpus passes the snapshot and fails only its own validation");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
