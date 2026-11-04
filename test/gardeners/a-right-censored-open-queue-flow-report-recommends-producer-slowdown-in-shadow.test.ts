@@ -522,6 +522,7 @@ test("W1-T11111 criterion 1: an open PR older than the ledger read with no stage
   const control = openQueueShadow(census(now), rows(now), previous, now, ledgerFromMs);
   assert.equal(control.cohort.stage_unread, 0);
   assert.equal(control.recommendation, "consider-slowing-plan-task-workers", "every open PR's stage is in the read");
+  assert.equal(control.status, "OBSERVED", "complete stage evidence is an observation");
   const old = census(now);
   old.open.push({ number: 15000, createdAtMs: now - 14 * DAY, updatedAtMs: now, headSha: "head-15000", headRefName: "run-W1-T15000-1", checksState: "SUCCESS" });
   const blocked = openQueueShadow(old, rows(now), previous, now, ledgerFromMs);
@@ -531,7 +532,9 @@ test("W1-T11111 criterion 1: an open PR older than the ledger read with no stage
   assert.equal(blocked.nextState.streak, 0);
   assert.equal(blocked.recommendation, undefined);
   assert.equal(blocked.reason, "stage-evidence-unread-before-ledger-read");
+  assert.equal(blocked.status, "UNKNOWN", "incomplete stage evidence is UNKNOWN, never OBSERVED (W1-T11111 criterion 1)");
   const seen = openQueueShadow(old, [...rows(now), { ts: at(now - HOUR), step: "sweep.review_eligible", pr_number: 15000, head_sha: "head-15000" }],
     previous, now, ledgerFromMs);
   assert.equal(seen.cohort.stage_unread, 0, "a row at its current head inside the read makes its stage known");
+  assert.equal(seen.status, "OBSERVED", "once every stage is read the report observes again");
 });

@@ -709,7 +709,8 @@ export function openQueueShadow(
     : holds && previousWindowConsecutive && producer === previous!.producer;
   const streak = !pressure ? 0 : sameWindow ? previous!.streak : previous!.pressure ? previous!.streak + 1 : 1;
   const nextState = { observedAtMs: census.observedAtMs, windowDay, window, reviewP50, baselineP50, pressure, streak, ...(producer ? { producer } : {}) };
-  return { mode: "shadow", permission: "not-granted", action: "none", status: "OBSERVED", reason: pressure
+  // Incomplete stage evidence is not an observation: an open PR whose stage the ledger read cannot see is UNKNOWN.
+  return { mode: "shadow", permission: "not-granted", action: "none", status: stageUnread > 0 ? "UNKNOWN" : "OBSERVED", reason: pressure
     ? `complete-window-inflow-exceeds-drain-review-p50-worsened-streak-${streak}`
     : stageUnread > 0 ? "stage-evidence-unread-before-ledger-read" : "complete-window-no-confirmed-pressure",
     window, cohort: { open: details.length, arrivals, merged_or_closed: drain,
