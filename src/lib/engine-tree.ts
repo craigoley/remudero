@@ -12,6 +12,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { materializeFromStore, type StoreBuildResult, type StoreLog, type StoreLookup } from "./child-entry-store.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { classifyRunDir, readSpec, realRunChildProbe, type RunChildProbe } from "./run-child-contract.js";
 import { linkWorktreeNodeModules, resolveNodeModulesSource, type NodeModulesLinkOutcome } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -289,6 +290,78 @@ async function buildEngine(stateRoot: string, sha: string, sourceHash: string, d
   }
 }
 
+// ── the pin lock ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * An in-place advance and a run naming the engine must not interleave. A launch resolves its engine, waits for
+ * admission, and only then writes the spec that names the engine; an advance's census reads those specs and then
+ * checks the tree out to a newer revision. A spec written between the census and the checkout named a revision the
+ * tree no longer held (#16735 review, 2026-11-04). `<state>/engines/<sourceHash>.pin.lock` closes that window: the
+ * advance holds it from its census through the record write, and a launch takes it only to re-read the record and
+ * write its spec, so a spec always names the revision its tree holds. Cross-process (an advance can run in a run
+ * child's verb while the daemon launches), so it is the O_EXCL holder file {@link acquireInflightLock} keeps.
+ */
+function pinLockName(sourceHash: string): string {
+  return `${sourceHash}.pin`;
+}
+
+function tryAcquirePin(stateRoot: string, sourceHash: string, runId: string): InflightLockHandle | InflightLockError {
+  mkdirSync(enginesRoot(stateRoot), { recursive: true });
+  try {
+    return acquireInflightLock(enginesRoot(stateRoot), pinLockName(sourceHash), { run_id: runId });
+  } catch (err) {
+    if (err instanceof InflightLockError) return err;
+    throw err;
+  }
+}
+
+/**
+ * The longest a launch waits for an advance to release the pin. An advance holds it for one checkout and one store
+ * re-judge, each bounded by the git leaf's own loop bound, so this is a backstop, not a policy: past it the launch
+ * is unavailable (no child starts), never unpinned.
+ */
+export const ENGINE_PIN_WAIT_MS = 60_000;
+
+export interface EnginePinOptions {
+  waitMs?: number;
+  pollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+/**
+ * Re-read `sourceHash`'s published record under the pin lock and hand its current revision to `publish` (which
+ * writes the run's spec naming it), releasing the lock after. Resolves to the revision published, or to
+ * `{ unavailable }` when the engine is gone or the pin stayed busy past {@link ENGINE_PIN_WAIT_MS}.
+ */
+export async function pinEngineForRun(
+  stateRoot: string,
+  sourceHash: string,
+  runId: string,
+  publish: (engine: { sourceHash: string; sha: string }) => void,
+  opts: EnginePinOptions = {},
+): Promise<{ sourceHash: string; sha: string } | { unavailable: string }> {
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = now() + (opts.waitMs ?? ENGINE_PIN_WAIT_MS);
+  for (;;) {
+    const held = tryAcquirePin(stateRoot, sourceHash, runId);
+    if (!(held instanceof InflightLockError)) {
+      try {
+        const record = readRecord(enginePath(stateRoot, sourceHash));
+        if (!record || record.sourceHash !== sourceHash) return { unavailable: `engine ${sourceHash.slice(0, 12)} is no longer published` };
+        const pinned = { sourceHash, sha: record.sha };
+        publish(pinned);
+        return pinned;
+      } finally {
+        held.release();
+      }
+    }
+    if (now() >= deadline) return { unavailable: `engine ${sourceHash.slice(0, 12)} pin busy: ${held.message}` };
+    await sleep(opts.pollMs ?? 100);
+  }
+}
+
 /**
  * An engine is keyed by its bundle's source hash, so main advancing only OUTSIDE that closure (workflows, plan, scripts,
  * docs) would leave the tree at the revision it was first cut at: a run child reads those files from its engine tree,
@@ -316,6 +389,31 @@ async function advanceEngine(
     return kept;
   }
   if (!forward) return kept; // never sideways or back: the tree holds a revision `sha` does not contain
+  // Held from the census through the record write: no launch can write a spec naming this engine in between.
+  const pin = tryAcquirePin(stateRoot, present.sourceHash, `advance-${process.pid}`);
+  if (pin instanceof InflightLockError) {
+    log("engine.advance_deferred", { ...row, reason: `a run is pinning the engine: ${pin.message}` });
+    return kept;
+  }
+  try {
+    return await advancePinned(stateRoot, final, present, sha, deps, git, clock, row, kept);
+  } finally {
+    pin.release();
+  }
+}
+
+async function advancePinned(
+  stateRoot: string,
+  final: string,
+  present: EngineRecord,
+  sha: string,
+  deps: EngineBuildOptions,
+  git: EngineGit,
+  clock: Clock,
+  row: { source_hash: string; from_sha: string; to_sha: string },
+  kept: BuildOutcome,
+): Promise<BuildOutcome> {
+  const log = deps.log ?? (() => {});
   let named: ReturnType<typeof namedByLiveRuns>;
   try {
     named = namedByLiveRuns(stateRoot, deps.probe ?? realRunChildProbe);

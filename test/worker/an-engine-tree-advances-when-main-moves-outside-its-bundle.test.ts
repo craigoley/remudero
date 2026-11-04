@@ -5,13 +5,13 @@
 // tree in place, a live run or a moved source keeps it where it is, and a revision that is not a descendant is refused.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { ENGINE_RECORD, enginePath, ensureEngineTree, newestCurrentEngine } from "#src/lib/engine-tree.js";
-import { writeStatus } from "#src/lib/run-child-contract.js";
+import { ENGINE_RECORD, enginePath, enginesRoot, ensureEngineTree, hardenedEngineGit, newestCurrentEngine, pinEngineForRun, type EngineGit } from "#src/lib/engine-tree.js";
+import { readSpec, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildSpec } from "#src/lib/run-child-contract.js";
 
 const tmp = (): string => realpathSync(mkdtempSync(join(tmpdir(), "rmd-engine-advance-")));
 const hashOf = (n: number): string => n.toString(16).padStart(64, "0");
@@ -100,4 +100,68 @@ test("an engine tree a live run names, or whose source no longer hashes to its b
   assert.deepEqual(engineAt(state, hash), { head: shas[2], recorded: shas[2] });
   await ensureEngineTree(state, shas[1]!, hash, { ...base, materialize: () => ({ outcome: "hit", hash }) });
   assert.deepEqual(engineAt(state, hash), { head: shas[2], recorded: shas[2] }, "a revision that does not descend is refused");
+});
+
+/** A launch's publish: the spec a real launch writes, naming the engine revision it was handed under the pin. */
+function publishInto(dir: string) {
+  return (engine: { sourceHash: string; sha: string }) => {
+    mkdirSync(dir, { recursive: true });
+    writeSpec(dir, { schema: RUN_CHILD_SCHEMA, taskId: "W1-T1", runId: "run-pin", instance: "core", engine,
+      planSnapshotPath: join(dir, "plan.json"), reservationId: "r1", options: {} } as unknown as RunChildSpec);
+  };
+}
+
+test("a run that pins while an engine advances names the revision its tree holds, never the one the tree left", async () => {
+  const { dir, shas } = seedCommits(3);
+  const state = tmp();
+  const hash = hashOf(94);
+  const rows: Row[] = [];
+  const log = (step: string, extra?: Record<string, unknown>) => void rows.push({ step, extra });
+  const base = { repoDir: dir, storeRoot: join(state, "store"), probe, log, linkNodeModules: () => "linked" as const,
+    materialize: () => ({ outcome: "hit" as const, hash }) };
+  assert.equal((await ensureEngineTree(state, shas[0]!, hash, base)).kind, "built");
+
+  // The reviewer's interleaving: a launch publishes its spec after the advance's census, before its checkout.
+  const run = join(state, "runs", "run-pin");
+  let during: Awaited<ReturnType<typeof pinEngineForRun>> | undefined;
+  const git: EngineGit = async (repoDir, args) => {
+    if (args[0] === "checkout" && during === undefined) {
+      during = await pinEngineForRun(state, hash, "run-pin", publishInto(run), { waitMs: 0 });
+    }
+    return hardenedEngineGit(repoDir, args);
+  };
+  await ensureEngineTree(state, shas[2]!, hash, { ...base, git });
+  assert.ok(during && "unavailable" in during, "a launch cannot publish a spec while the advance holds the pin");
+  assert.match(String((during as { unavailable: string }).unavailable), /pin busy/);
+  assert.deepEqual(engineAt(state, hash), { head: shas[2], recorded: shas[2] }, "positive control: the advance completed");
+
+  // The same launch, once the advance released the pin, names the revision the tree now holds.
+  const after = await pinEngineForRun(state, hash, "run-pin", publishInto(run), { waitMs: 0 });
+  assert.deepEqual(after, { sourceHash: hash, sha: shas[2] });
+  const spec = readSpec(run);
+  assert.ok(spec.ok);
+  assert.equal(spec.value.engine.sha, engineAt(state, hash).head, "the spec names exactly the revision its tree holds");
+});
+
+test("an engine a launch is pinning is not advanced until the pin is released", async () => {
+  const { dir, shas } = seedCommits(3);
+  const state = tmp();
+  const hash = hashOf(95);
+  const rows: Row[] = [];
+  const log = (step: string, extra?: Record<string, unknown>) => void rows.push({ step, extra });
+  const base = { repoDir: dir, storeRoot: join(state, "store"), probe, log, linkNodeModules: () => "linked" as const,
+    materialize: () => ({ outcome: "hit" as const, hash }) };
+  assert.equal((await ensureEngineTree(state, shas[0]!, hash, base)).kind, "built");
+
+  // A launch in another process holds the pin (a live holder: this process), between its record read and its spec.
+  const lock = join(enginesRoot(state), `${hash}.pin.lock`);
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, run_id: "run-elsewhere", host: hostname(), startedAt: new Date().toISOString() }));
+  await ensureEngineTree(state, shas[2]!, hash, base);
+  assert.deepEqual(engineAt(state, hash), { head: shas[0], recorded: shas[0] }, "the advance deferred instead of moving a pinned tree");
+  assert.ok(rows.some((r) => r.step === "engine.advance_deferred" && /a run is pinning the engine/.test(String(r.extra?.reason))));
+
+  // The pin released and no run named the engine: the next pass advances it.
+  rmSync(lock);
+  await ensureEngineTree(state, shas[2]!, hash, base);
+  assert.deepEqual(engineAt(state, hash), { head: shas[2], recorded: shas[2] }, "positive control: an unpinned engine advances");
 });
