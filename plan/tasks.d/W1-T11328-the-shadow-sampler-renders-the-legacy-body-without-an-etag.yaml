@@ -1,0 +1,35 @@
+- id: W1-T11328
+  title: "The shadow sampler computes the legacy view's body without its entity tag, so serve's main thread stops JSON-stringifying and SHA-1-hashing every sampled legacy body for an etag it never reads"
+  repo: remudero
+  depends_on: []
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, whether the shadow sampler pays for an etag; it spans the view renderer and the sampler that calls it
+  origin: operator-session#serve-cpu-profile-2026-11-04
+  plan_refs:
+    - W1-T5362
+  files:
+    - src/lib/views.ts
+    - src/lib/view-shadow.ts
+    - test/console-api/views/the-shadow-sampler-renders-the-legacy-body-without-an-etag.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: views.ts exports computeViewBody, which returns renderView's body with no entity tag, and renderView is computeViewBody plus viewEtag; legacyViewSampler builds its legacy reading from computeViewBody, so a sampled legacy view never runs viewEtag, while served responses keep the same body and etag
+      proof: "unit test: test/console-api/views/the-shadow-sampler-renders-the-legacy-body-without-an-etag.test.ts"
+    - claim: The shadow sampler calls computeViewBody on its production path
+      proof: "grep: computeViewBody( in src/lib/view-shadow.ts"
+  rationale: |
+    MEASURED 2026-11-04 by an operator-approved live CPU profile of serve (~/Remudero-notes/serve-cpu-profile-2026-11-04.md): on serve's main thread viewEtag (src/lib/views.ts) is 11.6% SELF time, and renderView 13.2% inclusive, under view-shadow.ts at 13.9%.
+    viewEtag JSON.stringifies the whole body and SHA-1 hashes it. legacyViewSampler (src/lib/view-shadow.ts) calls renderView for every sampled legacy body (the inbox alone about 7,681 times an hour) and never reads rendered.etag.
+    The legacy side only feeds the comparator's data diff, so that etag is pure waste on the thread that serves requests.
+  design: |
+    Split renderView into computeViewBody (compute, sources, stale, body), with renderView returning that body plus viewEtag. legacyViewSampler uses computeViewBody.
+    Test through the real legacyViewSampler with a post spy: the posted legacy data equals renderView's. Prove the etag path is never reached with a body whose JSON.stringify throws (a BigInt): computeViewBody succeeds where renderView would throw.
+  falsifier: |
+    At origin/main legacyViewSampler calls renderView, which computes viewEtag over the whole legacy body on every sample.
+  note: |
+    reservation hand-off: plan-file-1793804074000 -> plan-file-1793804074000. Reserved with rmd next-task-id --branch plan-file-1793804074000 from the operator session's ops worktree. Evidence was gathered live with the operator's approval (a SIGUSR1 inspector CPU profile of serve, plus read-only reads of read-model/view-shadow.json.sqlite) and is recorded in ~/Remudero-notes/serve-cpu-profile-2026-11-04.md. W1-T11328, W1-T11329 and W1-T11330 all edit src/lib/view-shadow.ts, so depends_on chains them to keep parallel builds off one file.

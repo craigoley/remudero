@@ -21,6 +21,9 @@
     - test/deploy/deploy-revival-resource-policy.test.ts
     - test/the-console-backend-keeps-its-share-of-the-host.test.ts
     - test/the-instances-share-one-host-memory-budget.test.ts
+    - deploy/install-host-units.sh
+    - test/recycle-container.test.ts
+    - test/deploy/the-rendered-watchdog-passes-the-installed-registry-to-the-memory-policy.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -47,6 +50,9 @@
     AMENDED again on 2026-11-04 (operator, AskUserQuestion: "Keep today's limit"). The rework of #16468 showed what max(formula, own peak) does on today's overcommitted 32,086 MiB host: every container is pinned at exactly its historical peak. Core goes from 24,918 MiB to 17,027 MiB with zero headroom, and a container capped at its peak can never record a higher one.
     So while overcommitted, a container keeps the larger of its own peak and the limit it already runs with, the overcommit row and alert (W1-T11286) surface the deficit, and the formula governs again once the peaks fit.
     The three suites added to files: still encode the old rule ("a host too small for the reserve gets no ceiling", memory.max as the raw formula, core at 3956 MiB on a 15988 MiB host) and move with it. src/lib/config-schema.ts registers the peer-registry variable the per-instance lookup reads.
+    AMENDED (scope) 2026-11-04, from #16468's review at 04e79eb141:
+    - Production watchdog wiring loses the registry: install-host-units.sh:1148 stores the installed one as INSTANCE_REGISTRY, while the tuner invocation (about :1405) and the revival policy it sources never receive RMD_INSTANCE_REGISTRY. So in production the per-peer-root reader ignores a custom selected registry. install-host-units.sh and a rendered-watchdog test join files.
+    - CI on Linux reads /proc/meminfo, which the Mac cannot. The new host.memory_max.overcommitted row then lands in test/recycle-container.test.ts's recycle ledger ahead of the row its W1-T1046 hung-worker test expects. That suite joins files so its fixtures pin RMD_MEMINFO_PATH, making them hermetic instead of depending on the runner's real MemTotal.
   design: |
     Add one function in resource-policy.sh that returns a container's memory.max from: the host's MemTotal (resource_policy_mem_total_mib), RMD_HOST_RESERVE_MIB, and each OTHER fleet container's learned peak. A learned peak is the larger of its recorded cgroup memory.peak (written beside memory-high-tuned-<container>.json by the tuner each healthy tick) and its learned memory.high; with neither, its RMD_MEMORY_HIGH_FLOORS entry. The build ceiling and serve's memory.max both call it. The value is recomputed at every recycle and by the W1-T4267 drift check, so as peaks are learned the split self-adjusts, and a container that grows takes headroom only from measured slack. memory.high stays under its own memory.max as today. The policy note names every term. No new constant.
   note: |

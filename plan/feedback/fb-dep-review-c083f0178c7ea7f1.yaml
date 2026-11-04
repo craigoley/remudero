@@ -1,0 +1,229 @@
+id: fb-dep-review-c083f0178c7ea7f1
+ts: 2026-11-04T14:17:10.891Z
+raw: |-
+  Land the dependency bump(s) of Dependabot PR #16733, whose red is its own: chore(deps): bump the npm-minor-and-patch group with 2 updates
+
+  Dependabot proposed a minor/patch update whose head fails a required check that main's newest run passes.
+  A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest
+  allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:
+  tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked
+  SDK's claudeCodeVersion), and the bumps of every sibling Dependabot PR named below that the fix needs.
+  Do not edit or close the Dependabot PRs: the superseded-by row closes them once the owned PR carries
+  their hunks, or Dependabot does once main carries the versions.
+
+  PR: https://github.com/craigoley/remudero/pull/16733
+  Head: 10a50cb875328708b77e78457cbad97b605b5d67
+  Bumps: @anthropic-ai/claude-agent-sdk 0.3.310 -> 0.3.316, @swc/core 1.16.20 -> 1.16.21
+  Red checks: ci-gate, coverage-ratchet
+  Sibling Dependabot PRs folded in: #16734 (@anthropic-ai/claude-code 2.1.310 -> 2.1.316, @openai/codex 0.163.0 -> 0.166.0)
+
+  Dependabot proposal body:
+
+  Bumps the npm-minor-and-patch group with 2 updates: [@anthropic-ai/claude-agent-sdk](https://github.com/anthropics/claude-agent-sdk-typescript) and [@swc/core](https://github.com/swc-project/swc/tree/HEAD/packages/core).
+
+  Updates `@anthropic-ai/claude-agent-sdk` from 0.3.310 to 0.3.316
+  <details>
+  <summary>Release notes</summary>
+  <p><em>Sourced from <a href="https://github.com/anthropics/claude-agent-sdk-typescript/releases">@​anthropic-ai/claude-agent-sdk's releases</a>.</em></p>
+  <blockquote>
+  <h2>v0.3.316</h2>
+  <h2>What's changed</h2>
+  <ul>
+  <li>Added <code>permissions.blockReadsExemptPaths</code> to the <code>Settings</code> type: paths, read only from <code>--settings</code> and settings the host sends, that <code>blockReadsOutsideWorkingDirectories</code> lets through without making them working directories</li>
+  <li>Updated to parity with Claude Code v2.1.316</li>
+  </ul>
+  <h2>Update</h2>
+  <pre lang="sh"><code>npm install @anthropic-ai/claude-agent-sdk@0.3.316
+  # or
+  yarn add @anthropic-ai/claude-agent-sdk@0.3.316
+  # or
+  pnpm add @anthropic-ai/claude-agent-sdk@0.3.316
+  # or
+  bun add @anthropic-ai/claude-agent-sdk@0.3.316
+  </code></pre>
+  <h2>v0.3.314</h2>
+  <h2>What's changed</h2>
+  <ul>
+  <li>Added <code>sandbox_required_unavailable</code> to <code>startup_failure_reason</code>, for the result Claude Code writes when a required sandbox cannot run</li>
+  <li>Added <code>permissions.blockWritesOutsideWorkingDirectories</code> to the <code>Settings</code> type</li>
+  <li>Added <code>prewarm()</code> (alpha) to the <code>@anthropic-ai/claude-agent-sdk/core</code> entry point</li>
+  <li>Fixed a settings file left out of <code>settingSources</code> still supplying some settings, such as auto mode rules and saved permission consents</li>
+  <li>Updated to parity with Claude Code v2.1.314</li>
+  </ul>
+  <h2>Update</h2>
+  <pre lang="sh"><code>npm install @anthropic-ai/claude-agent-sdk@0.3.314
+  # or
+  yarn add @anthropic-ai/claude-agent-sdk@0.3.314
+  # or
+  pnpm add @anthropic-ai/claude-agent-sdk@0.3.314
+  # or
+  bun add @anthropic-ai/claude-agent-sdk@0.3.314
+  </code></pre>
+  <h2>v0.3.312</h2>
+  <h2>What's changed</h2>
+  <ul>
+  <li>Added <code>autoMode</code>, <code>skipAutoPermissionPrompt</code>, <code>useAutoModeDuringPlan</code> and <code>permissions.disableAutoMode</code> to the <code>Settings</code> type</li>
+  <li>Added <code>unanswered</code> (<code>skipped</code>, <code>replied_in_chat</code> or <code>dismissed</code>) to AskUserQuestion answers' per-question <code>annotations</code>; send it only when <code>system/init</code> lists the <code>ask_user_question_unanswered_v1</code> capability</li>
+  <li>Fixed <code>resolveSettings()</code> returning mistyped managed auto-mode settings, such as <code>permissions.disableAutoMode: true</code>, as written instead of reading them as the CLI does; a user or project settings file whose auto-mode keys hold an invalid value is now skipped, as in the CLI</li>
+  <li>Updated to parity with Claude Code v2.1.312</li>
+  </ul>
+  <h2>Update</h2>
+  <pre lang="sh"><code>&lt;/tr&gt;&lt;/table&gt; 
+  </code></pre>
+  </blockquote>
+  <p>... (truncated)</p>
+  </details>
+  <details>
+  <summary>Changelog</summary>
+  <p><em>Sourced from <a href="https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md">@​anthropic-ai/claude-agent-sdk's changelog</a>.</em></p>
+  <blockquote>
+  <h2>0.3.316</h2>
+  <ul>
+  <li>Added <code>permissions.blockReadsExemptPaths</code> to the <code>Settings</code> type: paths, read only from <code>--settings</code> and settings the host sends, that <code>blockReadsOutsideWorkingDirectories</code> lets through without making them working directories</li>
+  <li>Updated to parity with Claude Code v2.1.316</li>
+  </ul>
+  <h2>0.3.315</h2>
+  <ul>
+  <li>Updated to parity with Claude Code v2.1.315</li>
+  </ul>
+  <h2>0.3.314</h2>
+  <ul>
+  <li>Added <code>sandbox_required_unavailable</code> to <code>startup_failure_reason</code>, for the result Claude Code writes when a required sandbox cannot run</li>
+  <li>Added <code>permissions.blockWritesOutsideWorkingDirectories</code> to the <code>Settings</code> type</li>
+  <li>Added <code>prewarm()</code> (alpha) to the <code>@anthropic-ai/claude-agent-sdk/core</code> entry point</li>
+  <li>Fixed a settings file left out of <code>settingSources</code> still supplying some settings, such as auto mode rules and saved permission consents</li>
+  <li>Updated to parity with Claude Code v2.1.314</li>
+  </ul>
+  <h2>0.3.313</h2>
+  <ul>
+  <li>Updated to parity with Claude Code v2.1.313</li>
+  </ul>
+  <h2>0.3.312</h2>
+  <ul>
+  <li>Added <code>autoMode</code>, <code>skipAutoPermissionPrompt</code>, <code>useAutoModeDuringPlan</code> and <code>permissions.disableAutoMode</code> to the <code>Settings</code> type</li>
+  <li>Added <code>unanswered</code> (<code>skipped</code>, <code>replied_in_chat</code> or <code>dismissed</code>) to AskUserQuestion answers' per-question <code>annotations</code>; send it only when <code>system/init</code> lists the <code>ask_user_question_unanswered_v1</code> capability</li>
+  <li>Fixed <code>resolveSettings()</code> returning mistyped managed auto-mode settings, such as <code>permissions.disableAutoMode: true</code>, as written instead of reading them as the CLI does; a user or project settings file whose auto-mode keys hold an invalid value is now skipped, as in the CLI</li>
+  <li>Updated to parity with Claude Code v2.1.312</li>
+  </ul>
+  <h2>0.3.311</h2>
+  <ul>
+  <li>Added <code>cacheCreationEphemeral5mInputTokens</code> and <code>cacheCreationEphemeral1hInputTokens</code> to <code>ModelUsage</code>, splitting <code>cacheCreationInputTokens</code> by cache lifetime</li>
+  <li>Changed background start-up work to wait until the first model request is sent, for about 10 seconds at most, when the first message arrives during start-up</li>
+  <li>Changed the minimum supported Node.js version from 18.0.0 to 18.14.0</li>
+  <li>Updated to parity with Claude Code v2.1.311</li>
+  </ul>
+  </blockquote>
+  </details>
+  <details>
+  <summary>Commits</summary>
+  <ul>
+  <li><a href="https://github.com/anthropics/claude-agent-sdk-typescript/commit/3a0b748adbb1d31fa66a24a15df7e7c973fe1368"><code>3a0b748</code></a> chore: Update CHANGELOG.md</li>
+  <li><a href="https://github.com/anthropics/claude-agent-sdk-typescript/commit/b6fae31a223da39de8163088ae0c8d75803a0445"><code>b6fae31</code></a> chore: Update CHANGELOG.md</li>
+  <li><a href="https://github.com/anthropics/claude-agent-sdk-typescript/commit/e2963809c50847f00143646418177031aa38dd9c"><code>e296380</code></a> chore: Update CHANGELOG.md</li>
+  <li><a href="https://github.com/anthropics/claude-agent-sdk-typescript/commit/a1ae8941bf4aa360250a2de2fa0792548307f3ba"><code>a1ae894</code></a> chore: Update CHANGELOG.md</li>
+  <li>See full diff in <a href="https://github.com/anthropics/claude-agent-sdk-typescript/compare/v0.3.310...v0.3.316">compare view</a></li>
+  </ul>
+  </details>
+  <br />
+
+  Updates `@swc/core` from 1.16.20 to 1.16.21
+  <details>
+  <summary>Changelog</summary>
+  <p><em>Sourced from <a href="https://github.com/swc-project/swc/blob/main/CHANGELOG.md">@​swc/core's changelog</a>.</em></p>
+  <blockquote>
+  <h2>[1.16.21] - 2026-10-31</h2>
+  <h3>Bug Fixes</h3>
+  <ul>
+  <li>
+  <p><strong>(ci)</strong> Install rustfmt before tagging releases (<a href="https://redirect.github.com/swc-project/swc/issues/12632">#12632</a>) (<a href="https://github.com/swc-project/swc/commit/99fe404a46687fd8e6314df471d8135874dd6042">99fe404</a>)</p>
+  </li>
+  <li>
+  <p><strong>(deps)</strong> Update cargo (major) (<a href="https://redirect.github.com/swc-project/swc/issues/12460">#12460</a>) (<a href="https://github.com/swc-project/swc/commit/78f73b783a66463aa42938d3b2bd7e6e4b2edab2">78f73b7</a>)</p>
+  </li>
+  <li>
+  <p><strong>(deps)</strong> Update npm (<a href="https://redirect.github.com/swc-project/swc/issues/12461">#12461</a>) (<a href="https://github.com/swc-project/swc/commit/56f4407325fbda4f13e6db43232881c19d748707">56f4407</a>)</p>
+  </li>
+  <li>
+  <p><strong>(es/codegen)</strong> Escape inline script markers in regex literals (<a href="https://redirect.github.com/swc-project/swc/issues/12614">#12614</a>) (<a href="https://github.com/swc-project/swc/commit/9167d300d13e420cb17331a1ecd4ea3d6f64ef1c">9167d30</a>)</p>
+  </li>
+  <li>
+  <p><strong>(es/helpers)</strong> Convert Map and Set values to arrays (<a href="https://redirect.github.com/swc-project/swc/issues/12616">#12616</a>) (<a href="https://github.com/swc-project/swc/commit/aa3782b0d44c710b68a816f9a08ba54e74c830e5">aa3782b</a>)</p>
+  </li>
+  <li>
+  <p><strong>(es/minifier)</strong> Mark variables assigned in a member object as accessed and mutated (<a href="https://redirect.github.com/swc-project/swc/issues/12543">#12543</a>) (<a href="https://github.com/swc-project/swc/commit/72bd6ce0264ea029a33b73bdef09d461ff6bfbab">72bd6ce</a>)</p>
+  </li>
+  <li>
+  <p><strong>(es/minifier)</strong> Avoid capturing outer references in lexical loops (<a href="https://redirect.github.com/swc-project/swc/issues/12608">#12608</a>) (<a href="https://github.com/swc-project/swc/commit/3ba25f026ddc60808a7b3b23a8700322ec20e3da">3ba25f0</a>)</p>
+  </li>
+  <li>
+  <p><strong>(es/minifier)</strong> Preserve rest arg iterator (<a href="https://redirect.github.com/swc-project/swc/issues/12604">#12604</a>) (<a href="https://github.com/swc-project/swc/commit/ea41a2362b187696c1ba119c7f5879b536790bdb">ea41a23</a>)</p>
+  </li>
+  <li>
+  <p><strong>(es/minifier)</strong> Avoid duplicate preserved class bindings (<a href="https://redirect.github.com/swc-project/swc/issues/12607">#12607</a>) (<a href="https://github.com/swc-project/swc/commit/aa970dfaed81f2191ab98933e0022f6a4c41918e">aa970df</a>)</p>
+  </li>
+  <li>
+  <p><strong>(es/minifier)</strong> Track assignment aliases in member objects (<a href="https://redirect.github.com/swc-project/swc/issues/12621">#12621</a>) (<a href="https://github.com/swc-project/swc/commit/f5b03404dadec65457125369c028b12e3d15f042">f5b0340</a>)</p>
+  </li>
+  <li>
+  <p><strong>(es/minifier)</strong> Treat spread arguments of pure calls as side effects (<a href="https://redirect.github.com/swc-project/swc/issues/12585">#12585</a>) (<a href="https://github.com/swc-project/swc/commit/ce4860f43ccf9b87096861903988c58f179ab8cf">ce4860f</a>)</p>
+  </li>
+  <li>
+  <p><strong>(es/minifier)</strong> Store IIFE arg inline into Finalizer (<a href="https://redirect.github.com/swc-project/swc/issues/12624">#12624</a>) (<a href="https://github.com/swc-project/swc/commit/f8a996ae34a3a97c768fd17cb06adb05163eddd4">f8a996a</a>)</p>
+  </li>
+  <li>
+  <p><strong>(node)</strong> Allow DELETE grants on native cache volume roots (<a href="https://redirect.github.com/swc-project/swc/issues/12609">#12609</a>) (<a href="https://github.com/swc-project/swc/commit/716f129053b99b478c0f8c5bd8f107323662d968">716f129</a>)</p>
+  </li>
+  <li>
+  <p><strong>(node)</strong> Restrict cache DELETE exemption to filesystem roots (<a href="https://redirect.github.com/swc-project/swc/issues/12610">#12610</a>) (<a href="https://github.com/swc-project/swc/commit/38250cb4dccd7914d03f02e91f4fe6235f0dec71">38250cb</a>)</p>
+  </li>
+  </ul>
+  <h3>Documentation</h3>
+  <!-- raw HTML omitted -->
+  </blockquote>
+  <p>... (truncated)</p>
+  </details>
+  <details>
+  <summary>Commits</summary>
+  <ul>
+  <li><a href="https://github.com/swc-project/swc/commit/836adfa15847a48e5649a429426e4a9a6d62af0a"><code>836adfa</code></a> chore: Publish <code>1.16.21</code> with <code>swc_core</code> <code>v83.0.0</code></li>
+  <li><a href="https://github.com/swc-project/swc/commit/4291d57765451958d3d83f9056d30146965fa9c8"><code>4291d57</code></a> chore: Publish <code>1.16.21-nightly-20261031.1</code> with <code>swc_core</code> <code>v83.0.0</code></li>
+  <li><a href="https://github.com/swc-project/swc/commit/b517954a9ee5093a4b3bb478373abe98019d8698"><code>b517954</code></a> chore: Publish <code>1.16.21-nightly-20261030.1</code> with <code>swc_core</code> <code>v83.0.0</code></li>
+  <li><a href="https://github.com/swc-project/swc/commit/56f4407325fbda4f13e6db43232881c19d748707"><code>56f4407</code></a> fix(deps): update npm (<a href="https://github.com/swc-project/swc/tree/HEAD/packages/core/issues/12461">#12461</a>)</li>
+  <li>See full diff in <a href="https://github.com/swc-project/swc/commits/v1.16.21/packages/core">compare view</a></li>
+  </ul>
+  </details>
+  <br />
+
+
+  Dependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.
+
+  [//]: # (dependabot-automerge-start)
+  [//]: # (dependabot-automerge-end)
+
+  ---
+
+  <details>
+  <summary>Dependabot commands and options</summary>
+  <br />
+
+  You can trigger Dependabot actions by commenting on this PR:
+  - `@dependabot rebase` will rebase this PR
+  - `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it
+  - `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency
+  - `@dependabot ignore <dependency name> major version` will close this group update PR and stop Dependabot creating any more for the specific dependency's major version (unless you unignore this specific dependency's major version or upgrade to it yourself)
+  - `@dependabot ignore <dependency name> minor version` will close this group update PR and stop Dependabot creating any more for the specific dependency's minor version (unless you unignore this specific dependency's minor version or upgrade to it yourself)
+  - `@dependabot ignore <dependency name>` will close this group update PR and stop Dependabot creating any more for the specific dependency (unless you unignore this specific dependency or upgrade to it yourself)
+  - `@dependabot unignore <dependency name>` will remove all of the ignore conditions of the specified dependency
+  - `@dependabot unignore <dependency name> <ignore condition>` will remove the ignore condition of the specified dependency and ignore conditions
+
+
+  </details>
+attachments: []
+origin: repair#dep-review
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: dep-review:own-red:craigoley/remudero:@anthropic-ai/claude-agent-sdk@0.3.316,@anthropic-ai/claude-code@2.1.316,@openai/codex@0.166.0,@swc/core@1.16.21
+thread_id: null
