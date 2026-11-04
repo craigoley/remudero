@@ -1,0 +1,37 @@
+id: incident-dd2cb740785471bc
+ts: 2026-11-03T22:01:54.655Z
+raw: >-
+  Incident dd2cb7407854: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix stood down at rung.pr_diff_unreadable and nothing it read has
+  changed (head <sha>, task contract) — no worker is dispatched until one does:
+  PR diff unreadable: Error: Command failed: gh pr view
+  https://github.com/craigoley/remudero/pull/<n> --json files HTTP <n>: <n>
+  Gateway Timeout (https://api.github.com/graphql)
+
+  First seen: 2026-11-03T14:21:57.470Z
+
+  Last seen: 2026-11-03T14:21:57.470Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16474 escalated: already escalated (reason unreadable: no escalation of this PR at head f967357 is in the ledger); this pass: fix stood down at rung.pr_diff_unreadable and nothing it read has changed (head f967357, task contract) — no worker is dispatched until one does: PR diff unreadable: Error: Command failed: gh pr view https://github.com/craigoley/remudero/pull/16474 --json files
+  HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)
+
+
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#dd2cb740785471bc1e53a797c50bf8f8ee43f6dd09c2623f03be1263b5992faf
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

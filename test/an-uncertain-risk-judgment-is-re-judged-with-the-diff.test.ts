@@ -140,7 +140,9 @@ test("W1-T7724: a verdict still uncertain with the diff escalates on the diff ti
 });
 
 test("W1-T7724: a high-risk description verdict escalates without a diff re-judgment", async () => {
-  const h = harness([{ verdict: "high", confidence: 0.55, reasons: ["touches the merge gate"] }]);
+  // A CONFIDENT `high` escalates on the description alone. An uncertain one is re-judged with the diff
+  // (test/review/an-uncertain-high-risk-verdict-is-re-judged-with-the-diff.test.ts, after PR #16213).
+  const h = harness([{ verdict: "high", confidence: 0.9, reasons: ["touches the merge gate"] }]);
   const result = await runRiskJudge(baseInput(), h.deps, CONFIG);
   assert.equal(result.action.kind, "escalate");
   assert.equal(h.calls.length, 1, "no second judgment");

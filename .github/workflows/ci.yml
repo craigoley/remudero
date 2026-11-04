@@ -2372,6 +2372,16 @@ jobs:
           # W1-T5892: a merge-group lcov whose shards all succeeded records provenance, so it may pin a floor.
           node scripts/coverage-floor.mjs provenance --producer coverage-merged --lcov coverage-merged-artifact/lcov.info \
             --out coverage-merged-artifact/provenance.json --matrix-result "$MATRIX_RESULT"
+      - name: Emit bounded source SF evidence for the native coverage consumer
+        run: |
+          node scripts/coverage-floor.mjs owning-sf --include-changed-source --lcov coverage/lcov.info \
+            --file src/lib/model-canary-command.ts \
+            --file src/lib/model-canary-owner.ts \
+            --file src/lib/model-canary-pilot-approval.ts \
+            --file src/lib/model-canary-pilot-budget.ts \
+            --file src/lib/model-canary-pilot-execution.ts \
+            --file src/lib/worker-provider.ts \
+            --file src/lib/worker.ts
       - name: Upload merged coverage artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

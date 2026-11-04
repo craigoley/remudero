@@ -7,7 +7,8 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # one concern: daemon-memory-census.ts compares its own rows across boot generations
+  risk: high  # Rule 19 span: widened to daemon-heap-census, daemon-memory-census by a scope amendment for #16522
+  band_meaning: span
   origin: operator-session#efficiency-findings-2026-10-27
   plan_refs:
     - W1-T9647
@@ -17,6 +18,7 @@
   files:
     - src/lib/daemon-memory-census.ts
     - test/memory/core-live-heap-growth-is-named-by-the-boot-that-brought-it.test.ts
+    - "scripts/daemon-heap-census.mts"
   status: queued
   attempts: 0
   acceptance:
