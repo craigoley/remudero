@@ -1,0 +1,76 @@
+- id: W1-T11297
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/every-message-names-one-declared-sender.test.ts cost 8.7 PR minute(s) across 7 round(s) on 7 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.25
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/every-message-names-one-declared-sender.test.ts"
+  files:
+    - src/lib/ledger.ts
+    - test/ledger/check-test-test-every-message-names-one-declared-sender-test-ts.test.ts
+  acceptance:
+    - claim: "a recorded check:test:test/every-message-names-one-declared-sender.test.ts round, replayed through the real code path in src/lib/ledger.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11297: check:test:test/every-message-names-one-declared-sender.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/every-message-names-one-declared-sender.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/every-message-names-one-declared-sender.test.ts cost 8.7 PR minute(s) (seven-day half-life) across 7 fix round(s) on 7 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ledger.ts: test/every-message-names-one-declared-sender.test.ts imports it
+    - test/every-message-names-one-declared-sender.test.ts: named by the failing check
+    - the rounds name a failing test: test/every-message-names-one-declared-sender.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #16606 (https://github.com/craigoley/remudero/pull/16606) at 2026-11-04T00:04:44.438Z: ci-log round — coverage-shard (2/8): test/every-message-names-one-declared-sender.test.ts; coverage-shard (6/8): test/model-canary-rotation.test.ts
+        failing tests: every raw task_id literal a producer writes to the ledger resolves to exactly one declared entry; canary rotation gives every arm one reproducible private day pack and unique instance ids; canary rotation rejects invalid calendars and private seed formats; canary rotation preserves real scorer authority and missing evidence across varied instances
+        log excerpt:
+          | not ok 1791 - every raw task_id literal a producer writes to the ledger resolves to exactly one declared entry
+          |   ---
+          |   duration_ms: 88.360151
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/every-message-names-one-declared-sender.test.ts:68:1'
+          |   failureType: 'testCodeFailure'
+          |   error: 'producer-identity: "MODEL-CANARY-CODING" is not a declared pseudo sender — declare it in PRODUCER_IDENTITIES (src/lib/producer-identity.ts) before writing it to the ledger'
+          |   code: 'ERR_TEST_FAILURE'
+          |   name: 'UndeclaredProducerError'
+          |   stack: |-
+          |     resolveProducerIdentity (/home/runner/work
+    - PR #15160 (https://github.com/craigoley/remudero/pull/15160) at 2026-10-28T13:41:03.957Z: ci-log round — coverage-shard (6/8): test/every-message-names-one-declared-sender.test.ts; remudero-review
+        failing tests: every raw task_id literal a producer writes to the ledger resolves to exactly one declared entry
+        log excerpt:
+          | not ok 3163 - every raw task_id literal a producer writes to the ledger resolves to exactly one declared entry
+          |   ---
+          |   duration_ms: 87.403583
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/every-message-names-one-declared-sender.test.ts:68:1'
+          |   failureType: 'testCodeFailure'
+          |   error: 'producer-identity: "field-trials-refresh" is not a declared pseudo sender — declare it in PRODUCER_IDENTITIES (src/lib/producer-identity.ts) before writing it to the ledger'
+          |   code: 'ERR_TEST_FAILURE'
+          |   name: 'UndeclaredProducerError'
+          |   stack: |-
+          |     resolveProducerIdentity (/home/runner/wor
+    - PR #12457 (https://github.com/craigoley/remudero/pull/12457) at 2026-10-16T23:10:12.551Z: ci-log round — comment-load-ratchet; coverage-shard (7/8): test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts; coverage-shard (4/8): test/every-message-names-one-declared-sender.test.ts; Sca
+        failing tests: W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment; a sync primitive handed over as a seam default counts, W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const, W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment; every raw task_id literal a producer writes to the ledger resolves to exactly one declared entry; selected serve composition forwards one shadow context to the real registry readiness and dashboard routes; selected registry shadow reaches real serve and discovery consumers
+        log excerpt:
+          | TO FIX, in this same PR, either way: (a) shorten the prose you added -- see docs/comment-standard.md
+          |   for what a comment must state and what may be cut; or (b) if the growth is right, record it in
+          |   scripts/comment-load-baseline.json so a reviewer reads the decision, setting:
+          |     "src/run-task.ts": 18500,
+          |   Re-run this script afterwards; it must print "OK". Recording is an ordinary, reviewed outcome, not a defeat.
+          |   THEN RE-DERIVE ANY FILE-COUNT CLAIM IN THE PR BODY from `git diff --name-only origin/main...HEAD`:
+          |   editing the baseline changes the diff, and `bodyContradictsDiff` fails a body
+    - PR #10316 (https://github.com/craigoley/remudero/pull/10316) at 2026-10-09T13:14:29.624Z: ci-log round — coverage-shard (5/8): test/every-message-names-one-declared-sender.test.ts
+        failing tests: every raw task_id literal a producer writes to the ledger resolves to exactly one declared entry
+    - PR #10146 at 2026-10-08T17:12:19.316Z: ci-log round — coverage-shard (3/8): test/every-message-names-one-declared-sender.test.ts
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
