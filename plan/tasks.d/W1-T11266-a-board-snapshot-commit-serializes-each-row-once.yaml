@@ -1,0 +1,40 @@
+- id: W1-T11266
+  title: A board snapshot commit serializes each row at most once, reusing an unchanged row's serialized line across commits, instead of JSON-stringifying every closed and issue row twice on serve's main thread for each 43 MB rewrite
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # how one cache builds the bytes it writes; the file format, its digest and its refusals are unchanged
+  origin: operator-session#review-throughput-2026-11-03
+  plan_refs:
+    - W1-T11210
+  files:
+    - src/lib/board-snapshot-cache.ts
+    - test/console-api/read-model/a-board-snapshot-commit-serializes-each-row-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A commit writes bytes identical to today's for the same state, stringifies each record at most once per commit, and a commit after a change to one issue row stringifies only that row and the header and footer; an oversized or invalid row is still refused before any byte is written
+      proof: "unit test: test/console-api/read-model/a-board-snapshot-commit-serializes-each-row-once.test.ts"
+    - claim: The commit path keys reused lines by row content
+      proof: "grep: W1-T11266 in src/lib/board-snapshot-cache.ts"
+  rationale: |
+    OBSERVED 2026-11-03, 18:00-19:58Z, Azure host:
+    - remudero-serve held 2.2 cores and a 4.3 GB process (heap about 620 MB). serve's runtime.loop_stall_profile rows sum 714 s of stall in 18Z and 838 s in 19Z.
+    - Top sampled self-time since 18Z: (garbage collector) 24.3 s, then lineBuffer in board-snapshot-cache.ts 22.8 s. The incident-invariants ledger read (W1-T11210, #16558) is 18.5 s together.
+    - board_snapshot.committed fired 46 times for the closed and issues channels in about 2 h, each about 43.2 MB (closed 12,574 rows, issues 3,929 rows), about 1,985 MB written. The open channel committed 71 more, small.
+    - Each commit runs records() twice: once to sum lineBuffer(record).length for the size refusal, once to write. lineBuffer is Buffer.from(JSON.stringify(record)), so every row is stringified twice per commit, even when only one issue row changed.
+  design: |
+    - Keep a per-cache Map from row identity to { content key, line Buffer }, where the content key is a cheap stable key such as updated_at plus number, or a digest of the row.
+    - The size pass computes and keeps each record's buffer. The write pass reuses those buffers.
+    - A row whose content key is unchanged since the last commit reuses its cached buffer without stringifying.
+    - Evict entries for rows no longer in nextState.
+    - Bytes, sha256 digest, footer counts and every refusal (line_too_large, oversized, invalid_row) stay the same.
+    - Mark the change with a comment naming W1-T11266.
+    NOT IN SCOPE: splitting the file per channel, the open channel, and the commit cadence.
+  note: |
+    reservation hand-off: run-unfiled-1793732872741 -> run-unfiled-1793732872741
+    Reserved with rmd next-task-id (W1-T11266 on run-unfiled-1793732872741). From the operator session's box CPU/memory diagnosis.

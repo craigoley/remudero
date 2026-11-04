@@ -1,0 +1,38 @@
+- id: W1-T11262
+  title: The full sweep's escalation-answer read takes its refusal history through the digest-cached ledger slice reader instead of walking and decompressing every ledger rotation on every full pass
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # how one prelude stage reads three steps of ledger history; the rows it acts on are unchanged
+  origin: operator-session#review-throughput-2026-11-03
+  plan_refs:
+    - W1-T4471
+  files:
+    - src/lib/escalation-answers.ts
+    - test/inbox/escalation-answers-read-their-history-through-a-cached-slice.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: readEscalationAnswers gathers its escalation_answer.ignored, escalation_answer.refusal_alarm and panel.question_answered history through createEscalationTriageHistoryReader with a declared slice, returns the same rows the openLedgerUnion walk returns, keeps its unreadable-history alarm, and a second read over unchanged rotations reads no archive bytes
+      proof: "unit test: test/inbox/escalation-answers-read-their-history-through-a-cached-slice.test.ts"
+    - claim: escalation-answers.ts no longer walks the whole ledger union for its refusal history
+      proof: "grep: createEscalationTriageHistoryReader( in src/lib/escalation-answers.ts"
+  rationale: |
+    OBSERVED 2026-11-03, 12:45-18:45Z, Azure host:
+    - The 5 full passes each began after a sweep.full_prelude of 23-72 min (elapsed_ms 1,432,300-4,356,472).
+    - Its escalation_answers stage took 447, 2,066, 340, 598 and 331 s.
+    - Green PRs wait for the full pass to dispose them: 17 PRs sat at awaiting-review for up to 222 min while lanes were free.
+    - readEscalationAnswers (src/lib/escalation-answers.ts) iterates openLedgerUnion over the whole ledger union, filtered to three steps, when gateway.refusalIssues is set. That is about 750 rotations (fleet_state_parts.union_rotations 717-754), decompressed on every full pass.
+    - The repo already reads such slices through createEscalationTriageHistoryReader. On the auto-triage refusal slice its rows show digest_hits 714 of 717 rotations (auto_triage.refusal_read).
+  design: |
+    - Declare a ledger slice for the three steps readEscalationAnswers reads. Read it through a module-level createEscalationTriageHistoryReader, held across passes in the daemon process, in place of the openLedgerUnion loop.
+    - Map the reader's unreadable outcome to the existing historyReadable = false path, so escalation_answer.refusal_alarm_unreadable still fires.
+    - Bump the slice version if the reader requires one.
+    NOT IN SCOPE: fleet_state's own union read, and any other prelude stage.
+  note: |
+    reservation hand-off: run-unfiled-1793732872741 -> run-unfiled-1793732872741
+    Reserved with rmd next-task-id (W1-T11262 on run-unfiled-1793732872741). From the operator session's review-throughput diagnosis.

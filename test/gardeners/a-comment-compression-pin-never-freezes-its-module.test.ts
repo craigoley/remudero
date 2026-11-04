@@ -46,3 +46,19 @@ test("PR-pins: the compression shard the gardener mints names compressionPinBase
   assert.equal(rendered.refused, undefined);
   assert.match(rendered.text, /compressionPinBase from #test\/helpers\/compression-pin\.js, never a frozen digest/);
 });
+
+test("PR-pins: historical compression evidence stays separate from live serve and worker pins", () => {
+  for (const [pin, historicalPath] of [
+    ["test/console-api/serve/compress-src-lib-serve-ts.test.ts", "test/console-api/historical-src-lib-serve-ts.test.ts"],
+    ["test/worker/spawn/compress-src-lib-worker-provider-ts.test.ts", "test/infra/historical-src-lib-worker-provider-ts.test.ts"],
+    ["test/worker/spawn/compress-src-lib-worker-ts.test.ts", "test/worker/spawn/historical-src-lib-worker-ts.test.ts"],
+  ]) {
+    const live = readFileSync(join(REPO_ROOT, pin), "utf8");
+    assert.ok(BASE_RELATIVE.test(live), `${pin} must compare current code against its PR base`);
+    assert.ok(!FROZEN_DIGEST.test(live), `${pin} must not freeze the live module`);
+    const historical = readFileSync(join(REPO_ROOT, historicalPath), "utf8");
+    assert.ok(FROZEN_DIGEST.test(historical), `${historicalPath} must retain the reviewed fingerprints`);
+    assert.ok(historical.includes("gunzipSync(Buffer.from("), "historical proofs must read embedded fixtures");
+    assert.ok(!historical.includes("readFileSync("), "historical fingerprints must not pin current source");
+  }
+});
