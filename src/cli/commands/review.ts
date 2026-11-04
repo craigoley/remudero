@@ -404,7 +404,7 @@ export async function readChecksGreenReviewedAtHead(
 /** W1-T11151: the raw status poster, recording whether a publication threw. That is the one non-terminal outcome (the
  *  guarded post ledgers `review.post_failed`), so it alone keeps the review's slot until it settles; a posted, refused,
  *  withheld or replayed verdict is terminal and reports `posted`. */
-function failureRecordingPoster(): { post: (o: Parameters<typeof postReviewStatus>[0]) => Promise<void>; failed: () => boolean } {
+export function failureRecordingPoster(): { post: (o: Parameters<typeof postReviewStatus>[0]) => Promise<void>; failed: () => boolean } {
   let threw = false;
   return {
     post: async (o) => {

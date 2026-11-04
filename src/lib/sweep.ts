@@ -1565,7 +1565,7 @@ export interface BuildSweepEffectsDeps {
   reviewRunner?: (prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void) => Promise<number>;
   /** W1-T3798 — reuse/discrimination is an explicit mode, so the adapter can run the cheap
    *  deterministic path instead of silently treating both dispositions as a full review. */
-  reviewReuseRunner?: (pr: OpenPrView, mode: ReviewDispatchMode, reviewAttemptId?: string) => Promise<number>;
+  reviewReuseRunner?: (pr: OpenPrView, mode: ReviewDispatchMode, reviewAttemptId?: string, onPhase?: (phase: string) => void) => Promise<number>;
   /** The command the DEFAULT `reviewRunner` above calls. Separate from `reviewRunner` on purpose:
    *  overriding `reviewRunner` replaces the default outright and leaves its opt-in untested, while
    *  this seam keeps the default arm itself — the one that names `executionMode: "semantic"` — as
@@ -3195,7 +3195,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const exit = await reviewPhaseObserver.run(phase, async () =>
           mode.kind === "full-review" || !deps.reviewReuseRunner
             ? await reviewRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, phase)
-            : await deps.reviewReuseRunner(pr, mode, reviewAttemptId));
+            : await deps.reviewReuseRunner(pr, mode, reviewAttemptId, phase));
         log("sweep.post_review.done", {
           ...(postedAtMs === undefined ? {} : { post_to_settle_ms: Math.max(0, systemClock.now() - postedAtMs) }),
           pr_number: pr.prNumber,

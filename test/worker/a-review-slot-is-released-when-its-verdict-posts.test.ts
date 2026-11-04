@@ -11,6 +11,10 @@ import {
 } from "#src/cli/commands/review.js";
 import type { Config } from "#src/lib/config.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { buildSweepEffects as commandEffects, type SweepCommandHost } from "#src/cli/commands/sweep.js";
+import { judgeReview } from "#src/lib/review.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   adoptChildWork, buildSweepEffects, childWorkCount, childWorkHoldsReviewKey, childWorkLeftRunning,
   DEFAULT_SWEEP_POLICY, drainInFlightReviews, registerChildWork, resetChildWork,
@@ -71,6 +75,114 @@ function deps(postReview: NonNullable<SweepDeps["postReview"]>): SweepDeps {
 }
 
 describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts", () => {
+  for (const kind of ["reuse", "discriminate-only"] as const) {
+    for (const publication of ["posted", "refused", "failed", "fallback", "command-fallback"] as const) {
+      test(`W1-T11151 criterion 2: production ${kind} releases only terminal publication (${publication})`, async () => {
+        const root = mkdtempSync(join(tmpdir(), "rmd-reuse-phase-"));
+        const ledgerPath = join(root, "ledger.ndjson");
+        const held = gate();
+        const subject = { ...pr(7), currentOwnDiffDigest: "own", currentMergeBaseSha: "base" };
+        const diff = "diff --git a/src/subject.ts b/src/subject.ts\n+verdict-ready\n";
+        const prior = judgeReview([{ claim: "verdict ready", proof: "grep: verdict-ready in src/subject.ts" }], {
+          diff, report: "verdict ready", headCheckoutDir: "/head", execProof: () => "pass",
+        });
+        appendLedger(ledgerPath, { run_id: "prior", task_id: subject.taskId!, step: "review.posted",
+          head_sha: "prior-head", pr_url: subject.prUrl,
+          decision_verdict: publication.endsWith("fallback") ? { ...prior, state: "pending" } : prior });
+        const shim = ghShim([
+          { when: "pr diff", stdout: diff },
+          { when: "pulls/", stdout: JSON.stringify({ state: publication === "refused" ? "closed" : "open", merged: false }) },
+          ...(publication === "failed" ? [{ when: "statuses/", stderr: "HTTP 422: invalid status", exit: 1 }] : []),
+        ]);
+        const oldPath = process.env.PATH;
+        process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+        const rows: Array<Record<string, unknown>> = [];
+        const phases: string[] = [];
+        const fallbackReview = async (onPhase?: (phase: string) => void): Promise<number> => {
+          fallback = true;
+          await turn();
+          onPhase?.("posted");
+          await held.promise;
+          return 0;
+        };
+        let cleaned = false;
+        let fallback = false;
+        const boundAtPublication: number[] = [];
+        const host = {
+          freshTreeGit: unexpected,
+          realDeps: () => ({ reviewWorktree: { addWorktree: unexpected } }),
+          buildFreshTreeReviewRunner: () => unexpected,
+          buildReviewerCodeFreshnessGate: () => ({ call: unexpected, staleThisPass: () => undefined }),
+          buildBaseReproductionProbe: () => unexpected, buildImportClosureRead: () => unexpected,
+          buildRequiredFixReviewRunner: () => unexpected, readyDraftViaGh: () => unexpected,
+          reviewPostedDescription: (verdict: { summary: string }) => verdict.summary,
+        } as unknown as SweepCommandHost & Required<Pick<SweepCommandHost, "freshTreeGit">>;
+        resetChildWork();
+        registerChildWork(child("reuse-child", () => phases.at(-1)));
+        const effects = commandEffects(host, {
+          owner: "o", repo: "r", localRepoName: "r", config: { root } as Config,
+          ledgerPath, runId: "W1-T11151", plan: { tasks: [], byId: new Map() },
+          instanceRegistryTextImpl: () => undefined,
+          log: (step, extra) => rows.push({ step, ...extra }),
+          materializeReviewWorktreeImpl: () => ({ worktreePath: "/head" }),
+          buildBaseProofDirImpl: () => ({ baseCheckoutDir: "/base", baseUnreadablePaths: new Set(),
+            baseIsCheckout: true, addedTestFiles: new Set() }),
+          reviewReuseExecProofImpl: (_proof: string, cwd: string) => cwd === "/head" ? "pass" : "fail",
+          worktreeRemoveImpl: () => {
+            cleaned = true;
+            assert.equal(childWorkHoldsReviewKey("reuse-child"), true);
+            assert.deepEqual(reviewAdmissionBound(1), { bound: publication === "failed" ? 0 : 1,
+              inFlight: publication === "failed" ? 1 : 0 });
+            assert.equal(rows.some((row) => row.step === "sweep.post_review.done"), false);
+          },
+          reviewRunner: publication === "command-fallback" ? undefined
+            : (_pr, _plan, _attempt, onPhase) => fallbackReview(onPhase),
+          reviewCommandImpl: (_pr, _rest, opts) => fallbackReview(opts.onPhase),
+        });
+        let work: Promise<unknown> | undefined;
+        try {
+          assert.deepEqual(reviewAdmissionBound(1), { bound: 0, inFlight: 1 });
+          work = effects.postReview!(subject, { kind, judgedHeadSha: "prior-head" }, undefined, (phase) => {
+            phases.push(`review:${phase}`);
+            boundAtPublication.push(reviewAdmissionBound(1).bound);
+          }) as Promise<unknown>;
+          if (publication.endsWith("fallback")) {
+            await eventually(() => fallback);
+            await turn();
+            assert.deepEqual(reviewAdmissionBound(1), { bound: 1, inFlight: 0 });
+            assert.equal(childWorkHoldsReviewKey("reuse-child"), true);
+            held.resolve();
+          }
+          await work;
+          assert.equal(cleaned, kind === "discriminate-only" && !publication.endsWith("fallback"));
+          const terminal = publication !== "failed";
+          assert.deepEqual(phases, terminal ? ["review:posted"] : []);
+          assert.deepEqual(boundAtPublication, terminal ? [1] : []);
+          assert.equal(childWorkHoldsReviewKey("reuse-child"), true);
+          const done = rows.find((row) => row.step === "sweep.post_review.done");
+          assert.ok(done, JSON.stringify(rows));
+          assert.equal(done.exit, publication === "failed" || publication === "refused" ? 1 : 0);
+          // W1-T11151 criterion 3: the real reuse effect measures its post-to-settlement tail.
+          assert.equal(typeof done.post_to_settle_ms, terminal ? "number" : "undefined");
+          const ledger = readLedgerLines(ledgerPath);
+          if (publication === "refused") assert.ok(ledger.some((row) => row.step === "review.post_refused"));
+          if (publication === "failed") assert.ok(ledger.some((row) => row.step === "review.post_failed"));
+          assert.equal(settleChildWork("reuse-child"), true);
+          assert.equal(settleChildWork("reuse-child"), false);
+          assert.equal(childWorkHoldsReviewKey("reuse-child"), false);
+          assert.deepEqual(reviewAdmissionBound(1), { bound: 1, inFlight: 0 });
+        } finally {
+          held.resolve();
+          await work;
+          resetChildWork();
+          process.env.PATH = oldPath;
+          rmSync(shim.dir, { recursive: true, force: true });
+          rmSync(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+
   test("the owned status reader accepts only a readable phase for this run", () => {
     const dir = mkdtempSync(join(tmpdir(), "rmd-review-phase-"));
     try {
