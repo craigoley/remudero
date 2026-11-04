@@ -1,13 +1,13 @@
 - id: W1-T11150
   title: "The review shed checks its own effect: a shed that does not lower core's CPU pressure stops shedding and hands its lanes back, and width restores in proportion to the relief instead of holding 1 until PSI reaches a calm line — all 78 cpu-pressure sheds in the window were attributed to host-load, width sat at 1 for 75% of the last 24 h while core CPU PSI full held at a median of 29%, and recovery needs PSI full <= 5 with memory PSI <= 5, so the 5-20 band holds the floor"
   repo: remudero
-  depends_on: [W1-T11151]
+  depends_on: []
   priority: 1
   type: implement
   verify: auto
   principles:
     tdd: strict
-  risk: high # one concern, the review shed's self-check; it spans review-capacity's shed, the sweep's width adapter that feeds it, and the review.posted row its settle time is read from
+  risk: medium # one concern, the review shed's response to its own measured effect; one module and its test
   origin: operator-session#review-lane-findings-2026-11-02
   plan_refs:
     - W1-T2853
@@ -15,8 +15,6 @@
     - W1-T3025
   files:
     - src/lib/review-capacity.ts
-    - src/cli/commands/review.ts
-    - src/lib/sweep.ts
     - test/review/a-review-shed-that-does-not-lower-pressure-stops-shedding.test.ts
   status: queued
   attempts: 0
@@ -64,4 +62,3 @@
     findings, item 2 (p1), under operator ruling Q2. Ordering: build after W1-T11129 (#16251), which rewrites the same arm of
     review-capacity.ts, and not in parallel with W1-T11149, which edits the same module; neither is in depends_on because neither
     is on main at filing.
-    Amended 2026-11-03 (scope-amendment/W1-T11151-detached-review-phase): src/cli/commands/review.ts and src/lib/sweep.ts join files, risk is raised to high, and the task depends on W1-T11151. The hand fix of #16474 found both inputs had no production producer. setup_ms and proofs_ms appear on no review.posted row: review.ts's phases marks are logged only for plan-only reviews (review.plan_only_phases), so the code-review review.posted row gains them, and deriving them from other rows fails because compaction prunes review.reviewer. reviewCpuChildren is never populated: the sweep's selectAdaptiveReviewWidth adapter passes activeWorkers but not the review-child count, so it passes the count of review children in their CPU phase, read from W1-T11151's phase signal.

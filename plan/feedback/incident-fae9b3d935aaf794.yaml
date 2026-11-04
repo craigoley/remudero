@@ -1,0 +1,28 @@
+id: incident-fae9b3d935aaf794
+ts: 2026-11-03T22:00:49.932Z
+raw: >-
+  Incident fae9b3d935aa: invariant reconcile.unreadable
+
+  First seen: 2026-11-03T12:47:27.530Z
+
+  Last seen: 2026-11-03T12:47:27.530Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - fleet reconciliation history unreadable: /home/node/Remudero/state/ledger.2026-10-08T01-05-06-802Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-08T05-05-10-963Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-08T08-26-04-062Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-08T12-13-51-921Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-08T15-09-40-084Z.ndjson.gz, /home/node/Remudero/state/ledger.2026-10-08T21-20-56-595Z.ndjson.gz — the fleet reconciler repairs nothing until it can read its history; move the named file out of the state dir (/home/node/Remudero/state)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#fae9b3d935aaf794f41fef4a2f02181ab28af2a42faae8a516b6902042dab0c2
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
