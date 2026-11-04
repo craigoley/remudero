@@ -18,7 +18,7 @@
  */
 import { readFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   defaultShadowMemoryPorts,
@@ -294,8 +294,21 @@ export interface LaneGovernorPorts {
   cpuUsageUsec?: () => number | null;
 }
 
-/** W1-T11129 — the one lane class the dispatch target counts: every in-flight lane is one unit of it. */
-export const LANE_CPU_CLASS = "lane";
+/**
+ * W1-T11129 — the lane classes the CPU arm learns apart, named as the run-child rows name them (host-memory-ledger.ts's
+ * WorkerClass): a dispatch lane runs an implement build, an in-process review is a review. The dispatch target admits
+ * implement lanes, so its bound reads that class's figure; an interval with reviews beside builds teaches neither.
+ */
+export const DISPATCH_LANE_CPU_CLASS = "implement";
+export const REVIEW_LANE_CPU_CLASS = "review";
+
+/** The lanes of each class running through the interval a CPU sample closes. */
+export type RunningLaneClasses = Readonly<Partial<Record<string, number>>>;
+
+/** One entry per running lane, its class as the label, in a stable order. */
+export function runningLaneClasses(running: RunningLaneClasses): string[] {
+  return Object.keys(running).sort().flatMap((cls) => Array.from({ length: Math.max(0, Math.floor(running[cls] ?? 0)) }, () => cls));
+}
 
 /** W1-T11129 — the container's own cgroup cpu.stat usage_usec (cgroup v2, read inside the container's namespace). */
 export function readCgroupCpuUsageUsec(path = "/sys/fs/cgroup/cpu.stat", read: (path: string) => string = (p) => readFileSync(p, "utf8")): number | null {
@@ -314,24 +327,64 @@ export function publishLaneCpuBound(bound: number | null): void {
 }
 
 /**
- * W1-T11129 — one CPU reading for the dispatch target: sample the container's cpu.stat through the ports, count the
- * in-flight lanes as one class, learn, and return the reading laneTarget takes plus the bound it implies. An unread or
- * throwing counter leaves the learner as it was, so the bound stays unlearned and the cap stays at the CPU count.
+ * W1-T11129 — one CPU reading for the dispatch target: sample the container's cpu.stat through the ports, label each
+ * running lane by its class, learn, and return the implement class's reading laneTarget takes plus the bound it
+ * implies. An unread or throwing counter reads as unread NOW, learned history or not: the figures are null, so the
+ * bound is null and the cap falls back to the CPU count rather than to medians the counter can no longer confirm. The
+ * history is kept for when the counter returns, but the last sample is dropped, so the first interval after the gap
+ * (whose lanes went unseen) teaches nothing.
  */
 export function readLaneCpu(
-  learner: LaneCpuLearnerState, ports: Pick<LaneGovernorPorts, "cpuCount" | "cpuUsageUsec">, nowMs: number, inFlight: number,
+  learner: LaneCpuLearnerState, ports: Pick<LaneGovernorPorts, "cpuCount" | "cpuUsageUsec">, nowMs: number, running: RunningLaneClasses,
 ): { learner: LaneCpuLearnerState; cpu: LaneCpuReading; bound: number | null } {
   let usageUsec: number | null = null;
   try { usageUsec = ports.cpuUsageUsec?.() ?? null; }
   catch {
-    // A throwing port is an unread counter: the learner is left as it was, so the cap stays at the CPU count.
+    // A throwing port is an unread counter, handled exactly as a null reading below.
     usageUsec = null;
   }
-  const next = usageUsec === null ? learner : learnLaneCpu(learner, {
-    atMs: nowMs, usageUsec, runningClasses: Array.from({ length: Math.max(0, Math.floor(inFlight)) }, () => LANE_CPU_CLASS),
-  });
-  const cpu = laneCpuReading(next, LANE_CPU_CLASS);
+  if (usageUsec === null) {
+    const kept: LaneCpuLearnerState = { ...learner };
+    delete kept.last;
+    return { learner: kept, cpu: { baselineCpus: null, perLaneCpus: null }, bound: null };
+  }
+  const next = learnLaneCpu(learner, { atMs: nowMs, usageUsec, runningClasses: runningLaneClasses(running) });
+  const cpu = laneCpuReading(next, DISPATCH_LANE_CPU_CLASS);
   return { learner: next, cpu, bound: cpuLaneBound(ports.cpuCount(), cpu) };
+}
+
+/** W1-T11129 — a container's cpu.weight over the sum of every running container's weights (its own included). */
+export function cpuWeightShare(own: number, running: readonly number[]): number | undefined {
+  if (!Number.isFinite(own) || own <= 0) return undefined;
+  const total = running.filter((weight) => Number.isFinite(weight) && weight > 0).reduce((sum, weight) => sum + weight, 0);
+  return total <= 0 ? undefined : Math.min(1, own / Math.max(total, own));
+}
+
+/** Where deploy/memory-high-tuner.sh records every fleet container's cpu.weight, in the instance's state dir. */
+export const CPU_WEIGHTS_FILE = "cpu-weights.json";
+
+/**
+ * W1-T11129 — the daemon's cpu.weight share, from the host tuner's record (`<stateDir>/cpu-weights.json`): its own
+ * weight (`self`) over every running fleet container's. Freshness is the tuner's own: the file carries its write time
+ * and the one before, and a record older than two of those intervals is stale. Unread, stale, a first record with no
+ * interval yet, or a malformed one: undefined, so review capacity keeps today's fixed line.
+ */
+export function readCpuWeightShare(stateDir: string, nowMs: number, read: (path: string) => string = (p) => readFileSync(p, "utf8")): number | undefined {
+  let record: unknown;
+  try { record = JSON.parse(read(join(stateDir, CPU_WEIGHTS_FILE))); }
+  catch {
+    // No record yet (the tuner has not run on this host, or off Linux): the share is unread.
+    return undefined;
+  }
+  if (typeof record !== "object" || record === null) return undefined;
+  const { self, weights, updated_at_s: at, previous_updated_at_s: before } = record as Record<string, unknown>;
+  if (typeof self !== "string" || typeof weights !== "object" || weights === null) return undefined;
+  if (typeof at !== "number" || typeof before !== "number" || !(at > before)) return undefined;
+  if (nowMs / 1000 - at > 2 * (at - before)) return undefined;
+  const values = Object.values(weights as Record<string, unknown>);
+  if (!values.every((w) => typeof w === "number")) return undefined;
+  const own = (weights as Record<string, unknown>)[self];
+  return typeof own === "number" ? cpuWeightShare(own, values as number[]) : undefined;
 }
 
 /** The last published learned CPU lane bound, or undefined while unlearned or unread. */

@@ -168,12 +168,22 @@ mht_policy_mib() {
   printf '%s' "${RP_HIGH_POLICY}"
 }
 
+# One `docker ps` per tick, shared by the cpu.weight record and the peer order. Sets MHT_FLEET_PS; never call it in a
+# command substitution (the cache would die with the subshell). Status 1: discovery failed.
+mht_fleet_list() {
+  [ -n "${MHT_FLEET_LISTED:-}" ] && return "${MHT_FLEET_PS_RC}"
+  MHT_FLEET_LISTED=1 MHT_FLEET_PS_RC=0
+  MHT_FLEET_PS="$(docker ps --no-trunc --format '{{.Names}} {{.ID}}' 2>/dev/null)" || MHT_FLEET_PS_RC=1
+  return "${MHT_FLEET_PS_RC}"
+}
+
 # Only tier 2 needs peer priority; unavailable discovery must not suppress the floor,
 # severe give-back or calm guards. Publish 1/0 only after the whole peer list is read.
 mht_peer_order() {
   local container="$1" id="$2" others name oid extra ocg olive opol furthest=1 seen=0
   MH_FURTHEST=unknown MH_PEER_WHY="peer discovery unavailable"
-  if ! others="$(docker ps --no-trunc --format '{{.Names}} {{.ID}}' 2>/dev/null)"; then return 0; fi
+  mht_fleet_list || return 0
+  others="${MHT_FLEET_PS}"
   [ -n "${others}" ] || { MH_PEER_WHY="peer discovery empty"; return 0; }
   while read -r name oid extra; do
     case "${name}" in remudero-*daemon|"${RMD_SERVE_CONTAINER_NAME:-remudero-serve}") : ;; *) continue ;; esac
@@ -200,6 +210,40 @@ mht_peer_order() {
 }
 
 mht_json_escape() { printf '%s' "$1" | tr -d '"\\' | tr '\n\t' '  '; }
+
+# W1-T11129 -- EVERY FLEET CONTAINER'S cpu.weight, FOR THE DAEMON'S SHARE. A container reads only its own
+# /sys/fs/cgroup/cpu.weight (core 59); its siblings' (serve 303) are visible only here, under their scopes. A daemon
+# tick writes them all into its instance's state dir as cpu-weights.json, which the lane governor's reader turns into
+# the share review capacity judges PSI against. Serve is tuned from core's tick and state dir: it writes nothing, so
+# the file always names the daemon that reads it. All or nothing: one unreadable weight writes no file, and the last
+# one then ages out (previous_updated_at_s is the write interval the reader judges staleness by).
+mht_record_cpu_weights() {
+  local container="$1" id="$2" state="$3" file others name oid extra ocg w weights="" seen=0 now prev tmp
+  case "${container}" in remudero-*daemon) : ;; *) return 0 ;; esac
+  file="${state}/cpu-weights.json"
+  mht_fleet_list || return 1
+  others="${MHT_FLEET_PS}"
+  [ -n "${others}" ] || return 1
+  while read -r name oid extra; do
+    case "${name}" in remudero-*daemon|"${RMD_SERVE_CONTAINER_NAME:-remudero-serve}") : ;; *) continue ;; esac
+    if [ "${#oid}" -ne 64 ] || [[ "${oid}" = *[!0-9a-f]* ]] || [ -n "${extra}" ]; then return 1; fi
+    if [ "${name}" = "${container}" ]; then
+      [ "${oid}" = "${id}" ] && [ "${seen}" -eq 0 ] || return 1
+      seen=1
+    fi
+    ocg="$(mht_cgroup_dir "${oid}")" || return 1
+    w="$(cat "${ocg}/cpu.weight" 2>/dev/null)"
+    case "${w}" in ''|0|*[!0-9]*) return 1 ;; esac
+    weights="${weights}${weights:+,}\"${name}\":${w}"
+  done <<< "${others}"
+  [ "${seen}" -eq 1 ] || return 1
+  now="$(date -u +%s)"
+  prev="$(sed -n 's/.*"updated_at_s":\([0-9][0-9]*\).*/\1/p' "${file}" 2>/dev/null | head -n 1)"
+  [ -n "${prev}" ] || prev=null
+  tmp="${file}.tmp.$$"
+  printf '{"self":"%s","weights":{%s},"updated_at_s":%s,"previous_updated_at_s":%s}\n' \
+    "${container}" "${weights}" "${now}" "${prev}" > "${tmp}" && mv -f "${tmp}" "${file}"
+}
 
 mht_record() {
   local file="$1" container="$2" high="$3" policy="$4" reason="$5" tmp
@@ -251,6 +295,7 @@ memory_high_tune() {
   local sample prev v pts pid pev prf psw pst prate rate interval x
   # shellcheck disable=SC2034 # read by resource-policy.sh's resource_policy_tuned_file
   STATE_DIR="${state_root}"
+  MHT_FLEET_LISTED=""
   mkdir -p "${state}" 2>/dev/null || true
   id="$(docker inspect --format '{{.Id}}' "${container}" 2>/dev/null)" && [ -n "${id}" ] ||
     { echo "memory-high-tuner: ${container} — hold: no running container"; return 0; }
@@ -259,6 +304,9 @@ memory_high_tune() {
   fi
   cg="$(mht_cgroup_dir "${id}")" || { echo "memory-high-tuner: ${container} — hold: cgroup of ${id:0:12} unreadable"; return 0; }
   case "${cg}" in *.scope) unit="${cg##*/}" ;; *) unit="" ;; esac
+  # Before every hold below: the weights move with the fleet, not with this container's memory.
+  mht_record_cpu_weights "${container}" "${id}" "${state}" ||
+    echo "memory-high-tuner: ${container} — cpu.weight of the fleet unreadable; cpu-weights.json not refreshed"
   now="$(date -u +%s)"
   high_b="$(cat "${cg}/memory.high" 2>/dev/null)"
   max_b="$(cat "${cg}/memory.max" 2>/dev/null)"

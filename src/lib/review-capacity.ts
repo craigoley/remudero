@@ -7,8 +7,12 @@
  */
 import { readFileSync } from "node:fs";
 import { cpus, loadavg } from "node:os";
-import { publishedLaneCpuBound } from "./lane-governor.js";
+import { join } from "node:path";
+import { cpuWeightShare, publishedLaneCpuBound, readCpuWeightShare } from "./lane-governor.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
+
+/** W1-T11129 — the share now lives beside its reader in lane-governor.ts; re-exported for this module's callers. */
+export { cpuWeightShare };
 
 export function initialReviewCapacityState(baseWidth: number): ReviewCapacityState {
   return { effectiveWidth: Math.max(1, Math.trunc(baseWidth)), healthySamples: 0 };
@@ -132,6 +136,8 @@ export interface ReviewCapacityState {
   suspended?: ReviewCpuShedSuspension;
   /** W1-T11129 — the previous sample shed on CPU; an overload that persists then halves instead of shrinking one. */
   cpuShed?: boolean;
+  /** W1-T11129 — when the current calm window began (share known); a recovery step waits for one whole window. */
+  cpuCalmSinceMs?: number;
 }
 
 export interface ReviewCapacityBounds {
@@ -416,6 +422,9 @@ export function selectAdaptiveReviewWidth(
       shed = undefined;
     }
   }
+  // W1-T11129 — the width every recovery path below may grow from. An ineffective shed's hand-back above is not
+  // recovery (the shed did nothing), so it stands; growth beyond it is stepped at the end.
+  const widthBeforeRecovery = effectiveWidth;
   const previousReading = priorReadings.length > 0 ? priorReadings[priorReadings.length - 1]!.v : undefined;
   if (shed && readingNow !== undefined && !cpuOverloaded) {
     shed.lowest = Math.min(shed.lowest, readingNow);
@@ -589,6 +598,17 @@ export function selectAdaptiveReviewWidth(
     }
   }
 
+  // W1-T11129 — WITH THE SHARE KNOWN, THE WIDTH WIDENS BACK ONE STEP PER CALM WINDOW. Measured by the same reading
+  // the shed judged (cpuPressureTier's calm), over the same window its effect check waits (settleMs): a calm streak
+  // that has lasted one window earns one lane, and the next lane needs a window of its own. The restore-to-base and
+  // proportional paths above jumped 1 -> 4 on a single calm sample; with no share, today's recovery is unchanged.
+  let cpuCalmSinceMs = shareKnown && cpu.calm ? prior.cpuCalmSinceMs ?? observation.nowMs : undefined;
+  if (shareKnown && effectiveWidth > widthBeforeRecovery) {
+    const windowDone = cpuCalmSinceMs !== undefined && observation.nowMs - cpuCalmSinceMs >= settleMs;
+    effectiveWidth = windowDone ? widthBeforeRecovery + 1 : widthBeforeRecovery;
+    if (windowDone) cpuCalmSinceMs = observation.nowMs;
+  }
+
   if (shed && effectiveWidth >= baseWidth) shed = undefined; // fully handed back
   const shedEffect: ReviewShedEffect | undefined = suspended ? "ineffective" : shed?.effect;
   const shedReading = shed?.reading ?? suspended?.reading;
@@ -656,6 +676,7 @@ export function selectAdaptiveReviewWidth(
     healthySamples,
     ...(lastHealthySampleAtMs !== undefined ? { lastHealthySampleAtMs } : {}),
     ...(cpuShed ? { cpuShed } : {}),
+    ...(cpuCalmSinceMs !== undefined ? { cpuCalmSinceMs } : {}),
     lastTelemetrySignature: signature,
     lastTelemetryAtMs: shouldLog ? observation.nowMs : prior.lastTelemetryAtMs,
     ...(cpuReadings.length > 0 ? { cpuReadings } : {}),
@@ -903,17 +924,10 @@ export interface RuntimeReviewCapacityInput extends ReviewCapacityBounds {
   ledgerLines: ReadonlyArray<Record<string, unknown>>;
   policy: ReviewCapacityPolicy;
   log: (step: string, extra?: Record<string, unknown>) => void;
-  /** W1-T11129 — the container's weight share, when the caller has it. */
+  /** W1-T11129 — the container's weight share; absent, the host tuner's record under `root` is read. */
   cpuWeightShare?: number;
   /** W1-T11129 — the governor's learned CPU lane bound; absent, the daemon's last published one is read. */
   laneCpuBound?: number;
-}
-
-/** W1-T11129 — a container's cpu.weight over the sum of every running container's weights (its own included). */
-export function cpuWeightShare(own: number, running: readonly number[]): number | undefined {
-  if (!finite(own) || own <= 0) return undefined;
-  const total = running.filter((weight) => finite(weight) && weight > 0).reduce((sum, weight) => sum + weight, 0);
-  return total <= 0 ? undefined : Math.min(1, own / Math.max(total, own));
 }
 
 /** Production adapter. It reads only local host files and the age-bounded provider snapshot. */
@@ -921,12 +935,15 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
   const prior = runtimeStates.get(input.root) ?? initialReviewCapacityState(input.baseWidth);
   const providerStatus = readProviderRoutingStatus(input.root, { now: () => input.nowMs });
   const settlements = summarizeReviewSettlements(input.ledgerLines, input.nowMs, input.policy.settlementWindowMs);
+  // W1-T11129 — the share's producer is the host tuner's cpu-weights.json in this instance's state dir; unread or
+  // stale, the observation carries no share and the fixed line decides, as before.
+  const weightShare = input.cpuWeightShare ?? readCpuWeightShare(join(input.root, "state"), input.nowMs);
   const observation: ReviewCapacityObservation = {
     nowMs: input.nowMs,
     queueDepth: input.queueDepth,
     activeWorkers: input.activeWorkers,
     ...readReviewHostObservation(),
-    ...(input.cpuWeightShare !== undefined ? { cpuWeightShare: input.cpuWeightShare } : {}),
+    ...(weightShare !== undefined ? { cpuWeightShare: weightShare } : {}),
     ...((input.laneCpuBound ?? publishedLaneCpuBound()) !== undefined ? { laneCpuBound: input.laneCpuBound ?? publishedLaneCpuBound() } : {}),
     // W1-T11150 — the review lane's own CPU share: reviews attempted and still inside their CPU phase.
     // Absent from the fold means none were counted: always supplied, so a later rise is visible.

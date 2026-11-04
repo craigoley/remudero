@@ -155,7 +155,7 @@ import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, sys
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
-import { defaultLaneGovernorPorts, initialLaneCpuLearner, LANE_TARGET_STEP, laneTarget, laneTargetPayload, publishLaneCpuBound, readLaneCpu, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget } from "./lane-governor.js";
+import { defaultLaneGovernorPorts, DISPATCH_LANE_CPU_CLASS, initialLaneCpuLearner, LANE_TARGET_STEP, laneTarget, laneTargetPayload, publishLaneCpuBound, readLaneCpu, REVIEW_LANE_CPU_CLASS, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget } from "./lane-governor.js";
 import type { LaneGovernorMode } from "./policy.js";
 import {
   createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimBeforeMemoryRestart, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
@@ -4204,7 +4204,8 @@ export async function runDaemon(
     log(LANE_TARGET_STEP, { mode: "shadow", mode_unread: error instanceof Error ? error.message : String(error) });
   }
   let laneTargetReading: { atMs: number; result: LaneTarget } | undefined;
-  // W1-T11129: the CPU arm learns from the container's cgroup cpu.stat at each reading, counting the lanes in flight.
+  // W1-T11129: the CPU arm learns from the container's cgroup cpu.stat at each reading, labelling the lanes in flight by
+  // class: each dispatch lane is an implement build, each in-process review a review.
   let laneCpuLearner = initialLaneCpuLearner();
   /** The lanes new admissions may fill: the governor's target under enforce, otherwise unbounded. */
   const enforcedLaneTarget = (inFlight: number, wipBound: number | undefined): number => {
@@ -4217,7 +4218,9 @@ export async function runDaemon(
         const reason = error instanceof Error ? error.message : String(error);
         memory = { unread: reason };
       }
-      const cpuReading = readLaneCpu(laneCpuLearner, laneGovernorPorts, nowMs, inFlight);
+      const cpuReading = readLaneCpu(laneCpuLearner, laneGovernorPorts, nowMs, {
+        [DISPATCH_LANE_CPU_CLASS]: inFlight, [REVIEW_LANE_CPU_CLASS]: inFlightReviewCount(),
+      });
       laneCpuLearner = cpuReading.learner;
       publishLaneCpuBound(cpuReading.bound);
       const result = laneTarget({
