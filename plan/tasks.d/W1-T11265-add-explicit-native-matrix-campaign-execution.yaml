@@ -1,0 +1,59 @@
+- id: W1-T11265
+  title: "Add explicit post-smoke grant and bounded native matrix execution"
+  repo: "remudero"
+  depends_on:
+    - W1-T11264
+  type: "implement"
+  verify: "auto"
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: "high"
+  band_meaning: "blast-radius"
+  origin: "operator-approved-followups:2026-11-03"
+  plan_refs:
+    - W1-T11264
+  files:
+    - src/lib/model-canary-command.ts
+    - src/lib/model-canary-pilot-approval.ts
+    - src/lib/model-canary-benchmark-command.ts
+    - src/lib/model-canary-native-census.ts
+    - src/lib/model-canary-campaign-execution.ts
+    - test/routing/model-canary-pilot-campaign.test.ts
+    - test/routing/model-canary-pilot-campaign-cli.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: >-
+    Add explicit post-smoke campaign approval and bounded native matrix execution using the preceding owner/projection task. This task does not fund or activate a pilot, authorize provider spend, or run a provider during implementation.
+  design: >-
+    Keep the fixed pilot approval/execution path and semantics unchanged. Add a separate explicit human-confirmed campaign grant and native bounded matrix campaign. Reuse existing trusted source identity/CI reader, validated corpus and scorer, effective cash catalog, worker/provider guard, shared allowance budget, CanarySchedulePorts, and Task 1 owner/projection APIs. Build the census from maintained read-only native sources via the exact new model-canary-native-census.ts module; if any census input cannot be authoritatively assembled, return unavailable instead of trusting JSON. Execute at most 128 slots per shard, concurrency one, with ordinary source/admission/busy/squeeze/allowance checks. Campaign claims use the existing global owner DB and a permanent fixed campaign key. Every send uses the same shared $10 lifetime cap after the $2 smoke phase; never add a wallet, cap, or fallback identity. Campaign source-CI qualification uses an internal static path constant, not a caller-supplied list. Route results through the Task 1 owner projector without run/grade JSON inputs. Require a successful real standalone CLI fixture with at least two eligible cash configurations and two cases, ordinary admission, real private SQLite custody and native worker composition, faking only external paid HTTP/CI metadata. The default canary executor, census builder, owner and grader must not all be replaced with fakes. An implementation that only returns unavailable on every normal input does not meet acceptance. Keep unsupported subscription/coding configurations explicit in the census. Unknown live eligibility may defer real operation but must not hide an unimplemented native producer. Source-only tests make zero real provider requests. Freeze the originally approved census/matrix snapshot and immutable semantic configuration/scorer/source bindings. Revalidate a fresh native snapshot separately at dispatch. Observation timestamps, current capacity/allowance counters and ordinary clock advance are not identity changes; recheck their freshness/admission predicates instead of requiring byte-identical time-stamped census JSON. Source/model/effort/endpoint/credential/corpus/scorer or policy-contract changes still refuse. Never backdate a new observation to make its digest match. A time-advanced unchanged-configuration positive control must execute the same frozen matrix, while an actual semantic configuration change must refuse before claim/send. For source qualification, preserve the existing smoke's unchanged seven default paths: `src/lib/model-canary-command.ts`, `src/lib/model-canary-owner.ts`, `src/lib/model-canary-pilot-approval.ts`, `src/lib/model-canary-pilot-budget.ts`, `src/lib/model-canary-pilot-execution.ts`, `src/lib/worker-provider.ts`, and `src/lib/worker.ts`. Qualification must also require every static campaign source path with positive `SF:` evidence and a matching Git blob OID in the trusted text receipt; for this task the compile-time campaign paths are `src/lib/model-canary-command.ts`, `src/lib/model-canary-pilot-approval.ts`, `src/lib/model-canary-benchmark-command.ts`, `src/lib/model-canary-native-census.ts`, and `src/lib/model-canary-campaign-execution.ts`. The three non-default changed paths must be present in normal `--include-changed-source` evidence. Do not add a caller-supplied path override or change the existing seven-path default footprint.
+  acceptance:
+    - claim: "campaign grant requires both complete settled smoke receipts and a distinct human confirmation"
+      proof: "unit test: campaign grant requires complete settled smoke receipts and explicit human confirmation"
+    - claim: "native census classifies every config as eligible, excluded, or unknown and never treats imported census JSON as authority"
+      proof: "unit test: native campaign census preserves eligible excluded and unknown configurations"
+    - claim: "campaign execution runs the bound matrix through the existing owner and ordinary admission/worker ports, serially and within shard bounds"
+      proof: "unit test: campaign executor runs bound matrix slots serially through the existing owner and admission ports"
+    - claim: "resume skips proven terminal slots and permanently holds uncertain slots without duplicate sends"
+      proof: "unit test: campaign resume holds uncertain slots and never duplicates a provider send"
+    - claim: "every provider fallback boundary enforces the exact approved provider/model/effort/billing identity"
+      proof: "unit test: campaign worker guard rejects fallback identity before a second HTTP send"
+    - claim: "campaign source approval requires every static campaign path in trusted owning-SF text receipt while smoke default seven stays unchanged"
+      proof: "unit test: campaign source qualification requires the static campaign rows in the trusted owning source frame"
+    - claim: "campaign CLI calls the owner-derived projector and accepts neither owner paths nor caller-supplied run/grade rows"
+      proof: "unit test: campaign CLI invokes the owner projector without accepting run or owner path inputs"
+    - claim: "The native CLI invokes the real campaign executor rather than leaving an unused exported implementation"
+      proof: "grep: executeCanaryCampaign( in src/lib/model-canary-command.ts"
+    - claim: "The real executor reconstructs the census from native sources before dispatch"
+      proof: "grep: buildNativeCanaryCampaignCensus( in src/lib/model-canary-campaign-execution.ts"
+    - claim: "A real CLI positive control traverses default census, owner, worker composition, custody, analysis and proposal projection for multiple eligible cash configs and cases; only paid HTTP and external CI metadata are faked"
+      proof: "unit test: native campaign CLI executes the complete eligible matrix through default composition"
+    - claim: "Clock advance and fresh admission observations preserve the approved frozen matrix when semantic configuration is unchanged; actual semantic changes refuse"
+      proof: "unit test: campaign bindings survive clock advance but refuse semantic configuration changes"
+  falsifier: >-
+    remove the known-busy preclaim check: unit test: campaign executor runs bound matrix slots serially through the existing owner and admission ports must fail with: busy-then-idle with the same grant must assert no campaign start claim while busy, then exactly one execution after idle
+    remove exact identity validation from the before-provider hook: unit test: campaign worker guard rejects fallback identity before a second HTTP send must fail with: fake HTTP fallback control must assert zero sends for mismatched identity; a second send makes assertion fail
+    remove a new or changed Task 2 source path from the compile-time campaign path constant: unit test: campaign source qualification requires the static campaign rows in the trusted owning source frame must fail with: actual producer frame with that row absent must be unavailable; accepting it makes the assertion fail
+    remove fixed-key campaign claim uniqueness: unit test: campaign resume holds uncertain slots and never duplicates a provider send must fail with: a second approval under a new XDG root must produce no new send; any second send fails the count assertion
+    delete the real campaign execution CLI dispatch or replace default execution with unavailable: unit test: native campaign CLI executes the complete eligible matrix through default composition must fail with: the complete fixture matrix must produce exact nonzero owner-verified terminal counts; missing wiring or all-unavailable output fails

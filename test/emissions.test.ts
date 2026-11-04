@@ -309,7 +309,7 @@ test("W1-T2951: unrelated review rows do not become evidence that daemon or swee
     const { code, out } = captureEmissions(dir);
     assert.equal(code, 0);
     assert.match(out, /corpus\s+: 1 ledger file\(s\).*1 lines scanned, 1 distinct in-window events/);
-    assert.match(out, /UNREACHABLE-IN-PRACTICE\s+rmd daemon\s+0 line\(s\)/);
+    assert.match(out, /REACHABLE-BUT-UNUSED\s+rmd daemon\s+0 line\(s\)/);
     assert.match(out, /UNREACHABLE-IN-PRACTICE\s+rmd sweep\s+0 line\(s\)/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

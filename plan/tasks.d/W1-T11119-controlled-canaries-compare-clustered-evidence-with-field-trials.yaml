@@ -1,7 +1,7 @@
 - id: W1-T11119
   title: Controlled canaries compare clustered evidence with field trials and export unmeasured improvement proposals
   repo: remudero
-  depends_on: [W1-T11117, W1-T11118]
+  depends_on: [W1-T11117, W1-T11118, W1-T10957]
   plan_refs: [W1-T10956, W1-T10957, W1-T100001]
   type: implement
   verify: auto
@@ -21,6 +21,17 @@
     - test/routing/model-canary-cluster-analysis.test.ts
     - test/routing/model-canary-field-comparison.test.ts
     - test/routing/model-canary-proposal-export.test.ts
+    - src/lib/model-canary-analysis-evidence-adapter.ts
+    - src/lib/model-canary-native-config.ts
+    - src/lib/model-canary-native-field-evidence.ts
+    - src/lib/model-canary-owner.ts
+    - src/lib/model-canary-router-value.ts
+    - test/model-canary-input.test.ts
+    - test/routing/model-canary-analysis-command.test.ts
+    - test/routing/model-canary-analysis-evidence-adapter.test.ts
+    - test/routing/model-canary-native-field-evidence.test.ts
+    - test/routing/model-canary-router-value.test.ts
+    - test/routing/model-canary-whole-pipeline-clustered-analysis.test.ts
   rationale: >-
     The approved benchmark must measure router value without treating observational model win
     rates as a randomized comparison. Existing paired analysis is descriptive and supplies no
@@ -49,6 +60,10 @@
     The operator approved coordinated implementation on 2026-11-02. Proposal export is an
     inert artifact, not an approval, autonomous self-modification or new allowance. Native source
     ownership and all ordinary author, hosted, security and review gates remain required.
+    The 2026-11-03 publication reconciliation declares the native custody readers, frozen router
+    replay and their real CLI controls. Consume W1-T10957 first-class case and owner contracts
+    after they merge; this orders existing preparation and grants no inference, new allowance,
+    schedule, routing promotion or duplicate full Linux qualification.
   acceptance:
     - claim: Paired uncertainty uses independent source families rather than treating repeats as new cases
       proof: 'unit test: cluster paired analysis keeps repeated attempts within independent task families'
@@ -70,6 +85,14 @@
       proof: 'grep: compareCanaryToFieldTrials( in src/lib/model-canary-command.ts'
     - claim: Native offline export actually builds the private unmeasured proposal
       proof: 'grep: buildExperimentProposal( in src/lib/model-canary-command.ts'
+    - claim: Native CLI obtains opaque same-owner analysis evidence
+      proof: 'grep: createAnalysisEvidenceReader( in src/lib/model-canary-command.ts'
+    - claim: Native CLI resolves existing configuration without creating runtime state
+      proof: 'grep: readExistingNativeCanaryConfig( in src/lib/model-canary-command.ts'
+    - claim: Native CLI reads separate field evidence through its native reader
+      proof: 'grep: createNativeFieldEvidenceReader( in src/lib/model-canary-command.ts'
+    - claim: Native CLI consumes the frozen router replay helper
+      proof: 'grep: evaluateCanaryRouterValue( in src/lib/model-canary-command.ts'
   falsifier: >-
     Use paired positive controls and known missing/mismatched inputs. Duplicate repeats within
     each family and require the independent-family count to stay fixed. Remove identity/split

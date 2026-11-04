@@ -2,7 +2,7 @@
   title: "The review lane's CPU bound counts only reviews in their CPU phases (setup and proofs); a review waiting on its LLM judge holds a provider slot instead — 57% of code-review lane time (53.6 of 94.6 h a week) is the LLM judge, which does not slow under CPU pressure, yet it holds one of the CPU-shed width's lanes, so at width 1 a 3-minute judge call blocks every other review's proofs"
   repo: remudero
   depends_on: []
-  priority: 1
+  priority: 0.5 # operator 2026-11-03: efficiency and throughput first
   type: implement
   verify: auto
   principles:

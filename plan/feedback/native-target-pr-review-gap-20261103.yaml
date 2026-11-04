@@ -1,0 +1,39 @@
+id: native-target-pr-review-gap-20261103
+ts: 2026-11-03T15:55:00.000Z
+raw: >-
+  Operator direction, 2026-11-03: adopt craigoley/wreckterra as a fleet repo.
+  Agent finding while landing its first plan change.
+
+  OBSERVED 2026-11-03. craigoley/wreckterra#6 (a one-line dispatch_hold release
+  in plan/tasks.d, CI green: quality and ci-gate) has no commit statuses and no
+  reviews on its head 367f7ffe. GitHub reads it as blocked, and the operator
+  reports its ruleset requires remudero-review with no bypass. Wreckterra is
+  enrolled in .remudero/managed-repos.json and has no row in
+  .remudero/daemon-instances.yaml, so nativeTargetAdmission
+  (src/lib/product-build.ts) reads it as "native". The native path runs one
+  bounded job per console Build kick (W1-T10799). No daemon reviews a PR on
+  that repository that the fleet did not open, so remudero-review is never
+  posted on an operator PR there.
+
+  OBSERVED. The manual remedy exists: rmd review <pr> --repo owner/name
+  (resolveReviewTarget, src/cli/commands/review.ts) posts remudero-review on a
+  hand-opened PR in another repository. It needs an operator on the host.
+
+  INFERRED. Every operator or Dependabot PR on a native target will stall the
+  same way until that repository has its own cell, and the stall is silent: no
+  ledger row names it, because no reviewer ever looked.
+
+  ASK. Either have the core daemon's review sweep include open PRs on native
+  managed targets (bounded, the same lane rules as its own repository), or have
+  the board name a native target's PR that is waiting on a remudero-review no
+  reviewer will post, with the rmd review command that clears it. Related:
+  wreckterra-shadow-cell-20261103, onboarding-is-a-code-edit-20261103.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: operator-direction:native-target-pr-review-gap:20261103
+thread_id: null

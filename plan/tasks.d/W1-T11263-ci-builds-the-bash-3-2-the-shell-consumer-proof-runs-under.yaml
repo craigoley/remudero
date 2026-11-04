@@ -1,0 +1,40 @@
+- id: W1-T11263
+  title: "CI builds a bash 3.2 from GNU's source, pinned by sha256 and cached, sets RMD_TEST_BASH32, and the shell-consumer suite fails in CI when that leg would be UNMEASURED, so bash-3.2 compatibility is proven on every PR without vendoring a binary"
+  repo: remudero
+  depends_on: [W1-T9795]
+  priority: 2
+  type: implement
+  verify: human
+  principles:
+    tdd: strict
+  risk: high # one concern, a bash 3.2 for the shell-consumer proof in CI; it edits a workflow and downloads a pinned source tarball
+  origin: operator-session#bash32-proof-2026-11-03
+  plan_refs:
+    - W1-T9795
+  files:
+    - .github/workflows/ci.yml
+    - test/selected-registry-shell-consumers.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The CI job that runs test/selected-registry-shell-consumers.test.ts downloads GNU bash-3.2 source from ftp.gnu.org, verifies it against a sha256 recorded in the workflow (taken once from GNU's signed release), builds it into the runner's temp dir with actions/cache keyed by that sha256, and exports RMD_TEST_BASH32 as the built binary's absolute path
+      proof: "grep: RMD_TEST_BASH32 in .github/workflows/ci.yml"
+    - claim: When CI is set, the suite fails, rather than reporting UNMEASURED, if RMD_TEST_BASH32 is missing or does not report version 3.2; outside CI the existing native-or-UNMEASURED resolution is unchanged
+      proof: "grep: W1-T11263 criterion 2 in test/selected-registry-shell-consumers.test.ts"
+  rationale: |
+    The operator chose, on 2026-11-03 (AskUserQuestion, #15638): replace the 628 KB of vendored bash-3.2 .deb packages with a bash 3.2 installed in CI.
+    The rebuild of #15638 (W1-T9795, re-scoped by #16605) deleted the packages. It resolves bash 3.2 as native /bin/bash at 3.2 (macOS), else an absolute RMD_TEST_BASH32, else a visible UNMEASURED diagnostic.
+    The planned Docker bash:3.2 image could not run the scripts: they call the host's node, and the recording transports write host paths. So on CI's Linux runners the 3.2 leg reads UNMEASURED today, and bash-3.2 compatibility is proven only on a Mac.
+    This task closes that gap without a vendored binary: CI builds bash 3.2 from GNU's source tarball, pinned by sha256 and cached, and the suite refuses to accept an unmeasured 3.2 leg under CI.
+    verify: human because it edits .github/workflows/ci.yml and downloads source in CI (the deterministic risk backstop).
+  design: |
+    1. ci.yml, in the job that runs test/selected-registry-shell-consumers.test.ts: an actions/cache step keyed bash-3.2-<sha256> on $RUNNER_TEMP/bash32. On a miss:
+       - curl https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz, and refuse unless sha256sum matches BASH32_SHA256. Take that value once from the tarball verified against GNU's .sig with GNU's keyring, and record its source and date in a comment.
+       - Build with ./configure --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int", because modern gcc rejects 3.2's K&R code by default, then make.
+       - Then export RMD_TEST_BASH32=$RUNNER_TEMP/bash32/bash to $GITHUB_ENV.
+    2. The test's 3.2 resolver: when process.env.CI is set and neither native nor RMD_TEST_BASH32 resolves to a bash reporting 3.2, fail with "the bash 3.2 leg is unmeasured in CI" instead of the UNMEASURED diagnostic. Outside CI the behaviour is unchanged.
+  falsifier: |
+    At origin/main, after W1-T9795, CI's Linux runners report the bash 3.2 leg as UNMEASURED and the suite passes.
+  note: |
+    reservation hand-off: plan-file-1793734567445 -> plan-file-1793734567445
+    Reserved with rmd next-task-id --branch plan-file-1793734567445 from the operator session's ops worktree. The test title is a new test added to the existing W1-T9795 suite.

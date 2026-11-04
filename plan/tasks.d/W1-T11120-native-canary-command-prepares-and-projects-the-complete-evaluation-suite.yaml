@@ -17,6 +17,7 @@
     - src/lib/model-canary-report.ts
     - test/routing/model-canary-benchmark-command.test.ts
     - test/routing/model-canary-benchmark-report.test.ts
+    - src/lib/model-canary-benchmark-command.ts
   rationale: >-
     Pure census, corpus and analysis helpers must become a usable native benchmark rather than
     unused exports. Integration must follow the existing execution/accounting and isolated
@@ -41,6 +42,8 @@
     merged PRs and active owners before editing these shared integration paths. This record
     grants no extra private allowance, new schedule, limit increase, worker stop, public release
     or live routing promotion. Preserve existing failed, refused and unrun receipts.
+    The 2026-11-03 publication reconciliation declares the extracted bounded benchmark helper;
+    preparation and projection stay inert under the existing source and activation gates.
   acceptance:
     - claim: Native preparation reaches the complete census corpus and matrix helpers and keeps execution unarmed
       proof: 'unit test: native benchmark preparation covers the registry and remains prepared not activated'
@@ -52,6 +55,10 @@
       proof: 'unit test: native benchmark report displays unavailable evidence and unmeasured proposals safely'
     - claim: The complete cost and resource ceiling includes repeats retries and graders and refuses unknown inputs
       proof: 'unit test: benchmark ceilings include retries and graders and reject unknown inputs'
+    - claim: Native CLI calls the bounded benchmark preparation helper
+      proof: 'grep: prepareCanaryBenchmark( in src/lib/model-canary-command.ts'
+    - claim: Native CLI calls the benchmark projection helper
+      proof: 'grep: projectCanaryBenchmark( in src/lib/model-canary-command.ts'
   falsifier: >-
     Exercise the real standalone command in a contained subprocess with private temporary
     inputs and outputs. Assert complete physical-file TAP and exact bundle pins. Remove a real
