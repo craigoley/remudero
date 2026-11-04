@@ -2917,6 +2917,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         minWidth: policy.reviewLaneMin,
         maxWidth: policy.reviewLaneMax,
         log,
+        // W1-T11149: the provider bound learns from this pass's ledger and from the sample's own provider reading.
+        observeReviewPhases: (provider, width) => {
+          seedReviewProviderBound(ledgerLines);
+          observeReviewProviderReading(provider, width);
+          return reviewPhaseSplit(width);
+        },
       }),
     repairRecordableRatchet,
     // impl-BI — RETURN THE OUTCOME. PR #968 taught `runSweep` to read this effect's return
@@ -16980,6 +16986,10 @@ export interface ChildWorkRegistration {
 }
 interface RegisteredChildWork extends ChildWorkRegistration {
   releasedAtPost?: number; phaseTimer?: ReturnType<typeof setInterval>; phaseReadError?: string;
+  /** W1-T11149: the review's last phase read back from its status.json, without the `review:` prefix; unread is undefined. */
+  phase?: string;
+  /** W1-T11149: the provider-refusal epoch when this review registered, so its settlement knows whether it ran refusal-free. */
+  refusalEpoch?: number;
 }
 const childWork = new Map<string, RegisteredChildWork>();
 const settledChildWork = new Set<string>();
@@ -16987,13 +16997,22 @@ const childWorkSettleKey = (runId: string, headSha?: string): string => `${runId
 
 function refreshChildReviewPhase(work: RegisteredChildWork): void {
   if (work.kind !== "review" || work.releasedAtPost !== undefined || !work.readPhase) return;
+  let read: string | undefined;
   try {
-    if (work.readPhase() !== "review:posted") return;
+    read = work.readPhase();
   } catch (error) {
     const reason = String(error);
     work.phaseReadError = reason;
     return;
   }
+  if (read?.startsWith("review:")) {
+    const next = read.slice("review:".length);
+    // W1-T11149: leaving the CPU phases frees a CPU-bound slot, so a waiting admission re-checks at once.
+    const leftCpu = !isReviewProviderPhase(work.phase) && isReviewProviderPhase(next);
+    work.phase = next;
+    if (leftCpu) releaseReviewSlot();
+  }
+  if (read !== "review:posted") return;
   work.releasedAtPost = systemClock.now();
   clearInterval(work.phaseTimer);
   releaseReviewSlot();
@@ -17002,7 +17021,7 @@ function refreshChildReviewPhase(work: RegisteredChildWork): void {
 /** Claims the slot and the mutex key of a child's work. Registering a run id again is a no-op. */
 export function registerChildWork(work: ChildWorkRegistration): void {
   if (childWork.has(work.runId)) return;
-  const registered: RegisteredChildWork = { ...work };
+  const registered: RegisteredChildWork = { ...work, refusalEpoch: reviewProviderRefusalEpoch };
   childWork.set(work.runId, registered);
   if (work.reviewKey !== undefined) inFlightReviewKeys.add(work.reviewKey);
   if (work.fixKey !== undefined) inFlightFixKeys.add(work.fixKey);
@@ -17048,6 +17067,10 @@ export function settleChildWork(runId: string): boolean {
   if (work.fixKey !== undefined) inFlightFixKeys.delete(work.fixKey);
   if (work.releasedAtPost === undefined) releaseReviewSlot();
   if (settledChildWork.has(settleKey)) return false;
+  // W1-T11149: a code review that posted with no provider refusal since it registered grows the provider bound by one.
+  if (work.kind === "review" && work.planLane !== true) {
+    noteReviewProviderSettlement(work.releasedAtPost !== undefined, work.refusalEpoch ?? reviewProviderRefusalEpoch);
+  }
   settledChildWork.add(settleKey);
   return true;
 }
@@ -23947,9 +23970,13 @@ export async function runSweep(
           fullReviews.settled++;
           releaseReviewSlot();
         };
+        // W1-T11149: an in-process review's judge and posting phases leave the CPU bound for the provider bound.
+        const phases = trackInProcessReviewPhase();
         const tracked = startReview(job, (phase) => {
+          phases.phase(phase);
           if (phase === "posted") release();
-        });
+          else if (isReviewProviderPhase(phase)) releaseReviewSlot();
+        }).finally(phases.done);
         const work = !fullSurface ? tracked : tracked.finally(release);
         if (deps.detachReviewWait) {
           deps.detachReviewWait(work);
@@ -24562,12 +24589,141 @@ export function readLiveLedgerRows(path: string): ReadonlyArray<Readonly<Record<
   return tail(0);
 }
 
-/** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
+/** W1-T11149: a review in its judge or posting phase waits on its LLM or GitHub, not the CPU, so the CPU bound skips it. */
+const REVIEW_PROVIDER_PHASES: ReadonlySet<string> = new Set(["judge", "posting"]);
+export function isReviewProviderPhase(phase: string | undefined): boolean {
+  return phase !== undefined && REVIEW_PROVIDER_PHASES.has(phase.startsWith("review:") ? phase.slice("review:".length) : phase);
+}
+
+/** W1-T11149: in-process code reviews currently in their judge or posting phase (a child's phase lives in its registration). */
+const inProcessProviderPhaseReviews = new Set<symbol>();
+
+/** W1-T11149: follows one in-process code review's phases; `done` forgets it and records its settlement. */
+export function trackInProcessReviewPhase(): { phase: (phase: string) => void; done: () => void } {
+  const token = Symbol("in-process review");
+  const epoch = reviewProviderRefusalEpoch;
+  let posted = false;
+  let finished = false;
+  return {
+    phase: (phase) => {
+      if (finished) return;
+      if (phase === "posted") { posted = true; inProcessProviderPhaseReviews.delete(token); return; }
+      if (isReviewProviderPhase(phase)) inProcessProviderPhaseReviews.add(token);
+      else inProcessProviderPhaseReviews.delete(token);
+    },
+    done: () => {
+      if (finished) return;
+      finished = true;
+      inProcessProviderPhaseReviews.delete(token);
+      noteReviewProviderSettlement(posted, epoch);
+    },
+  };
+}
+
+/** W1-T11149: registered code-review children by phase class; an unread phase counts as CPU, as every review did before. */
+export function childReviewPhaseCounts(): { cpu: number; provider: number } {
+  let cpu = 0;
+  let provider = 0;
+  for (const work of childWork.values()) {
+    if (work.kind !== "review" || work.planLane === true) continue;
+    refreshChildReviewPhase(work);
+    if (work.releasedAtPost !== undefined) continue;
+    if (isReviewProviderPhase(work.phase)) provider++;
+    else cpu++;
+  }
+  return { cpu, provider };
+}
+
+// W1-T11149 — THE PROVIDER BOUND. Reviews waiting on their LLM judge (or posting) do not load the CPU, so they are bounded by
+// what the provider has sustained instead: seeded from the ledger's refusal-free judge concurrency, one more per refusal-free
+// settlement, halved on a fresh refusal, held while the provider's reading is unreadable. Unseeded, it is the CPU width itself.
+let reviewProviderBoundValue: number | undefined;
+let reviewProviderBoundSeeded = false;
+let reviewProviderRefusalEpoch = 0;
+let reviewProviderRefusalLatched = false;
+
+/** The highest number of review judge calls (`review.reviewer` rows) that ran at once with no refused call overlapping them. */
+export function sustainedReviewJudgeConcurrency(rows: ReadonlyArray<Record<string, unknown>>): number | undefined {
+  const events: Array<{ at: number; ok: boolean; delta: 1 | -1 }> = [];
+  for (const row of rows) {
+    if (row.step !== "review.reviewer" || typeof row.ts !== "string") continue;
+    const end = Date.parse(row.ts);
+    const duration = typeof row.worker_duration_ms === "number" ? row.worker_duration_ms : Number.NaN;
+    if (!Number.isFinite(end) || !Number.isFinite(duration) || duration < 0) continue;
+    const ok = row.subtype === "success";
+    events.push({ at: end - duration, ok, delta: 1 }, { at: end, ok, delta: -1 });
+  }
+  if (events.length === 0) return undefined;
+  // Ends before starts at the same instant, so back-to-back calls are not counted as concurrent.
+  events.sort((a, b) => a.at - b.at || a.delta - b.delta);
+  let ok = 0;
+  let refused = 0;
+  let best = 0;
+  for (const event of events) {
+    if (event.ok) ok += event.delta;
+    else refused += event.delta;
+    if (refused === 0) best = Math.max(best, ok);
+  }
+  return best > 0 ? best : undefined;
+}
+
+/** Seeds the provider bound once per process from the ledger it is first given. */
+export function seedReviewProviderBound(rows: ReadonlyArray<Record<string, unknown>>): void {
+  if (reviewProviderBoundSeeded) return;
+  reviewProviderBoundSeeded = true;
+  const sustained = sustainedReviewJudgeConcurrency(rows);
+  if (sustained !== undefined && reviewProviderBoundValue === undefined) reviewProviderBoundValue = sustained;
+}
+
+/** One provider reading: a fresh refusal halves the bound once per refusal; an unreadable reading holds it. */
+export function observeReviewProviderReading(
+  reading: { fresh: boolean; readable: boolean; refused?: boolean }, width: number,
+): void {
+  if (!reading.fresh || (!reading.readable && reading.refused !== true)) return;
+  if (reading.refused === true) {
+    if (reviewProviderRefusalLatched) return;
+    reviewProviderRefusalLatched = true;
+    reviewProviderRefusalEpoch++;
+    reviewProviderBoundValue = Math.max(1, Math.floor((reviewProviderBoundValue ?? Math.max(1, width)) / 2));
+    return;
+  }
+  reviewProviderRefusalLatched = false;
+}
+
+function noteReviewProviderSettlement(posted: boolean, epoch: number): void {
+  if (!posted || epoch !== reviewProviderRefusalEpoch || reviewProviderBoundValue === undefined) return;
+  reviewProviderBoundValue++;
+}
+
+/** The provider bound for this width: the learned value, or the width itself until anything is learned. */
+export function reviewProviderBound(width: number): number {
+  return reviewProviderBoundValue ?? Math.max(0, width);
+}
+
+/** Forgets the learned provider bound. For a test's fresh process. */
+export function resetReviewProviderBound(): void {
+  reviewProviderBoundValue = undefined;
+  reviewProviderBoundSeeded = false;
+  reviewProviderRefusalEpoch = 0;
+  reviewProviderRefusalLatched = false;
+  inProcessProviderPhaseReviews.clear();
+}
+
+/** W1-T11149: the review phase split the capacity row records beside its width. */
+export function reviewPhaseSplit(width: number): { cpuPhaseInFlight: number; judgePhaseInFlight: number; providerBound: number } {
+  const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight + childWorkCount("review", "code");
+  const judge = Math.min(inFlight, inProcessProviderPhaseReviews.size + childReviewPhaseCounts().provider);
+  return { cpuPhaseInFlight: inFlight - judge, judgePhaseInFlight: judge, providerBound: reviewProviderBound(width) };
+}
+
+/** W1-T5931: the one review bound both passes admit under. W1-T11149: the CPU width bounds only reviews in their CPU phases
+ *  (setup, proofs, or unread); every review in flight must also sit under the provider bound. `inFlight` stays every review. */
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
   // W1-T9114: a review child holds its slot while it runs, adopted or not; W1-T11151: its posted phase frees the slot
   // before settlement, while its key stays held.
   const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight + childWorkCount("review", "code");
-  return { bound: Math.max(0, width - inFlight), inFlight };
+  const { cpuPhaseInFlight, providerBound } = reviewPhaseSplit(width);
+  return { bound: Math.max(0, Math.min(width - cpuPhaseInFlight, providerBound - inFlight)), inFlight };
 }
 
 /** Publish eligibility from the same selection inputs the light batch uses, before ready-only reads. */
@@ -24696,16 +24852,25 @@ export async function runSweepLightPass(
   let providerFloorMet = false;
   const basePostReview = deps.postReview;
   const passPostReview: SweepDeps["postReview"] = basePostReview && (async (pr, mode, attempt, onPhase) => {
+    // W1-T11149: a spawning (code) review's judge and posting phases leave the CPU bound for the provider bound.
+    const phases = spawningNumbers.has(pr.prNumber) ? trackInProcessReviewPhase() : undefined;
     try {
       const reviewStartedAtMs = performance.now();
       await basePostReview(pr, mode, attempt, (phase) => {
+        phases?.phase(phase);
         if (phase === "posted") releases.get(pr.prNumber)?.();
+        else if (phases && isReviewProviderPhase(phase)) {
+          releaseReviewSlot();
+          onOwnLaneFreed();
+        }
         onPhase?.(phase);
       });
       noteReviewDuration(performance.now() - reviewStartedAtMs);
     } catch (e) {
       if (e instanceof GhPaceFloorStandDownError) providerFloorMet = true;
       throw e;
+    } finally {
+      phases?.done();
     }
   });
   let refillRunning = false;
