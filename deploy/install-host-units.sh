@@ -1164,6 +1164,9 @@ render_registry_shadow() {
   printf 'registry_shadow_session=%q\n' "$registry_shadow_session"
   printf 'registry_shadow_pin=%q\n' "$registry_shadow_pin"
   printf 'registry_shadow_forward=(--selected-registry-shadow %q --selected-registry-pin %q)\n' "$registry_shadow_session" "$registry_shadow_pin"
+  # The launcher's own docker run mounts these; its observation re-checks the session against them.
+  printf '{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root %q %q %q %q; }\n' \
+    "$STATE_DIR" "$CLAUDE_DIR" "$CODEX_DIR" "$CONTAINER_CONFIG_DIR"
 }
 
 render_registry_shadow_boundary() {
@@ -2027,6 +2030,7 @@ unit_file_changes() { # $1 = installed path, $2 = rendered text
 }
 
 drift=0
+{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "$STATE_DIR" "$CLAUDE_DIR" "$CODEX_DIR" "$CONTAINER_CONFIG_DIR"; }
 registry_shadow_observe install "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
 converge_host_node
 for row in $UNITS; do

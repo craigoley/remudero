@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readSelectedInstanceRegistry, type RegistrySelectionInput } from "./lib/instance-registry-selection.js";
 import { copySelectedRegistryIntent } from "./lib/selected-registry-consumers.js";
@@ -14,6 +14,31 @@ interface Session {
 }
 const flags = new Set(["--session", "--consumer", "--instance", "--repository", "--namespace", "--identity",
   "--registry", "--contract-version", "--require-capability", "--pin"]);
+
+/** At most this many worker-mounted roots per call; a longer list is malformed, not a policy ceiling. */
+const MOUNTED_ROOTS_BACKSTOP = 64;
+
+async function canonical(path: string): Promise<string> {
+  try { return await realpath(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(path) === path) throw error;
+    return resolve(await canonical(dirname(path)), basename(path));
+  }
+}
+
+/**
+ * Design constraint 3: private selected input reaches no blanket worker mount. Fleet launchers bind-mount whole
+ * host directories (the state root, credential, codex and config directories) into UID-1000 workers, and an owned
+ * 0700 directory is no barrier when the host user is that same UID. So a session inside any mounted root is refused
+ * before a byte is written, and every later observation re-checks it against the consumer's actual mounts.
+ */
+async function assertUnmounted(path: string, roots: readonly string[]): Promise<void> {
+  const session = await canonical(path);
+  for (const root of roots) {
+    const rel = relative(await canonical(root), session);
+    if (rel === "" || (rel !== ".." && !rel.startsWith("../") && !isAbsolute(rel))) throw new Error("mounted_session");
+  }
+}
 
 async function privateParent(path: string): Promise<void> {
   if (!isAbsolute(path) || path.includes("\0")) throw new Error("invalid_session");
@@ -58,13 +83,20 @@ async function readSession(path: string): Promise<Session & { pin: string }> {
 export async function selectedRegistryShadowMain(argv: readonly string[], env: NodeJS.ProcessEnv = process.env,
   signal?: AbortSignal): Promise<number> {
   const options = new Map<string, string>();
+  const mountedRoots: string[] = [];
   let shadow = false, capture = false;
-  if (argv.length > 30) return 2;
+  if (argv.length > 30 + 2 * MOUNTED_ROOTS_BACKSTOP) return 2;
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]!;
     if (flag === "--shadow") { shadow = true; continue; }
     if (flag === "--capture") { capture = true; continue; }
     const value = argv[++i];
+    if (flag === "--mounted-root") {
+      if (value === undefined || !isAbsolute(value) || value.includes("\0") || value.length > 4096
+        || mountedRoots.length >= MOUNTED_ROOTS_BACKSTOP) return 2;
+      mountedRoots.push(value);
+      continue;
+    }
     if (!flags.has(flag) || options.has(flag) || value === undefined || value.length > 4096) return 2;
     options.set(flag, value);
   }
@@ -72,6 +104,7 @@ export async function selectedRegistryShadowMain(argv: readonly string[], env: N
   if (!shadow || !path || (!capture && !consumers.has(consumer ?? ""))) return 2;
   if (!capture && !/^[a-f0-9]{64}$/.test(pin ?? "")) return 2;
   try {
+    await assertUnmounted(path, mountedRoots);
     if (capture) {
       const envPath = env.RMD_INSTANCE_REGISTRY;
       const input: RegistrySelectionInput = {

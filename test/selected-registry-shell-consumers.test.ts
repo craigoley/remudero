@@ -8,8 +8,8 @@ import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdi
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
-import { test } from "node:test";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { test, type TestContext } from "node:test";
 import { selectedRegistryShadowMain } from "#src/selected-registry-shadow-main.js";
 import { selectedRegistryShadowChild } from "#src/lib/child-entry-argv.js";
 import { SELECTED_REGISTRY_LAUNCH_WRAPPER, selectedRegistryLifecycleExec } from "#src/lib/selected-registry-consumers.js";
@@ -111,6 +111,17 @@ function bash32(): { shell: string; env: NodeJS.ProcessEnv; version: string } | 
   return undefined;
 }
 const CURRENT_BASH = { shell: "bash", env: {} as NodeJS.ProcessEnv };
+type Interpreter = { shell: string; env: NodeJS.ProcessEnv };
+/**
+ * Design constraint 5: every 3.2 leg is its own named node:test subtest. It runs only on a verified real 3.2 and is
+ * otherwise SKIPPED by name, naming W1-T11263, so the run's skip count shows each unmeasured leg instead of the leg
+ * disappearing from an interpreter loop; it never runs under the current bash.
+ */
+async function eachInterpreter(t: TestContext, body: (st: TestContext, interpreter: Interpreter) => void | Promise<void>) {
+  await t.test("current bash", st => body(st, CURRENT_BASH));
+  const historical = bash32();
+  await t.test("bash 3.2", { skip: historical ? false : BASH32_SKIP }, st => body(st, historical!));
+}
 
 test("selected shell capability probe reads the whole trusted child script", t => {
   const root = mkdtempSync(join(tmpdir(), "rmd-shadow-supports-"));
@@ -347,11 +358,9 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers", asy
   assert.ok(f.rows().some(row => row.action === "host-update"));
 });
 
-test("selected shell shadow reaches real lifecycle and heartbeat consumers: installed field trials command", t => {
-  const historical = bash32();
-  if (!historical) t.diagnostic(`bash 3.2 leg not run: ${BASH32_SKIP}`);
-  for (const interpreter of [CURRENT_BASH, ...(historical ? [historical] : [])]) {
-    const f = refreshFixture(t);
+test("selected shell shadow reaches real lifecycle and heartbeat consumers: installed field trials command", async t => {
+  await eachInterpreter(t, (st, interpreter) => {
+    const f = refreshFixture(st);
     const installer = join(REPO_ROOT, "deploy/install-field-trials-refresh.sh");
     const installed = join(f.root, ".local/bin/rmd-field-trials-refresh");
     const install = f.run(["--install"], installer, interpreter.shell, interpreter.env);
@@ -381,7 +390,7 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers: inst
       assert.equal(f.rows().length, rows.length, "missing or unsupported trusted checkout stays unrecorded");
       assert.equal(existsSync(trap), false);
     }
-  }
+  });
 });
 
 test("selected shell qualification preserves mixed version legacy effects: a healthy observer slower than five seconds still records", t => {
@@ -406,13 +415,11 @@ test("selected shell qualification preserves mixed version legacy effects: a hea
 });
 
 for (const phase of ["capture", "observation"] as const) {
-test(`selected shell defaults and failures remain shadow only without live effects: observer deadlines (${phase})`, t => {
-  const historical = bash32();
-  if (!historical) t.diagnostic(`bash 3.2 leg not run: ${BASH32_SKIP}`);
-  for (const base of [CURRENT_BASH, ...(historical ? [historical] : [])]) {
+test(`selected shell defaults and failures remain shadow only without live effects: observer deadlines (${phase})`, async t => {
+  await eachInterpreter(t, (st, base) => {
       // The production backstop is 20 s; pinning 5 s keeps this hung-observer proof fast.
       const interpreter = { ...base, env: { ...base.env, RMD_REGISTRY_SHADOW_DEADLINE_S: "5" } };
-      const f = registryShellFixture(t);
+      const f = registryShellFixture(st);
       const script = join(REPO_ROOT, "deploy/host-update.sh");
       const legacy = f.run(script, ["--print-daemon-run"], interpreter.env, interpreter.shell);
       assert.equal(legacy.status, 0, legacy.stderr);
@@ -453,7 +460,7 @@ if (phase === ${JSON.stringify(phase)}) {
         assert.ok(f.receipts().some(c => c.bin === "docker" && c.args[0] === "run"),
           "a hung observer cannot prevent the generated launcher's actual legacy child effect");
       }
-  }
+  });
 });
 }
 
@@ -846,6 +853,90 @@ test("selected shell qualification does not disclose private inputs", async t =>
   assert.ok(!publicBytes.includes("binding_digest="), "a digest grants no public publication field");
 });
 
+/** The host sources of every bind mount in one recorded `docker run` argv (`-v src:dst[:ro]`, `--mount ...,src=...`). */
+function mountSources(args: readonly string[]): string[] {
+  const sources: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "-v" || args[i] === "--volume") sources.push(args[++i]!.split(":")[0]!);
+    else if (args[i] === "--mount") {
+      const fields = Object.fromEntries(args[++i]!.split(",").map(part => {
+        const at = part.indexOf("="); return at < 0 ? [part, ""] : [part.slice(0, at), part.slice(at + 1)];
+      }));
+      const source = fields.src ?? fields.source;
+      if (source) sources.push(source);
+    }
+  }
+  return sources.filter(isAbsolute);
+}
+/** realpath through the nearest existing ancestor, as the observer canonicalizes a not-yet-created mount source. */
+const canonicalPath = (path: string): string => {
+  try { return fs.realpathSync(path); }
+  catch { return dirname(path) === path ? path : join(canonicalPath(dirname(path)), basename(path)); }
+};
+const within = (path: string, root: string) => {
+  const rel = relative(canonicalPath(root), canonicalPath(path));
+  return rel === "" || (rel !== ".." && !rel.startsWith("../") && !isAbsolute(rel));
+};
+
+test("selected shell qualification does not disclose private inputs: a session inside a worker-mounted root is never written", t => {
+  const f = registryShellFixture(t);
+  const installer = join(REPO_ROOT, "deploy/install-host-units.sh");
+  const legacy = f.install(false);
+  assert.equal(legacy.status, 0, legacy.stderr);
+  // The state root and an explicit credential directory (both mounted by the generated launcher), and a HOME default
+  // a consumer mounts when its variable is unset: an owned 0700 directory inside any is still readable by workers.
+  for (const mounted of [f.state, f.env.RMD_CLAUDE_DIR!, join(f.env.HOME!, ".config/remudero-container")]) {
+    const dir = join(mounted, "shadow-private");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    const session = join(dir, "session.json");
+    const qualified = f.run(installer, ["--install", "--selected-registry-shadow", session]);
+    assert.equal(qualified.status, legacy.status, qualified.stdout + qualified.stderr);
+    assert.match(qualified.stderr, /instance_registry\.shell_shadow_unrecorded/);
+    assert.equal(existsSync(session), false, `${mounted}: the capture writes no private session inside a worker mount`);
+    assert.equal(existsSync(session + ".observations"), false, `${mounted}: and no observation sink`);
+    assert.ok(!qualified.stderr.includes(session) && !qualified.stderr.includes(f.selected));
+  }
+  // Positive control: the same capture outside every mounted root is written.
+  const outside = f.run(installer, ["--install", "--selected-registry-shadow", f.session]);
+  assert.equal(outside.status, 0, outside.stderr);
+  assert.equal(existsSync(f.session), true, "a session outside every worker mount is captured");
+  assert.ok(f.rows().some(row => row.action === "install"));
+});
+
+test("selected shell qualification does not disclose private inputs: the generated launcher's own mounts never hold the session", t => {
+  const f = registryShellFixture(t);
+  f.capture();
+  assert.equal(f.install().status, 0);
+  const launched = f.run(join(f.output, "launcher"), ["--boot"]);
+  assert.equal(launched.status, 0, launched.stdout + launched.stderr);
+  const daemon = f.receipts().filter(c => c.bin === "docker" && c.args[0] === "run" && c.args.includes("-d")).at(-1);
+  assert.ok(daemon, "positive control: the generated launcher's daemon docker run was recorded");
+  const sources = mountSources(daemon!.args);
+  assert.ok(sources.some(source => within(f.state, source) && within(source, f.state)),
+    "positive control: the launcher bind-mounts the state root into its UID-1000 workers");
+  for (const source of sources) {
+    for (const secret of [f.session, f.session + ".observations"]) {
+      assert.equal(within(secret, source), false, `${secret} is reachable through mount ${source}`);
+    }
+  }
+  assert.ok(f.rows().some(row => row.action === "launcher"), "positive control: outside every mount, the launcher observes");
+  // Every directory this launcher actually mounts refuses a session planted inside it (an older capture's shape).
+  const directories = sources.filter(source => existsSync(source) && fs.statSync(source).isDirectory());
+  assert.ok(directories.some(source => within(f.state, source)), "the planted sweep reaches the mounted state root");
+  for (const source of directories) {
+    const dir = join(source, `shadow-private-${createHash("sha256").update(source).digest("hex").slice(0, 8)}`);
+    mkdirSync(dir, { mode: 0o700 });
+    chmodSync(dir, 0o700);
+    const planted = join(dir, "session.json");
+    f.cli(["--shadow", "--capture", "--session", planted, "--registry", f.selected], { RMD_INSTANCE_REGISTRY: undefined });
+    const install = f.run(join(REPO_ROOT, "deploy/install-host-units.sh"), ["--install", "--selected-registry-shadow", planted]);
+    assert.equal(install.status, 0, install.stdout + install.stderr);
+    assert.match(install.stderr, /instance_registry\.shell_shadow_unrecorded/, `${source}: the observation is refused`);
+    assert.equal(existsSync(planted + ".observations"), false, `${source}: nothing is recorded inside a worker mount`);
+  }
+});
+
 function qualifyPackageTransports(t: { after(fn: () => void): void }, shell: string,
   shellEnv: NodeJS.ProcessEnv, failure: string, existing?: ReturnType<typeof registryShellFixture>) {
   const pin = readFileSync(join(REPO_ROOT, ".nvmrc"), "utf8").trim().replace(/^v/, "");
@@ -892,18 +983,18 @@ exec '${process.execPath.replaceAll("'", "'\\''")}' "$@"
   assert.ok(f.rows().some(row => row.action === "install"), "the default observer really executed");
 }
 
-test("selected shell installer package failures use disposable recording transports", t => {
-  const historical = bash32();
-  if (!historical) t.diagnostic(`bash 3.2 leg not run: ${BASH32_SKIP}`);
-  for (const interpreter of [CURRENT_BASH, ...(historical ? [historical] : [])]) {
+test("selected shell installer package failures use disposable recording transports", async t => {
+  await eachInterpreter(t, (st, interpreter) => {
     for (const failure of ["none", "update", "madison", "install"]) {
-      qualifyPackageTransports(t, interpreter.shell, interpreter.env, failure);
+      qualifyPackageTransports(st, interpreter.shell, interpreter.env, failure);
     }
-  }
+  });
 });
 
 test("selected shell defaults and failures remain shadow only without live effects", async t => {
-  const interpreter = bash32() ?? CURRENT_BASH;
+  // Never substituted (design constraint 5): this proof runs under the current bash; its 3.2 leg is the named
+  // "bash 3.2" subtest of "selected shell installer package failures use disposable recording transports".
+  const interpreter = CURRENT_BASH;
   const absent = fixture(t);
   const absentPin = await capture(absent.session);
   assert.equal(await observe(absent.session, absentPin, "install"), 0);

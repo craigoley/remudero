@@ -58,6 +58,7 @@ state_for() {
   ' "$REGISTRY"
 }
 CORE="$(state_for core)"; SITE="$(state_for site)"; CONSOLE="$(state_for console)"
+{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "$CORE" "$SITE" "$CONSOLE"; }
 for dir in "$CORE" "$SITE" "$CONSOLE"; do
   case "$dir" in /*) :;; *) echo "field-trials-refresh: missing absolute state directory" >&2; exit 2;; esac
   test -d "$dir/state" || { echo "field-trials-refresh: ledger directory absent: $dir/state" >&2; exit 2; }

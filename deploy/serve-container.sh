@@ -405,6 +405,7 @@ if [ -f "${SCRIPT_ROOT}/deploy/scratch-mounts.sh" ]; then
   SERVE_DAEMON_CHECKOUT="$(scratch_daemon_checkout "${STATE_DIR}" "${DAEMON_CONTAINER}")" || SERVE_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
 fi
 
+{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "${STATE_DIR}" "${SERVE_REPO_DIR}" "${SERVE_GENS_DIR}"; }
 if [ -L "${SERVE_REPO_DIR}" ]; then
   echo "serve-container: REFUSING — RMD_SERVE_REPO_DIR must be a real directory, not a symlink." >&2
   echo "  A symlink can silently resolve back to the daemon checkout and reintroduce the shared-code race." >&2
@@ -701,6 +702,7 @@ if [ -z "${INSTANCE_NAME}" ] && [ -r "${INSTANCE_REGISTRY}" ]; then
       continue
     fi
     INSTANCE_STATE_ARGS+=(-v "${other_dir}:${INSTANCE_STATE_BASE}/${other_name}:ro" -v "${other_dir}/state:${INSTANCE_STATE_BASE}/${other_name}/state")
+    { ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "${other_dir}"; }
     echo "serve-container: instance ${other_name} state ${other_dir} mounted at ${INSTANCE_STATE_BASE}/${other_name} (read-only except state/)"
   done < <(list_registry_state_dirs "${INSTANCE_REGISTRY}")
 fi

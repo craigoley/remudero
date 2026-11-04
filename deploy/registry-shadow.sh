@@ -4,6 +4,9 @@ registry_shadow_session=""
 registry_shadow_pin="${registry_shadow_pin:-}"
 registry_shadow_root="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 registry_shadow_args=()
+# Host directories a consumer bind-mounts into UID-1000 workers. A consumer adds its actual roots
+# (registry_shadow_mount_root) once it has computed them; the observer refuses a session inside any.
+registry_shadow_mounted_roots=()
 # BACKSTOP, not pacing: a healthy observer exits in well under a second, so this bounds only a hung one.
 # Five seconds killed healthy cold starts on the CPU-saturated fleet host (#15638's review, 2026-11-03).
 registry_shadow_deadline_s="${RMD_REGISTRY_SHADOW_DEADLINE_S:-20}"
@@ -18,6 +21,27 @@ registry_shadow_supports() {
   [ -f "$1" ] && [ -r "$1" ] || return 1
   [ "$(wc -c < "$1")" -le 4194304 ] || return 1
   grep -F -- '--selected-registry-shadow)' "$1" >/dev/null && grep -F -- '--selected-registry-pin)' "$1" >/dev/null
+}
+
+registry_shadow_mount_root() {
+  local root
+  for root in "$@"; do
+    case "$root" in /*) registry_shadow_mounted_roots+=("$root") ;; esac
+  done
+}
+
+# Design constraint 3: the private session must never sit in a directory a fleet launcher mounts into
+# workers. These are the roots every consumer derives its mounts from, from the same variables and
+# HOME defaults (recycle-container.sh, host-update.sh, serve-container.sh, install-host-units.sh),
+# so the check holds at capture, before a consumer has computed its own list.
+registry_shadow_root_args() {
+  local home="${HOME:-/root}" root
+  for root in "${RMD_STATE_DIR:-}" "${DAEMON_STATE_DIR:-}" "${INSTANCE_STATE_DIR:-}" "${RMD_CLAUDE_DIR:-}" \
+    "${RMD_CODEX_DIR:-}" "${RMD_CONTAINER_CONFIG_DIR:-}" "${RMD_SERVE_REPO_DIR:-}" "${SERVE_GENS_DIR_OVERRIDE:-}" \
+    "$home/rmd-state" "$home/rmd-state2" "$home/.claude" "$home/.codex" "$home/.config/remudero-container" \
+    "$home/rmd-serve-repo" "$home/rmd-serve-gens" ${registry_shadow_mounted_roots[@]+"${registry_shadow_mounted_roots[@]}"}; do
+    case "$root" in /*) printf '%s\0' --mounted-root "$root" ;; esac
+  done
 }
 
 registry_shadow_call() (
@@ -41,9 +65,11 @@ registry_shadow_call() (
             fi ;;
         esac
       fi
+      local root_args=() arg
+      while IFS= read -r -d '' arg; do root_args+=("$arg"); done < <(registry_shadow_root_args)
       exec ${observer_user[@]+"${observer_user[@]}"} node --import "$registry_shadow_root/node_modules/tsx/dist/loader.mjs" \
         "$registry_shadow_root/src/lib/child-entry-argv.ts" --selected-registry-shadow "$registry_shadow_root" --shadow \
-        --session "$registry_shadow_session" "$@"
+        --session "$registry_shadow_session" ${root_args[@]+"${root_args[@]}"} "$@"
     ) &
     observer_pid=$!
     (sleep "$registry_shadow_deadline_s"; kill -KILL -- "-$observer_pid" 2>/dev/null || :) >/dev/null 2>&1 &

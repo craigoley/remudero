@@ -188,6 +188,7 @@ CODEX_MOUNT_DEST="/home/node/.codex"
 # executable paths. This host-only variable selects a bind source and therefore does not belong in
 # deploy/runtime-env-vars.sh or the container environment.
 CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-${HOME:-/root}/.config/remudero-container}"
+{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "${STATE_DIR}" "${CRED_DIR}" "${CODEX_DIR}" "${CONTAINER_CONFIG_DIR}"; }
 CONTAINER_CONFIG_MOUNT_DEST="/home/node/.config/remudero"
 # W1-T3612: the operator's OWN checkout, alongside the daemon's own checkout under
 # ${STATE_DIR}/remudero — both are inputs to section 4a's git object reclaim, below. Derived the

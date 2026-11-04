@@ -785,6 +785,8 @@ else
 fi
 SELECTED_REGISTRY_BROAD_MOUNT_ARGS=(-v "${STATE_DIR}:${STATE_MOUNT_DEST}" -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
   "${CODEX_MOUNT_ARGS[@]+"${CODEX_MOUNT_ARGS[@]}"}" "${CONTAINER_CONFIG_MOUNT_ARGS[@]+"${CONTAINER_CONFIG_MOUNT_ARGS[@]}"}")
+# Design constraint 3: the shadow refuses a private session inside any directory this launch mounts.
+{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "${STATE_DIR}" "${CRED_DIR}" "${CODEX_DIR}" "${CONTAINER_CONFIG_DIR}"; }
 
 # Resolve the reusable provider-runtime verifier before any lifecycle action. The PWD fallback is
 # load-bearing for a copied script (the mutation fixtures exercise that supported test shape); an
