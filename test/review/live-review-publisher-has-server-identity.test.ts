@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { appendLedger } from "#src/lib/ledger.js";
 import { postReviewStatusGuarded, readReviewStatusEntry, resolveReviewProvenance } from "#src/lib/review.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { readRequiredStatusCheckContextsAsync } from "#src/lib/status.js";
 
 const SHA = "1234567890abcdef1234567890abcdef12345678";
 const combined = (state = "success") => ({ statuses: [{ context: "remudero-review", state }] });
@@ -109,6 +110,7 @@ test("the default publisher reader confirms the existing review without rejudgin
     reviewDecisionDigest: "v2:identity-fixture",
     fetchLifecycle: () => ({ merged: false, closed: false, reviewInputDigest: "same-input", baseRef: "main" }),
     fetchPublisher: () => ({ checks: [{ context: "remudero-review", app_id: null }] }),
+    readRequiredContexts: readRequiredStatusCheckContextsAsync,
     post: () => { posts++; },
   });
   assert.equal(result.replayed, true, JSON.stringify(result));

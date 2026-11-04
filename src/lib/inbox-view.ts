@@ -11,7 +11,7 @@ import { captureInboxOwner } from "./inbox-owner.js";
  * last human read: 6 h in the Phase 0 measurement. A read now writes nothing.
  */
 import { readFileSync, statSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { persistedInboxIdentity, readPersistedInbox, writeClassificationSnapshot, writePersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
@@ -275,6 +275,17 @@ export function inboxShadowSampleKey(data: unknown, params: URLSearchParams, sco
   return logicalInboxPage(scope, data.section, data.page.index as number, params);
 }
 
+/**
+ * W1-T11329: a page's incarnation is a stable function of its policy and logical position, so a page that leaves the
+ * population (a section shrank below a page boundary) and later returns carries the SAME incarnation, and the
+ * comparator may restore the evidence it measured before (view-shadow.ts). A page still present keeps the
+ * incarnation it already has; a new policy mints new incarnations. UUID-shaped, as the population parser requires.
+ */
+function stableIncarnation(policy: string, logicalKey: string): string {
+  const hex = createHash("sha256").update(`${policy}\u0000${logicalKey}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
 function populationGeneration(scope: InboxQualificationScope, pages: ShadowPopulation["pages"]): string {
   return `${INBOX_QUALIFICATION_GENERATION}:${qualificationHash([scope.instance, scope.repository, pages.map(page => [page.logicalKey, page.incarnation])])}`;
 }
@@ -350,7 +361,7 @@ export function inboxShadowPopulation(bodies: readonly InboxPopulationBody[], sc
         if (data.page.next !== next) throw new Error("Inbox producer continuation does not match its next page");
         const logicalKey = logicalInboxPage(scope, section, index, params);
         if (bindings.some(page => page.logicalKey === logicalKey || page.key === body.key)) throw new Error("Inbox producer page identity is duplicated");
-        bindings.push({ key: body.key, logicalKey, incarnation: old.get(logicalKey)?.incarnation ?? randomUUID(), section, index });
+        bindings.push({ key: body.key, logicalKey, incarnation: old.get(logicalKey)?.incarnation ?? stableIncarnation(policy, logicalKey), section, index });
       }
       if (!Number.isSafeInteger(offset) || offset !== total) throw new Error("Inbox producer total does not cover all pages");
     }

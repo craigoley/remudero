@@ -1,0 +1,46 @@
+- id: W1-T11340
+  title: "A first review's prior-verdict lookup reads only the ledger archives that rotated since its PR opened, and a stale pending held by an in-process review past its ceiling is aborted and re-admitted instead of standing down as already in flight, so a plan PR's review cannot hang for hours and escalate as a stage-stall"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, how a light pass's in-process review is bounded and reclaimed; it gates every plan-lane review and the freshness drain
+  origin: operator-session#hung-in-process-reviews-2026-11-04
+  plan_refs:
+    - W1-T9681
+    - W1-T7955
+    - W1-T8088
+    - W1-T2753
+  files:
+    - src/lib/review.ts
+    - src/lib/sweep.ts
+    - src/cli/commands/sweep.ts
+    - test/a-first-review-reads-only-archives-since-its-pr-opened.test.ts
+    - test/a-stuck-in-process-review-is-aborted-and-readmitted.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: On a live-ledger miss, priorPostedReviewRow reads only the archives that rotated at or after the PR's created_at, using the rotationBeforeTime bound recoverPromisedFollowUpReports already uses, so a never-reviewed PR's first review gunzips no archive older than the PR; an unknown created_at keeps today's full union read
+      proof: "unit test: test/a-first-review-reads-only-archives-since-its-pr-opened.test.ts"
+    - claim: When the stale-pending rule re-runs a pending past its ceiling whose head key this process holds for an in-process review, the light pass aborts that review through its registered stop controller, releases the head key and re-admits the head with a review.in_process_reclaimed row; a review under its ceiling still stands down as already in flight
+      proof: "unit test: test/a-stuck-in-process-review-is-aborted-and-readmitted.test.ts"
+    - claim: The prior-verdict archive scan honors the review's cancellation signal, so an aborted review settles instead of finishing the scan
+      proof: "grep: W1-T11340 criterion 3 in test/a-stuck-in-process-review-is-aborted-and-readmitted.test.ts"
+  rationale: |
+    OBSERVED 2026-11-04 in core (pid 149, booted 16:32Z on 93efa2c8d): plan-only PRs #16763 and #16764 were admitted 2 ms apart at 16:39:27Z, logged review.provider_provenance and review.pending_posted at 16:46-16:47, and then nothing for over 2 h. There was no child process. Both runs created their inflight/review-workers locks but no review-decision-claims lock, so they stopped inside runReview before claimReviewDecision.
+    - Leading cause: preparePromisedReviewDecision (src/lib/review.ts ~:5487) calls priorPostedReviewRow (:6336). For a PR never reviewed, the live ledger has no review.posted row, so it runs readLedgerUnionRawLinesAsync with requireArchives and refuseIncomplete over ALL ~391 archives (647 MB gzipped), 10k lines per setImmediate turn, on core's loop. daemon.loop_lag read 65-334 s that afternoon. A PR opened at 16:20 cannot have a review.posted row in an August archive.
+    - Nothing reclaimed it. The stale-pending rule fired at 18:34Z and 18:57Z ("pending 107m/129m (>= 60m ceiling) — treating the stuck pending as unattended and re-running"), but each re-run stood down with "review already in flight for this head (admitted by an overlapping light pass)" (W1-T7955, src/lib/sweep.ts ~:24689). lightPassReservedHeads is released only after postReview settles. W1-T8088's dead-owner takeover cannot fire, because the owner pid is alive.
+    - Cost: the daemon read the stall as a stage-stall and opened human escalations #16775 and #16776, and daemon.freshness_drain.started (18:50:39Z) waits on both, so core's freshness recycle stalls up to its learned drain bound.
+    Child-process reviews (#16737, #16728) did the same full scan and finished; the in-process plan lane has no bound.
+  design: |
+    1. priorPostedReviewRow takes the PR's created_at (preparePromisedReviewDecision and the two src/cli/commands/sweep.ts callers already read the PR) and, on a live miss, opens the union with afterRotation = rotationBeforeTime(names, created_at) and includeLive false, exactly as recoverPromisedFollowUpReports does. When created_at is unknown it keeps today's full read. It also forwards currentReviewSignal() so an abort stops the scan between rotation turns. No fixed bound: the window is the PR's own lifetime.
+    2. In the light pass, when a head's stale-pending disposition fires (reviewPendingIsStale against the policy's learned pendingCeilingMinutes) and lightPassReservedHeads holds that head for an in-process review registered in inFlightReviewRuns, abort that review's controller in inFlightReviewStops and log review.in_process_reclaimed (pr, head_sha, run age, ceiling). Release the head key when the review settles. If it has not settled by the next pass, release it then and mark the run abandoned, so its late verdict post is refused by the existing pending-owner guard. Then admit the head as usual.
+    Tests: (a) a state dir with N gzipped archives all rotated before the PR's created_at and no live row. Assert the lookup opens none of them; at base it reads all N. (b) a sweep whose postReview never settles until aborted, with a pending older than the ceiling. Assert the next pass aborts it, writes review.in_process_reclaimed and re-admits; at base it stands down as already in flight. Criterion 3 lives in (b): an abort during the archive scan settles the lookup.
+  falsifier: |
+    At origin/main, a never-reviewed PR's prior-verdict lookup reads every ledger archive, and a stale pending held by an in-process review stands down every pass as already in flight until core restarts.
+  note: |
+    reservation hand-off: plan-file-1793819351000 -> plan-file-1793819351000
+    Reserved with rmd next-task-id --branch plan-file-1793819351000 from the operator session's ops worktree. Diagnosis was read-only: no async stack of core's main thread was taken, so "crawling" versus "never settles" is not proven; both fixes hold either way.

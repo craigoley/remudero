@@ -44,6 +44,10 @@ import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedge
 import { deriveReviewFindingOutcomes, type FindingOutcomeReport, type VerifiedFindingEvidence } from "./review-finding-outcomes.js";
 import { deriveVerifiedReviewFindingEvidence, readReviewFindingEvidence, type FindingEvidenceInput, type FindingEvidenceReport } from "./review-finding-evidence.js";
 import type { TaskCaseFile } from "./task-case-file.js";
+import { attributeAttemptOutcome } from "./attempt-outcome-attribution.js";
+import { publicCategoryOfLane, publicGuardrailClassOf, type GuardrailSignal, type PublicCategory,
+  type PublicGuardrailClass } from "./public-model-vocabulary.js";
+import { OpenWeightTruncatedReplyError } from "./worker-provider.js";
 
 export const FIELD_TRIALS_FLOW_VERSION = "field-trials-flow-v1" as const;
 export const FIELD_TRIALS_RELEASE_VERSION = "field-trials-release-v1" as const;
@@ -67,6 +71,8 @@ export const SAFE_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const DAY_MS = 86_400_000;
 const FLOW_STEPS = new Set(["run.start", "worker.assignment", "worker.attempt", "verdict", "pr.opened", "review.posted", "review.reviewer", "review.finding",
   "fix.dispatch", "fix.remedy_path_execution", "escalation.issue_opened", "daemon.boot", "evidence_coverage.filed"]);
+/** W1-T10877: rows read only by the guardrails family; they stay out of every per-task family. */
+const GUARDRAIL_STEPS = new Set(["inbox.drafted", "fix.done", "fix.exhausted", "fix.commit_refused", "fix.stood_down"]);
 const STAGES = ["eligible", "assigned", "worker", "pr", "review", "merge", "deployment", "verified"] as const;
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -108,8 +114,12 @@ export interface FlowRow {
   provider?: string | null;
   servedModel: string | null;
   servedModelReason?: string | null;
-  /** W1-T10875: bounded worker.attempt fields the cohort's attribution reads (see projectOutcomeSignals). */
+  /** Bounded attempt and fix-terminal attribution fields (see projectOutcomeSignals). */
   outcomeSignals?: Readonly<Record<string, unknown>>;
+  /** W1-T10877: a non-dispatch worker.attempt's own `lane`, and an inbox draft's lint verdict. */
+  lane?: string;
+  lintClean?: boolean;
+  fixRoundId?: string;
   notionalCostUsd?: number | null;
   notionalCostReported?: boolean;
   repair?: RepairCostContext;
@@ -142,14 +152,13 @@ export interface FlowRow {
 
 function flowRelevant(row: Record<string, unknown>): boolean {
   const step = String(row.step);
-  return FLOW_STEPS.has(step) || step.endsWith(".scorecard") || step.endsWith(".gardener_judged")
+  return FLOW_STEPS.has(step) || GUARDRAIL_STEPS.has(step) || step.endsWith(".scorecard") || step.endsWith(".gardener_judged")
     || (row.actor === "operator" && typeof row.task_id === "string");
 }
 
-/** W1-T10875: the bounded worker.attempt fields attributeAttemptOutcome reads; strings, finite numbers and
- *  observed {state,value} cells only, so a prompt or body can never ride along. */
+/** Bounded attribution fields and output-retention states; prompts, bodies and file reasons stay out. */
 function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<string, unknown>> | undefined {
-  if (row.step !== "worker.attempt") return undefined;
+  if (row.step !== "worker.attempt" && !GUARDRAIL_STEPS.has(String(row.step))) return undefined;
   const cell = (value: unknown) => {
     const observed = record(value);
     return observed && typeof observed.state === "string"
@@ -163,6 +172,19 @@ function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<st
   const tokens = record(row.tokens);
   const counted = tokens ? Object.fromEntries(Object.entries(tokens)
     .filter(([, value]) => typeof value === "number" && Number.isFinite(value))) : undefined;
+  const retention = record(row.output_retention);
+  const retained = retention ? Object.fromEntries(["text", "blocks", "stdout", "stderr", "completion"].flatMap((channel) => {
+    const state = record(retention[channel])?.state;
+    return typeof state === "string" && ["complete", "truncated", "unreadable", "malformed", "absent"].includes(state)
+      ? [[channel, { state }]] : [];
+  })) : undefined;
+  const retry = record(row.guardrail_attempt);
+  const guardrailAttempt = retry && (retry.signal === "relint-used" || retry.signal === "judge-retry")
+    && Number.isSafeInteger(retry.attempt) && Number(retry.attempt) >= 1
+    ? { signal: retry.signal, attempt: retry.attempt as number } : undefined;
+  const pin = record(row.sampling_pin);
+  const samplingPin = pin && text(pin.deployment) && (pin.temperature === null || Number.isFinite(pin.temperature))
+    ? { deployment: pin.deployment as string, temperature: pin.temperature as number | null } : undefined;
   const signals: Record<string, unknown> = {
     ...(text(row.worker_failure) ? { worker_failure: row.worker_failure } : {}),
     ...(text(row.error_class) ? { error_class: row.error_class } : {}),
@@ -172,6 +194,10 @@ function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<st
       ? { selection_assignment_unavailable_reason: row.selection_assignment_unavailable_reason } : {}),
     ...(terminal && Object.keys(terminal).length > 0 ? { terminal_evidence: terminal } : {}),
     ...(counted && Object.keys(counted).length > 0 ? { tokens: counted } : {}),
+    ...(retained && Object.keys(retained).length > 0 ? { output_retention: retained } : {}),
+    ...(guardrailAttempt ? { guardrail_attempt: guardrailAttempt } : {}),
+    ...(samplingPin ? { sampling_pin: samplingPin } : {}),
+    ...(row.capacity_shortfall === true ? { capacity_shortfall: true } : {}),
   };
   return Object.keys(signals).length > 0 ? signals : undefined;
 }
@@ -193,12 +219,16 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     fingerprint, ts: iso(row.ts), step: String(row.step), host: text(row.host), actor: text(row.actor),
     taskId: text(row.task_id), runId: text(row.run_id),
     assignmentId: text(assignment?.id) ?? text(row.selection_assignment_id),
-    requestedModel: text(record(assignment?.requested)?.model), selectedModel: text(record(assignment?.selected)?.model),
+    requestedModel: text(record(assignment?.requested)?.model) ?? (GUARDRAIL_STEPS.has(String(row.step)) ? text(row.requested_model) : null),
+    selectedModel: text(record(assignment?.selected)?.model),
     selectedEffort: text(record(assignment?.selected)?.effort), stackRevisions: trialRevisionPins(stack),
     provider: text(row.provider) ?? text(record(assignment?.selected)?.provider),
     servedModel: text(row.served_model),
     servedModelReason: text(row.served_model_reason),
     ...(projectOutcomeSignals(row) ? { outcomeSignals: projectOutcomeSignals(row) } : {}),
+    ...(row.step === "worker.attempt" && (text(row.guardrail_lane) ?? text(row.lane)) ? { lane: (text(row.guardrail_lane) ?? text(row.lane))! } : {}),
+    ...(row.step === "inbox.drafted" && typeof row.lint_clean === "boolean" ? { lintClean: row.lint_clean } : {}),
+    ...(text(row.round_id) ? { fixRoundId: row.round_id as string } : {}),
     notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
     repair: projectRepairCostContext(row),
     importedModule: importedModuleOf(benchmark?.loadedModule),
@@ -451,6 +481,14 @@ function learningCells(units: LearningUnit[]) {
     humanEffort: { state: "unavailable" as const, reason: "no-independent-human-effort-estimate" } };
 }
 
+type GuardrailUnit = Unit & { modelId: string; category: PublicCategory; guardrailClass: PublicGuardrailClass; fired: boolean; row: string };
+
+function guardrailCells(units: GuardrailUnit[]) {
+  const [first] = units;
+  return { modelId: first!.modelId, category: first!.category, guardrailClass: first!.guardrailClass,
+    opportunities: units.length, fires: units.filter((unit) => unit.fired).length };
+}
+
 function withDigest<U extends Omit<Unit, "digest">>(unit: U): U & Unit {
   return { ...unit, digest: sha256(JSON.stringify(unit)) };
 }
@@ -521,6 +559,8 @@ export interface FieldTrialsFlowSnapshot {
     repair: Record<string, Partition<ReturnType<typeof repairCells>>>;
     flow: Record<string, Partition<ReturnType<typeof flowCells>>>;
     learning: Record<string, Partition<ReturnType<typeof learningCells>>>;
+    /** W1-T10877: private fires and opportunities per model|public category|public guardrail class. */
+    guardrails: Record<string, Partition<ReturnType<typeof guardrailCells>>>;
   };
   rebuild: { rebuiltPartitions: string[]; reusedPartitions: number };
   /** Every private join key this snapshot saw, so a release can be refused if one leaks. */
@@ -731,6 +771,129 @@ function adoptionUnits(ctx: SourceContext, caseFiles: readonly TaskCaseFile[] | 
   return { units, transitions: [...transitions.values()].sort((a, b) => `${a.host}\n${a.model}`.localeCompare(`${b.host}\n${b.model}`)) };
 }
 
+/** Draft validation uses inbox.drafted; bounded retry checks use each attributable producing call. */
+const DRAFT_UNIT_LANES = new Set(["inbox-draft"]);
+
+function guardrailAttribution(row: FlowRow) {
+  return attributeAttemptOutcome({ ...row.outcomeSignals, success: row.success, served_model: row.servedModel,
+    ...(row.servedModelReason != null ? { served_model_reason: row.servedModelReason } : {}),
+    ...(row.costUsd != null ? { total_cost_usd: row.costUsd } : {}) });
+}
+
+/** Join terminal fix events to the final worker attempt in their round, within the caller's run.
+ * Exhaustion has no round id in production; it belongs to the latest preceding round in that run. */
+function guardrailFixRounds(rows: FlowRow[]) {
+  const rounds = new Map<string, { attempt: FlowRow; events: FlowRow[] }>();
+  const aliases = new Map<string, string>();
+  const latest = new Map<string, string>();
+  const context = (row: FlowRow) => JSON.stringify([row.host, row.taskId, row.runId]);
+  const identities = (row: FlowRow) => [
+    ["round", row.fixRoundId ?? row.repair?.roundId], ["worker", row.repair?.workerRunId], ["assignment", row.assignmentId],
+  ].flatMap(([kind, id]) => id ? [JSON.stringify([context(row), kind, id])] : []);
+  const ordered = [...rows].sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? "")
+    || Number(b.step === "worker.attempt") - Number(a.step === "worker.attempt"));
+  for (const row of ordered) {
+    const ids = identities(row);
+    if (row.step === "worker.attempt" && (row.repair?.rung === "fix" || row.lane === "fix" || row.workLane === "fix")) {
+      if (ids.length === 0) continue;
+      const key = ids[0]!;
+      const round = rounds.get(key) ?? { attempt: row, events: [] };
+      round.attempt = row;
+      rounds.set(key, round);
+      for (const id of ids) aliases.set(id, key);
+      latest.set(context(row), key);
+    } else if (GUARDRAIL_STEPS.has(row.step) && row.step !== "inbox.drafted") {
+      if (ids.length === 0 && (row.taskId === null || row.runId === null)) continue;
+      // An explicit but unjoined round must never borrow an earlier round's attribution.
+      const key = ids.length > 0 ? aliases.get(ids[0]!) : latest.get(context(row));
+      if (ids.length > 0) {
+        if (key === undefined) latest.delete(context(row));
+        else latest.set(context(row), key);
+      }
+      if (key !== undefined) rounds.get(key)!.events.push(row);
+    }
+  }
+  return [...rounds.values()].filter(({ attempt, events }) => {
+    const { outcome } = guardrailAttribution(attempt);
+    const signalled = events.some((row) => {
+      const signals = row.outcomeSignals;
+      if (signals === undefined) return false;
+      return signals.worker_exit === "signal" || text(signals.worker_exit_signal) !== null;
+    });
+    return (outcome === "success" || outcome === "model") && events.length > 0
+      && signalled === false;
+  });
+}
+
+/**
+ * W1-T10877: one unit per (attributable call, draft or fix round) x guardrail class it could fire. Only a
+ * worker.attempt attributeAttemptOutcome reads as success or model counts, so a pre-request refusal or an
+ * infrastructure kill is neither a fire nor an opportunity; a lane that maps to no public category is excluded.
+ */
+function guardrailUnits(rows: FlowRow[]): GuardrailUnit[] {
+  const assignments = new Map(rows.filter((row) => row.step === "worker.assignment" && row.assignmentId !== null)
+    .map((row) => [row.assignmentId!, row]));
+  const units: GuardrailUnit[] = [];
+  const add = (row: FlowRow, modelId: string, lane: string | null, signals: Partial<Record<GuardrailSignal, boolean>>) => {
+    const category = publicCategoryOfLane(lane);
+    if (category === null) return;
+    const classes = new Map<PublicGuardrailClass, boolean>();
+    for (const [signal, fired] of Object.entries(signals)) {
+      const guardrailClass = publicGuardrailClassOf(signal)!;
+      classes.set(guardrailClass, classes.get(guardrailClass) === true || fired === true);
+    }
+    for (const [guardrailClass, fired] of classes) {
+      units.push(withDigest({ key: `${modelId}|${category}|${guardrailClass}`, modelId, category, guardrailClass,
+        fired: fired === true, row: row.fingerprint }));
+    }
+  };
+  for (const row of rows) {
+    if (row.step === "worker.attempt") {
+      const assignment = row.assignmentId === null ? undefined : assignments.get(row.assignmentId);
+      const lane = row.lane ?? row.workLane ?? assignment?.workLane ?? null;
+      if (lane === null) continue;
+      const { outcome, signal } = guardrailAttribution(row);
+      if (outcome !== "success" && outcome !== "model") continue;
+      const named = row.servedModel ?? assignment?.selectedModel ?? row.selectedModel;
+      const modelId = named ?? "unknown";
+      const retry = record(row.outcomeSignals?.guardrail_attempt);
+      if (retry) add(row, modelId, lane, { [retry.signal as GuardrailSignal]: Number(retry.attempt) > 1 });
+      // A pinned deployment is an opportunity; the pin fires when the request carried a deterministic temperature.
+      const pin = record(row.outcomeSignals?.sampling_pin);
+      if (pin) add(row, modelId, lane, { "temperature-pin": pin.temperature !== null });
+      const truncation = {
+        "truncated-reply": signal === `reply-${OpenWeightTruncatedReplyError.name}`,
+        "output-retention": Object.values(record(row.outcomeSignals?.output_retention) ?? {})
+          .some((evidence) => record(evidence)?.state !== "complete") };
+      // A cash call is metered: it passed the budget cap and the per-minute fit check, and fires either when refused.
+      const allowance = record(record(row.outcomeSignals?.terminal_evidence)?.allowanceRefused);
+      const metered = allowance?.state === "observed" && typeof allowance.value === "boolean" ? {
+        "budget-refusal": allowance.value === true,
+        "per-minute-shortfall": row.outcomeSignals?.capacity_shortfall === true || row.outcomeSignals?.worker_failure === "capacity_shortfall",
+      } : {};
+      if (DRAFT_UNIT_LANES.has(lane)) {
+        if (named !== null && named !== undefined) add(row, modelId, lane, { ...truncation, ...metered });
+        continue;
+      }
+      add(row, modelId, lane, { "draft-contract-dirty": signal === "draft-contract", ...truncation, ...metered,
+        "served-model-unnamed": row.servedModel === null });
+    } else if (row.step === "inbox.drafted") {
+      const modelId = row.servedModel ?? row.requestedModel;
+      if (modelId !== null) add(row, modelId, "inbox-draft", { "draft-contract-dirty": row.lintClean === false,
+        "served-model-unnamed": row.servedModel === null });
+    }
+  }
+  for (const { attempt, events } of guardrailFixRounds(rows)) {
+    const row = events.findLast((event) => event.servedModel !== null || event.requestedModel !== null);
+    const lane = attempt.lane ?? attempt.workLane ?? "fix";
+    if (row === undefined) continue;
+    const fingerprint = sha256([attempt.fingerprint, ...events.map((event) => event.fingerprint)].sort().join("\n"));
+    add({ ...row, fingerprint }, (row.servedModel ?? row.requestedModel)!, lane,
+      { "fix-rounds-exhausted": events.some((event) => event.step === "fix.exhausted") });
+  }
+  return units;
+}
+
 function learningUnits(ctx: SourceContext, pullsByRepo: (repo: string) => GithubRepoStore | undefined): LearningUnit[] {
   const units: LearningUnit[] = [];
   for (const row of ctx.rows) {
@@ -756,7 +919,7 @@ function learningUnits(ctx: SourceContext, pullsByRepo: (repo: string) => Github
  */
 export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): FieldTrialsFlowSnapshot {
   const units = { adoption: [] as AdoptionUnit[], funnel: [] as FunnelUnit[], flow: [] as FlowUnit[], repair: [] as RepairUnit[],
-    learning: [] as LearningUnit[] };
+    learning: [] as LearningUnit[], guardrails: [] as GuardrailUnit[] };
   const transitions: ModelTransition[] = [];
   const preventionExecutions: NonNullable<FieldTrialsFlowSnapshot["preventionExecution"]> = [];
   const preventionSources: NonNullable<FieldTrialsFlowSnapshot["preventionAdoption"]> = [];
@@ -841,6 +1004,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         assignmentTelemetry.set(key, counts);
       }
       for (const key of [row.taskId, row.runId, row.assignmentId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);
+      if (GUARDRAIL_STEPS.has(row.step)) continue;
       if (row.remedyExecution?.state === "observed") for (const key of [row.remedyExecution.invocationId,
         row.remedyExecution.processInstanceId, row.remedyExecution.callerRunId]) privateKeys.add(key);
       if (row.taskId !== null) {
@@ -894,6 +1058,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     units.adoption.push(...adoption.units);
     transitions.push(...adoption.transitions);
     units.learning.push(...learningUnits(ctx, storeOf));
+    units.guardrails.push(...guardrailUnits(ledgerRows));
   }
   const rebuilt: string[] = [];
   const reused = { count: 0 };
@@ -905,6 +1070,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     repair: rebuildFamily("repair", units.repair, prior?.repair, repairCells, rebuilt, reused),
     flow: rebuildFamily("flow", units.flow, prior?.flow, flowCells, rebuilt, reused),
     learning: rebuildFamily("learning", units.learning, prior?.learning, learningCells, rebuilt, reused),
+    guardrails: rebuildFamily("guardrails", units.guardrails, prior?.guardrails, guardrailCells, rebuilt, reused),
   };
   const githubFresh = (input.githubPass?.pagesRead ?? 0) > 0;
   const anyObserved = githubFresh || provenance.some((source) => source.ledger.state !== "unavailable");
