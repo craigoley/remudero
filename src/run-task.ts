@@ -1289,6 +1289,7 @@ import {
   captureDiagnosticsBundle,
   decideProgressWatchdog,
   openPrCountReadingFromRows,
+  readLiveRecyclePausePid,
   renderProgressWatchdogVerdict,
 } from "./lib/progress-watchdog.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
@@ -41144,21 +41145,7 @@ export function progressWatchdogCommand(
     step: PROGRESS_WATCHDOG_READ_STEPS,
   });
   const count = openPrCountReadingFromRows(read.rows);
-  let liveRecyclePausePid: number | undefined;
-  try {
-    const pause = JSON.parse(readFileSync(join(stateDir, "PAUSE"), "utf8"));
-    if (pause?.reason === "container recycle (deploy/recycle-container.sh)"
-      && Number.isSafeInteger(pause.pid) && pause.pid > 0 && pause.host === hostname()
-      && typeof pause.writerStart === "string" && pause.writerStart.length > 0) {
-      const start = run("env", ["LC_ALL=C", "TZ=UTC", "ps", "-o", "lstart=", "-p", String(pause.pid)])
-        .trim().replace(/[ \t]+/g, " ");
-      if (start === pause.writerStart) liveRecyclePausePid = pause.pid;
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.error(`progress-watchdog: cannot verify recycle PAUSE writer: ${(error as Error).message}`);
-    }
-  }
+  const liveRecyclePausePid = readLiveRecyclePausePid(stateDir, run);
   const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: count.count,
     openPrCountSource: count.source, liveRecyclePausePid });
   const bundle = verdict.action === "capture-diagnostics"

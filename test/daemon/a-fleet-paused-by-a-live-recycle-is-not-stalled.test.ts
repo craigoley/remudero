@@ -6,11 +6,12 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
   decideProgressWatchdog,
+  readLiveRecyclePausePid,
   STALL_DIAGNOSE_AFTER_MS,
   STALL_RECYCLE_AFTER_MS,
 } from "#src/lib/progress-watchdog.js";
-import { progressWatchdogCommand } from "#src/run-task.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const reason = "container recycle (deploy/recycle-container.sh)";
 const nowMs = Date.now();
@@ -54,15 +55,21 @@ function fixture(t: TestContext) {
   const { dir } = writeLedger(rows, { scope: t });
   const pause = join(dir, "PAUSE");
   const body = { reason, pid: process.pid, host: hostname(), writerStart: "Wed Nov 4 12:00:00 2026" };
-  const out: string[] = [];
   const err: string[] = [];
-  t.mock.method(console, "log", (text: unknown) => { out.push(String(text)); });
   t.mock.method(console, "error", (text: unknown) => { err.push(String(text)); });
   return {
     pause, body, err,
     run(exec?: (file: string, args: string[]) => string) {
-      assert.equal(progressWatchdogCommand(["--state-root", dir, "--json"], exec), 0);
-      return JSON.parse(out.at(-1)!) as { state: string; action: string; reason: string };
+      return decideProgressWatchdog({ ...input, liveRecyclePausePid: readLiveRecyclePausePid(dir, exec) });
+    },
+    cli() {
+      const child = spawnSync(process.execPath, ["--import", "tsx", "src/run-task.ts",
+        "progress-watchdog", "--state-root", dir, "--json"], {
+        cwd: REPO_ROOT, encoding: "utf8",
+        env: { ...process.env, RMD_SELF_SYNC_DONE: "1", NODE_V8_COVERAGE: "" },
+      });
+      assert.equal(child.status, 0, child.stderr);
+      return JSON.parse(child.stdout) as { state: string; action: string; reason: string };
     },
   };
 }
@@ -77,11 +84,14 @@ test("the verb verifies a real live writer with C locale and UTC ps output", (t)
   writeFileSync(f.pause, body);
   const verdict = f.run();
   assert.deepEqual([verdict.state, verdict.action], ["IN_RECYCLE", "none"]);
+  const cli = f.cli();
+  assert.deepEqual([cli.state, cli.action], ["IN_RECYCLE", "none"]);
+  assert.equal(cli.reason, verdict.reason);
   assert.equal(readFileSync(f.pause, "utf8"), body);
   assert.deepEqual(f.err, []);
 });
 
-test("the verb normalizes ps whitespace and requests the recorded pid", (t) => {
+test("the PAUSE reader normalizes ps whitespace and requests the recorded pid", (t) => {
   const f = fixture(t);
   writeFileSync(f.pause, JSON.stringify(f.body));
   const verdict = f.run((file, args) => {
@@ -104,12 +114,16 @@ for (const [name, fields] of [
   ["a negative pid", { pid: -1 }],
   ["a fractional pid", { pid: 1.5 }],
 ] as const) {
-  test(`the verb preserves STALLED for ${name} without probing a process`, (t) => {
+  test(`the PAUSE reader preserves STALLED for ${name} without probing a process`, (t) => {
     const f = fixture(t);
     writeFileSync(f.pause, JSON.stringify({ ...f.body, ...fields }));
     const verdict = f.run(() => assert.fail("ownership is not eligible for a liveness probe"));
     assert.deepEqual([verdict.state, verdict.action], ["STALLED", "recycle"]);
     assert.deepEqual(f.err, []);
+    if (name === "operator PAUSE") {
+      const cli = f.cli();
+      assert.deepEqual([cli.state, cli.action], ["STALLED", "recycle"]);
+    }
   });
 }
 
@@ -130,6 +144,8 @@ test("a real exited writer still reads STALLED", (t) => {
   writeFileSync(f.pause, JSON.stringify({ ...f.body, pid: child.pid }));
   const verdict = f.run();
   assert.deepEqual([verdict.state, verdict.action], ["STALLED", "recycle"]);
+  const cli = f.cli();
+  assert.deepEqual([cli.state, cli.action], ["STALLED", "recycle"]);
 });
 
 test("no PAUSE retains STALLED without probing a process", (t) => {
@@ -137,6 +153,8 @@ test("no PAUSE retains STALLED without probing a process", (t) => {
   const verdict = f.run(() => assert.fail("no PAUSE needs no ps"));
   assert.deepEqual([verdict.state, verdict.action], ["STALLED", "recycle"]);
   assert.deepEqual(f.err, []);
+  const cli = f.cli();
+  assert.deepEqual([cli.state, cli.action], ["STALLED", "recycle"]);
 });
 
 for (const body of ["null", "[]", "broken json"]) {
