@@ -480,6 +480,24 @@ function codingExecutionProjection(attempts: readonly CanaryAttempt[], dispositi
     invalid: rows.filter(row => row.state === "invalid").length, rows };
 }
 
+/**
+ * A coding run's verdict is evidence only when its final attempt's execution receipt qualified a score:
+ * an invalid, absent or unavailable receipt leaves the run unresolved, so missing resource evidence
+ * never becomes correctness in an aggregate or a pair. Other families' verdicts pass through unchanged.
+ */
+function qualifiedVerdict(run: CanaryRun, disposition: (attempt: CanaryAttempt) => ReturnType<typeof inspectCodingExecution>): boolean | null {
+  if (run.verified === null || run.family !== "coding") return run.verified;
+  const final = run.attempts.at(-1);
+  if (!final) return null;
+  const receipt = disposition(final);
+  return receipt.state === "observed" && receipt.evidence.state === "scored" ? run.verified : null;
+}
+
+/** The verdict a coding run may contribute to correctness, judged by the same receipt validator as the projection. */
+export function qualifiedCanaryVerdict(run: CanaryRun): boolean | null {
+  return qualifiedVerdict(run, attempt => inspectCodingExecution(attempt.codingExecution, attempt, run));
+}
+
 function codingCohortProjection(runs: readonly CanaryRun[]): CanaryCodingCohortCoverage {
   const coverage: CanaryCodingCohortCoverage = { includedAttempts: 0, excludedNonDispatchReviewAttempts: 0,
     excludedSyntheticCanaryAttempts: 0, excludedOtherAttempts: 0, unclassifiedAttempts: 0, sourceReceiptIds: [] };
@@ -600,9 +618,10 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
   return { version: "model-canary-metrics-v1" as const, private: true as const, uniqueRuns: runs.size,
     executionSourceTrust: "caller-declared-unverified" as const, groups: [...groups.values()].map(rows => {
       const attempts = rows.flatMap(r => r.attempts);
-      const observed = rows.filter(r => r.verified !== null).length;
-      const correct = rows.filter(r => r.verified === true).length;
-      const durations = rows.filter(r => r.verified === true && r.totalDurationMs !== null).map(r => r.totalDurationMs!);
+      const verdicts = new Map(rows.map(r => [r, qualifiedVerdict(r, attempt => codingByAttempt.get(attempt.id) ?? { state: "absent" })]));
+      const observed = rows.filter(r => verdicts.get(r) !== null).length;
+      const correct = rows.filter(r => verdicts.get(r) === true).length;
+      const durations = rows.filter(r => verdicts.get(r) === true && r.totalDurationMs !== null).map(r => r.totalDurationMs!);
       const first = attempts.flatMap(a => a.firstTextMs === null ? [] : [a.firstTextMs]);
       const cost = (mode: CanaryBilling) => {
         const calls = attempts.filter(a => a.billing === mode), known = calls.filter(a => a.usageRatedUsd !== null);

@@ -231,6 +231,34 @@ test("W1-T10957: paired trial results retain correctness, native resource and mi
     assert.deepEqual(pairs.comparisons[0]!.pairs[0]!.differences,
       { correct: null, durationMs: null, inputTokens: null, outputTokens: null, usageRatedUsd: null });
     assert.equal(pairs.exclusions[0]!.reason, "incomplete-planned-block");
+    // Correctness aggregates and pairs only from qualified receipts; missing resource evidence stays unresolved.
+    const qualifiedA = pairedRuns.find(run => run.model === "coder-a")!;
+    const groupOf = (runs: CanaryRun[], model: string) => projectCanaryRuns(runs).groups.find(group => group.model === model)!;
+    const controlA = groupOf([structuredClone(qualifiedA)], "coder-a");
+    assert.deepEqual([controlA.correct, controlA.observed, controlA.passRate], [1, 1, 1], "a qualified receipt's verdict counts");
+    const unqualifiedA: CanaryRun = structuredClone(qualifiedA);
+    for (const field of Object.keys(unqualifiedA.attempts[0]!.codingExecution!.observed!))
+      Reflect.set(unqualifiedA.attempts[0]!.codingExecution!.observed!, field, null);
+    const unqualifiedGroup = groupOf([unqualifiedA], "coder-a");
+    assert.equal(unqualifiedGroup.codingExecution!.rows[0]!.reason, "coding-execution-score-unqualified");
+    assert.equal(unqualifiedA.verified, true, "the run still claims a pass");
+    assert.deepEqual([unqualifiedGroup.correct, unqualifiedGroup.observed, unqualifiedGroup.passRate, unqualifiedGroup.unresolved],
+      [0, 0, null, 1], "an unqualified receipt's verdict is unresolved, never correct");
+    assert.equal(unqualifiedGroup.completionP50Ms, null, "an unqualified run contributes no completion time");
+    const forged: CanaryRun = { ...structuredClone(unavailable), verified: true };
+    const forgedGroup = groupOf([forged], forged.model);
+    assert.deepEqual([forgedGroup.correct, forgedGroup.observed, forgedGroup.passRate], [0, 0, null],
+      "an unavailable receipt cannot carry a verdict into the aggregate");
+    // A pair whose identities match: the qualified control yields a correctness difference, an unqualified side none.
+    const identified = (runs: CanaryRun[]) => runs.map(run => ({ ...run,
+      attempts: run.attempts.map(attempt => ({ ...attempt, servedModel: run.model })) }));
+    const pairedClone = identified(structuredClone(pairedRuns));
+    const qualifiedPair = analyzeCanaryPairs(pairedClone).comparisons[0]!.pairs[0]!.differences;
+    assert.notEqual(qualifiedPair.correct, null, "positive control: qualified receipts pair their correctness");
+    const unqualifiedPairRuns = pairedClone.map(run => run.model === "coder-a" ? unqualifiedA : run);
+    const unqualifiedPair = analyzeCanaryPairs(identified(unqualifiedPairRuns)).comparisons[0]!.pairs[0]!.differences;
+    assert.equal(unqualifiedPair.correct, null, "an unqualified side pairs no correctness");
+    assert.equal(unqualifiedPair.durationMs, null, "an unqualified side pairs no completion time");
     const wrongFixture = syntheticCodingFixture(rotated.codingControl!.seed);
     assert.equal(scoreCodingControl(wrongFixture, outcomes[0]!.codingResult!).reason, "coding-case-binding-mismatch");
   } finally { owner.close(); rmSync(root, { recursive: true, force: true }); }

@@ -1,5 +1,5 @@
 /** Descriptive matched-task differences. Repeated cases do not become independent samples. */
-import { projectCanaryRuns, type CanaryRun } from "./model-canary-metrics.js";
+import { projectCanaryRuns, qualifiedCanaryVerdict, type CanaryRun } from "./model-canary-metrics.js";
 
 type Metric = "correct" | "durationMs" | "inputTokens" | "outputTokens" | "usageRatedUsd";
 interface MetricCoverage {
@@ -12,8 +12,11 @@ const configuration = (run: CanaryRun) => JSON.stringify([run.model, run.route, 
 function measurement(run: CanaryRun, metric: Metric): number | null {
   // A requested model is not a served identity; mixed or absent identities withhold attribution.
   if (!run.attempts.length || run.attempts.some(a => a.servedModel !== run.model)) return null;
-  if (metric === "correct") return run.verified === null ? null : Number(run.verified);
-  if (metric === "durationMs") return run.totalDurationMs;
+  // A coding verdict counts only from a qualified execution receipt; an unqualified run has neither correctness nor
+  // a completion time to pair, while provider usage below does not depend on the host execution.
+  const verdict = qualifiedCanaryVerdict(run);
+  if (metric === "correct") return verdict === null ? null : Number(verdict);
+  if (metric === "durationMs") return run.family === "coding" && verdict === null ? null : run.totalDurationMs;
   const values = run.attempts.map(a => a[metric]);
   if (values.some(v => v === null)) return null;
   const sum = values.reduce<number>((n, value) => n + value!, 0);
