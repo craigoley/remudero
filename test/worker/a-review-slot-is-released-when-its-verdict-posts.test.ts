@@ -254,12 +254,15 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  for (const publication of ["posted", "refused"] as const) {
-    test(`runReview reports ${publication} before post-verdict work`, async () => {
+  // W1-T11151 criterion 2: only a status GitHub accepted reports `posted`. A refused publication (stale reviewer code) and
+  // a failed one (the status POST itself errors, review.post_failed) end without posting, so they hold their slot.
+  for (const publication of ["posted", "refused", "failed"] as const) {
+    test(`W1-T11151 criterion 2: runReview reports posted only when its status is published (${publication})`, async () => {
       const root = mkdtempSync(join(tmpdir(), "rmd-review-terminal-"));
       const sha = "a".repeat(40);
       const prUrl = "https://github.com/o/r/pull/1";
       const shim = ghShim([
+        ...(publication === "failed" ? [{ when: "statuses/", stderr: "HTTP 422: Validation Failed", exit: 1 }] : []),
         { when: "headRefOid", stdout: JSON.stringify({ headRefOid: sha }) },
         { when: "pr diff", stdout: "diff --git a/plan/tasks.d/a.yaml b/plan/tasks.d/a.yaml\n+status: queued" },
         { when: "pulls/", stdout: JSON.stringify({ number: 1, html_url: prUrl,
@@ -285,11 +288,17 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
           disarm: () => "not-armed", arm: () => { events.push("arm"); return "armed"; },
         };
         await runReview(args);
-        assert.equal(events.filter((event) => event === "phase:posted").length, 1);
         if (publication === "posted") {
+          assert.equal(events.filter((event) => event === "phase:posted").length, 1);
           assert.ok(events.indexOf("phase:posted") < events.indexOf("review.posted"));
         } else {
+          assert.equal(events.includes("phase:posted"), false, `a ${publication} publication must hold its slot until it settles`);
           assert.equal(events.includes("review.posted"), false);
+        }
+        if (publication === "failed") {
+          // Positive control: the status POST really failed through the production publication path.
+          const ledger = readFileSync(args.ledgerPath, "utf8");
+          assert.match(ledger, /"step":"review\.post_failed"/);
         }
       } finally {
         process.env.PATH = oldPath;

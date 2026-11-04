@@ -1141,7 +1141,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     recordReplay(classifyReviewOutcome(replayInput));
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
     log("review.post_refused", withheldReviewRefusalRow({ headSha, prUrl, reason: verdict.taskIdOwnershipWithheld, ownership: verdict.taskIdOwnership, inputDigest }));
-    (args.onPhase ?? reportReviewPhase)("posted");
+    // W1-T11151: a withheld verdict publishes nothing, so no `posted` phase: its slot is held until it settles.
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -1176,7 +1176,9 @@ export async function runReview(host: ReviewCommandHost, args: {
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
   });
   phases.post = systemClock.now();
-  (args.onPhase ?? reportReviewPhase)("posted");
+  // W1-T11151: `posted` releases admission, so it fires only for a status GitHub accepted; a refused or failed
+  // publication (review.post_refused / review.post_failed) holds its slot until the review settles.
+  if (posted.posted) (args.onPhase ?? reportReviewPhase)("posted");
   if (posted.conflict) {
     decisionDisposition = "conflict";
     verdict = {
@@ -2269,7 +2271,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     } else {
       verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
     }
-    (deps.onPhase ?? reportReviewPhase)("posted");
+    // W1-T11151: a restore that left nothing live is unposted, and holds its slot until it settles.
+    if (replayStatusAction !== undefined) (deps.onPhase ?? reportReviewPhase)("posted");
   }
 
   console.log(
