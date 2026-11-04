@@ -2,7 +2,6 @@
   title: An agent response returns to the escalation conversation and says whether more input is needed
   repo: remudero
   depends_on: []
-  dispatch_hold: true
   priority: 1.15
   type: implement
   verify: auto
@@ -93,6 +92,6 @@
     clarification answer to another thread: named fixtures must fail. Keep control/mutant/restored
     receipts. An exported helper with only test callers does not satisfy the first criterion.
   note: |
-    Held until W1-T11096 is merged/served and its native contract and source ownership are reconciled.
-    Filing this task does not release the current host recycle PAUSE, change budgets or prove runtime
-    adoption. Preserve W1-T8887 and CONSOLE-T128 execution scope and holds.
+    Released 2026-11-04 after W1-T11096 PR #16221 merged on run-W1-T11096-1793624940000 and deployed generation 93efa2c contains the route; an unauthenticated GET returned 401, while the signed-in response remains unverified. W1-T9795 PR #15638 merged at 5ac78fe. Fresh sweep of all 11 open core PR heads found zero overlap with this task. No run-W1-T11103 claim or live PAUSE was present.
+    This plan change does not alter host recycle PAUSE, budget, scope or gates, and does not prove
+    runtime adoption. Preserve W1-T8887 and CONSOLE-T128 execution scope and holds.
