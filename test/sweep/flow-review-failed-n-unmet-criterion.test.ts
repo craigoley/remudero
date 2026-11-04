@@ -48,9 +48,10 @@ function fixture(t: { after: (fn: () => void) => void }, heldForMs: number, cloc
       site: "rung.strike", reason: HOLD_REASON, read_head_sha: HEAD, read_contract_revision: "contract-A", ts: heldAt }]),
   ];
   const calls: string[] = [];
+  const observations: string[] = [];
   const judged: string[] = [];
   const open: OpenIssue[] = [];
-  if (sweepOwned) open.push({ number: 14219, url: "https://github.com/acme/remudero/issues/14219",
+  open.push({ number: 14219, url: "https://github.com/acme/remudero/issues/14219",
     title: "[BLOCKED] review false-block", body: `**Task:** ${TASK}\n**Class:** BLOCKED\nhttps://github.com/acme/remudero/pull/${PR}\n**Head:** ${HEAD}\n**Cause:** review\n**Contract:** contract-A\n` });
   const closed = new Set<number>();
   const issues: IssueGateway = {
@@ -74,15 +75,16 @@ function fixture(t: { after: (fn: () => void) => void }, heldForMs: number, cloc
   const deps: SweepDeps = {
     strikeLadder: effects.strikeLadder,
     fixProgressJudge: judge ?? (async (input) => {
+      observations.push("judge");
       judged.push(String(input.parkedReason));
       return { verdict: "change-approach", reason: "the same round stood down twice", approach: "publish the proof through the PR body" };
     }),
     readTaskContractRevision: () => "contract-A",
-    readOpenEscalations: () => open,
+    readOpenEscalations: () => { observations.push("read-open"); return open; },
     arm: () => { calls.push("arm"); },
-    close: (candidate) => { calls.push("close"); closed.add(candidate.prNumber); },
+    close: (candidate) => { observations.push("close"); calls.push("close"); closed.add(candidate.prNumber); },
     updateBranch: () => { calls.push("refresh"); return "updated"; },
-    dispatchFix: () => { calls.push("fix"); },
+    dispatchFix: () => { observations.push("fix"); calls.push("fix"); },
     escalate: () => { calls.push("escalate"); },
     claimFixAdmission: () => ({ admitted: true }),
     readLiveState: (candidate) => ({ ok: true, state: closed.has(candidate.prNumber) ? "CLOSED" : "OPEN", headSha: candidate.headSha }),
@@ -98,10 +100,25 @@ function fixture(t: { after: (fn: () => void) => void }, heldForMs: number, cloc
     priorStrikes: 1, autoMergeArmed: false, lastActivityAt: stamp(-heldForMs),
     body: `Builds the remedy.\n\nRemudero-Task: ${TASK}\n`,
   };
-  return { rows, calls, judged, effects, pr, open, sweep: () => runSweep([pr], deps) };
+  return { rows, calls, observations, judged, effects, pr, open, sweep: () => runSweep([pr], deps) };
 }
 
 test("W1-T10653: flow-review-failed-n-unmet-criterion clears without a person", async (t) => {
+  for (const issueOpen of [false, true]) {
+    await t.test(`aged fix-lane hold with escalation ${issueOpen ? "open" : "closed"}`, async (t) => {
+      const legacy = fixture(t, HELD_ESCALATION_SLO_MS + MIN);
+      if (!issueOpen) legacy.open.length = 0;
+      assert.equal(legacy.rows.some(r => typeof r.open_escalation_hold_since === "string"), false,
+        "the legacy fix-lane stand-down has no sweep-owned hold record");
+      await legacy.sweep();
+      assert.deepEqual(legacy.observations, ["read-open", "judge", issueOpen ? "close" : "fix"],
+        "revalidate before judging or closing; a closed escalation resumes the owner fix lane");
+      assert.deepEqual(legacy.calls, issueOpen ? ["close"] : ["fix"]);
+      assert.equal(legacy.rows.some(r => r.step === "sweep.strike_ladder.requeued" && r.pr_number === PR), issueOpen,
+        "only an escalation observed still open can trigger the aged-hold rebuild");
+    });
+  }
+
   const clock = { now: NOW - HELD_ESCALATION_SLO_MS - MIN };
   const owned = fixture(t, HELD_ESCALATION_SLO_MS + MIN, clock, false, undefined, true);
   await owned.sweep();

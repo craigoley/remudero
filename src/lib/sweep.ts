@@ -20951,17 +20951,12 @@ export async function runSweep(
     if (heldEscalationAt === undefined && disposition === "blocked-fixable" && !deps.dryRun) {
       const openSince = openEscalationStandDownSince(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha, pr.prNumber);
       if (openSince !== undefined && now - Date.parse(openSince) >= HELD_ESCALATION_SLO_MS) {
-        const sweepOwned = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
-          row.head_sha === pr.headSha && typeof row.open_escalation_hold_since === "string");
-        let stillOpen = true;
-        if (sweepOwned) {
-          const issues = await readOpenEscalations();
-          const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
-            pr.mergeConflict !== undefined, isBlockedCi(pr), deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
-          stillOpen = openEscalationStandDownReason(pr.headSha, matchDuplicateEscalation(key, issues),
-            key.contractRevision, { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
-            isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer) !== undefined;
-        }
+        const issues = await readOpenEscalations();
+        const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
+          pr.mergeConflict !== undefined, isBlockedCi(pr), deps.readTaskContractRevision?.(escalationTaskIdFor(pr)));
+        const stillOpen = openEscalationStandDownReason(pr.headSha, matchDuplicateEscalation(key, issues),
+          key.contractRevision, { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
+          isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer) !== undefined;
         if (stillOpen) {
           heldEscalationAt = openSince;
           disposition = "refused-escalate";
