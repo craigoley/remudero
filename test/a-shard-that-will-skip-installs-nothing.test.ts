@@ -131,7 +131,8 @@ test("W1-T5697: in ci-shard and test-slow-shard the classify step runs on plain 
     if (jobId === "ci") assertProducerAwareCiScheduling(job);
     else {
       assert.equal(job.if, undefined, `${jobId}: the required check must still register on every event`);
-      assert.equal(job.needs, undefined, `${jobId}: the slow tier remains independent`);
+      // W1-T11206: its only prerequisite is the install-free planner that sizes it.
+      assert.deepEqual(job.needs, ["test-slow-plan"], `${jobId}: the slow tier remains independent of the fast lane`);
     }
     const classify = job.steps.findIndex((s) => s.id === id);
     assert.ok(classify >= 0, `${jobId}: no '${id}' step`);
@@ -215,6 +216,7 @@ function slowShard(event: string, files: string[], stubNode?: string) {
     stubNode: "exit 0",
     subs: {
       "${{ matrix.shard }}": "1",
+      "${{ needs.test-slow-plan.outputs.count }}": "2",
       "${{ steps.plan-reading.outputs.established }}": plan.outputs.established ?? "",
       "${{ steps.plan-reading.outputs.class }}": plan.outputs.class ?? "",
     },

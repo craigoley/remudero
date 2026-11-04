@@ -135,7 +135,7 @@ test("ci and test-slow drop the same way once their own shard failed", () => {
 
 test("each aggregator in the table is a ci.yml job that needs the matrix its pattern names", () => {
   const workflow = parse(readFileSync(join(import.meta.dirname, "..", ".github", "workflows", "ci.yml"), "utf8")) as {
-    jobs: Record<string, { name?: string; needs?: string | string[]; strategy?: { matrix?: { shard?: unknown[] } } }>;
+    jobs: Record<string, { name?: string; needs?: string | string[]; strategy?: { matrix?: { shard?: unknown[] | string } } }>;
   };
   const jobs = Object.values(workflow.jobs);
   assert.ok(jobs.length > 5, "the workflow parsed into its jobs");
@@ -145,8 +145,11 @@ test("each aggregator in the table is a ci.yml job that needs the matrix its pat
     const needs = [job.needs ?? []].flat();
     const matrixNames = needs.flatMap((id) => {
       const need = workflow.jobs[id];
-      const shards = need?.strategy?.matrix?.shard ?? [];
-      return shards.map((shard) => (need?.name ?? "").replace("${{ matrix.shard }}", String(shard)));
+      // W1-T11206: a run-time matrix (fromJSON of a needed job's output) is checked on a sample shard.
+      const raw = need?.strategy?.matrix?.shard ?? [];
+      const shards = typeof raw === "string" && raw.includes("fromJSON(needs.") ? [1] : (raw as unknown[]);
+      return shards.map((shard) =>
+        (need?.name ?? "").replace("${{ matrix.shard }}", String(shard)).replace(/\$\{\{ needs\.[\w-]+\.outputs\.[\w-]+ \}\}/g, "3"));
     });
     assert.ok(matrixNames.length > 0, `${aggregator} needs a sharded matrix job`);
     for (const name of matrixNames) assert.match(name, constituent, `${aggregator}'s shard ${name}`);
