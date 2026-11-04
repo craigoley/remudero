@@ -15,12 +15,12 @@
     - W1-T11153
   files:
     - src/lib/sweep.ts
-    - test/daemon/a-light-pass-refill-admits-no-review-under-a-recycle-pause.test.ts
+    - test/deploy/a-light-pass-refill-admits-no-review-under-a-recycle-pause.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: With a recycle PAUSE engaged (isRecyclePauseDetail), a light pass already running when the pause began admits no review through admitOneRefill when a lane frees, and ledgers why; with no PAUSE, or an operator PAUSE, the refill behaves as today
-      proof: "unit test: test/daemon/a-light-pass-refill-admits-no-review-under-a-recycle-pause.test.ts"
+      proof: "unit test: test/deploy/a-light-pass-refill-admits-no-review-under-a-recycle-pause.test.ts"
     - claim: The refill's recycle-pause check names this task
       proof: "grep: W1-T11321 in src/lib/sweep.ts"
   rationale: |
