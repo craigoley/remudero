@@ -300,7 +300,10 @@ export const LANE_CPU_CLASS = "lane";
 /** W1-T11129 — the container's own cgroup cpu.stat usage_usec (cgroup v2, read inside the container's namespace). */
 export function readCgroupCpuUsageUsec(path = "/sys/fs/cgroup/cpu.stat", read: (path: string) => string = (p) => readFileSync(p, "utf8")): number | null {
   try { return parseCpuUsageUsec(read(path)); }
-  catch { return null; } // unread: the learner holds still and the bound falls back to the CPU count
+  catch {
+    // Unread (no cgroup v2, or off Linux): null makes the learner hold still and the bound fall back to the CPU count.
+    return null;
+  }
 }
 
 let publishedCpuLaneBound: number | null = null;
@@ -320,7 +323,10 @@ export function readLaneCpu(
 ): { learner: LaneCpuLearnerState; cpu: LaneCpuReading; bound: number | null } {
   let usageUsec: number | null = null;
   try { usageUsec = ports.cpuUsageUsec?.() ?? null; }
-  catch { usageUsec = null; }
+  catch {
+    // A throwing port is an unread counter: the learner is left as it was, so the cap stays at the CPU count.
+    usageUsec = null;
+  }
   const next = usageUsec === null ? learner : learnLaneCpu(learner, {
     atMs: nowMs, usageUsec, runningClasses: Array.from({ length: Math.max(0, Math.floor(inFlight)) }, () => LANE_CPU_CLASS),
   });
