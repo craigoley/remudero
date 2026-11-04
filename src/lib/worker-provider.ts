@@ -4477,6 +4477,8 @@ export interface OpenWeightWorkerResult {
   /** W1-T4079: the deployment this attempt found absent (HTTP 404). */
   openWeightDeploymentAbsent?: string;
   openWeightCapacityShortfall?: CapacityShortfall;
+  /** W1-T10877: see WorkerResult.openWeightErrorClass. */
+  openWeightErrorClass?: string;
   sessionId: string;
   costUsd: number;
   numTurns: number;
@@ -5399,6 +5401,9 @@ function openWeightResult(input: {
       reason: "capacity_shortfall" as const, deployment: input.model,
       estimatedTokens: input.error.estimatedTokens, limitTokens: input.error.limitTokens!,
     } } : {}),
+    // W1-T10877: a truncated reply or a timeout is returned, not thrown, so its class must ride the result typed.
+    ...(input.error instanceof OpenWeightTruncatedReplyError ? { openWeightErrorClass: OpenWeightTruncatedReplyError.name }
+      : input.error instanceof OpenWeightRequestTimeoutError ? { openWeightErrorClass: OpenWeightRequestTimeoutError.name } : {}),
     webSearchAttempted: input.webSearchAttempted ?? 0,
     webSearchAccepted: input.webSearchAccepted ?? 0,
     webSearchRefused: input.webSearchRefused ?? 0,
