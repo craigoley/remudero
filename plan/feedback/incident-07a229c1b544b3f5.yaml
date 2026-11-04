@@ -1,0 +1,31 @@
+id: incident-07a229c1b544b3f5
+ts: 2026-11-04T12:34:13.930Z
+raw: >-
+  Incident 07a229c1b544: flow pr-stage-stall:own-red:required checks red —
+  ci-log fix, strike <n>/<n> — NOT DISPATCHED this pass: another CI run for this
+  head is still queued or in progress — waiting for its result, never
+  re-queueing over it
+
+  First seen: 2026-11-04T12:19:14.778Z
+
+  Last seen: 2026-11-04T12:19:14.778Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16658 own-red: repeat: "required checks red — ci-log fix, strike <n>/<n> — NOT DISPATCHED this pass: another CI run for this head is still queued or in progress — waiting for its result, never re-queueing over it" x3; duplicate build
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#07a229c1b544b3f5e2dfcc79505d720dbd2b08106ef503bd1878cfba2733ff2b
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

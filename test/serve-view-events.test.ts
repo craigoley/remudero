@@ -123,7 +123,10 @@ test("a ledger row reaches an events subscriber of the assembled serve over real
   assert.equal(event.data.view, "read-model");
   assert.equal(event.data.cause, "body");
   const res = await fetch(`${url}/v1/views/read-model`, { headers: READ });
-  assert.equal(res.headers.get("etag"), event.data.etag, "the event's etag is the one the refetch answers with");
+  // The sweep re-judges on the clock, so a source can age to stale between the body event and the refetch;
+  // the refetch's etag is then the one the sweep's later "judge" event carries, never one no event announced.
+  const refetched = res.headers.get("etag");
+  await until(() => frames.slice(seen).some((f) => f.event === "view" && f.data.etag === refetched), 5_000, "an event carrying the refetch's etag");
   t.diagnostic(`ledger append -> SSE view event: ${Math.round(event.at - appendedAt)} ms (tick 20 ms)`);
 });
 
