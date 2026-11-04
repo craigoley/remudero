@@ -1,11 +1,71 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
+import { fstatSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { issueLinuxCodingProfilePreflight, readLinuxCodingProfilePreflight,
   type LinuxCodingProfilePreflightV1 } from "#src/lib/model-canary-linux-profile-preflight-capabilities.js";
-import { probeNativeLinuxCodingProfile } from "#src/lib/model-canary-systemd-bwrap-backend.js";
+import { probeNativeLinuxCodingProfile, runProfileControl,
+  type LinuxCodingProfileSpec } from "#src/lib/model-canary-systemd-bwrap-backend.js";
+import { elfInterpreter } from "#src/lib/model-canary-native-profile-probe.js";
 
 const hash = "a".repeat(64);
+
+test("native ELF inspection reads the real Node binary and refuses a malformed fixture", () => {
+  const interpreter = elfInterpreter(process.execPath);
+  assert.ok(interpreter === null || interpreter.startsWith("/"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-elf-fixture-"));
+  try {
+    const malformed = join(root, "not-elf");
+    writeFileSync(malformed, Buffer.alloc(64));
+    assert.throws(() => elfInterpreter(malformed), /native-profile-preflight-node-elf-invalid/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("native profile control closes a pinned cgroup descriptor after readback refusal", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-profile-fd-"));
+  const pinned = join(root, "pinned");
+  writeFileSync(pinned, "synthetic cgroup fixture");
+  const fd = openSync(pinned, "r");
+  const preflight = validPreflight();
+  const profile: LinuxCodingProfileSpec = {
+    profileId: preflight.profileId, profileDigest: hash, binaryDigest: hash,
+    backendSourceDigest: hash, producerSourceDigest: hash, testSourceDigest: hash,
+    preflightCapabilitySourceDigest: hash, hostIdentityDigest: hash,
+    controlSourceDigest: hash, runtimeId: preflight.runtimeId,
+    bounds: { ...preflight.bounds, profileId: preflight.profileId, profileDigest: hash,
+      binaryDigest: hash, runtimeId: preflight.runtimeId },
+    systemdRun: preflight.binaries.systemdRun,
+    systemctl: { path: join(root, "no-systemctl"), sha256: hash },
+    bubblewrap: preflight.binaries.bubblewrap, node: preflight.binaries.node,
+    runtimeFiles: preflight.runtimeFiles, isolationProofDigest: hash,
+    controlCallTimeoutMs: 1, cleanupGraceMs: 1,
+  };
+  try {
+    const result = await runProfileControl(profile,
+      "a75643cd-65c6-474d-a91d-e6f63bbb0743", "known-good",
+      "2b9b3603-a178-4542-a5df-d24d3dc363fa", {
+        startUnit: (_profile, unit) => ({ child: null as never, unit, output: [], outputBytes: 0,
+          errors: [], errorBytes: 0, closed: new Promise(() => {}), send() {}, kill() {} }),
+        waitForActive: async () => ({ ControlGroup: "/synthetic" }),
+        exactCgroupDir: () => ({ path: pinned, fd }),
+      });
+    assert.equal(result.state, "unavailable");
+    assert.equal(result.reason, "systemd-effective-limit-readback-mismatch");
+    assert.equal(result.candidateClosed, false, "the fake fixture supplies no process closure proof");
+    assert.throws(() => fstatSync(fd), { code: "EBADF" }, "the pinned descriptor must close on refusal");
+
+    const defaultIOResult = await runProfileControl({ ...profile, cleanupGraceMs: 1000,
+      systemdRun: { path: "/bin/false", sha256: hash } },
+    "a75643cd-65c6-474d-a91d-e6f63bbb0743", "known-bad",
+    "35a20df1-efab-4e66-9914-fc0dfc30a722");
+    assert.equal(defaultIOResult.state, "unavailable", "the real spawn path must report a failed synthetic controller");
+    assert.equal(defaultIOResult.candidateClosed, false,
+      "an exited controller without a pinned cgroup readback cannot prove unit closure");
+    assert.equal(defaultIOResult.hostExecutionId, "rmd-coding-probe-35a20df1-efab-4e66-9914-fc0dfc30a722");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 function validPreflight(): LinuxCodingProfilePreflightV1 {
   return {

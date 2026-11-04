@@ -105,7 +105,7 @@ function readProfileToolVersion(path: string, args: readonly string[], stage: Pr
   return line;
 }
 
-function elfInterpreter(path: string): string | null {
+export function elfInterpreter(path: string): string | null {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = fstatSync(fd), header = Buffer.alloc(64);

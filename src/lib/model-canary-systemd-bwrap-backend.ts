@@ -831,8 +831,15 @@ function namespaceAndMountObservation(stdout: string, parentSentinelAttested: bo
     tmpConfiguredBytes, tmpReadbackBytes: Number(tmpReadbackBytes) } };
 }
 
-async function runProfileControl(
+interface ProfileControlPinIO {
+  startUnit: typeof startUnit;
+  waitForActive: typeof waitForActive;
+  exactCgroupDir: typeof exactCgroupDir;
+}
+
+export async function runProfileControl(
   profile: LinuxCodingProfileSpec, profileProbeId: string, control: typeof PROFILE_CONTROL_NAMES[number], controlAttemptId: string,
+  pinIO: ProfileControlPinIO = { startUnit, waitForActive, exactCgroupDir },
 ): Promise<ProfileControlRun> {
   if (!/^[a-f0-9-]{36}$/i.test(profileProbeId)) throw new Error("linux-profile-probe-id-invalid");
   const unit = `rmd-coding-probe-${controlAttemptId}`;
@@ -852,9 +859,9 @@ async function runProfileControl(
   let controllerDiagnosticDigest: string | null = null;
   const started = performance.now();
   try {
-    running = startUnit(profile, unit, parentSentinel); hostStarted = "unknown";
-    props = await waitForActive(profile, unit, controller.signal); hostStarted = "yes";
-    dir = exactCgroupDir(props.ControlGroup!, process.getuid?.() ?? -1, unit);
+    running = pinIO.startUnit(profile, unit, parentSentinel); hostStarted = "unknown";
+    props = await pinIO.waitForActive(profile, unit, controller.signal); hostStarted = "yes";
+    dir = pinIO.exactCgroupDir(props.ControlGroup!, process.getuid?.() ?? -1, unit);
     verifyEffectiveProperties(props, profile, process.getuid?.() ?? -1, unit);
     verifyKernelBounds(dir, profile.bounds); readbacks = controlUnitReadbacks(dir, profile.bounds);
     const mainPid = Number(props.MainPID);
@@ -973,7 +980,7 @@ export type LinuxCodingProfileProbeOutcome =
       diagnostic?: LinuxCodingProfileProbeDiagnostic }
   | { state: "observed"; receipt: LinuxCodingProfileProbeReceipt };
 
-function probeDiagnostic(profileProbeId: string, controls: readonly ProfileControlRun[]): LinuxCodingProfileProbeDiagnostic {
+export function probeDiagnostic(profileProbeId: string, controls: readonly LinuxCodingProfileProbeControlDiagnostic[]): LinuxCodingProfileProbeDiagnostic {
   const safeControls = controls.map(control => Object.freeze({ ...control,
     observed: Object.freeze({ ...control.observed }),
     unitReadbacks: control.unitReadbacks ? Object.freeze(Object.fromEntries(Object.entries(control.unitReadbacks)

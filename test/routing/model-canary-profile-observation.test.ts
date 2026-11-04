@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runInNewContext, Script } from "node:vm";
-import { LINUX_CODING_PROFILE_CANCEL_CONTROL_SOURCE, LINUX_CODING_PROFILE_KNOWN_GOOD_CONTROL_SOURCE } from "#src/lib/model-canary-systemd-bwrap-backend.js";
+import { LINUX_CODING_PROFILE_CANCEL_CONTROL_SOURCE, LINUX_CODING_PROFILE_KNOWN_GOOD_CONTROL_SOURCE,
+  probeDiagnostic, type LinuxCodingProfileProbeControlDiagnostic } from "#src/lib/model-canary-systemd-bwrap-backend.js";
 
 type FixedControlObservation = {
   sum: number;
@@ -74,4 +75,46 @@ test("W1-T10957: the fixed native control converts tmpfs size=K readbacks to byt
 test("W1-T10957: the cancellation child uses fixed bounded V8 runtime options", () => {
   assert.doesNotThrow(() => new Script(LINUX_CODING_PROFILE_CANCEL_CONTROL_SOURCE));
   assert.ok(LINUX_CODING_PROFILE_CANCEL_CONTROL_SOURCE.includes("['--v8-pool-size=1','--max-old-space-size=64','-e'"));
+});
+
+test("native probe diagnostics freeze observed counters and exact unit readbacks", () => {
+  const unitReadbacks = {
+    cpuQuotaMicros: { configured: 100_000, readback: 100_000 },
+    memoryMaxBytes: { configured: 268_435_456, readback: 268_435_456 },
+    swapMaxBytes: { configured: 0, readback: 0 },
+    tasksMax: { configured: 16, readback: 16 },
+  };
+  const isolation = {
+    userNamespace: true, pidNamespace: true, networkNamespace: true, ipcNamespace: true,
+    utsNamespace: true, mountNamespace: true, cgroupNamespace: true, rootReadOnly: true,
+    tmpfsScratch: true, devReadOnly: true, devRegularWriteDenied: true, devNullWritable: true,
+    procReadOnly: true, devPtsReadOnly: true, devPtsPseudoFilesystem: true,
+    cleanEnvironment: true, parentEnvironmentHidden: true,
+  };
+  const control: LinuxCodingProfileProbeControlDiagnostic = {
+    control: "known-good", controlAttemptId: "control-1", sourceDigest: "a".repeat(64),
+    state: "passed", hostExecutionId: "rmd-coding-probe-control-1", exitCode: 0,
+    candidateClosed: true, unitClosureBasis: "cgroup-events-empty", unitRetirement: "retired",
+    diagnosticDigest: "b".repeat(64),
+    observed: { cpuUsec: 12, memoryPeakBytes: 1024, swapPeakBytes: 0, pidsPeak: 2,
+      wallMs: 4, stdoutBytes: 3, stderrBytes: 0 },
+    unitReadbacks,
+    scratchMountReadbacks: { rootConfiguredBytes: 8192, rootReadbackBytes: 8192,
+      tmpConfiguredBytes: 8192, tmpReadbackBytes: 8192 },
+    isolation, reason: null,
+  };
+  const diagnostic = probeDiagnostic("probe-1", [control]);
+  assert.deepEqual(diagnostic.heldUnitIds, []);
+  assert.deepEqual(diagnostic.controls[0]?.observed, control.observed);
+  assert.deepEqual(diagnostic.controls[0]?.unitReadbacks, unitReadbacks);
+  assert.deepEqual(diagnostic.controls[0]?.scratchMountReadbacks, control.scratchMountReadbacks);
+  assert.deepEqual(diagnostic.controls[0]?.isolation, isolation);
+  assert.ok(Object.isFrozen(diagnostic.controls[0]?.observed));
+  assert.ok(Object.isFrozen(diagnostic.controls[0]?.unitReadbacks?.cpuQuotaMicros));
+  assert.ok(Object.isFrozen(diagnostic.controls[0]?.scratchMountReadbacks));
+  assert.ok(Object.isFrozen(diagnostic.controls[0]?.isolation));
+  control.observed.cpuUsec = 99;
+  assert.equal(diagnostic.controls[0]?.observed.cpuUsec, 12);
+  const held = probeDiagnostic("probe-2", [{ ...control, candidateClosed: false }]);
+  assert.deepEqual(held.heldUnitIds, [control.hostExecutionId]);
 });

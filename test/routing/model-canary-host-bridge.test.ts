@@ -229,6 +229,8 @@ test("host bridge client bounds replies and preserves closed unavailable candida
   const unknownExecution = { hostStarted: "unknown", closure: "unavailable", hostExecutionId: null };
   const closedExecution = { hostStarted: "yes", closure: "proven", hostExecutionId: "rmd-coding-test.service" };
   const candidateOutput = { candidateExitCode: 7, stdout: "partial answer\n", stderr: "candidate error\n" };
+  const observed = { cpuUsec: 21, memoryPeakBytes: 1024, swapPeakBytes: 0, pidsPeak: 2,
+    scratchPeakBytes: 128, wallMs: 4, stdoutBytes: 15, stderrBytes: 16, heapPeakBytes: 256 };
   const closedReply = { state: "closed-unavailable", reason: "resource-readback-incomplete",
     binding: { ...binding, codingExecutionAttemptId: "fd52e8ab-c357-40cb-98dd-4cf0a8bb5762" },
     configured: null, observed: null, candidateOutput, execution: closedExecution };
@@ -237,6 +239,11 @@ test("host bridge client bounds replies and preserves closed unavailable candida
       reply: { ...closedReply, candidateOutput: { ...candidateOutput, stdout: "x".repeat(2200) } },
       expected: "uncertain", execution: unknownExecution },
     { name: "closed partial output", oversized: false, reply: closedReply, expected: "closed-unavailable", execution: closedExecution },
+    { name: "closed measured partial output", oversized: false, reply: { ...closedReply, observed },
+      expected: "closed-unavailable", execution: closedExecution },
+    { name: "negative observed wall time", oversized: false,
+      reply: { ...closedReply, observed: { ...observed, wallMs: -1 } },
+      expected: "uncertain", execution: unknownExecution },
     ...[
       { ...candidateOutput, extra: true },
       { ...candidateOutput, candidateExitCode: 0.5 },
@@ -287,7 +294,8 @@ test("host bridge client bounds replies and preserves closed unavailable candida
           assert.deepEqual(result.candidateOutput, candidateOutput);
           assert.deepEqual(result.binding, closedReply.binding);
           assert.equal(result.configured, null);
-          assert.equal(result.observed, null, "partial candidate output cannot stand in for measured resources");
+          assert.deepEqual(result.observed, scenario.reply.observed,
+            "partial candidate output cannot stand in for measured resources");
         }
       }
     } finally {
