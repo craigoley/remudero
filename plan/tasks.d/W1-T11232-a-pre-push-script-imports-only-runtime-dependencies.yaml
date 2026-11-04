@@ -1,0 +1,48 @@
+- id: W1-T11232
+  title: acorn is a declared runtime dependency, and the dependency-declaration suite refuses any bare package import in a script the pre-push hook runs that is not a runtime dependency, so the fleet's pre-push census check loads in the daemon image again
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # package.json and package-lock.json ship into the daemon image every fleet process runs
+  band_meaning: blast-radius
+  origin: operator-session#wreckterra-pr6-lint-recon-2026-11-03
+  plan_refs:
+    - W1-T10798
+  files:
+    - package.json
+    - package-lock.json
+    - test/dependency-declarations-match-use.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: acorn is listed in package.json dependencies at the version package-lock.json already resolves
+      proof: 'grep: "acorn": in package.json'
+    - claim: The dependency-declaration suite walks every scripts/*.mjs that hooks/pre-push runs, with their relative imports, and refuses a bare package import that is not in dependencies; its own positive control finds scripts/census-precheck.mjs importing acorn
+      proof: "grep: W1-T11232 criterion 2 in test/dependency-declarations-match-use.test.ts"
+    - claim: The dependency-declaration suite passes with the declaration in place
+      proof: "unit test: test/dependency-declarations-match-use.test.ts"
+      kind: guard
+  rationale: |
+    OBSERVED 2026-11-03:
+    - scripts/census-precheck.mjs imports `parse, parseExpressionAt` from "acorn" (added by W1-T10798, df2d09dd5, 2026-10-28). package.json declares acorn in neither dependencies nor devDependencies; `npm ls acorn` shows it only under dependency-cruiser, a devDependency.
+    - In remudero-daemon, acorn does not resolve from /app/scripts (MODULE_NOT_FOUND), while the control `yaml` resolves to /app/node_modules/yaml.
+    - Every daemon push in four of today's operator-directed triage runs printed "Cannot find package 'acorn' imported from /app/scripts/census-precheck.mjs" and then "pre-push: census-precheck could not measure — not blocking on an unreadable check". The fleet's pre-push census check has therefore not run in the daemon since the image picked up W1-T10798.
+    - The ledger keeps pre-push output only when a push fails (86 "census-precheck could not measure" rows since 2026-10-13, one naming acorn), so the loss was invisible there.
+    - Of the 12 distinct scripts hooks/pre-push names, census-precheck.mjs is the only one with a bare import outside dependencies.
+    - test/dependency-declarations-match-use.test.ts checks only `src/**/*.ts` ("src runtime package uses are dependencies"), so a script the daemon runs at push time is outside its population.
+  design: |
+    - Move acorn into dependencies at the version package-lock.json already pins. Update the lock's root entry; no new package is installed.
+    - In test/dependency-declarations-match-use.test.ts, add a test titled with "W1-T11232 criterion 2", and include "W1-T11232 criterion 3" in that title too so the guard's path-form proof is bound:
+      - read the scripts/*.mjs paths hooks/pre-push names;
+      - follow their relative imports;
+      - collect bare package specifiers, ignoring node: builtins;
+      - assert each package root is in dependencies.
+      - Positive control: assert that census-precheck.mjs and acorn are in the walked set, so a blind walk cannot pass.
+    NOT IN SCOPE: scripts the pre-push hook does not run, and the hook's own handling of an unreadable census check.
+  note: |
+    reservation hand-off: run-unfiled-1793727592387 -> run-unfiled-1793727592387
+    Reserved with rmd next-task-id (W1-T11232 on run-unfiled-1793727592387). Found in the daemon triage logs during the operator session's wreckterra#6 lint recon.

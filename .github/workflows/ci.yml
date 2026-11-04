@@ -2078,9 +2078,47 @@ jobs:
     # job AND this dependent aggregator. See test/workflow-job-timeouts.test.ts.
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            scripts/
+            src/lib/plan-scope.ts
+            src/lib/rule-suites.ts
+            package.json
+            package-lock.json
+            .nvmrc
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      # W1-T11161: the gate below reads this diff's class from the same predicate the shards use, so a
+      # PLAN_ONLY diff whose matrix was skipped upstream is judged on evidence, not on the skip.
+      - name: Classify this pull request's diff for the coverage gate (W1-T11161)
+        id: coverage-plan-class
+        env:
+          MATRIX_RESULT: ${{ needs.coverage-ratchet.result }}
+        run: |
+          CLASS=SOURCE
+          COUNT=0
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && { [ "${MATRIX_RESULT:-}" = "skipped" ] || [ "${MATRIX_RESULT:-}" = "success" ]; }; then
+            git diff --name-only HEAD^1...HEAD > coverage-class-files.txt 2>/dev/null || : > coverage-class-files.txt
+            COUNT="$(grep -c . coverage-class-files.txt || true)"
+            CLASS="$(node scripts/diff-class.mjs --coverage-class --changed-files coverage-class-files.txt 2>coverage-class.log)" || CLASS=SOURCE
+            case "$CLASS" in PLAN_ONLY|DOCS_ONLY|TEST_ONLY|NO_SRC|SOURCE) ;; *) CLASS=SOURCE ;; esac
+            cat coverage-class.log 2>/dev/null || true
+          fi
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
       - name: Require every coverage shard to produce an artifact
+        id: coverage-gate
         env:
           SHARD_RESULT: ${{ needs.coverage-ratchet.result }}
+          COVERAGE_CLASS: ${{ steps.coverage-plan-class.outputs.class }}
+          COVERAGE_CLASS_COUNT: ${{ steps.coverage-plan-class.outputs.count }}
+          CLASS_EVENT: ${{ github.event_name }}
+          LEDGER_RESULT: ${{ needs.coverage-ledger.result }}
           RUN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_REPO_SLUG: ${{ github.repository }}
@@ -2132,9 +2170,16 @@ jobs:
             rm -f "$LOG_FILE"
           }
 
+          plan_only_evidenced() {
+            [ "${CLASS_EVENT:-}" = "pull_request" ] && [ "${COVERAGE_CLASS:-}" = "PLAN_ONLY" ] && [[ "${COVERAGE_CLASS_COUNT:-}" =~ ^[1-9][0-9]*$ ]]
+          }
+          not_applicable_line() {
+            echo "coverage-ratchet: not applicable — class=PLAN_ONLY over ${COVERAGE_CLASS_COUNT} changed file(s) per scripts/diff-class.mjs; coverage-ledger=${LEDGER_RESULT:-unknown}; no source line can move coverage (W1-T11161)."
+          }
+
           case "$SHARD_RESULT" in
             success)
-            :
+              if plan_only_evidenced; then not_applicable_line; fi
               ;;
             failure)
               echo "coverage-ratchet: a coverage shard FAILED (matrix result: failure) — open the shard log; this is a real break until that log says otherwise."
@@ -2170,6 +2215,11 @@ jobs:
               exit 1
               ;;
             skipped)
+              if plan_only_evidenced; then
+                not_applicable_line
+                echo "not_applicable=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+                exit 0
+              fi
               echo "coverage-ratchet: the shard matrix never ran (matrix result: skipped) — nothing was measured, so nothing is certified. Open the workflow run to see which upstream job gated it."
               exit 1
               ;;
@@ -2178,13 +2228,17 @@ jobs:
               exit 1
               ;;
           esac
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
+      - name: Restore the full checkout for coverage artifact consumption
+        id: coverage-full-checkout
+        env:
+          NOT_APPLICABLE: ${{ steps.coverage-gate.outputs.not_applicable }}
+        run: |
+          if [ "${NOT_APPLICABLE:-}" = "true" ]; then
+            echo "coverage-ratchet: PLAN_ONLY — no full checkout or history is needed."
+            exit 0
+          fi
+          git sparse-checkout disable
+          git fetch --unshallow
       - name: Download coverage shards
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -2192,7 +2246,15 @@ jobs:
           path: coverage-shards
       - name: Require downloaded coverage shard artifacts
         id: coverage-artifact
+        env:
+          NOT_APPLICABLE: ${{ steps.coverage-gate.outputs.not_applicable }}
         run: |
+          if [ "${NOT_APPLICABLE:-}" = "true" ]; then
+            echo "coverage-ratchet: not applicable (W1-T11161) — the matrix was skipped for a PLAN_ONLY diff; no shard artifact is expected."
+            echo "event=pull_request" >> "$GITHUB_OUTPUT"
+            echo "class=PLAN_ONLY" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           EXPECTED=""
           for SHARD in 1 2 3 4 5 6 7 8; do
             CLASS_FILE="coverage-shards/coverage-shard-${SHARD}/class"
@@ -2347,6 +2409,16 @@ jobs:
           # W1-T5892: a merge-group lcov whose shards all succeeded records provenance, so it may pin a floor.
           node scripts/coverage-floor.mjs provenance --producer coverage-merged --lcov coverage-merged-artifact/lcov.info \
             --out coverage-merged-artifact/provenance.json --matrix-result "$MATRIX_RESULT"
+      - name: Emit bounded source SF evidence for the native coverage consumer
+        run: |
+          node scripts/coverage-floor.mjs owning-sf --include-changed-source --lcov coverage/lcov.info \
+            --file src/lib/model-canary-command.ts \
+            --file src/lib/model-canary-owner.ts \
+            --file src/lib/model-canary-pilot-approval.ts \
+            --file src/lib/model-canary-pilot-budget.ts \
+            --file src/lib/model-canary-pilot-execution.ts \
+            --file src/lib/worker-provider.ts \
+            --file src/lib/worker.ts
       - name: Upload merged coverage artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -2422,6 +2494,7 @@ jobs:
           npm ci
       - name: Determine whether this diff can move src/lib/classify.ts's mutation score
         id: trigger
+        if: steps.classify.outputs.class == 'SOURCE'
         run: |
           set -euo pipefail
           git diff --name-only HEAD^1...HEAD > changed-files.txt
