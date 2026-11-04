@@ -26,3 +26,11 @@
   note: |
     reservation hand-off: plan-file-1793744859465 -> plan-file-1793744859465
     Reserved with rmd next-task-id --branch plan-file-1793744859465 from the operator session's ops worktree. Found 2026-11-03 by the hand rebuild of #15638 (W1-T9795) onto #15532's active selection. Operator, in chat: "fix the root causes of issues you find".
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filed rationale explicitly states that deciding RMD_INSTANCE_REGISTRY's meaning is an operator call; the escalation rule includes decisions only the operator can make.; on the change's description/files alone, no diff was read — Acceptance requires recommending that meaning and a live-fleet migration order. The declared scope is a recon report, so this assessment does not assert that runtime or deployment changes are included."
+    judged_at: "2026-11-04T04:01:17.292Z"
+    pin: "c5a5bc7e7f0050fce51bbd966bc42de99888a9fe077b3353979ae658998fe21b"
