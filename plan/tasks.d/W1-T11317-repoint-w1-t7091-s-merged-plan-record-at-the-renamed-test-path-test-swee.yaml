@@ -1,0 +1,22 @@
+- id: W1-T11317
+  title: Repoint W1-T7091's merged plan record at the renamed test path test/sweep/flow-review-failed-n-unmet-criterion.test.ts
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T7091-flow-review-failed-n-unmet-criterion.yaml
+  acceptance:
+    - claim: W1-T7091's shard names the renamed test path in its files list and its acceptance proof, replacing the old flat test/ path
+      proof: "grep: test/sweep/flow-review-failed-n-unmet-criterion.test.ts in plan/tasks.d/W1-T7091-flow-review-failed-n-unmet-criterion.yaml"
+  origin: followup:DAEMON-1793746875762:2026-11-04T00:04:42.923Z:0
+  rationale: >-
+    From the 2026-11-03 follow-up on https://github.com/craigoley/remudero/pull/16565, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: Update W1-T7091’s historical proof path after this rename; its plan
+    record still names the old test path. — from W1-T10653 (run DAEMON-1793746875762,
+    https://github.com/craigoley/remudero/pull/16565)
