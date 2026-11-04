@@ -171,6 +171,26 @@ test("a run folder idle six hours retires with its reports, saved work, links an
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
+test("loose files idle six hours leave a non-checkout scan root while state, keys, fresh files and checkout files stay", () => {
+  const fx = setup();
+  try {
+    const base = join(fx.home, "Remudero");
+    const loose = (name: string, hours: number) => { const p = file(join(base, name), "scratch\n"); age(p, hours); return p; };
+    const gone = [loose("full4637b.log", 7), loose("dialect-check.mjs", 7), loose(".p2380.txt", 7), loose("filing-body-acceptance.md", 7)];
+    const kept = [loose("notes-today.md", 2), loose("ledger.ndjson", 60), loose("deploy.pem", 60), loose(".rmd-janitor-keep", 60)];
+    const bare = origin(fx);
+    const checkout = join(base, "remudero");
+    git(fx.root, "clone", "-q", bare, checkout);
+    const tracked = join(checkout, "package.json"); age(checkout, 60);
+    const keychainSource = join(base, "source-copy/test/worker-keychain.test.ts");
+    file(keychainSource); age(join(base, "source-copy"), 7);
+    const out = run(fx, { REMUDERO_JANITOR_DIRECTORY_ROOTS: `${base}:${checkout}` });
+    for (const path of gone) assert.equal(existsSync(path), false, path + out);
+    for (const path of [...kept, tracked]) assert.ok(existsSync(path), path + out);
+    assert.equal(existsSync(join(base, "source-copy")), false, "a source copy naming keychains is not a keychain" + out);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
 /**
  * A publication probe over `work`, answered by the shared gh shim (test/helpers/gh-shim.ts): only
  * the exact `repos/craigoley/remudero/commits/<head>/pulls` query prints a pull-request count, and

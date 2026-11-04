@@ -824,7 +824,7 @@ scratch_directory_risk() {
   # coordination files, and anything marked .rmd-janitor-keep. Do not follow links.
   found=$(find -P "$path" -xdev \( -name .git -o -name HEAD -o -name objects \
     -o -name '.rmd-janitor-keep' -o \( -type f \( -name ledger -o -name 'ledger.*' \) \) -o -name '*.ndjson' -o -name '*.jsonl' -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' \
-    -o -name '.env' -o -name '.env.*' -o -iname '*keychain*' -o -name '*.pem' -o -name '*.p12' -o -name '*.pfx' \
+    -o -name '.env' -o -name '.env.*' -o -name '*.keychain' -o -name '*.keychain-db' -o -name '*.pem' -o -name '*.p12' -o -name '*.pfx' \
     -o -name '*.keytab' -o -name 'id_rsa*' -o -name 'id_ed25519*' \) -print -quit 2>/dev/null) || {
     printf 'repository/state scan unavailable'; return 0;
   }
@@ -949,6 +949,50 @@ clean_scratch_directory() {
   fi
 }
 
+# A loose regular file directly in a scan root that is not inside a checkout
+# (notes, logs, probe scripts left at ~/Remudero's top level). The same 6-hour,
+# owner, process and open-file guards apply; state, keys and keep-marked names stay.
+clean_scratch_file() {
+  local path="$1" root="$2" parent modified changed metadata kb open_out open_rc
+  local RMD_DECISION_KNOWN_BYTES=unknown
+  [ -f "$path" ] && [ ! -L "$path" ] || return 0
+  case "$root" in "$USER_HOME"/*) ;; *) return 0 ;; esac
+  parent="$root"
+  while [ "$parent" != / ] && [ -n "$parent" ]; do
+    [ ! -e "$parent/.git" ] && [ ! -L "$parent/.git" ] || return 0
+    parent=$(dirname "$parent")
+  done
+  case "${path##*/}" in
+    .rmd-janitor-keep|ledger|ledger.*|*.ndjson|*.jsonl|*.sqlite*|*.lock|*.pid|.env|.env.*|*.keychain|*.keychain-db|*.pem|*.p12|*.pfx|*.keytab|id_rsa*|id_ed25519*)
+      log "SKIP scratch-file $path (state, keys or coordination)"; return ;;
+  esac
+  [ "$(artifact_owner "$path")" = "$RUN_USER" ] || { log "SKIP scratch-file $path (foreign or unknown owner)"; return; }
+  if [ "$OS_NAME" = Darwin ]; then metadata=$(stat -f '%m %c' "$path" 2>/dev/null)
+  else metadata=$(stat -c '%Y %Z' "$path" 2>/dev/null); fi || { log "SKIP scratch-file $path (age unavailable)"; return; }
+  read -r modified changed <<< "$metadata"
+  case "$modified:$changed" in :*|*:|*[!0-9:]*) log "SKIP scratch-file $path (age unavailable)"; return ;; esac
+  if [ "$(( $(date +%s) - modified ))" -lt "$((AGE_HOURS * 3600))" ] || [ "$(( $(date +%s) - changed ))" -lt "$((AGE_HOURS * 3600))" ]; then
+    return
+  fi
+  refresh_process_snapshot || { log "SKIP scratch-file $path (process visibility unavailable)"; return; }
+  is_live "$path" && { log "SKIP scratch-file $path (live command)"; return; }
+  [ "$HAS_LSOF" = 1 ] || { log "SKIP scratch-file $path (open-file visibility unavailable)"; return; }
+  open_out=$(lsof -nP -- "$path" 2>/dev/null); open_rc=$?
+  { [ "$open_rc" = 1 ] && [ -z "$open_out" ]; } || { log "SKIP scratch-file $path (open or visibility unknown)"; return; }
+  kb=$(du -sk "$path" 2>/dev/null | cut -f1)
+  rmd_decision_known_kib "$kb" "$?"
+  kb=${kb:-0}
+  if [ "$APPLY" = 1 ]; then
+    if rm -f -- "$path"; then
+      removed=$((removed+1)); reclaimed_kb=$((reclaimed_kb+kb))
+      log "REMOVED-SCRATCH-FILE age>=${AGE_HOURS}h ${kb}K $path"
+    else log "FAILED scratch file $path"; fi
+  else
+    planned=$((planned+1)); estimated_kb=$((estimated_kb+kb))
+    log "WOULD-REMOVE-SCRATCH-FILE age>=${AGE_HOURS}h ${kb}K $path"
+  fi
+}
+
 repair_alternates() {
   local repo="$1" stamp line alternate head_path
   command -v python3 >/dev/null 2>&1 || return
@@ -1066,7 +1110,8 @@ for directory_root in "${DIRECTORY_ROOTS[@]+"${DIRECTORY_ROOTS[@]}"}"; do
   }
   log "scratch-directory-scan: $directory_root; all-content age>=${AGE_HOURS}h"
   for scratch in "$directory_root"/* "$directory_root"/.[!.]* "$directory_root"/..?*; do
-    clean_scratch_directory "$scratch" "$directory_root"
+    if [ -d "$scratch" ]; then clean_scratch_directory "$scratch" "$directory_root"
+    else clean_scratch_file "$scratch" "$directory_root"; fi
   done
 done
 
