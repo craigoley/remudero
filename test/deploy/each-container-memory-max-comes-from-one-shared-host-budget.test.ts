@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -57,8 +57,8 @@ function running(dir: string, container: string, peakMib: number) {
 }
 
 /** Sources the policy in a clean environment and runs `script`; every RMD_* knob is at its default. */
-function policy(dir: string, script: string, env: Record<string, string> = {}) {
-  const run = spawnSync("bash", ["-c", `source "$1"; ${script}`, "policy", POLICY], {
+function policy(dir: string, script: string, env: Record<string, string | undefined> = {}, source = POLICY) {
+  const run = spawnSync("bash", ["-c", `source "$1"; ${script}`, "policy", source], {
     encoding: "utf8",
     env: {
       PATH: `${join(dir, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`, STATE_DIR: dir,
@@ -72,11 +72,11 @@ function policy(dir: string, script: string, env: Record<string, string> = {}) {
 }
 
 /** The --memory value (MiB) each launcher gets for `container`, and its policy note. */
-function memoryMax(dir: string, container: string, env: Record<string, string> = {}) {
+function memoryMax(dir: string, container: string, env: Record<string, string | undefined> = {}, source = POLICY) {
   const script = container === SERVE
     ? 'resource_policy_serve_args; printf "%s\\n" "${RESOURCE_POLICY_SERVE_ARGS[@]}"; printf "note=%s\\n" "$RESOURCE_POLICY_NOTE"'
     : 'resource_policy_build_args "$2"; printf "%s\\n" "${RESOURCE_POLICY_BUILD_ARGS[@]}"; printf "note=%s\\n" "$RESOURCE_POLICY_NOTE"';
-  const out = policy(dir, script.replace('"$2"', `"${container}"`), env);
+  const out = policy(dir, script.replace('"$2"', `"${container}"`), env, source);
   const flag = /^--memory=(\d+)m$/m.exec(out);
   return { mib: flag ? Number(flag[1]) : undefined, note: /^note=(.*)$/m.exec(out)?.[1] ?? "", out };
 }
@@ -115,6 +115,8 @@ test("each container's memory.max is the host less the reserve less the OTHER co
       assert.ok(limits[container]! + peaks[grown]! + RESERVE_MIB <= HOST_MIB, `${container} at its limit and ${grown} at its peak fit the host`);
     }
   }
+  // And no container is capped below what it has been measured to need: every limit is at least its own peak.
+  for (const container of FLEET) assert.ok(limits[container]! >= peaks[container]!, `${container}: limit ${limits[container]} is not below its own peak ${peaks[container]}`);
   // The limits themselves are overlapping ceilings: together they exceed the budget by 3 x the measured peaks.
   assert.equal(FLEET.reduce((sum, c) => sum + limits[c]!, 0), 4 * budget - 3 * sumPeaks);
   // Serve is no longer the fixed 7,680 MiB, and no build daemon is the old total - 5120 - 2048.
@@ -189,25 +191,104 @@ test("W1-T11130: an overcommitted host still follows the shared-budget formula; 
   assert.doesNotMatch(core.note, /today's arithmetic|OVERCOMMITTED/);
   assert.match(core.note, /memory\.max 3956 MiB = shared budget: host 15988 - reserve 2048 - remudero-serve 5632 \(floor, nothing learned\)/);
 
-  // Peaks that together exceed the host leave a negative limit, and that is the number the note names.
-  // A container's OWN learned peak, however large, is not a term of its own limit.
+  // Peaks that together exceed the host. A container with NO learned peak of its own has nothing to be
+  // raised to, so it gets the formula as it is: a negative limit is no ceiling, and the note names it.
   const crowded = host(t);
   learn(crowded, CORE, { high: 30000 });
-  learn(crowded, CONSOLE, { peak: 4608 });
   const noCeiling = memoryMax(crowded, CONSOLE);
   assert.equal(noCeiling.mib, undefined, `a negative limit is no ceiling, not today's arithmetic: ${noCeiling.out}`);
   assert.match(noCeiling.note, /NO memory ceiling — memory\.max -7984 MiB = shared budget: host 32000 - reserve 2048 - remudero-daemon 30000 \(learned memory\.high\) - remudero-serve 5632 \(floor, nothing learned\) - remudero-site-daemon 2304 \(floor, nothing learned\), under the 2048 MiB floor/);
   assert.match(noCeiling.out, /--annotation=org\.systemd\.property\.MemoryHigh=uint64 \d+/, "memory.high is still sized with no memory.max to stay under");
-  const coreBefore = memoryMax(crowded, CORE);
-  assert.equal(coreBefore.mib, 29952 - 4608 - FLOORS[SERVE]! - FLOORS[SITE]!, coreBefore.out);
+  assert.deepEqual(overcommitRows(crowded), [], "a floor is not a measurement, so a container with none learned is never overcommitted");
+  // Console then LEARNS a 4608 MiB peak: its memory.max is the LARGER of the formula (still -7984 MiB, its own
+  // peak is no term of it) and that peak, so it is never capped below what it has been measured to need.
+  learn(crowded, CONSOLE, { peak: 4608 });
+  const raised = memoryMax(crowded, CONSOLE);
+  assert.equal(raised.mib, 4608, raised.out);
+  assert.match(raised.note, /memory\.max 4608 MiB = its own learned peak \(memory\.peak\), larger than the shared-budget formula -7984 MiB: OVERCOMMITTED, deficit 12592 MiB; formula: host 32000 - reserve 2048 - remudero-daemon 30000/);
+  assert.match(raised.out, /^--memory-swap=8704m$/m, "the swap rides the raised ceiling");
+  // Core: the formula (29952 - console 4608 - serve 5632 - site 2304 = 17408) is below core's own 30000.
+  const core = memoryMax(crowded, CORE);
+  assert.equal(core.mib, 30000, core.out);
+  assert.match(core.note, /memory\.max 30000 MiB = its own learned peak \(learned memory\.high\), larger than the shared-budget formula 17408 MiB: OVERCOMMITTED, deficit 12592 MiB/);
+  // Its own peak grows: the limit follows it up, the formula does not move.
   learn(crowded, CORE, { high: 31000, peak: 31000 });
-  assert.equal(memoryMax(crowded, CORE).mib, coreBefore.mib, "core's own learned peak is not a term of core's limit");
-  learn(crowded, CONSOLE, { peak: 4096 }); // console's own peak never moves console's limit
-  assert.equal(memoryMax(crowded, CONSOLE).mib, undefined);
-  // Serve is sized the same way: under its reserve, the formula's number means no ceiling.
+  const grown = memoryMax(crowded, CORE);
+  assert.equal(grown.mib, 31000, "core's own learned peak is a floor under core's limit");
+  assert.match(grown.note, /larger than the shared-budget formula 17408 MiB: OVERCOMMITTED, deficit 13592 MiB/);
+  // Serve is sized the same way: with no peak of its own the formula's negative number means no ceiling,
+  // and once it has measured 6144 MiB it keeps a 6144 MiB ceiling instead.
   const serve = memoryMax(crowded, SERVE);
   assert.equal(serve.mib, undefined, serve.out);
   assert.match(serve.note, /NO memory ceiling — -\d+ MiB \(memory\.max -\d+ MiB = shared budget: host 32000 - reserve 2048 - remudero-daemon 31000 \(/);
+  learn(crowded, SERVE, { peak: 6144 });
+  const serveRaised = memoryMax(crowded, SERVE);
+  assert.equal(serveRaised.mib, 6144, serveRaised.out);
+  assert.match(serveRaised.note, /memory ceiling 6144 MiB \(\+2048 MiB swap\) from memory\.max 6144 MiB = its own learned peak \(memory\.peak\), larger than the shared-budget formula -\d+ MiB: OVERCOMMITTED, deficit \d+ MiB/);
+  // Own peak under the formula: the formula stands and nothing is overcommitted.
+  const roomy = host(t);
+  learn(roomy, CORE, { peak: 4096 });
+  const fits = memoryMax(roomy, CORE);
+  assert.equal(fits.mib, 29952 - FLOORS[SERVE]! - FLOORS[CONSOLE]! - FLOORS[SITE]!, fits.out);
+  assert.doesNotMatch(fits.note, /OVERCOMMITTED|deficit/);
+  assert.deepEqual(overcommitRows(roomy), []);
+});
+
+/** The host.memory_max.overcommitted rows in <dir>/state/ledger.ndjson (all containers, or just one). */
+function overcommitRows(dir: string, container?: string): Array<Record<string, unknown>> {
+  const file = join(dir, "state", "ledger.ndjson");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((row) => row.step === "host.memory_max.overcommitted" && (container === undefined || row.container === container));
+}
+
+test("W1-T11130 criterion 3: a formula below the container's own peak appends one host.memory_max.overcommitted ledger row", (t) => {
+  const dir = host(t);
+  learn(dir, CORE, { high: 30000 });
+  learn(dir, CONSOLE, { peak: 4608 });
+  // Console: formula 29952 - 30000 - 5632 - 2304 = -7984, own peak 4608, so the deficit is 12592 MiB.
+  const first = memoryMax(dir, CONSOLE);
+  assert.equal(first.mib, 4608, first.out);
+  assert.match(first.note, /OVERCOMMITTED, deficit 12592 MiB/);
+  const rows = overcommitRows(dir, CONSOLE);
+  assert.equal(rows.length, 1, JSON.stringify(rows));
+  assert.deepEqual(
+    [rows[0]!.container, rows[0]!.formula_mib, rows[0]!.own_peak_mib, rows[0]!.deficit_mib, rows[0]!.lane, rows[0]!.task_id],
+    [CONSOLE, -7984, 4608, 12592, "host", "HOST"],
+  );
+  assert.match(String(rows[0]!.ts), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.000Z$/);
+  // The same formula and peak at the next recycle, or the next drift check, is not ledgered again.
+  memoryMax(dir, CONSOLE);
+  assert.equal(overcommitRows(dir, CONSOLE).length, 1, "an unchanged overcommit is one row, not one per tick");
+  // The deficit moves (console measured more): that is a new fact, so a second row.
+  learn(dir, CONSOLE, { peak: 5120 });
+  memoryMax(dir, CONSOLE);
+  const after = overcommitRows(dir, CONSOLE);
+  assert.equal(after.length, 2);
+  assert.deepEqual([after[1]!.formula_mib, after[1]!.own_peak_mib, after[1]!.deficit_mib], [-7984, 5120, 13104]);
+  // Core, whose own 30000 is above ITS formula too, is ledgered under its own name; serve (nothing learned) is not.
+  memoryMax(dir, CORE);
+  memoryMax(dir, SERVE);
+  const coreRows = overcommitRows(dir, CORE);
+  assert.equal(coreRows.length, 1);
+  assert.deepEqual([coreRows[0]!.formula_mib, coreRows[0]!.own_peak_mib, coreRows[0]!.deficit_mib], [29952 - 5120 - FLOORS[SERVE]! - FLOORS[SITE]!, 30000, 30000 - (29952 - 5120 - FLOORS[SERVE]! - FLOORS[SITE]!)]);
+  assert.deepEqual(overcommitRows(dir, SERVE), []);
+  // Nothing is ledgered while every formula holds.
+  const calm = host(t);
+  learn(calm, CORE, { peak: 4096 });
+  memoryMax(calm, CORE);
+  assert.equal(existsSync(join(calm, "state", "ledger.ndjson")), false, "no overcommit, so no ledger file is created");
+});
+
+test("W1-T11130 criterion 3: the overcommit row never fails the policy when the ledger cannot be written", (t) => {
+  const dir = host(t);
+  learn(dir, CORE, { high: 30000 });
+  learn(dir, CONSOLE, { peak: 4608 });
+  // A directory where the ledger file should be: the append fails, and the limit is still raised.
+  mkdirSync(join(dir, "state", "ledger.ndjson"));
+  const got = memoryMax(dir, CONSOLE);
+  assert.equal(got.mib, 4608, got.out);
+  assert.match(got.note, /OVERCOMMITTED, deficit 12592 MiB/);
 });
 
 test("W1-T11130 criterion 2: an unreadable host total keeps today's arithmetic and is never fatal", (t) => {
@@ -255,7 +336,7 @@ function instances(dir: string) {
   return { roots, registry, env: (root: string) => ({ RMD_INSTANCE_REGISTRY: registry, STATE_DIR: root }) };
 }
 
-test("W1-T11130 criterion 2: a learned peak is read from the peer's own state root, not only the caller's", (t) => {
+test("W1-T11130 criterion 3: a learned peak is read from the peer's own state root, not only the caller's", (t) => {
   const dir = host(t);
   const fleet = instances(dir);
   // Each peer's tuner wrote its record under its own root; the caller (core's recycle) has none of them.
@@ -286,7 +367,7 @@ test("W1-T11130 criterion 2: a learned peak is read from the peer's own state ro
   assert.equal(memoryMax(dir, CORE, { RMD_INSTANCE_REGISTRY: away, STATE_DIR: fleet.roots.core }).mib, blind.mib);
 });
 
-test("W1-T11130 criterion 2: the recorded memory.peak lands in the peer's own root, where every recycle reads it", (t) => {
+test("W1-T11130 criterion 3: the recorded memory.peak lands in the peer's own root, where every recycle reads it", (t) => {
   const dir = host(t);
   const fleet = instances(dir);
   running(dir, CONSOLE, 3072);
@@ -299,4 +380,52 @@ test("W1-T11130 criterion 2: the recorded memory.peak lands in the peer's own ro
   const site = memoryMax(dir, SITE, fleet.env(fleet.roots.site));
   assert.match(site.note, new RegExp(`- ${CONSOLE} 3072 \\(memory\\.peak\\)`), site.note);
   assert.equal(site.mib, HOST_MIB - RESERVE_MIB - FLOORS[CORE]! - 3072 - FLOORS[SERVE]!);
+});
+
+test("W1-T11130 criterion 3: each peer's peak is read from its own root the same with the registry unset, legacy, or an active selection", (t) => {
+  const dir = host(t);
+  const fleet = instances(dir);
+  learn(fleet.roots.console, CONSOLE, { high: 4096 });
+  learn(fleet.roots.site, SITE, { peak: 3072 });
+  learn(fleet.roots.core, SERVE, { peak: 6144 }); // serve: the root where core's tuner records it
+  const budget = HOST_MIB - RESERVE_MIB;
+  const coreWant = budget - 4096 - 3072 - 6144;
+  const serveWant = budget - FLOORS[CORE]! - 4096 - 3072;
+
+  // UNSET: the registry beside the policy's own checkout (.remudero/daemon-instances.yaml) is the one read.
+  const checkout = join(dir, "checkout");
+  mkdirSync(join(checkout, "deploy"), { recursive: true });
+  mkdirSync(join(checkout, ".remudero"), { recursive: true });
+  const checkoutPolicy = join(checkout, "deploy", "resource-policy.sh");
+  copyFileSync(POLICY, checkoutPolicy);
+  copyFileSync(fleet.registry, join(checkout, ".remudero", "daemon-instances.yaml"));
+  // ACTIVE SELECTION: the selected registry the launcher binds (RMD_INSTANCE_REGISTRY plus its digest and instance name).
+  const selected = join(dir, "config", "selected-registry.yaml");
+  mkdirSync(join(dir, "config"), { recursive: true });
+  copyFileSync(fleet.registry, selected);
+  const active = { RMD_INSTANCE_REGISTRY: selected, RMD_INSTANCE_REGISTRY_DIGEST: "a".repeat(64), RMD_INSTANCE_NAME: "core", STATE_DIR: fleet.roots.core };
+
+  const modes: Record<string, { core: ReturnType<typeof memoryMax>; serve: ReturnType<typeof memoryMax> }> = {
+    unset: {
+      core: memoryMax(dir, CORE, { RMD_INSTANCE_REGISTRY: undefined, STATE_DIR: fleet.roots.core }, checkoutPolicy),
+      serve: memoryMax(dir, SERVE, { RMD_INSTANCE_REGISTRY: undefined, STATE_DIR: fleet.roots.core }, checkoutPolicy),
+    },
+    legacy: {
+      core: memoryMax(dir, CORE, fleet.env(fleet.roots.core)),
+      serve: memoryMax(dir, SERVE, fleet.env(fleet.roots.core)),
+    },
+    active: { core: memoryMax(dir, CORE, active), serve: memoryMax(dir, SERVE, active) },
+  };
+  for (const [mode, got] of Object.entries(modes)) {
+    assert.equal(got.core.mib, coreWant, `${mode}: core reads console's, site's and serve's peaks from their own roots\n${got.core.out}`);
+    assert.match(got.core.note, new RegExp(`- ${CONSOLE} 4096 \\(learned memory\\.high\\)`), mode);
+    assert.match(got.core.note, new RegExp(`- ${SITE} 3072 \\(memory\\.peak\\)`), mode);
+    assert.match(got.core.note, new RegExp(`- ${SERVE} 6144 \\(memory\\.peak\\)`), mode);
+    assert.equal(got.serve.mib, serveWant, `${mode}: serve, launched from core's root, reads the same peaks\n${got.serve.out}`);
+    assert.equal(got.core.note, modes.legacy!.core.note, `${mode}: the policy note is the same in every mode`);
+  }
+  // Discriminating: with the registry turned off the peers' records are invisible and their floors count instead.
+  const blind = memoryMax(dir, CORE, { STATE_DIR: fleet.roots.core });
+  assert.equal(blind.mib, budget - FLOORS[CONSOLE]! - FLOORS[SITE]! - 6144, blind.out);
+  assert.notEqual(blind.mib, coreWant);
 });

@@ -101,6 +101,12 @@ test("deploy revival uses the installed policy when the checkout is absent", (t)
   const helper = join(f.bin, "rmd-resource-policy");
   assert.equal(readFileSync(helper, "utf8"), readFileSync(policySource, "utf8"));
   writeFileSync(join(f.state, "state", "memory-high-tuned-remudero-console-daemon.json"), '{"container":"remudero-console-daemon","high_mib":3072}\n');
+  // W1-T11130: console's memory.max is the larger of the shared budget less the others' peaks and its own learned
+  // 3072 MiB. With the others' measured peaks recorded the budget is the larger (13940 - 5120 = 8820 MiB), so
+  // the learned high is not cut by a ceiling raised only to console's own peak.
+  for (const [name, mib] of [["remudero-daemon", 2048], ["remudero-serve", 2048], ["remudero-site-daemon", 1024]] as const) {
+    writeFileSync(join(f.state, "state", `memory-peak-${name}.json`), `{"container":"${name}","peak_mib":${mib}}\n`);
+  }
   const result = f.run();
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assertPolicyApplied(f.args(), expectedPolicy(f.env, "remudero-console-daemon"));

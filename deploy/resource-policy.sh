@@ -228,14 +228,21 @@ resource_policy_tuned_high() {
 # state_dir: core rmd-state2, site rmd-site-state, console /mnt/rmd/...), so a recycle in one instance
 # reads every peer's two files from that peer's root (resource_policy_instance_state_dir), and the
 # caller's own STATE_DIR/state too (serve is no registry instance); the larger value wins.
-# THE FORMULA IS ALWAYS THE FORMULA. A host whose floors and peaks together exceed the budget leaves a
-# small or negative limit, and that is what a container gets: no second arithmetic stands in for it.
+# THE LARGER OF THE FORMULA AND THE CONTAINER'S OWN PEAK. memory.max is the formula above, unless the
+# container's OWN learned peak (the same larger-of memory.peak and learned memory.high, never its
+# floor: a floor is a policy number, not a measurement) is bigger. Then memory.max is that peak, so no
+# container is ever capped below what it has been measured to need. The formula is then short by
+# (own peak - formula) MiB, the DEFICIT: the host is overcommitted by that much if the others sit at
+# their peaks. Each such recompute appends one host.memory_max.overcommitted ledger row (container,
+# formula_mib, own_peak_mib, deficit_mib) beside the tuner's rows, and the policy note names the
+# deficit. A repeat of the same (formula, own peak) pair is not appended again. With no own learned
+# peak the formula stands as it is, small or negative: a limit under the build floor
+# (RMD_MIN_BUILD_CEILING_MIB) or serve's reserve means NO memory ceiling and the note names the number.
 # The only exception is an unreadable MemTotal, where there is no budget to share and the caller keeps
-# today's arithmetic. A limit under the build floor (RMD_MIN_BUILD_CEILING_MIB) or serve's reserve
-# means NO memory ceiling for that container and the note names the number. The invariant is per
-# container: its limit plus the other containers' peaks equals the budget, so any one container at its
-# limit beside the rest at their peaks fits the host. The four limits are NOT disjoint shares and are
-# not meant to sum to the host: each is the most that container can take from measured slack.
+# today's arithmetic. Whenever the formula holds, its invariant is per container: its limit plus the
+# other containers' peaks equals the budget, so any one container at its limit beside the rest at
+# their peaks fits the host. The four limits are NOT disjoint shares and are not meant to sum to the
+# host: each is the most that container can take from measured slack.
 
 # Where container $1's recorded cgroup memory.peak lives: beside memory-high-tuned-<container>.json
 # (in directory $2 when given).
@@ -324,13 +331,30 @@ resource_policy_learned_peak() {
   fi
 }
 
-# Container $1's memory.max in MiB from the shared budget: host MemTotal - RMD_HOST_RESERVE_MIB - the
-# sum of every OTHER fleet container's learned peak. Sets RP_MAX (possibly small or negative on an
-# overcommitted host: it is never replaced) and RP_MAX_NOTE, which names every term. Status 1 (RP_MAX
-# empty) only when MemTotal is unreadable: the caller keeps today's arithmetic.
+# Appends one host.memory_max.overcommitted row for container $1 (formula $2, own peak $3, deficit $4,
+# all MiB) beside the caller's tuner records. Skipped when the newest such row for the container
+# already holds the same formula and peak; never fatal and silent when the ledger cannot be written.
+resource_policy_overcommit_row() {
+  local container="$1" formula="$2" peak="$3" deficit="$4" file dir last
+  file="$(resource_policy_tuned_file "${container}")" || return 0
+  dir="${file%/*}"
+  [ -d "${dir}" ] || return 0
+  last="$(tail -n 400 "${dir}/ledger.ndjson" 2>/dev/null | grep "\"step\":\"host.memory_max.overcommitted\",.*\"container\":\"${container}\"" | tail -n 1)" || last=""
+  case "${last}" in *"\"formula_mib\":${formula},\"own_peak_mib\":${peak},"*) return 0 ;; esac
+  printf '{"ts":"%s","run_id":"HOST-MEMORY-MAX","task_id":"HOST","step":"host.memory_max.overcommitted","lane":"host","container":"%s","formula_mib":%s,"own_peak_mib":%s,"deficit_mib":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${container}" "${formula}" "${peak}" "${deficit}" 2>/dev/null >> "${dir}/ledger.ndjson" || true
+  return 0
+}
+
+# Container $1's memory.max in MiB: the LARGER of the shared-budget formula (host MemTotal -
+# RMD_HOST_RESERVE_MIB - the sum of every OTHER fleet container's learned peak) and the container's
+# own learned peak. Sets RP_MAX, RP_MAX_FORMULA (the formula's own value, possibly small or negative),
+# RP_MAX_DEFICIT (own peak - formula MiB when the own peak is larger, else empty) and RP_MAX_NOTE,
+# which names every term and the deficit. Status 1 (RP_MAX empty) only when MemTotal is unreadable:
+# the caller keeps today's arithmetic.
 resource_policy_shared_memory_max() {
-  local container="$1" total budget others=0 entry name terms=""
-  RP_MAX="" RP_MAX_NOTE=""
+  local container="$1" total budget others=0 entry name terms="" own="" own_from=""
+  RP_MAX="" RP_MAX_FORMULA="" RP_MAX_DEFICIT="" RP_MAX_NOTE=""
   if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
     RP_MAX_NOTE="host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
     return 1
@@ -346,8 +370,17 @@ resource_policy_shared_memory_max() {
     others=$((others + RP_PEAK))
     terms="${terms} - ${name} ${RP_PEAK} (${RP_PEAK_FROM})"
   done
-  RP_MAX=$((budget - others))
+  # This container's OWN learned peak (never its floor): memory.max is never below it.
+  resource_policy_learned_peak "${container}"
+  if [ -n "${RP_PEAK}" ] && [ "${RP_PEAK_FROM}" != "floor, nothing learned" ]; then own="${RP_PEAK}" own_from="${RP_PEAK_FROM}"; fi
+  RP_MAX_FORMULA=$((budget - others))
+  RP_MAX="${RP_MAX_FORMULA}"
   RP_MAX_NOTE="memory.max ${RP_MAX} MiB = shared budget: host ${total} - reserve ${RMD_HOST_RESERVE_MIB}${terms}"
+  if [ -n "${own}" ] && [ "${own}" -gt "${RP_MAX_FORMULA}" ]; then
+    RP_MAX="${own}" RP_MAX_DEFICIT=$((own - RP_MAX_FORMULA))
+    RP_MAX_NOTE="memory.max ${RP_MAX} MiB = its own learned peak (${own_from}), larger than the shared-budget formula ${RP_MAX_FORMULA} MiB: OVERCOMMITTED, deficit ${RP_MAX_DEFICIT} MiB; formula: host ${total} - reserve ${RMD_HOST_RESERVE_MIB}${terms}"
+    resource_policy_overcommit_row "${container}" "${RP_MAX_FORMULA}" "${own}" "${RP_MAX_DEFICIT}"
+  fi
   return 0
 }
 
