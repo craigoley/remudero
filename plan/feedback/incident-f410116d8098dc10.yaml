@@ -1,0 +1,33 @@
+id: incident-f410116d8098dc10
+ts: 2026-11-04T11:17:21.534Z
+raw: >-
+  Incident f410116d8098: flow pr-stage-stall:conflict:merge conflict (mergeState
+  dirty) — rmd-owned branch has captured deletion evidence on
+  src/cli/commands/review.ts (ours -<n>, theirs -<n>), src/lib/sweep.ts (ours
+  -<n>, theirs -<n>), src/run-task.ts (ours -<n>, theirs -<n>) — dispatching the
+  bounded merge-conflict fix worker to inspect actual hunks and preserve both
+  sides' intended behavior; a fresh review and CI gate the new head
+
+  First seen: 2026-11-04T11:08:14.348Z
+
+  Last seen: 2026-11-04T11:08:14.348Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16452 conflict: repeat: "merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on src/cli/commands/review.ts (ours -<n>, theirs -<n>), src/lib/sweep.ts (ours -<n>, theirs -<n>), src/run-task.ts (ours -<n>, theirs -<n>) — dispatching the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head" x3
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#f410116d8098dc1021787c87fc28cdbdc27b9f23927b83797f727e85915c5aff
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

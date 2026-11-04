@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: high # every container's hard memory limit moves; one concern, the memory.max arithmetic in resource-policy.sh
+  risk: high # every container's hard memory limit moves; one concern, the memory.max arithmetic in resource-policy.sh and the suites that pin it
   band_meaning: blast-radius
   origin: "operator ruling R1, 2026-10-27: memory.max is derived from the host as ONE SHARED BUDGET (supersedes 10-10's never-raise)"
   plan_refs:
@@ -16,11 +16,15 @@
     - W1-T4267
   files:
     - deploy/resource-policy.sh
+    - src/lib/config-schema.ts
     - test/deploy/each-container-memory-max-comes-from-one-shared-host-budget.test.ts
+    - test/deploy/deploy-revival-resource-policy.test.ts
+    - test/the-console-backend-keeps-its-share-of-the-host.test.ts
+    - test/the-instances-share-one-host-memory-budget.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: For each fleet container, serve included, memory.max is the LARGER of the shared-budget formula (the host's MemTotal less the host reserve less the sum of the OTHER containers' learned peaks) and that container's own learned peak, so one container at its limit beside the rest at their peaks fits the host whenever the peaks fit, and no container is ever capped below what it has been measured to need; the four limits are not disjoint shares and are not meant to sum to the host
+    - claim: For each fleet container, serve included, memory.max is the shared-budget formula (the host's MemTotal less the host reserve less the sum of the OTHER containers' learned peaks) whenever that covers the container's own learned peak; when the formula falls below its own peak the host is overcommitted and the container keeps the larger of its own peak and the memory.max it already runs with (read from its running container's cgroup, or its own peak when none runs), so no limit is lowered below today's while overcommitted and none is ever below measured need, and once the peaks fit the formula governs
       proof: "unit test: test/deploy/each-container-memory-max-comes-from-one-shared-host-budget.test.ts"
     - claim: A container with no learned peak yet counts its policy floor as its peak, a learned peak is re-read at every recycle so the budget follows measured use, an unreadable host total keeps today's arithmetic (never fatal), and an explicit RMD_SERVE_MEMORY_LIMIT_MIB remains an operator override that is named in the policy note
       proof: "grep: W1-T11130 criterion 2 in test/deploy/each-container-memory-max-comes-from-one-shared-host-budget.test.ts"
@@ -40,6 +44,9 @@
     So the next recycle would OOM core on its next spike and squeeze serve at once. A restart costs about a quarter of fleet capacity.
     The old criterion's "the four limits cannot together exceed the host" was also not satisfiable: per-container limits that are each the budget less the others' peaks sum past the host whenever the peaks are below it.
     Overcommit is now RECORDED, not enforced by OOM: W1-T11286 turns the row into one alert issue, and reducing usage stays required (R1).
+    AMENDED again on 2026-11-04 (operator, AskUserQuestion: "Keep today's limit"). The rework of #16468 showed what max(formula, own peak) does on today's overcommitted 32,086 MiB host: every container is pinned at exactly its historical peak. Core goes from 24,918 MiB to 17,027 MiB with zero headroom, and a container capped at its peak can never record a higher one.
+    So while overcommitted, a container keeps the larger of its own peak and the limit it already runs with, the overcommit row and alert (W1-T11286) surface the deficit, and the formula governs again once the peaks fit.
+    The three suites added to files: still encode the old rule ("a host too small for the reserve gets no ceiling", memory.max as the raw formula, core at 3956 MiB on a 15988 MiB host) and move with it. src/lib/config-schema.ts registers the peer-registry variable the per-instance lookup reads.
   design: |
     Add one function in resource-policy.sh that returns a container's memory.max from: the host's MemTotal (resource_policy_mem_total_mib), RMD_HOST_RESERVE_MIB, and each OTHER fleet container's learned peak. A learned peak is the larger of its recorded cgroup memory.peak (written beside memory-high-tuned-<container>.json by the tuner each healthy tick) and its learned memory.high; with neither, its RMD_MEMORY_HIGH_FLOORS entry. The build ceiling and serve's memory.max both call it. The value is recomputed at every recycle and by the W1-T4267 drift check, so as peaks are learned the split self-adjusts, and a container that grows takes headroom only from measured slack. memory.high stays under its own memory.max as today. The policy note names every term. No new constant.
   note: |

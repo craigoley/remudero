@@ -1,0 +1,36 @@
+- id: W1-T11307
+  title: "Compress the 301 comment lines in src/lib/ledger-union.ts without changing executable code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "comment-compression:src/lib/ledger-union.ts"
+  files:
+    - src/lib/ledger-union.ts
+    - test/ledger/compress-src-lib-ledger-union-ts.test.ts
+  acceptance:
+    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+      proof: "unit test: W1-T11307: comment compression preserves executable code"
+  rationale: |
+    Observed 301 comment lines in src/lib/ledger-union.ts. This is maintenance debt, never a merge ceiling.
+    Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
+    Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.
+    Add the named regression in test/ledger/compress-src-lib-ledger-union-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
+    Read the pre-compression source with compressionPinBase from #test/helpers/compression-pin.js, never a frozen digest or token count: a frozen pin fails every later feature edit to the module (#16082).
+    Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
+    Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.97
+    reasons:
+      - "The filed scope is comment compression in one source file plus a regression test requiring preserved executable tokens, existing behavioral assertions, and measurable comment reduction."
+      - "The rationale explicitly preserves owners, stops, deployment holds, and historical citations, and prohibits a new hard comment ceiling."
+      - "The supplied family record reports 34 merged tasks with no declines; the filing-time gates show no concerning condition."
+    judged_at: "2026-11-04T13:45:12.233Z"
+    pin: "36c0b53227d17228b2286e5f027333df1d7f0eb3e0625f281d3652858c7bb804"
