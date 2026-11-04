@@ -222,8 +222,22 @@ attachments: []
 origin: repair#dep-review
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/16808
+summary:
+  headline: Carry the dependency updates in an owned PR
+  what_happened: "Dependabot PR #16733 proposes updates to the Claude SDK and SWC,
+    but its required checks are red while main’s newest run passes. The fix
+    needs related version pins, derived image CLI alignment, and the updates
+    from sibling PR #16734."
+  decision: Land the same version moves and required companion edits together on
+    an owned task branch; leave both Dependabot PRs untouched.
+  options:
+    - label: Approve owned PR
+      consequence: Carries both PRs’ needed updates and companion edits together for review.
+      intent: approve
+    - label: Decline the updates
+      consequence: Leaves the current dependency versions in place.
+      intent: decline
 expansion: null
 submission_key: dep-review:own-red:craigoley/remudero:@anthropic-ai/claude-agent-sdk@0.3.316,@anthropic-ai/claude-code@2.1.316,@openai/codex@0.166.0,@swc/core@1.16.21
 thread_id: null
