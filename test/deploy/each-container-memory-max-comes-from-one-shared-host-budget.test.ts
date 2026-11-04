@@ -56,6 +56,11 @@ function running(dir: string, container: string, peakMib: number) {
   return scope;
 }
 
+/** The memory.max a RUNNING container's cgroup reports now: MiB, the literal "max", or any raw text. */
+function runningLimit(scope: string, limit: number | "max" | string) {
+  writeFileSync(join(scope, "memory.max"), typeof limit === "number" ? `${limit * 1048576}\n` : `${limit}\n`);
+}
+
 /** Sources the policy in a clean environment and runs `script`; every RMD_* knob is at its default. */
 function policy(dir: string, script: string, env: Record<string, string | undefined> = {}, source = POLICY) {
   const run = spawnSync("bash", ["-c", `source "$1"; ${script}`, "policy", source], {
@@ -180,57 +185,85 @@ test("W1-T11130 criterion 2: a learned peak is re-read at every recycle, so the 
   assert.match(out, new RegExp(`- ${SERVE} 9216 \\(memory\\.peak\\)`));
 });
 
-test("W1-T11130: an overcommitted host still follows the shared-budget formula; no other arithmetic stands in", (t) => {
-  // The reviewer's case: a readable MemTotal of 15988 MiB (the 15.6 GiB host). With nothing learned the
-  // others' floors are the peaks, so core gets 15988 - 2048 - 5632 - 2048 - 2304, NOT total - 5120 - 2048.
+test("W1-T11130 criterion 1: an overcommitted host keeps each container's running limit, never below its own peak", (t) => {
+  // THE LIVE HOST, 2026-11-04: MemTotal 32086 MiB, the measured peaks, and the limits each container runs with
+  // today. Every formula is below its container's own peak, so the host is overcommitted: each container keeps
+  // the larger of its own peak and the limit it runs with (operator ruling 2026-11-04, "keep today's limit").
+  const LIVE_MIB = 32086;
+  const dir = host(t, `MemTotal:       ${LIVE_MIB * 1024} kB\n`);
+  const peaks: Record<string, number> = { [CORE]: 17027, [SERVE]: 7309, [CONSOLE]: 4977, [SITE]: 2051 };
+  const today: Record<string, number> = { [CORE]: 24918, [SERVE]: 7680, [CONSOLE]: 24918, [SITE]: 24918 };
+  for (const container of FLEET) runningLimit(running(dir, container, peaks[container]!), today[container]!);
+  const budget = LIVE_MIB - RESERVE_MIB;
+  for (const container of FLEET) {
+    const formula = budget - FLEET.filter((c) => c !== container).reduce((sum, c) => sum + peaks[c]!, 0);
+    assert.ok(formula < peaks[container]!, `${container}: the live host is overcommitted (formula ${formula} < peak ${peaks[container]})`);
+    const got = memoryMax(dir, container);
+    t.diagnostic(`${container}: own peak ${peaks[container]}, formula ${formula}, runs with ${today[container]} -> memory.max ${got.mib}`);
+    assert.equal(got.mib, today[container], `${container} keeps the limit it runs with\n${got.out}`);
+    assert.ok(got.mib! >= peaks[container]!, `${container} is never below its own peak`);
+    assert.match(got.note, new RegExp(`memory\\.max ${today[container]} MiB kept = the ${today[container]} MiB it runs with now, above its own peak ${peaks[container]} \\(memory\\.peak\\): OVERCOMMITTED, the shared-budget formula ${formula} MiB is ${peaks[container]! - formula} MiB under its own peak`));
+    const rows = overcommitRows(dir, container);
+    assert.equal(rows.length, 1, `${container}: one overcommit row`);
+    assert.deepEqual([rows[0]!.formula_mib, rows[0]!.own_peak_mib, rows[0]!.deficit_mib, rows[0]!.kept_mib],
+      [formula, peaks[container], peaks[container]! - formula, today[container]]);
+  }
+  // Pin-at-peak (the superseded rule) would have cut core from 24918 to 17027 MiB with no room to learn more.
+  assert.notEqual(memoryMax(dir, CORE).mib, peaks[CORE], "core is not pinned at its peak");
+});
+
+test("W1-T11130 criterion 1: an overcommitted container whose running limit is below its peak, or unknown, gets its own peak", (t) => {
+  const dir = host(t, `MemTotal:       ${32086 * 1024} kB\n`);
+  const peaks: Record<string, number> = { [CORE]: 17027, [SERVE]: 7309, [CONSOLE]: 4977, [SITE]: 2051 };
+  const scopes: Record<string, string> = {};
+  for (const container of FLEET) scopes[container] = running(dir, container, peaks[container]!);
+  // Running below its own peak: never below measured need, so the own peak wins.
+  runningLimit(scopes[CORE]!, 12000);
+  const below = memoryMax(dir, CORE);
+  assert.equal(below.mib, 17027, below.out);
+  assert.match(below.note, /kept = its own peak 17027 \(memory\.peak\), at or above the 12000 MiB it runs with now: OVERCOMMITTED/);
+  // An unreadable running limit: the own peak, and the note says it could not be read.
+  runningLimit(scopes[CORE]!, "not-a-number");
+  const unread = memoryMax(dir, CORE);
+  assert.equal(unread.mib, 17027, unread.out);
+  assert.match(unread.note, /its own peak 17027 \(memory\.peak\); the running container's memory\.max could not be read: OVERCOMMITTED/);
+  // Not running (no container, no cgroup scope): the own peak.
+  rmSync(join(dir, "ids", CORE));
+  const stopped = memoryMax(dir, CORE);
+  assert.equal(stopped.mib, 17027, stopped.out);
+  assert.match(stopped.note, /its own peak 17027 \(memory\.peak\); no running container to keep a limit from: OVERCOMMITTED/);
+  // A running "max" is a real no-ceiling: kept, and named.
+  runningLimit(scopes[CONSOLE]!, "max");
+  const open = memoryMax(dir, CONSOLE);
+  assert.equal(open.mib, undefined, `a kept "max" is no ceiling: ${open.out}`);
+  assert.match(open.note, /NO memory ceiling kept — the no-ceiling \(memory\.max "max"\) it runs with now: OVERCOMMITTED/);
+  assert.match(open.out, /--annotation=org\.systemd\.property\.MemoryHigh=uint64 \d+/, "memory.high is still sized");
+  assert.deepEqual(overcommitRows(dir, CONSOLE).at(-1)!.kept_mib, "unlimited");
+  // Serve runs with "max" too: no --memory, and the note says why.
+  runningLimit(scopes[SERVE]!, "max");
+  const serveOpen = memoryMax(dir, SERVE);
+  assert.equal(serveOpen.mib, undefined, serveOpen.out);
+  assert.match(serveOpen.note, /NO memory ceiling kept — the no-ceiling/);
+});
+
+test("W1-T11130 criterion 1: a container with nothing learned counts its floor as its own peak, so a small host never leaves it under it", (t) => {
+  // The 15.6 GiB host with nothing learned: core's formula is 15988 - 2048 - 5632 - 2048 - 2304 = 3956, below
+  // core's 8192 floor (its own peak, criterion 2), so the host is overcommitted and, with no container running,
+  // core gets its floor, never today's 8820 and never 3956.
   const small = host(t, `MemTotal:       ${15988 * 1024} kB\n`);
   const core = memoryMax(small, CORE);
-  assert.equal(core.mib, 15988 - RESERVE_MIB - FLOORS[SERVE]! - FLOORS[CONSOLE]! - FLOORS[SITE]!, core.out);
-  assert.equal(core.mib, 3956);
+  assert.equal(core.mib, FLOORS[CORE], core.out);
   assert.notEqual(core.mib, 15988 - 5120 - 2048, "today's 8820 is gone");
-  assert.doesNotMatch(core.note, /today's arithmetic|OVERCOMMITTED/);
-  assert.match(core.note, /memory\.max 3956 MiB = shared budget: host 15988 - reserve 2048 - remudero-serve 5632 \(floor, nothing learned\)/);
-
-  // Peaks that together exceed the host. A container with NO learned peak of its own has nothing to be
-  // raised to, so it gets the formula as it is: a negative limit is no ceiling, and the note names it.
-  const crowded = host(t);
-  learn(crowded, CORE, { high: 30000 });
-  const noCeiling = memoryMax(crowded, CONSOLE);
-  assert.equal(noCeiling.mib, undefined, `a negative limit is no ceiling, not today's arithmetic: ${noCeiling.out}`);
-  assert.match(noCeiling.note, /NO memory ceiling — memory\.max -7984 MiB = shared budget: host 32000 - reserve 2048 - remudero-daemon 30000 \(learned memory\.high\) - remudero-serve 5632 \(floor, nothing learned\) - remudero-site-daemon 2304 \(floor, nothing learned\), under the 2048 MiB floor/);
-  assert.match(noCeiling.out, /--annotation=org\.systemd\.property\.MemoryHigh=uint64 \d+/, "memory.high is still sized with no memory.max to stay under");
-  assert.deepEqual(overcommitRows(crowded), [], "a floor is not a measurement, so a container with none learned is never overcommitted");
-  // Console then LEARNS a 4608 MiB peak: its memory.max is the LARGER of the formula (still -7984 MiB, its own
-  // peak is no term of it) and that peak, so it is never capped below what it has been measured to need.
-  learn(crowded, CONSOLE, { peak: 4608 });
-  const raised = memoryMax(crowded, CONSOLE);
-  assert.equal(raised.mib, 4608, raised.out);
-  assert.match(raised.note, /memory\.max 4608 MiB = its own learned peak \(memory\.peak\), larger than the shared-budget formula -7984 MiB: OVERCOMMITTED, deficit 12592 MiB; formula: host 32000 - reserve 2048 - remudero-daemon 30000/);
-  assert.match(raised.out, /^--memory-swap=8704m$/m, "the swap rides the raised ceiling");
-  // Core: the formula (29952 - console 4608 - serve 5632 - site 2304 = 17408) is below core's own 30000.
-  const core = memoryMax(crowded, CORE);
-  assert.equal(core.mib, 30000, core.out);
-  assert.match(core.note, /memory\.max 30000 MiB = its own learned peak \(learned memory\.high\), larger than the shared-budget formula 17408 MiB: OVERCOMMITTED, deficit 12592 MiB/);
-  // Its own peak grows: the limit follows it up, the formula does not move.
-  learn(crowded, CORE, { high: 31000, peak: 31000 });
-  const grown = memoryMax(crowded, CORE);
-  assert.equal(grown.mib, 31000, "core's own learned peak is a floor under core's limit");
-  assert.match(grown.note, /larger than the shared-budget formula 17408 MiB: OVERCOMMITTED, deficit 13592 MiB/);
-  // Serve is sized the same way: with no peak of its own the formula's negative number means no ceiling,
-  // and once it has measured 6144 MiB it keeps a 6144 MiB ceiling instead.
-  const serve = memoryMax(crowded, SERVE);
-  assert.equal(serve.mib, undefined, serve.out);
-  assert.match(serve.note, /NO memory ceiling — -\d+ MiB \(memory\.max -\d+ MiB = shared budget: host 32000 - reserve 2048 - remudero-daemon 31000 \(/);
-  learn(crowded, SERVE, { peak: 6144 });
-  const serveRaised = memoryMax(crowded, SERVE);
-  assert.equal(serveRaised.mib, 6144, serveRaised.out);
-  assert.match(serveRaised.note, /memory ceiling 6144 MiB \(\+2048 MiB swap\) from memory\.max 6144 MiB = its own learned peak \(memory\.peak\), larger than the shared-budget formula -\d+ MiB: OVERCOMMITTED, deficit \d+ MiB/);
-  // Own peak under the formula: the formula stands and nothing is overcommitted.
-  const roomy = host(t);
-  learn(roomy, CORE, { peak: 4096 });
-  const fits = memoryMax(roomy, CORE);
-  assert.equal(fits.mib, 29952 - FLOORS[SERVE]! - FLOORS[CONSOLE]! - FLOORS[SITE]!, fits.out);
-  assert.doesNotMatch(fits.note, /OVERCOMMITTED|deficit/);
+  assert.match(core.note, /memory\.max 8192 MiB kept = its own peak 8192 \(floor, nothing learned\); no running container to keep a limit from: OVERCOMMITTED, the shared-budget formula 3956 MiB is 4236 MiB under its own peak 8192/);
+  // A roomy host: every formula covers its container's peak, so the formula governs and nothing is ledgered.
+  const roomy = host(t, `MemTotal:       ${64000 * 1024} kB\n`);
+  for (const container of FLEET) {
+    const want = 64000 - RESERVE_MIB - FLEET.filter((c) => c !== container).reduce((sum, c) => sum + FLOORS[c]!, 0);
+    runningLimit(running(roomy, container, FLOORS[container]!), 24918);
+    const got = memoryMax(roomy, container);
+    assert.equal(got.mib, want, `${container}: the formula wins on a roomy host\n${got.out}`);
+    assert.doesNotMatch(got.note, /OVERCOMMITTED|kept/);
+  }
   assert.deepEqual(overcommitRows(roomy), []);
 });
 
@@ -246,15 +279,16 @@ test("W1-T11130 criterion 3: a formula below the container's own peak appends on
   const dir = host(t);
   learn(dir, CORE, { high: 30000 });
   learn(dir, CONSOLE, { peak: 4608 });
-  // Console: formula 29952 - 30000 - 5632 - 2304 = -7984, own peak 4608, so the deficit is 12592 MiB.
+  // Console: formula 29952 - 30000 - 5632 - 2304 = -7984, own peak 4608, so the deficit is 12592 MiB. Console is
+  // not running, so it keeps its own peak.
   const first = memoryMax(dir, CONSOLE);
   assert.equal(first.mib, 4608, first.out);
-  assert.match(first.note, /OVERCOMMITTED, deficit 12592 MiB/);
+  assert.match(first.note, /OVERCOMMITTED, the shared-budget formula -7984 MiB is 12592 MiB under its own peak 4608/);
   const rows = overcommitRows(dir, CONSOLE);
   assert.equal(rows.length, 1, JSON.stringify(rows));
   assert.deepEqual(
-    [rows[0]!.container, rows[0]!.formula_mib, rows[0]!.own_peak_mib, rows[0]!.deficit_mib, rows[0]!.lane, rows[0]!.task_id],
-    [CONSOLE, -7984, 4608, 12592, "host", "HOST"],
+    [rows[0]!.container, rows[0]!.formula_mib, rows[0]!.own_peak_mib, rows[0]!.deficit_mib, rows[0]!.kept_mib, rows[0]!.lane, rows[0]!.task_id],
+    [CONSOLE, -7984, 4608, 12592, 4608, "host", "HOST"],
   );
   assert.match(String(rows[0]!.ts), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.000Z$/);
   // The same formula and peak at the next recycle, or the next drift check, is not ledgered again.
@@ -266,13 +300,15 @@ test("W1-T11130 criterion 3: a formula below the container's own peak appends on
   const after = overcommitRows(dir, CONSOLE);
   assert.equal(after.length, 2);
   assert.deepEqual([after[1]!.formula_mib, after[1]!.own_peak_mib, after[1]!.deficit_mib], [-7984, 5120, 13104]);
-  // Core, whose own 30000 is above ITS formula too, is ledgered under its own name; serve (nothing learned) is not.
+  // Core, whose own 30000 is above ITS formula too, is ledgered under its own name. Serve has nothing learned,
+  // so its floor is its own peak (criterion 2), and its formula is below that too: it is ledgered as well.
   memoryMax(dir, CORE);
-  memoryMax(dir, SERVE);
+  const serve = memoryMax(dir, SERVE);
   const coreRows = overcommitRows(dir, CORE);
   assert.equal(coreRows.length, 1);
   assert.deepEqual([coreRows[0]!.formula_mib, coreRows[0]!.own_peak_mib, coreRows[0]!.deficit_mib], [29952 - 5120 - FLOORS[SERVE]! - FLOORS[SITE]!, 30000, 30000 - (29952 - 5120 - FLOORS[SERVE]! - FLOORS[SITE]!)]);
-  assert.deepEqual(overcommitRows(dir, SERVE), []);
+  assert.equal(serve.mib, FLOORS[SERVE], serve.out);
+  assert.deepEqual(overcommitRows(dir, SERVE).map((row) => row.kept_mib), [FLOORS[SERVE]]);
   // Nothing is ledgered while every formula holds.
   const calm = host(t);
   learn(calm, CORE, { peak: 4096 });
@@ -288,7 +324,7 @@ test("W1-T11130 criterion 3: the overcommit row never fails the policy when the 
   mkdirSync(join(dir, "state", "ledger.ndjson"));
   const got = memoryMax(dir, CONSOLE);
   assert.equal(got.mib, 4608, got.out);
-  assert.match(got.note, /OVERCOMMITTED, deficit 12592 MiB/);
+  assert.match(got.note, /OVERCOMMITTED, the shared-budget formula -7984 MiB is 12592 MiB under its own peak 4608/);
 });
 
 test("W1-T11130 criterion 2: an unreadable host total keeps today's arithmetic and is never fatal", (t) => {
@@ -320,8 +356,8 @@ test("W1-T11130 criterion 2: an explicit RMD_SERVE_MEMORY_LIMIT_MIB stays an ope
 
 /**
  * Production layout: every instance's tuner records under ITS OWN state root (the registry's state_dir),
- * never beside a peer's. Three roots, one registry; serve is no registry instance, so its records live in
- * the root of whoever launches it (here core's).
+ * never beside a peer's. Three roots, one registry; serve is no registry instance: the primary instance's
+ * watchdog tunes it, so its records live in the `primary: true` row's root (core's).
  */
 function instances(dir: string) {
   const roots = { core: join(dir, "core-root"), site: join(dir, "site-root"), console: join(dir, "console-root") };
@@ -329,7 +365,7 @@ function instances(dir: string) {
   const registry = join(dir, "daemon-instances.yaml");
   writeFileSync(registry, [
     "instances:",
-    `  core:\n    repo: remudero\n    container_name: ${CORE}\n    state_dir: ${roots.core}`,
+    `  core:\n    repo: remudero\n    primary: true\n    container_name: ${CORE}\n    state_dir: ${roots.core}`,
     `  site:\n    repo: remudero-site  # the site\n    container_name: ${SITE}\n    state_dir: ${roots.site}`,
     `  console:\n    repo: remudero-console\n    container_name: ${CONSOLE}\n    state_dir: ${roots.console}`,
   ].join("\n") + "\n");
@@ -353,11 +389,16 @@ test("W1-T11130 criterion 3: a learned peak is read from the peer's own state ro
   const blind = memoryMax(dir, CORE, { STATE_DIR: fleet.roots.core });
   assert.equal(blind.mib, budget - FLOORS[CONSOLE]! - FLOORS[SITE]! - 6144, blind.out);
   assert.notEqual(blind.mib, split.mib);
-  // Site's recycle reads console's record from console's root. Serve is no registry row and its record is in
-  // core's root, which is not site's caller root, so site counts serve's floor.
+  // Site's recycle reads console's record from console's root, and serve's from the PRIMARY's root (core's),
+  // where core's tuner records it, although that is not site's caller root (criterion 3).
   const site = memoryMax(dir, SITE, fleet.env(fleet.roots.site));
-  assert.equal(site.mib, budget - FLOORS[CORE]! - 4096 - FLOORS[SERVE]!, site.out);
+  assert.equal(site.mib, budget - FLOORS[CORE]! - 4096 - 6144, site.out);
   assert.match(site.note, new RegExp(`- ${CONSOLE} 4096 \\(learned memory\\.high\\)`));
+  assert.match(site.note, new RegExp(`- ${SERVE} 6144 \\(memory\\.peak\\)`), "serve's record is read from the primary's root");
+  // A retired row is skipped: its root is never read.
+  const retired = join(dir, "retired.yaml");
+  writeFileSync(retired, readFileSync(fleet.registry, "utf8").replace(`container_name: ${CONSOLE}`, `retired: true\n    container_name: ${CONSOLE}`));
+  assert.equal(memoryMax(dir, CORE, { RMD_INSTANCE_REGISTRY: retired, STATE_DIR: fleet.roots.core }).mib, budget - FLOORS[CONSOLE]! - 3072 - 6144);
   // The drift check evaluates the same policy, so it follows the same roots and finds the same limit.
   const drift = policy(dir, `resource_policy_build_args ${CORE}; printf "%s\\n" "\${RESOURCE_POLICY_BUILD_ARGS[@]}"`, fleet.env(fleet.roots.core));
   assert.match(drift, new RegExp(`^--memory=${budget - 4096 - 3072 - 6144}m$`, "m"));

@@ -24,8 +24,12 @@ import {
 const REPO_ROOT = join(import.meta.dirname, "..");
 const BASH = ["/opt/homebrew/opt/bash/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"].find(existsSync) ?? "bash";
 const HOST_MIB = 15988;
-// W1-T11130: with nothing learned the others' floors (serve 5632, console 2048, site 2304) are their peaks.
-const CORE_SHARE_MIB = HOST_MIB - 2048 - 5632 - 2048 - 2304;
+// W1-T11130: with nothing learned the others' floors (serve 5632, console 2048, site 2304) are their peaks,
+// so core's formula here is 15988 - 2048 - 5632 - 2048 - 2304 = 3956. That is below core's own 8192 floor
+// (its peak when nothing is learned), so this host is overcommitted, and with no running container to keep
+// a limit from, core keeps its floor (operator ruling 2026-11-04).
+const CORE_FORMULA_MIB = HOST_MIB - 2048 - 5632 - 2048 - 2304;
+const CORE_KEPT_MIB = 8192;
 // W1-T11130: serve's memory.max is its share of the shared host budget, so a serve launch reads a
 // pinned meminfo too. 32086 MiB is the fleet host's MemTotal after the 2026-10-27 resize. With
 // nothing learned, serve gets host - 2048 reserve - the other containers' floors (8192 + 2048 + 2304).
@@ -220,10 +224,11 @@ test("operator ruling 2026-10-19: every build daemon launch carries the glibc ma
   const { args } = recycle(HOST_MIB);
   assert.ok(args.includes("GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"), args.join(" "));
   assert.ok(args.some((a) => (a.startsWith("NODE_OPTIONS=") && a.endsWith(" --max-semi-space-size=16")) || a === "NODE_OPTIONS=--max-semi-space-size=16"), args.join(" "));
-  // Dropping serve's memory.low leaves the build ceiling's arithmetic alone: core's limit is the shared
-  // budget (W1-T11130), host - reserve - the others' floors, never today's total - 5120 - 2048.
-  assert.ok(args.includes(`--memory=${CORE_SHARE_MIB}m`));
+  // Dropping serve's memory.low leaves the build ceiling's arithmetic alone: core's limit comes from the shared
+  // budget (W1-T11130), here its kept floor, never today's total - 5120 - 2048 and never the formula's 3956.
+  assert.ok(args.includes(`--memory=${CORE_KEPT_MIB}m`), args.join(" "));
   assert.ok(!args.includes(`--memory=${HOST_MIB - 5120 - 2048}m`));
+  assert.ok(!args.includes(`--memory=${CORE_FORMULA_MIB}m`));
 });
 
 test("the serve memory ceiling and a CPU quota are operator knobs without a code change", () => {
@@ -239,8 +244,8 @@ test("the serve memory ceiling and a CPU quota are operator knobs without a code
 
 test("W1-T4102: every build daemon is launched with a memory ceiling that leaves the host reserve free", () => {
   const { args, output } = recycle(HOST_MIB);
-  const ceiling = CORE_SHARE_MIB; // the shared budget's formula on every host (W1-T11130)
-  assert.ok(args.includes(`--memory=${ceiling}m`), `ceiling = host - reserve - the others' floors:\n${args.join(" ")}`);
+  const ceiling = CORE_KEPT_MIB; // an overcommitted host: core keeps its own peak, here its floor (W1-T11130)
+  assert.ok(args.includes(`--memory=${ceiling}m`), `ceiling = core's own peak, the formula being below it:\n${args.join(" ")}`);
   assert.ok(args.includes(`--memory-swap=${ceiling + 4096}m`), "swap is bounded, so the container pages its own memory");
   assert.ok(args.includes("--cpu-shares=512"));
   assert.match(output, /resource policy — build: cpu-shares 512; memory ceiling/);
@@ -257,9 +262,11 @@ test("W1-T4102: the resource policy derives its ceiling from the host's memory a
   assert.ok(unreadable.args.includes("--cpu-shares=512"), "the CPU weight still applies");
   assert.match(unreadable.output, /NO memory ceiling — host MemTotal unreadable/);
 
+  // A host far too small for the floors is overcommitted: core keeps its own peak (its floor, nothing being
+  // learned), never no ceiling and never the formula's negative number (operator ruling 2026-11-04).
   const tiny = recycle(4096);
-  assert.ok(!tiny.args.some((a) => a.startsWith("--memory=")), "a host too small for the reserve gets no ceiling rather than a useless one");
-  assert.match(tiny.output, /under the 2048 MiB floor/);
+  assert.ok(tiny.args.includes(`--memory=${CORE_KEPT_MIB}m`), `a tiny host keeps core at its own peak: ${tiny.args.join(" ")}`);
+  assert.match(tiny.output, /OVERCOMMITTED/);
 });
 
 function healthBody(deps: Partial<Parameters<typeof buildDaemonHealthRoute>[0]>): DaemonHealthSnapshot {

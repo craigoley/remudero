@@ -91,8 +91,9 @@ test("deploy revival applies the current build resource policy to the actual Doc
   assertPolicyApplied(f.args(), expected);
   assert.ok(f.args().includes("--restart=on-failure:5"));
   assert.match(result.stdout, /resource policy from .*daemon-install\/deploy\/resource-policy\.sh/);
-  // W1-T11130: the 15988 MiB host less the 2048 MiB reserve less the others' floors (5632 + 2048 + 2304).
-  assert.match(result.stdout, /memory ceiling 3956 MiB/);
+  // W1-T11130: on the 15988 MiB host the formula (15988 - 2048 - 5632 - 2048 - 2304 = 3956) is below core's
+  // own 8192 floor, so the host is overcommitted and core, with no running container to keep from, keeps it.
+  assert.match(result.stdout, /memory ceiling 8192 MiB \(\+4096 MiB swap\), memory\.max 8192 MiB kept = its own peak 8192 \(floor, nothing learned\)/);
 });
 
 test("deploy revival uses the installed policy when the checkout is absent", (t) => {
