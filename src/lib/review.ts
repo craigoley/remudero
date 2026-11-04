@@ -6377,7 +6377,12 @@ export async function priorPostedReviewRow(
   const lane = reviewLanePr.getStore();
   let createdAt = lookup.prCreatedAt ?? (lane?.prUrl === prUrl ? lane.createdAt : undefined);
   if (createdAt === undefined && lookup.fetchPrCreatedAt) {
-    try { createdAt = await lookup.fetchPrCreatedAt(prUrl); } catch { createdAt = undefined; } // unread: today's full read
+    try {
+      createdAt = await lookup.fetchPrCreatedAt(prUrl);
+    } catch {
+      // deliberate: an unread created_at is an unknown bound, and an unknown bound keeps today's full union read
+      createdAt = undefined;
+    }
   }
   const bounded = createdAt !== undefined && Number.isFinite(Date.parse(createdAt));
   let newest: Record<string, unknown> | undefined;
