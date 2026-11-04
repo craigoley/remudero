@@ -18,7 +18,7 @@ import {
   trackInFlightReview, type OpenPrView, type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 import { appendLedger } from "#src/lib/ledger.js";
-import { priorPostedReviewRow } from "#src/lib/review.js";
+import { priorPostedReviewRow, reviewLanePr } from "#src/lib/review.js";
 import { readLedgerLines } from "#src/lib/status.js";
 
 const NOW = Date.parse("2026-11-04T16:47:00Z");
@@ -29,7 +29,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: 16763, prUrl: "https://github.com/acme/scratch/pull/16763", taskId: "PR-16763",
     reviewState: "none", checksState: "green", unmetCriteria: [], priorStrikes: 0,
-    lastActivityAt: "2026-11-04T16:20:07Z", headSha: "ebc13ba8cd", autoMergeArmed: false, ...over,
+    lastActivityAt: "2026-11-04T16:20:07Z", createdAt: "2026-11-04T16:20:07Z", headSha: "ebc13ba8cd", autoMergeArmed: false, ...over,
   };
 }
 
@@ -45,15 +45,17 @@ function deps(path: string, now: number, over: Partial<SweepDeps> = {}): SweepDe
 }
 
 /** A first pass whose review settles only when its lane aborts it (`honorsAbort`) or when the test lets it go. */
-async function holdReviewOpen(honorsAbort: boolean): Promise<{ aborted: () => boolean; finish: () => Promise<void> }> {
+async function holdReviewOpen(honorsAbort: boolean): Promise<{ aborted: () => boolean; lanePr: () => unknown; finish: () => Promise<void> }> {
   let let_go!: () => void;
   const gate = new Promise<void>((resolve) => { let_go = resolve; });
   let started!: () => void;
   const began = new Promise<void>((resolve) => { started = resolve; });
   let sawAbort = false;
+  let lanePr: unknown;
   const first = runSweepLightPass([pr()], deps(ledgerPath(), NOW, {
     postReview: async () => {
       const signal = currentReviewSignal();
+      lanePr = reviewLanePr.getStore();
       started();
       await new Promise<void>((resolve, reject) => {
         void gate.then(resolve);
@@ -65,7 +67,7 @@ async function holdReviewOpen(honorsAbort: boolean): Promise<{ aborted: () => bo
     },
   }), DEFAULT_SWEEP_POLICY);
   await began;
-  return { aborted: () => sawAbort, finish: async () => { let_go(); await first; } };
+  return { aborted: () => sawAbort, lanePr: () => lanePr, finish: async () => { let_go(); await first; } };
 }
 
 const rows = (path: string, step: string): Record<string, unknown>[] => readLedgerLines(path).filter((l) => l.step === step);
@@ -78,6 +80,8 @@ test("W1-T11340: a stale pending held by this process's stuck review is aborted 
     await runSweepLightPass([pendingSinceFirstReview()], deps(lp, NOW + CEILING_MS + 60_000, {
       postReview: (p) => { admitted.push(p.prNumber); },
     }), DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(first.lanePr(), { prUrl: pr().prUrl, createdAt: "2026-11-04T16:20:07Z" },
+      "the in-process review ran inside its lane's view of the PR, so its first scan is bounded by created_at");
     assert.equal(first.aborted(), true, "the stuck review's own controller was aborted");
     const reclaimed = rows(lp, REVIEW_IN_PROCESS_RECLAIMED_STEP);
     assert.equal(reclaimed.length, 1);

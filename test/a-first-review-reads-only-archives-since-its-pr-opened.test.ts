@@ -16,7 +16,7 @@ import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 
 import { appendLedger } from "#src/lib/ledger.js";
-import { priorPostedReviewRow, type ReviewVerdict } from "#src/lib/review.js";
+import { priorPostedReviewRow, reviewLanePr, type ReviewVerdict } from "#src/lib/review.js";
 
 const URL = "https://github.com/acme/scratch/pull/16763";
 const CREATED_AT = "2026-11-04T16:20:07Z";
@@ -80,6 +80,19 @@ test("W1-T11340: created_at is fetched only on a live miss with archives to boun
     appendLedger(s.ledgerPath, { run_id: "r", task_id: "PR-16763", step: "review.posted", pr_url: URL, head_sha: "live", decision_verdict: VERDICT });
     assert.equal((await priorPostedReviewRow(s.ledgerPath, "PR-16763", URL, { fetchPrCreatedAt }))?.head_sha, "live");
     assert.deepEqual(fetched, [URL], "a live hit answers without any GitHub read");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("W1-T11340: a review inside its lane's view of the same PR takes that PR's created_at", async () => {
+  const s = stateDir(12);
+  try {
+    assert.equal(await reviewLanePr.run({ prUrl: URL, createdAt: CREATED_AT }, () => priorPostedReviewRow(s.ledgerPath, "PR-16763", URL)),
+      undefined, "the admitting lane's open-PR view bounds the scan with no GitHub read");
+    assert.equal((await reviewLanePr.run({ prUrl: "https://github.com/acme/scratch/pull/1", createdAt: CREATED_AT },
+      () => priorPostedReviewRow(s.ledgerPath, "PR-16763", URL)))?.head_sha, "old-12",
+      "another PR's lifetime is never this PR's bound");
   } finally {
     s.cleanup();
   }

@@ -204,6 +204,7 @@ import {
   sampleHostLoad,
   reviewLedgerKeyFor,
   reviewLaneCancellation,
+  reviewLanePr,
   reviewTaskNarrative,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
@@ -23938,7 +23939,9 @@ export async function runSweep(
   let passReviewsInFlight = 0;
   let widthStopReason: string | undefined;
   const workerCount = Math.min(reviewLanes, codeLane.jobs.length);
-  const startReview = (job: (typeof orderedReviews)[number], onPhase?: (phase: string) => void): Promise<void> => trackInFlightReview(() => runReview(job, onPhase), {
+  // W1-T11340: the review runs inside this lane's view of its PR, so its archive scans stay within the PR's lifetime.
+  const startReview = (job: (typeof orderedReviews)[number], onPhase?: (phase: string) => void): Promise<void> => trackInFlightReview(
+    () => reviewLanePr.run({ prUrl: job.pr.prUrl, createdAt: job.pr.createdAt }, () => runReview(job, onPhase)), {
     taskId: job.pr.taskId, prNumber: job.pr.prNumber, kind: job.mode.kind, admittedAtMs: deps.now?.() ?? systemClock.now(),
   });
   const lightAdmitted = deps.repairAdmissionSurface === "light"; // its light pass already bounded and reserved each plan review

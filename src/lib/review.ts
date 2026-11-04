@@ -5485,9 +5485,9 @@ export async function preparePromisedReviewDecision(args: {
     prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt,
   });
   const defaultProofExecutor = memoizeAsyncProofExecutor(execWhitelistedProofAsync);
-  // W1-T11340: the PR's own lifetime bounds a first review's archive scan; created_at is read only on a live miss.
+  // W1-T11340: the PR's own lifetime bounds a first review's archive scan (the admitting lane's view supplies it).
   const priorRow = existsSync(ledgerPath) ? await priorPostedReviewRow(ledgerPath, task.id, prUrl, {
-    prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt ?? fetchPrCreatedAtRest,
+    prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt,
   }) : undefined;
   const priorVerdict = priorRow?.decision_verdict as ReviewVerdict | undefined;
   const priorInconclusiveLoads = new Map<string, number>();
@@ -6339,21 +6339,18 @@ export function reviewRowNamesPr(line: Record<string, unknown>, key: string | un
  *  review inside it; review.ts reads it here, so a lookup this module owns stops when the lane aborts the review. */
 export const reviewLaneCancellation = new AsyncLocalStorage<AbortSignal>();
 
+/** W1-T11340: the PR an admitting lane is reviewing, as that lane's open-PR view read it. sweep.ts runs each in-process
+ *  review inside it, so the review's own lookups learn the PR's lifetime without another GitHub read. */
+export const reviewLanePr = new AsyncLocalStorage<{ prUrl: string; createdAt?: string }>();
+
 /** W1-T11340: where a prior-verdict lookup learns its PR's lifetime, and the cancellation it honors. */
 export interface PriorPostedReviewLookup {
-  /** The PR's GitHub `created_at`. No review.posted row for the PR can be older, so no archive cut before it can hold one. */
+  /** The PR's GitHub `created_at`. No review.posted row for the PR can be older, so no archive cut before it can hold one.
+   *  Absent, the admitting lane's {@link reviewLanePr} supplies it when that lane is reviewing this same PR. */
   prCreatedAt?: string;
   /** Read `created_at` only when the live file missed AND archives exist to bound; a failure keeps the full read. */
   fetchPrCreatedAt?: (prUrl: string) => Promise<string | undefined>;
   signal?: AbortSignal;
-}
-
-/** The PR's `created_at`, read once over REST — the same single-PR read the promise harvest uses. */
-export async function fetchPrCreatedAtRest(prUrl: string): Promise<string | undefined> {
-  const target = prLifecycleUrlTarget(prUrl);
-  if (!target) return undefined;
-  const row = await ghJsonAsync(singlePrRestArgs(target.owner, target.repo, target.number)) as { created_at?: string };
-  return row.created_at;
 }
 
 /** W1-T9681: the newest `review.posted` row {@link reviewRowNamesPr} matches with a verdict — by URL, so a plan filing or
@@ -6377,7 +6374,8 @@ export async function priorPostedReviewRow(
   const fileNames = existsSync(stateDir) ? readdirSync(stateDir) : [];
   const archived = fileNames.some((name) => rotationStampIso(name) !== undefined);
   if (!archived) return undefined; // nothing rotated: the live miss is the whole answer
-  let createdAt = lookup.prCreatedAt;
+  const lane = reviewLanePr.getStore();
+  let createdAt = lookup.prCreatedAt ?? (lane?.prUrl === prUrl ? lane.createdAt : undefined);
   if (createdAt === undefined && lookup.fetchPrCreatedAt) {
     try { createdAt = await lookup.fetchPrCreatedAt(prUrl); } catch { createdAt = undefined; } // unread: today's full read
   }
