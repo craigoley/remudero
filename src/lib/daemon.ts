@@ -155,7 +155,8 @@ import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, sys
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
-import { defaultLaneGovernorPorts, LANE_TARGET_STEP, laneTarget, laneTargetPayload, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget } from "./lane-governor.js";
+import { cpuLaneBound, defaultLaneGovernorPorts, initialLaneCpuLearner, publishLaneCpuBound,LANE_TARGET_STEP, laneCpuReading, laneTarget, laneTargetPayload, learnLaneCpu, type LaneCpuReading, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget } from "./lane-governor.js";
+import { deriveTaskClass } from "./task-class.js";
 import type { LaneGovernorMode } from "./policy.js";
 import {
   createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimBeforeMemoryRestart, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
@@ -4200,6 +4201,29 @@ export async function runDaemon(
     log(LANE_TARGET_STEP, { mode: "shadow", mode_unread: error instanceof Error ? error.message : String(error) });
   }
   let laneTargetReading: { atMs: number; result: LaneTarget } | undefined;
+  // W1-T11129: the CPU arm. The class of each task the pool started (the lane's class), the learner over the cgroup's
+  // `usage_usec` deltas, and the classes running at the previous reading (an interval whose lanes changed teaches nothing).
+  const laneClassByTask = new Map<string, string>();
+  // Lanes this process started (by class, until they settle) plus adopted run children it did not start.
+  const runningLaneClasses = (): string[] => [
+    ...laneClassByTask.values(),
+    ...[...children.values()].filter((child) => child.work === undefined && !laneClassByTask.has(child.taskId)).map(() => "(adopted)"),
+  ].sort();
+  let laneCpuLearner = initialLaneCpuLearner();
+  let laneCpuPrevClasses: string[] | undefined;
+  let admittingLaneClass: string | undefined;
+  /** One cpu.stat reading folded into the learner; returns what the CPU arm has learned for the class next admitted. */
+  const readLaneCpu = (nowMs: number): LaneCpuReading | undefined => {
+    const usageUsec = laneGovernorPorts?.cpuUsageUsec?.() ?? null;
+    if (usageUsec === null) return undefined;
+    const classes = runningLaneClasses();
+    const steady = laneCpuPrevClasses !== undefined && laneCpuPrevClasses.join("\n") === classes.join("\n");
+    // Lanes that started or ended inside the interval make its delta a blend of two loads: advance the counter only.
+    laneCpuLearner = learnLaneCpu(laneCpuLearner, { atMs: nowMs, usageUsec, runningClasses: steady ? classes : ["(changed)", "(changing)"] });
+    laneCpuPrevClasses = classes;
+    if (classes.length > 0) admittingLaneClass = classes[classes.length - 1];
+    return admittingLaneClass === undefined ? { baselineCpus: laneCpuReading(laneCpuLearner, "").baselineCpus, perLaneCpus: null } : laneCpuReading(laneCpuLearner, admittingLaneClass);
+  };
   /** The lanes new admissions may fill: the governor's target under enforce, otherwise unbounded. */
   const enforcedLaneTarget = (inFlight: number, wipBound: number | undefined): number => {
     if (!laneGovernorPorts) return Infinity;
@@ -4211,7 +4235,11 @@ export async function runDaemon(
         const reason = error instanceof Error ? error.message : String(error);
         memory = { unread: reason };
       }
-      const result = laneTarget({ previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount() });
+      const cpu = readLaneCpu(nowMs);
+      const cpuCount = laneGovernorPorts.cpuCount();
+      const result = laneTarget({ previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount, ...(cpu !== undefined ? { cpu } : {}) });
+      // Review capacity sheds on this same verdict (W1-T11129), whichever mode the lane count itself is in.
+      if (laneGovernorPorts.cpuUsageUsec) publishLaneCpuBound(cpuLaneBound(cpuCount, cpu));
       laneTargetReading = { atMs: nowMs, result };
       log(LANE_TARGET_STEP, laneTargetPayload(result, { mode: laneGovernorMode, fixed: laneCount, inFlight }));
     }
@@ -7643,6 +7671,7 @@ export async function runDaemon(
     // Only these named phase boundaries are contained. Other logging keeps its existing contract.
     const phaseFaults: Array<{ phase: string; reason: unknown }> = [];
     const admittedWork = runLanePool(admitted, (id, task) => {
+      laneClassByTask.set(id, deriveTaskClass(task));
       const startedAtMs = preparedStartTimes.get(id)!;
       const kick = forcedKick?.taskId === id ? forcedKick : undefined;
       const bindRun = (runId: string) => {
@@ -7663,9 +7692,13 @@ export async function runDaemon(
         if (restartDecided) releaseChildren?.();
         if (childDrainDone) poolControl.detach?.(outOfProcess);
       }, mayRunInProcess: (reason) => judgeChildFallback(task, reason) }).then((outcome) => {
+        laneClassByTask.delete(id);
         const length = daemonClock.now() - startedAtMs;
         if (length > 0) { runLengths.totalMs += length; runLengths.samples++; measuredRuns.push({ taskId: id, ms: length }); }
         return outcome;
+      }, (reason: unknown) => {
+        laneClassByTask.delete(id);
+        throw reason;
       });
     }, refillLane, lanes, admitAtStart, onStarted, poolControl);
     let poolOutcome: LanePoolOutcome<Task, RunResult>;
