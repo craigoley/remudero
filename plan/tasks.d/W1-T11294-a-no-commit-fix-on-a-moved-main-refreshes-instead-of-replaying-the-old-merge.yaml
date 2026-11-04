@@ -1,0 +1,41 @@
+- id: W1-T11294
+  title: "When a fix round changes nothing and main has moved since the failed run's merge commit was made, the no-commit remedy refreshes the branch onto current main instead of re-running the failed jobs, because a pull_request re-run replays the old merge commit and reproduces a red main has since repaired"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, which no-commit remedy the sweep applies; it chooses between a job re-run and a branch update
+  origin: operator-session#stale-merge-rerun-2026-11-04
+  plan_refs:
+    - W1-T8041
+    - W1-T528
+  files:
+    - src/lib/sweep.ts
+    - test/a-no-commit-fix-on-a-moved-main-refreshes-instead-of-replaying-the-old-merge.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Before the one-shot no-commit failed-job rerun, the sweep compares the base sha the failed run was created against with current main; when main has moved, it takes the branch-update path (deps.updateBranch, ledgered with the run's base and current main) instead of rerunFailedChecks, and when main has not moved the rerun is unchanged
+      proof: "unit test: test/a-no-commit-fix-on-a-moved-main-refreshes-instead-of-replaying-the-old-merge.test.ts"
+    - claim: The refresh spends the same one-shot no-commit receipt as the rerun, so a head is never both refreshed and rerun in one round, and an unreadable run base keeps today's rerun
+      proof: "grep: W1-T11294 criterion 2 in test/a-no-commit-fix-on-a-moved-main-refreshes-instead-of-replaying-the-old-merge.test.ts"
+  rationale: |
+    OBSERVED 2026-11-04. Main was red from 22:30Z to 23:54Z: #16501's census met #15532's embedded fixture digests, and #16634 repaired it.
+    #16498's CI run 41729490376 was created at 22:17Z on a merge commit that contained the red main.
+    After main's repair, the fix lane's round 3 on #16498 changed nothing, which was correct. At 00:45:51Z the sweep applied the one-shot no-commit remedy: no_commit_rerun_outcome "rerun", no_commit_rerun_run_ids [41729490376]. GitHub re-ran attempt 2 of that run on the same 22:17 merge commit. coverage-shard (8/8) failed again at 01:11Z, on the census #16634 had already fixed ("PR-pins: every comment-compression pin compares against its PR base and freezes no digest").
+    So the remedy could not have worked: a pull_request re-run keeps its original GITHUB_SHA. It cost about 26 minutes of a CI shard, kept the PR red for another round, and spent the head's one-shot receipt.
+    The fix lane's no-commit verdict was right. Its remedy was chosen without reading whether the base had moved.
+  design: |
+    In the no-commit branch of src/lib/sweep.ts (the rerunFailedChecks call, about line 21915):
+    1. Read the failed run's base sha. For a pull_request run, this is the pull_request.base.sha GitHub records on the run (the same run read rerunFailedChecks already does), and current main is the tip the pass already has.
+    2. When the two differ, call deps.updateBranch for this PR, the path W1-T528 owns, instead of the rerun. Record no_commit_refresh_attempted with run_base_sha and main_sha on the same receipt row.
+    3. When they match, or the base is unreadable, keep today's rerun.
+    Test with stub rerun and update-branch gateways: a moved base calls only updateBranch, an unmoved base calls only the rerun, and either one claims the receipt exactly once.
+  falsifier: |
+    At origin/main a no-commit fix round re-runs the failed jobs even when main has moved since the failed run's merge commit. The re-run replays that commit and reproduces a red main has since fixed.
+  note: |
+    reservation hand-off: plan-file-1793755004000 -> plan-file-1793755004000
+    Reserved with rmd next-task-id --branch plan-file-1793755004000 from the operator session's ops worktree. Operator, 2026-11-03: fix the reds and their root causes.

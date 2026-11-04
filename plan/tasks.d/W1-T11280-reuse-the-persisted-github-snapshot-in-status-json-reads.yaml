@@ -13,7 +13,10 @@
     - W1-T4208
     - W1-T11155
   files: [src/lib/report-commands.ts, test/status-json-deadline.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=f59d8828f1f28637
+  # backlog gardener: placed=2026-11-04T03:16:35.154Z
   attempts: 0
   rationale: |
     READ 2026-11-03 in the PLAN-create-1793745608891 worktree. Line numbers are approximate (~); check them again at your head.
