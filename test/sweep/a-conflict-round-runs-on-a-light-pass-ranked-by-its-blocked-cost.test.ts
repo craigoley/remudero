@@ -190,3 +190,74 @@ test("W1-T11171 criterion 3: a full pass writes no light-pass conflict counts", 
   assert.ok(summary && !("light_conflict_acted" in summary) && !("light_conflict_deferred" in summary));
   assert.equal(f.disposed(pr.prNumber)?.conflict_age_ms, 0);
 });
+
+test("W1-T11171 criterion 2: only PRs due a conflict round reorder; a dirty PR disposed otherwise keeps its walk place", async () => {
+  const now = Date.now();
+  const conflictRow = (pr: sweep.OpenPrView, hoursAgo: number) => ({
+    ts: new Date(now - hoursAgo * HOUR).toISOString(), step: "sweep.disposed", pr_number: pr.prNumber,
+    head_sha: pr.headSha, disposition: "conflicted", blocker: "conflict",
+  });
+  // Snapshot order is by createdAt (prNumber here): young conflict, a dirty PR with no captured conflict evidence (the
+  // walk does not dispose it "conflicted"), then an old conflict.
+  const young = view(11060, "7".repeat(40), "W1-T90060");
+  const dirtyOther = { ...view(11061, "8".repeat(40), "W1-T90061"), mergeConflict: undefined } as sweep.OpenPrView;
+  const old = view(11062, "9".repeat(40), "W1-T90062");
+  assert.notEqual(sweep.deriveDisposition(dirtyOther).disposition, "conflicted", "control: the dirty PR is disposed otherwise");
+  const f = fixture([conflictRow(young, 1), conflictRow(old, 5)]);
+  await withLiveWritesAllowed(async () => {
+    await sweep.runSweep([young, dirtyOther, old], { ...f.deps, escalate: () => {} });
+    await sweep.drainDetachedSweepActions();
+  });
+  const walked = f.rowsFor("sweep.disposed").filter((row) => row.run_id === "light-conflict-test").map((row) => row.pr_number);
+  assert.deepEqual(walked, [old.prNumber, dirtyOther.prNumber, young.prNumber],
+    "the two conflicts swap places by cost; the non-conflicted dirty PR stays second");
+  assert.deepEqual(f.calls.admissions, [old.prNumber, young.prNumber]);
+});
+
+test("W1-T11171 criterion 2: conflict age comes from the first observation at the head even after rotation pruned its row", async () => {
+  const now = Date.now();
+  const pr = view(11070, "a".repeat(40), "W1-T90070");
+  const firstSeen = new Date(now - 5 * HOUR).toISOString();
+  // Rotation kept only the newest conflict row at this head (10 minutes old); it carries the first observation forward.
+  const f = fixture([{
+    ts: new Date(now - 10 * 60_000).toISOString(), step: "sweep.disposed", pr_number: pr.prNumber,
+    head_sha: pr.headSha, disposition: "conflicted", blocker: "conflict", conflict_since: firstSeen,
+  }]);
+  await withLiveWritesAllowed(async () => {
+    await sweep.runSweep([pr], f.deps);
+    await sweep.drainDetachedSweepActions();
+  });
+  const row = f.disposed(pr.prNumber)!;
+  assert.ok((row.conflict_age_ms as number) >= 5 * HOUR - 60_000, `age from the first observation, got ${String(row.conflict_age_ms)}`);
+  assert.equal(row.conflict_since, firstSeen, "the new row carries the first observation forward, so the next rotation keeps it");
+});
+
+test("W1-T11171 criterion 3: a light pass's sweep.pass row carries its conflict shares, a full pass's does not", async () => {
+  const now = Date.now();
+  const noWorker = view(11080, "b".repeat(40), "W1-T90080");
+  const workerOnly = view(11081, "c".repeat(40), "W1-T90081");
+  const f = fixture([cleanProbe(noWorker.prNumber, noWorker.headSha), {
+    ts: new Date(now - HOUR).toISOString(), step: "sweep.disposed", pr_number: workerOnly.prNumber,
+    head_sha: workerOnly.headSha, disposition: "conflicted", blocker: "conflict",
+  }]);
+  const logged: Array<[string, Record<string, unknown> | undefined]> = [];
+  await withLiveWritesAllowed(async () => {
+    await sweep.runSweep([noWorker, workerOnly], {
+      ...f.deps, actionable: lightGate, repairAdmissionSurface: "light",
+      log: (step, extra) => { logged.push([step, extra]); },
+    });
+    await sweep.drainDetachedSweepActions();
+  });
+  const pass = logged.find(([step]) => step === "sweep.pass")?.[1];
+  assert.ok(pass, "the pass wrote its sweep.pass row");
+  assert.equal(pass.light_conflict_acted, 1);
+  assert.equal(pass.light_conflict_deferred, 1);
+  const g = fixture();
+  const fullLogged: Array<[string, Record<string, unknown> | undefined]> = [];
+  await withLiveWritesAllowed(async () => {
+    await sweep.runSweep([view(11082, "d".repeat(40), "W1-T90082")], { ...g.deps, log: (step, extra) => { fullLogged.push([step, extra]); } });
+    await sweep.drainDetachedSweepActions();
+  });
+  const fullPass = fullLogged.find(([step]) => step === "sweep.pass")?.[1];
+  assert.ok(fullPass && !("light_conflict_acted" in fullPass) && !("light_conflict_deferred" in fullPass));
+});

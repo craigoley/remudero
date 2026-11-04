@@ -18064,12 +18064,20 @@ export function conflictBlockedCost(
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   dependents: number,
   nowMs: number,
-): { conflict_age_ms: number; dependents: number; blocked_cost: number } {
-  const first = ledgerLines.find((row) => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+): { conflict_age_ms: number; dependents: number; blocked_cost: number; conflict_since: string } {
+  // The first observation survives rotation by riding forward: every conflicted row at this head carries the
+  // `conflict_since` its predecessor carried, and rotation keeps the newest row per head. Only a head whose rows predate
+  // the field falls back to its earliest live row; a head never seen before starts its clock now.
+  const atHead = ledgerLines.filter((row) => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
     row.head_sha === pr.headSha && row.blocker === "conflict");
-  const since = typeof first?.ts === "string" ? Date.parse(first.ts) : NaN;
-  const age = Number.isFinite(since) ? Math.max(0, nowMs - since) : 0;
-  return { conflict_age_ms: age, dependents, blocked_cost: age * (1 + dependents) };
+  const carried = atHead.findLast((row) => typeof row.conflict_since === "string" &&
+    Number.isFinite(Date.parse(row.conflict_since)))?.conflict_since as string | undefined;
+  const earliest = atHead.find((row) => typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts)))?.ts as string | undefined;
+  const seen = [carried, earliest].flatMap((iso) => iso === undefined ? [] : [Date.parse(iso)]);
+  const sinceMs = seen.length > 0 ? Math.min(...seen) : nowMs;
+  const age = Math.max(0, nowMs - sinceMs);
+  return { conflict_age_ms: age, dependents, blocked_cost: age * (1 + dependents),
+    conflict_since: clockFromMillisFn(() => sinceMs).iso() };
 }
 
 /**
@@ -20396,8 +20404,40 @@ export async function runSweep(
   // legible state `judgeSweepLiveness` reads. RENDER_RELEVANT, rotating on recency (W1-T1237).
 
   deps.markPrelude?.("walk_setup", true);
+  // W1-T11171: the PRs due a conflict round are the ones the walk itself will dispose "conflicted" (the same inherited
+  // mergeability and the same rule table), not every dirty head: a dirty PR disposed otherwise keeps its walk place.
+  const conflictRankedAtMs = passClockMs();
+  const dueConflictRound = new Set<number>();
+  // W1-T11171: a gated (light) pass decides its conflict shares up front with the predicates its gate uses — a
+  // no-worker route not yet attempted at this head and main acts, every other due round is deferred — so the pass's
+  // own `sweep.pass` row carries them; `sweep.summary` still counts what the walk actually did.
+  let lightConflictShares: Record<string, unknown> = {};
+  // The heartbeat below must be written before anything the walk calls can kill the pass (W1-T1237), so a fault in
+  // this decision is NAMED on the row, never thrown past it: the walk then meets the same fault after the heartbeat.
+  try {
+    openPrs.forEach((open, index) => {
+      if (open.mergeState !== "dirty" && open.mergeState !== undefined) return;
+      const view = withInheritedMergeState(open, ledgerLines, mainTipSha).pr;
+      if (deriveDisposition(view, policy, conflictRankedAtMs).disposition === "conflicted") dueConflictRound.add(index);
+    });
+    if (deps.actionable !== undefined && !deps.actionable("conflicted")) {
+      let admitted = 0;
+      for (const index of dueConflictRound) {
+        const open = openPrs[index]!;
+        const noWorker = mainTipSha !== undefined &&
+          conflictNoWorkerMode(open, ledgerLines, mainTipSha, deps.regenerateConflict !== undefined) !== undefined &&
+          !ledgerLines.some((row) => row.step === "sweep.conflict_regenerated" && row.pr_number === open.prNumber &&
+            row.head_sha === open.headSha && row.main_sha === mainTipSha);
+        if (noWorker) admitted++;
+      }
+      lightConflictShares = { light_conflict_acted: admitted, light_conflict_deferred: dueConflictRound.size - admitted };
+    }
+  } catch (error) {
+    dueConflictRound.clear();
+    lightConflictShares = { light_conflict_shares: { status: "unreadable", error: error instanceof Error ? error.message : String(error) } };
+  }
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true,
-    ...(deps.repairAdmissionSurface ? { surface: deps.repairAdmissionSurface } : {}) });
+    ...(deps.repairAdmissionSurface ? { surface: deps.repairAdmissionSurface } : {}), ...lightConflictShares });
 
   // W1-T7734 — the walk is a queue, so a PR whose head moved under this pass can be put back at the
   // front once its one fresh read has rebuilt its view. `rederivedPrs` spends that read once per
@@ -20408,9 +20448,8 @@ export async function runSweep(
   // W1-T11171: conflicted PRs walk, and so take fix admission, in descending blocked cost among their own places.
   // Every cost is measured at ONE instant: a clock read per PR makes the later-measured of two equal conflicts look
   // older on a slow runner and reorders a tie the rule says keeps snapshot order.
-  const conflictRankedAtMs = passClockMs();
   walkOrder.splice(0, walkOrder.length, ...orderConflictsByBlockedCost(walkOrder,
-    (index) => openPrs[index]?.mergeState === "dirty",
+    (index) => dueConflictRound.has(index),
     (index) => conflictBlockedCost(openPrs[index]!, ledgerLines, deps.conflictDependents?.(openPrs[index]!) ?? 0,
       conflictRankedAtMs).blocked_cost));
   let lightConflictActed = 0;
