@@ -1,0 +1,44 @@
+- id: W1-T11255
+  title: "Every script a CI step runs before its job's npm ci (or where a fast-lane if can skip that install) loads only Node built-ins and repo files at module scope, enforced by a census over the workflows' steps and each script's static import closure — #16275's top-level @swc/core import reddened every plan-only PR's mutation-ratchet for 2.5 h"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: a census of what CI's pre-install steps may import; test-only plus its precheck parity row
+  origin: operator-session#ci-preinstall-imports-2026-11-03
+  plan_refs:
+    - W1-T3512
+    - W1-T5697
+    - W1-T10354
+  files:
+    - test/rules/a-script-ci-runs-before-npm-ci-imports-only-builtins.test.ts
+    - scripts/census-precheck.mjs
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: For every job in .github/workflows/*.yml, every step before the job's first npm ci step, and every step after an install step whose if can skip it, that runs bare `node scripts/<x>.mjs` has a static import closure (relative imports followed; static import and export-from at module scope) whose only bare specifiers are node built-ins; a violation names the workflow, job, step, script and the import chain to the package
+      proof: "unit test: test/rules/a-script-ci-runs-before-npm-ci-imports-only-builtins.test.ts"
+    - claim: A package loaded lazily inside a function (createRequire(...)(pkg) or await import(pkg) in a function body) is not a violation, and the census fails on a fixture copy of scripts/mutation-ratchet.mjs as it was at #16275 (a top-level import of @swc/core) while passing on main's
+      proof: "grep: W1-T11255 criterion 2 in test/rules/a-script-ci-runs-before-npm-ci-imports-only-builtins.test.ts"
+  rationale: |
+    OBSERVED 2026-11-03:
+    - #16275 (W1-T10354, merged 15:05Z) added `import { parseSync } from '@swc/core'` at the top of scripts/mutation-ratchet.mjs.
+    - mutation-ratchet's W1-T3512 fast lane skips npm ci on a PLAN_ONLY or DOCS_ONLY diff and then runs `node scripts/mutation-ratchet.mjs --changed-files`. So every plan-only PR's mutation-ratchet died with ERR_MODULE_NOT_FOUND @swc/core, and ci-gate went red with it: #16549 and #16312 among them.
+    - #16561 (17:28Z) moved the load into the function and added a guard for that one trigger step.
+    MEASURED at origin/main the same day: 14 jobs run bare node scripts before npm ci, or with no npm ci at all. That is 40 invocations of 13 distinct scripts: ci-shard-admission, code-health-provenance, coverage-floor, coverage-ratchet, diff-class, diff-coverage, flake-retry-aggregate, flake-screen, merge-queue-review-attest, needs-human-issue, security-merge-producer, semgrep-native-contract-ratchet and test-tier-manifest. Any of them gaining a module-scope package import fails its job on every diff that takes the skip, including the required security-merge-producer.
+    EXISTING GUARDS ARE PER STEP: test/a-shard-that-will-skip-installs-nothing.test.ts pins that named classify steps use no --import tsx, and #16561 pins the mutation trigger. Neither walks the workflows or a script's imports, so the next script with this shape is not caught until CI breaks.
+  design: |
+    1. Parse every .github/workflows/*.yml with the yaml package (already a dependency the census suites use). For each job, find the first step whose run contains `npm ci`. Every earlier step is pre-install. A later step is also pre-install when that install step has an `if:` (the fast-lane skip).
+    2. From each pre-install step's run text, collect `node scripts/<x>.mjs` invocations, excluding any with --import or --loader.
+    3. Walk the script's static import closure with an acorn parse (census-precheck.mjs already uses acorn).
+       - Module-scope ImportDeclaration and ExportNamed/All with a source are followed. A relative specifier is followed to the repo file; a bare specifier must be `node:*` or a built-in from module.builtinModules.
+       - Imports inside function bodies are not module scope, so they are lazy and allowed.
+    4. Report every violation with workflow, job, step name, script and chain. Add a-script-ci-runs-before-npm-ci-imports-only-builtins.test.ts beside PRECHECK_PARITY in scripts/census-precheck.mjs, since it lives in test/rules/ and listRuleSuites reads it as a rule suite.
+  falsifier: |
+    At origin/main no suite walks the workflows' pre-install steps or the import closures of the scripts they run. A fixture copy of mutation-ratchet.mjs with a module-scope `import … from '@swc/core'` fails no test.
+  note: |
+    reservation hand-off: plan-file-1793729018006 -> plan-file-1793729018006
+    Reserved with rmd next-task-id --branch plan-file-1793729018006, from the operator session's detached ops worktree because the operator checkout sat on a Codex branch. Operator 2026-11-03, in chat: "fix the root causes of issues you find". The test path is where rmd test-place put a stub reading the workflows (test/rules/, high).

@@ -198,3 +198,25 @@ test("the CI shadow record names each retried file's own pass-two outcome", () =
     { file: "test/c.test.ts", floor: "missed" },
   ]);
 });
+
+test("a stored miss is re-asked about main at its base each pass, so a corrected base-red read reaches it", async () => {
+  const miss = { file: "test/slow-red-on-main.test.ts", floor: "selected", narrow: "missed", retry: "failed" };
+  const stored = harness();
+  const first = await stored.pass([run(8120, [miss], { baseSha: "base-slow" })], async () => []);
+  assert.equal(first.narrow.missed, 1, "the reader of its day read main green, so the miss was charged and stored");
+  const later = await stored.pass([], async (sha) => (sha === "base-slow" ? [miss.file] : []));
+  assert.equal(later.narrow.missed, 0, "the stored miss is base-red once main's failure at its base is read");
+  assert.equal(later.observations.reattributed, 1);
+  assert.notEqual(later.verdict, "misses");
+
+  const green = harness();
+  await green.pass([run(8121, [miss], { baseSha: "base-green" })], async () => []);
+  const still = await green.pass([], async () => []);
+  assert.equal(still.narrow.missed, 1, "main green at the base keeps the miss charged");
+  assert.equal(still.observations.reattributed, 0);
+
+  const flaky = harness();
+  await flaky.pass([run(8122, [miss], { baseSha: "base-green" })], async () => []);
+  const recovered = await flaky.pass([run(8123, [], { recoveredFlakes: [miss.file] })], async () => []);
+  assert.equal(recovered.narrow.missed, 1, "a later window's retry recovery is not evidence about a stored run");
+});
