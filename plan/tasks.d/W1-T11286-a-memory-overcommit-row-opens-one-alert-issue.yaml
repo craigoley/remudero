@@ -1,0 +1,43 @@
+- id: W1-T11286
+  title: "A host.memory_max.overcommitted ledger row opens one alert issue naming the container, its formula limit, its own peak and the deficit, and the issue is withdrawn once a later recycle records no overcommit, so an overcommitted host is surfaced instead of being enforced by OOM kills"
+  repo: remudero
+  depends_on: [W1-T11130]
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, escalating the memory overcommit row; it opens and withdraws a GitHub alert issue from the deploy-run cycle
+  origin: operator-session#memmax-2026-11-03
+  plan_refs:
+    - W1-T11130
+    - W1-T6062
+  files:
+    - src/lib/memory-overcommit-escalation.ts
+    - src/run-task.ts
+    - test/inbox/a-memory-overcommit-row-opens-one-alert-issue.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The deploy-run cycle reads host.memory_max.overcommitted rows newer than its last pass and opens one alert issue per container, deduplicated on a stable title, whose detail names the formula limit, the own peak, the deficit in MiB and every peak term, and spools it through host-escalation-spool like the persisting-refusal escalation when no gateway is reachable
+      proof: "unit test: test/inbox/a-memory-overcommit-row-opens-one-alert-issue.test.ts"
+    - claim: A later recycle of that container that records no overcommit withdraws the open alert, and repeated overcommit rows update the open issue rather than opening another
+      proof: "grep: W1-T11286 criterion 2 in test/inbox/a-memory-overcommit-row-opens-one-alert-issue.test.ts"
+    - claim: rmd deploy-run calls the escalation on its production path
+      proof: "grep: memoryOvercommitEscalation( in src/run-task.ts"
+  rationale: |
+    The operator ruled on 2026-11-03 (AskUserQuestion on #16468): memory.max is never below a container's own learned peak. When the shared-budget formula undercuts a peak, the host is overcommitted, and that is surfaced rather than enforced by OOM.
+    W1-T11130 (amended) appends host.memory_max.overcommitted from deploy/resource-policy.sh. Without a reader, the row is invisible.
+    Live 2026-11-03T23:00Z, the 32,086 MiB host would be overcommitted today: its learned peaks total 31,364 MiB, so core and serve would both log a deficit.
+  design: |
+    1. Follow src/lib/deploy-refusal-escalation.ts (W1-T6062): src/lib/memory-overcommit-escalation.ts exports memoryOvercommitEscalation(rows, { issues, ledgerPath, runId, spool }).
+       - It groups the newest row per container.
+       - It escalates with class BLOCKED, taskId MEMORY-OVERCOMMIT-<container>, and a stable title, because escalate dedups on the title.
+       - It withdraws the alert when the newest recycle note for that container carries no deficit.
+    2. src/run-task.ts: rmd deploy-run calls it once per pass, next to refusalEscalationOrNone, with the same gateway and spool wiring.
+    3. Test it with an in-memory IssueGateway and a ledger fixture containing real rows in the shape W1-T11130's writer appends.
+  falsifier: |
+    At origin/main nothing reads host.memory_max.overcommitted; no issue is opened for an overcommitted host.
+  note: |
+    reservation hand-off: plan-file-1793748002000 -> plan-file-1793748002000
+    Reserved with rmd next-task-id --branch plan-file-1793748002000 from the operator session's ops worktree. Test path from rmd test-place src/lib/deploy-refusal-escalation.ts (test/inbox/, high).

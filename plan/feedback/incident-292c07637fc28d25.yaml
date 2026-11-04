@@ -1,0 +1,31 @@
+id: incident-292c07637fc28d25
+ts: 2026-11-03T21:58:34.418Z
+raw: >-
+  Incident 292c07637fc2: flow pr-stage-stall:awaiting-review:review setup
+  refused at this head on every pass (head-task-metadata-unavailable, <n>
+  refusals); duplicate build
+
+  First seen: 2026-11-03T15:38:06.709Z
+
+  Last seen: 2026-11-03T17:02:06.901Z
+
+  Count: 2, burn: 1.43/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16513 awaiting-review: review setup refused at this head on every pass (head-task-metadata-unavailable, 1 refusals); duplicate build
+    - pr=16541 awaiting-review: review setup refused at this head on every pass (head-task-metadata-unavailable, 1 refusals); duplicate build
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#292c07637fc28d25249c4e46f32b1067acf9810e05d0422851008bb6987e6cb7
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

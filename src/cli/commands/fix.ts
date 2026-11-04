@@ -1,7 +1,10 @@
 /** The fix verb and its exclusive helpers, moved from the entrypoint (W1-T9337). */
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
-import { judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
+import { judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
+import { buildFixProgressInputWithHostedProofs, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
+import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
+import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "../../lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger } from "../../lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
@@ -133,6 +136,60 @@ export interface FixCommandHost {
  * check that is actually red.
  */
 const ACCEPTANCE_AUTHOR_GATE_CHECK_NAME = "acceptance-author-gate";
+
+/** Run acceptance on the worker host, with the proof runner's environment and concurrency. */
+export const workerAcceptanceProofSpawner: AsyncProofSpawner = async (command, args, cwd, timeoutMs) => {
+  const child = proofChildCommand(command, args);
+  try {
+    const result = await execFileLoopBounded(child.file, child.args, { cwd, encoding: "utf8",
+      env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined }, timeout: timeoutMs, killSignal: "SIGKILL" });
+    return result.stdout;
+  } catch (error) {
+    const childError = error as { code?: unknown; status?: number };
+    if (typeof childError.code === "number") childError.status = childError.code;
+    throw error;
+  }
+};
+
+/** The acceptance run belongs to the worker checkout and the committed head it will push. */
+export async function runWorkerAcceptanceProofs(
+  input: { worktreePath: string; headSha: string; criteria: readonly { proof: string; met: boolean; proof_exec: string }[] },
+  io = {
+    readTree: async (cwd: string) => ({ head: (await hostWorktreeGitAsync(cwd, ["rev-parse", "HEAD"])).trim(),
+      dirty: (await hostWorktreeGitAsync(cwd, ["status", "--porcelain"])).trim() !== "" }),
+    spawn: workerAcceptanceProofSpawner,
+  },
+): Promise<FixProgressWorkerProofResult[]> {
+  const proofs = [...new Set(input.criteria.filter(c => !c.met && c.proof_exec === "executed_fail" &&
+    /^unit test:\s*test\/[\w./-]+\.test\.[mc]?[jt]s\s*$/.test(c.proof)).map(c => c.proof))];
+  const results: FixProgressWorkerProofResult[] = [];
+  for (const proof of proofs) {
+    let output = "";
+    try {
+      const before = await io.readTree(input.worktreePath);
+      if (before.head !== input.headSha || before.dirty) throw new Error("worker acceptance tree differs from the committed head");
+      const parsed = parseWhitelistedProof(proof)!;
+      const result = await execWhitelistedProofAsync(parsed, input.worktreePath, undefined, async (...args) => {
+        try {
+          output = await io.spawn(...args);
+          return output;
+        } catch (error) {
+          const child = error as { stdout?: unknown; stderr?: unknown };
+          output = [child?.stdout, child?.stderr].filter(value => value !== undefined).join("\n");
+          throw error;
+        }
+      });
+      const after = await io.readTree(input.worktreePath);
+      if (after.head !== input.headSha || after.dirty) throw new Error("worker acceptance tree changed during the proof");
+      results.push({ proof, headSha: input.headSha, result: result === "pass" ? "pass" : "fail",
+        output: (output || parsed.failureOutput || result).slice(-600) });
+    } catch (error) {
+      const reason = String(error);
+      results.push({ proof, headSha: input.headSha, result: "fail", output: `${reason.slice(0, 200)}\n${output.slice(-400)}` });
+    }
+  }
+  return results;
+}
 
 export interface FixRungGateRemedyScopeDeadlock {
   disposition: FixCommandHost["FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION"];
@@ -287,6 +344,7 @@ export interface FixDeps {
   escalate: SweepDeps["escalate"];
   /** W1-T7096: decides whether a PR that already spent rounds gets another; unwired ⇒ the announced stand-in. */
   fixProgressJudge?: FixProgressJudge;
+  readHostedProofResults?: HostedFixProofReader;
   /** The ledger the judge reads the round history from. */
   ledgerLines?: () => ReadonlyArray<Record<string, unknown>>;
   log?: (step: string, extra?: Record<string, unknown>) => void;
@@ -1506,12 +1564,13 @@ async function fixLearnedArmsFor(
 function formerBoundStandIn(reached: () => boolean,
   log: (step: string, extra?: Record<string, unknown>) => void, say: (line: string) => void): FixProgressJudge {
   let announced = false;
-  return async () => {
+  return async (input) => {
     if (!announced) {
       announced = true;
       log("fix.progress_judge_stand_in", { judge: "former_bound_stand_in" });
       say("fix rung: no progress judge wired — using the former fixed bound (W1-T7096 stand-in)");
     }
+    if (input.signals?.offHostPass) return { verdict: "harness", reason: "the persisted reviewer proof passes on the worker and hosted CI" };
     return reached()
       ? { verdict: "escalate", loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound" }
       : { verdict: "continue", reason: "unwired caller keeps the pre-W1-T7096 bound" };
@@ -1947,13 +2006,13 @@ async function routeFix(
     const log = deps.log ?? (() => {});
     const judge = deps.fixProgressJudge ?? formerBoundStandIn(() => (pr.priorStrikes ?? 0) >= policy.strikeCap, log,
       (line) => console.error(line));
-    const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+    const input = await buildFixProgressInputWithHostedProofs({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
       ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined,
       strikesSpent: pr.priorStrikes,
       currentRed: isBlockedCi(pr) || securityFix ? ciFailures.map((f) => f.name)
         : pr.unmetCriteria.filter((c) => !c.met).map((c) => `review:${c.claim}`),
       ledger: [...(deps.ledgerLines?.() ?? [])], formerCeiling: policy.strikeCap,
-      parkedReason: "fix-strike: another operator-requested repair after prior rounds" });
+      parkedReason: "fix-strike: another operator-requested repair after prior rounds" }, deps.readHostedProofResults);
     const decision = await judgeFixProgress(input, judge);
     log("fix.progress_judged", { pr_number: pr.prNumber, head_sha: pr.headSha, prior_strikes: pr.priorStrikes,
       site: "fix-strike", parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, ...decision });
@@ -2172,6 +2231,8 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
 }
 
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
+  workerProofIo?: Parameters<typeof runWorkerAcceptanceProofs>[1];
+  hostedProofReader?: HostedFixProofReader;
   pendingAnswer?: OpenPrView["pendingAnswer"];
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
   prBodySha256?: string;
@@ -2218,6 +2279,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     deriveChangesetClaimUpdate,
   } = fixCommandHelpers(host);
   const roundRows: Record<string, unknown>[] = [];
+  const readHostedProofs: HostedFixProofReader = opts.hostedProofReader ?? ((headSha, proofs) =>
+    readHostedFixProofResults({ owner: opts.reviewBase.owner, repo: opts.reviewBase.repo, headSha, proofs }));
   let roundModelFields: { requested_model: string | null; served_model: string | null; served_model_reason?: string } | undefined;
   const deps = { ...opts.deps, log: (step: string, extra?: Record<string, unknown>) => {
     // W1-T10339: a stand-down (and a design handoff) records the head, task contract and body it read, so the sweep
@@ -2490,7 +2553,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // unchanged tree is already in the judge's own signals; a false-block finding and merge refusals are not.
   const consultAtSite = async (parkedReason: string, forJudge = true) => {
     const persisted = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
-    const input = buildFixProgressInput({ taskId: opts.taskId, prNumber,
+    const input = await buildFixProgressInputWithHostedProofs({ taskId: opts.taskId, prNumber,
       ciFailures: currentCiFailures, reviewFailures: currentMergeConflict === undefined && !noReviewYet ? review.criteria : undefined,
       headSha: review.headSha, currentRed: currentMergeConflict !== undefined
         ? (conflictedFilePaths(currentMergeConflict) ?? []).map(path => `conflict:${path}`)
@@ -2498,7 +2561,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         : review.criteria.filter(c => !c.met).map(c => `review:${c.claim}`),
       ledger: [...persisted.filter(row => !roundRows.some(local => row.step === local.step &&
         row.round_id === local.round_id && row.head_sha === local.head_sha && row.strike === local.strike)), ...roundRows],
-      operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap, parkedReason: forJudge ? parkedReason : undefined });
+      operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap, parkedReason: forJudge ? parkedReason : undefined }, readHostedProofs);
     standInEscalates = true;
     try {
       const { decision, receipt } = await resolveFixProgress(input, persisted,
@@ -2854,7 +2917,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 
     if (!consultedThisRound && (roundRows.some(row => row.step === "fix.dispatch" || row.step === "fix.retrigger") || !opts.progressDecision)) {
       const persisted = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
-      const input = buildFixProgressInput({ taskId: opts.taskId, prNumber,
+      const input = await buildFixProgressInputWithHostedProofs({ taskId: opts.taskId, prNumber,
       ciFailures: currentCiFailures, reviewFailures: currentMergeConflict === undefined && !noReviewYet ? review.criteria : undefined,
         headSha: review.headSha,
         strikesSpent: Math.max(strikes, priorStrikesFor([...persisted, ...roundRows], opts.taskId,
@@ -2867,7 +2930,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           row.round_id === local.round_id && row.head_sha === local.head_sha && row.strike === local.strike)), ...roundRows],
         operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
-          ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
+          ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason }, readHostedProofs);
       const { decision, receipt } = await resolveFixProgress(input, persisted,
         { judge: progressJudge, firstRound: true, reviewInputDigest: progressReviewInputDigest,
           contractRevision: currentContractRevision });
@@ -4531,6 +4594,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       releasedClaimId ??= deps.branchClaim?.id();
       deps.branchClaim?.release();
     };
+    let workerProofResults: FixProgressWorkerProofResult[] = [];
     const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
@@ -4540,6 +4604,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       ...fixClaimFields,
       head_sha: priorHeadSha,
       pushed_head_sha: pushedHeadSha,
+      ...(workerProofResults.length > 0 ? { worker_proof_results: workerProofResults } : {}),
       strike: attempt,
       round,
       session_id: fixResult.sessionId,
@@ -4873,6 +4938,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     }
 
     let roundPush: FixRungOutcome | "refused" | undefined;
+    if (expectedHeadShaForPush && fixOutcome?.kind === "FIXED") {
+      workerProofResults = await runWorkerAcceptanceProofs({ worktreePath: opts.worktreePath,
+        headSha: expectedHeadShaForPush, criteria: unmet }, opts.workerProofIo);
+    }
     let landing: FixRoundLanding = { landed: false, outcome: "failed", reason: "the push did not return" };
     try {
       roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundPushBaseSha : undefined), expectedHeadShaForPush, "rung.strike");
