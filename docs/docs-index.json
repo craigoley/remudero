@@ -886,7 +886,7 @@
     {
       "path": "docs/recon/rmd-instance-registry-has-two-meanings.md",
       "title": "`RMD_INSTANCE_REGISTRY` has two meanings",
-      "summary": "Snapshot: `origin/main` at `9fac5a463b5d884f62ce927f37bb09e40ad6f59e` (2026-11-04). This is a source inventory, not proof of the environment loaded by any runn…",
+      "summary": "Snapshot: `origin/main` at `d733e7ada3e6d6a40e3867f8030a4608c2802312` (2026-11-04). This is a source inventory, not proof of the environment loaded by any runn…",
       "grepHint": "`RMD_INSTANCE_REGISTRY` has two meanings"
     },
     {
