@@ -1,6 +1,6 @@
 # `RMD_INSTANCE_REGISTRY` has two meanings
 
-**Snapshot:** `origin/main` at `b238444b32e7611e862d64e9e6fdf86eb7a890b5` (2026-11-04). This is a source inventory, not proof of the environment loaded by any running container. The deployment task must read each target container and generated unit before claiming adoption.
+**Snapshot:** `origin/main` at `9fac5a463b5d884f62ce927f37bb09e40ad6f59e` (2026-11-04). This is a source inventory, not proof of the environment loaded by any running container. The deployment task must read each target container and generated unit before claiming adoption.
 
 ## Finding
 
@@ -22,7 +22,7 @@ The source already has a useful absence distinction: an *unset* selected path is
 | `src/cli/commands/daemon.ts:651-652,2103-2107` | Runtime-presence guard and selected path (or checkout-local default). | An explicit selection without an established runtime is rejected; target resolution uses the active binding and can return missing/unqualified rather than selecting a different instance. |
 | `src/cli/commands/run-task-verb.ts:4441-4443,5093-5103,5391-5398` | Guards runtime context, captures selected intent, and passes the environment path plus `RMD_INSTANCE_NAME` into target resolution. | An explicit but unavailable selection refuses/records unknown; it does not silently choose a different registry. |
 | `src/run-task.ts:1889,28511,28539,29520,33510-33521,33602,38628,38636,42997` | CLI dispatch, pause/resume, sweep/reload and explicit-selection checks. Some reads distinguish “variable was set” from the local default. | Selected target resolution must be present in the bound registry; an explicit unresolved selection is refused. The unset case continues through the existing local/default path. |
-| `src/lib/sweep.ts:2649` | Captures the selected-registry intent and instance name for sweep/admission. | Missing/unreadable/stale selection is unknown or refused, not permission to infer another instance. |
+| `src/lib/sweep.ts:2653` | Captures the selected-registry intent and instance name for sweep/admission. | Missing/unreadable/stale selection is unknown or refused, not permission to infer another instance. |
 | `src/lib/sre-lane.ts:453` | Resolves registry path for SRE target/state-root attribution, defaulting to the checkout-local registry when unset. | If no matching row can be established, target identity is not proven; callers must keep the outcome unknown rather than attribute to another instance. |
 | `deploy/registry-shadow.sh:83-100` | Forwards the caller's variable to the shadow observer; it does not select a runtime target itself. | The observer records its own absent/unknown state; this forwarding path cannot grant selection. |
 | `src/selected-registry-shadow-main.ts:103-119` | Shadow-session capture reads the selected input and records ready, absent/legacy, or unknown. | Observation only: absent/unreadable input does not activate a target. |
@@ -32,7 +32,7 @@ The source already has a useful absence distinction: an *unset* selected path is
 
 - `src/lib/deployer.ts:2718-2719,2915` and `src/lib/serve-policy-convergence.ts:429` forward the selected path, instance, digest, and launch binding into trusted shell/container launches.
 - `deploy/install-host-units.sh:781,1148,1313` renders that value into generated relaunch code; these are part of the boundary even though the generated code reads it later.
-- `src/lib/worker.ts:3227` removes `RMD_INSTANCE_REGISTRY` from the model-worker environment. `src/lib/worker-provider.ts:2807` has an environment filter that mentions the key. Any new selected-variable prefix must receive the same privacy treatment and tests.
+- `src/lib/worker.ts:3230` removes `RMD_INSTANCE_REGISTRY` from the model-worker environment. `src/lib/worker-provider.ts:2807` has an environment filter that mentions the key. Any new selected-variable prefix must receive the same privacy treatment and tests.
 - `deploy/recycle-container.sh:1253` recognizes registry binding keys in its secret/private-output filter; update that classification for any new variable.
 
 ## Recommendation
