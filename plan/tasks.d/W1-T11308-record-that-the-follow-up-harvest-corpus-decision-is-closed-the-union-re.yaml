@@ -1,0 +1,21 @@
+- id: W1-T11308
+  title: "Record that the follow-up harvest corpus decision is closed: the union read and the rotation-carry both shipped, and ledger.ts needs no further scope"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - docs/forensics/retro.md
+  acceptance:
+    - claim: "The retro forensics page states that the follow-up harvest corpus decision is closed, because W1-T1013 shipped the ledger-union read and W1-T964 shipped the rotation-carry of the harvest steps"
+      proof: "grep: follow-up harvest corpus decision closed in docs/forensics/retro.md"
+  origin: "followup:W1-T11013-1793711457874:2026-11-03T13:15:38.191Z:0"
+  rationale: >-
+    From the 2026-11-03 follow-up on W1-T11013-1793711457874, ratified via rmd approve:
+  
+    follow-up harvest [task]: Decide between the ledger-union read and the rotation-carry fix, and
+    add `src/lib/ledger.ts` to the task's `files` if rotation is chosen. The declared file list
+    currently excludes it. — from W1-T11013 (run W1-T11013-1793711457874)

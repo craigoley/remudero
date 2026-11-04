@@ -587,6 +587,7 @@ function looksLikeNonTitleBody(body: string): boolean {
  *  looksLikeNonTitleBody}) draws a separate WARN, always, independent of `opts.proofDialect`. */
 export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const severity: LintSeverity = opts.proofDialect ?? "block";
+  const target = opts.taskRepoOwner === undefined ? undefined : { owner: opts.taskRepoOwner, repo: task.repo };
   const violations: LintViolation[] = [];
   (task.acceptance ?? []).forEach((c, i) => {
     if (c.satisfied_by) return; // Architect-only; never expected to be executable prose
@@ -612,7 +613,7 @@ export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintVio
       return;
     }
 
-    const whitelisted = parseWhitelistedProof(proof);
+    const whitelisted = parseWhitelistedProof(proof, target);
     if (whitelisted) {
       if (whitelisted.kind === "test" && whitelisted.nameFiltered && looksLikeNonTitleBody(whitelisted.label)) {
         violations.push({
@@ -637,7 +638,7 @@ export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintVio
       // W1-T3073's scope creep, not its task — test/task-linter.test.ts's near-miss case pins the
       // existing sentence.
       why =
-        explainUnitTestProofRefusal(trimmed) ??
+        explainUnitTestProofRefusal(trimmed, target) ??
         "dialect-prefixed but refused by parseWhitelistedProof (e.g. a `grep:` proof with no `in <path>` clause, " +
           "or a path attempting traversal/a glob) — not executable as written";
     } else if (NEAR_MISS_PREFIX_RE.test(trimmed)) {
@@ -3460,6 +3461,8 @@ export function unmintedTaskIdViolations(task: Task, opts: LintOpts = {}): LintV
 }
 
 export interface LintOpts {
+  /** Resolved owner of the task's repository; absent retains the parser's legacy core default. */
+  taskRepoOwner?: string;
   /** The task's resolved mount turn-budget — only needed to opt INTO budget-sanity. */
   mountMaxTurns?: number;
   /** The observed class mean, from a real Calibration row — never hardcoded. */
