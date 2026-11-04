@@ -489,3 +489,26 @@ test("W1-T10957: the owner refuses a coding outcome whose trace cannot be snapsh
     data.owner.terminal(data.slot, outcome);
   } finally { data.owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("W1-T10957: an unparseable coding response is refused before the host executor runs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-canary-coding-unparseable-"));
+  const data = fixture(root), events: string[] = []; let hostCalls = 0;
+  const base = ordinaryPorts(events, "019f5ab2-4420-4ea0-993f-470a56362e06");
+  const ports: CanaryExecutionPorts = { ...base,
+    executeCoding: registerQualifiedCodingExecutionPort(async () => {
+      hostCalls++; throw new Error("host executor must not run for an unparseable response");
+    }),
+    request: async (request, context) => {
+      const response = await base.request(request, context);
+      return { ...response, text: "this is not a coding candidate" };
+    } };
+  try {
+    assert.equal(data.owner.claim(data.slot), "claimed");
+    const outcome = await executeCanary(CODING_ITEM, data.pin, ports,
+      { maxCalls: 1, wallMs: 10_000, maxOutputBytes: 16_384 }, { corpus: data.corpus, slotId: data.slot.id });
+    assert.equal(hostCalls, 0);
+    assert.equal(outcome.codingResult?.state, "refused");
+    assert.equal(outcome.codingResult?.reason, "coding-response-invalid");
+    assert.equal(outcome.codingResult?.execution.hostStarted, "no");
+  } finally { data.owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
