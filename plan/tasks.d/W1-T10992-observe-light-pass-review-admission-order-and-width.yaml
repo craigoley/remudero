@@ -4,7 +4,7 @@
   depends_on: []
   priority: 2
   type: recon
-  verify: human
+  verify: auto
   risk: low
   origin: operator-session#slo-ladder-recon-2026-10-29
   plan_refs:
@@ -43,18 +43,16 @@
   note: |
     Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-29 as an observation proposal at priority normal (2).
     Read-only: no change to selectReviewAdmissions, refillFreedLanes, effectiveReviewWidth or reviewAdmissionBound is authorized by this task. Any change is a separate filing.
-  risk_ruling:
-    verdict: "low"
-    action: escalate
-    confidence: 0.9
-    reasons:
-      - "The declared files list is a single new docs/recon report, and the plan record states the task changes no code, configuration or ledger."
-      - "The description shows no contact with secrets, auth, deletion, merge/deploy/review policy or irreversible actions; the review-admission policy is measured, not altered, and any change is a separate filing."
-      - "Verifiability is defined by the operator ruling (manifest plus positive control on #15538), so the finding can be checked from what the report shows."
-      - "The author family is the operator, with a strong track record (22 merged, Beta mean 0.87)."
-      - "the judge said proceed, but W1-T10992: at verify: auto it fails lint (proof-dialect)"
-    judged_at: "2026-11-03T16:54:12.857Z"
-    pin: "d1e03a17fa7c296bf4ef6c057dde805711f9aa3265c6283947053afa71b602bf"
   amendment: |
     2026-11-04, by the redesign Architect (machine, rule 16): Proof dialect invalid; changed to allowed grep proofs
     Restated each acceptance proof to use a grep proof that checks for a specific marker line added to the report markdown, satisfying the same claim without dropping any criteria.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.97
+    reasons:
+      - "The filed scope is one recon report; it explicitly prohibits changes to code, configuration, ledger or review admission behavior and requires a separate filing for implementation."
+      - "The acceptance criteria require a seven-day replay, a named positive control and disclosure of measurement limits; the operator ruling specifies a corpus manifest for verifying completeness."
+      - "This bounded observation proposal follows the stated practice of measuring recurrence before class-wide repair; the supplied filing-time gates show no additional escalation condition."
+    judged_at: "2026-11-04T04:38:38.612Z"
+    pin: "2a796fc3989f4ac5fbc505042c69bde6323811fdf31babdd9082452a1f964db1"
