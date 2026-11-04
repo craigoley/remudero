@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { decodeCodingHostRequest, startCodingHostBridge, createCodingHostBridgeClient,
   bindAuthenticatedHostPeer, bindHostQualifiedBackend,
-  HOST_CODING_PROTOCOL } from "#src/lib/model-canary-host-bridge.js";
+  HOST_CODING_PROTOCOL, HOST_CODING_RESPONSE_MAX } from "#src/lib/model-canary-host-bridge.js";
 import { CanarySlotOwner, codingAttemptConsumptionBinding } from "#src/lib/model-canary-owner.js";
 
 const digest = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
@@ -223,4 +223,76 @@ test("hostCodingBridgeClientRejectsExtraResponseFieldsAndDecodesSplitUtf8", asyn
   if (accepted.state === "complete") assert.equal(accepted.stdout, "café\n");
   const closed = await runFake({}, false, true);
   assert.equal(closed.state, "closed-unavailable", "proven closure with missing metrics stays unavailable, not uncertain or passed");
+});
+
+test("host bridge client bounds replies and preserves closed unavailable candidate output", async t => {
+  const unknownExecution = { hostStarted: "unknown", closure: "unavailable", hostExecutionId: null };
+  const closedExecution = { hostStarted: "yes", closure: "proven", hostExecutionId: "rmd-coding-test.service" };
+  const candidateOutput = { candidateExitCode: 7, stdout: "partial answer\n", stderr: "candidate error\n" };
+  const closedReply = { state: "closed-unavailable", reason: "resource-readback-incomplete",
+    binding: { ...binding, codingExecutionAttemptId: "fd52e8ab-c357-40cb-98dd-4cf0a8bb5762" },
+    configured: null, observed: null, candidateOutput, execution: closedExecution };
+  const cases = [
+    { name: "oversized valid reply", oversized: true,
+      reply: { ...closedReply, candidateOutput: { ...candidateOutput, stdout: "x".repeat(2200) } },
+      expected: "uncertain", execution: unknownExecution },
+    { name: "closed partial output", oversized: false, reply: closedReply, expected: "closed-unavailable", execution: closedExecution },
+    ...[
+      { ...candidateOutput, extra: true },
+      { ...candidateOutput, candidateExitCode: 0.5 },
+      { ...candidateOutput, candidateExitCode: -1 },
+      { ...candidateOutput, candidateExitCode: 256 },
+      { ...candidateOutput, stdout: 123 },
+      { ...candidateOutput, stdout: "x".repeat(4097) },
+    ].map((output, index) => ({ name: `invalid candidate output ${index}`, oversized: false, reply: { ...closedReply, candidateOutput: output },
+      expected: "uncertain", execution: unknownExecution })),
+  ];
+  for (const scenario of cases) await t.test(scenario.name, async () => {
+    // Only the client wire parser runs: this fake peer never executes a coding candidate.
+    const root = mkdtempSync(join(tmpdir(), "rmd-coding-bridge-client-")), socketPath = join(root, "s");
+    let requests = 0;
+    const fake = createServer(socket => {
+      let body = "";
+      socket.on("data", chunk => {
+        body += chunk.toString("utf8");
+        const newline = body.indexOf("\n");
+        if (newline < 0) return;
+        const req = decodeCodingHostRequest(body.slice(0, newline));
+        requests++;
+        const reply = JSON.stringify({ version: HOST_CODING_PROTOCOL, kind: "result", requestId: req.requestId, ...scenario.reply });
+        // Escaped ASCII exceeds the wire cap while the decoded candidate output is valid.
+        const wire = scenario.oversized ? reply.replace("x".repeat(2200), "\\u0078".repeat(2200)) : reply;
+        if (scenario.oversized) assert.ok(Buffer.byteLength(wire, "utf8") > HOST_CODING_RESPONSE_MAX + 1);
+        socket.end(wire + "\n");
+      });
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        fake.once("error", reject);
+        fake.listen(socketPath, resolve);
+      });
+      const client = createCodingHostBridgeClient({ enabled: true, socketPath, timeoutMs: 3_000 })!;
+      const result = await client.execute({ binding, source, sourceDigest: digest(source), stdin: "1\n2\n3\n4\n" },
+        new AbortController().signal);
+      assert.equal(requests, 1);
+      assert.equal(result.state, scenario.expected);
+      assert.deepEqual(result.execution, scenario.execution);
+      if (result.state === "uncertain") {
+        assert.equal(result.reason, "execution-outcome-unknown");
+        assert.deepEqual(result.binding, binding, "uncertainty must stay attached to the consumed request");
+      } else {
+        assert.equal(result.state, "closed-unavailable");
+        if (result.state === "closed-unavailable") {
+          assert.equal(result.reason, "resource-readback-incomplete");
+          assert.deepEqual(result.candidateOutput, candidateOutput);
+          assert.deepEqual(result.binding, closedReply.binding);
+          assert.equal(result.configured, null);
+          assert.equal(result.observed, null, "partial candidate output cannot stand in for measured resources");
+        }
+      }
+    } finally {
+      await new Promise<void>(resolve => fake.close(() => resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

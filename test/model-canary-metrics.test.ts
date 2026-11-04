@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { canaryPassInterval, canaryStreamClock, projectCanaryRuns, canaryTrialBlockId, type CanaryAttempt, type CanaryRun } from "../src/lib/model-canary-metrics.js";
+import { canaryPassInterval, canaryStreamClock, projectCanaryRuns, canaryTrialBlockId, type CanaryAttempt, type CanaryRun } from "#src/lib/model-canary-metrics.js";
 import type { WorkerExecutionEvidenceV1 } from "#src/lib/worker-execution-evidence.js";
 const attempt = (id: string, usd: number | null = .02): CanaryAttempt => ({ id, durationMs: 20, firstTextMs: null,
   generationMs: null, inputTokens: 50, outputTokens: 10, cacheReadTokens: null, cacheWriteTokens: null,
@@ -61,6 +61,48 @@ test("canary metrics retain distinct canary and worker spawn identities through 
   const invalid = projectCanaryRuns([mismatched]).groups[0]!.executionEvidence;
   assert.equal(invalid.invalid, 1);
   assert.equal(invalid.attemptRows[0]!.workerSpawnAttemptId, workerSpawnAttemptId);
+});
+
+test("coding metrics preserve unavailable native evidence and reject corrupted identity receipts", () => {
+  const row = run("coding-run"), call = row.attempts[0]!;
+  row.family = "coding";
+  const workerSpawnAttemptId = "b2044072-86e2-4b85-b871-3735362cb492";
+  call.workerExecutionJoin = { version: "canary-worker-execution-join-v1", runId: row.id,
+    canaryAttemptId: call.id, workerSpawnAttemptId, unit: "worker-spawn", measurementScope: "returned-terminal-result" };
+  call.codingExecution = { version: "canary-coding-execution-observation-v1", canaryAttemptId: call.id,
+    workerSpawnAttemptId, codingExecutionAttemptId: "22ca9b50-8cc8-492d-bf51-f38e782f38f5",
+    hostExecutionId: "rmd-coding-test.service", sourceDigest: "b".repeat(64), fixtureDigest: "c".repeat(64),
+    state: "unavailable", reason: "resource-readback-incomplete", configured: null, observed: null, closure: "proven" };
+  const projection = projectCanaryRuns([row]).groups[0]!.codingExecution!;
+  assert.equal(projection.observed, 0);
+  assert.equal(projection.unavailable, 1);
+  assert.equal(projection.invalid, 0);
+  assert.deepEqual(projection.rows, [{ canaryAttemptId: call.id, workerSpawnAttemptId,
+    codingExecutionAttemptId: call.codingExecution.codingExecutionAttemptId,
+    hostExecutionId: "rmd-coding-test.service", sourceDigest: "b".repeat(64), fixtureDigest: "c".repeat(64),
+    state: "unavailable", reason: "resource-readback-incomplete", closure: "proven", configured: null, observedResources: null }]);
+
+  for (const change of [
+    { version: "unknown" }, { canaryAttemptId: "other-canary" }, { workerSpawnAttemptId: "not-a-uuid" },
+    { workerSpawnAttemptId: "b2044072-86e2-4b85-b871-3735362cb493" },
+    { codingExecutionAttemptId: "bad-execution" }, { fixtureDigest: "bad-digest" }, { extra: true },
+  ]) {
+    const corrupted = structuredClone(row);
+    Object.assign(corrupted.attempts[0]!.codingExecution!, change);
+    const invalid = projectCanaryRuns([corrupted]).groups[0]!.codingExecution!;
+    assert.equal(invalid.invalid, 1, JSON.stringify(change));
+    assert.equal(invalid.observed, 0);
+    assert.equal(invalid.rows[0]!.reason, "coding-execution-identity-invalid");
+    assert.equal(invalid.rows[0]!.hostExecutionId, null);
+  }
+  const incomplete = structuredClone(row);
+  Reflect.deleteProperty(incomplete.attempts[0]!.codingExecution!, "configured");
+  assert.equal(projectCanaryRuns([incomplete]).groups[0]!.codingExecution!.rows[0]!.reason,
+    "coding-execution-identity-invalid");
+  const unqualified = structuredClone(row);
+  unqualified.attempts[0]!.codingExecution!.state = "scored";
+  assert.equal(projectCanaryRuns([unqualified]).groups[0]!.codingExecution!.rows[0]!.reason,
+    "coding-execution-score-unqualified", "missing resources cannot become a scored observation");
 });
 
 test("canary projection refuses case block corruption and reused durable slot identities", () => {

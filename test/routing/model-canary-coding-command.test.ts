@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { canaryCommand, executeOwnedCodingCanarySchedule } from "#src/lib/model-canary-command.js";
 import { codingAttemptConsumptionBinding, CanarySlotOwner } from "#src/lib/model-canary-owner.js";
 import { bindCodingExecutionAuthority, executeCodingCandidate, parseCodingCandidate,
+  refuseCodingBeforeHost, scoreCodingControl, syntheticCodingFixture,
   type CodingConfiguredBounds, type CodingRunnerResult } from "#src/lib/model-canary-coding.js";
 import { registerQualifiedCodingExecutionPort } from "#src/lib/model-canary-coding-port-capability.js";
 import { buildCanarySchedule } from "#src/lib/model-canary-schedule.js";
@@ -19,6 +20,7 @@ import { codingLedgerSave } from "#src/lib/model-canary-ledger.js";
 import { executeCanary, type CanaryExecutionPorts } from "#src/lib/model-canary-runner.js";
 import type { CanaryRun } from "#src/lib/model-canary-metrics.js";
 import { codingProviderRequestState } from "#src/lib/model-canary-coding-capabilities.js";
+import { resolveProducerIdentity } from "#src/lib/producer-identity.js";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const CODING_ITEM = commonCanarySuite().find(item => item.family === "coding")!;
@@ -160,6 +162,23 @@ test("W1-T10957: complete coding tool denial is preserved while coding grade rem
     assert.equal(row?.passed, null);
     assert.equal(row?.observed_resources, null);
   } finally { data.owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("coding ledger producer resolves to its declared identity", () => {
+  const codingResult = refuseCodingBeforeHost("native-backend-unavailable");
+  const codingGrade = scoreCodingControl(syntheticCodingFixture("ledger-identity-control"), codingResult);
+  const run: CanaryRun = { id: "ledger-identity-control", caseId: CODING_ITEM.id,
+    suiteHash: canarySuiteDigest([CODING_ITEM]), model: "unit-control-model", route: "subscription",
+    effort: "low", family: "coding", verified: null, totalDurationMs: null, attempts: [] };
+  const rows: Record<string, unknown>[] = [];
+  codingLedgerSave("unused-unit-ledger", { run, trace: [], codingResult, codingGrade },
+    (_path, row) => { rows.push(row); });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.task_id, "MODEL-CANARY-CODING");
+  assert.equal(rows[0]!.step, "model_canary.coding_execution");
+  const sender = rows[0]!.task_id;
+  if (typeof sender !== "string") assert.fail("coding ledger sender must be declared");
+  assert.deepEqual(resolveProducerIdentity(sender), { id: "model-canary-coding", displayName: "Model Canary Coding" });
 });
 
 test("W1-T10957: unresolved coding provider request leaves the real owner started and skips ledger append", async () => {

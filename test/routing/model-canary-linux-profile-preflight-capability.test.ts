@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createHash } from "node:crypto";
 import { issueLinuxCodingProfilePreflight, readLinuxCodingProfilePreflight,
   type LinuxCodingProfilePreflightV1 } from "#src/lib/model-canary-linux-profile-preflight-capabilities.js";
+import { probeNativeLinuxCodingProfile } from "#src/lib/model-canary-systemd-bwrap-backend.js";
 
 const hash = "a".repeat(64);
 
@@ -55,4 +57,32 @@ test("W1-T10957: native preflight capability accepts the producer schema and rej
     bounds: { ...preflight.bounds, memoryMaxBytes: preflight.bounds.memoryMaxBytes + 1 },
   }), /linux-profile-preflight-invalid/);
   assert.equal(readLinuxCodingProfilePreflight({ kind: "linux-coding-profile-preflight-capability-v1" }), null);
+});
+
+test("native profile probe refuses forged capabilities and mismatched canonical host digests", async () => {
+  assert.deepEqual(await probeNativeLinuxCodingProfile({ kind: "linux-coding-profile-preflight-capability-v1" }),
+    { state: "unavailable", phase: "preflight", reason: "linux-profile-preflight-capability-invalid" });
+
+  const preflight = validPreflight();
+  preflight.hostIdentity.uid = process.getuid!();
+  preflight.hostIdentity.userManagerControlGroup = `/user.slice/user-${preflight.hostIdentity.uid}.slice/user@${preflight.hostIdentity.uid}.service`;
+  const mismatched = await probeNativeLinuxCodingProfile(issueLinuxCodingProfilePreflight(preflight));
+  assert.equal(mismatched.state, "unavailable");
+  if (mismatched.state !== "unavailable") assert.fail("a mismatched host digest must refuse the probe");
+  assert.equal(mismatched.phase, "controls");
+  assert.equal(mismatched.reason, "linux-profile-host-digest-invalid");
+  assert.deepEqual(mismatched.diagnostic?.controls, []);
+  assert.deepEqual(mismatched.diagnostic?.heldUnitIds, []);
+
+  // This independently serialized flat identity includes both controller arrays.
+  const canonicalHost = JSON.stringify(preflight.hostIdentity, Object.keys(preflight.hostIdentity).sort());
+  preflight.hostIdentityDigest = createHash("sha256").update(canonicalHost).digest("hex");
+  const matched = await probeNativeLinuxCodingProfile(issueLinuxCodingProfilePreflight(preflight));
+  assert.equal(matched.state, "unavailable");
+  if (matched.state !== "unavailable") assert.fail("synthetic binary digests cannot qualify a host");
+  assert.equal(matched.phase, "controls");
+  assert.equal(matched.reason, "linux-profile-binary-or-runtime-validation-failed",
+    "a matching canonical host digest must reach binary validation without starting controls");
+  assert.deepEqual(matched.diagnostic?.controls, []);
+  assert.deepEqual(matched.diagnostic?.heldUnitIds, []);
 });
