@@ -12,6 +12,7 @@
   plan_refs: [W1-T3835, W1-T4423, W1-T11225, W1-T9545, W1-T10621, W1-T913, W1-T228]
   files:
     - src/lib/review.ts
+    - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
     - test/plan-only-review-runs-lint-plan.test.ts
   status: queued
   attempts: 0
