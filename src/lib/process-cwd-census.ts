@@ -125,6 +125,7 @@ export function readBoundedProcessCwdCensus(
         try {
           status = readStatus(entry);
         } catch (statusError) {
+          // Not erased: an exited pid is skipped as ENOENT is above; any other failure names the pid and errno.
           if (errnoOf(statusError) === "ENOENT") continue;
           return unreadable({ pid: Number(entry), errno, uid: "unreadable" });
         }
@@ -152,6 +153,7 @@ export function readBoundedProcessCwdCensus(
             decided = { kind: "readable", pid: parent, cwd: readCwd(String(parent)) };
             break;
           } catch (ancestorError) {
+            // Not erased: EACCES/EPERM walk on to the next ancestor; every other errno fails closed with its cause.
             const ancestorErrno = errnoOf(ancestorError);
             if (ancestorErrno === "ENOENT") return unreadable({ pid: Number(entry), errno, uid: "same", walk: "ancestor_exited" });
             if (ancestorErrno !== "EACCES" && ancestorErrno !== "EPERM") {
@@ -163,6 +165,7 @@ export function readBoundedProcessCwdCensus(
           try {
             parentStatus = readStatus(String(parent));
           } catch (parentStatusError) {
+            // Not erased: an ancestor whose PPid cannot be read fails closed and names that errno.
             return unreadable({ pid: Number(entry), errno: errnoOf(parentStatusError), uid: "same", walk: "ppid_unreadable" });
           }
           parent = statusField(parentStatus, "PPid");
