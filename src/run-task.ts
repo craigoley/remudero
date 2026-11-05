@@ -2996,6 +2996,7 @@ export function buildEscalationTriageRuntime(
 ): ((deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings) & { refresh(ledgerPath: string): Promise<void> } {
   const { root, config, owner, repo } = context;
   let pass: ReturnType<typeof newTriagePass> | undefined;
+  let reportedBytes = 0, reportedRotations = 0;
   const evidenceHistory = io.evidenceHistory ?? createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE });
   const readRows = io.readRows ?? ((path) => {
     const read = evidenceHistory.current(dirname(path));
@@ -3027,7 +3028,10 @@ export function buildEscalationTriageRuntime(
     if (!id || e.taskId !== `TRIAGE-${id}`) throw new Error("feedback referent is unreadable");
     return id;
   };
-  const refresh = async (ledgerPath: string): Promise<void> => void (await evidenceHistory(dirname(ledgerPath)));
+  const refresh = async (ledgerPath: string): Promise<void> => {
+    reportedBytes = 0; reportedRotations = 0;
+    await evidenceHistory(dirname(ledgerPath));
+  };
   return Object.assign((deps: EscalateDeps<AsyncIssueGateway>): EscalateTriageSettings => {
     const policy = parseEscalationTriagePolicy((io.readPolicy ?? (() => readEscalationTriagePolicySource(root)))());
     pass ??= newTriagePass(policy.maxAutoResolvesPerPass);
@@ -3035,7 +3039,21 @@ export function buildEscalationTriageRuntime(
     return {
       mode: policy.mode, pass, asyncExecutors: true,
       evidence: (e) => {
-        const history = readRows(deps.ledgerPath);
+        let history: Record<string, unknown>[];
+        try {
+          history = readRows(deps.ledgerPath);
+        } finally {
+          if (!io.readRows) {
+            const cost = evidenceHistory.lastLoad();
+            appendSliceReadRow(deps.ledgerPath, deps.runId, "escalation_triage.evidence_read", {
+              evidence_bytes_read: cost.bytesRead - reportedBytes,
+              evidence_rotations_read: cost.rotationsRead - reportedRotations,
+              evidence_snapshot_hit: cost.snapshotHit,
+              ...(cost.snapshotError ? { evidence_snapshot_error: cost.snapshotError } : {}),
+            });
+            reportedBytes = cost.bytesRead; reportedRotations = cost.rotationsRead;
+          }
+        }
         const strike = [...history].reverse().find((row) => row.step === "fix.dispatch" && row.task_id === e.taskId &&
           row.head_sha === e.headSha && row.kind !== "proof_amendment");
         const previousCause = strike?.mode === "ci-log" ? "ci" : strike?.mode === "merge-conflict" ? "conflict" :
