@@ -128,3 +128,16 @@ test("native field reader treats a broken git marker symlink as a private checko
     assert.deepEqual(result, { state: "unavailable", reason: "native-field-inside-git" });
   } finally { rmSync(parent, { recursive: true, force: true }); }
 });
+
+test("native field reader accepts a private snapshot above 8 MiB within the bounded limit", () => {
+  const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-field-large-snapshot-`));
+  try {
+    chmodSync(directory, 0o700);
+    const snapshot = JSON.stringify({ version: "field-trials-flow-v1", asOf: "2026-10-10T00:00:00.000Z",
+      state: "observed", observational: true, causalClaims: "none", servedTrialCohorts: [],
+      padding: "x".repeat(9 * 1024 * 1024) });
+    assert.ok(Buffer.byteLength(snapshot) > 8 * 1024 * 1024);
+    writeFileSync(join(directory, "field-trials-flow-v1.json"), snapshot, { mode: 0o600 });
+    assert.equal(createNativeFieldEvidenceReader(directory)().state, "available");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});

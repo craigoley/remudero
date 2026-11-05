@@ -16,7 +16,8 @@ export interface NativeFieldEvidenceV1 {
 }
 export type NativeFieldEvidenceResultV1 = { state: "available"; evidence: NativeFieldEvidenceV1 }
   | { state: "unavailable"; reason: string };
-const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024, MAX_CANDIDATES = 128;
+// Bound snapshots at 32 MiB: the current native flow snapshot is about 14 MiB, with growth headroom.
+const MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024, MAX_CANDIDATES = 128;
 const nativeFieldSha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 const nativeFieldRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
