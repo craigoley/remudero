@@ -39,5 +39,5 @@
     - changing telemetry decisions or spawn admission;
     - weakening or rewriting W1-T11268's acceptance criteria.
   note: |
-    reservation hand-off: run-unfiled-1793884960326 -> run-unfiled-1793884960326
+    reservation hand-off: run-unfiled-1793884960326 -> plan-file-1793889110830
     Reserved with rmd next-task-id on the operator's unfiled worktree after PR #16817's merged code failed the reviewer's production-ghExecFile bundle probe.
