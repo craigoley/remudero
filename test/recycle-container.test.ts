@@ -361,6 +361,13 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers: gene
   assert.equal(createHash("sha256").update(readFileSync(f.session)).digest("hex"), pin);
 });
 
+/** A 64 GiB fixture host: every fleet floor fits its shared budget, so the policy records no overcommit. */
+function recycleFixtureMeminfo(dir: string): string {
+  const path = join(dir, "meminfo");
+  writeFileSync(path, "MemTotal:       67108864 kB\n");
+  return path;
+}
+
 function runRecycle(mode: string, opts: RunOpts = {}): Run {
   if (opts.scriptPath && dirname(opts.scriptPath) !== dirname(SCRIPT)) cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(opts.scriptPath), "acr-login.sh"));
   const dir = mkdtempSync(join(tmpdir(), "recycle-stub-"));
@@ -429,6 +436,10 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
         // this suite's own environment, not about the script under test. The dedicated guard test below
         // overrides this deliberately to point at a real file.
         RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-container-test-no-such-dockerenv-marker"),
+        // W1-T11130: the memory policy reads the host's MemTotal. Pinned to a roomy fixture host so a
+        // recycle here never depends on the runner's real RAM: on Linux an overcommitted runner made the
+        // policy append host.memory_max.overcommitted into this ledger (the Mac has no /proc/meminfo).
+        RMD_MEMINFO_PATH: recycleFixtureMeminfo(dir),
         ...opts.extraEnv,
         ...(opts.unsetDockerHost ? { DOCKER_HOST: undefined } : {}),
         ...(opts.unselectedRegistry ? { RMD_INSTANCE_REGISTRY: undefined, RMD_INSTANCE_REGISTRY_DIGEST: undefined,
