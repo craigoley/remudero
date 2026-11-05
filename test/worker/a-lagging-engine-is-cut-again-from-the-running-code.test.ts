@@ -11,7 +11,7 @@ import { after, test } from "node:test";
 
 import type { StoreBuildResult } from "#src/lib/child-entry-store.js";
 import { refreshEngineFromCodeTree, type EngineGit } from "#src/lib/engine-tree.js";
-import { refreshEngineWhen, startRunChildProbe, type RunChildProbeInput } from "#src/lib/run-child.js";
+import { refreshEngineWhen, spawnRunChild, startRunChildProbe, type RunChildProbeInput, type SpawnRunChildInput } from "#src/lib/run-child.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
@@ -132,4 +132,25 @@ test("in a daemon-owned process the default refresh reads this checkout's own re
   assert.ok(asked instanceof Promise, "a daemon-owned process starts the refresh");
   await asked;
   assert.deepEqual(rows, [], "the engine already holds the running code's revision: nothing is filled or cut");
+});
+
+async function spawnAsks(engineSha: string): Promise<{ engineSha: string | null; mainSha: string }[]> {
+  const state = engineFixture(engineSha);
+  const asked: { engineSha: string | null; mainSha: string }[] = [];
+  const input = {
+    taskId: "W1-T1", stateRoot: state, repoDir: "/repo", root: state, plan: async () => { throw new Error("unused"); },
+    options: {} as SpawnRunChildInput["options"], log: () => {},
+  } as SpawnRunChildInput;
+  await spawnRunChild(input, {
+    mainSha: async () => MAIN,
+    engine: { isCurrent: () => true, git: async () => "" },
+    refreshEngine: (_input, lag) => { asked.push(lag); return undefined; },
+    launch: () => { throw new Error("stop after the engine is chosen"); },
+  }).catch(() => undefined);
+  return asked;
+}
+
+test("a run child spawned on an engine behind main asks for a current engine; one at main does not", TIMEOUT, async () => {
+  assert.deepEqual(await spawnAsks(ENGINE), [{ engineSha: ENGINE, mainSha: MAIN }]);
+  assert.deepEqual(await spawnAsks(MAIN), []);
 });
