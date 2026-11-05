@@ -1,6 +1,6 @@
 # `RMD_INSTANCE_REGISTRY` has two meanings
 
-**Snapshot:** `origin/main` at `9280e48b616f1c1dd61f738f00c29d8fad1e8ea6` (2026-11-04). This is a source inventory, not proof of the environment loaded by any running container. The deployment task must read each target container and generated unit before claiming adoption.
+**Snapshot:** `origin/main` at `cf18cab6dffc3d979228510c323fa85e043a8576` (2026-11-04). This is a source inventory, not proof of the environment loaded by any running container. The deployment task must read each target container and generated unit before claiming adoption.
 
 ## Finding
 
@@ -21,8 +21,8 @@ The source already has a useful absence distinction: an *unset* selected path is
 | `src/lib/instance-registry-selection.ts:17,303-320,329-333,348-355` | Active selected path, with optional digest and physical file binding. | Unset input returns `legacy`. Explicit missing/unreadable/malformed/changed bytes remain `unknown` or `refused`; runtime launch packets require one live matching row and reject a missing or mismatched target. No legacy fallback after an explicit selection fails. |
 | `src/cli/commands/daemon.ts:651-652,2103-2107` | Runtime-presence guard and selected path (or checkout-local default). | An explicit selection without an established runtime is rejected; target resolution uses the active binding and can return missing/unqualified rather than selecting a different instance. |
 | `src/cli/commands/run-task-verb.ts:4441-4443,5093-5103,5391-5398` | Guards runtime context, captures selected intent, and passes the environment path plus `RMD_INSTANCE_NAME` into target resolution. | An explicit but unavailable selection refuses/records unknown; it does not silently choose a different registry. |
-| `src/run-task.ts:1889,28523,28551,29532,33522-33533,33614,38640,38648,43009` | CLI dispatch, pause/resume, sweep/reload and explicit-selection checks. Some reads distinguish “variable was set” from the local default. | Selected target resolution must be present in the bound registry; an explicit unresolved selection is refused. The unset case continues through the existing local/default path. |
-| `src/lib/sweep.ts:2653` | Captures the selected-registry intent and instance name for sweep/admission. | Missing/unreadable/stale selection is unknown or refused, not permission to infer another instance. |
+| `src/run-task.ts:1889,28541,28569,29550,33540-33551,33632,38658,38666,43027` | CLI dispatch, pause/resume, sweep/reload and explicit-selection checks. Some reads distinguish “variable was set” from the local default. | Selected target resolution must be present in the bound registry; an explicit unresolved selection is refused. The unset case continues through the existing local/default path. |
+| `src/lib/sweep.ts:2655` | Captures the selected-registry intent and instance name for sweep/admission. | Missing/unreadable/stale selection is unknown or refused, not permission to infer another instance. |
 | `src/lib/sre-lane.ts:453` | Resolves registry path for SRE target/state-root attribution, defaulting to the checkout-local registry when unset. | If no matching row can be established, target identity is not proven; callers must keep the outcome unknown rather than attribute to another instance. |
 | `deploy/registry-shadow.sh:83-100` | Forwards the caller's variable to the shadow observer; it does not select a runtime target itself. | The observer records its own absent/unknown state; this forwarding path cannot grant selection. |
 | `src/selected-registry-shadow-main.ts:103-119` | Shadow-session capture reads the selected input and records ready, absent/legacy, or unknown. | Observation only: absent/unreadable input does not activate a target. |
