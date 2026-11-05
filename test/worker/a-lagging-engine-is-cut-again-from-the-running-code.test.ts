@@ -15,7 +15,7 @@ import { refreshEngineWhen, spawnRunChild, startRunChildProbe, type RunChildProb
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
-const MAIN = "m".repeat(40);
+const MAIN = "d".repeat(40);
 const ENGINE = "e".repeat(40);
 const CODE = "c".repeat(40);
 const HASH = "a".repeat(64);
@@ -99,13 +99,15 @@ const probeInput = (state: string): RunChildProbeInput => ({
 async function probeAsks(engineSha: string): Promise<{ engineSha: string | null; mainSha: string }[]> {
   const state = engineFixture(engineSha);
   const asked: { engineSha: string | null; mainSha: string }[] = [];
+  let launched = 0;
   await startRunChildProbe(probeInput(state), {
     readMode: () => "shadow",
     mainSha: async () => MAIN,
     engine: { isCurrent: () => true, git: async () => "" },
     refreshEngine: (_input, lag) => { asked.push(lag); return undefined; },
-    launch: () => { throw new Error("stop after the engine is chosen"); },
+    launch: () => { launched++; throw new Error("stop after the engine is chosen"); },
   });
+  assert.equal(launched, 1, "control: the probe chose the fixture engine and reached its launch");
   return asked;
 }
 
@@ -137,6 +139,7 @@ test("in a daemon-owned process the default refresh reads this checkout's own re
 async function spawnAsks(engineSha: string): Promise<{ engineSha: string | null; mainSha: string }[]> {
   const state = engineFixture(engineSha);
   const asked: { engineSha: string | null; mainSha: string }[] = [];
+  let launched = 0;
   const input = {
     taskId: "W1-T1", stateRoot: state, repoDir: "/repo", root: state, plan: async () => { throw new Error("unused"); },
     options: {} as SpawnRunChildInput["options"], log: () => {},
@@ -145,8 +148,9 @@ async function spawnAsks(engineSha: string): Promise<{ engineSha: string | null;
     mainSha: async () => MAIN,
     engine: { isCurrent: () => true, git: async () => "" },
     refreshEngine: (_input, lag) => { asked.push(lag); return undefined; },
-    launch: () => { throw new Error("stop after the engine is chosen"); },
+    launch: () => { launched++; throw new Error("stop after the engine is chosen"); },
   }).catch(() => undefined);
+  assert.equal(launched, 1, "control: the spawn chose the fixture engine and reached its launch");
   return asked;
 }
 
