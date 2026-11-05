@@ -11,6 +11,7 @@
   plan_refs: [W1-T7998, W1-T6355, W1-T7719, W1-T9682]
   files:
     - src/run-task.ts
+    - src/lib/process-cwd-census.ts
     - test/ci/a-foreign-pid-whose-cwd-is-unreadable-does-not-hold-a-dead-fix-worktree.test.ts
   status: queued
   priority: 2
@@ -82,3 +83,10 @@
     from 11-05 14:35Z, with none in flight, all container cwds read cleanly. Design point 6 and the third claim cover it.
     Proof form modernised in the same amendment (claims unchanged): the title-form `unit test:` proofs no longer lint for an
     unbuilt task, so criterion 1 names the declared test file and criteria 2-3 grep their criterion markers in it.
+    Scope amended 2026-11-05 (operator session, approved): src/lib/process-cwd-census.ts joins files. The declared test must
+    exercise readBoundedProcessCwdCensus, which lives in src/run-task.ts, but test/the-affected-suite-reach-ratchet.test.ts
+    refuses any new suite importing src/run-task.ts directly (importerCount may only shrink against
+    scripts/affected-reach-baseline.json). The census (ProcessCwdCensus, ProcessCwdCensusDeps, readBoundedProcessCwdCensus,
+    pathIsAtOrBelow and its two bound constants) therefore moves into src/lib/process-cwd-census.ts; src/run-task.ts imports
+    and re-exports it, so the existing importer test/fix-branch-checkout-serialization.test.ts is untouched, and the new test
+    imports the smaller module. This moves logic into a smaller module, it does not route around the ratchet.
