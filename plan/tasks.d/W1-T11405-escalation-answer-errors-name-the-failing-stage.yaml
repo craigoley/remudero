@@ -1,0 +1,114 @@
+- id: W1-T11405
+  title: "An unexpected throw inside readEscalationAnswers reaches the existing escalation_answers.error row naming its failing stage from a finite code-owned vocabulary, so a recurring stack overflow stops being stage-less, with no change to what the reader accepts, counts, writes or retries"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium  # one reader, but its wrapper encloses answer acceptance; a wrapper that swallowed or relabelled a deliberate read boundary would hide real answers
+  origin: architect
+  plan_refs: [W1-T4471, W1-T4676, W1-T6407, W1-T8511, W1-T11262]
+  files:
+    - src/lib/escalation-answers.ts
+    - test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    THE GAP. The complete ledger union holds 56 deduplicated rows, all step escalation_answers.error and all
+    with the exact message "Maximum call stack size exceeded", across 44 daemon runs from
+    2026-11-04 06:28:51Z to 2026-11-05 12:29:32Z. The count covers 392 gzip archives and the live ledger.
+    src/cli/commands/sweep.ts catches the whole readEscalationAnswers call and records only the error message,
+    and a stack overflow's message names no location, so nothing says which part of the reader failed.
+    The underlying root cause remains UNKNOWN. This task names the stage. It does not repair the cause.
+
+    Settled by lookup: is this already filed or decided? -> No. A grep of MASTER-PLAN.md, LEARNINGS.md, DECISIONS.md, plan/tasks.yaml and plan/tasks.d for escalation_answers.error, the stack overflow message and the failing-stage phrase finds no task; the initiative's own sweep of current main and all 9 open PR heads found none either, with W1-T11119 as the positive control on each head.
+    Settled by lookup: can the two declared files reach the row? -> Yes. sweep.ts logs String((e as Error)?.message ?? e) into the error field, so a thrown message carrying the stage reaches the current row with no sweep.ts change (src/cli/commands/sweep.ts, the escalation_answers prelude stage).
+    Settled by lookup: what is the exact test placement? -> test/dispatch, by the initiative's placement result for src/lib/escalation-answers.ts on current main.
+    Settled by lookup: does the two-file scope pass Rule 19 sizing? -> Yes. The shard slug equals the test's module id, so the W1-T2525 own-falsifier discount leaves one concern (subsystemsOf, src/lib/task-linter.ts).
+    Settled by lookup: does an existing test pin the raw thrown message? -> No. The W1-T4471 sweep test at test/an-operator-reply-reaches-the-fix-rung.test.ts asserts only that the error row exists and the unreadable row does not, and both stay true (a null comment now reads as stage answer_parse).
+    Settled by lookup: which throws are deliberate and stay as they are? -> The inner catches around listOpen, listComments, listReactions, both best-effort acknowledgement reactions, the torn question-store line, applyGrilledFeedbackAnswer's try and raiseRefusalAlarms' try (src/lib/escalation-answers.ts). All sit inside or before the new boundary and never reach it.
+    Settled by lookup: does the task need a dependency or an overlap wait? -> No. The initiative confirms every declared overlap on src/lib/escalation-answers.ts is merged with exact trailers and matching run branches, and no open PR head changes either declared file.
+    Settled by lookup: what priority keeps W1-T11119 ahead? -> 2, the initiative's stated value, kept so the W11119 model matrix stays ahead (plan/tasks.d/W1-T11119-controlled-canaries-compare-clustered-evidence-with-field-trials.yaml).
+  design: |
+    All code goes in src/lib/escalation-answers.ts. Keep readEscalationAnswers' signature, its result shape and
+    its rejection: an unexpected throw still rejects, and the caller still writes its row.
+
+    1. VOCABULARY. Export a const tuple ESCALATION_ANSWER_STAGES holding exactly:
+       refusal_history_read (the awaited reader call), refusal_history_fold (copying and scanning the returned
+       rows), recorded_origins, answer_parse (everything in the per-issue and per-comment/reaction walk outside
+       landing), answer_landing (landAnswer), feedback (the deps.feedback block), refusal_alarm
+       (raiseRefusalAlarms). A TypeScript union derived from the tuple types the cursor, so a stage outside the
+       vocabulary does not compile. Stage text never comes from data.
+
+    2. BOUNDARY. Keep the listOpen try/catch exactly as it is, before the boundary. Enclose everything after it
+       in one try/catch with a local mutable stage cursor, set before each section and set back to answer_parse
+       after each landing. The reader's steps run one at a time, so a local cursor is enough. The catch throws one new
+       Error and never retries, resumes, counts or writes.
+
+    3. MESSAGE. The new Error's message is exactly
+       "escalation answers failed at stage <stage>: <class>". <class> is decided only by code:
+       the literal Maximum call stack size exceeded when the throw is a RangeError with that exact message;
+       otherwise RangeError, TypeError, SyntaxError or Error by instanceof; otherwise non-Error. Read no other
+       property of the thrown value: not its other message text, name, stack, code or cause. Do not attach
+       the original as cause and add no message truncation, because no unowned text enters the message.
+
+    4. TESTS go in test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts and write first, red,
+       against the current reader. Each drives an injected fault with no network, using a temp root:
+       - refusal_history_read: deps.history rejects, with a set gateway.refusalIssues.
+       - refusal_history_fold: deps.history resolves ok with a rows value whose iterator throws.
+       - recorded_origins: plan/questions.ndjson is a directory.
+       - answer_parse: an accepted comment whose body getter throws.
+       - answer_landing: deps.writeLedger throws on step panel.question_answered.
+       - feedback: deps.writeLedger throws on the escalation_answer.feedback_ row written after
+         applyGrilledFeedbackAnswer returns, on a TRIAGE-<id> issue.
+       - refusal_alarm: seeded refused history reaches the threshold and deps.writeLedger throws on step
+         escalation_answer.refusal_alarm.
+       The stack overflow case uses a real recursive overflow at each of refusal_history_read and
+       refusal_history_fold. The disclosure case throws messages built from answer text, issue body text, a raw
+       JSON response, a credential-shaped string and a 100,000-character string, plus a non-Error object, and
+       asserts the whole message equals the expected constant string. One test goes through buildSweepHook
+       (the runSweepWith shape in test/an-operator-reply-reaches-the-fix-rung.test.ts) so the assertion lands on
+       the real escalation_answers.error row, and the unreadable row stays absent.
+
+    NOT IN SCOPE, AND NEVER DONE BY THIS TASK OR ITS BUILD:
+    - repairing, guessing at or working around the recursive cause;
+    - src/cli/commands/sweep.ts, any new row, field or ledger step;
+    - any human authority or config change, including operatorGithubLogins (the repository operator already
+      authorized cao825 there);
+    - posting a comment, running the reader against a real repository, or any provider or model call;
+    - spend, routing changes, or dispatching any matrix task.
+  acceptance:
+    - claim: "a throw at each of the refusal history read, refusal history fold, recorded-origin read, answer parse, answer landing, feedback handling and refusal alarm stages rejects with a message naming exactly that stage"
+      proof: "unit test: test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts"
+    - claim: "a real Maximum call stack size exceeded overflow keeps that exact phrase and gains its stage, and the row from the real sweep caller stays step escalation_answers.error with no escalation_answers.unreadable row"
+      proof: "unit test: test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts"
+    - claim: "answer text, issue body text, a raw response, a credential-shaped string, a stack and a 100,000-character message never enter the row, whose text comes wholly from the code-owned stage and class vocabularies"
+      proof: "unit test: test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts"
+    - claim: "listOpen, listComments and listReactions read failures still resolve with their existing unreadable counts, and the feedback_unreadable and refusal_alarm_unreadable rows are still written with no error thrown"
+      proof: "unit test: test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts"
+    - claim: "a pass with no fault returns the same counts, issue writes, answers and ledger rows, a second pass lands no duplicate answer, and a stage failure rejects once with no retry of any gateway or store call"
+      proof: "unit test: test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts"
+    - claim: "the stage vocabulary is one exported finite constant"
+      proof: "grep: ESCALATION_ANSWER_STAGES in src/lib/escalation-answers.ts"
+    - claim: "the reader throws the one code-owned message shape"
+      proof: "grep: escalation answers failed at stage in src/lib/escalation-answers.ts"
+  falsifier: |
+    Delete the fix: remove the boundary and let the original throw through. The stage tests redden, because
+    readEscalationAnswers rejects with the raw message and the real sweep row reads the generic stage-less
+    Maximum call stack size exceeded again, exactly what the 56 ledger rows show.
+    Interpolate the original message into the new one and the disclosure case reddens on the first injected
+    secret-shaped string. Convert the rejection into a counted unreadable and the sweep test reddens on the
+    unexpected escalation_answers.unreadable row. Move the listOpen catch inside the boundary, or remove an inner
+    catch, and the preservation claim reddens. Leave one cursor assignment out and that stage's test reddens
+    on the neighbouring stage name.
+  note: |
+    verify:auto: every stage is reached by an injected fault over a temp root and a fake gateway, so nothing
+    needs a live repository, GitHub or a provider.
+    risk:medium: a single concern in one reader, but the boundary encloses answer acceptance.
+    No depends_on, and priority 2 is deliberate so the W11119 model matrix stays ahead.
+    The stage split between refusal_history_read and refusal_history_fold is deliberate. Line 618 spreads the
+    returned rows into history.push, and JavaScript engines raise this same RangeError message when a spread
+    passes the argument limit. That is an UNVERIFIED candidate only, not a finding: nothing here measured the row count,
+    and the cause stays UNKNOWN. The split exists so the next row can rule it in or out, and this task must not
+    change that line.
