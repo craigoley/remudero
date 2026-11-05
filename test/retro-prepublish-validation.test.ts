@@ -150,7 +150,7 @@ test("retro prepublish runs the dynamically enumerated plan-reading suites throu
       remotePrExisted: false,
       repair: async () => assert.fail("a passing preflight must not resume the Architect"),
       regenerateHarnessArtifacts: async () => assert.fail("a passing preflight must not regenerate twice"),
-      log: (step, extra) => rows.push({ step, extra }),
+      log: (step, extra) => { if (step !== "retro.preflight_started") rows.push({ step, extra }); },
       deps: {
         run,
         now: (() => { let now = 1_000; return () => (now += 25); })(),
@@ -248,7 +248,7 @@ test("the first failure resumes once with bounded fenced evidence, regenerates, 
     remotePrExisted: true,
     repair: async (prompt) => { repairPrompt = prompt; },
     regenerateHarnessArtifacts: async () => { regenerations += 1; },
-    log: (step, extra) => rows.push({ step, extra }),
+    log: (step, extra) => { if (step !== "retro.preflight_started") rows.push({ step, extra }); },
     deps: { run },
   });
 
@@ -287,7 +287,7 @@ test("a second failure is terminal and emits two compact attempt rows", async ()
     remotePrExisted: false,
     repair: async () => { repairs += 1; },
     regenerateHarnessArtifacts: async () => { regenerations += 1; },
-    log: (step, extra) => rows.push({ step, extra }),
+    log: (step, extra) => { if (step !== "retro.preflight_started") rows.push({ step, extra }); },
     deps: { run },
   });
 
@@ -316,7 +316,7 @@ test("suite enumeration failure fails closed without inventing an empty passing 
     remotePrExisted: false,
     repair: async () => { repairs += 1; },
     regenerateHarnessArtifacts: async () => {},
-    log: (step, extra) => rows.push({ step, extra }),
+    log: (step, extra) => { if (step !== "retro.preflight_started") rows.push({ step, extra }); },
     deps: { run },
   });
 
@@ -344,7 +344,7 @@ test("an output ceiling breach is classified distinctly from a spawn failure", a
     remotePrExisted: false,
     repair: async () => {},
     regenerateHarnessArtifacts: async () => {},
-    log: (step, extra) => rows.push({ step, extra }),
+    log: (step, extra) => { if (step !== "retro.preflight_started") rows.push({ step, extra }); },
     deps: { run },
   });
 
@@ -364,7 +364,7 @@ test("a failed repair is terminal and records a compact synthetic second attempt
     remotePrExisted: false,
     repair: async () => { throw new Error("repair worker unavailable"); },
     regenerateHarnessArtifacts: async () => assert.fail("regeneration must wait for a successful repair"),
-    log: (step, extra) => rows.push({ step, extra }),
+    log: (step, extra) => { if (step !== "retro.preflight_started") rows.push({ step, extra }); },
     deps: { run },
   });
 
@@ -385,7 +385,7 @@ test("a failed harness regeneration is terminal after a successful repair", asyn
     remotePrExisted: false,
     repair: async () => {},
     regenerateHarnessArtifacts: async () => { throw "generator unavailable"; },
-    log: (step, extra) => rows.push({ step, extra }),
+    log: (step, extra) => { if (step !== "retro.preflight_started") rows.push({ step, extra }); },
     deps: { run },
   });
 
