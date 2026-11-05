@@ -9,6 +9,7 @@ import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
@@ -16,10 +17,9 @@ import { systemClock } from "./clock.js";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
 import { type EnginePinOptions, type EngineRef, type EngineRefreshLag, listEngines, newestCurrentEngine, type NewestEngineOptions, pinEngineForRun, refreshEngineFromCodeTree } from "./engine-tree.js";
 import { childEntryStoreRoot } from "./child-entry-store.js";
-import { repoRoot } from "./repo-location.js";
 import { defaultInstance, type HostMemoryLedgerOptions } from "./host-memory-ledger.js";
 import {
-  createTreePeakSampler, openLearnedReservation, type LearnedReservation, type PeakStoreOptions, type TreePeakSampler,
+  createTreePeakSampler, daemonOwnedProcess, openLearnedReservation, type LearnedReservation, type PeakStoreOptions, type TreePeakSampler,
 } from "./host-memory-learning.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { readLedgerUnionRawLinesSync, realLedgerFs } from "./ledger-union.js";
@@ -259,13 +259,17 @@ export function pruneTerminalRunDirs(stateRoot: string, prefix: string, keep: nu
 }
 
 /** Asks for an engine cut from this process's own code when the newest engine lags main; never awaited by a spawn. */
-export type EngineRefresh = (input: { stateRoot: string; root: string }, lag: EngineRefreshLag, log: Log) => void;
-export const refreshEngineOnLag: EngineRefresh = (input, lag, log) => {
-  void refreshEngineFromCodeTree(repoRoot, input.stateRoot, childEntryStoreRoot(input.root), lag, log);
-};
+export type EngineRefresh = (input: { stateRoot: string; root: string }, lag: EngineRefreshLag, log: Log) => Promise<void> | undefined;
+/** This package's root, from src/lib or the dist/child-entries bundle alike (child-entry-argv.ts's OWN_TREE). */
+const OWN_TREE = fileURLToPath(new URL("../../", import.meta.url));
+/** Refreshes only in a daemon-owned process, as child-entry-argv's store fill does: a test or a shell never builds. */
+export function refreshEngineWhen(daemonOwned: () => boolean): EngineRefresh {
+  return (input, lag, log) => (daemonOwned() ? refreshEngineFromCodeTree(OWN_TREE, input.stateRoot, childEntryStoreRoot(input.root), lag, log) : undefined);
+}
+export const refreshEngineOnLag: EngineRefresh = refreshEngineWhen(daemonOwnedProcess);
 function askForCurrentEngine(refresh: EngineRefresh | undefined, input: { stateRoot: string; root: string }, engine: EngineRef | undefined, mainSha: string, log: Log): void {
   if (engine?.sha === mainSha) return;
-  (refresh ?? refreshEngineOnLag)(input, { engineSha: engine?.sha ?? null, mainSha }, log);
+  void (refresh ?? refreshEngineOnLag)(input, { engineSha: engine?.sha ?? null, mainSha }, log);
 }
 
 // ── the probe ────────────────────────────────────────────────────────────────────────────────

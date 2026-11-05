@@ -3,6 +3,7 @@
 // the probe kept running stale code for 4+ h. A spawn that finds the engine behind main now asks for an engine cut from
 // the running process's own code tree.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,8 @@ import { after, test } from "node:test";
 
 import type { StoreBuildResult } from "#src/lib/child-entry-store.js";
 import { refreshEngineFromCodeTree, type EngineGit } from "#src/lib/engine-tree.js";
-import { startRunChildProbe, type RunChildProbeInput } from "#src/lib/run-child.js";
+import { refreshEngineWhen, startRunChildProbe, type RunChildProbeInput } from "#src/lib/run-child.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const MAIN = "m".repeat(40);
@@ -101,7 +103,7 @@ async function probeAsks(engineSha: string): Promise<{ engineSha: string | null;
     readMode: () => "shadow",
     mainSha: async () => MAIN,
     engine: { isCurrent: () => true, git: async () => "" },
-    refreshEngine: (_input, lag) => { asked.push(lag); },
+    refreshEngine: (_input, lag) => { asked.push(lag); return undefined; },
     launch: () => { throw new Error("stop after the engine is chosen"); },
   });
   return asked;
@@ -110,4 +112,24 @@ async function probeAsks(engineSha: string): Promise<{ engineSha: string | null;
 test("a probe spawned on an engine behind main asks for a current engine; one at main does not", TIMEOUT, async () => {
   assert.deepEqual(await probeAsks(ENGINE), [{ engineSha: ENGINE, mainSha: MAIN }]);
   assert.deepEqual(await probeAsks(MAIN), []);
+});
+
+// Both cases name this checkout's own HEAD as the engine, so even a wrong gate never starts a real store build.
+const OWN_HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+
+test("the default refresh asks nothing outside a daemon-owned process", TIMEOUT, () => {
+  const state = tmp("gate-off");
+  const { rows, log } = recorder();
+  const asked = refreshEngineWhen(() => false)({ stateRoot: state, root: state }, { engineSha: OWN_HEAD, mainSha: MAIN }, log);
+  assert.equal(asked, undefined, "a test or a shell never starts a refresh");
+  assert.deepEqual(rows, []);
+});
+
+test("in a daemon-owned process the default refresh reads this checkout's own revision and skips an engine already at it", TIMEOUT, async () => {
+  const state = tmp("gate-on");
+  const { rows, log } = recorder();
+  const asked = refreshEngineWhen(() => true)({ stateRoot: state, root: state }, { engineSha: OWN_HEAD, mainSha: MAIN }, log);
+  assert.ok(asked instanceof Promise, "a daemon-owned process starts the refresh");
+  await asked;
+  assert.deepEqual(rows, [], "the engine already holds the running code's revision: nothing is filled or cut");
 });
