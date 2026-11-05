@@ -1,7 +1,7 @@
 - repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles:
     tdd: strict
   priority: 3
@@ -47,3 +47,14 @@
       proof: "unit test: prerequisite outcome context is deterministic bounded and reuses prepared evidence"
   falsifier: Remove hydration at either real producer, substitute status merged for canonical evidence, label a missing merge SHA as base-applicable or accept a known predecessor merge absent from the child base, omit truncation metadata, or place an instruction sentinel from a result outside the deterministic untrusted-data envelope or strip its provenance label. Retain failing named cases for each removed guard and restored passing controls. Verify a no-dependency control and a valid reachable predecessor. This is a proposed context contract, not proof the model used it or completed work faster. Assert envelope bytes and provenance placement, not that a model obeys them.
   note: "Authorized by the operator on 2026-11-05 to research Conductor and dex.rip and file and update the plan. This is an implementation proposal entering normal ownership, capacity, budget, author, hosted CI, adversarial review and protected merge gates; it is not a delivered feature or adoption result. Preserve existing dispatch holds, cash routing and spending caps, credentials, schedules, archives and other owners. No new model/evaluation spend, automatic retry, deployment, service restart, permission expansion or gate waiver is granted. Reservation holder: codex/conductor-dex-plan-20261105. Source audit and all 12 open PR head subject counts are recorded in plan/notes/conductor-dex-2026-11-05.md; unpushed work is outside that census."
+  risk_ruling:
+    verdict: low
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - The description scopes the change to the existing task preparation boundary, reusing already-hydrated canonical evidence with no new per-dependency reads, which is consistent with the plan refs.
+      - The description states that overlap with W1-T11159/W1-T11160 (worker.ts, learning-selection) is avoided and that shared run-task-verb.ts edits must be serialized by native overlap admission.
+      - "The design fails closed: missing merge SHA gives base-applicability-unknown, no favorable results are synthesized, and worker REPORT text stays in an untrusted envelope. No authority, spend, or gate waivers are granted."
+      - The gates state shows a plan-only filing, and the sole prior lint refusal concerned the verify:human draft admission, not the change's substance. The five declared files match the described scope, and each acceptance criterion maps to a named unit test.
+    judged_at: 2026-11-05T12:32:36.390Z
+    pin: 8f3199daba182cfc8b151f5539732b55872a4f12f997558ea727dca34419a944

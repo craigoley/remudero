@@ -1,7 +1,7 @@
 - repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles:
     tdd: strict
   priority: 3
@@ -46,3 +46,14 @@
       proof: "unit test: task activity cursor bounds demand cardinality and total materialization work"
   falsifier: Remove the task/run scope predicate, use timestamp-only pagination, query decision facts instead of the activity ring, erase the generation/gap check, or collapse a failed projection read into an empty page. The corresponding interleaved/equal-time/rollover/unreadable production-path cases must fail; retain control/mutant/restored receipts. A healthy nonempty authorized page is the positive control before trusting any empty result. No lower latency or reduced model cost is claimed before measurement.
   note: "Authorized by the operator on 2026-11-05 to research Conductor and dex.rip and file and update the plan. This is an implementation proposal entering normal ownership, capacity, budget, author, hosted CI, adversarial review and protected merge gates; it is not a delivered feature or adoption result. Preserve existing dispatch holds, cash routing and spending caps, credentials, schedules, archives and other owners. No new model/evaluation spend, automatic retry, deployment, service restart, permission expansion or gate waiver is granted. Reservation holder: codex/conductor-dex-plan-20261105. Source audit and all 12 open PR head subject counts are recorded in plan/notes/conductor-dex-2026-11-05.md; unpushed work is outside that census."
+  risk_ruling:
+    verdict: low
+    action: proceed
+    confidence: 0.78
+    reasons:
+      - The gates state shows a plan-only filing at filing time. The only lint note is a refused verify:human draft, and no implementation is under judgment.
+      - The description says it reuses existing activity_ring, Workstreams cursor/gap behavior and DemandBook bounds. It explicitly rules out a second ring, raw ledger scans and transcript reads, which is consistent with established practice.
+      - The declared files (task-view, views, openapi, generated client schema, and tests) match the described scope. The description preserves backward compatibility, read-only authority, redaction, and existing holds and spend caps. It includes a stop-and-amend clause if a producer migration is needed.
+      - No ACTUAL CHANGE view was supplied, so the touched-file shape could not be cross-checked. The cursor, bounded-demand and wire contract work is somewhat broad, but five acceptance tests and a falsifier cover it.
+    judged_at: 2026-11-05T12:32:29.707Z
+    pin: 1febb8631922550f4ac451558ba2d874d2f285d90234d54d0df56abb1f663122
