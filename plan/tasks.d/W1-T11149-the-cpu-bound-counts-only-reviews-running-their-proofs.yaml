@@ -22,6 +22,7 @@
     - src/lib/sweep.ts
     - src/lib/review-capacity.ts
     - test/review/the-cpu-bound-counts-only-reviews-running-their-proofs.test.ts
+    - src/lib/ledger.ts
   status: queued
   attempts: 0
   acceptance:
@@ -71,6 +72,7 @@
     Tests go in test/review/the-cpu-bound-counts-only-reviews-running-their-proofs.test.ts, titled verbatim as in the proofs, over
     the real registry and bound with an injected phase reader and provider observation.
   note: |
+    Amended 2026-11-04 (scope for #16756): src/lib/ledger.ts joins files. The provider bound's seed (sustainedReviewJudgeConcurrency) reads review.reviewer rows to decide the bound, which makes review.reviewer a decision-relevant step. test/ledger-rotation.test.ts derives DECISION_RELEVANT_LEDGER_STEPS from real deciding readers, and failed on #16756 (twice, with its flake-retry) because review.reviewer was missing. Rotation compaction would otherwise prune the history the bound learns from.
     reservation hand-off: plan-file-1793657964812 -> plan-file-1793657964812
     Reserved with rmd next-task-id --branch plan-file-1793657964812 from the operator checkout. Filed 2026-11-02 from the review-lane
     findings, item 2 (p1), under operator ruling Q2. Ordering: build after W1-T11129 (#16251) merges if it is still open, since both

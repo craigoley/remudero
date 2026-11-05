@@ -148,6 +148,7 @@ import {
   DEFAULT_RISK,
   RETIREMENT_REASONS,
   loadPlan,
+  transitiveDependents,
   unmetDependencies,
   type AcceptanceCriterion,
   type MergedResolver,
@@ -2279,6 +2280,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "draftRefusalAmendments",
   // W1-T5349: the plan-repair rung's fact read and its renumber/retitle effect.
   "readPlanRepairFacts",
+  // W1-T11171: the dependents term of a conflict's blocked cost.
+  "conflictDependents",
   "repairPlanPr",
   "dispatchPlanGateRound",
   "strikeLadder",
@@ -2439,6 +2442,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "repairMissingTaskTrailer"
   | "repairMetadata"
   | "readPlanRepairFacts"
+  | "conflictDependents"
   | "repairPlanPr"
   | "dispatchPlanGateRound"
   | "readMergeQueueMembership"
@@ -2913,6 +2917,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         minWidth: policy.reviewLaneMin,
         maxWidth: policy.reviewLaneMax,
         log,
+        // W1-T11149: the provider bound learns from this pass's ledger and from the sample's own provider reading.
+        observeReviewPhases: (provider, width) => {
+          seedReviewProviderBound(ledgerLines);
+          observeReviewProviderReading(provider, width);
+          return reviewPhaseSplit(width);
+        },
       }),
     repairRecordableRatchet,
     // impl-BI — RETURN THE OUTCOME. PR #968 taught `runSweep` to read this effect's return
@@ -5373,6 +5383,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
       }
     },
+    conflictDependents: (pr) => pr.taskId === undefined ? 0 : queuedTransitiveDependents(plan, pr.taskId),
     readPlanRepairFacts: (pr) => {
       const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
       const row = ghJsonForBuild(["api", pulls]) as {
@@ -14364,6 +14375,8 @@ export interface SweepDeps {
   ) => boolean | void | Promise<boolean | void>;
   /** W1-T5349 — the PR's author and live title, read only for a red plan-only PR on a machine-lane head. */
   readPlanRepairFacts?: (pr: OpenPrView) => PlanRepairFacts | Promise<PlanRepairFacts>;
+  /** W1-T11171: the queued plan tasks that wait, transitively, on this PR's task; a conflict's blocked cost reads it. */
+  conflictDependents?: (pr: OpenPrView) => number;
   /** W1-T5349 — renumber a held id or retitle, on the lane's own branch; refresh uses `updateBranch`. */
   repairPlanPr?: (
     pr: OpenPrView,
@@ -16973,6 +16986,10 @@ export interface ChildWorkRegistration {
 }
 interface RegisteredChildWork extends ChildWorkRegistration {
   releasedAtPost?: number; phaseTimer?: ReturnType<typeof setInterval>; phaseReadError?: string;
+  /** W1-T11149: the review's last phase read back from its status.json, without the `review:` prefix; unread is undefined. */
+  phase?: string;
+  /** W1-T11149: the provider-refusal epoch when this review registered, so its settlement knows whether it ran refusal-free. */
+  refusalEpoch?: number;
 }
 const childWork = new Map<string, RegisteredChildWork>();
 const settledChildWork = new Set<string>();
@@ -16980,13 +16997,22 @@ const childWorkSettleKey = (runId: string, headSha?: string): string => `${runId
 
 function refreshChildReviewPhase(work: RegisteredChildWork): void {
   if (work.kind !== "review" || work.releasedAtPost !== undefined || !work.readPhase) return;
+  let read: string | undefined;
   try {
-    if (work.readPhase() !== "review:posted") return;
+    read = work.readPhase();
   } catch (error) {
     const reason = String(error);
     work.phaseReadError = reason;
     return;
   }
+  if (read?.startsWith("review:")) {
+    const next = read.slice("review:".length);
+    // W1-T11149: leaving the CPU phases frees a CPU-bound slot, so a waiting admission re-checks at once.
+    const leftCpu = !isReviewProviderPhase(work.phase) && isReviewProviderPhase(next);
+    work.phase = next;
+    if (leftCpu) releaseReviewSlot();
+  }
+  if (read !== "review:posted") return;
   work.releasedAtPost = systemClock.now();
   clearInterval(work.phaseTimer);
   releaseReviewSlot();
@@ -16995,7 +17021,7 @@ function refreshChildReviewPhase(work: RegisteredChildWork): void {
 /** Claims the slot and the mutex key of a child's work. Registering a run id again is a no-op. */
 export function registerChildWork(work: ChildWorkRegistration): void {
   if (childWork.has(work.runId)) return;
-  const registered: RegisteredChildWork = { ...work };
+  const registered: RegisteredChildWork = { ...work, refusalEpoch: reviewProviderRefusalEpoch };
   childWork.set(work.runId, registered);
   if (work.reviewKey !== undefined) inFlightReviewKeys.add(work.reviewKey);
   if (work.fixKey !== undefined) inFlightFixKeys.add(work.fixKey);
@@ -17041,6 +17067,10 @@ export function settleChildWork(runId: string): boolean {
   if (work.fixKey !== undefined) inFlightFixKeys.delete(work.fixKey);
   if (work.releasedAtPost === undefined) releaseReviewSlot();
   if (settledChildWork.has(settleKey)) return false;
+  // W1-T11149: a code review that posted with no provider refusal since it registered grows the provider bound by one.
+  if (work.kind === "review" && work.planLane !== true) {
+    noteReviewProviderSettlement(work.releasedAtPost !== undefined, work.refusalEpoch ?? reviewProviderRefusalEpoch);
+  }
   settledChildWork.add(settleKey);
   return true;
 }
@@ -18038,6 +18068,81 @@ export function needsPersonPredicate(
     if (value === undefined) memo.set(key, value = needsPersonToMerge(pr, ledgerLines) !== undefined);
     return value;
   };
+}
+
+/** W1-T11171: the queued plan tasks that wait on `taskId`, transitively; a merged or blocked one waits on nothing. */
+export function queuedTransitiveDependents(plan: Plan, taskId: string): number {
+  let count = 0;
+  for (const id of transitiveDependents(plan, taskId)) if (plan.byId.get(id)?.status === "queued") count++;
+  return count;
+}
+
+/**
+ * W1-T11171: a conflict's blocked cost is how long it has been conflicted at its current head (from the first
+ * `sweep.disposed` row with blocker `conflict` for this PR and head) times one plus the queued tasks behind it.
+ * The first observation at a head reads age 0, so no guess enters the order.
+ */
+export function conflictBlockedCost(
+  pr: Pick<OpenPrView, "prNumber" | "headSha">,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  dependents: number,
+  nowMs: number,
+): { conflict_age_ms: number; dependents: number; blocked_cost: number; conflict_since: string } {
+  // The first observation survives rotation by riding forward: every conflicted row at this head carries the
+  // `conflict_since` its predecessor carried, and rotation keeps the newest row per head. Only a head whose rows predate
+  // the field falls back to its earliest live row; a head never seen before starts its clock now.
+  const atHead = ledgerLines.filter((row) => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+    row.head_sha === pr.headSha && row.blocker === "conflict");
+  const carried = atHead.findLast((row) => typeof row.conflict_since === "string" &&
+    Number.isFinite(Date.parse(row.conflict_since)))?.conflict_since as string | undefined;
+  const earliest = atHead.find((row) => typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts)))?.ts as string | undefined;
+  const seen = [carried, earliest].flatMap((iso) => iso === undefined ? [] : [Date.parse(iso)]);
+  const sinceMs = seen.length > 0 ? Math.min(...seen) : nowMs;
+  const age = Math.max(0, nowMs - sinceMs);
+  return { conflict_age_ms: age, dependents, blocked_cost: age * (1 + dependents),
+    conflict_since: clockFromMillisFn(() => sinceMs).iso() };
+}
+
+/**
+ * W1-T11171: a stable reorder of the walk that moves the conflicted PRs, among their own positions, into descending
+ * blocked cost. Every other PR keeps its place, so admission order changes only between conflict rounds; ties keep
+ * the incoming order.
+ */
+export function orderConflictsByBlockedCost(walkOrder: number[], isConflicted: (index: number) => boolean,
+  costOf: (index: number) => number): number[] {
+  const positions = walkOrder.flatMap((index, position) => isConflicted(index) ? [position] : []);
+  const ranked = positions.map((position) => ({ index: walkOrder[position]!, position, cost: costOf(walkOrder[position]!) }))
+    .sort((a, b) => b.cost - a.cost || a.position - b.position);
+  const out = [...walkOrder];
+  positions.forEach((position, i) => { out[position] = ranked[i]!.index; });
+  return out;
+}
+
+/**
+ * W1-T11171: the conflicted arm's NO-WORKER resolution for this head and main, if it has one: the registry
+ * regenerator (W1-T9578) or W1-T11167's clean merge. Neither spawns a worker nor takes fix admission, so a light pass
+ * may run it. One predicate serves the light-pass gate and the arm itself, so the two cannot disagree.
+ */
+export function conflictNoWorkerMode(
+  pr: Pick<OpenPrView, "prNumber" | "headSha" | "headRefName" | "taskId">,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  mainTipSha: string | undefined,
+  regenerateWired: boolean,
+): ConflictRegenerationMode | undefined {
+  if (mainTipSha === undefined || !regenerateWired || pr.taskId === undefined ||
+      !fixHeadAcceptable(pr.headRefName, pr.taskId, false)) return undefined;
+  const probe = ledgerLines.findLast(row => row.step === "sweep.merge_probe" &&
+    row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.main_sha === mainTipSha);
+  const conflictPaths = probe?.conflict_paths;
+  const regenerable = probe?.verdict === "conflict" && Array.isArray(conflictPaths) && conflictPaths.length > 0 &&
+    conflictPaths.every(path => typeof path === "string" && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
+  if (regenerable) return "regenerable";
+  // W1-T11167: GitHub reads this head dirty while git's merge of it is clean. A head this route already
+  // produced is never merged again: GitHub still reading it dirty at the same main is a worker's case.
+  const cleanMerge = probe?.verdict === "clean" && !ledgerLines.some(row =>
+    row.step === "sweep.conflict_regenerated" && row.mode === "clean-merge" && row.outcome === "pushed" &&
+    row.pr_number === pr.prNumber && row.new_head_sha === pr.headSha && row.main_sha === mainTipSha);
+  return cleanMerge ? "clean-merge" : undefined;
 }
 
 export function sweepWalkOrder(prs: readonly Pick<OpenPrView, "createdAt" | "prNumber">[]): number[] {
@@ -20322,8 +20427,40 @@ export async function runSweep(
   // legible state `judgeSweepLiveness` reads. RENDER_RELEVANT, rotating on recency (W1-T1237).
 
   deps.markPrelude?.("walk_setup", true);
+  // W1-T11171: the PRs due a conflict round are the ones the walk itself will dispose "conflicted" (the same inherited
+  // mergeability and the same rule table), not every dirty head: a dirty PR disposed otherwise keeps its walk place.
+  const conflictRankedAtMs = passClockMs();
+  const dueConflictRound = new Set<number>();
+  // W1-T11171: a gated (light) pass decides its conflict shares up front with the predicates its gate uses — a
+  // no-worker route not yet attempted at this head and main acts, every other due round is deferred — so the pass's
+  // own `sweep.pass` row carries them; `sweep.summary` still counts what the walk actually did.
+  let lightConflictShares: Record<string, unknown> = {};
+  // The heartbeat below must be written before anything the walk calls can kill the pass (W1-T1237), so a fault in
+  // this decision is NAMED on the row, never thrown past it: the walk then meets the same fault after the heartbeat.
+  try {
+    openPrs.forEach((open, index) => {
+      if (open.mergeState !== "dirty" && open.mergeState !== undefined) return;
+      const view = withInheritedMergeState(open, ledgerLines, mainTipSha).pr;
+      if (deriveDisposition(view, policy, conflictRankedAtMs).disposition === "conflicted") dueConflictRound.add(index);
+    });
+    if (deps.actionable !== undefined && !deps.actionable("conflicted")) {
+      let admitted = 0;
+      for (const index of dueConflictRound) {
+        const open = openPrs[index]!;
+        const noWorker = mainTipSha !== undefined &&
+          conflictNoWorkerMode(open, ledgerLines, mainTipSha, deps.regenerateConflict !== undefined) !== undefined &&
+          !ledgerLines.some((row) => row.step === "sweep.conflict_regenerated" && row.pr_number === open.prNumber &&
+            row.head_sha === open.headSha && row.main_sha === mainTipSha);
+        if (noWorker) admitted++;
+      }
+      lightConflictShares = { light_conflict_acted: admitted, light_conflict_deferred: dueConflictRound.size - admitted };
+    }
+  } catch (error) {
+    dueConflictRound.clear();
+    lightConflictShares = { light_conflict_shares: { status: "unreadable", error: error instanceof Error ? error.message : String(error) } };
+  }
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true,
-    ...(deps.repairAdmissionSurface ? { surface: deps.repairAdmissionSurface } : {}) });
+    ...(deps.repairAdmissionSurface ? { surface: deps.repairAdmissionSurface } : {}), ...lightConflictShares });
 
   // W1-T7734 — the walk is a queue, so a PR whose head moved under this pass can be put back at the
   // front once its one fresh read has rebuilt its view. `rederivedPrs` spends that read once per
@@ -20331,6 +20468,15 @@ export async function runSweep(
   const walkOrder = sweepWalkOrder(openPrs);
   // Preserve held-head priority before arrival consumes the pass's refresh slots.
   if (!refreshAdmission.holding()) walkOrder.sort((a, b) => heldSinceMs(openPrs[a]) - heldSinceMs(openPrs[b]));
+  // W1-T11171: conflicted PRs walk, and so take fix admission, in descending blocked cost among their own places.
+  // Every cost is measured at ONE instant: a clock read per PR makes the later-measured of two equal conflicts look
+  // older on a slow runner and reorders a tie the rule says keeps snapshot order.
+  walkOrder.splice(0, walkOrder.length, ...orderConflictsByBlockedCost(walkOrder,
+    (index) => dueConflictRound.has(index),
+    (index) => conflictBlockedCost(openPrs[index]!, ledgerLines, deps.conflictDependents?.(openPrs[index]!) ?? 0,
+      conflictRankedAtMs).blocked_cost));
+  let lightConflictActed = 0;
+  let lightConflictDeferred = 0;
   const rederivedPrs = new Set<number>();
   const admissionFinalizations: Array<() => Promise<void>> = [];
   for (let walkStep = 0; walkStep < walkOrder.length; walkStep++) {
@@ -21530,6 +21676,9 @@ export async function runSweep(
       design_hold_main_adoption_decision: terminalDesignHold.mainAdoptionDecision,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
       ...(terminalDesignHold.semantic === undefined ? {} : { progress_task_semantic_revision: terminalDesignHold.semantic.standingOn }) };
+    // W1-T11171: every conflicted row names its blocked cost, so the order the walk used is readable off the ledger.
+    if (disposition === "conflicted") extraDisposedFields = { ...extraDisposedFields,
+      ...conflictBlockedCost(pr, ledgerLines, deps.conflictDependents?.(pr) ?? 0, passClockMs()) };
     const selectedContractRefresh = async (
       revision: string, action: () => Promise<string | undefined>,
     ): Promise<string | undefined> => {
@@ -21615,11 +21764,18 @@ export async function runSweep(
     // PR's finalize call to the bounded concurrent batch after the loop rather than running inline.
     let deferredReview = false;
 
+    // W1-T11171: a light pass that denies "conflicted" still lets in a conflict whose resolution needs no worker
+    // (and that has not been attempted at this head and main), and only for that route.
+    const conflictGated = disposition === "conflicted" && deps.actionable !== undefined && !deps.actionable(disposition);
+    const conflictNoWorkerOnly = acted && conflictGated && mainTipSha !== undefined &&
+      conflictNoWorkerMode(pr, ledgerLines, mainTipSha, deps.regenerateConflict !== undefined) !== undefined &&
+      !ledgerLines.some((row) => row.step === "sweep.conflict_regenerated" && row.pr_number === pr.prNumber &&
+        row.head_sha === pr.headSha && row.main_sha === mainTipSha);
     if (acted) {
       // W1-T254 — LIGHT-SWEEP RESTRICTION. `actionable` defaults to everything, so `rmd sweep` and
       // the full sweep are unchanged. The light ticker passes `d => d === "post-review"`, so every
       // other lane stands down here and is re-derived on the next full sweep, never dropped.
-      if (deps.actionable && !deps.actionable(disposition)) {
+      if (deps.actionable && !deps.actionable(disposition) && !conflictNoWorkerOnly) {
         acted = false;
         // W1-T2426: the caller may name WHICH mechanism refused; absent, the generic sentence
         // every gated disposition has always recorded, unchanged.
@@ -22908,20 +23064,11 @@ export async function runSweep(
                 standDownReason = terminal;
                 break;
               }
-              if (mainTipSha !== undefined && deps.regenerateConflict && pr.taskId !== undefined &&
-                  fixHeadAcceptable(pr.headRefName, pr.taskId, false)) {
-                const probe = ledgerLines.findLast(row => row.step === "sweep.merge_probe" &&
-                  row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.main_sha === mainTipSha);
-                const conflictPaths = probe?.conflict_paths;
-                const regenerable = probe?.verdict === "conflict" && Array.isArray(conflictPaths) && conflictPaths.length > 0 &&
-                  conflictPaths.every(path => typeof path === "string" && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path));
-                // W1-T11167: GitHub reads this head dirty while git's merge of it is clean. A head this route already
-                // produced is never merged again: GitHub still reading it dirty at the same main is a worker's case.
-                const cleanMerge = !regenerable && probe?.verdict === "clean" && !ledgerLines.some(row =>
-                  row.step === "sweep.conflict_regenerated" && row.mode === "clean-merge" && row.outcome === "pushed" &&
-                  row.pr_number === pr.prNumber && row.new_head_sha === pr.headSha && row.main_sha === mainTipSha);
-                if (regenerable || cleanMerge) {
-                  const mode: ConflictRegenerationMode = cleanMerge ? "clean-merge" : "regenerable";
+              const noWorkerMode = conflictNoWorkerMode(pr, ledgerLines, mainTipSha, deps.regenerateConflict !== undefined);
+              if (mainTipSha !== undefined && deps.regenerateConflict && pr.taskId !== undefined && noWorkerMode !== undefined) {
+                const cleanMerge = noWorkerMode === "clean-merge";
+                {
+                  const mode: ConflictRegenerationMode = noWorkerMode;
                   const regenerationKey = `${deps.ledgerPath}:${pr.prNumber}:${pr.headSha}:${mainTipSha}`;
                   if (inFlightConflictRegenerations.has(regenerationKey)) {
                     acted = false;
@@ -22959,6 +23106,13 @@ export async function runSweep(
                     break;
                   }
                 }
+              }
+              // W1-T11171: a light pass let this conflicted PR in only for its no-worker route; a worker round still
+              // waits for the full sweep, with the sentence every gated disposition records.
+              if (conflictNoWorkerOnly) {
+                acted = false;
+                standDownReason = deps.standDownReasonFor?.(disposition) ?? "deferred to full sweep (light pass)";
+                break;
               }
               // The "conflicted" row already gated this on the admission predicates, so the
               // dispatch carries merge-conflict evidence and never a mix. W1-T2231: the
@@ -23540,6 +23694,12 @@ export async function runSweep(
       standDownReason = fixHolder.reason;
       extraDisposedFields = { ...extraDisposedFields, ...fixHolder.fields };
     }
+    // W1-T11171: the light pass's conflict shares, for the pass summary.
+    if (conflictGated) {
+      if (acted) lightConflictActed++;
+      else if ((fixHolder?.reason ?? standDownReason) ===
+        (deps.standDownReasonFor?.(disposition) ?? "deferred to full sweep (light pass)")) lightConflictDeferred++;
+    }
     // Pressed heads dispose now; only overflow waits for the admission's final settlement.
     const finalize = () => finalizeDisposition(prIndex, pr, disposition, reason, question, acted, alreadyDone, actionError,
       fixHolder?.reason ?? admissionReasons.get(pr.prNumber) ?? standDownReason, depReviewOutcome, armOutcome, spent, baseCausedMainTipSha, extraDisposedFields);
@@ -23810,9 +23970,13 @@ export async function runSweep(
           fullReviews.settled++;
           releaseReviewSlot();
         };
+        // W1-T11149: an in-process review's judge and posting phases leave the CPU bound for the provider bound.
+        const phases = trackInProcessReviewPhase();
         const tracked = startReview(job, (phase) => {
+          phases.phase(phase);
           if (phase === "posted") release();
-        });
+          else if (isReviewProviderPhase(phase)) releaseReviewSlot();
+        }).finally(phases.done);
         const work = !fullSurface ? tracked : tracked.finally(release);
         if (deps.detachReviewWait) {
           deps.detachReviewWait(work);
@@ -23868,6 +24032,8 @@ export async function runSweep(
     total: summary.total,
     actions_taken: actionsTaken,
     actions_failed: actionsFailed,
+    // W1-T11171: only a gated (light) pass has conflict shares to report.
+    ...(deps.actionable !== undefined ? { light_conflict_acted: lightConflictActed, light_conflict_deferred: lightConflictDeferred } : {}),
   });
   // W1-T520 — the stall report. One line PER STALLED PR naming both facts, and NOTHING when the
   // set is empty. Emitted through `appendLine`, the durable sink, because `log` is an optional hook
@@ -24423,12 +24589,141 @@ export function readLiveLedgerRows(path: string): ReadonlyArray<Readonly<Record<
   return tail(0);
 }
 
-/** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
+/** W1-T11149: a review in its judge or posting phase waits on its LLM or GitHub, not the CPU, so the CPU bound skips it. */
+const REVIEW_PROVIDER_PHASES: ReadonlySet<string> = new Set(["judge", "posting"]);
+export function isReviewProviderPhase(phase: string | undefined): boolean {
+  return phase !== undefined && REVIEW_PROVIDER_PHASES.has(phase.startsWith("review:") ? phase.slice("review:".length) : phase);
+}
+
+/** W1-T11149: in-process code reviews currently in their judge or posting phase (a child's phase lives in its registration). */
+const inProcessProviderPhaseReviews = new Set<symbol>();
+
+/** W1-T11149: follows one in-process code review's phases; `done` forgets it and records its settlement. */
+export function trackInProcessReviewPhase(): { phase: (phase: string) => void; done: () => void } {
+  const token = Symbol("in-process review");
+  const epoch = reviewProviderRefusalEpoch;
+  let posted = false;
+  let finished = false;
+  return {
+    phase: (phase) => {
+      if (finished) return;
+      if (phase === "posted") { posted = true; inProcessProviderPhaseReviews.delete(token); return; }
+      if (isReviewProviderPhase(phase)) inProcessProviderPhaseReviews.add(token);
+      else inProcessProviderPhaseReviews.delete(token);
+    },
+    done: () => {
+      if (finished) return;
+      finished = true;
+      inProcessProviderPhaseReviews.delete(token);
+      noteReviewProviderSettlement(posted, epoch);
+    },
+  };
+}
+
+/** W1-T11149: registered code-review children by phase class; an unread phase counts as CPU, as every review did before. */
+export function childReviewPhaseCounts(): { cpu: number; provider: number } {
+  let cpu = 0;
+  let provider = 0;
+  for (const work of childWork.values()) {
+    if (work.kind !== "review" || work.planLane === true) continue;
+    refreshChildReviewPhase(work);
+    if (work.releasedAtPost !== undefined) continue;
+    if (isReviewProviderPhase(work.phase)) provider++;
+    else cpu++;
+  }
+  return { cpu, provider };
+}
+
+// W1-T11149 — THE PROVIDER BOUND. Reviews waiting on their LLM judge (or posting) do not load the CPU, so they are bounded by
+// what the provider has sustained instead: seeded from the ledger's refusal-free judge concurrency, one more per refusal-free
+// settlement, halved on a fresh refusal, held while the provider's reading is unreadable. Unseeded, it is the CPU width itself.
+let reviewProviderBoundValue: number | undefined;
+let reviewProviderBoundSeeded = false;
+let reviewProviderRefusalEpoch = 0;
+let reviewProviderRefusalLatched = false;
+
+/** The highest number of review judge calls (`review.reviewer` rows) that ran at once with no refused call overlapping them. */
+export function sustainedReviewJudgeConcurrency(rows: ReadonlyArray<Record<string, unknown>>): number | undefined {
+  const events: Array<{ at: number; ok: boolean; delta: 1 | -1 }> = [];
+  for (const row of rows) {
+    if (row.step !== "review.reviewer" || typeof row.ts !== "string") continue;
+    const end = Date.parse(row.ts);
+    const duration = typeof row.worker_duration_ms === "number" ? row.worker_duration_ms : Number.NaN;
+    if (!Number.isFinite(end) || !Number.isFinite(duration) || duration < 0) continue;
+    const ok = row.subtype === "success";
+    events.push({ at: end - duration, ok, delta: 1 }, { at: end, ok, delta: -1 });
+  }
+  if (events.length === 0) return undefined;
+  // Ends before starts at the same instant, so back-to-back calls are not counted as concurrent.
+  events.sort((a, b) => a.at - b.at || a.delta - b.delta);
+  let ok = 0;
+  let refused = 0;
+  let best = 0;
+  for (const event of events) {
+    if (event.ok) ok += event.delta;
+    else refused += event.delta;
+    if (refused === 0) best = Math.max(best, ok);
+  }
+  return best > 0 ? best : undefined;
+}
+
+/** Seeds the provider bound once per process from the ledger it is first given. */
+export function seedReviewProviderBound(rows: ReadonlyArray<Record<string, unknown>>): void {
+  if (reviewProviderBoundSeeded) return;
+  reviewProviderBoundSeeded = true;
+  const sustained = sustainedReviewJudgeConcurrency(rows);
+  if (sustained !== undefined && reviewProviderBoundValue === undefined) reviewProviderBoundValue = sustained;
+}
+
+/** One provider reading: a fresh refusal halves the bound once per refusal; an unreadable reading holds it. */
+export function observeReviewProviderReading(
+  reading: { fresh: boolean; readable: boolean; refused?: boolean }, width: number,
+): void {
+  if (!reading.fresh || (!reading.readable && reading.refused !== true)) return;
+  if (reading.refused === true) {
+    if (reviewProviderRefusalLatched) return;
+    reviewProviderRefusalLatched = true;
+    reviewProviderRefusalEpoch++;
+    reviewProviderBoundValue = Math.max(1, Math.floor((reviewProviderBoundValue ?? Math.max(1, width)) / 2));
+    return;
+  }
+  reviewProviderRefusalLatched = false;
+}
+
+function noteReviewProviderSettlement(posted: boolean, epoch: number): void {
+  if (!posted || epoch !== reviewProviderRefusalEpoch || reviewProviderBoundValue === undefined) return;
+  reviewProviderBoundValue++;
+}
+
+/** The provider bound for this width: the learned value, or the width itself until anything is learned. */
+export function reviewProviderBound(width: number): number {
+  return reviewProviderBoundValue ?? Math.max(0, width);
+}
+
+/** Forgets the learned provider bound. For a test's fresh process. */
+export function resetReviewProviderBound(): void {
+  reviewProviderBoundValue = undefined;
+  reviewProviderBoundSeeded = false;
+  reviewProviderRefusalEpoch = 0;
+  reviewProviderRefusalLatched = false;
+  inProcessProviderPhaseReviews.clear();
+}
+
+/** W1-T11149: the review phase split the capacity row records beside its width. */
+export function reviewPhaseSplit(width: number): { cpuPhaseInFlight: number; judgePhaseInFlight: number; providerBound: number } {
+  const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight + childWorkCount("review", "code");
+  const judge = Math.min(inFlight, inProcessProviderPhaseReviews.size + childReviewPhaseCounts().provider);
+  return { cpuPhaseInFlight: inFlight - judge, judgePhaseInFlight: judge, providerBound: reviewProviderBound(width) };
+}
+
+/** W1-T5931: the one review bound both passes admit under. W1-T11149: the CPU width bounds only reviews in their CPU phases
+ *  (setup, proofs, or unread); every review in flight must also sit under the provider bound. `inFlight` stays every review. */
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
   // W1-T9114: a review child holds its slot while it runs, adopted or not; W1-T11151: its posted phase frees the slot
   // before settlement, while its key stays held.
   const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight + childWorkCount("review", "code");
-  return { bound: Math.max(0, width - inFlight), inFlight };
+  const { cpuPhaseInFlight, providerBound } = reviewPhaseSplit(width);
+  return { bound: Math.max(0, Math.min(width - cpuPhaseInFlight, providerBound - inFlight)), inFlight };
 }
 
 /** Publish eligibility from the same selection inputs the light batch uses, before ready-only reads. */
@@ -24557,16 +24852,25 @@ export async function runSweepLightPass(
   let providerFloorMet = false;
   const basePostReview = deps.postReview;
   const passPostReview: SweepDeps["postReview"] = basePostReview && (async (pr, mode, attempt, onPhase) => {
+    // W1-T11149: a spawning (code) review's judge and posting phases leave the CPU bound for the provider bound.
+    const phases = spawningNumbers.has(pr.prNumber) ? trackInProcessReviewPhase() : undefined;
     try {
       const reviewStartedAtMs = performance.now();
       await basePostReview(pr, mode, attempt, (phase) => {
+        phases?.phase(phase);
         if (phase === "posted") releases.get(pr.prNumber)?.();
+        else if (phases && isReviewProviderPhase(phase)) {
+          releaseReviewSlot();
+          onOwnLaneFreed();
+        }
         onPhase?.(phase);
       });
       noteReviewDuration(performance.now() - reviewStartedAtMs);
     } catch (e) {
       if (e instanceof GhPaceFloorStandDownError) providerFloorMet = true;
       throw e;
+    } finally {
+      phases?.done();
     }
   });
   let refillRunning = false;

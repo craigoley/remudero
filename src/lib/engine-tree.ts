@@ -12,6 +12,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { materializeFromStore, type StoreBuildResult, type StoreLog, type StoreLookup } from "./child-entry-store.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { classifyRunDir, readSpec, realRunChildProbe, type RunChildProbe } from "./run-child-contract.js";
 import { linkWorktreeNodeModules, resolveNodeModulesSource, type NodeModulesLinkOutcome } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -169,7 +170,10 @@ export interface EngineBuildOptions {
   git?: EngineGit;
   /** Links `<treeRoot>/node_modules` to `target`, the resolved install. */
   linkNodeModules?: (target: string, treeRoot: string) => NodeModulesLinkOutcome;
-  materialize?: (treeRoot: string, storeRoot: string) => StoreLookup;
+  /** `expectedHash`, when given, refuses before publishing a tree that hashes elsewhere; default {@link materializeFromStore}. */
+  materialize?: (treeRoot: string, storeRoot: string, expectedHash?: string) => StoreLookup;
+  /** Whether a run directory's child is live, for the advance's "named by a live run" check; default the real probe. */
+  probe?: RunChildProbe;
 }
 
 export type EngineBuildResult =
@@ -195,6 +199,11 @@ async function removeEngineDir(path: string, repoDir: string, git: EngineGit): P
 }
 
 const inFlight = new Map<string, Promise<EngineBuildResult>>();
+
+/** The store materializer with the engine's expected hash, never the tree-hash override, in third place. */
+function storeMaterialize(treeRoot: string, storeRoot: string, expectedHash?: string): StoreLookup {
+  return materializeFromStore(treeRoot, storeRoot, undefined, undefined, expectedHash);
+}
 
 /**
  * Build `<state>/engines/<sourceHash>/` for `sha`: a detached worktree cut into a temporary sibling, its node_modules
@@ -237,7 +246,9 @@ async function buildEngine(stateRoot: string, sha: string, sourceHash: string, d
   let replacedUnsafeReason: string | undefined;
   if (present?.sourceHash === sourceHash) {
     const existing = engineModules(final, present.nodeModulesTarget, roots);
-    if (!modulesUnsafe(existing)) return { kind: "present", root: final };
+    if (!modulesUnsafe(existing)) {
+      return present.sha === sha ? { kind: "present", root: final } : advanceEngine(stateRoot, final, present, sha, deps, git, clock);
+    }
     const reason = `node-modules-${existing.kind}: ${existing.detail}`;
     let named: ReturnType<typeof namedByLiveRuns>;
     try {
@@ -266,7 +277,7 @@ async function buildEngine(stateRoot: string, sha: string, sourceHash: string, d
     const link = deps.linkNodeModules ?? ((target, tree) => linkWorktreeNodeModules(target, tree, { resolveSource: () => target }));
     const linked = link(modules.target, temp);
     if (linked !== "linked") return { kind: "failed", reason: `node-modules-${linked}` };
-    const lookup = (deps.materialize ?? materializeFromStore)(temp, deps.storeRoot);
+    const lookup = (deps.materialize ?? storeMaterialize)(temp, deps.storeRoot);
     if (lookup.outcome !== "hit") return { kind: "failed", reason: `store-${lookup.reason}` };
     // The stored key is the tree's own source hash: a checkout that moved between the build and this cut keys elsewhere.
     if (lookup.hash !== sourceHash) return { kind: "failed", reason: `source-moved: tree hashes to ${lookup.hash}` };
@@ -283,6 +294,203 @@ async function buildEngine(stateRoot: string, sha: string, sourceHash: string, d
   } finally {
     if (existsSync(temp)) await removeEngineDir(temp, deps.repoDir, git);
   }
+}
+
+// ── the pin lock ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * An in-place advance and a run naming the engine must not interleave. A launch resolves its engine, waits for
+ * admission, and only then writes the spec that names the engine; an advance's census reads those specs and then
+ * checks the tree out to a newer revision. A spec written between the census and the checkout named a revision the
+ * tree no longer held (#16735 review, 2026-11-04). `<state>/engines/<sourceHash>.pin.lock` closes that window: the
+ * advance holds it from its census through the record write, and a launch takes it only to re-read the record and
+ * write its spec, so a spec always names the revision its tree holds. Cross-process (an advance can run in a run
+ * child's verb while the daemon launches), so it is the O_EXCL holder file {@link acquireInflightLock} keeps.
+ */
+function pinLockName(sourceHash: string): string {
+  return `${sourceHash}.pin`;
+}
+
+function tryAcquirePin(stateRoot: string, sourceHash: string, runId: string): InflightLockHandle | InflightLockError {
+  mkdirSync(enginesRoot(stateRoot), { recursive: true });
+  try {
+    return acquireInflightLock(enginesRoot(stateRoot), pinLockName(sourceHash), { run_id: runId });
+  } catch (err) {
+    if (err instanceof InflightLockError) return err;
+    throw err;
+  }
+}
+
+/**
+ * The longest a launch waits for an advance to release the pin. An advance holds it for one checkout and one store
+ * re-judge, each bounded by the git leaf's own loop bound, so this is a backstop, not a policy: past it the launch
+ * is unavailable (no child starts), never unpinned.
+ */
+export const ENGINE_PIN_WAIT_MS = 60_000;
+
+export interface EnginePinOptions {
+  waitMs?: number;
+  pollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  clock?: Clock;
+}
+
+/**
+ * Re-read `sourceHash`'s published record under the pin lock and hand its current revision to `publish` (which
+ * writes the run's spec naming it), releasing the lock after. Resolves to the revision published, or to
+ * `{ unavailable }` when the engine is gone or the pin stayed busy past {@link ENGINE_PIN_WAIT_MS}.
+ */
+export async function pinEngineForRun(
+  stateRoot: string,
+  sourceHash: string,
+  runId: string,
+  publish: (engine: { sourceHash: string; sha: string }) => void,
+  opts: EnginePinOptions = {},
+): Promise<{ sourceHash: string; sha: string } | { unavailable: string }> {
+  const clock = opts.clock ?? systemClock;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = clock.now() + (opts.waitMs ?? ENGINE_PIN_WAIT_MS);
+  for (;;) {
+    const held = tryAcquirePin(stateRoot, sourceHash, runId);
+    if (!(held instanceof InflightLockError)) {
+      try {
+        const record = readRecord(enginePath(stateRoot, sourceHash));
+        if (!record || record.sourceHash !== sourceHash) return { unavailable: `engine ${sourceHash.slice(0, 12)} is no longer published` };
+        const pinned = { sourceHash, sha: record.sha };
+        publish(pinned);
+        return pinned;
+      } finally {
+        held.release();
+      }
+    }
+    if (clock.now() >= deadline) return { unavailable: `engine ${sourceHash.slice(0, 12)} pin busy: ${held.message}` };
+    await sleep(opts.pollMs ?? 100);
+  }
+}
+
+/**
+ * An engine is keyed by its bundle's source hash, so main advancing only OUTSIDE that closure (workflows, plan, scripts,
+ * docs) would leave the tree at the revision it was first cut at: a run child reads those files from its engine tree,
+ * and the reviewer then rightly withholds every terminal verdict as stale (#15638, 2026-11-04: 67 commits behind).
+ * Advance the published tree to `sha` in place when `sha` descends from the tree's revision, no live run names the
+ * engine, and the advanced tree still hashes to the same source. Any other case keeps the tree where it is.
+ */
+async function advanceEngine(
+  stateRoot: string,
+  final: string,
+  present: EngineRecord,
+  sha: string,
+  deps: EngineBuildOptions,
+  git: EngineGit,
+  clock: Clock,
+): Promise<BuildOutcome> {
+  const log = deps.log ?? (() => {});
+  const kept: BuildOutcome = { kind: "present", root: final };
+  const row = { source_hash: present.sourceHash, from_sha: present.sha, to_sha: sha };
+  let forward: boolean;
+  try {
+    forward = await isAncestor(git, deps.repoDir, present.sha, sha);
+  } catch (err) {
+    log("engine.advance_deferred", { ...row, reason: `ancestry unreadable: ${reasonOf(err)}` });
+    return kept;
+  }
+  if (!forward) return kept; // never sideways or back: the tree holds a revision `sha` does not contain
+  // Held from the census through the record write: no launch can write a spec naming this engine in between.
+  const pin = tryAcquirePin(stateRoot, present.sourceHash, `advance-${process.pid}`);
+  if (pin instanceof InflightLockError) {
+    log("engine.advance_deferred", { ...row, reason: `a run is pinning the engine: ${pin.message}` });
+    return kept;
+  }
+  try {
+    // The record read above predates the pin: another process may have advanced the tree since. Every decision that
+    // gates the move (ancestry, the census, the restore target, the record written) is taken again from the record
+    // as it stands under the pin, so two overlapping advances can never move the tree back (A→C, then C→B).
+    const current = readRecord(final);
+    if (current === undefined || current.sourceHash !== present.sourceHash) {
+      log("engine.advance_deferred", { ...row, reason: "the engine record changed under the pin" });
+      return kept;
+    }
+    if (current.sha === sha) return kept;
+    let stillForward: boolean;
+    try {
+      stillForward = await isAncestor(git, deps.repoDir, current.sha, sha);
+    } catch (err) {
+      log("engine.advance_deferred", { ...row, from_sha: current.sha, reason: `ancestry unreadable: ${reasonOf(err)}` });
+      return kept;
+    }
+    if (!stillForward) {
+      log("engine.advance_deferred", { ...row, from_sha: current.sha, reason: "superseded" });
+      return kept;
+    }
+    return await advancePinned(stateRoot, final, current, sha, deps, git, clock, { ...row, from_sha: current.sha }, kept);
+  } finally {
+    pin.release();
+  }
+}
+
+async function advancePinned(
+  stateRoot: string,
+  final: string,
+  present: EngineRecord,
+  sha: string,
+  deps: EngineBuildOptions,
+  git: EngineGit,
+  clock: Clock,
+  row: { source_hash: string; from_sha: string; to_sha: string },
+  kept: BuildOutcome,
+): Promise<BuildOutcome> {
+  const log = deps.log ?? (() => {});
+  let named: ReturnType<typeof namedByLiveRuns>;
+  try {
+    named = namedByLiveRuns(stateRoot, deps.probe ?? realRunChildProbe);
+  } catch (err) {
+    log("engine.advance_deferred", { ...row, reason: `live runs unreadable: ${reasonOf(err)}` });
+    return kept;
+  }
+  if ("undecidable" in named) {
+    log("engine.advance_deferred", { ...row, reason: named.undecidable });
+    return kept;
+  }
+  if (named.hashes.has(present.sourceHash) || named.shas.has(present.sha)) {
+    log("engine.advance_deferred", { ...row, reason: "named by a live run" });
+    return kept;
+  }
+  const started = clock.now();
+  const materialize = deps.materialize ?? storeMaterialize;
+  // Every mutation an advance makes, in order: the checkout (HEAD and tracked files), the bundle publish
+  // (dist/child-entries and its manifest), the record. Each is either refused before it happens or undone on the way
+  // out, so a failed advance leaves the engine at its own revision AND its own bundle, still current (#16735 review).
+  let published = false;
+  try {
+    await git(final, ["checkout", "--detach", "--quiet", sha]);
+    // The advance keeps the stored bundle only while the tree's own source still hashes to it. The expected hash is
+    // checked BEFORE the publish, so another hash's stored build never replaces this engine's bundle.
+    const lookup = materialize(final, deps.storeRoot, present.sourceHash);
+    published = lookup.outcome === "hit";
+    if (lookup.outcome !== "hit" || lookup.hash !== present.sourceHash) {
+      throw new Error(lookup.outcome !== "hit" ? `store-${lookup.reason}` : `source-moved: tree hashes to ${lookup.hash}`);
+    }
+    const record: EngineRecord = { ...present, sha, builtAt: clock.now() };
+    writeAtomic(join(final, ENGINE_RECORD), `${JSON.stringify(record)}\n`);
+  } catch (err) {
+    try {
+      await git(final, ["checkout", "--detach", "--quiet", present.sha]);
+      if (published) {
+        // A publish happened: put the engine's own stored bundle back, judged against its own source again.
+        const restored = materialize(final, deps.storeRoot, present.sourceHash);
+        if (restored.outcome !== "hit" || restored.hash !== present.sourceHash) {
+          throw new Error(restored.outcome !== "hit" ? `bundle store-${restored.reason}` : `bundle hashes to ${restored.hash}`);
+        }
+      }
+    } catch (restore) {
+      log("engine.advance_failed", { ...row, reason: `${reasonOf(err)}; restore failed: ${reasonOf(restore)}` });
+      return { kind: "failed", reason: `advance-failed: ${reasonOf(err)}` };
+    }
+    log("engine.advance_failed", { ...row, reason: reasonOf(err) });
+    return kept;
+  }
+  log("engine.advanced", { ...row, ms: clock.now() - started });
+  return kept;
 }
 
 // ── currency ─────────────────────────────────────────────────────────────────────────────────

@@ -901,6 +901,11 @@ export interface RuntimeReviewCapacityInput extends ReviewCapacityBounds {
   cpuWeightShare?: number;
   /** W1-T11129 — the governor's learned CPU lane bound; absent, the daemon's last published one is read. */
   laneCpuBound?: number;
+  /** W1-T11149: hands the sample's provider reading to the sweep's provider bound and returns the review phase split the row
+   *  records. Absent: no split is recorded. */
+  observeReviewPhases?: (provider: ReviewProviderCapacityObservation, width: number) => {
+    cpuPhaseInFlight: number; judgePhaseInFlight: number; providerBound: number;
+  };
 }
 
 /** Production adapter. It reads only local host files and the age-bounded provider snapshot. */
@@ -926,6 +931,7 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
   };
   const result = selectAdaptiveReviewWidth(prior, input.policy, observation, input);
   runtimeStates.set(input.root, result.state);
+  const phaseSplit = input.observeReviewPhases?.(observation.provider, result.decision.effectiveWidth);
   if (result.decision.shouldLog) {
     input.log("review.capacity", {
       reason: result.decision.reason,
@@ -978,6 +984,12 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       current_reading: result.decision.evidence.currentReading ?? null,
       noise_band: result.decision.evidence.noiseBand ?? null,
       shed_suspended: result.decision.evidence.shedSuspended,
+      // W1-T11149 — the admission gate's split: reviews the CPU width bounds, reviews the provider bound covers, and that bound.
+      ...(phaseSplit === undefined ? {} : {
+        cpu_phase_in_flight: phaseSplit.cpuPhaseInFlight,
+        judge_phase_in_flight: phaseSplit.judgePhaseInFlight,
+        provider_bound: phaseSplit.providerBound,
+      }),
     });
   }
   return result.decision.effectiveWidth;
