@@ -138,6 +138,9 @@ export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
 import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
 import { daemonBoot } from "./lib/daemon.js";
+import { describeProcessCwdProbe, pathIsAtOrBelow, readBoundedProcessCwdCensus, type ProcessCwdCensus, type UnreadableCwdDetail } from "./lib/process-cwd-census.js";
+// W1-T10389: the census moved to its own module; run-task re-exports it for its existing importers.
+export { readBoundedProcessCwdCensus, type ProcessCwdCensus, type ProcessCwdCensusDeps } from "./lib/process-cwd-census.js";
 import { settleRunChildBacklog } from "./lib/run-child.js";
 export { readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync };
 import { tsImport } from "tsx/esm/api";
@@ -227,7 +230,7 @@ import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
 // @ts-expect-error executable gate module has no declaration file.
 import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
-import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -30295,79 +30298,6 @@ export function decideRegisteredFixOwnerRecovery(
   return { kind: "reclaim-contained" };
 }
 
-export interface ProcessCwdCensusDeps {
-  readNextPid?: () => string | null;
-  readCwd?: (pid: string) => string;
-  now?: () => number;
-  maxEntries?: number;
-  wallMs?: number;
-}
-
-export type ProcessCwdCensus =
-  | { state: "clear"; scanned: number }
-  | { state: "occupied"; scanned: number; pid: number }
-  | { state: "unknown"; scanned: number; reason: "proc_unavailable" | "cwd_unreadable" | "entry_bound" | "wall_bound" };
-
-const FIX_OWNER_PROC_ENTRY_BOUND = 4_096;
-const FIX_OWNER_PROC_WALL_MS = 100;
-
-function pathIsAtOrBelow(candidate: string, root: string): boolean {
-  const rel = relative(root, candidate);
-  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
-}
-
-export function readBoundedProcessCwdCensus(
-  ownerPath: string,
-  deps: ProcessCwdCensusDeps = {},
-): ProcessCwdCensus {
-  const now = deps.now ?? Date.now;
-  const maxEntries = deps.maxEntries ?? FIX_OWNER_PROC_ENTRY_BOUND;
-  const wallMs = deps.wallMs ?? FIX_OWNER_PROC_WALL_MS;
-  const started = now();
-  let procDir: ReturnType<typeof opendirSync> | undefined;
-  let readNextPid = deps.readNextPid;
-  try {
-    if (!readNextPid) {
-      try {
-        procDir = opendirSync("/proc");
-      } catch {
-        return { state: "unknown", scanned: 0, reason: "proc_unavailable" };
-      }
-      readNextPid = () => procDir!.readSync()?.name ?? null;
-    }
-    const readCwd = deps.readCwd ?? ((pid: string) => readlinkSync(join("/proc", pid, "cwd")));
-    let scanned = 0;
-    for (;;) {
-      if (now() - started > wallMs) return { state: "unknown", scanned, reason: "wall_bound" };
-      let entry: string | null;
-      try {
-        entry = readNextPid();
-      } catch {
-        return { state: "unknown", scanned, reason: "proc_unavailable" };
-      }
-      if (entry === null) return { state: "clear", scanned };
-      if (!/^\d+$/.test(entry)) continue;
-      if (scanned >= maxEntries) return { state: "unknown", scanned, reason: "entry_bound" };
-      scanned += 1;
-      let cwd: string;
-      try {
-        cwd = readCwd(entry);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
-        return { state: "unknown", scanned, reason: "cwd_unreadable" };
-      }
-      if (pathIsAtOrBelow(cwd, ownerPath)) return { state: "occupied", scanned, pid: Number(entry) };
-    }
-  } finally {
-    try {
-      procDir?.closeSync();
-    } catch (e) {
-      const error = String(e);
-      void error;
-    }
-  }
-}
-
 export interface CaptureRegisteredFixOwnerDeps {
   processCensus?: (ownerPath: string) => ProcessCwdCensus;
   readClaim?: (inflightDir: string, claimKey: string) => "clear" | "occupied" | "unknown";
@@ -30498,9 +30428,14 @@ export function captureRegisteredFixOwnerSnapshot(
   }
   if (snapshot.claimState !== "clear") return snapshot;
 
-  const process = (deps.processCensus ?? readBoundedProcessCwdCensus)(ownerPath);
+  let unreadable: UnreadableCwdDetail | undefined;
+  const process = (deps.processCensus ?? ((path: string) => readBoundedProcessCwdCensus(path, {
+    onUnreadable: (detail) => { unreadable = detail; },
+  })))(ownerPath);
   snapshot.processState = process.state;
-  if (process.state === "unknown") snapshot.processProbeReason = process.reason;
+  // W1-T10389: the decline row names the errno, the uid relation and any skipped or attributed pids.
+  const probe = describeProcessCwdProbe(process, unreadable);
+  if (probe !== undefined) snapshot.processProbeReason = probe;
   return snapshot;
 }
 
