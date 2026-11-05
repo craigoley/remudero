@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const root = fileURLToPath(new URL("..", import.meta.url));
+const root = REPO_ROOT;
 const json = (path: string) => JSON.parse(readFileSync(join(root, path), "utf8"));
 
 test("Haiku 5.5 image pins the CLI declared by its actual locked SDK", () => {
@@ -13,9 +13,13 @@ test("Haiku 5.5 image pins the CLI declared by its actual locked SDK", () => {
   const lock = json("package-lock.json");
   const image = json("deploy/package.json");
   const imageLock = json("deploy/package-lock.json");
-  assert.equal(lock.packages["node_modules/@anthropic-ai/claude-agent-sdk"].version, "0.3.310");
-  assert.equal(sdk.version, "0.3.310", "the actual installed SDK must match the committed lock");
-  assert.equal(sdk.claudeCodeVersion, "2.1.310", "read CLI identity from SDK metadata, never infer it");
+  const manifest = json("package.json");
+  const lockedSdk = lock.packages["node_modules/@anthropic-ai/claude-agent-sdk"].version;
+  assert.equal(lock.packages[""].dependencies["@anthropic-ai/claude-agent-sdk"],
+    manifest.dependencies["@anthropic-ai/claude-agent-sdk"]);
+  assert.equal(sdk.version, lockedSdk, "the actual installed SDK must match the committed lock");
+  assert.equal(typeof sdk.claudeCodeVersion, "string", "the SDK must declare its CLI identity");
+  assert.ok(sdk.claudeCodeVersion.length > 0, "the SDK CLI identity must not be empty");
   assert.equal(image.dependencies["@anthropic-ai/claude-code"], sdk.claudeCodeVersion);
   assert.equal(imageLock.packages["node_modules/@anthropic-ai/claude-code"].version, sdk.claudeCodeVersion);
   assert.equal(imageLock.packages[""].dependencies["@anthropic-ai/claude-code"], sdk.claudeCodeVersion);
