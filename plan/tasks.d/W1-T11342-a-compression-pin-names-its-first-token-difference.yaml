@@ -1,0 +1,68 @@
+- id: W1-T11342
+  title: A comment-compression pin compares its executable tokens with a bounded first-difference check instead of assert.deepEqual over two whole token arrays, whose failure diff grows quadratically and took one test process to 19.2 GiB
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one shared test helper, the five pins that use the unbounded compare, and the census and gardener text that keep new pins off it
+  band_meaning: span
+  origin: operator-session#review-runaway-memory-2026-11-04
+  plan_refs:
+    - W1-T10821
+    - W1-T11312
+  files:
+    - test/helpers/compression-pin.ts
+    - test/infra/a-compression-pin-names-its-first-token-difference.test.ts
+    - test/ci/parity/compress-src-lib-ci-parity-ts.test.ts
+    - test/learning/compress-src-lib-retro-ts.test.ts
+    - test/ledger/compress-src-lib-ledger-ts.test.ts
+    - test/worker/sandbox/compress-src-lib-containment-ts.test.ts
+    - test/worker/spawn/compress-src-lib-worker-ts.test.ts
+    - test/gardeners/a-comment-compression-pin-never-freezes-its-module.test.ts
+    - src/lib/gate-gardener.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: assertSameTokens in test/helpers/compression-pin.ts returns on equal token arrays. On two 50,000-entry arrays that differ at one index, it throws an AssertionError naming that index, both lengths and at most 20 entries from each side, within 5 s and with a message under 4 KiB. Arrays that differ only in length name the first index past the shorter one.
+      proof: "unit test: test/infra/a-compression-pin-names-its-first-token-difference.test.ts"
+    - claim: The worker pin compares its tokens with assertSameTokens
+      proof: "grep: assertSameTokens( in test/worker/spawn/compress-src-lib-worker-ts.test.ts"
+    - claim: The ci-parity pin compares its tokens with assertSameTokens
+      proof: "grep: assertSameTokens( in test/ci/parity/compress-src-lib-ci-parity-ts.test.ts"
+    - claim: The retro pin compares its tokens with assertSameTokens
+      proof: "grep: assertSameTokens( in test/learning/compress-src-lib-retro-ts.test.ts"
+    - claim: The ledger pin compares its tokens with assertSameTokens
+      proof: "grep: assertSameTokens( in test/ledger/compress-src-lib-ledger-ts.test.ts"
+    - claim: The containment pin compares its tokens with assertSameTokens
+      proof: "grep: assertSameTokens( in test/worker/sandbox/compress-src-lib-containment-ts.test.ts"
+    - claim: The PR-pins census refuses a compression pin that passes two executableTokens( calls to assert.deepEqual, with a positive control that its detector catches one
+      proof: "grep: assertSameTokens in test/gardeners/a-comment-compression-pin-never-freezes-its-module.test.ts"
+    - claim: The compression shard the gardener mints tells the builder to compare tokens with assertSameTokens
+      proof: "grep: assertSameTokens in src/lib/gate-gardener.ts"
+  rationale: |
+    OBSERVED 2026-11-04:
+    - At 19:09Z, a test process in #16240's semantic review grew to 19.2 GiB. The reviewer's census run (`node --test --test-concurrency=2` over 647 tests) reported that file as "not ok 73 - test/worker/spawn/compress-src-lib-worker-ts.test.ts", a file-level failure once the operator approved stopping it.
+    - The review's clone had a 10-16 origin/main (W1-T11343 has the mechanism), so compressionPinBase compared worker.ts at HEAD (51,281 tokens) against worker.ts at the 10-16 base (43,242 tokens), and `assert.deepEqual(executableTokens(source), executableTokens(before), …)` failed.
+    - Measured in this session, a failing assert.deepEqual over two prefixes of those same arrays:
+
+      | Tokens | Peak RSS | Time | Message |
+      |---|---|---|---|
+      | 2,000 | 546 MiB | 0.9 s | 29 KB |
+      | 5,000 | 1,642 MiB | 2.0 s | 43 KB |
+      | 10,000 | 9,217 MiB | 14.6 s | 123 KB |
+
+      The tokenizer itself takes about 0.1 s and 100 MiB on either version.
+    - So any real failure of these five pins ends as a runaway that is killed, not a test failure. That includes a compression PR that really did change code, and a stale base anywhere.
+    - The other pins compare digests (assert.equal on a token or AST digest) and are not affected.
+  design: |
+    - Add assertSameTokens<T>(actual: readonly T[], expected: readonly T[], message: string) to test/helpers/compression-pin.ts. It finds the first index whose entries differ (comparing each entry with isDeepStrictEqual), or the shorter length when one is a prefix of the other. It then throws an AssertionError with the message, the index, both lengths, and at most 10 entries before and after it from each side.
+    - Replace the whole-array assert.deepEqual in each of the five pins with it. Their small fingerprint control tests keep their own assertions.
+    - In the PR-pins census, refuse a pin whose text matches assert.deepEqual( followed by two executableTokens( calls, and add the detector's positive and negative controls.
+    - In renderCommentCompressionShard's design text (src/lib/gate-gardener.ts), add "compare the token streams with assertSameTokens from #test/helpers/compression-pin.js".
+  note: |
+    W1-T11312 (open, run-W1-T11312-1793816189000) also edits test/helpers/compression-pin.ts, in compressionPinBase. This adds a separate export; merge origin/main first if it lands.
+    reservation hand-off: run-unfiled-1793821353770 -> run-unfiled-1793821353770
+    Reserved with rmd next-task-id (W1-T11342 on run-unfiled-1793821353770). From the operator session's 2026-11-04 runaway-review diagnosis.

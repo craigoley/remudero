@@ -70,19 +70,41 @@ function policyOf(root: string, env: NodeJS.ProcessEnv, role: "serve" | "build",
   return { max: field("Memory"), swap: field("MemorySwap"), high: field("MemoryHigh") };
 }
 
-test("each instance's memory.high sits above its working set and below an unchanged memory.max, summing to the host budget where the working sets fit", () => {
+/** W1-T11130: the observed working-set floors, which count as a container's peak until it has learned one. */
+const FLOORS_MIB: Record<string, number> = { "remudero-daemon": 8192, "remudero-serve": 5632, "remudero-console-daemon": 2048, "remudero-site-daemon": 2304 };
+/**
+ * A container's memory.max under the shared host budget with nothing learned: the formula (host - reserve -
+ * the OTHER containers' floors) when it covers the container's own peak, which with nothing learned is its
+ * floor (criterion 2). Otherwise the host is overcommitted and, with no running container to keep a limit
+ * from, the container keeps that floor (operator ruling 2026-11-04). No listed container is left without one.
+ */
+function sharedMax(hostMib: number, container: string, _role: "serve" | "build"): number {
+  const others = INSTANCES.filter((i) => i.container !== container).reduce((sum, i) => sum + FLOORS_MIB[i.container]!, 0);
+  return Math.max(hostMib - HOST_RESERVE_MIB - others, FLOORS_MIB[container]!);
+}
+
+test("each instance's memory.high sits above its working set and below its shared-budget memory.max, summing to the host budget where the working sets fit", () => {
   const { root, env } = install();
   const big = install(BIG_HOST_MIB * 1024);
   try {
     const hostMib = Math.floor(HOST_KB / 1024);
-    // SOFT LIMITS ONLY: memory.max and swap are byte-identical to the policy before memory.high existed,
-    // except serve's swap, which operator ruling 2026-10-19 raised from 1 GiB to 2 GiB.
-    const baseMax = { build: hostMib - 5120 - 2048, serve: 7680 };
     const baseSwap = { build: 4096, serve: 2048 };
-    for (const { container, role, workingSet } of INSTANCES) {
+    // Each memory.max follows the shared budget (R1, W1-T11130), on the 15.6 GiB host too. Its floors exceed
+    // that host's budget, so it is overcommitted there and each container keeps its own floor.
+    for (const { container, role } of INSTANCES) {
       const p = policyOf(root, env, role, container);
-      assert.equal(p.max, baseMax[role] * MIB, `${container}: memory.max unchanged`);
-      assert.equal(p.swap, (baseMax[role] + baseSwap[role]) * MIB, `${container}: swap unchanged`);
+      const max = sharedMax(hostMib, container, role);
+      assert.equal(p.max, max * MIB, `${container}: memory.max is the shared budget's share, not total - 5120 - 2048`);
+      assert.equal(p.swap, max > 0 ? (max + baseSwap[role]) * MIB : 0, `${container}: swap follows the ceiling`);
+      assert.ok(p.high > 0, `${container}: memory.high is sized`);
+      if (max > 0) assert.ok(p.high < p.max, `${container}: memory.high ${p.high / MIB} MiB below memory.max ${p.max / MIB} MiB`);
+    }
+    assert.ok(hostMib - 2048 - 5632 - 2048 - 2304 < FLOORS_MIB["remudero-daemon"]!, "positive control: core's formula is below its floor here");
+    assert.equal(policyOf(root, env, "build", "remudero-daemon").max, FLOORS_MIB["remudero-daemon"]! * MIB);
+    // Where the working sets fit (a 40 GiB host), memory.max is the same formula and memory.high clears each working set.
+    for (const { container, role, workingSet } of INSTANCES) {
+      const p = policyOf(big.root, big.env, role, container);
+      assert.equal(p.max, sharedMax(BIG_HOST_MIB, container, role) * MIB, `${container}: memory.max on the big host`);
       assert.ok(p.high > 0 && p.high < p.max, `${container}: memory.high ${p.high / MIB} MiB below memory.max ${p.max / MIB} MiB`);
       assert.ok(p.high > workingSet, `${container}: memory.high ${p.high / MIB} MiB above its ${workingSet / GB} GB working set`);
     }
