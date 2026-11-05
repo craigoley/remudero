@@ -162,7 +162,13 @@ function readsOf(counted: { bodyRows(): number }, board: BoardProjection, id: st
 }
 
 test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
-  const w = world(t, [...rowsFrom(T0, 40), ...aliasRows(T0 + 50_000, "W1-T23", 1)]);
+  const payload = JSON.parse('{"__proto__":{"run_id":"inherited"},"detail":{"__proto__":"nested","items":[{"__proto__":null}]}}') as Row;
+  const withPayload = (row: Row): Row => ({ ...row, ...payload });
+  const w = world(t, [
+    ...rowsFrom(T0, 40),
+    ...aliasRows(T0 + 50_000, "W1-T23", 1).map(withPayload),
+    withPayload({ ts: at(T0 + 500), host: "h1", step: "verdict", task_id: "W1-T24", verdict: "failed" }),
+  ]);
   const board = w.board();
   drain(board);
   bucketsOf(board); // every task's bucket held
@@ -171,8 +177,8 @@ test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
     const late = T0 + 5_000 + round;
     w.append([
       ...rowsFrom(T0 + 600_000 + round * 60_000, 4, 40 + round * 4),
-      ...aliasRows(T0 + 650_000 + round * 60_000, "W1-T23", 2 + round),
-      { ts: at(late), host: "h1", step: "verdict", task_id: "W1-T24", run_id: "r-W1-T24", verdict: "failed", cost_usd: 0.1, late: round },
+      ...aliasRows(T0 + 650_000 + round * 60_000, "W1-T23", 2 + round).map(withPayload),
+      withPayload({ ts: at(late), host: "h1", step: "verdict", task_id: "W1-T24", run_id: "r-W1-T24", verdict: "failed", cost_usd: 0.1, late: round }),
     ]);
     drain(board);
     const extended = bucketsOf(board);
@@ -263,18 +269,26 @@ function built(w: World, db: ReadModelDb, view: ReturnType<typeof createNowView>
 }
 
 test("W1-T9716: now-view bodies are identical with the task cache on and off", (t) => {
-  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1)];
+  const start = (ms: number): Row => ({
+    ts: at(ms), host: "h1", step: "run.start", task_id: "W1-T21",
+    ...JSON.parse('{"__proto__":{"run_id":"inherited"}}') as Row,
+  });
+  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1), start(T0 + 3_600_000)];
   const on = world(t, history);
   const off = world(t, history);
   const [onDb, offDb] = [counting(on.db), counting(off.db)];
   const onView = nowView(on, {});
   const offView = nowView(off, { taskCacheBytes: 0 });
-  const portable = (w: World, data: NowViewData): unknown => JSON.parse(JSON.stringify(data).split(w.root).join("<root>"));
+  const portable = (w: World, data: NowViewData): string => JSON.stringify(data).split(w.root).join("<root>");
   let ms = T0 + 3_600_000;
   const [onMark, offMark] = [onDb.bodyRows(), offDb.bodyRows()];
   for (let round = 0; round < 5; round++) {
     if (round > 0) {
-      const more = [...rowsFrom(T0 + 700_000 + round * 60_000, 2, 40 + round * 2), ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T26", round + 1)];
+      const more = [
+        ...rowsFrom(T0 + 700_000 + round * 60_000, 2, 40 + round * 2),
+        ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T26", round + 1),
+        start(ms + 31_000),
+      ];
       on.append(more);
       off.append(more);
       // Past the clock rule's 30 s, so every aging projection re-derives as it does in serve.
@@ -283,7 +297,12 @@ test("W1-T9716: now-view bodies are identical with the task cache on and off", (
       off.set(ms);
     }
     const [a, b] = [built(on, onDb.db, onView), built(off, offDb.db, offView)];
-    assert.deepEqual(portable(on, a), portable(off, b), `round ${round}: the now-view bodies are byte-identical`);
+    assert.equal(portable(on, a), portable(off, b), `round ${round}: the now-view bodies are byte-identical`);
+    for (const data of [a, b]) {
+      const running = data.board.tasks.find((row) => row.taskId === "W1-T21");
+      assert.ok(running?.worker, `round ${round}: control, the run.start produces worker telemetry`);
+      assert.equal(running.worker.runId, undefined, `round ${round}: a JSON __proto__ property never supplies a run id`);
+    }
     assert.ok(JSON.stringify(a).includes("W1-T21"), `round ${round}: control, the body lists the tasks`);
   }
   const [onReads, offReads] = [onDb.bodyRows() - onMark, offDb.bodyRows() - offMark];
