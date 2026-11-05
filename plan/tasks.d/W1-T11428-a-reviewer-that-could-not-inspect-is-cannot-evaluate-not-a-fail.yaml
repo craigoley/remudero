@@ -15,13 +15,16 @@
     - W1-T178
   files:
     - src/lib/review.ts
+    - src/cli/commands/review.ts
+    - src/lib/review-outcome-class.ts
+    - src/lib/required-semantic-review.ts
     - test/review/a-reviewer-that-could-not-inspect-is-cannot-evaluate-not-a-fail.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: A reviewer verdict line in the UNABLE form never downgrades a criterion; a criterion whose proof executed and passed keeps its floor verdict and is marked reviewer-unavailable
       proof: "unit test: test/review/a-reviewer-that-could-not-inspect-is-cannot-evaluate-not-a-fail.test.ts"
-    - claim: A review with any reviewer-unavailable criterion posts cannot-evaluate (pending, the existing one-per-head escalation) instead of failure, and its next attempt is re-admitted on a provider other than the one that was unable when another is eligible
+    - claim: A review with any reviewer-unavailable criterion posts cannot-evaluate (pending, the existing one-per-head escalation) instead of failure, and a required semantic review counts an UNABLE line as an answered criterion, so it is never withheld for incomplete verdicts
       proof: "grep: W1-T11428 criterion 2 in test/review/a-reviewer-that-could-not-inspect-is-cannot-evaluate-not-a-fail.test.ts"
   rationale: |
     OBSERVED 2026-11-05T17:13:18Z: core's review of #16758 (run review-PR16758-1793898595025, head 22bb3e7311) posted remudero-review=FAILURE. All 4 proofs executed and PASSED, and all 4 were downgraded with "Review unavailable: sandbox launcher failed before execution; could not inspect …". The reviewer had been routed by the auction to provider codex (gpt-6.1-sol, tightestRemainingPercent 4). worker.attempt reported success; review.reviewer reported subtype success with downgrades 4.
@@ -30,11 +33,13 @@
   design: |
     1. Contract: the reviewer verdict contract built in src/lib/review.ts (buildReviewPrompt / reviewerVerdictContract) gains one explicit per-criterion form, UNABLE <n>: <what could not be inspected and why>, to be used when the reviewer's own tools or sandbox failed or the proof could not be read. The parser (parseReviewerVerdicts / parseReviewerVerdictClauses) recognises it as its own outcome, never as FAIL.
     2. Judge: an UNABLE criterion is never downgraded. It keeps the floor's verdict and is marked reviewer_unavailable with the reviewer's reason. Only a reviewer that actually inspected may downgrade.
-    3. Review state: any reviewer_unavailable criterion makes the review cannot-evaluate (state pending, the existing cannot-evaluate escalation, once per head). The light pass re-admits it, and the next attempt excludes the unable provider from the auction when another provider is eligible. No FAILURE is posted.
+    3. Review state: any reviewer_unavailable criterion makes the review cannot-evaluate (state pending, the existing cannot-evaluate escalation, once per head). Re-admission is the EXISTING one; excluding the unable provider is W1-T11432's. No FAILURE is posted.
+    3a. Required semantic review: recordedReviewVerdictLines (src/lib/review-outcome-class.ts) records UNABLE lines, and requiredSemanticRefusal (src/lib/required-semantic-review.ts) treats an UNABLE criterion as answered, so a required review whose reviewer was unable reaches the judge and becomes cannot-evaluate, never "required-semantic-incomplete-verdicts" withheld. The CLI (src/cli/commands/review.ts ~:906) hands the UNABLE markers to judgeReview beside semantic and semanticClauses.
     4. No prose matching of free-text clauses as the mechanism; the contract token is the signal. The builder checks whether the provider's terminal or execution evidence also reports the tool or sandbox failure in a structured field (codex exec events); if it does, that becomes a backstop for a reviewer that ignores the contract. If it does not, record that in the PR.
-    Tests: a judged review whose reviewer output carries UNABLE for every criterion over executed_pass proofs posts pending and not failure, and keeps every criterion met (at base it fails all four). A mix of a real FAIL with a reason and an UNABLE fails only the real one. Re-admission excludes the unable provider.
+    Tests: a judged review whose reviewer output carries UNABLE for every criterion over executed_pass proofs posts pending and not failure, and keeps every criterion met (at base it fails all four). A mix of a real FAIL with a reason and an UNABLE fails only the real one. A required semantic review whose reviewer emitted UNABLE is cannot-evaluate, not withheld.
   falsifier: |
     At origin/main, a reviewer whose sandbox launcher failed returns clauses saying it could not inspect, and the review posts FAILURE on proofs that executed and passed (#16758, 2026-11-05T17:13Z).
   note: |
     reservation hand-off: plan-file-1793898946000 -> plan-file-1793898946000
     Reserved with rmd next-task-id from the operator session's ops worktree. No duplicate: W1-T2946 (merged) let Codex reviewers write a private TMPDIR; W1-T2263 refuses only UNEXPLAINED downgrades. Whether codex's sandbox launcher fails systematically inside the container is not established (one occurrence); this task fixes the classification, and the launcher itself is a separate finding if it recurs.
+    Amended 2026-11-05 (operator-approved split, NEEDS_SCOPE at build): the builder found the reviewer's output is folded in src/cli/commands/review.ts, and that a required semantic review WITHHOLDS any criterion without a boolean verdict (src/lib/review-outcome-class.ts recordedReviewVerdictLines records only PASS|FAIL; src/lib/required-semantic-review.ts refuses non-boolean verdicts), so an UNABLE line could never reach the judge with only review.ts in scope. files gains those three paths. No exclude-provider mechanism exists anywhere in src, so re-admitting on another provider moved to W1-T11432 (worker.ts auction + sweep.ts), which depends on this task.
