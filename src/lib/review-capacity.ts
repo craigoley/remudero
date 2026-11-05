@@ -361,13 +361,16 @@ export function selectAdaptiveReviewWidth(
   // W1-T11129 — the weight-relative verdict replaces the fixed cpuPsiHighPct line everywhere this controller read it.
   // An unread or stale share holds both ways: no shed, and no calm to grow on.
   const cpu = cpuPressureTier(observation, policy);
+  // W1-T11129 — WITH THE SHARE UNREAD OR STALE THE WHOLE CPU ARM HOLDS: every CPU shed, every effect judgement and every
+  // relief restore reads PSI, and PSI with no share is no evidence either way, so none of them acts until a share is read.
+  const shareKnown = finite(observation.cpuWeightShare) && observation.cpuWeightShare > 0;
   // W1-T11129 — THE SHED READS THE GOVERNOR'S CPU VERDICT too: reviews past the learned capacity (the CPU the host has,
   // less its measured baseline, over what a lane is measured to use) are CPU overload while PSI still shows pressure
   // (`full` above the low watermark, the latency arm's corroboration): past the bound on a calm host there is nothing
   // for W1-T11150's relief to measure, and a widening the healthy window earned there stays untouched. It sheds through
   // the SAME path as a PSI shed, so W1-T11150's record, effect check, suspension and proportional restore treat it like
-  // any shed. Not PSI alone: the bound is learned from cgroup cpu.stat, so an unread share does not stop it.
-  const overLearnedCapacity = readingNow !== undefined && readingNow > policy.cpuPsiLowPct &&
+  // any shed. Its corroboration and its effect check read PSI, so it too waits for a read share.
+  const overLearnedCapacity = shareKnown && readingNow !== undefined && readingNow > policy.cpuPsiLowPct &&
     finite(observation.laneCpuBound) && observation.activeWorkers + effectiveWidth > observation.laneCpuBound;
   const cpuOverloaded = cpu.tier === "shed" || overLearnedCapacity;
   const cpuCalm = cpu.calm;
@@ -382,12 +385,15 @@ export function selectAdaptiveReviewWidth(
   const latencyRatio = reviewLatencyRatio(observation.settlements);
   const latencyExpanded = latencyRatio !== undefined && latencyRatio >= policy.latencyExpansionRatio;
   // 2026-10-06 — PSI AT OR BELOW BOTH LOW WATERMARKS, and only when both readings exist: an unread
-  // PSI never counts as calm. This is the recovery condition and the latency arm's corroboration.
-  const psiCalm =
+  // PSI never counts as calm. `psiQuiet` is that reading as it is; it corroborates the latency arm below, which sheds
+  // only while PSI still shows pressure, share or no share (2026-10-06, unchanged by W1-T11129). `psiCalm` is the
+  // recovery condition, and it also needs the CPU verdict's calm, which an unread share never gives (W1-T11129).
+  const psiQuiet =
     finite(observation.cpuPsiFullAvg10Pct) &&
     finite(observation.memoryPsiSomeAvg10Pct) &&
-    cpuCalm &&
+    observation.cpuPsiFullAvg10Pct <= policy.cpuPsiLowPct &&
     observation.memoryPsiSomeAvg10Pct <= policy.memoryPsiLowPct;
+  const psiCalm = psiQuiet && cpuCalm;
   // Back to base in one sample, never past what the host worker budget leaves room for, and never
   // above base: lanes above it stay earned by the healthy window below.
   const restoreBase = (): void => {
@@ -405,7 +411,7 @@ export function selectAdaptiveReviewWidth(
   }
   const band = cpuNoiseBand(cpuReadings, (shed?.atMs ?? observation.nowMs) - settleMs);
   const roomNow = Math.trunc(policy.hostWorkerBudget) - Math.max(0, Math.trunc(observation.activeWorkers));
-  if (shed && shed.effect === "pending" && readingNow !== undefined && observation.nowMs - shed.atMs >= settleMs) {
+  if (shed && shed.effect === "pending" && shareKnown && readingNow !== undefined && observation.nowMs - shed.atMs >= settleMs) {
     if (shed.reading - readingNow > band) {
       shed.effect = "effective";
     } else {
@@ -421,7 +427,7 @@ export function selectAdaptiveReviewWidth(
     }
   }
   const previousReading = priorReadings.length > 0 ? priorReadings[priorReadings.length - 1]!.v : undefined;
-  if (shed && readingNow !== undefined && !cpuOverloaded) {
+  if (shed && shareKnown && readingNow !== undefined && !cpuOverloaded) {
     shed.lowest = Math.min(shed.lowest, readingNow);
     if (previousReading !== undefined && readingNow <= previousReading && effectiveWidth < baseWidth) {
       // Proportional restore: relief is the fraction of the shedding reading's excess (over the calm
@@ -479,7 +485,7 @@ export function selectAdaptiveReviewWidth(
     observation.settlements.timeouts >= policy.unhealthySettlementThreshold
   ) {
     directPressure("review-unhealthy");
-  } else if (latencyExpanded && !psiCalm) {
+  } else if (latencyExpanded && !psiQuiet) {
     // MEASURED 2026-10-06 (Azure, base 4): this arm stepped 4 -> 3 -> 2 -> 1 on three samples
     // whose cpu `full` PSI read 2.18, 0.31 and 0; the third fired on reviews that had run long
     // during a load spike already gone, and recovery then took 30+ min. Latency is a lagging

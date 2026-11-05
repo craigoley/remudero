@@ -40,7 +40,7 @@ import {
   type ReviewCapacityState,
 } from "#src/lib/review-capacity.js";
 import { loadPlan } from "#src/lib/plan.js";
-import { trackInFlightReview } from "#src/lib/sweep.js";
+import { runningReviewLaneIds, trackInFlightReview } from "#src/lib/sweep.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -411,8 +411,8 @@ test("W1-T11129 criterion 2: W1-T11150's relief replay keeps its widths with a l
 
 test("W1-T11129 criterion 2: a shed on the learned cpu bound is W1-T11150's shed: recorded, judged, handed back", () => {
   // The reviewer's replay: two builds run, the governor has learned room for four lanes, review width is 4, and PSI full
-  // sits unchanged in the band above calm for ten minutes. Share or no share: the bound is learned from cpu.stat.
-  for (const share of [1, undefined]) {
+  // sits unchanged in the band above calm for ten minutes.
+  for (const share of [1]) {
     let state: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 2 };
     const decisions: ReviewCapacityDecision[] = [];
     for (let i = 0; i <= 10; i++) {
@@ -437,6 +437,96 @@ test("W1-T11129 criterion 2: a shed on the learned cpu bound is W1-T11150's shed
       assert.notEqual(later.reason, "cpu-pressure");
     }
   }
+});
+
+test("W1-T11129 criterion 2: with the share unread the learned bound sheds nothing either: its evidence is PSI", () => {
+  let state: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 2 };
+  for (let i = 0; i <= 10; i++) {
+    const step = selectAdaptiveReviewWidth(state, POLICY, observation({ nowMs: i * 60_000, activeWorkers: 2, laneCpuBound: 4, cpuPsiFullAvg10Pct: 8 }), BOUNDS);
+    assert.equal(step.decision.effectiveWidth, 4, `held at sample ${i}`);
+    assert.notEqual(step.decision.reason, "cpu-pressure");
+    state = step.state;
+  }
+});
+
+test("W1-T11129 criterion 2: an unread share holds a relief restore too: nothing is added on PSI alone", () => {
+  // The reviewer's replay: three CPU sheds on the container's own overload (share 1), then the share goes unread while
+  // PSI full falls from 25 to 20. The fall is PSI evidence alone, so the width holds at 1 until a share is read again.
+  let state: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 0 };
+  const widths: number[] = [];
+  // The last sample is past the settle time: an effect check judging the unchanged PSI would hand the lanes back.
+  for (const [at, full, share] of [[0, 25, 1], [5_000, 25, 1], [10_000, 25, 1], [20_000, 20, undefined], [30_000, 15, undefined], [400_000, 20, undefined]] as const) {
+    const step = selectAdaptiveReviewWidth(state, POLICY, observation({
+      nowMs: at, cpuPsiFullAvg10Pct: full, ...(share === undefined ? {} : { cpuWeightShare: share }),
+    }), BOUNDS);
+    widths.push(step.decision.effectiveWidth);
+    state = step.state;
+  }
+  assert.deepEqual(widths, [3, 2, 1, 1, 1, 1], "no relief restore and no effect-check hand-back on PSI with no share");
+  // The share read again and PSI under its shed line (10 at share 1), the relief restores in proportion (W1-T11150).
+  const back = selectAdaptiveReviewWidth(state, POLICY, observation({ nowMs: 410_000, cpuPsiFullAvg10Pct: 8, cpuWeightShare: 1 }), BOUNDS);
+  assert.ok(back.decision.effectiveWidth > 1, `restored once the share is read, got ${back.decision.effectiveWidth}`);
+});
+
+test("W1-T11129 criterion 2: the latency arm is unchanged and share-independent: it sheds only while PSI shows pressure", () => {
+  // Slow reviews (recent latency three times the baseline). The reviewer's case: no share, CPU and memory PSI both 0.
+  const slow = { successes: 3, failures: 0, timeouts: 0, baselineLatencyMs: 60_000, recentLatencyMs: 180_000 };
+  const decide = (over: Partial<ReviewCapacityObservation>) =>
+    run({ effectiveWidth: 4, healthySamples: 0 }, { settlements: slow, memoryPsiSomeAvg10Pct: 0, ...over } as Partial<ReviewCapacityObservation>);
+  for (const share of [undefined, 1]) {
+    const quiet = decide({ cpuPsiFullAvg10Pct: 0, ...(share === undefined ? {} : { cpuWeightShare: share }) });
+    assert.notEqual(quiet.reason, "review-latency-expanded", `share ${share}: quiet PSI does not corroborate latency`);
+    assert.equal(quiet.effectiveWidth, 4);
+    // With PSI showing pressure the latency arm sheds as it did before W1-T11129 (2026-10-06), with or without a share.
+    const pressed = decide({ cpuPsiFullAvg10Pct: 8, ...(share === undefined ? {} : { cpuWeightShare: share }) });
+    assert.equal(pressed.reason, "review-latency-expanded", `share ${share}`);
+  }
+});
+
+test("W1-T11129 criterion 1: runDaemon adopts a review child at boot as a sampled review lane, without throwing", async (t) => {
+  const dir = cgroupDir(t);
+  const planFile = join(dir, "tasks.yaml");
+  writeFileSync(planFile, "- id: A\n  title: A\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/A.ts]\n");
+  const clock = { ms: Date.parse("2026-11-05T00:00:00Z") };
+  const samples: Array<{ atMs: number }> = [];
+  const ports: LaneGovernorPorts = {
+    mode: () => "shadow",
+    read: () => { throw new Error("memory unread in this test"); },
+    cpuCount: () => 8,
+    cpuUsageUsec: () => { samples.push({ atMs: clock.ms }); return (clock.ms - Date.parse("2026-11-05T00:00:00Z")) * 1000; },
+  };
+  let settleChild!: () => void;
+  const childSettled = new Promise<void>((resolve) => { settleChild = resolve; });
+  const bootAtMs = clock.ms;
+  let lanesAtAdoption: string[] | undefined;
+  const merged = new Set<string>();
+  publishLaneCpuBound(null);
+  t.after(() => publishLaneCpuBound(null));
+  const summary = await runDaemon(loadPlan(planFile), {
+    refreshMerged: () => (id: string) => merged.has(id),
+    log: () => {},
+    // A restart finds a review still running as a run child (W1-T9114) and adopts it at boot.
+    adoptRunChildren: () => [{
+      runId: "review-child-1", taskId: "PR-7", settled: childSettled,
+      work: { kind: "review", prNumber: 7, headSha: "a".repeat(40), reviewKey: "pr-7-review" },
+    }],
+    runOne: async (id: string) => {
+      lanesAtAdoption ??= runningReviewLaneIds();
+      clock.ms += 30_000;
+      settleChild();
+      for (let i = 0; i < 20; i++) await drainMicrotasks();
+      merged.add(id);
+      return { taskId: id, merged: true, verdict: "merged", costUsd: 0, prUrl: "https://x/A" } as unknown as RunResult;
+    },
+    sleep: async () => {},
+    now: () => new Date(clock.ms),
+    laneGovernor: ports,
+  } as unknown as DaemonDeps, { max: 1, laneCount: 2, pollIntervalMs: 1000 });
+  assert.equal(summary.stopReason, "max_reached", "the boot adoption did not abort the daemon");
+  assert.deepEqual(lanesAtAdoption, ["review-child-review-child-1"], "the adopted child is a review lane");
+  assert.ok(samples.some((s) => s.atMs === bootAtMs), "the counter was sampled at the adoption, the review lane's start");
+  assert.ok(samples.some((s) => s.atMs === bootAtMs + 30_000), "and at the child's settlement, its end");
+  assert.deepEqual(runningReviewLaneIds(), [], "settled: no review lane left behind");
 });
 
 test("W1-T11129 criterion 2: past the learned bound on a calm host there is nothing to shed", () => {
