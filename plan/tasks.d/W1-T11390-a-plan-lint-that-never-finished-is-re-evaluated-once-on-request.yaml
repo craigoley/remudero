@@ -31,7 +31,7 @@
     Settled by lookup: is the base recorded on the failed row? -> Best-effort. merge_base_sha reaches review.posted from tryFetchReviewReuseFacts, and absence means unreadable, so a row without it refuses.
     Settled by lookup: may a retry counter enter the decision digest? -> No. W1-T3835's design keeps timestamps and retry counters out of reviewDecisionDigest, so the bound is a ledger row and REVIEW_ENGINE_REVISION does not move.
     Settled by lookup: does any production caller pass an explicit request today? -> No. src/cli/commands/review.ts calls claimReviewDecision with ledgerPath, taskId, prUrl, digest and headCheckoutDir only, and that file is outside the requested scope.
-    Settled by lookup: who owns W1-T11381 and W1-T11389? -> Unknown. Neither id appears anywhere in this checkout, and the reservation refs are not readable from a plan worker, so both stay untouched. This task files under W1-T11390, the next id this run holds.
+    Settled by lookup: who owns W1-T11381 and the earlier unused reservation? -> Unknown. Their ownership cannot be established from this checkout, and the reservation refs are not readable from a plan worker, so both stay untouched. This task files under W1-T11390, the next id this run holds.
 
     EXCLUDED SCOPE, BY DECISION. This task builds the guard and leaves it dormant: the new option is absent on
     every production path until a caller supplies it, and that caller change is outside these two files.
@@ -96,7 +96,7 @@
     - editing a consumer PR's head or body to reset review identity;
     - publishing a status by hand, or by any path other than postReviewStatusGuarded;
     - weakening branch protection, a required check or a pinned identity;
-    - reusing or clearing the unknown W1-T11381 or W1-T11389 reservations;
+    - reusing or clearing W1-T11381 or the earlier unused reservation;
     - src/cli/commands/review.ts, src/run-task.ts, a new verb or a new flag;
     - fixing why the lint child dies, which W1-T11225's ledger row exists to name.
   acceptance:
@@ -138,6 +138,6 @@
     budget_usd 30 is the operator's cap for this filing.
     Reason-shape coupling: W1-T11225, still queued, appends "; it printed: ..." to the same reason, so the
     eligibility match accepts both forms and neither task depends on the other landing first.
-    Id note: this run's first reserved id was W1-T11389, which the initiative forbids reusing, so it is left
-    unfiled and this task takes the run's next reserved id. A hole in the sequence is not a defect
+    Id note: the first reservation stays unfiled because the initiative forbids reusing it. This task takes
+    the run's next reserved id. A hole in the sequence is not a defect
     (reserveTaskIdRemote, src/lib/task-id-reservation.ts).
