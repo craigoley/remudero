@@ -80,17 +80,33 @@ export function clockFromIsoFn(fn?: () => string): Clock {
  * When a stalled loop resumes, Node runs due timers before I/O, so a plain timer fires ahead of a result already
  * waiting in a pipe or socket. A firing late by a twentieth of the budget or more therefore re-arms for the time the
  * loop was held, and only a deadline that fires on a free loop expires (#11962's exchange deadline, generalised).
+ * W1-T11368: the re-arms are bounded by elapsed time since the deadline started, and every held turn counts against
+ * it. The first firing keeps the rule above (it re-arms for the held time, up to the budget), which may stretch the
+ * window to cover a single stall longer than the budget; every later re-arm must end inside that window, otherwise the
+ * deadline expires. A loop held at every firing therefore expires within the window (2 x budget unless the first turn
+ * stretched it) plus its last firing's lateness, instead of re-arming without end.
  */
 export function loopAvailableDeadline(clock: Clock, budgetMs: number, onExpire: () => void): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const arm = (ms: number): void => {
-    const dueAt = clock.now() + ms;
+  const startedAt = clock.now();
+  let windowMs = 2 * budgetMs;
+  let firstFiring = true;
+  const arm = (ms: number, armedAt: number): void => {
+    const dueAt = armedAt + ms;
     timer = setTimeout(() => {
-      const late = clock.now() - dueAt;
-      if (late >= budgetMs / 20) arm(Math.min(late, budgetMs));
+      const now = clock.now();
+      const late = now - dueAt;
+      const elapsed = now - startedAt;
+      let grace = Math.min(late, windowMs - elapsed);
+      if (firstFiring) {
+        firstFiring = false;
+        grace = Math.min(late, budgetMs);
+        windowMs = Math.max(windowMs, elapsed + grace);
+      }
+      if (late >= budgetMs / 20 && grace > 0) arm(grace, now);
       else onExpire();
     }, ms);
   };
-  arm(budgetMs);
+  arm(budgetMs, startedAt);
   return () => clearTimeout(timer);
 }

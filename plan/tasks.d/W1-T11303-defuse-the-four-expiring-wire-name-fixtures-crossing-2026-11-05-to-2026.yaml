@@ -6,7 +6,10 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=dcdcf0fea216036c
+  # backlog gardener: placed=2026-11-05T18:26:24.203Z
   attempts: 0
   files:
     - test/a-flapping-stalled-stage-escalates-once-per-head.test.ts
