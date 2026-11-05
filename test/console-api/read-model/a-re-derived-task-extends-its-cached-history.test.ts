@@ -367,3 +367,49 @@ test("W1-T9716: the task cache bound counts body bytes, not characters", (t) => 
   assert.ok(cache.bytes <= bound, `the cache holds ${cache.bytes} bytes, at most its bound ${bound}`);
   assert.ok(cache.not_admitted > 0, "and counts the history it could not hold");
 });
+
+/** A row as the ledger holds it with an own `"__proto__"` key: built by JSON.parse, since a literal would set the prototype. */
+const protoRow = (fields: Record<string, unknown>, proto: Record<string, unknown>): Row =>
+  JSON.parse(`${JSON.stringify(fields).slice(0, -1)},"__proto__":${JSON.stringify(proto)}}`) as Row;
+
+test("W1-T9716: a held row keeps an own __proto__ key exactly as a fresh read does", (t) => {
+  const own = protoRow({ ts: at(T0 + 900), host: "h1", step: "verdict", task_id: "W1-T25", run_id: "r-W1-T25", verdict: "failed" }, { kept: "own" });
+  assert.ok(Object.hasOwn(own, "__proto__") && Object.getPrototypeOf(own) === Object.prototype, "control: the fixture key is own, not a prototype");
+  const w = world(t, [...rowsFrom(T0, 20), own, ...aliasRows(T0 + 30_000, "W1-T25", 1)]);
+  const board = w.board();
+  drain(board);
+  bucketsOf(board); // held
+  // Extend the held bucket by an alias row and a late row, as the reviewer did.
+  w.append([...aliasRows(T0 + 40_000, "W1-T25", 2), { ts: at(T0 + 100), host: "h1", step: "verdict", task_id: "W1-T25", run_id: "r-W1-T25", late: true }]);
+  drain(board);
+  const extended = bucketsOf(board);
+  assert.deepEqual(extended, uncachedBuckets(w), "the extended bucket equals a fresh full read, __proto__ key included");
+  assert.ok(extended["W1-T25"]!.some((r) => r.includes('"__proto__":{"kept":"own"}')), "control: the bucket hands out the own key");
+  const handed = (board.index(board.rows()).byTask.get("W1-T25") ?? []).find((r) => Object.hasOwn(r, "__proto__"));
+  assert.ok(handed && Object.getPrototypeOf(handed) === Object.prototype, "a handed-out copy keeps the key own and the plain prototype");
+});
+
+test("W1-T9716: a run.start row with an own __proto__ key leaves now-view bodies identical with the task cache on and off", (t) => {
+  // No own run_id: a copy that turns `__proto__` into a prototype would hand this row an inherited one.
+  const start = protoRow({ ts: at(T0 + 60_500), host: "h1", step: "run.start", task_id: "W1-T27" }, { run_id: "inherited" });
+  const history = [...rowsFrom(T0, 30), start];
+  const on = world(t, history);
+  const off = world(t, history);
+  const [onView, offView] = [nowView(on, {}), nowView(off, { taskCacheBytes: 0 })];
+  const portable = (w: World, data: NowViewData): unknown => JSON.parse(JSON.stringify(data).split(w.root).join("<root>"));
+  let ms = T0 + 3_600_000;
+  for (let round = 0; round < 3; round++) {
+    if (round > 0) {
+      const more = [...rowsFrom(T0 + 700_000 + round * 60_000, 2, 30 + round * 2), ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T27", round)];
+      on.append(more);
+      off.append(more);
+      ms += 31_000; // past the clock rule, so the task re-derives from its held bucket
+      on.set(ms);
+      off.set(ms);
+    }
+    const [a, b] = [built(on, on.db, onView), built(off, off.db, offView)];
+    assert.deepEqual(portable(on, a), portable(off, b), `round ${round}: the now-view bodies are byte-identical`);
+    assert.ok(!JSON.stringify(a).includes('"inherited"'), `round ${round}: no field is inherited from the row's own __proto__ key`);
+    assert.ok(JSON.stringify(a).includes("W1-T27"), `round ${round}: control, the body lists the task`);
+  }
+});

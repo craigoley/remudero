@@ -148,6 +148,13 @@ export function boardDirtForRow(row: Row, rules: Pick<BoardDirtRules, "alias" | 
   return { all: false, tasks: [...new Set(named)] };
 }
 
+/** Sets `key` on `target` as JSON.parse would: an own data property. Assigning `"__proto__"` would set the prototype
+ *  instead, dropping the key and leaking its fields as inherited ones, so that key alone is defined, never assigned. */
+function setOwnProperty(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === "__proto__") Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+  else target[key] = value;
+}
+
 /** The JSON a comparison sees: key-sorted, `undefined` dropped, and the clock-read `elapsedMs` removed. */
 export function canonicalProjection(p: StatusProjection | undefined): string {
   if (p === undefined) return "absent";
@@ -156,7 +163,7 @@ export function canonicalProjection(p: StatusProjection | undefined): string {
     if (value === null || typeof value !== "object") return value;
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(value).sort()) {
-      if (key !== "elapsedMs") out[key] = sort((value as Record<string, unknown>)[key]);
+      if (key !== "elapsedMs") setOwnProperty(out, key, sort((value as Record<string, unknown>)[key]));
     }
     return out;
   };
@@ -450,7 +457,7 @@ export function withoutUnreadFields(row: Row): Row {
   const keys = Object.keys(row);
   if (!keys.some((key) => BOARD_ROW_UNREAD_FIELDS.has(key))) return row;
   const kept: Row = {};
-  for (const key of keys) if (!BOARD_ROW_UNREAD_FIELDS.has(key)) kept[key] = row[key];
+  for (const key of keys) if (!BOARD_ROW_UNREAD_FIELDS.has(key)) setOwnProperty(kept, key, row[key]);
   return kept;
 }
 
@@ -730,12 +737,13 @@ interface TaskBucket {
   readonly s: number;
 }
 
-/** W1-T9716: a held row's deep copy (rows are parsed JSON), so a reader's writes never reach the cache. */
+/** W1-T9716: a held row's deep copy with a fresh parse's shape (own keys only, `__proto__` too), so a reader's writes
+ *  never reach the cache. */
 function copyRow<T>(value: T): T {
   if (Array.isArray(value)) return value.map(copyRow) as T;
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value)) out[key] = copyRow((value as Record<string, unknown>)[key]);
+    for (const key of Object.keys(value)) setOwnProperty(out, key, copyRow((value as Record<string, unknown>)[key]));
     return out as T;
   }
   return value;
