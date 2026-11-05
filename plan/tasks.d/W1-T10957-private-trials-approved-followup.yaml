@@ -116,6 +116,7 @@
     2026-11-04, operator ruling on #16606 (AskUserQuestion, "Split the native backend"): the native systemd/bwrap backend, its profile probe and preflight capabilities, the native coding execution port (createCodingCanaryExecutionPort, which builds the backend's executor from a backend-issued profile), and the host bridge move to W1-T11313. The worker request port (codingWorkerRequestPorts) in the same adapter file stays, because it needs no native host. Their criterion, "the existing private coding executor contains filesystem and credential effects and closes its real descendants", moves with them.
     MEASURED at #16606 head 7a883fd1c5: diff-coverage listed 842 added lines with no covering test. 760 of them are native-only: systemd-bwrap-backend 587, native-profile-probe 174, plus the coding adapter and host bridge that need a backend-issued profile. GitHub's runners have neither systemd for the user nor bwrap, so the one real-path test skips ("native Linux profile prerequisites unavailable"). The gate exempts no spawned external binary.
     W1-T10957 keeps the coding canary contract (suite, schedule, runner, scorer, metrics, owner, ledger, private corpus and replay) and proves it refuses cleanly with no native profile. W1-T11313 wires the native profile source and the real execution path.
+    2026-11-04 correction of that split (#16606's 19:05Z review): the two claims that the real default production path invokes scoreCodingControl and codingLedgerSave move VERBATIM to W1-T11313. With no native profile source the default composition defers before it builds a coding execution port, so no production producer can reach the scorer or the ledger save until W1-T11313 wires the port. The split ruling left them here by mistake; they move unchanged and are not weakened.
   acceptance:
     - claim: Without a native coding profile source, the default coding composition defers with coding-native-profile-unavailable before eligibility, claim, admission or request; it never runs, scores or reports a coding case as passed
       proof: 'grep: W1-T10957: default coding composition defers before eligibility in test/routing/model-canary-coding-command.test.ts'
@@ -124,12 +125,6 @@
       proof: 'grep: test("W1-T10957: paired trial results retain correctness, native resource and
         missing-identity evidence without changing schedules" in
         test/routing/model-canary-coding-isolation.test.ts'
-    - claim: The real default production path invokes scoreCodingControl; an unused export, declaration or
-        re-export is insufficient.
-      proof: "grep: scoreCodingControl( in src/lib/model-canary-runner.ts"
-    - claim: The real default production path invokes codingLedgerSave; an unused export, declaration or
-        re-export is insufficient.
-      proof: "grep: codingLedgerSave( in src/lib/model-canary-command.ts"
     - claim: First-class coding cases retain their identity through full census validation
       proof: 'grep: coding cases retain first class identity through matrix census validation in test/ci/gates/model-canary-config-inventory.test.ts'
     - claim: The raw coding ledger sender resolves through the declared producer identity registry

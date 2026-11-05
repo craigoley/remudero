@@ -1,0 +1,45 @@
+- id: W1-T11336
+  title: An in-process fix worker re-reads the fleet STOP/PAUSE hold after its memory admission and before it spawns, as a run child already does, so a fix round admitted before a recycle PAUSE never starts its worker inside it
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # spawnWorker is every worker's start path; the re-read applies only to in-process starts of the fix class, whose caller already stands down on admission-abandoned
+  band_meaning: blast-radius
+  origin: operator-session#recycle-and-status-2026-11-04
+  plan_refs:
+    - W1-T10001
+    - W1-T5804
+    - W1-T11321
+  files:
+    - src/lib/worker.ts
+    - test/memory/an-in-process-fix-start-rereads-the-fleet-hold.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: For an in-process start (no run-child reservation) of worker class fix, spawnWorker reads the fleet STOP/PAUSE hold after awaitMemoryAdmission and before claiming occupancy; under a hold it releases any reservation, spawns nothing and returns notStarted admission-abandoned; with no hold, and for every other worker class, it starts exactly as before
+      proof: "unit test: test/memory/an-in-process-fix-start-rereads-the-fleet-hold.test.ts"
+    - claim: The spawn-time fleet-hold re-read names this task
+      proof: "grep: W1-T11336 in src/lib/worker.ts"
+  rationale: |
+    OBSERVED 2026-11-04, remudero-daemon, during recycle #3's PAUSE (requested 14:36:39Z by the deploy tick; refused, cleared about 15:3xZ):
+    - Three fix workers started in-process from the daemon (actor_pid 1684607, lane daemon, run DAEMON-1793789899544): W1-T10877 and W1-T10957 at 15:16:35Z, W1-T11129 at 15:18:28Z. No run_child rows; their fix.dispatch rows followed at 15:23:20, 15:23:29 and 15:26:05Z.
+    - Their rounds were judged before the PAUSE: fix.progress_reused W1-T10957 14:31:27Z and fix.progress_judged W1-T11129 14:31:47Z. W1-T11129's disposition row is at 14:37:31Z, followed by fix.remedy_path_execution 14:40:42Z, fix.census_snapshot 14:50:49Z and skills.selection 14:51:20Z.
+    - The sweep reads the hold once, at the disposition (workerAdmissionHoldReason in src/lib/sweep.ts). Nothing reads it again in the 40-47 min of preparation before spawnWorker.
+    - run-child.ts re-reads the hold after its reservation admits and before the spawn (W1-T10001; RUN_CHILD_SPAWN_WITHHELD_STEP, returning admission-abandoned). spawnWorker's in-process path goes from awaitMemoryAdmission straight to claimWorkerOccupancy.
+    - A fix worker started under a recycle PAUSE extends the drain it is waiting on. Recycle #3 waited its derived 2,234 s and refused.
+  design: |
+    In spawnWorker (src/lib/worker.ts), after awaitMemoryAdmission and the existing abandoned/aborted return, when currentRunChildReservationId() is undefined and workerClassOf(args) is "fix":
+    - Read the hold with the same default run-child.ts uses: stopDetail/pauseDetail under (args.config ?? loadConfig()).root, behind an injectable seam.
+    - If a hold is present, release the admission's reservation as the abandoned branch does, log run_child-style "worker.spawn_withheld" with the hold, and return the existing admission-abandoned not-started result. runFixRung (src/cli/commands/fix.ts) already stands that down with no strike.
+    Mark the re-read with a comment naming W1-T11336.
+    NOT IN SCOPE:
+    - other worker classes (reviews, risk judge, issue revalidation, feedback summary also started inside this PAUSE). Their callers do not handle a not-started result yet (no notStarted handling in src/cli/commands/review.ts or src/lib/review.ts), so they need that first, filed separately;
+    - light-pass refill reviews (W1-T11321);
+    - the sweep's own admission rules.
+  note: |
+    reservation hand-off: run-unfiled-1793808171119 -> run-unfiled-1793808171119
+    Reserved with rmd next-task-id (W1-T11336 on run-unfiled-1793808171119). From the operator session's 2026-11-04 recycle diagnosis (finding H).

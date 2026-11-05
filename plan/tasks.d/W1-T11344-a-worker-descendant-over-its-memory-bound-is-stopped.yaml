@@ -1,0 +1,52 @@
+- id: W1-T11344
+  title: A worker tree's descendant whose resident memory passes 8 GiB is stopped and ledgered by the tree sampler that already reads it, and every sampled tree ledgers its largest descendant's peak, so one runaway test process cannot throttle the whole container
+  repo: remudero
+  depends_on: []
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new signal path inside the shared tree sampler that every learned reservation uses; it may stop a process another lane started
+  band_meaning: blast-radius
+  origin: operator-session#review-runaway-memory-2026-11-04
+  plan_refs:
+    - W1-T9762
+    - W1-T117
+  files:
+    - src/lib/descendant-memory-bound.ts
+    - src/lib/host-memory-learning.ts
+    - test/memory/a-worker-descendant-over-its-memory-bound-is-stopped.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: While a learned reservation's tree is sampled, a non-root member whose VmRSS exceeds DESCENDANT_RSS_BOUND_MIB (8192) is sent SIGKILL only after a fresh read of its start time still matches the sampled one. One worker.descendant_memory_killed row records the pid, rss_mib, bound_mib, worker class, reservation id and the member's test file when known. A tracked root, a member at or under the bound and a member whose start time changed are never signalled.
+      proof: "unit test: test/memory/a-worker-descendant-over-its-memory-bound-is-stopped.test.ts"
+    - claim: A node --test runner adopted as its own nested tracked tree carries the bound, so a test-file child of that runner over the bound is stopped. That is the 2026-11-04 case.
+      proof: "grep: W1-T11344 criterion 2 in test/memory/a-worker-descendant-over-its-memory-bound-is-stopped.test.ts"
+    - claim: At release every sampled tree ledgers one worker.descendant_rss_peak row with its class, its largest single member's VmRSS in MiB and that member's test file when known
+      proof: "grep: worker\\.descendant_rss_peak in src/lib/descendant-memory-bound.ts"
+    - claim: learnedHandle wires the bound into every learned reservation's tracked tree through descendantMemoryBoundHook
+      proof: "grep: descendantMemoryBoundHook( in src/lib/host-memory-learning.ts"
+  rationale: |
+    OBSERVED 2026-11-04, remudero-daemon (memory.max 26,128,416,768 bytes):
+    - About 16:50Z and again 19:08:59Z, one test process in #16240's semantic review grew to 18–19.2 GiB in under five minutes. W1-T11342 and W1-T11343 have the causes.
+    - Each time, the container's anon memory reached 24.8 GB and memory.events `high` read 4,199,998. The cgroup swapped 4.29 GB, and host memory PSI read some avg10 98.49 and full avg10 51.45. Every lane slowed, and Claude Code killed this operator session's own ship job for low memory.
+    - Nothing in the fleet bounds one process's memory. The tree peak sampler (createTreePeakSampler in src/lib/host-memory-learning.ts) already reads every tracked member's VmRSS every TREE_SAMPLE_MS (15 s), but by design it never alters work.
+    - The operator stopped the 19.2 GiB process by hand at 19:28Z. The container fell to 4.3 GiB.
+    - OPERATOR RULING 2026-11-04: "Shadow, then enforce 8 GiB". Ledger the population, and stop a single descendant over 8 GiB, about a third of memory.max.
+    - No ledger row today records a single process's peak, so the healthy population is unmeasured. A 2026-10-10 census put trees at 0.4–0.84 GB steady and about 2.8 GB with a cold tsc or a broad test run (host-memory-learning.ts header).
+  design: |
+    - The sampler still only measures. TrackHooks gains an optional onMember(pid, start, rssKb, facts) hook, called from peakOf for each member read. Nested test-run trees inherit it the way they inherit onTestFilePeak today.
+    - Amend the module header's "nothing here alters work" to say that the hook's owner may.
+    - New src/lib/descendant-memory-bound.ts owns the decision, the signal and both rows. Its ports are injectable: read start time, kill and write ledger.
+    - learnedHandle passes descendantMemoryBoundHook(...) as the hook, with the reservation's ledger, class and id. Roots are the reservation's bound roots, which are never signalled. A member over the bound is signalled once.
+    - At release, write worker.descendant_rss_peak with the largest member seen.
+    - A failed read, signal or write is caught and ledgered as an error field. It never stops sampling.
+    NOT IN SCOPE:
+    - a tracked root over the bound (a worker's own agent CLI);
+    - per-lane bounds;
+    - changing the 8 GiB value, which needs an operator ruling read from the worker.descendant_rss_peak population.
+  note: |
+    reservation hand-off: run-unfiled-1793821353770 -> run-unfiled-1793821353770
+    Reserved with rmd next-task-id (W1-T11344 on run-unfiled-1793821353770). From the operator session's 2026-11-04 runaway-review diagnosis. The operator approved filing a memory cap ("Kill child + file") and ruled its shape ("Shadow, then enforce 8 GiB").

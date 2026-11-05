@@ -1,0 +1,44 @@
+- id: W1-T11388
+  title: "A conflicted machine-judge PR whose ruled record changed on main is withdrawn for a re-judge by the sweep, instead of running plan-scoped conflict rounds that machine-author-verify must refuse and then escalating to a person"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two concerns per Rule 19 (the sweep's conflict disposition and the judge's exported stale check); no new ruling path, it reuses staleRulingPins
+  origin: operator-session#16824-conflict-2026-11-05
+  plan_refs:
+    - W1-T2694
+    - W1-T2977
+    - W1-T5359
+  files:
+    - src/lib/sweep.ts
+    - src/lib/machine-filing-judge.ts
+    - test/triage/a-conflicted-judge-pr-whose-ruled-record-moved-is-withdrawn-not-escalated.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A conflicted machine-judge plan PR whose ruled record's pin no longer matches origin/main is withdrawn for a re-judge, its PR closed with the stale-ruling comment and the judge's pending state cleared, with no plan-scoped conflict round dispatched and no escalation
+      proof: "unit test: test/triage/a-conflicted-judge-pr-whose-ruled-record-moved-is-withdrawn-not-escalated.test.ts"
+    - claim: A conflicted machine-judge PR whose rulings all still match origin/main keeps today's plan-scoped conflict round
+      proof: "grep: W1-T11388 criterion 2 in test/triage/a-conflicted-judge-pr-whose-ruled-record-moved-is-withdrawn-not-escalated.test.ts"
+  rationale: |
+    OBSERVED 2026-11-04/05. #16824 (machine-judge-garden-1793833454070, the judge ruling on W1-T11334, W1-T11190, W1-T11276 and W1-T11313) was judged at 23:03Z, passed review, then went DIRTY when #16845 merged a new proof into W1-T11190 on main.
+    - The sweep ran its plan-scoped conflict round twice (sweep.plan_round.refused 03:33Z and 04:48Z). Both were refused by lint-plan-precheck [machine-author-verify], so the PR was disposed blocked-ambiguous and escalated to the operator.
+    - The refusal is correct by construction. machineAuthorVerifyViolation (src/lib/task-linter.ts) refuses a verify:auto record whose risk_ruling.pin is not taskRulingPin(task). Any merge that keeps W1-T11190's ruling and main's new proof carries a stale pin, so no conflict round can ever pass, and no further round adds information.
+    - The right action already exists. runMachineFilingJudge (src/lib/machine-filing-judge.ts) checks its pending PR with staleRulingPins and, when origin/main moved a ruled record, closes the PR ("Withdrawing stale machine-filing rulings…"), clears the ruling, and re-rules on the next pass. It never fired: machine-filing-judge.json still named #16824 as pending, last written 2026-11-04T23:08Z, and the machine-judge garden logged only phase queued (09:48Z, 11:07Z, 11:25Z, 12:04Z on 11-05) with no running pass in between, across several in-place core restarts.
+    - The operator session resolved it by hand: it took main's side for W1-T11190 so the judge re-rules it, kept the three still-current rulings, and pushed efab637e97. That is the sweep's job, by the 2026-11-02 ruling that conflicts must resolve automatically.
+  design: |
+    1. Export the judge's stale check from machine-filing-judge.ts as a pure function: given a machine-judge PR's ruled records (id, shard path, pin, source pin) and origin/main's text for those paths, return the stale ones (today's staleRulingPins; no new rule).
+    2. In the sweep's conflict disposition for a fleet plan PR whose head ref is a machine-judge garden branch, before dispatching a plan-scoped conflict round: read the PR's ruled records from its diff, read origin/main's shards through the existing async git helpers, and call (1).
+    3. If any ruling is stale, withdraw through the judge's existing path: close the PR with the same stale-ruling comment, ledger machine_judge.withdrawn with reason conflict-stale-pin, and clear the judge state's pending entry and rulings for those ids so the judge re-rules on its next pass. Spend no strike and do not escalate.
+    4. If none is stale, keep today's plan-scoped round. A record removed on main counts as stale (main_pin null), as in staleRulingPins.
+    Tests: a fixture judge state with a pending PR, a ruled shard, and origin/main where that shard's proof changed. The sweep withdraws, does not dispatch a plan round, and appends no escalation; at base it dispatches the round and then escalates. Controls: every ruling current, so the round dispatches; and a non-judge plan PR, so the path is unchanged.
+  falsifier: |
+    At origin/main, a conflicted machine-judge PR whose ruled record changed on main is sent to the plan-scoped conflict round, refused by machine-author-verify, and escalated to a person, while the judge's own withdraw never runs.
+  note: |
+    reservation hand-off: plan-file-1793880793000 -> plan-file-1793880793000
+    Reserved with rmd next-task-id --branch from the operator session's ops worktree. W1-T11387 was reserved first without a branch and is left as is (a reservation is never deleted).
+    Separate observation, not this task's scope: the machine-judge garden pass logged only phase queued from 09:48Z to 12:04Z on 11-05 and never ran, across in-place core restarts. Starvation of queued garden passes over restarts needs its own investigation.

@@ -1,0 +1,144 @@
+- id: W1-T11390
+  title: "A plan-only review failure whose lint-plan exited with no summary can be re-evaluated once on explicit request at the unchanged exact head and base, keeping the prior failure immutably and failing closed on every other outcome"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high  # Rule 19: one concern, but it can replace a failed required review on the merge gate, so a too-wide predicate turns a real refusal into a PASS
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T3835, W1-T4423, W1-T11225, W1-T9545, W1-T10621, W1-T913, W1-T228]
+  files:
+    - src/lib/review.ts
+    - test/plan-only-review-runs-lint-plan.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    THE GAP. When lint-plan dies before printing a summary, a plan-only review records
+    planLint { ran: false } and judgeReview fails it (W1-T4423: a lint that cannot run is an unknown that
+    withholds the PASS). That failure is the right answer for that attempt. It is also permanent:
+    claimReviewDecision replays the terminal for an identical decision digest, so an unchanged PR head
+    can never reach a trustworthy lint result. W1-T11225 records that wreckterra#6 and wreckterra#1 got this
+    verdict, and that the same lint over the same head passes outside the review. The only ways past it
+    today change the review input or the gate, and all of those are forbidden here.
+
+    Settled by lookup: is this already filed or decided? -> No. W1-T3835 reopens only a terminal that is both capped and keyword-only (isReopenableDegradedTerminal, src/lib/review.ts). W1-T11225 only names the lint child's output. W1-T4423 only withholds. W1-T9932 only re-runs CI jobs. grep of plan/tasks.d, MASTER-PLAN.md, LEARNINGS.md and DECISIONS.md finds no task reopening a lint-incomplete terminal.
+    Settled by lookup: can the two-file scope reach the terminal gate? -> Yes. claimReviewDecision, isReopenableDegradedTerminal and postReviewStatusGuarded all live in src/lib/review.ts, and src/cli/commands/review.ts already forwards decisionClaim.reopenedDegradedTerminal to the guarded post.
+    Settled by lookup: does this task need a second lint runner? -> No. After an owned claim, the existing path at src/cli/commands/review.ts calls lintPlanForReview for a plan-only diff, so the retry reuses that one call.
+    Settled by lookup: is a real lint-incomplete terminal capped? -> No. capped means zero proofs executed (judgeReview), and W1-T10621 records the same "no summary" refusal after all nine filing proofs executed. So requiring capped false and keywordOnly false matches the real shape and leaves W1-T3835's class alone.
+    Settled by lookup: is the base recorded on the failed row? -> Best-effort. merge_base_sha reaches review.posted from tryFetchReviewReuseFacts, and absence means unreadable, so a row without it refuses.
+    Settled by lookup: may a retry counter enter the decision digest? -> No. W1-T3835's design keeps timestamps and retry counters out of reviewDecisionDigest, so the bound is a ledger row and REVIEW_ENGINE_REVISION does not move.
+    Settled by lookup: does any production caller pass an explicit request today? -> No. src/cli/commands/review.ts calls claimReviewDecision with ledgerPath, taskId, prUrl, digest and headCheckoutDir only, and that file is outside the requested scope.
+    Settled by lookup: who owns W1-T11381 and the unfiled reservation artifact named in the original filing record? -> Unknown. The original worker reported no declared task and could not read the reservation refs; both artifacts stay untouched. The original identifier and claim remain preserved at https://github.com/craigoley/remudero/blob/3223915130175427823b361df69b84de670f726d/plan/tasks.d/W1-T11390-a-plan-lint-that-never-finished-is-re-evaluated-once-on-request.yaml#L141 . This record claims only its declared W1-T11390 task id.
+
+    EXCLUDED SCOPE, BY DECISION. This task builds the guard and leaves it dormant: the new option is absent on
+    every production path until a caller supplies it, and that caller change is outside these two files.
+    Until then a stuck PR stays failed, which is the safe direction. Shipping this task does not by itself
+    recover any PR.
+  design: |
+    All code goes in src/lib/review.ts. Add no new exported value: extend the option types of existing
+    exports, and keep helpers module-private. Do not change reviewDecisionDigest or REVIEW_ENGINE_REVISION.
+
+    1. ELIGIBILITY PREDICATE (module-private, beside isReopenableDegradedTerminal). True only when the stored
+       terminal has state failure, planOnly true, capped false, keywordOnly false, and
+       verdict.planLint is { ran: false } with a string reason matching "lint-plan exited <n> with no summary",
+       either whole or followed by the "; it printed: ..." suffix W1-T11225 adds. Anything else is false: a
+       ran: true outcome with violations (real findings), any other ran: false reason (no merge base, no
+       checkout, aborted, a signal, a failed start, a thrown lint, a "### rmd lint-plan:" refusal), a
+       missing or malformed planLint, or a terminal that failed for any reason besides the lint.
+
+    2. EXPLICIT REQUEST. claimReviewDecision gains an optional planLintRetry option carrying attemptId,
+       the expected headSha and mergeBaseSha, and an observe() reader. With the option absent, behaviour is
+       byte-identical to today, including W1-T3835's reopening. Nothing infers a request: not a sweep pass,
+       not an existing --review-attempt-id value.
+
+    3. ADMISSION, inside the existing decision lock, acquire-before-read. Admit only when every one holds:
+       a. the terminal satisfies the eligibility predicate;
+       b. the terminal row's merge_base_sha is readable and equals the request, and its head equals the request;
+       c. observe(), read inside the lock, reports the PR's current head and merge base equal to the request;
+       d. headCheckoutDir is present and its own HEAD resolves to exactly that head;
+       e. observe() reports the full check set for that head as fresh, complete and passing. A failing,
+          pending, missing or unreadable check refuses;
+       f. the review context resolves to a pinned App id through the logic replayPublisher already uses, and the
+          current credential can publish as it. An unpinned, unreadable or mismatched identity refuses;
+       g. no other run owns the decision: the lock is free, and no live review.pending_posted by another
+          run follows the terminal;
+       h. no admitted attempt already exists for this PR, head, merge base and digest.
+       A throw from any read is a refusal, never an admission.
+
+    4. ATTEMPT RECORD. Every request appends one row, step review.plan_lint_retry, with attempt_id,
+       pr_url, head_sha, merge_base_sha, review_decision_digest, the prior terminal's run id, outcome, and on
+       refusal a bounded reason. Admitted returns { kind: "owned", reopenedDegradedTerminal: true }. Refused
+       releases the lock and returns the existing replay of the prior terminal. The lock-held case keeps
+       returning in_flight. The admitted row is the whole bound: there is no numeric constant, and an attempt
+       that dies after admission stays consumed, which fails closed.
+
+    5. PUBLICATION. postReviewStatusGuarded gains an optional planLintRetry option with attemptId and the
+       fresh PlanLintOutcome, and replaces the prior terminal only when an admitted row for this attempt,
+       head, base and digest exists and the outcome is ran: true. A clean result may publish success. A result
+       with violations may publish failure, naming those real findings. An absent outcome, or ran: false,
+       appends the review.plan_lint_retry row with outcome incomplete and goes through withholdReplay, posting
+       nothing. It must not reach the "conflicting verdicts" arm, which would post a new failure of its own.
+       A re-check of the head, base, lifecycle or identity that no longer holds at publication is the same refusal.
+
+    6. IMMUTABILITY. The ledger stays append-only. Never rewrite, delete or supersede the prior review.posted
+       row, and keep lastReviewDecisionTerminal's last-row reading. A successful retry adds a distinct terminal
+       row that sits beside the prior failure.
+
+    7. TESTS go in test/plan-only-review-runs-lint-plan.test.ts, drive claimReviewDecision and
+       postReviewStatusGuarded against a seeded ledger with injected observe and post seams, and use the
+       titles the acceptance proofs name. The positive test obtains its fresh outcome from the real
+       lintPlanForReview over the existing consumer fixture, then judgeReview. No test needs a network.
+
+    NOT IN SCOPE, AND NEVER DONE BY THIS TASK OR ITS BUILD:
+    - editing a consumer PR's head or body to reset review identity;
+    - publishing a status by hand, or by any path other than postReviewStatusGuarded;
+    - weakening branch protection, a required check or a pinned identity;
+    - reusing or clearing W1-T11381 or the unverified reservation artifact identified by the immutable filing-record citation above;
+    - src/cli/commands/review.ts, src/run-task.ts, a new verb or a new flag;
+    - fixing why the lint child dies, which W1-T11225's ledger row exists to name.
+  acceptance:
+    - claim: "an incomplete first lint followed by one explicit retry at the unchanged head and base records a distinct attempt, runs lint-plan again, publishes the fresh result, and leaves the prior failed terminal row byte-identical in the ledger"
+      proof: "grep: W1-T11390: an incomplete first lint retries once and keeps the prior terminal in test/plan-only-review-runs-lint-plan.test.ts"
+    - claim: "a terminal carrying real lint findings cannot retry, and also stays replayed when its reason is any ran false reason other than the exited-with-no-summary shape"
+      proof: "grep: W1-T11390: real lint findings never retry in test/plan-only-review-runs-lint-plan.test.ts"
+    - claim: "a malformed terminal, a capped or keyword-only terminal, an absent recorded base, or a missing checkout refuses with the prior terminal replayed"
+      proof: "grep: W1-T11390: a malformed terminal or missing checkout refuses in test/plan-only-review-runs-lint-plan.test.ts"
+    - claim: "a changed head or base, whether seen at admission or by the re-check at publication, refuses and posts nothing"
+      proof: "grep: W1-T11390: a changed head or base refuses in test/plan-only-review-runs-lint-plan.test.ts"
+    - claim: "failing, incomplete or unreadable checks, and an unpinned or unusable review App identity, each refuse before any lint runs"
+      proof: "grep: W1-T11390: failing checks or an unpinned identity refuse in test/plan-only-review-runs-lint-plan.test.ts"
+    - claim: "a concurrent owner stands the request down, whether it holds the decision lock or has a live pending claim from another run"
+      proof: "grep: W1-T11390: a concurrent owner refuses in test/plan-only-review-runs-lint-plan.test.ts"
+    - claim: "a second incomplete lint posts nothing, reaches no conflict status, keeps the previous failure as the terminal, and refuses any further request for that head, base and digest"
+      proof: "grep: W1-T11390: a second incomplete retry keeps the prior failure in test/plan-only-review-runs-lint-plan.test.ts"
+    - claim: "with no retry request the same terminal replays exactly as before and W1-T3835's capped keyword-only reopening is unchanged"
+      proof: "grep: W1-T11390: without a request the terminal still replays in test/plan-only-review-runs-lint-plan.test.ts"
+    - claim: "each request ledgers its own attempt row under one step"
+      proof: "grep: review\\.plan_lint_retry in src/lib/review.ts"
+    - claim: "the whole plan-only review suite still passes, so W1-T4423's withholding and the fail-closed lint parser are preserved"
+      proof: "unit test: test/plan-only-review-runs-lint-plan.test.ts"
+      kind: guard
+  falsifier: |
+    At origin/main, seed a review.posted row whose decision_verdict is a plan-only failure with planLint
+    { ran: false, reason: "lint-plan exited 1 with no summary" }, capped false and keywordOnly false, and call
+    claimReviewDecision with a materialized checkout. It returns replay, and no option can change that. At head,
+    the same call with an explicit request and matching facts returns owned, and a clean fresh outcome posts
+    success while the seeded row remains unchanged.
+    Remove any one guard from the admission list and its named test reddens. Widen the reason match to any
+    ran false reason and "real lint findings never retry" reddens. Drop the admitted-row bound and "a second
+    incomplete retry" reddens. Route an incomplete outcome through the conflict arm and the same test reddens
+    on the unexpected post.
+  note: |
+    verify:auto: every guard is decided over a seeded ledger and injected readers, so no live GitHub state is needed.
+    risk:high with band_meaning blast-radius: two declared paths, but the danger is the gate. A wrong predicate
+    turns a required failed review into a PASS that can arm auto-merge.
+    budget_usd 30 is the operator's cap for this filing.
+    Reason-shape coupling: W1-T11225, still queued, appends "; it printed: ..." to the same reason, so the
+    eligibility match accepts both forms and neither task depends on the other landing first.
+    Id note: the original run reported a first reservation identified by the immutable filing-record citation above.
+    Its existence and ownership remain unverified; the initiative forbids reusing or clearing it.
+    This task remains W1-T11390. A hole in the sequence is not a defect
+    (reserveTaskIdRemote, src/lib/task-id-reservation.ts).
