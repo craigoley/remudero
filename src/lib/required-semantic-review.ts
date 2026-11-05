@@ -9,10 +9,15 @@ export function requiredSemanticDecisionDigest(digest: string, required: boolean
 export function requiredSemanticRefusal(input: {
   required: boolean; planOnly: boolean; outcome: string;
   criteriaCount: number; verdicts: readonly (boolean | undefined)[] | undefined;
+  /** (W1-T11428) Per-criterion UNABLE markers. An UNABLE criterion is ANSWERED (the reviewer said it could not look),
+   *  so it never makes the verdicts incomplete; the judge turns it into cannot-evaluate, not a withheld verdict. */
+  unable?: readonly (string | undefined)[];
 }): string | undefined {
   if (!input.required || input.planOnly) return undefined;
   if (input.outcome !== "success") return `required-semantic-${input.outcome}`;
   if (input.criteriaCount <= 0 || input.verdicts === undefined || input.verdicts.length !== input.criteriaCount ||
-      input.verdicts.some(value => typeof value !== "boolean")) return "required-semantic-incomplete-verdicts";
+      input.verdicts.some((value, i) => typeof value !== "boolean" && input.unable?.[i] === undefined)) {
+    return "required-semantic-incomplete-verdicts";
+  }
   return undefined;
 }
