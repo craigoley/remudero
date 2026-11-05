@@ -59,7 +59,9 @@
     repository-prefixed read through the assembled authenticated service, including foreign-scope
     refusal, bounded reads and no source fan-out or live fixture write.
   acceptance:
-    - claim: the real service mounts the repository-scoped index through authenticated service reads
+    - claim: the real Serve assembly calls the native index route
+      proof: 'grep: buildEscalationConversationIndexRoute( in src/lib/serve.ts'
+    - claim: the repository-scoped index is served through authenticated service reads
       proof: 'unit test: test/inbox/escalation-conversation-index-serving.test.ts'
     - claim: saved answers and agent follow-ups keep one thread with honest archive and reopen states
       proof: 'unit test: test/inbox/escalation-conversation-index.test.ts'
