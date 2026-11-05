@@ -1,0 +1,40 @@
+- id: W1-T11428
+  title: "A semantic reviewer that could not inspect a proof (its tools or sandbox failed) reports UNABLE, and the review is cannot-evaluate and re-admitted, never a FAILURE on proofs that executed and passed"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, how a reviewer's inability is classified; it decides whether a green PR is failed or retried
+  origin: operator-session#review-infra-fail-as-fail-2026-11-05
+  plan_refs:
+    - W1-T2263
+    - W1-T2946
+    - W1-T178
+  files:
+    - src/lib/review.ts
+    - test/review/a-reviewer-that-could-not-inspect-is-cannot-evaluate-not-a-fail.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A reviewer verdict line in the UNABLE form never downgrades a criterion; a criterion whose proof executed and passed keeps its floor verdict and is marked reviewer-unavailable
+      proof: "unit test: test/review/a-reviewer-that-could-not-inspect-is-cannot-evaluate-not-a-fail.test.ts"
+    - claim: A review with any reviewer-unavailable criterion posts cannot-evaluate (pending, the existing one-per-head escalation) instead of failure, and its next attempt is re-admitted on a provider other than the one that was unable when another is eligible
+      proof: "grep: W1-T11428 criterion 2 in test/review/a-reviewer-that-could-not-inspect-is-cannot-evaluate-not-a-fail.test.ts"
+  rationale: |
+    OBSERVED 2026-11-05T17:13:18Z: core's review of #16758 (run review-PR16758-1793898595025, head 22bb3e7311) posted remudero-review=FAILURE. All 4 proofs executed and PASSED, and all 4 were downgraded with "Review unavailable: sandbox launcher failed before execution; could not inspect …". The reviewer had been routed by the auction to provider codex (gpt-6.1-sol, tightestRemainingPercent 4). worker.attempt reported success; review.reviewer reported subtype success with downgrades 4.
+    Cause, src/lib/review.ts ~:4756-4769 (judge per criterion): an EXPLAINED semantic downgrade (semanticClause defined) overrides an observed executed_pass. The W1-T2263 guard refuses only an UNEXPLAINED one. A reviewer that could not look supplies a clause ("Review unavailable …") that states inability, not judgement, and the code cannot tell the two apart, so a green PR is failed.
+    Frequency: one confirmed occurrence in the live ledger; 28 codex-routed reviews on 11-04/11-05, 18 with downgrades, the others reviewed being real findings. Intermittent, but every occurrence costs a fix round and a red PR, and it grows as Claude quota pressure routes more reviews to codex.
+  design: |
+    1. Contract: the reviewer verdict contract built in src/lib/review.ts (buildReviewPrompt / reviewerVerdictContract) gains one explicit per-criterion form, UNABLE <n>: <what could not be inspected and why>, to be used when the reviewer's own tools or sandbox failed or the proof could not be read. The parser (parseReviewerVerdicts / parseReviewerVerdictClauses) recognises it as its own outcome, never as FAIL.
+    2. Judge: an UNABLE criterion is never downgraded. It keeps the floor's verdict and is marked reviewer_unavailable with the reviewer's reason. Only a reviewer that actually inspected may downgrade.
+    3. Review state: any reviewer_unavailable criterion makes the review cannot-evaluate (state pending, the existing cannot-evaluate escalation, once per head). The light pass re-admits it, and the next attempt excludes the unable provider from the auction when another provider is eligible. No FAILURE is posted.
+    4. No prose matching of free-text clauses as the mechanism; the contract token is the signal. The builder checks whether the provider's terminal or execution evidence also reports the tool or sandbox failure in a structured field (codex exec events); if it does, that becomes a backstop for a reviewer that ignores the contract. If it does not, record that in the PR.
+    Tests: a judged review whose reviewer output carries UNABLE for every criterion over executed_pass proofs posts pending and not failure, and keeps every criterion met (at base it fails all four). A mix of a real FAIL with a reason and an UNABLE fails only the real one. Re-admission excludes the unable provider.
+  falsifier: |
+    At origin/main, a reviewer whose sandbox launcher failed returns clauses saying it could not inspect, and the review posts FAILURE on proofs that executed and passed (#16758, 2026-11-05T17:13Z).
+  note: |
+    reservation hand-off: plan-file-1793898946000 -> plan-file-1793898946000
+    Reserved with rmd next-task-id from the operator session's ops worktree. No duplicate: W1-T2946 (merged) let Codex reviewers write a private TMPDIR; W1-T2263 refuses only UNEXPLAINED downgrades. Whether codex's sandbox launcher fails systematically inside the container is not established (one occurrence); this task fixes the classification, and the launcher itself is a separate finding if it recurs.
