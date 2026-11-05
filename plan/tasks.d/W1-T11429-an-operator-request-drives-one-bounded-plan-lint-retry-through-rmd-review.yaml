@@ -1,7 +1,7 @@
 - id: W1-T11429
   title: "rmd review accepts one explicit operator request to re-evaluate a lint-incomplete plan-only failure, capturing the exact head and merge base and handing W1-T11390's dormant guard its first caller; without the request nothing changes"
   repo: remudero
-  depends_on: [W1-T11390]
+  depends_on: []
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -89,6 +89,7 @@
        - failing, pending or incomplete checks, a missing checkout and an unpinned publisher each refuse through
          the library and replay;
        - a shadow review carrying the flag builds no request and leaves no admitted row;
+       - the guard test is named "W1-T11429 no flag preserves prior terminal".
        - reviewOptionFlags never emits PLAN_LINT_RETRY_FLAG for any input.
 
     NOT IN SCOPE, AND NEVER DONE BY THIS TASK OR ITS BUILD:
@@ -102,11 +103,11 @@
     - claim: "the request reaches the single existing claimReviewDecision call as its planLintRetry option"
       proof: "grep: planLintRetry: in src/cli/commands/review.ts"
     - claim: "a caller that could not capture the head or base ledgers its own refusal row and replays"
-      proof: "grep: review.plan_lint_retry_not_requested in src/cli/commands/review.ts"
+      proof: "grep: review\\.plan_lint_retry_not_requested in src/cli/commands/review.ts"
     - claim: "absence of the flag replays the old failure with no retry row; one flag at matching facts makes exactly one admitted attempt that publishes through postReviewStatusGuarded; a repeat is refused; mismatched head, unreadable base, failing or incomplete checks, missing checkout, unpinned publisher and shadow reviews all replay"
       proof: "unit test: test/an-explicit-plan-lint-retry-request-drives-one-bounded-review.test.ts"
-    - claim: "W1-T11390's own guard suite still passes"
-      proof: "unit test: test/plan-only-review-runs-lint-plan.test.ts"
+    - claim: "the no-flag guard remains explicit in the integration suite"
+      proof: "grep: W1-T11429 no flag preserves prior terminal in test/an-explicit-plan-lint-retry-request-drives-one-bounded-review.test.ts"
       kind: guard
   falsifier: |
     At origin/main, seed the lint-incomplete plan-only failure and run the review twice, with and without
