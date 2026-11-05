@@ -1,4 +1,4 @@
-import { compressionPinBase } from "#test/helpers/compression-pin.js";
+import { assertSameTokens, compressionPinBase } from "#test/helpers/compression-pin.js";
 // @source-text-subject: worker.ts comment compression against its PR base.
 // @census-reads: src/lib/worker.ts
 import assert from "node:assert/strict";
@@ -55,7 +55,7 @@ test("W1-T10879: comment compression preserves executable code: current PR-base 
   const before = compressionPinBase("src/lib/worker.ts", import.meta.url);
   if (before === undefined) return;
   // Only on the PR that adds this pin: later feature edits to the module stay free.
-  assert.deepEqual(executableTokens(source), executableTokens(before),
+  assertSameTokens(executableTokens(source), executableTokens(before),
     "all PR-base executable tokens, literals and line-break boundaries must remain unchanged");
   assert.ok(comments < countCommentLines(before, "src/lib/worker.ts").comments,
     "comment lines decrease from the PR base");

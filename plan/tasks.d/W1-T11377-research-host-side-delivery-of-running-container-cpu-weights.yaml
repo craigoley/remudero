@@ -5,7 +5,10 @@
   type: recon
   verify: human
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=66c644f867557fc4
+  # backlog gardener: placed=2026-11-05T18:26:24.203Z
   attempts: 0
   files:
     - DECISIONS.md

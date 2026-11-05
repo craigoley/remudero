@@ -17,6 +17,7 @@
     - test/learning/a-retro-preflight-ledgers-its-start.test.ts
     - test/retro-prepublish-validation.test.ts # its row-list pins gain the start row
     - test/learning/scout-retro-preflight-failed.test.ts # likewise
+  # redesign: signature=622563fc631539c6
   status: queued
   attempts: 0
   acceptance:
@@ -39,3 +40,6 @@
   note: |
     reservation hand-off: run-unfiled-1793801339784 -> run-unfiled-1793801339784
     Reserved with rmd next-task-id (W1-T11326 on run-unfiled-1793801339784). From the operator session's 2026-11-04 recycle diagnosis.
+  amendment: |
+    2026-11-05, by the redesign Architect (machine, rule 16): Add start‑row ledger in runRetroPrepublishPreflight to satisfy the grep claim
+    Insert a ledger entry for retro.preflight_started (including run_id, task_id, changed_files count, pool, started_at) at the start of runRetroPrepublishPreflight before it spawns the preflight.
