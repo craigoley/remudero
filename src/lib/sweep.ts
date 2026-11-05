@@ -34,6 +34,7 @@ import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } f
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { recyclePauseDetail } from "./recycle-yield.js";
+import { isRecyclePauseDetail } from "./fleet-control.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
   baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingRuleSuitesFromCiFailures, failingTestFilesFromCiFailures,
@@ -111,7 +112,7 @@ import {
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
   createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
-  readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
+  readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
@@ -2377,6 +2378,14 @@ export function productionDispatchBreakJudge(opts: {
     return parseFixProgressVerdict(result.text);
   };
 }
+
+// W1-T11267: retain the digest-backed reconciliation slice and immutable commit files across passes.
+const FLEET_STATE_HISTORY_SLICE: EscalationTriageSlice = {
+  holder: "sweep.fleet-state-history",
+  steps: ["reconcile.repaired", "reconcile.repair_failed", "reconcile.escalated", "main.run_gap.dispatched", "deploy.ok"],
+};
+let fleetStateHistoryReader: EscalationTriageHistoryReader | undefined;
+const fleetStateChangedFiles = new Map<string, readonly string[]>();
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
@@ -5042,12 +5051,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const unionStarted = nowMsImpl();
       readdirSync(dirname(ledgerPath));
       const freshLive = readFileSync(ledgerPath, "utf8");
-      const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), {
-        requireArchives: false, refuseIncomplete: true,
-        step: ["reconcile.repaired", "reconcile.repair_failed", "reconcile.escalated", "main.run_gap.dispatched", "deploy.ok"],
-      });
+      fleetStateHistoryReader ??= createEscalationTriageHistoryReader({ slice: FLEET_STATE_HISTORY_SLICE });
+      const union = await fleetStateHistoryReader(dirname(ledgerPath));
       if (!union.ok || union.unclassified.length > 0) throw new Error(`fleet reconciliation history unreadable: ${[...union.unread, ...union.unclassified].join(", ")}`);
-      const history = [...parseLedger(union.rawLines.join("\n")), ...parseLedger(freshLive), ...live];
+      const history = [...union.rows, ...parseLedger(freshLive), ...live];
       parts.union_ms = Math.max(0, nowMsImpl() - unionStarted);
       parts.union_rotations = union.archiveCount;
       const rows: FleetStateRow[] = [];
@@ -5078,9 +5085,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           countRunsForSha: (sha) => { parts.commits_walked++; return runCount(sha); },
           countWorkflowRuns: runCount,
           changedFiles: async (sha) => {
+            const cached = fleetStateChangedFiles.get(sha);
+            if (cached !== undefined) return cached;
             const body = await readCommit(["api", `repos/${owner}/${repo}/commits/${sha}`]) as
               { files?: Array<{ filename: string }> } | undefined;
-            return body?.files?.map((f) => f.filename);
+            const files = body?.files?.map((f) => f.filename);
+            if (files !== undefined) fleetStateChangedFiles.set(sha, files);
+            return files;
           },
           dispatch: (workflow) => ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`, "-f", "ref=main"]),
         }, readWorkflowPushTriggers(repoDir), history, MAIN_RUN_GAP_LOOKBACK));
@@ -25201,13 +25212,28 @@ export async function runSweepLightPass(
       policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson,
     ).spawning);
   };
+  let recycleRefillHeld = false;
+  const refillHeldForRecycle = (): boolean => {
+    // W1-T11321: a pass begun before the recycle PAUSE must not refill the drain with new reviews.
+    const detail = workerAdmissionHoldReason(deps, "review")?.replace(/^fleet PAUSE hold: /, "") ??
+      recyclePauseDetail(dirname(dirname(deps.ledgerPath)));
+    if (!isRecyclePauseDetail(detail)) return false;
+    if (!recycleRefillHeld && !deps.dryRun) {
+      append(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step: "sweep.review_refill_held",
+        reason: "recycle_pause", detail });
+      recycleRefillHeld = true;
+    }
+    return true;
+  };
   const admitOneRefill = async (): Promise<boolean> => {
     if (providerFloorMet || deps.restartAdmission?.("review", "light-refill") === false) return false;
+    if (refillHeldForRecycle()) return false;
     // Read the queue only when a lane is actually free, so a refill that admits nothing reads nothing.
     const freeWidth = effectiveReviewWidth(deps, policy, Math.max(1, refillTail.length), deps.now ? deps.now() : systemClock.now(),
       selectionLedgerLines, (deps.readActiveWorkerCount ?? activeWorkerCount)());
     if (reviewAdmissionBound(freeWidth).bound === 0) return false;
     await refreshRefillTail();
+    if (refillHeldForRecycle()) return false;
     if (refillTail.length === 0) return false;
     const nowMs = deps.now ? deps.now() : systemClock.now();
     const width = effectiveReviewWidth(deps, policy, refillTail.length, nowMs, selectionLedgerLines,
@@ -25254,6 +25280,12 @@ export async function runSweepLightPass(
       return true;
     }
     try {
+      if (refillHeldForRecycle()) {
+        unreserve();
+        refilledHeads.delete(key);
+        refillTail.unshift(next);
+        return false;
+      }
       append(deps.ledgerPath, { ...row, step: "sweep.review_refilled" });
     } catch (error) {
       unreserve();

@@ -1290,6 +1290,7 @@ import {
   captureDiagnosticsBundle,
   decideProgressWatchdog,
   openPrCountReadingFromRows,
+  readLiveRecyclePausePid,
   renderProgressWatchdogVerdict,
 } from "./lib/progress-watchdog.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
@@ -1758,6 +1759,7 @@ import {
   type NodePinSyncIo,
   depReviewMigrationSubmissionKey,
   renderDepReviewMigrationFeedback,
+  proposalTaskLedgerRows,
 } from "./lib/dep-review.js";
 import {
   headWasCreatedAfterReflogSnapshot,
@@ -1767,7 +1769,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, failedFireBackoff, feedbackChangedAtOnMain, AUTO_TRIAGE_FAILURE_STEPS, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, failedFireBackoff, feedbackChangedAtOnMain, AUTO_TRIAGE_FAILURE_STEPS, triageCandidateReaders, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, releaseDispatchClaimAsync, gitDispatchClaimReserver, gitDispatchClaimReserverAsync, gitClaimRunnerAsync, dispatchClaimRef, claimDropRefusal, pidIsPresent, readNamespaceBootMs, reclaimSilentDispatchClaim, holdDispatchClaim, renewDispatchClaim, DISPATCH_CLAIM_RENEW_INTERVAL_MS, type DispatchClaimRenewal, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
@@ -12324,7 +12326,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
           const feedback = existsSync(path) ? readFeedbackEntry(proposalRoot, feedbackId) : undefined;
           const planPath = join(proposalRoot, "plan", "tasks.yaml");
           const tasks = existsSync(planPath) ? loadPlan(planPath).tasks.filter(t => t.origin === `feedback#${feedbackId}`) : [];
-          const rows = tasks.length ? readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true }).rows : [];
+          const rows = (await proposalTaskLedgerRows(dirname(ledgerPath), new Set(tasks.map(t => t.id)), feedback?.ts)).rows;
           const outcomes = await Promise.all(tasks.map(async task => {
             const history = rows.filter(r => r.task_id === task.id);
             const taskRows = history.slice(Math.max(0, history.findLastIndex(r => r.step === "run.start" || r.step === "dispatch")));
@@ -21118,6 +21120,9 @@ export async function autoTriageCheck(
   const held = readDrainLock(triageLockPath(config.root));
   const now = opts.now ?? new Date();
   const feedbackRoot = opts.feedbackRoot ?? repoRoot;
+  // W1-T11374: the readers come only from a refresh of origin/main's feedback, so an entry merged after boot is a candidate now.
+  const { newFeedbackIdsOldestFirst, oldestFeedbackAgeMs } = await triageCandidateReaders(feedbackRoot, (step, extra) =>
+    appendProducerLedger(ledgerPathFor(config), "daemon", { run_id: "AUTO-TRIAGE", step, ...extra }));
   const inputs: AutoTriageInputs = {
     policy: policy.values.autoTriage,
     // W1-T469 — WAS HARDCODED `idle: true`, WHICH IS WHY THE GUARD WAS DOUBLY UNREACHABLE: the rung
@@ -41188,7 +41193,9 @@ export function progressWatchdogCommand(
     step: PROGRESS_WATCHDOG_READ_STEPS,
   });
   const count = openPrCountReadingFromRows(read.rows);
-  const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: count.count, openPrCountSource: count.source });
+  const liveRecyclePausePid = readLiveRecyclePausePid(stateDir, run);
+  const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: count.count,
+    openPrCountSource: count.source, liveRecyclePausePid });
   const bundle = verdict.action === "capture-diagnostics"
     ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, { run })
     : undefined;

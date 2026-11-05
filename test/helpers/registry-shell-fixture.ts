@@ -167,6 +167,9 @@ process.exit(98);
     RMD_MEMINFO_PATH: meminfo, RMD_MEMINFO: meminfo, RMD_CGROUP_ROOT: join(root, "cgroups"),
     RMD_DISKSTATS: join(root, "no-diskstats"), RMD_SYS_DEV_BLOCK: join(root, "no-blocks"),
     RMD_CLAUDE_DIR: join(root, "claude"), RMD_CODEX_DIR: join(root, "codex"),
+    // W1-T11370: deploy/edge-heal.sh (reached from a generated launcher's boot) defaults this to the host's real
+    // /etc/remudero/cloudflared-token; a host that has one then records a cloudflared launch. Nothing creates this path.
+    RMD_CLOUDFLARED_TOKEN_FILE: join(root, "no-cloudflared-token"),
     RMD_CONTAINER_CONFIG_DIR: join(root, "config"), RMD_CASH_SECRET_DIR: join(root, "secrets"),
     RMD_GH_APP_PRIVATE_KEY_HOST_PATH: "", RMD_CLEANUP_PATH: "", RMD_LEGACY_USER_UNIT_DIR: "",
     RMD_SYSTEMCTL_CMD: join(bin, "systemctl"), RMD_CRONTAB_CMD: join(bin, "crontab"),

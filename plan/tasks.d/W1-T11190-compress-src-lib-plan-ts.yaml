@@ -3,12 +3,13 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: low
   priority: 1
   # redesign: signature=edc82c8dbf9f3a4d
   # redesign: signature=8892c0e7448b5e87
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-05T18:20:15.263Z
   attempts: 0
   author_class: machine
   origin: "comment-compression:src/lib/plan.ts"

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { transformSync } from "esbuild";
-import { compressionPinBase } from "#test/helpers/compression-pin.js";
+import { assertSameTokens, compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // scripts/ is outside tsconfig's include; load the real counter with its explicit runtime contract.
@@ -56,7 +56,7 @@ test("W1-T10998: comment compression preserves executable code", () => {
   const before = compressionPinBase("src/lib/ledger.ts", import.meta.url);
   if (before === undefined) return;
   // Only on the PR that adds this pin: later feature edits to the module stay free.
-  assert.deepEqual(executableTokens(source), executableTokens(before),
+  assertSameTokens(executableTokens(source), executableTokens(before),
     "all PR-base executable tokens, literals and line-break boundaries must remain unchanged");
   assert.equal(emittedDigest(source), emittedDigest(before),
     "emitted JavaScript must preserve newline-sensitive behavior");
