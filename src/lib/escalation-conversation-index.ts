@@ -6,11 +6,15 @@ import { boundedMessages, escalationIssueLocation, projectEscalationCorresponden
 import { readAllThreads, type ThreadMessage } from "./inbox-thread.js";
 import type { Route } from "./service.js";
 
-/** One list read bounds: rows retained per snapshot, rows per page, text per row, store bytes read. */
+/** PRIMARY CONTROL: rows retained per snapshot; over it the snapshot is truncated and reports no whole-mailbox total. */
 export const ESCALATION_INDEX_MAX_ROWS = 2_000;
+/** PRIMARY CONTROL: rows per page; a larger request is refused as invalid, not clamped. */
 export const ESCALATION_INDEX_MAX_LIMIT = 50;
+/** PRIMARY CONTROL: rows per page when the caller names none. */
 export const ESCALATION_INDEX_DEFAULT_LIMIT = 25;
+/** PRIMARY CONTROL: characters of source or preview text published per row; longer text is clipped. */
 export const ESCALATION_INDEX_MAX_TEXT = 200;
+/** PRIMARY CONTROL: bytes of the saved discussion store read per request; over it the source is unavailable, never truncated into readiness. */
 export const ESCALATION_INDEX_MAX_STORE_BYTES = 16 * 1024 * 1024;
 const NATIVE_CLASSES = new Set(["BLOCKED", "MANUAL", "HARD_STOP", "GRILL"]);
 const FOLDERS: readonly EscalationAttention[] = ["needs_input", "waiting_for_agent", "archived", "unknown"];
