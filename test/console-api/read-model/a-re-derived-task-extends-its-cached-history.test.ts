@@ -390,17 +390,19 @@ test("W1-T9716: a held row keeps an own __proto__ key exactly as a fresh read do
 });
 
 test("W1-T9716: a run.start row with an own __proto__ key leaves now-view bodies identical with the task cache on and off", (t) => {
-  // No own run_id: a copy that turns `__proto__` into a prototype would hand this row an inherited one.
-  const start = protoRow({ ts: at(T0 + 60_500), host: "h1", step: "run.start", task_id: "W1-T27" }, { run_id: "inherited" });
-  const history = [...rowsFrom(T0, 30), start];
+  // W1-T27's only row: a live run.start (inside the liveness bound) with no own run_id, so its worker telemetry reaches
+  // the body. A copy that turned `__proto__` into a prototype would hand it an inherited run_id.
+  const others = (rows: Row[]): Row[] => rows.filter((r) => r.task_id !== "W1-T27");
+  let ms = T0 + 3_600_000;
+  const start = protoRow({ ts: at(ms - 60_000), host: "h1", step: "run.start", task_id: "W1-T27" }, { run_id: "inherited" });
+  const history = [...others(rowsFrom(T0, 30)), start];
   const on = world(t, history);
   const off = world(t, history);
   const [onView, offView] = [nowView(on, {}), nowView(off, { taskCacheBytes: 0 })];
   const portable = (w: World, data: NowViewData): unknown => JSON.parse(JSON.stringify(data).split(w.root).join("<root>"));
-  let ms = T0 + 3_600_000;
   for (let round = 0; round < 3; round++) {
     if (round > 0) {
-      const more = [...rowsFrom(T0 + 700_000 + round * 60_000, 2, 30 + round * 2), ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T27", round)];
+      const more = [...others(rowsFrom(T0 + 700_000 + round * 60_000, 2, 30 + round * 2)), ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T27", round)];
       on.append(more);
       off.append(more);
       ms += 31_000; // past the clock rule, so the task re-derives from its held bucket
@@ -408,8 +410,9 @@ test("W1-T9716: a run.start row with an own __proto__ key leaves now-view bodies
       off.set(ms);
     }
     const [a, b] = [built(on, on.db, onView), built(off, off.db, offView)];
+    const live = JSON.stringify(b.board.tasks.find((task) => task.taskId === "W1-T27") ?? null);
+    assert.ok(live.includes('"worker"'), `round ${round}: control, the uncached body carries W1-T27's worker telemetry (${live})`);
     assert.deepEqual(portable(on, a), portable(off, b), `round ${round}: the now-view bodies are byte-identical`);
     assert.ok(!JSON.stringify(a).includes('"inherited"'), `round ${round}: no field is inherited from the row's own __proto__ key`);
-    assert.ok(JSON.stringify(a).includes("W1-T27"), `round ${round}: control, the body lists the task`);
   }
 });
