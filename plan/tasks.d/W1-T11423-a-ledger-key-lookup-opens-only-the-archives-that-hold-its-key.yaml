@@ -1,0 +1,56 @@
+- id: W1-T11423
+  title: "A ledger key lookup opens only the archives that hold its key, and no long-lived code materialises the whole ledger union: each immutable archive gets a key manifest once, ledgerRowsFor answers task, PR and step questions from it, and a census refuses an unbounded union read"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, how a keyed question reads the ledger; every daemon and serve ledger reader routes through it, and the census gates new readers
+  origin: operator-session#whole-ledger-reads-2026-11-05
+  plan_refs:
+    - W1-T11340
+    - W1-T11341
+    - W1-T3368
+    - W1-T4262
+    - W1-T4100
+    - W1-T5114
+  files:
+    - src/lib/ledger-key-manifest.ts
+    - src/lib/ledger-union.ts
+    - test/ledger/a-ledger-key-lookup-opens-only-the-archives-that-hold-its-key.test.ts
+    - test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts
+    - deploy/install-host-units.sh
+    - src/lib/baked-runtime-inputs.ts
+    - .github/workflows/acr-build.yml
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: ledgerRowsFor returns exactly the rows a full union read filtered to the same task ids, PR numbers, steps and since would return, while opening only the archives whose key manifest holds one of the requested keys inside the window, plus the live file
+      proof: "unit test: test/ledger/a-ledger-key-lookup-opens-only-the-archives-that-hold-its-key.test.ts"
+    - claim: Each rotated archive's key manifest is built once and reused, keyed by the archive's name, size and mtime in the existing rotation-digests store, and a stale, damaged or foreign manifest is rebuilt rather than trusted
+      proof: "grep: W1-T11423 criterion 2 in test/ledger/a-ledger-key-lookup-opens-only-the-archives-that-hold-its-key.test.ts"
+    - claim: A census refuses any non-test src call of readLedgerUnionRecords, readLedgerUnionRecordsSync, readLedgerUnionRawLines, openLedgerUnion or readLedgerCorpus that passes no key, step, pattern, time or rotation bound and is not on a reasoned allowlist, and a planted unbounded call reddens it
+      proof: "unit test: test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts"
+    - claim: ledgerRowsFor reads each archive's manifest through readLedgerKeyManifest before it opens that archive
+      proof: "grep: readLedgerKeyManifest( in src/lib/ledger-union.ts"
+  rationale: |
+    OBSERVED 2026-11-05: core (remudero-daemon) aborted with "FATAL ERROR: Reached heap limit … JavaScript heap out of memory" (docker die exit=134 at 14:36:30Z and 15:04:47Z, 29 boots between 06:00 and 15:07Z). A live sampling heap profile (operator-approved SIGUSR1 inspector, 15:21–15:29Z) put 4.0 GB of a 6.0 GB heap under readLedgerUnionRecordsSync, called from dep-review's proposalProgress (src/run-task.ts ~:12328), which reads `readLedgerUnionRecordsSync(dir, { refuseIncomplete: true }).rows`: every row of every archive, to filter about a dozen rows by task_id. 28 of 49 review runs since 06:00Z were killed mid-flight by those restarts, which is why reviews looked slow. That reader is being hotfixed on its own; this task removes the class.
+    It is the third keyed question answered by a whole-ledger scan in two days: priorPostedReviewRow (W1-T11340, bounded by the PR's created_at), the run-child mode read per spawn (W1-T11341), and proposalProgress. The same class aborted core on 09-10 (W1-T3368) and 09-23 (buildMountHeadroomSweep → readLedgerCorpus, #6753).
+    MEASURED on the fleet host, 2026-11-05: 394 rotated archives, 692 MB gzipped (08-08 to 11-05), about 7–10× compression, so about 5–6 GB raw; 0.0132 rows per gzipped byte gives about 9.1 million rows. Current volume is about 300k rows a day. Over the newest 30 archives (446k rows): 516 distinct task ids, 345 PR numbers, 25,681 run ids, 817 steps. Rows per real task: p50 14, p90 470, p99 4,883. Pseudo task ids dominate the volume (INCIDENT 167k, SERVE 108k, DAEMON 77k). A task lookup therefore needs about 14 rows of 9 million, and today pays for all 9 million.
+    INVENTORY (origin/main): 96 call sites of the union readers outside ledger-union.ts. Most pass a step, pattern or time filter, so they stream without retaining, but every one still decompresses every archive it does not time-bound: that is CPU and loop time, not just heap. A whole-union materialisation with no filter remains in dep-review proposalProgress (daemon loop), field-trials readControlledLedgerRows, routing-experiments (CLI) and the human-gate measurement's second read. Whole-history streams with no key: the pr-owner projection, the retro reader, the analytics snapshot, field-trials, benchmark-cohort and pr-state. The existing ledgerRotationDigests store (cache/rotation-digests/<holder>/) already caches a per-reader reduction of each immutable archive, but no shared record says which keys an archive holds, so a key lookup cannot skip an archive.
+  design: |
+    1. src/lib/ledger-key-manifest.ts: for each rotated archive, a manifest {minTs, maxTs, taskIds, prNumbers, steps} built by one full parse the first time the archive is seen. It is stored in the rotation-digests store under a reserved holder, with that store's validation (name, size, mtime and a reducer version), pruning and write-failure handling. Archives are immutable once rotated, so a manifest is never rebuilt for an unchanged archive. The live file is never manifested; it is always read, filtered while streaming.
+    2. src/lib/ledger-union.ts: `ledgerRowsFor(stateDir, { taskIds?, prNumbers?, runIds?, steps?, since? })`, sync and async, the same rows a union read with the equivalent filter returns. It opens only the archives whose manifest intersects a requested key, or (for a steps-only query) a requested step, inside the since window, and streams each opened archive through the filter, so no non-matching row is ever retained. An archive whose manifest is missing and cannot be built is read in full and reported as unindexed, never silently skipped. The union's refuseIncomplete and unread-archive contracts hold unchanged.
+    3. The census, test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts: walk every non-test src call of the union readers and refuse one whose options carry none of step, pattern, keep, since, sinceTs, maxRotations, rotationWindowMs, afterRotation or rotationRecords, and that is not on an allowlist entry naming its file, function and a written reason. It asserts a minimum population, so an empty walk cannot pass, and plants an unbounded call to prove it reddens. The allowlist starts as exactly the whole-history readers in the inventory, each linked to W1-T11424, which empties it.
+    No fixed thresholds: the manifest's key sets are exact, and opening an archive depends only on whether it holds a requested key.
+    Tests: (a) a state dir with N gzipped archives where the requested task appears in k of them. ledgerRowsFor opens exactly those k plus the live file, and its rows equal a full union read filtered the same way. At base the export does not exist. (b) A second lookup rebuilds no manifest; a touched archive (new mtime) is re-manifested. (c) The census reddens on a planted unbounded call and is green on main with the allowlist.
+  falsifier: |
+    At origin/main there is no ledgerRowsFor and no key manifest. A lookup of a dozen rows for one task decompresses and parses all 394 archives (about 9 million rows), and nothing refuses a new reader that does the same.
+  note: |
+    Amended 2026-11-05 (scope, from the hand build): ledger-union.ts imports the new ledger-key-manifest module, so it joins the baked supervisor's runtime closure and the deploy-logic paths. The deploy-logic census (test/a-busy-primary-reaches-its-image-recycle.test.ts, DEPLOY_LOGIC_PATHS in deploy/install-host-units.sh) and the baked-runtime census (test/baked-supervisor-inputs.test.ts, src/lib/baked-runtime-inputs.ts and .github/workflows/acr-build.yml) require it catalogued; each file gains one line.
+    reservation hand-off: plan-file-1793893317000 -> plan-file-1793893317000
+    Reserved with rmd next-task-id --branch plan-file-1793893317000 from the operator session's ops worktree.
+    Alternatives weighed. (i) A SQLite side-index of row bodies: random access into gzip is impossible, so it must copy the rows. About 9 million rows and hundreds of MB, plus cross-process write contention between daemon, serve and garden children. Rejected. (ii) A time bound only: it does not help a long-lived task whose rows span weeks, and it does nothing for steps-only questions. Rejected. (iii) Per-archive key manifests in the store that already holds per-archive digests: one small file per immutable archive, built once, and a lookup's I/O is proportional to the archives that hold its key. Chosen.
+    The dep-review proposalProgress hotfix is separate operator-session work. W1-T11424 moves it onto ledgerRowsFor if that hotfix lands first with a narrower bound.

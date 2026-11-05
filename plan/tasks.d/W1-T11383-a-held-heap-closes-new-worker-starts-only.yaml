@@ -1,0 +1,159 @@
+- id: W1-T11383
+  title: "A hysteretic heap hold closes new worker starts before the 75% restart guard, with its thresholds derived only from W1-T11382's measured growth and recovery, shipping disabled and reporting NOT READY with the precise missing evidence until a safe pair and dwell can be justified; it never touches admitted work"
+  repo: remudero
+  depends_on:
+    - W1-T11129
+    - W1-T11382
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high  # one admission predicate read by every worker-start surface; a wrong latch idles the fleet, so the band is blast radius
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs:
+    - W1-T3335
+    - W1-T5804
+    - W1-T9433
+    - W1-T9808
+    - W1-T10737
+    - W1-T11129
+    - W1-T11168
+    - W1-T11321
+    - W1-T11336
+    - W1-T11382
+  files:
+    - src/lib/daemon-heap-admission-hold.ts
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
+    - src/lib/sweep.ts
+    - src/lib/idle-lane-accounting.ts
+    - test/memory/a-held-heap-closes-new-worker-starts-only.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "heapHoldReadiness over W1-T11382's trace returns READY only with a high, low and dwell each derived from measured same-boot growth, reserve, recovery and rebound, with high below the 75% guard by at least the worst rise plus reserve, low below high, and a replay of the trace that latches before every retained guard crossing and releases after every recovery; otherwise it returns NOT READY naming each missing item, a fixture of PID 138's 12.59% to 99.56% gap with no clean close returns NOT READY, and moving the fixture's measured growth moves the derived pair"
+      proof: "unit test: test/memory/a-held-heap-closes-new-worker-starts-only.test.ts"
+    - claim: "DISABLED BY DEFAULT: with no enforce mode, or under NOT READY, no surface is held and a shadow row records what would have held; the live hold requires both the operator's enforce mode and READY; the readiness row is written at boot, hourly and on a verdict change"
+      proof: "grep: W1-T11383 criterion 2 in test/memory/a-held-heap-closes-new-worker-starts-only.test.ts"
+    - claim: "HOLD LATCH: enabled, a fresh seam reading at or above high latches, and the latch stays set on every later reading above low, closing the dispatch, lane-refill, intake, wipe-test, retro, auto-triage, full-sweep and light-pass worker starts; a dispatch tick with the latch set starts no batch, exits nothing, and writes no daemon.pause row"
+      proof: "grep: W1-T11383 criterion 3 in test/memory/a-held-heap-closes-new-worker-starts-only.test.ts"
+    - claim: "RELEASE HYSTERESIS: only readings below low held for the whole dwell release the latch; a reading between low and high never releases, one rise above low restarts the dwell, an unreadable reading keeps a set latch and sets no new one, and the pair that latched stays pinned until release even if readiness changes"
+      proof: "grep: W1-T11383 criterion 4 in test/memory/a-held-heap-closes-new-worker-starts-only.test.ts"
+    - claim: "IN-FLIGHT OWNERS PRESERVED: latching or holding aborts, signals, reclaims and re-claims nothing; every admitted lane, review, detached action and run child keeps its owner and finishes, and the 75% restart decision and its drain run unchanged under the latch"
+      proof: "grep: W1-T11383 criterion 5 in test/memory/a-held-heap-closes-new-worker-starts-only.test.ts"
+    - claim: "CONTROL PRIORITY: a STOP or PAUSE read wins over a set heap latch at every surface with its existing behavior, resolveFleetControlHold still returns only STOP and PAUSE, and the boot gate and improvement pump that call it directly are unchanged"
+      proof: "grep: W1-T11383 criterion 6 in test/memory/a-held-heap-closes-new-worker-starts-only.test.ts"
+    - claim: "A heap stand-down is named as what it is: fleetWithheldStageMs counts it as fleet-withheld, the idle-lane cause is memory, the light pass does not report it as a latched restart, a full pass still arms and merges, and each surface writes one daemon.admission_held row per latch episode, never one per read"
+      proof: "grep: W1-T11383 criterion 7 in test/memory/a-held-heap-closes-new-worker-starts-only.test.ts"
+    - claim: "The seam composes the heap hold after the fleet controls through one named call"
+      proof: "grep: heapAdmissionHold( in src/lib/daemon.ts"
+  rationale: |
+    THIS TASK DOES NOT FIX THE UNKNOWN HEAP ALLOCATION OR ITS ROOT CAUSE. It reduces new load near the limit. Growth inside
+    a sweep pass, or inside one blocked event-loop turn, can still reach V8's limit. W1-T9647, W1-T9765 and W1-T11134
+    remain the holder and generation work.
+
+    NO THRESHOLD IS CHOSEN IN THIS FILING, BECAUSE THE EVIDENCE CANNOT JUSTIFY ONE. Matched heap-used/limit is max 55.23%,
+    p99 41.78%. All daemon.memory rows are max 56.85%, p99 40.05%. The fatal-window cohort is 8 samples, all at or below
+    15.61%, and PID 138 went from 12.59% to near 99.56% in 7m50s with no sample between. The initiative's research states
+    this cadence cannot justify a numeric watermark or dwell. On those figures a single-gap rise of about 87 points leaves
+    no room below the 75% guard, so a correct readiness verdict today is NOT READY.
+
+    READ at this checkout:
+    - THE THIRD-CONTROL TRAP. daemon.ts's dispatch gate does `const workerHold = holdWorkerAdmission("dispatch")`, then
+      branches on control === "STOP" and control === "PAUSE" only. A HEAP hold passes both branches and the batch
+      dispatches anyway. A hold encoded as PAUSE instead would write daemon.pause and be counted as operator_pause.
+    - The seam's other readers need no new branch: intake, wipe-test, retro and auto-triage take the truthy hold, and
+      lane-refill takes .reason.
+    - THE LIGHT PASS IS NOT ON THE SEAM. It asks LightPassScope.admit, which exists only while a restart is latched
+      (latchedAdmission). A false from it reports the literal "restart latched, and the review would outlast its drain"
+      at src/lib/sweep.ts:25070, so reusing it unchanged would misname a heap stand-down. sweep.ts:24850 also reads
+      deps.restartAdmission's presence as "a latch holds": a pass given it does not reopen refills a drain closed.
+    - FLEET_WITHHELD_STAND_DOWN in sweep.ts matches only `fleet (?:PAUSE|STOP) hold`, so a held PR would age toward the stage
+      backstop. idleLaneCauseForRefillReason has no heap arm.
+    - resolveFleetControlHold is also read directly by the boot gate (cli/commands/daemon.ts) and the improvement pump
+      (daemon.ts), which must keep their meaning. So it stays STOP and PAUSE, and the heap arm composes after it.
+    - holdWorkerAdmission logs one row per read, which a latch would turn into a flood.
+    - decideMemoryPressure's TRAP, unknown is not pressure, governs a clear latch. A set latch is different: an unreadable
+      reading must not release it.
+
+    Settled by lookup: is this already filed or decided? -> No. W1-T5347 and W1-T8401 hold on host and container memory, W1-T9808 holds on a latched restart, W1-T3335 is the 75% exit, and none holds on the V8 heap before the guard. MASTER-PLAN.md, LEARNINGS.md and DECISIONS.md record no such decision; an exact-phrase grep for this subject across plan/, src/ and test/ found nothing.
+    Settled by lookup: may the thresholds be chosen now? -> No. The initiative forbids invented numbers, and the operator's standing rule is no hard thresholds (W1-T9808 design, W1-T11129 note, W1-T11168 rationale). Thresholds are derived at run time from W1-T11382's trace.
+    Settled by lookup: is the seam enough on its own? -> No. The dispatch branch and the light pass need their own arms, as listed above (src/lib/daemon.ts, src/lib/sweep.ts).
+    Settled by lookup: does a start's later recheck need the hold? -> No. spawnRunChild's re-read and W1-T11336's in-process fix re-read both run after the seam, for work already admitted, and runFixDispatchChild's recheckFixDispatch runs in a separate child process that cannot read the daemon's latch (src/lib/run-child.ts, src/run-task.ts, src/lib/sweep.ts).
+    Settled by lookup: does a held fix strike its PR? -> No. The sweep's dispatch sites stand down on workerAdmissionHoldReason before dispatching, and the child's recheck never sees a HEAP refusal, so FLEET_PAUSE_REFUSAL needs no change. W1-T11168 owns that backstop (src/lib/sweep.ts).
+    Settled by lookup: does W1-T11129 overlap? -> Yes. It declares src/lib/daemon.ts and src/lib/sweep.ts and its open PR #16523 changes both, so this task depends on it, and on W1-T11382, which it needs for the trace.
+  design: |
+    A new module, src/lib/daemon-heap-admission-hold.ts. Pure readiness and a small per-boot latch, on injected ports. It adds
+    no timer. It reads W1-T11382's persisted trace and takes its reading from recordNearLimitHeapSample's return value.
+
+    1. READINESS. heapHoldReadiness(trace, guard) is pure. guard is HEAP_LIMIT_EXIT_FRACTION, the mirror of
+       HEAP_PRESSURE_RESTART_FRACTION in src/lib/daemon-memory-policy.ts, because daemon.ts imports this module.
+       - high = guard less the worst same-boot rise less the reserve (largest rise following an admission).
+       - low comes from the observed post-peak troughs plus their spread, so a release is one the heap has shown it can
+         reach and hold.
+       - dwell is the longest observed trough-to-rebound interval.
+       - The replay runs the candidates over the retained trace, latching before every retained guard crossing and
+         releasing after every recovery, and reports its held share of time for the operator to read.
+       - Sample-count and reserve figures are read from the trace; any floor that must exist is a named, documented
+         BACKSTOP, never a watermark.
+       - NOT READY lists every failing item from: no_same_boot_growth_pairs, unmeasured_final_gap (a retained boot with no
+         clean close), no_room_below_guard, high_within_ordinary_peaks, no_observed_recovery, no_observed_rebound,
+         pair_inverted, replay_failed, trace_unread.
+       Row step daemon.heap_admission_hold_readiness carries the verdict, the pair and dwell or the missing list, and the
+       counts each was read from.
+    2. MODE. An optional daemonMemory.heapAdmissionHold.mode, default shadow, parsed fail-closed to shadow. This task ships
+       no policy.yaml row. Enabling takes READY and an operator ruling to set mode enforce, as sweep.hostMemoryBudget.mode
+       does. In shadow, would-hold transitions write a row with shadow true and close nothing.
+    3. LATCH. On each seam read: a fresh sample, then clear to set at reading >= high. Once set, release only after readings
+       below low have lasted the whole dwell. Unreadable: stay as you are. The pair is pinned at latch and re-derived
+       only while clear. The latch lives per boot and a restart clears it, because the new process's heap is new.
+    4. SEAM. heapAdmissionHold() yields { control: "HEAP", detail }. Compose as fleet control first, heap second, in one place
+       every reader shares, typed so deps.workerAdmissionHold can carry HEAP while resolveFleetControlHold keeps
+       STOP and PAUSE. Add the dispatch gate's HEAP arm after the STOP and PAUSE branches: no batch, tick accounted, sleep to
+       the next wake, no exit. Keep runGatedSweep running under HEAP with its admissions closed, so green PRs still merge.
+       continueReviewAdmissions gets the same read.
+    5. LIGHT PASS. Close its review, refill and fix admission from daemon.ts, carrying the cause so sweep.ts writes a heap
+       stand-down rather than the restart literal, and check the sweep.ts:24850 presence reading against it. Edit sweep.ts
+       only for that stand-down text and FLEET_WITHHELD_STAND_DOWN, adding no comment lines.
+    6. ROWS. Dedupe by latch episode and surface. idleLaneCauseForRefillReason maps a heap hold to memory.
+    7. READ COST. The latch reads one bounded sample per seam read. Readiness runs at boot and every HEAP_PROPOSAL_EVERY_MS,
+       over W1-T11382's bounded trace.
+
+    NOT HELD IN THIS SLICE, and named here so nobody assumes otherwise: sweep passes themselves, the improvement pump,
+    garden workers, target jobs, and any start already past the seam (spawnRunChild's reservation re-read, W1-T11336's
+    in-process re-read). A start past the seam counts as admitted work. If evidence shows a gap there matters, file it
+    separately.
+
+    NOT IN SCOPE: any change to the heap ceiling, HEAP_PRESSURE_RESTART_FRACTION or heapPressureDetail; any daemon kill or
+    child termination; aborting, reclaiming or re-claiming admitted work; provider or model calls; paid canaries; schedules;
+    allowance increases; routing or promotion effects; setting mode enforce; finding the allocation.
+
+    TESTS: test/memory/a-held-heap-closes-new-worker-starts-only.test.ts, driving the real readiness and latch, and runDaemon
+    with an injected runOne, sweep, sweepLight, clock and heap reader as test/a-latched-restart-admits-no-work-its-drain-would-abandon.test.ts
+    does. One test title carries "W1-T11383 criterion N" for each of criteria 1 to 7. Criterion 1's whole-file proof
+    executes them all.
+  falsifier: |
+    DELETE-THE-FIX, each read against the suite:
+    - Hold latch: make the hold stateless, held only while reading >= high. A reading between low and high re-admits and
+      criterion 3 fails.
+    - Dispatch arm: delete the HEAP branch. The batch falls through the STOP and PAUSE branches and starts, and criterion 3
+      fails.
+    - Release hysteresis: release at the first reading below low, or at high. Criterion 4's dwell and between-thresholds
+      cases fail.
+    - In-flight owners: abort or signal any admitted lane on latch. Criterion 5's owner and finish assertions fail.
+    - Control priority: put the heap arm ahead of the fleet controls, or inside resolveFleetControlHold. Criterion 6 fails.
+    - Readiness: drop the gate, or hard-code a pair. Criterion 2 fails, and moving the fixture's growth no longer moves
+      the pair, so criterion 1 fails.
+    - Naming: drop HEAP from FLEET_WITHHELD_STAND_DOWN. Criterion 7's stage-age assertion fails.
+    At this checkout no such hold exists, so the suite cannot pass.
+  note: |
+    verify:auto, because every criterion runs on injected ports with no provider and no live daemon.
+    SHIPPED STATE IS DISABLED. Merging this task changes no admission on the live fleet. A READY verdict plus an operator
+    ruling turns it on, and the filing recommends keeping that ruling separate from the merge.
+    A NOT READY VERDICT IS A VALID OUTCOME OF THIS TASK, not a failure of it. If the readiness row stays NOT READY, read its
+    missing list. A persistent unmeasured_final_gap or no_room_below_guard means an admission hold cannot get ahead of this
+    growth, and the holder work must come first.
+    OVERLAPS: W1-T11129 (src/lib/daemon.ts, src/lib/sweep.ts) by depends_on. W1-T11168 and W1-T11321 also edit sweep.ts near
+    these lines and are serialized by file overlap. W1-T11336 owns src/lib/worker.ts, which this task leaves untouched.

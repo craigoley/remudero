@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { holderFromLsRemote, type Awaitable, type ClaimGitDeps, type ClaimGitDepsAsync, type GitAnswer } from "./dispatch-claim.js";
 import { fixedClock } from "./clock.js";
 import { sameHost } from "./host-identity.js";
@@ -862,31 +862,194 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
  * Why: docs/forensics/auto-triage.md#feedbackentriesoldestfirst.
  */
 function feedbackEntriesOldestFirst(root: string, admission?: FeedbackAdmissionContext): Array<{ id: string; ts: string }> {
-  const dir = join(root, "plan", "feedback");
-  if (!existsSync(dir)) return [];
   const out: Array<{ id: string; ts: string }> = [];
+  const view = currentMainFeedbackView(root);
+  // W1-T11374: origin/main judges every entry it or the checkout's HEAD tracks; only a capture neither holds is read locally.
+  if (view !== undefined) for (const entry of view.entries) admitNewEntry(entry.id, entry.text, admission, out);
+  const dir = join(root, "plan", "feedback");
+  if (!existsSync(dir)) return sortOldestFirst(out);
   for (const name of readdirSync(dir)) {
     if (!name.endsWith(".yaml")) continue;
+    if (view !== undefined && (view.mainNames.has(name) || view.headNames.has(name))) continue;
     let text: string;
     try {
       text = readFileSync(join(dir, name), "utf8");
     } catch {
       continue; // an unreadable entry is skipped, never a reason to refuse the whole sweep
     }
-    if (!/^status:\s*new\s*$/m.test(text)) continue;
-    if (admission?.mode === "shadow") {
-      let record: unknown;
-      try { record = parseYaml(text); }
-      catch { /* The shared observer classifies parse failure as unreadable-entry, never trusted absence. */ record = null; }
-      observeFeedbackAdmission(record, admission, "autonomous-selection");
-    }
-    const ts = text.match(/^ts:\s*(\S+)\s*$/m)?.[1] ?? "";
-    out.push({ id: name.replace(/\.yaml$/, ""), ts });
+    admitNewEntry(name.replace(/\.yaml$/, ""), text, admission, out);
   }
-  // `ts` sorts lexicographically because it is ISO-8601; the id is the tiebreak so the order is
-  // total and stable rather than dependent on readdir order.
-  out.sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
-  return out;
+  return sortOldestFirst(out);
+}
+
+function admitNewEntry(id: string, text: string, admission: FeedbackAdmissionContext | undefined, out: Array<{ id: string; ts: string }>): void {
+  if (!/^status:\s*new\s*$/m.test(text)) return;
+  if (admission?.mode === "shadow") {
+    let record: unknown;
+    try { record = parseYaml(text); }
+    catch { /* The shared observer classifies parse failure as unreadable-entry, never trusted absence. */ record = null; }
+    observeFeedbackAdmission(record, admission, "autonomous-selection");
+  }
+  out.push({ id, ts: text.match(/^ts:\s*(\S+)\s*$/m)?.[1] ?? "" });
+}
+
+/** `ts` sorts lexicographically because it is ISO-8601; the id is the tiebreak, so the order is total and stable. */
+function sortOldestFirst(out: Array<{ id: string; ts: string }>): Array<{ id: string; ts: string }> {
+  return out.sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
+}
+
+/** W1-T11374: origin/main's plan/feedback as read at one sha, plus the names the checkout's HEAD tracks. */
+interface MainFeedbackView {
+  mainSha: string;
+  headSha: string | undefined;
+  mainNames: ReadonlySet<string>;
+  headNames: ReadonlySet<string>;
+  entries: ReadonlyArray<{ id: string; text: string }>;
+}
+
+const mainFeedbackViews = new Map<string, MainFeedbackView>();
+const fallbackReasons = new Map<string, string>();
+
+/** The git a refresh spawns; {@link hostWorktreeGitAsync} in production, a counting double in tests. */
+export type MainFeedbackGit = (cwd: string, args: readonly string[],
+  opts: { timeout?: number; input?: string; encoding?: "utf8" | "latin1"; maxBuffer?: number }) => Promise<string>;
+
+/**
+ * W1-T11374: re-read origin/main's plan/feedback for {@link newFeedbackIdsOldestFirst} and
+ * {@link oldestFeedbackAgeMs}. The daemon's checkout advances only on a restart, so an entry merged
+ * mid-process was invisible until then (#16733/#16734 waited 3.5 h on 11-04). Keyed by origin/main's
+ * sha, read from the ref files, so an unchanged main spawns nothing. An unreadable main drops the view:
+ * the readers fall back to the checkout walk, and `auto_triage.candidates_fallback` says why.
+ */
+export async function refreshFeedbackFromMain(
+  root: string,
+  log?: (step: string, extra: Record<string, unknown>) => void,
+  git: MainFeedbackGit = hostWorktreeGitAsync,
+): Promise<void> {
+  const dirs = gitDirsOf(root);
+  if (dirs === undefined) return dropView(root, "not a git checkout", log);
+  const known = refSha(dirs.commonDir, "refs/remotes/origin/main");
+  const headSha = headShaOf(dirs);
+  const cached = mainFeedbackViews.get(root);
+  if (known !== undefined && cached?.mainSha === known && cached.headSha === headSha) return;
+  try {
+    const mainSha = known ?? (await git(root, ["rev-parse", "--verify", "origin/main^{commit}"], { timeout: 10_000 })).trim();
+    const listed = parseFeedbackTree(await git(root, ["ls-tree", "-z", "-l", mainSha, "--", "plan/feedback/"], { timeout: 30_000 }));
+    const blobs = listed.length === 0 ? new Map<string, string>() : parseCatFileBatch(await git(root, ["cat-file", "--batch"], {
+      timeout: 60_000, encoding: "latin1", input: `${listed.map((e) => e.oid).join("\n")}\n`,
+      // Sized from the listing itself: every blob's bytes plus one header line per object.
+      maxBuffer: listed.reduce((sum, e) => sum + e.size + e.oid.length + 32, 1024) * 2,
+    }));
+    const headNames = headSha === undefined ? new Set<string>()
+      : cached?.headSha === headSha ? cached.headNames
+      : new Set(parseFeedbackTree(await git(root, ["ls-tree", "-z", "-l", headSha, "--", "plan/feedback/"], { timeout: 30_000 })).map((e) => e.name));
+    const entries = listed.flatMap((e) => {
+      const text = blobs.get(e.oid);
+      return text === undefined ? [] : [{ id: e.name.replace(/\.yaml$/, ""), text }];
+    });
+    mainFeedbackViews.set(root, { mainSha, headSha, mainNames: new Set(listed.map((e) => e.name)), headNames, entries });
+    fallbackReasons.delete(root);
+  } catch (error) {
+    mainFeedbackViews.delete(root);
+    // A missing ref or tree is an unreadable main, so the checkout walk governs; a security refusal from the leaf still propagates.
+    if (error === null || typeof error !== "object" || !("status" in error || "code" in error)) throw error;
+    dropView(root, String(error instanceof Error ? error.message : error).split("\n")[0], log);
+  }
+}
+
+/** The checkout walk governs; ledgered once per distinct reason, so a main that stays unreadable is one row, not one per tick. */
+function dropView(root: string, reason: string, log: ((step: string, extra: Record<string, unknown>) => void) | undefined): void {
+  mainFeedbackViews.delete(root);
+  if (fallbackReasons.get(root) !== reason) log?.("auto_triage.candidates_fallback", { reason });
+  fallbackReasons.set(root, reason);
+}
+
+/** The two readers {@link triageCandidateReaders} hands back: the queue's count and its age, off one walk. */
+export interface TriageCandidateReaders {
+  newFeedbackIdsOldestFirst: typeof newFeedbackIdsOldestFirst;
+  oldestFeedbackAgeMs: typeof oldestFeedbackAgeMs;
+}
+
+/**
+ * W1-T11374: the only way auto-triage obtains its candidate readers. It refreshes origin/main's feedback
+ * view first, so a reader built without that refresh cannot reach the daemon by construction.
+ */
+export async function triageCandidateReaders(
+  root: string,
+  log?: (step: string, extra: Record<string, unknown>) => void,
+  git: MainFeedbackGit = hostWorktreeGitAsync,
+): Promise<TriageCandidateReaders> {
+  await refreshFeedbackFromMain(root, log, git);
+  return { newFeedbackIdsOldestFirst, oldestFeedbackAgeMs };
+}
+
+/** The view, unless origin/main has moved past it unrefreshed; the checkout walk governs then, as before. */
+function currentMainFeedbackView(root: string): MainFeedbackView | undefined {
+  const view = mainFeedbackViews.get(root);
+  if (view === undefined) return undefined;
+  const dirs = gitDirsOf(root);
+  const sha = dirs === undefined ? undefined : refSha(dirs.commonDir, "refs/remotes/origin/main");
+  return sha === undefined || sha === view.mainSha ? view : undefined;
+}
+
+function parseFeedbackTree(out: string): Array<{ name: string; oid: string; size: number }> {
+  return out.split("\0").flatMap((line) => {
+    const m = /^\d+ blob ([0-9a-f]+)\s+(\d+)\tplan\/feedback\/([^/]+\.yaml)$/.exec(line);
+    return m === null ? [] : [{ oid: m[1], size: Number(m[2]), name: m[3] }];
+  });
+}
+
+/** `cat-file --batch` read as latin1, so each char is one byte and a blob's declared size slices it exactly. */
+function parseCatFileBatch(out: string): Map<string, string> {
+  const bytes = Buffer.from(out, "latin1");
+  const blobs = new Map<string, string>();
+  let at = 0;
+  while (at < bytes.length) {
+    const eol = bytes.indexOf(0x0a, at);
+    if (eol < 0) break;
+    const header = /^([0-9a-f]+) blob (\d+)$/.exec(bytes.subarray(at, eol).toString("latin1"));
+    if (header === null) { at = eol + 1; continue; }
+    const size = Number(header[2]);
+    blobs.set(header[1], bytes.subarray(eol + 1, eol + 1 + size).toString("utf8"));
+    at = eol + 1 + size + 1;
+  }
+  return blobs;
+}
+
+function gitDirsOf(root: string): { gitDir: string; commonDir: string } | undefined {
+  const dot = join(root, ".git");
+  const gitDir = !existsSync(dot) ? undefined
+    : statSync(dot).isDirectory() ? dot
+    : /^gitdir:\s*(.+?)\s*$/m.exec(readTextOrUndefined(dot) ?? "")?.[1];
+  if (gitDir === undefined) return undefined;
+  const absolute = resolve(root, gitDir);
+  const common = readTextOrUndefined(join(absolute, "commondir"))?.trim();
+  return { gitDir: absolute, commonDir: common === undefined ? absolute : resolve(absolute, common) };
+}
+
+function refSha(commonDir: string, ref: string): string | undefined {
+  const loose = readTextOrUndefined(join(commonDir, ref))?.trim();
+  if (loose !== undefined && /^[0-9a-f]{40,64}$/.test(loose)) return loose;
+  for (const line of (readTextOrUndefined(join(commonDir, "packed-refs")) ?? "").split("\n")) {
+    const [sha, name] = line.split(" ");
+    if (name === ref && /^[0-9a-f]{40,64}$/.test(sha)) return sha;
+  }
+  return undefined;
+}
+
+function headShaOf(dirs: { gitDir: string; commonDir: string }): string | undefined {
+  const head = readTextOrUndefined(join(dirs.gitDir, "HEAD"))?.trim();
+  if (head === undefined) return undefined;
+  const symbolic = /^ref:\s*(\S+)$/.exec(head)?.[1];
+  return symbolic === undefined ? (/^[0-9a-f]{40,64}$/.test(head) ? head : undefined) : refSha(dirs.commonDir, symbolic);
+}
+
+function readTextOrUndefined(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined; // absent or unreadable: the caller treats the ref as unknown and spawns git or falls back
+  }
 }
 
 /** The feedback entry's `status:` as committed on origin/main — the daemon's own checkout can lag a merged
