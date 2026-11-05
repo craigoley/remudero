@@ -6540,6 +6540,92 @@ export interface components {
       reason: "invalid_request" | "wrong_repository" | "source_unavailable" | "invalid_source";
       detail: string;
     };
+    EscalationConversationIndexUnavailable: {
+      state: "unavailable";
+      reason: "invalid_request" | "refresh_required" | "source_unavailable";
+      detail: string;
+    };
+    EscalationConversationIndexItem: {
+      /** Stable `issue:<canonical issue URL>`. */
+      id: string;
+      issueUrl: string;
+      threadId: string;
+      identity: {
+        taskId: string;
+        class: "BLOCKED" | "MANUAL" | "HARD_STOP" | "GRILL";
+        cause?: string;
+        prRef?: string;
+      };
+      identityState: "verified" | "unverified";
+      source: {
+        kind: "saved_thread" | "board_flag" | "saved_thread_and_board_flag";
+        taskId: string;
+        headline: string;
+      };
+      correspondence: {
+        state: "needs_input" | "waiting_for_agent" | "archived" | "unknown";
+        reason?: "identity_unverified" | "history_incomplete" | "source_unverified";
+      };
+      history: "verified" | "partial" | "absent";
+      lastActivityAt: string;
+      messageCount: number;
+      preview: {
+        from: "operator" | "daemon";
+        text: string;
+      };
+    };
+    EscalationConversationIndex: {
+      state: "served";
+      version: 1;
+      repository: string;
+      snapshot: {
+        version: string;
+        observedAt: string;
+      };
+      coverage: {
+        state: "complete" | "partial" | "unavailable";
+        sources: {
+          threads: "complete" | "unavailable";
+          board: "complete" | "unavailable";
+        };
+        truncated: boolean;
+        /** Sources left out because they named conflicting or foreign conversations. */
+        conflicts: number;
+        incompleteHistory: number;
+        /** Saved escalation threads with no source-bound issue; not listed. */
+        unboundThreads: number;
+        reasons: (string)[];
+      };
+      counts: {
+        unit: "unique_conversations";
+        scope: "repository_snapshot";
+        complete: boolean;
+        /** Null unless every source was read completely. */
+        total: number;
+        folders: {
+          needs_input: number;
+          waiting_for_agent: number;
+          archived: number;
+          unknown: number;
+        };
+        /** Rows on this page only; never a folder total. */
+        loaded: {
+          total: number;
+          folders: {
+            needs_input: number;
+            waiting_for_agent: number;
+            archived: number;
+            unknown: number;
+          };
+        };
+      };
+      items: (EscalationConversationIndexItem)[];
+      page: {
+        limit: number;
+        folder: "needs_input" | "waiting_for_agent" | "archived" | "unknown" | null;
+        nextCursor: string;
+      };
+    };
     /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */
     EscalationReplyRequest: {
       /** Opt in to recording the verified original issue body and first answer in the native store. Requires the current canStartConversation capability and all reply binding fields. */
@@ -8641,6 +8727,18 @@ export interface paths {
           "404": EscalationConversationUnavailable;
           "422": EscalationConversationUnavailable;
           "503": EscalationConversationUnavailable;
+        };
+    };
+  };
+  "/v1/escalation/threads": {
+    get: {
+      responses: {
+          "200": EscalationConversationIndex;
+          "400": EscalationConversationIndexUnavailable;
+          "401": Error;
+          "403": Error;
+          "409": EscalationConversationIndexUnavailable;
+          "503": EscalationConversationIndexUnavailable;
         };
     };
   };
