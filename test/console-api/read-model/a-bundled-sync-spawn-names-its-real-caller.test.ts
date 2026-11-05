@@ -16,18 +16,28 @@ test("test/console-api/read-model/a-bundled-sync-spawn-names-its-real-caller.tes
 import childProcess from "node:child_process";
 import { callerFrame, startReadPlaneTelemetry } from "#src/lib/read-plane.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
+import { ghExecFile } from "#src/lib/github-transport.js";
 function actualCaller() { return callerFrame(); }
 function spawnOwner() { childProcess.execFileSync(process.execPath, ["-e", ""]); }
 function shellOwner() { childProcess.execSync("true"); }
 function syncOwner() { childProcess.spawnSync(process.execPath, ["-e", ""]); }
+function sharedLeafOwner() { ghExecFile(process.execPath, ["-e", ""]); }
 let now = 0;
 const telemetry = startReadPlaneTelemetry({ clock: clockFromMillisFn(() => now += 3000) });
+let sample;
 try {
   spawnOwner();
   shellOwner();
   syncOwner();
-  console.log(JSON.stringify({ frame: actualCaller(), sample: telemetry.sample() }));
+  sample = telemetry.sample();
 } finally { telemetry.stop(); }
+const leafTelemetry = startReadPlaneTelemetry({ clock: clockFromMillisFn(() => now += 3000) });
+let leafSample;
+try {
+  sharedLeafOwner();
+  leafSample = leafTelemetry.sample();
+} finally { leafTelemetry.stop(); }
+console.log(JSON.stringify({ frame: actualCaller(), sample, leafSample }));
 `, resolveDir: REPO_ROOT, sourcefile: "bundled-spawn-fixture.ts" },
       outfile, bundle: true, platform: "node", format: "esm", keepNames: true,
       packages: "external", logLevel: "silent",
@@ -38,6 +48,9 @@ try {
     })) as { frame: { caller: string }; sample: {
       sync_spawn_by_caller: { caller: string; calls: number; total_ms: number }[];
       sync_spawn_top: { caller: string; duration_ms: number }[];
+    }; leafSample: {
+      sync_spawn_by_caller: { caller: string; leaf?: string; calls: number }[];
+      sync_spawn_top: { caller: string; leaf?: string }[];
     } };
     assert.match(result.frame.caller, /^at actualCaller \(.*[/\\]run-task\.mjs:\d+:\d+\)$/);
     const totals = result.sample.sync_spawn_by_caller;
@@ -48,6 +61,12 @@ try {
       const pattern = new RegExp(`^at ${owner} \\(.*[/\\\\]run-task\\.mjs:\\d+:\\d+\\)$`);
       assert.ok(totals.some(row => pattern.test(row.caller) && row.calls === 1 && row.total_ms === 3000), owner);
       assert.ok(top.some(row => pattern.test(row.caller) && row.duration_ms === 3000), owner);
+    }
+    assert.equal(result.leafSample.sync_spawn_by_caller.length, 1);
+    assert.equal(result.leafSample.sync_spawn_top.length, 1);
+    for (const row of [...result.leafSample.sync_spawn_by_caller, ...result.leafSample.sync_spawn_top]) {
+      assert.match(row.caller, /^at sharedLeafOwner \(.*[/\\]run-task\.mjs:\d+:\d+\)$/);
+      assert.equal(row.leaf, "ghExecFile");
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
