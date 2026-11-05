@@ -10,7 +10,7 @@
   risk: high # Rule 19: one concern (the daemon's crash-loop verdict and its incident) spanning daemon.ts, its CLI boot read, the escalation catalogue and the test
   band_meaning: span
   origin: operator-session#review-throughput-2026-11-05
-  plan_refs: [W1-T215, W1-T3335, W1-T11137, W1-T11422]
+  plan_refs: [W1-T215, W1-T3335, W1-T11137]
   files:
     - src/lib/daemon.ts
     - src/cli/commands/daemon.ts
@@ -39,9 +39,9 @@
   design: |
     1. Abnormal exit, from the ledger alone. For each prior daemon process (run_id DAEMON-*) in the bounded boot-ledger tail that src/cli/commands/daemon.ts already reads (bootLedgerLines, priorDaemonBootTs), derive its lifetime (its daemon.boot to its last row) and whether it logged a clean-exit row before the next boot. Keep the existing priorExitReason "freshness" exclusion.
     2. Learned clean lifetime. Take the lifetimes of the instance's cleanly ended processes in that same tail, as a median and a p90. With fewer than two clean samples the history is unlearned. Then keep today's detectDaemonCrashLoop window exactly, so nothing regresses where nothing is learned.
-    3. Tiers. Every abnormal exit ledgers one daemon.crash.abnormal_exit row carrying its lifetime, the last daemon.memory heap sample of that process and the heap ceiling in force. A RUN of consecutive abnormal exits, each shorter than the learned median, raises ONE incident through escalateCrashLoop with a stable summary that names no count, so the escalation dedup holds. Each further abnormal exit in the run updates that incident (ledger row plus one appended update) instead of opening another. The incident names the run length, every lifetime, the heap evidence, and the newest heap snapshot under state/diagnostics/heap when W1-T11422 has left one.
+    3. Tiers. Every abnormal exit ledgers one daemon.crash.abnormal_exit row carrying its lifetime, the last daemon.memory heap sample of that process and the heap ceiling in force. A RUN of consecutive abnormal exits, each shorter than the learned median, raises ONE incident through escalateCrashLoop with a stable summary that names no count, so the escalation dedup holds. Each further abnormal exit in the run updates that incident (ledger row plus one appended update) instead of opening another. The incident carries the exit evidence: the run length, and for each exit its exit code, its lifetime, the last daemon.memory sample of that process and the heap-limit log line when the container log has one.
     4. Close. When the running process has lived longer than the learned p90 clean lifetime and no abnormal exit has occurred since, close the incident and ledger daemon.crashloop.cleared. Use the same withdraw-or-close path the launcher alerts use (clearLauncherAlert / withdrawSpooledEscalation).
-    5. Rewrite escalateCrashLoop's detail and options for the container: the docker die exit code, the heap-limit log line, the heap snapshot, and the in-container restart path.
+    5. Rewrite escalateCrashLoop's detail and options for the container: the docker die exit code, the heap-limit log line, the last daemon.memory sample, and the in-container restart path.
     No fixed thresholds: every rate and interval comes from the instance's own learned lifetimes.
   note: |
     Filed 2026-11-05 by the operator session after "Reviews are supposed to be fast - why is this taking so long? Do we need something that oversees this process and fixes issues? Let's solve the root cause."
@@ -50,4 +50,8 @@
     - W1-T215 (merged) shipped the fixed window this replaces.
     - W1-T3335 (merged) guards the heap on the daemon's own tick, which a between-tick spike outruns.
     - W1-T11137 (queued) changes the entrypoint's crash-throttle sleep, not the reporting.
-    - W1-T11422 makes each heap-limit abort leave a snapshot for this incident to link.
+    W1-T11422 (filed with this task, never built) was DROPPED by operator ruling on 2026-11-05 ("Drop it; rely on the census"). Its id stays reserved. Measured before the ruling:
+    - --heapsnapshot-near-heap-limit: on an object-heavy heap a snapshot is about 2.4 x the heap (607 MiB / 1.18 GiB / 2.48 GiB at 256 / 512 / 1024 MiB heaps) with peak RSS of 2.3 / 3.2 / 5.0 GiB, so at core's 7.5 GB ceiling one snapshot would need about 17–18 GB of disk and an RSS above core's ~24.9 GB memory.max.
+    - In-process sampling (a worker with inspector connectToMainThread) cannot see a blocked main thread: its commands run only when the main loop turns, and the 2026-11-05 heap grew inside one synchronous read.
+    - --heap-prof writes nothing on a heap-limit abort, and --report-on-fatalerror records "No stack." for a heap OOM.
+    The whole-ledger OOM class behind that crash loop is covered structurally by PR #16897's census (W1-T11423/W1-T11424). Naming a new allocator live stays an operator runbook step (SIGUSR1 plus a CDP HeapProfiler sampling profile), so this incident carries the exit evidence instead of a snapshot.
