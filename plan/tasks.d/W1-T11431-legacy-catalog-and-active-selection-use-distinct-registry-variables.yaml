@@ -1,0 +1,50 @@
+- id: W1-T11431
+  title: "Legacy registry catalogs and explicit active selection use separate environment variables"
+  repo: remudero
+  depends_on: [W1-T11320, W1-T11322]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # one concern — separate legacy catalog-path meaning from explicit active-selection meaning while preserving old launchers
+  band_meaning: span
+  origin: "Operator-approved source-only compatibility follow-up to W1-T10573 and W1-T11276, initial 11-file scope 2026-10-24; six-path files-only amendment approved 2026-11-05"
+  plan_refs: [W1-T10573, W1-T11276, W1-T11277, W1-T100]
+  files:
+    - src/lib/deployer.ts
+    - src/lib/worker.ts
+    - src/lib/instance-registry-selection.ts
+    - src/run-task.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/cli/commands/daemon.ts
+    - src/lib/sweep.ts
+    - src/lib/sre-lane.ts
+    - src/lib/instance-mode.ts
+    - src/lib/config-schema.ts
+    - deploy/recycle-container.sh
+    - deploy/serve-container.sh
+    - test/deployer.test.ts
+    - test/shadow-instance-safety.test.ts
+    - test/recycle-container.test.ts
+    - test/serve-launch-uniformity.test.ts
+    - test/env-var-registry.test.ts
+    - docs/instance-registry-selection-contract.md
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Private registry selection reaches the real host and daemon readers through their existing bounded selection seams."
+      proof: "unit test: private registry selection reaches real host and daemon readers"
+    - claim: "Absent selection preserves legacy behavior, while invalid, unreadable, malformed, unsupported, stale or revised selected inputs remain explicit failures or unknown and never fall back as though no selection existed."
+      proof: "unit test: private registry selection preserves legacy and refuses unknown selected inputs"
+    - claim: "Owner STOP/PAUSE and override behavior, shadow policy, environment allowlisting and private-safe boundaries remain independent and unchanged."
+      proof: "unit test: private registry selection preserves owner holds and private-safe boundaries"
+    - claim: "Defaults and deletion/restoration falsifiers demonstrate that this task cannot install or select a private registry, release a baked image, recycle workers or cut over live behavior."
+      proof: "unit test: private registry selection defaults and falsifiers forbid live effects"
+  rationale: |
+    W1-T10573 (#15532) is already merged and introduced explicit private-registry selection through the existing host, serve, recycle and daemon paths. The merged code still overloads RMD_INSTANCE_REGISTRY: the recon in W1-T11276 found that heartbeat, host-update, installer enumeration and resource-policy readers consume that same variable as a legacy catalog path. This task fixes that distinct compatibility defect: retain RMD_INSTANCE_REGISTRY for legacy catalog consumers and use RMD_SELECTED_INSTANCE_REGISTRY for active selection. During transition, selected readers accept the old variable only when the new variable is absent; when the new variable is present but invalid, they fail closed instead of falling back. If both are set, each reader uses the variable matching its meaning. W1-T10573 built the selection behavior; this task separates the two meanings and preserves mixed-version compatibility.
+
+    The implementation is limited to the exact eighteen existing paths approved by the operator. The six reader paths added by PR #16930 carry explicit selection through the real task, CLI, daemon, sweep and SRE paths. This separate one-path amendment adds src/lib/worker.ts so child environments strip RMD_SELECTED_INSTANCE_REGISTRY alongside the legacy registry variable, preventing explicit worker environment overrides from exposing the private registry path. Reuse the existing selected-reader, bounded file-read and binding contracts; do not add another loader, scanner, daemon, scheduler or private-data channel. Keep absent-configuration behavior byte-compatible. Invalid, unreadable, malformed, unsupported, stale or revised selected inputs remain explicit failure/unknown. Selection confers no actor, publication, deployment or release authority. Existing owner STOP/PAUSE/override, SHADOW policy, trusted paths, environment allowlisting, and private-safe prompts/argv/logs/public projections remain unchanged. Add only a synthetic setup example to the existing contract documentation; retain the complete public Apache implementation and existing public registry data.
+
+    W1-T100 (#173) is a separate, already-merged blocked_ci-to-ci-log fix-routing task; its shared src/run-task.ts and src/lib/sweep.ts paths are touched here only to propagate selected-registry semantics through existing readers and environment guards, not to alter that routing. The scope also overlaps open PR #16832 (src/lib/deployer.ts) and #16833 (deploy/recycle-container.sh). The declared depends_on records those existing task IDs; implement only after both normally merge and fresh ownership permits. Do not edit or adopt either PR. Existing four approved proof titles intentionally span the corresponding host, launcher, reader and safety test modules.
+
+    This is source-only compatibility work. It does not authorize installing or selecting private configuration, invoking the real installer/recycler, changing GitHub/runtime settings, stopping or restarting workers, releasing an image/recycle, or performing live cutover. Because deployer.ts and config-schema.ts are baked runtime inputs, verify the exact automatic image-build/recycle and release-hold behavior before publication/merge. Obtain the separately required exact release/cutover approval if existing safeguards do not prevent worker-affecting release. Preserve all existing owners, receipts, failures, budgets and readiness holds.

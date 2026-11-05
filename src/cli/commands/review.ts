@@ -226,7 +226,7 @@ export function materializeReviewerSnapshot(
   reviewRoot: string,
   sourceDir: string | undefined,
   expectedHeadSha: string,
-): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules>; dependencyReadRoots: string[] } {
+): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules>; dependencyReadRoots: string[]; originMain: string | null } {
   if (!sourceDir || !existsSync(sourceDir)) {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -258,10 +258,15 @@ export function materializeReviewerSnapshot(
   }
 
   const cwd = join(reviewRoot, "checkout");
+  let originMain: string | null;
   try {
     execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceRepo, cwd], {
       stdio: ["ignore", "pipe", "ignore"],
     });
+    // W1-T11343: a clone maps the source's LOCAL main, which the daemon never moves, to origin/main.
+    // Pin the source's own origin/main instead; with none keep none, not a stale base posing as main.
+    originMain = hostWorktreeGit(sourceRepo, ["for-each-ref", "--format=%(objectname)", "refs/remotes/origin/main"]).trim() || null;
+    hostWorktreeGit(cwd, originMain ? ["update-ref", "refs/remotes/origin/main", originMain] : ["update-ref", "-d", "refs/remotes/origin/main"]);
     hostWorktreeGit(cwd, ["checkout", "--quiet", "--detach", "--force", expectedHeadSha]);
   } catch {
     throw new ReviewerSnapshotError(
@@ -285,17 +290,15 @@ export function materializeReviewerSnapshot(
     );
   }
 
-  // The clone's exclude may change; source/common Git metadata remain untouched.
-  // This keeps a linked dependency tree invisible to the post-review cleanliness proof.
-  // Dependency roots outside the disposable checkout are passed to Codex as read-only.
-  // The source checkout still does not receive a broader writable sandbox grant.
-  // Repositories whose committed .gitignore omits node_modules still get a clean review checkout.
+  // Only the clone's exclude changes, so a linked dependency tree stays invisible to the post-review
+  // cleanliness proof even where .gitignore omits node_modules. Dependency roots outside the
+  // checkout reach Codex read-only; the source checkout gets no broader writable sandbox grant.
   excludeNodeModulesFromGit(cwd);
   const dependencyRoot = (() => { try { const source = resolveNodeModulesSource(sourceDir); return source ? realpathSync(source) : undefined; } catch { /* No source earns no grant. */ return undefined; } })();
   const nodeModules = linkWorktreeNodeModules(sourceDir, cwd, dependencyRoot ? { resolveSource: () => dependencyRoot } : {});
   const dependencyRelative = dependencyRoot ? relative(cwd, dependencyRoot) : "";
   const dependencyReadRoots = dependencyRoot && (dependencyRelative === ".." || dependencyRelative.startsWith(`..${sep}`) || isAbsolute(dependencyRelative)) ? [dependencyRoot] : [];
-  return { cwd, nodeModules, dependencyReadRoots };
+  return { cwd, nodeModules, dependencyReadRoots, originMain };
 }
 
 /** A semantic result is usable only while the disposable checkout remains exact and clean. */
@@ -812,6 +815,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         log("review.reviewer.materialized", {
           head_sha: headSha,
           node_modules: snapshot.nodeModules,
+          origin_main: snapshot.originMain,
         });
         const evidencePath = join(snapshot.cwd, ".git", "rmd-review-input.json");
         writeFileSync(evidencePath, JSON.stringify({

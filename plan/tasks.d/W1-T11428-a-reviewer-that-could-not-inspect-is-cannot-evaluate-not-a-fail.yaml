@@ -19,6 +19,7 @@
     - src/lib/review-outcome-class.ts
     - src/lib/required-semantic-review.ts
     - test/review/a-reviewer-that-could-not-inspect-is-cannot-evaluate-not-a-fail.test.ts
+    - test/prompt-contracts-name-the-commit-contract.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -43,3 +44,4 @@
     reservation hand-off: plan-file-1793898946000 -> plan-file-1793898946000
     Reserved with rmd next-task-id from the operator session's ops worktree. No duplicate: W1-T2946 (merged) let Codex reviewers write a private TMPDIR; W1-T2263 refuses only UNEXPLAINED downgrades. Whether codex's sandbox launcher fails systematically inside the container is not established (one occurrence); this task fixes the classification, and the launcher itself is a separate finding if it recurs.
     Amended 2026-11-05 (operator-approved split, NEEDS_SCOPE at build): the builder found the reviewer's output is folded in src/cli/commands/review.ts, and that a required semantic review WITHHOLDS any criterion without a boolean verdict (src/lib/review-outcome-class.ts recordedReviewVerdictLines records only PASS|FAIL; src/lib/required-semantic-review.ts refuses non-boolean verdicts), so an UNABLE line could never reach the judge with only review.ts in scope. files gains those three paths. No exclude-provider mechanism exists anywhere in src, so re-admitting on another provider moved to W1-T11432 (worker.ts auction + sweep.ts), which depends on this task.
+    Amended 2026-11-05 (operator-approved): test/prompt-contracts-name-the-commit-contract.test.ts joins files. It pins sha256(reviewerVerdictContract(1|3)) byte-identically, and design 1 deliberately changes that contract (the UNABLE form); the pin is re-measured with a comment citing this task, only the hash values and that comment change, the same precedent W1-T11209 set for its own deliberate contract change.

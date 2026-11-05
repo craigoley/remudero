@@ -1,0 +1,57 @@
+- id: W1-T11421
+  title: "A slow crash loop is reported: the daemon's crash-loop check counts abnormal exits against the instance's own learned lifetime, not more than 5 boots in a fixed 10 minutes — on 2026-11-05 core aborted on its heap limit about every 25 minutes, booted 29 times from 06:00 to 15:07Z, killed 28 of 49 review runs in flight, and the check never fired"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern (the daemon's crash-loop verdict and its incident) spanning daemon.ts, its CLI boot read, the escalation catalogue and the test
+  band_meaning: span
+  origin: operator-session#review-throughput-2026-11-05
+  plan_refs: [W1-T215, W1-T3335, W1-T11137]
+  files:
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
+    - src/lib/escalation-catalogue.ts
+    - test/daemon/a-slow-crash-loop-is-reported.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A run of abnormal daemon exits, each ending a process that lived shorter than the instance's learned clean lifetime, raises one crash-loop incident even when no ten-minute window holds six boots
+      proof: "unit test: test/daemon/a-slow-crash-loop-is-reported.test.ts"
+    - claim: Each further abnormal exit in the run updates that one incident with its evidence and opens no second issue, while a single abnormal exit after a long lifetime only ledgers a row
+      proof: "grep: W1-T11421 criterion 2 in test/daemon/a-slow-crash-loop-is-reported.test.ts"
+    - claim: The incident closes itself once the running process outlives the learned clean lifetime, and with no learned history the check keeps today's ten-minute window
+      proof: "grep: W1-T11421 criterion 3 in test/daemon/a-slow-crash-loop-is-reported.test.ts"
+  rationale: |
+    MEASURED 2026-11-05 (operator session; core ledger plus 12 rotated archives, docker events, container log):
+    - Core (remudero-daemon) logged 29 daemon.boot rows from 06:00 to 15:07Z, 15-28 minutes apart.
+    - docker events: `die exit=134` at 14:36:30 and 15:04:47. The container log before each: "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory", with about 7.1 GB live after Mark-Compact. The 3-minute daemon.memory samples sit at 0.7-1.9 GB, then the heap reaches the 7.5 GB ceiling (daemon.heap_ceiling_shadow ceiling_in_force_bytes 7540310016) between two samples.
+    - Of 49 review runs started since 06:00, 29 never posted. 28 of those ended before a later boot, 24 of them at worker.assignment. Reviews that completed took 1.6 min p50. Reviews looked slow only because the process kept dying under them.
+    - Nothing alerted. No daemon.crashloop.escalated row and no launcher_alert row exist for the day.
+    WHY THE CHECK STAYED SILENT, read at origin/main 629ad177de:
+    - detectDaemonCrashLoop (src/lib/daemon.ts:3141) breaches only when more than DEFAULT_CRASHLOOP_WINDOW.maxBoots=5 boots fall inside windowMs=10 min (:3116). A loop whose processes live about 25 minutes never puts six boots in ten minutes. A fixed window cannot see a slow loop, and the operator's standing rule is no fixed thresholds.
+    - escalateCrashLoop (src/lib/escalation-catalogue.ts:186) still explains the loop in launchd/KeepAlive terms. Core now runs in a container with docker on-failure restarts and in-container restarts (deploy/entrypoint.sh).
+    - The launcher's crash-loop alert (src/lib/launcher-host-alerts.ts, rmd-relaunch CRASH_LOOP_RUN) counts only watchdog revivals. Docker and the entrypoint absorbed every one of today's crashes, so no revival ever happened.
+    - The ledger can already tell a clean exit from an abnormal one. A clean stop logs daemon.stop / daemon.stop_drain.completed, and a freshness handoff logs daemon.freshness_exit / daemon.freshness_drain.completed. A process whose rows end without one of those before the next daemon.boot died abnormally.
+  design: |
+    1. Abnormal exit, from the ledger alone. For each prior daemon process (run_id DAEMON-*) in the bounded boot-ledger tail that src/cli/commands/daemon.ts already reads (bootLedgerLines, priorDaemonBootTs), derive its lifetime (its daemon.boot to its last row) and whether it logged a clean-exit row before the next boot. Keep the existing priorExitReason "freshness" exclusion.
+    2. Learned clean lifetime. Take the lifetimes of the instance's cleanly ended processes in that same tail, as a median and a p90. With fewer than two clean samples the history is unlearned. Then keep today's detectDaemonCrashLoop window exactly, so nothing regresses where nothing is learned.
+    3. Tiers. Every abnormal exit ledgers one daemon.crash.abnormal_exit row carrying its lifetime, the last daemon.memory heap sample of that process and the heap ceiling in force. A RUN of consecutive abnormal exits, each shorter than the learned median, raises ONE incident through escalateCrashLoop with a stable summary that names no count, so the escalation dedup holds. Each further abnormal exit in the run updates that incident (ledger row plus one appended update) instead of opening another. The incident carries the exit evidence: the run length, and for each exit its exit code, its lifetime, the last daemon.memory sample of that process and the heap-limit log line when the container log has one.
+    4. Close. When the running process has lived longer than the learned p90 clean lifetime and no abnormal exit has occurred since, close the incident and ledger daemon.crashloop.cleared. Use the same withdraw-or-close path the launcher alerts use (clearLauncherAlert / withdrawSpooledEscalation).
+    5. Rewrite escalateCrashLoop's detail and options for the container: the docker die exit code, the heap-limit log line, the last daemon.memory sample, and the in-container restart path.
+    No fixed thresholds: every rate and interval comes from the instance's own learned lifetimes.
+  note: |
+    Filed 2026-11-05 by the operator session after "Reviews are supposed to be fast - why is this taking so long? Do we need something that oversees this process and fixes issues? Let's solve the root cause."
+    The heap growth itself is being profiled live (operator-approved SIGUSR1 sampling heap profile) and gets its own fix. This task is the oversight that would have surfaced the loop on its own.
+    Not duplicated:
+    - W1-T215 (merged) shipped the fixed window this replaces.
+    - W1-T3335 (merged) guards the heap on the daemon's own tick, which a between-tick spike outruns.
+    - W1-T11137 (queued) changes the entrypoint's crash-throttle sleep, not the reporting.
+    W1-T11422 (filed with this task, never built) was DROPPED by operator ruling on 2026-11-05 ("Drop it; rely on the census"). Its id stays reserved. Measured before the ruling:
+    - --heapsnapshot-near-heap-limit: on an object-heavy heap a snapshot is about 2.4 x the heap (607 MiB / 1.18 GiB / 2.48 GiB at 256 / 512 / 1024 MiB heaps) with peak RSS of 2.3 / 3.2 / 5.0 GiB, so at core's 7.5 GB ceiling one snapshot would need about 17–18 GB of disk and an RSS above core's ~24.9 GB memory.max.
+    - In-process sampling (a worker with inspector connectToMainThread) cannot see a blocked main thread: its commands run only when the main loop turns, and the 2026-11-05 heap grew inside one synchronous read.
+    - --heap-prof writes nothing on a heap-limit abort, and --report-on-fatalerror records "No stack." for a heap OOM.
+    The whole-ledger OOM class behind that crash loop is covered structurally by PR #16897's census (W1-T11423/W1-T11424). Naming a new allocator live stays an operator runbook step (SIGUSR1 plus a CDP HeapProfiler sampling profile), so this incident carries the exit evidence instead of a snapshot.

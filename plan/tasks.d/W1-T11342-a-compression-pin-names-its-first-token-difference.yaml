@@ -23,6 +23,23 @@
     - test/worker/spawn/compress-src-lib-worker-ts.test.ts
     - test/gardeners/a-comment-compression-pin-never-freezes-its-module.test.ts
     - src/lib/gate-gardener.ts
+  # refusal-amendment (W1-T11342, run DAEMON-1793897932969@581fddd769bdef248a383bcc74c07c4f9bd9a6ff, 2026-11-05T20:12:19.734Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The missing shell launcher prevents verifying equality, diagnostic bounds, timing and prefix behavior.
+  # refusal-amendment (W1-T11342, run DAEMON-1793897932969@581fddd769bdef248a383bcc74c07c4f9bd9a6ff, 2026-11-05T20:12:19.734Z): the worker refused criterion 2 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The worker pin cannot be inspected or checked.
+  # refusal-amendment (W1-T11342, run DAEMON-1793897932969@581fddd769bdef248a383bcc74c07c4f9bd9a6ff, 2026-11-05T20:12:19.734Z): the worker refused criterion 3 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The ci-parity pin cannot be inspected or checked.
+  # refusal-amendment (W1-T11342, run DAEMON-1793897932969@581fddd769bdef248a383bcc74c07c4f9bd9a6ff, 2026-11-05T20:12:19.734Z): the worker refused criterion 4 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The retro pin cannot be inspected or checked.
+  # refusal-amendment (W1-T11342, run DAEMON-1793897932969@581fddd769bdef248a383bcc74c07c4f9bd9a6ff, 2026-11-05T20:12:19.734Z): the worker refused criterion 5 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The ledger pin cannot be inspected or checked.
+  # refusal-amendment (W1-T11342, run DAEMON-1793897932969@581fddd769bdef248a383bcc74c07c4f9bd9a6ff, 2026-11-05T20:12:19.734Z): the worker refused criterion 6 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The containment pin cannot be inspected or checked.
+  # refusal-amendment (W1-T11342, run DAEMON-1793897932969@581fddd769bdef248a383bcc74c07c4f9bd9a6ff, 2026-11-05T20:12:19.734Z): the worker refused criterion 7 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The census detector and its controls cannot be inspected or executed.
+  # refusal-amendment (W1-T11342, run DAEMON-1793897932969@581fddd769bdef248a383bcc74c07c4f9bd9a6ff, 2026-11-05T20:12:19.734Z): the worker refused criterion 8 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The generated shard design cannot be inspected or checked.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
