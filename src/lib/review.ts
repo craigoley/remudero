@@ -288,15 +288,12 @@ function isReopenableDegradedTerminal(
   return hasHeadCheckout && terminal.verdict.capped && terminal.verdict.keywordOnly;
 }
 
-/** W1-T11390: one review.plan_lint_retry row per request and per publication. An `admitted` row is the only bound on
- *  re-evaluating an incomplete lint: no counter joins the decision digest, and a run that dies stays consumed. */
+/** W1-T11390: an `admitted` row is the only bound; a run that dies stays consumed. */
 const PLAN_LINT_RETRY_STEP = "review.plan_lint_retry";
 const PLAN_LINT_RETRY_REASON_MAX = 300;
-/** Whole, or with the "; it printed: ..." suffix W1-T11225 adds. Every other ran:false reason stays final. */
 const PLAN_LINT_NO_SUMMARY_REASON = /^lint-plan exited \d+ with no summary(?:; it printed: [\s\S]*)?$/;
 
-/** Read inside the lock by a {@link PlanLintRetryRequest}. `checks` covers every check on the head except
- *  `remudero-review`, which is the failure being re-evaluated. */
+/** `checks` excludes `remudero-review`, the failure being re-evaluated. */
 interface PlanLintRetryObservation {
   headSha: string;
   mergeBaseSha: string;
@@ -306,14 +303,12 @@ interface PlanLintRetryObservation {
 type PlanLintRetryObserver = () => PlanLintRetryObservation | Promise<PlanLintRetryObservation>;
 type ReviewPublisherReaders = Pick<PostReviewStatusGuardedOpts, "owner" | "repo" | "fetchPublisher" | "readRequiredContexts">;
 
-/** The explicit request {@link claimReviewDecision} admits against; nothing infers one. */
 interface PlanLintRetryRequest extends ReviewPublisherReaders {
   attemptId: string;
   runId: string;
   headSha: string;
   mergeBaseSha: string;
   observe: PlanLintRetryObserver;
-  /** Seams for a pending claim's liveness, defaulting as {@link postReviewPending} does. */
   clock?: Clock;
   assessPendingOwner?: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment;
 }
@@ -343,16 +338,14 @@ function appendPlanLintRetryRow(
   });
 }
 
-/** The whole corpus: this step is not rotation-exempt, while a replay keeps re-appending a live terminal row, so a
- *  live-only read would forget a consumed attempt. A partial read throws, which every caller turns into a refusal. */
+/** Whole corpus: this step rotates away while a replay keeps its terminal row live. */
 async function readPlanLintRetryRows(ledgerPath: string): Promise<Array<Record<string, unknown>>> {
   const read = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { step: PLAN_LINT_RETRY_STEP, refuseIncomplete: true });
   if (!read.ok) throw new Error(`ledger unreadable: ${read.unread.join(", ")}`);
   return read.rawLines.map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-/** True only for a plan-only failure the lint alone caused, by a lint that died before its summary. judgeReview
- *  renders exactly {@link planLintRefusalText} only when nothing else failed, so the summary names any other cause. */
+/** judgeReview renders exactly planLintRefusalText only when nothing else failed. */
 function isPlanLintRetryEligible(terminal: ReviewDecisionTerminal): boolean {
   const { state, verdict } = terminal;
   const lint: unknown = verdict.planLint;
@@ -363,8 +356,6 @@ function isPlanLintRetryEligible(terminal: ReviewDecisionTerminal): boolean {
     verdict.summary === planLintRefusalText({ ran, reason });
 }
 
-/** A pending claim by another run that {@link postReviewPending} would itself still honour: a young claim whose owner
- *  is not proven dead, an unreadable age, or a row too malformed to assess. */
 function foreignPendingClaim(
   rows: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -383,7 +374,6 @@ function foreignPendingClaim(
   return undefined;
 }
 
-/** Why this repository's review context cannot take a replacement from this credential, or `undefined` when it can. */
 async function planLintRetryPublisherRefusal(publisher: ReviewPublisherReaders, baseRef: string): Promise<string | undefined> {
   if (typeof baseRef !== "string" || baseRef.length === 0) return "the PR's base branch is unreadable";
   const { canPublish, evidence } = await replayPublisher(publisher, { baseRef }, undefined);
@@ -391,7 +381,6 @@ async function planLintRetryPublisherRefusal(publisher: ReviewPublisherReaders, 
   return canPublish ? undefined : `the current credential cannot publish as App ${evidence.requiredAppId}`;
 }
 
-/** Every admission guard, in cost order. Returns why the request is refused; a throw from any read is a refusal. */
 async function planLintRetryRefusal(
   opts: { ledgerPath: string; taskId: string; prUrl: string; digest: string; headCheckoutDir?: string },
   retry: PlanLintRetryRequest,
@@ -428,8 +417,6 @@ async function planLintRetryRefusal(
   }
 }
 
-/** Decide one explicit request with the decision lock held; only an admission keeps the lock. The prior terminal row
- *  is never touched: a refusal replays it and a later publication appends beside it. */
 async function admitPlanLintRetry(
   opts: Parameters<typeof planLintRetryRefusal>[0],
   retry: PlanLintRetryRequest,
@@ -471,7 +458,7 @@ export async function claimReviewDecision(opts: {
   /** A successfully materialized checkout at the exact PR head; absent means replay remains final. */
   headCheckoutDir?: string;
   lockOpts?: AcquireReviewStatusLockOpts;
-  /** W1-T11390: an explicit request to re-evaluate an incomplete lint once. Absent, nothing below changes. */
+  /** W1-T11390: an explicit request; absent, nothing below changes. */
   planLintRetry?: PlanLintRetryRequest;
 }): Promise<ReviewDecisionClaim> {
   const retry = opts.planLintRetry;
@@ -496,7 +483,6 @@ export async function claimReviewDecision(opts: {
     handle.release();
     return { kind: "replay", terminal };
   }
-  // No terminal is an ordinary first review: it keeps its claim, but no retry is admitted, so its publication refuses.
   if (retry) appendPlanLintRetryRow(opts.ledgerPath, retryRowIdentity(opts, retry), "refused", "no terminal exists for this decision");
   return { kind: "owned", release: () => handle.release() };
 }
@@ -11689,8 +11675,7 @@ export interface PostReviewStatusGuardedOpts {
   reviewDecisionDigest?: string;
   /** Permit replacement only of the matching CAPPED keyword-only terminal reopened after exact-head materialization. */
   reopenedDegradedTerminal?: boolean;
-  /** W1-T11390: this post is the fresh result of an admitted lint retry. Replaces the terminal only when that row
-   *  exists and `outcome` ran; anything else withholds and posts nothing. */
+  /** W1-T11390: this post is an admitted lint retry's fresh result. */
   planLintRetry?: PlanLintRetryPublicationRequest;
   reviewEngineRevision?: string;
   evaluatorProvenance?: ReviewEvaluatorProvenance;
@@ -11767,13 +11752,11 @@ function reviewerCodePublicationRefusal(
 
 interface PlanLintRetryPublicationRequest {
   attemptId: string;
-  /** The lint this attempt re-ran. Absent or `ran: false` is an incomplete attempt. */
   outcome?: PlanLintOutcome;
   observe: PlanLintRetryObserver;
 }
 
-/** W1-T11390: re-check everything admission established, inside the status lock. The prior terminal stays final unless
- *  this returns `publish: true`, and only a clean lint may publish success, so a retry can never launder a violation. */
+/** Only a clean lint may publish success, so a retry cannot launder a violation. */
 async function decidePlanLintRetryPublication(
   opts: PostReviewStatusGuardedOpts,
   retry: PlanLintRetryPublicationRequest,
