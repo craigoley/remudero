@@ -26,12 +26,13 @@
     Preserve the repository-wide shadow setting. Add the smallest explicit capability that lets
     only the exact plan PR already selected by W1-T5901 take that pass's existing plan merge path.
     Keep its fresh exact-head, review, required-check, security, operator-hold and W1-T5748
-    plan-safety decisions, including W1-T4405 merge-queue behavior. Unknown or changed selection
-    evidence refuses. Code PRs, non-selected plan PRs and every other shadow-mode mutation remain
-    refused. The per-pass and overlapping-pass single-candidate claim remains unchanged.
+    plan-safety decisions, including W1-T4405 merge-queue behavior. Require fresh mergeability
+    against current main in the same pass; unknown selection or mergeability evidence, or state
+    read against an older main, refuses. Code PRs, non-selected plan PRs and every other shadow-mode
+    mutation remain refused. The per-pass and overlapping-pass single-candidate claim remains unchanged.
   acceptance:
-    - claim: "With the core still in shadow mode, only the exact W1-T5901-selected plan PR uses the existing one-per-light-pass merge path after fresh exact-head, review, required-check, security, operator-hold and W1-T5748 safety checks; unknown selection evidence refuses. The proving test title includes the exact marker W1-T11434 criterion 1: selected plan merge passes shadow guards."
-      proof: "unit test: W1-T11434 criterion 1: selected plan merge passes shadow guards"
+    - claim: "With the core still in shadow mode, only the exact W1-T5901-selected plan PR uses the existing one-per-light-pass merge path after fresh exact-head, review, required-check, security, operator-hold, current-main mergeability and W1-T5748 safety checks; unknown selection or mergeability evidence refuses. The proving test title includes the exact marker W1-T11434 criterion 1: selected plan merge passes shadow and mergeability guards."
+      proof: "unit test: W1-T11434 criterion 1: selected plan merge passes shadow and mergeability guards"
     - claim: "The promoted path preserves the one-plan-PR-per-light-pass bound, W1-T4405 merge-queue behavior, and current code-PR deferral. The proving test title includes the exact marker W1-T11434 criterion 2: plan merge remains one per light pass and code PRs defer."
       proof: "unit test: W1-T11434 criterion 2: plan merge remains one per light pass and code PRs defer"
   falsifier: |
