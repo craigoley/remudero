@@ -470,3 +470,24 @@ test("W1-T10957: canary owner refuses coding evidence on an ordinary slot and ke
     assert.equal(owner.claim(slot), "already-owned-or-terminal");
   } finally { owner.close(); }
 }));
+
+test("canary owner refuses terminal custody over a corrupted coding consumption receipt", () => {
+  const coding = commonCanarySuite().find(item => item.family === "coding")!;
+  const input = { runId: "c0044072-86e2-4b85-b871-3735362cb490",
+    canaryAttemptId: "d1044072-86e2-4b85-b871-3735362cb491",
+    workerSpawnAttemptId: "e2044072-86e2-4b85-b871-3735362cb492", sourceDigest: "a".repeat(64) };
+  // A receipt that parses but is no consumption binding, and bytes that are not JSON at all.
+  for (const corrupt of [JSON.stringify({ version: "not-a-receipt", binding: {} }), "{not json"]) fixture(dir => {
+    const [slot] = buildCanarySchedule("2026-10-11", "coding-owner", [coding],
+      [{ model: "test-model", route: "test-route", effort: "medium",
+        suiteHash: canarySuiteDigest([coding]), billing: "subscription" }]).slots;
+    const owner = openOwner(dir);
+    try {
+      assert.equal(owner.claim(slot), "claimed");
+      assert.equal(owner.consumeCodingAttempt(slot, input).state, "consumed");
+      const db = new DatabaseSync(join(dir, "model-canary-slots.sqlite"));
+      try { db.prepare("UPDATE canary_slots_v1 SET receipt=? WHERE id=?").run(corrupt, slot.id); } finally { db.close(); }
+      assert.throws(() => owner.terminal(slot, outcome(slot)), /^Error: canary-owner-coding-consumption-invalid$/);
+    } finally { owner.close(); }
+  });
+});
