@@ -69,6 +69,8 @@
       proof: "grep: W1-T10389 criterion 2 in test/ci/a-foreign-pid-whose-cwd-is-unreadable-does-not-hold-a-dead-fix-worktree.test.ts"
     - claim: "an unreadable cwd on a same-uid sandboxed pid is decided by its nearest readable ancestor's cwd"
       proof: "grep: W1-T10389 criterion 3 in test/ci/a-foreign-pid-whose-cwd-is-unreadable-does-not-hold-a-dead-fix-worktree.test.ts"
+    - claim: "the fix-owner capture in src/run-task.ts names the census probe through the extracted src/lib/process-cwd-census.ts"
+      proof: "grep: describeProcessCwdProbe( in src/run-task.ts"
   falsifier: |
     Return unknown on every non-ENOENT error again, and the foreign-pid fixture keeps the dead round's worktree.
   note: |
