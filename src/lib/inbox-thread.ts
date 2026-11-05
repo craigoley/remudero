@@ -92,9 +92,12 @@ export interface ThreadMessageExtra {
   operator?: string;
   replyId?: string;
   /** Immutable source binding of a native escalation reply intent. */
-  escalation?: { issueUrl: string; revision: string; recommendationResponse?: "accept" | "decline" };
+  escalation?: { issueUrl: string; revision: string; recommendationResponse?: "accept" | "decline"; inputVersion?: 1;
+    question?: { issueUrl: string; feedbackId: string; revision: string; seq: number } };
   /** A verified issue body copied when an operator starts a native conversation. */
   sourceImport?: { issueUrl: string; revision: string };
+  /** Native intake publication answering one exact saved escalation reply. */
+  intake?: { feedbackId: string; replyId: string; replySeq: number; publicationPr: string; questionIssueUrl?: string };
   input?: InboxInputReference;
   response?: InboxResponseReference;
 }
@@ -342,6 +345,12 @@ export function appendThreadReplyOnce(
   const prior = current.messages.find((message) => message.role === "reply" && message.extra?.replyId === replyId);
   if (prior) return { kind: prior.body === body && (extra.escalation === undefined || isDeepStrictEqual(prior.extra?.escalation, extra.escalation))
     ? "existing" : "conflict", seq: prior.seq, ts: prior.ts };
+  if (extra.escalation?.question) {
+    const question = extra.escalation.question, last = current.messages.at(-1);
+    if (last?.role !== "escalation" || last.seq !== question.seq || last.extra?.question !== true
+      || last.extra.intake?.feedbackId !== question.feedbackId || last.extra.intake.questionIssueUrl !== question.issueUrl)
+      return { kind: "conflict", seq: last?.seq ?? 0 };
+  }
   if (current.messages.length === 0 && initialEscalation) {
     appendThreadMessageHeld(identity, "escalation", initialEscalation.body, deps, initialEscalation.extra, owns);
   }
@@ -464,6 +473,11 @@ export function appendThreadMessageOnce(identity: ThreadIdentity, role: ThreadMe
     if (prior.length === 1) {
       syncThreadFile(deps.threadStorePath);
       return { kind: "existing", threadId, seq: prior[0]!.seq, ts: prior[0]!.ts };
+    }
+    if (extra.intake) {
+      const latestReply = current.messages.filter(message => message.role === "reply").at(-1);
+      if (latestReply?.seq !== extra.intake.replySeq || latestReply.extra?.replyId !== extra.intake.replyId)
+        return { kind: "conflict", reason: "A later answer superseded this intake result. The current ask was retained." };
     }
     const saved = appendThreadMessageHeld(identity, role, body, deps, expected, owns);
     return { kind: "appended", threadId, seq: saved.seq, ts: saved.ts };

@@ -1,0 +1,61 @@
+- id: W1-T11341
+  title: "Core's event loop is held for minutes by two review-path calls the daemon's own rows name: an in-process review builds its base-proof checkout with synchronous git (976 s in one call on 11-04), and every review spawn re-reads the whole ledger union synchronously to decide the run-child mode; both move off the loop"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # core's main loop; every in-process lane stalls behind these two calls
+  origin: operator-session#core-loop-lag-2026-11-04
+  plan_refs:
+    - W1-T11162
+    - W1-T9816
+    - W1-T9754
+    - W1-T7746
+    - W1-T11340
+  files:
+    - src/cli/commands/review.ts
+    - src/lib/check-proof.ts
+    - src/lib/run-child.ts
+    - src/lib/run-child-mode.ts
+    - src/lib/review.ts
+    - src/lib/proof-base-stale.ts
+    - test/preexisting-proof-hits-wiring.test.ts
+    - test/base-blob-read-failure.test.ts
+    - test/review/an-in-process-review-builds-its-base-proof-off-the-loop.test.ts
+    - test/worker/a-review-spawn-decides-its-mode-without-re-reading-the-union.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The review command builds its base-proof directory with awaited git (the existing detachedAsync shape of buildBaseProofDir, or an async builder), so a timer scheduled while that git runs fires before the git child exits
+      proof: "unit test: test/review/an-in-process-review-builds-its-base-proof-off-the-loop.test.ts"
+    - claim: A review spawn decides its run-child mode from the tracker the daemon already folds, never by re-reading the ledger union, so N spawns after boot make zero synchronous union reads
+      proof: "unit test: test/worker/a-review-spawn-decides-its-mode-without-re-reading-the-union.test.ts"
+  rationale: |
+    MEASURED 2026-11-04 on core (remudero-daemon, actor_pid 149, booted ~16:32Z on 93efa2c8d). The live ledger holds 10 daemon.loop_lag rows from 18:12Z to 19:35Z (earlier rows pruned):
+    - lag p50 142.7 s, p90 334.7 s, max 1,094.6 s. The 10 rows sum to 2,590 s of the loop held in about 83 min of wall time.
+    - Sync spawns 1,035 s, of which 978 s (6 calls) is `buildBaseProofDir` (src/lib/check-proof.ts:117) through `hostWorktreeGit` execFileSync. One call ran 976,711 ms (the 19:29:07Z row and its 19:29:20Z daemon.loop_stall_profile).
+    - The 19:03:39Z stall profile: 353 s held, 890 ms of sync spawn, 90.8 s profiled. Its inclusive top is sweep → spawnReview (src/lib/run-child.ts:1438) → mode() (:1433) → detachedWorkModeNow (:1389) → readRunChildModeUnion (src/lib/run-child-mode.ts:240) → readLedgerUnionRecordsSync (src/lib/ledger-union.ts:1682), 34.2 s, with GC 24.2 s and scanLedgerBuffer 7.8 s self.
+    - Context: core at 246–313 % CPU, with 111 GB of block reads since boot.
+    WHY THESE PATHS RUN ON THE LOOP:
+    - W1-T11162 places a plan-only filing's review in-process (run-child.ts:1440). The review command then calls buildBaseProof(criteria, worktreePath) synchronously at src/cli/commands/review.ts:2187. buildBaseProofDir's default seams (merge-base :151, show :162, worktree add :169, diff :195) are execFileSync. run-task.ts:2446 already uses the detachedAsync form for the same builder.
+    - detachedWorkModeNow re-reads the whole union on every spawn, although bootRunChildMode (run-child-mode.ts) builds a tracker once per boot that observes each row the daemon writes.
+    RELATED, NOT IN THIS TASK:
+    - W1-T11340 (filed in #16787): the in-process review of a never-reviewed PR scans every archive in priorPostedReviewRow, and nothing reclaims it. This task removes the loop-holding sync work that makes those reviews and everything else crawl.
+    - Unrouted forks: 489 direct execFileLoopBounded spawns cost 99 s of fork time. W1-T9754's spawn helper (src/lib/spawn-helper.ts:304 execFileRouted) carries only 5 call files; 22 others still call execFileLoopBounded directly. The rows also name execFileLoopBounded itself as the caller, so the real call sites are not attributed.
+    - liveStateFromRest (src/lib/open-prs-rest.ts:408), reached through the sync ghJson fetcher (run-task.ts:7805): 13 s across 13 calls.
+    - src/lib/clock.ts:84 loopAvailableDeadline re-arms whenever a timer fires late by 1/20 of its budget or more. On a loop held for minutes, the bounds on gh/git children may never expire.
+  design: |
+    1. Review base proof: the review command awaits an async base build. Either pass buildBaseProofDir's detachedAsync seam with the awaited-git runner the run lane uses (run-task.ts:2446), or add an async twin whose merge-base, show, worktree add and diff go through the awaited git leaf (hostWorktreeGitAsync). The BaseProofDir contract stays the same, including baseUnreadablePaths, addedTestFiles and the grep tree, and teardown still runs on every exit. Any bound on that git is the existing loop-available bound (W1-T9651); no new timer.
+    2. Run-child mode: the detached-work host is handed the daemon's own childModeTracker.evidence (src/cli/commands/daemon.ts:1332, which childLog feeds at :1335 and which build runs already read at :1848 and :1857). detachedWorkModeNow decides from that evidence and no longer calls readRunChildModeUnion. The union is read once, at boot, as bootRunChildMode already does. An unread union at boot keeps today's posture: it refuses or forces shadow, as before. A host given no evidence reader keeps today's posture of "off" (in process).
+    TESTS (no fixed thresholds; ordering and counts only):
+    - (a) Drive the review command's base build against a real fixture repo, with PATH fronted by a git wrapper that records its exit time after a short real sleep. Schedule a 0 ms timer as the build starts, and assert that the timer fired before the wrapper's recorded exit. At base, execFileSync holds the loop for the whole sleep, so the timer fires after the exit.
+    - (b) Construct the detached-work host with a counting union reader, boot it, then make N review spawns. Assert zero union reads after boot. At base there are N.
+  falsifier: |
+    At origin/main, src/cli/commands/review.ts:2187 calls buildBaseProofDir synchronously (execFileSync git on core's loop for in-process plan-filing reviews), and every spawnReview calls detachedWorkModeNow → readRunChildModeUnion → readLedgerUnionRecordsSync.
+  note: |
+    Amended 2026-11-04 (build of W1-T11341, before review): files gain src/lib/review.ts, because resolveProofTestPath resolves a test-citing proof's path in the base tree through the resolver's sync git (rev-parse, ls-tree), and the async builder must hand it awaited answers, so it takes the resolver's git seam through. src/lib/proof-base-stale.ts exports its grep tree's ls-tree and blob-read argv and row parser, so the awaited readers run the same git instead of a copy. They also gain test/preexisting-proof-hits-wiring.test.ts and test/base-blob-read-failure.test.ts, whose source-text pins name buildBaseProofDir as the review command's base-proof default; the default becomes the awaited builder, so the pins move with it and keep asserting the same call and the same forwarded facts.
+    reservation hand-off: plan-file-1793821303000 -> plan-file-1793821303000
+    Reserved with rmd next-task-id --branch plan-file-1793821303000 from the operator session. Test paths from rmd test-place src/lib/check-proof.ts (test/review/) and src/lib/run-child.ts (test/worker/).
