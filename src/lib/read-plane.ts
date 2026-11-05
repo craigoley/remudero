@@ -35,6 +35,8 @@ const STALL_PROFILE_CONSUMER = "loop_stall_profile";
 
 /** The shared spawn leaves: frames that only forward a spawn for someone else, so none is the caller. Declared
  *  once here: a module path, or plan.ts's named default runner (`loadPlanAtRef`'s `runGit` arrow). */
+export const SYNC_SPAWN_LEAF_FRAME_NAMES: ReadonlySet<string> = new Set(["ghExecFile"]);
+
 export const SYNC_SPAWN_LEAF_FRAMES: readonly RegExp[] = [
   /[/\\]worktree-git\.[cm]?[jt]s/,
   /[/\\]github-transport\.[cm]?[jt]s/,
@@ -111,7 +113,8 @@ export function callerFrame(): { caller?: string; leaf?: string; callerIsLeaf?: 
   for (const [index, line] of lines.entries()) {
     if (READ_PLANE_FRAME_NAMES.has(sites[index]!.functionName)
       || /read-plane\.[cm]?[jt]s/.test(line) || /node:/.test(line)) continue;
-    if (SYNC_SPAWN_LEAF_FRAMES.some((leaf) => leaf.test(line))) { leafLine = line; continue; }
+    if (SYNC_SPAWN_LEAF_FRAME_NAMES.has(sites[index]!.functionName)
+      || SYNC_SPAWN_LEAF_FRAMES.some((leaf) => leaf.test(line))) { leafLine = line; continue; }
     const chain = callerChain(line, sites.slice(index));
     return { caller: line.trim().slice(0, 200), ...(leafLine === undefined ? {} : { leaf: frameName(leafLine) }),
       ...(chain === undefined ? {} : { chain }) };
