@@ -168,7 +168,7 @@ test("W1-T9515: a recycle with no known caller is a hand-recycle intervention", 
   assert.equal(deriveControlInterventions([{ ...row, actor_evidence: undefined }])[0]!.cause_class, "hand-recycle:actor unrecorded");
 
   f.run({ SSH_CONNECTION: "192.0.2.1 123 192.0.2.2 22" }, ["--bad-argument"]);
-  const second = { ...f.rows()[1], ts: row.ts };
+  const second = { ...f.rows().filter((entry) => entry.step === "recycle.invoked")[1], ts: row.ts };
   assert.notEqual(second.pid, row.pid);
   assert.notEqual(second.run_id, row.run_id);
   assert.equal(second.instance, row.instance);
