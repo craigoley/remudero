@@ -1,0 +1,44 @@
+- id: W1-T11335
+  title: A retro's prepublish preflight beats the host test slot it holds for the whole suite run, as the author preflight does, so a held slot is not read as silent for an hour while its suites are still running
+  repo: remudero
+  depends_on: []
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one slot holder adopts the existing W1-T9928 heartbeat; admission, reclaim rules and the suite run are unchanged
+  origin: operator-session#recycle-and-status-2026-11-04
+  plan_refs:
+    - W1-T9928
+    - W1-T6111
+  files:
+    - src/lib/retro-preflight.ts
+    - test/learning/a-retro-preflight-beats-the-slot-it-holds.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: While runRetroPrepublishPreflight's suite run holds its test slot, the slot's heartbeatAt advances on the slot's recorded cadence (startTestSlotHeartbeat), and the heartbeat stops and withdraws its cadence when the run ends by pass, failure, timeout or spawn error, before the slot is released
+      proof: "unit test: test/learning/a-retro-preflight-beats-the-slot-it-holds.test.ts"
+    - claim: The retro preflight starts the W1-T9928 slot heartbeat
+      proof: "grep: startTestSlotHeartbeat( in src/lib/retro-preflight.ts"
+  rationale: |
+    OBSERVED 2026-11-04, remudero-daemon:
+    - RETRO-1793795675454 held the host test slot. /mnt/scratch/rmd/test-slots/slot-1.json read pid 2031531, label retro-preflight:plan-reading-suites, startedAt 14:22:29.744Z and heartbeatAt 14:29:31.381Z, while its suite run continued to 15:29:31Z (retro.preflight_failed attempt 2, exit_class process_timeout, elapsed_ms 4,025,267).
+    - For an hour the slot read as silent while it was busy. An operator diagnosis (this session's) took it for hung.
+    - Its pool coordinator was idle in ep_poll by design, waiting on its test children.
+    - Attempt 1 had run 79 min (elapsed_ms 4,746,239, failing 2 load-sensitive tests) after waiting 1,469 s for the slot. Both attempts ran 272 suites at --test-concurrency=1 for a PLAN_ONLY diff of 2 changed paths.
+    - W1-T9928 added startTestSlotHeartbeat so a long-step holder "keeps beating through long steps". Its only caller on origin/main is scripts/lib/author-step-capture.mjs (the author preflight).
+    - runRetroPrepublishPreflight acquires the slot with acquireTestSlotAsync, runs its suites and releases in a finally, with no heartbeat in between.
+  design: |
+    In runRetroPrepublishPreflight's suite block (src/lib/retro-preflight.ts):
+    - After the slot is acquired and testSlotExecutionAllowed passes, and when the lease carries slot.heartbeat (TestSlotLease.heartbeat, absent only for a private writer), start startTestSlotHeartbeat(slot.heartbeat, log).
+    - Stop it with stop(true) in the existing finally, before slot.release(). A heartbeat that cannot start is a diagnostic row and does not block the run, matching W1-T9928's "a failed or deferred beat is a diagnostic, never a release".
+    NOT IN SCOPE:
+    - the retro's suite selection (272 plan-reading suites for a plan-only diff; it mirrors ci.yml's plan-reading lane by design, and narrowing it is a separate decision);
+    - its concurrency;
+    - how a recycle classifies a retro.
+  note: |
+    Build after W1-T11326 if it is still open: both edit src/lib/retro-preflight.ts.
+    reservation hand-off: run-unfiled-1793808171119 -> run-unfiled-1793808171119
+    Reserved with rmd next-task-id (W1-T11335 on run-unfiled-1793808171119). From the operator session's 2026-11-04 recycle diagnosis (finding G). The "hung pool" premise was wrong: the run was busy, and silent only because nothing beat the slot.
