@@ -1,0 +1,48 @@
+- repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles:
+    tdd: strict
+  priority: 3
+  risk: high
+  band_meaning: span
+  author_class: machine
+  status: queued
+  attempts: 0
+  id: W1-T11394
+  title: An approved product plan exposes a source-bound requirement to task and proof coverage receipt
+  budget_usd: 20
+  origin: research:conductor-dex-2026-11-05:requirements
+  plan_refs:
+    - §2
+    - §4G
+    - §7B
+    - W1-T10823
+  files:
+    - src/lib/product-plan-operation.ts
+    - src/lib/product-case.ts
+    - src/lib/product-build.ts
+    - test/dispatch/product-plan-operation.test.ts
+    - test/plan/product-plan-verification.test.ts
+    - test/plan/wreckterra-product-case.test.ts
+  rationale: "OBSERVED at 1438f25d780f8119342dbc36dc8715f9c6670e26: product plan operations already freeze the approved brief, objective revision, request key/payload digest and exact source head; verifyProductPlanEvidence is shared by product-case record/admit and product-build admission. Whole brief inclusion and valid proofs do not expose which approved requirement maps to which task/proof or which requirement is omitted/deferred. Dex documents plan decomposition in its agent skill, while dex plan itself stores one whole Markdown ticket. Adapt its explicit task context into a native coverage receipt, not another importer, task database or generic planner. Sources: https://dex.rip/skills ; https://github.com/dcramer/dex/blob/3f55b2a3ec9746fc56cf62037ca6a828555ce17d/plugins/dex/skills/dex/SKILL.md ; https://github.com/craigoley/remudero/blob/1438f25d780f8119342dbc36dc8715f9c6670e26/src/lib/product-plan-operation.ts . Source pointers are structural provenance, not semantic proof.
+    plan-proposals.ts is a separate disposition ledger and is outside this change. W1-T10823 owns the original product plan operation and its whole-brief evidence. This follow-up adds the independent requirement inventory and structural mapping receipt to that existing path, without refiling the original operation."
+  design: >-
+    Extend the existing product-plan operation and its evidence verifier. Build a bounded, versioned coverage receipt against the exact frozen approved brief and committed task/proof snapshot. Each proposed atomic requirement has a stable source-relative anchor (section plus exact excerpt/offset or equivalent resolvable coordinates), source digest, task IDs and concrete acceptance-proof references. Validate that anchors resolve to that source and task/proof references resolve to the declared committed plan. Treat requirement extraction and task allocation as untrusted proposals; source links do not attest that extraction is exhaustive or that a task semantically satisfies a requirement. Record that review state explicitly.
+
+    Pin the independently enumerated and reviewed requirement inventory separately from its task mappings. Structural completeness is evaluated against that inventory; meaning omitted during extraction remains semantic-review-unverified, never automatically exhaustive. Represent linked, unmapped, explicitly deferred with rationale, and unreadable/unverifiable states separately. Never silently discard an unsupported requirement, convert unavailable evidence to an empty covered set, or label structural linking as tested/implemented/complete. Show requirement inventory and missing mappings to the existing plan reviewer, with the original approved brief available to challenge omissions. Preserve the native requestKey/payloadDigest conflict handling, immutable brief operation, journal replay and existing review authority. Repeating the exact operation produces the same receipt; changed brief, head, task/proof text or mapping cannot inherit the old receipt. A manifest edited after approval
+    requires a new reviewed revision.
+
+    Carry the validated receipt through the real product-case record and product-build read/verify consumer, reusing verifyProductPlanEvidence rather than introducing a second verifier. Legacy operations without this contract report coverage unavailable without inventing success or invalidating existing approvals under a new policy; do not silently weaken current admission/proof requirements. Expose the receipt through existing stored evidence/report fields where possible and do not expand the public API merely to add a new dashboard. No additional model service or scheduled job is introduced. Exercise real proposal/journal/verifier/record/build boundaries with committed Git fixtures. New tests use package aliases and the shared repo root helper.
+  acceptance:
+    - claim: the native operation binds each resolvable requirement anchor and referenced task and proof to the frozen brief and plan revision
+      proof: "unit test: product plan coverage binds requirement anchors tasks and proofs to the frozen source"
+    - claim: unmapped, deferred, unreadable and unreviewed semantic coverage remain distinct from structural links and successful implementation
+      proof: "unit test: product plan coverage preserves omissions deferrals and unknown review states"
+    - claim: exact replays are idempotent and changed source or mapping cannot reuse an earlier coverage receipt
+      proof: "unit test: product plan coverage refuses stale source and mapping reuse"
+    - claim: real product record and build verification consume the same validated receipt while legacy coverage is explicitly unavailable
+      proof: "unit test: product plan coverage reaches record and build verification without inventing legacy coverage"
+  falsifier: Delete the receipt binding, mutate only an anchor or proof at the same task ID, remove an entry or mapping from the already pinned independently enumerated and reviewed requirement inventory, treat an unreadable source as zero requirements, or drop the receipt at either real consumer. Retain control/mutant/restored results proving the corresponding named case fails and then passes when restored. A correct reference map alone must never make an unreviewed or omitted requirement semantically covered. This is a proposed regression contract, not a measured omission rate. A proposal that omits source meaning during extraction must remain semantic-review-unverified; no deterministic test is claimed to infer every requirement from arbitrary prose.
+  note: "Authorized by the operator on 2026-11-05 to research Conductor and dex.rip and file and update the plan. This is an implementation proposal entering normal ownership, capacity, budget, author, hosted CI, adversarial review and protected merge gates; it is not a delivered feature or adoption result. Preserve existing dispatch holds, cash routing and spending caps, credentials, schedules, archives and other owners. No new model/evaluation spend, automatic retry, deployment, service restart, permission expansion or gate waiver is granted. Reservation holder: codex/conductor-dex-plan-20261105. Source audit and all 12 open PR head subject counts are recorded in plan/notes/conductor-dex-2026-11-05.md; unpushed work is outside that census."

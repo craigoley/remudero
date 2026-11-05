@@ -1,0 +1,49 @@
+- repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles:
+    tdd: strict
+  priority: 3
+  risk: high
+  band_meaning: span
+  author_class: machine
+  status: queued
+  attempts: 0
+  id: W1-T11396
+  title: Recon and implementation prompts receive bounded verified prerequisite outcome references
+  budget_usd: 20
+  origin: research:conductor-dex-2026-11-05:prerequisites
+  plan_refs:
+    - §2
+    - §3
+    - §4G
+    - W1-T11159
+    - W1-T11160
+    - W1-T9785
+  files:
+    - src/lib/prompt-render.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/prompt-render.test.ts
+    - test/recon-names-its-task.test.ts
+    - test/recon-gaps-relayed.test.ts
+  rationale: "OBSERVED at 1438f25d780f8119342dbc36dc8715f9c6670e26: scheduler prerequisites gate readiness, while renderReconPrompt and renderImplementPromptWithParts receive the task context but do not hydrate depends_on with bounded verified predecessor outcomes. Dex exposes parent and blocker context/results to a new agent. Remudero already has continuation/session recovery, task-card/case-file/trace surfaces and provider handoffs; a new resume capsule or task store would duplicate them. The missing seam is input to the real recon and implementation prompt calls in run-task-verb.ts. Sources: https://dex.rip/skills ; https://dex.rip/guide ; https://github.com/craigoley/remudero/blob/1438f25d780f8119342dbc36dc8715f9c6670e26/src/lib/prompt-render.ts ; https://github.com/craigoley/remudero/blob/1438f25d780f8119342dbc36dc8715f9c6670e26/src/cli/commands/run-task-verb.ts . Reuse canonical merge evidence and committed snapshots, not advisory Dex blockers or plan status labels. W1-T9785 owns
+    the implement prompt base-check instruction. This follow-up adds predecessor PR evidence and unknown/base-applicability metadata in recon and implement preparation, without changing that base-check instruction."
+  design: >-
+    At the existing task preparation boundary construct an optional bounded prerequisite context block for declared depends_on only. Reuse the already hydrated canonical merged-task projection (API merged PR state with exact Remudero-Task trailer union run-task branch credit), source task snapshot and frozen child base. Do not perform one new GitHub read per predecessor, reread whole transcripts, add a memory database, or infer merge from a shard status, ledger verdict or git subject. The task card display formatter is outside this change; reuse the existing StatusProjection/PR evidence already prepared by the real run-task path. Avoid worker.ts, learning-selection and learned-rule lookup changes owned by W1-T11159/W1-T11160; native overlap admission must serialize edits to shared run-task-verb.ts.
+
+    Include declared prerequisite ID, verified canonical PR-state/reference and minimal approved outcome/artifact/proof references where available; bind them to repository, snapshot and child base. The current prepared projection lacks merge commit SHA. In this first slice base applicability is explicitly unknown whenever an existing captured source does not supply that SHA; no new per-dependency source acquisition is authorized. Missing commit/proof identity is unavailable, never inferred from PR head SHA. A predecessor merge attests integration only, not proof of live adoption or feature success. Only when an existing verified merge commit is already available, check its applicability/reachability to the child's base using the existing hardened Git helper; otherwise render base-applicability-unknown; known merge outside the base, foreign-repo ambiguity, missing proof/result, unreadable evidence and truncation are explicit distinct states. If the current preparation path lacks the
+    needed pinned snapshot or canonical evidence, surface unavailable without synthesizing a favorable result; do not widen authority to fetch secrets or probe production. Never turn a free-form worker REPORT into trusted instructions or proof.
+
+    Render the same bounded untrusted-data/citation envelope in the real recon and implementation prompt producers, within existing prompt budgets. Deterministic ordering and truncation counts preserve the declared dependency total and omitted IDs; no hidden whole-history append. Existing no-dependency tasks and model/provider continuation behavior remain unchanged. The block helps the worker locate source evidence and constraints; it cannot grant access, loosen a guard, satisfy an acceptance proof or allow dispatch when the canonical scheduler says blocked. Add integration fixtures proving both actual run-task-verb render calls receive the block, rather than testing a helper alone. New tests use package aliases and the shared repo root helper.
+  acceptance:
+    - claim: real recon and implementation prompt preparation both carry the declared prerequisite references from the pinned canonical evidence
+      proof: "unit test: prerequisite outcome context reaches real recon and implementation prompt preparation"
+    - claim: known merged evidence outside the child base, missing merge identity, and foreign stale or unreadable references remain explicitly unavailable or base-applicability-unknown
+      proof: "unit test: prerequisite outcome context preserves base applicability and unknown evidence"
+    - claim: a merge receipt and untrusted result text cannot become proof of runtime success or instruction authority
+      proof: "unit test: prerequisite outcome context preserves provenance and untrusted data boundaries"
+    - claim: ordering and truncation are bounded and no-dependency prompts retain existing behavior without new per-dependency reads
+      proof: "unit test: prerequisite outcome context is deterministic bounded and reuses prepared evidence"
+  falsifier: Remove hydration at either real producer, substitute status merged for canonical evidence, label a missing merge SHA as base-applicable or accept a known predecessor merge absent from the child base, omit truncation metadata, or place an instruction sentinel from a result outside the deterministic untrusted-data envelope or strip its provenance label. Retain failing named cases for each removed guard and restored passing controls. Verify a no-dependency control and a valid reachable predecessor. This is a proposed context contract, not proof the model used it or completed work faster. Assert envelope bytes and provenance placement, not that a model obeys them.
+  note: "Authorized by the operator on 2026-11-05 to research Conductor and dex.rip and file and update the plan. This is an implementation proposal entering normal ownership, capacity, budget, author, hosted CI, adversarial review and protected merge gates; it is not a delivered feature or adoption result. Preserve existing dispatch holds, cash routing and spending caps, credentials, schedules, archives and other owners. No new model/evaluation spend, automatic retry, deployment, service restart, permission expansion or gate waiver is granted. Reservation holder: codex/conductor-dex-plan-20261105. Source audit and all 12 open PR head subject counts are recorded in plan/notes/conductor-dex-2026-11-05.md; unpushed work is outside that census."
