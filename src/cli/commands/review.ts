@@ -581,6 +581,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
 }): Promise<ReviewRunResult> {
   const phases: Record<string, number> = { started: systemClock.now() };
+  // W1-T11149: the phase reaches the CPU bound (setup, proofs) or the provider bound (judge, posting), in process or as a child.
+  const reportPhase = (phase: string): void => (args.onPhase ?? reportReviewPhase)(phase);
+  reportPhase("setup");
   const { attributeWorkerStreamEvent, ledgeredNonDispatchSpawn, lintPlanForReview, readHeadShaRest, reviewPostedDescription } = host;
   const { owner, repo, prUrl, task, report, log, say } = args;
   const laneSignal = currentReviewSignal();
@@ -782,6 +785,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     taskDeclaredFiles: task.files,
     openTaskIds: args.openTaskIds,
   };
+  // The proofs run here when a reviewer follows, else in the binding judge below; either way the CPU work starts now.
+  reportPhase("proofs");
   const preliminaryProofs = attemptReviewer ? await preparedDecision.judge(proofEvidence) : undefined;
   let reviewerSubtype: string | undefined;
   let reviewerExit: WorkerResult["exit"];
@@ -793,6 +798,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     log("review.reviewer.skipped", { reason: "plan-only", criteria: criteria.length });
   }
   if (attemptReviewer) {
+    // The proofs are done; the LLM judge waits on its provider, not this host's CPU (the binding judge after it reuses them).
+    reportPhase("judge");
     try {
       // W1-T115: routed through withTempDir so this throwaway cwd is ALWAYS
       // removed on exit — success or thrown error — instead of the bare
@@ -1175,6 +1182,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     replayReviewerCodeSha = reviewerCodeFreshness.codeSha;
   }
   phases.postStart = systemClock.now();
+  reportPhase("posting");
   const poster = failureRecordingPoster();
   const posted = await postReviewStatusGuarded({
     post: poster.post,

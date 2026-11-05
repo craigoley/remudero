@@ -2996,6 +2996,7 @@ export function buildEscalationTriageRuntime(
 ): ((deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings) & { refresh(ledgerPath: string): Promise<void> } {
   const { root, config, owner, repo } = context;
   let pass: ReturnType<typeof newTriagePass> | undefined;
+  let reportedBytes = 0, reportedRotations = 0;
   const evidenceHistory = io.evidenceHistory ?? createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE });
   const readRows = io.readRows ?? ((path) => {
     const read = evidenceHistory.current(dirname(path));
@@ -3027,7 +3028,10 @@ export function buildEscalationTriageRuntime(
     if (!id || e.taskId !== `TRIAGE-${id}`) throw new Error("feedback referent is unreadable");
     return id;
   };
-  const refresh = async (ledgerPath: string): Promise<void> => void (await evidenceHistory(dirname(ledgerPath)));
+  const refresh = async (ledgerPath: string): Promise<void> => {
+    reportedBytes = 0; reportedRotations = 0;
+    await evidenceHistory(dirname(ledgerPath));
+  };
   return Object.assign((deps: EscalateDeps<AsyncIssueGateway>): EscalateTriageSettings => {
     const policy = parseEscalationTriagePolicy((io.readPolicy ?? (() => readEscalationTriagePolicySource(root)))());
     pass ??= newTriagePass(policy.maxAutoResolvesPerPass);
@@ -3035,7 +3039,21 @@ export function buildEscalationTriageRuntime(
     return {
       mode: policy.mode, pass, asyncExecutors: true,
       evidence: (e) => {
-        const history = readRows(deps.ledgerPath);
+        let history: Record<string, unknown>[];
+        try {
+          history = readRows(deps.ledgerPath);
+        } finally {
+          if (!io.readRows) {
+            const cost = evidenceHistory.lastLoad();
+            appendSliceReadRow(deps.ledgerPath, deps.runId, "escalation_triage.evidence_read", {
+              evidence_bytes_read: cost.bytesRead - reportedBytes,
+              evidence_rotations_read: cost.rotationsRead - reportedRotations,
+              evidence_snapshot_hit: cost.snapshotHit,
+              ...(cost.snapshotError ? { evidence_snapshot_error: cost.snapshotError } : {}),
+            });
+            reportedBytes = cost.bytesRead; reportedRotations = cost.rotationsRead;
+          }
+        }
         const strike = [...history].reverse().find((row) => row.step === "fix.dispatch" && row.task_id === e.taskId &&
           row.head_sha === e.headSha && row.kind !== "proof_amendment");
         const previousCause = strike?.mode === "ci-log" ? "ci" : strike?.mode === "merge-conflict" ? "conflict" :
@@ -10846,13 +10864,23 @@ function* fixCensusSnapshotSteps(
   const precheck = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
     { cwd: scriptsRoot, env, encoding: "utf8", timeout: controllerTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
   const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
-  let refusal = censusPushRefusal(text);
   let unmeasured = precheck.status === 2 ? text.trim() : undefined;
   const unavailable = (subject: string, result: CensusChildResult, output: string) => {
     unmeasured = `${subject}: ${String(result.error ?? result.signal ?? (output || `exit ${result.status} without a complete test summary`)).slice(-4000)}`;
     return { text: `census-precheck: NOT MEASURED — ${unmeasured}`, censuses: [], offeredBaselines: [] };
   };
-  if (!refusal && (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2))) {
+  const timedOutChildren: string[] = [];
+  const timedOut = (child: string, result: CensusChildResult, boundMs: number): boolean => {
+    const error = result.error as (Error & { code?: unknown }) | undefined;
+    if (!(error instanceof LoopBoundedChildTimeout || error?.code === "ETIMEDOUT")) return false;
+    timedOutChildren.push(child);
+    const line = `census-precheck: not measured — ${child} timed out at ${(error instanceof LoopBoundedChildTimeout ? error.budgetMs : boundMs) / 1000} s (${result.signal ?? "SIGTERM"}); CI and pre-push still measure`;
+    unmeasured = unmeasured ? `${unmeasured}\n${line}` : line;
+    return true;
+  };
+  const precheckTimedOut = timedOut("scripts/census-precheck.mjs", precheck, controllerTimeBoundMs);
+  let refusal = precheckTimedOut ? undefined : censusPushRefusal(text);
+  if (!refusal && !precheckTimedOut && (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2))) {
     refusal = unavailable("census precheck child", precheck, text);
   }
   if (!refusal) {
@@ -10866,10 +10894,11 @@ function* fixCensusSnapshotSteps(
       const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
       const stopped = (reason: string): CensusPushRefusal => ({ text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
         censuses: ["census-suite"], offeredBaselines: [] });
-      if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
-        refusal = unavailable(`census suite ${reach}`, result, output);
+      const reachTimedOut = timedOut(reach, result, childTimeBoundMs);
+      if (reachTimedOut || result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
+        if (!reachTimedOut) refusal = unavailable(`census suite ${reach}`, result, output);
       } else if (result.status !== 0) {
-        refusal = stopped(String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000));
+        refusal = stopped(output.slice(-4000));
         refusal.inheritedMain = yield* inheritedCensusContextSteps(root, path, runGit);
       } else {
         const verdict = judged.judge(0);
@@ -10880,7 +10909,8 @@ function* fixCensusSnapshotSteps(
     }
   }
   log("fix.census_check", { outcome: refusal ? "refused" : unmeasured ? "partially-measured" : "passed",
-    ...(refusal ? { refusal: refusal.text } : {}), ...(unmeasured ? { reason: unmeasured } : {}) });
+    ...(refusal ? { refusal: refusal.text } : {}), ...(unmeasured ? { reason: unmeasured } : {}),
+    ...(timedOutChildren.length > 0 ? { timed_out_child: timedOutChildren.join(", ") } : {}) });
   return { refusal, unmeasured };
 }
 
