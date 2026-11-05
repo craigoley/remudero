@@ -1,0 +1,46 @@
+- id: W1-T11337
+  title: A retro whose prepublish diff is PLAN_ONLY runs the author lane's plan-only suite selection locally (about 34 suites) instead of the changed-path plan-reading lane (272-639 suites), while hosted CI keeps the full plan-reading set as the gate
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which suites one local pre-publish gate runs for a plan-only retro diff; the hosted gate, other diff classes and the gate's verdict rules are unchanged
+  origin: operator-session#recycle-and-status-2026-11-04
+  plan_refs:
+    - W1-T10144
+    - W1-T7809
+    - W1-T2803
+  files:
+    - src/lib/retro-preflight.ts
+    - test/learning/a-plan-only-retro-runs-the-author-plan-only-suites.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the retro's changed paths classify PLAN_ONLY, runRetroPrepublishPreflight enumerates its suites with diff-class's --list-plan-only-suites over the same changed-file list and runs exactly those, its ledgered selection reading mode plan-only with the selected count and the plan-reading count it replaced; a DOCS_ONLY or SOURCE diff, an unreadable change list or a failed plan-only listing keep today's plan-reading enumeration
+      proof: "unit test: test/learning/a-plan-only-retro-runs-the-author-plan-only-suites.test.ts"
+    - claim: The retro preflight asks for the author lane's plan-only selection
+      proof: "grep: list-plan-only-suites in src/lib/retro-preflight.ts"
+  rationale: |
+    Operator ruling 2026-11-04: "Use the plan-only set (Recommended)". A plan-only retro diff runs the author lane's plan-only selection, about 34 suites, locally, and hosted CI keeps the full set as the gate.
+    OBSERVED 2026-11-04:
+    - RETRO-1793795675454's two prepublish attempts each ran 272 suites at --test-concurrency=1, niced, for a PLAN_ONLY diff of 2 paths. retro.preflight_failed rows show suite_selection changed-paths, "diff class PLAN_ONLY", changed_path_count 2, broad_suite_count 778.
+    - Attempt 1 ran 4,746,239 ms and failed tests_failed at 14:18:30Z. Attempt 2 ran 4,025,267 ms and failed process_timeout at 15:29:31Z. The failing tests were load-sensitive.
+    - Each attempt held the shared host test slot and counted as a busy worker in deploy/recycle-container.sh's drain. Recycle #2 (13:04Z) refused after 3,000 s, recycle #3 (14:36Z deploy tick, derived wait 2,234 s) refused, and the fleet stayed paused behind them.
+    - On origin/main 8b080aa8c, scripts/diff-class.mjs for a 2-shard plan-only change list prints 639 suites under --list-plan-reading-suites --changed-files and 34 under --list-plan-only-suites --changed-files. The second is planOnlySuiteFiles: suites that read a changed shard plus the plan-integrity suites. That is the selection the author lane uses (W1-T7809, src/lib/affected-suites.ts).
+    - Hosted CI's plan-reading lane runs on the retro's PR regardless, so the full set still gates the merge.
+  design: |
+    In enumerateSuites (src/lib/retro-preflight.ts), when changedPathScope returns mode changed-paths for diff class PLAN_ONLY:
+    - Run [--import, tsx, scripts/diff-class.mjs, --list-plan-only-suites, --changed-files <list>] instead of --list-plan-reading-suites. Keep the list file's lifetime and cleanup as today.
+    - Record selection { mode: "plan-only", reason: "diff class PLAN_ONLY (author plan-only selection)", changedPathCount, broadSuiteCount }, where broadSuiteCount is the plan-reading count the old path would have run (one extra listing call, or the previous_count it prints).
+    - Widen SuiteSelection.mode with "plan-only".
+    - The existing preflight row keeps suite_selection, suite_selection_reason and suite_count, so the saving shows per retro.
+    - If the plan-only listing fails or prints zero lines, fall back to today's --list-plan-reading-suites call with the same list, naming the fallback in the reason. Never run zero suites.
+    - DOCS_ONLY and SOURCE diffs keep today's path.
+    NOT IN SCOPE: DOCS_ONLY narrowing (the ruling covers plan-only diffs); hosted CI's plan-reading lane; the silence bound (W1-T2803); the slot heartbeat and start row, which are sibling tasks.
+  note: |
+    Build order: W1-T11335 (the retro preflight beats its slot) and W1-T11326 (retro preflight ledgers its start) also edit src/lib/retro-preflight.ts. Build after whichever of them is still open, or check their hunks first.
+    reservation hand-off: run-unfiled-1793808171119 -> run-unfiled-1793808171119
+    Reserved with rmd next-task-id (W1-T11337 on run-unfiled-1793808171119). Filed on the operator's 2026-11-04 ruling.

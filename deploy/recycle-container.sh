@@ -374,6 +374,35 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then return 0; fi
 
 set -euo pipefail
 
+registry_shadow_observe() { :; }
+registry_shadow_session=""
+registry_shadow_pin=""
+registry_shadow_forward=()
+registry_shadow_argv=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --selected-registry-pin)
+      registry_shadow_pin="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    --selected-registry-shadow)
+      registry_shadow_session="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    *) registry_shadow_argv+=("$1"); shift ;;
+  esac
+done
+set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+
 # ── BASH 3.2 PORTABILITY (W1-T3595) ─────────────────────────────────────────────────────────────
 # The macOS worker host's `/bin/bash` is 3.2 (Apple has shipped nothing newer since the GPLv3
 # relicense), which rejects `readarray`/`mapfile` outright ("command not found") and rejects
@@ -623,10 +652,12 @@ if [ -n "$INSTANCE_NAME" ]; then
     echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' is not declared in ${INSTANCE_REGISTRY}." >&2
     exit 2
   fi
-  repo=""; state_dir=""; container_name=""; image_ref=""; claude_dir=""; codex_dir=""; container_config_dir=""
+  repo=""; github_repo=""; state_dir=""; container_name=""; image_ref=""; claude_dir=""; codex_dir=""; container_config_dir=""
   max_old_space_mb=""; gh_app_id=""; gh_app_installation_id=""; gh_app_private_key_path=""
   instance_mode_seen=0
   while IFS='=' read -r key value; do
+    # The shell shadow names its target by owner/name, the identity the selected binding matches.
+    [ "$key" = github_repo ] && github_repo="$value"
     case "$key" in
       mode)
         [ "$instance_mode_seen" = 0 ] || { echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' declares duplicate mode." >&2; exit 2; }
@@ -754,6 +785,8 @@ else
 fi
 SELECTED_REGISTRY_BROAD_MOUNT_ARGS=(-v "${STATE_DIR}:${STATE_MOUNT_DEST}" -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
   "${CODEX_MOUNT_ARGS[@]+"${CODEX_MOUNT_ARGS[@]}"}" "${CONTAINER_CONFIG_MOUNT_ARGS[@]+"${CONTAINER_CONFIG_MOUNT_ARGS[@]}"}")
+# Design constraint 3: the shadow refuses a private session inside any directory this launch mounts.
+{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "${STATE_DIR}" "${CRED_DIR}" "${CODEX_DIR}" "${CONTAINER_CONFIG_DIR}"; }
 
 # Resolve the reusable provider-runtime verifier before any lifecycle action. The PWD fallback is
 # load-bearing for a copied script (the mutation fixtures exercise that supported test shape); an
@@ -1872,12 +1905,33 @@ mkdir -p "$(dirname "${PAUSE_FILE}")"
 if [ -e "${PAUSE_FILE}" ] && ! grep -qF -- "\"reason\":\"${RECYCLE_PAUSE_REASON}\"" "${PAUSE_FILE}" 2>/dev/null; then
   echo "recycle-container: PAUSE already engaged by someone else — left in place, and never removed by this recycle"
 else
+  # W1-T11318: a live writer still owns its PAUSE; use the orphan release check's identity helpers.
+  if [ -f "${PAUSE_FILE}" ]; then
+    . "${SCRIPT_DIR}/release-orphan-recycle-pause.sh"
+    EXISTING_RECYCLE_PAUSE="$(cat "${PAUSE_FILE}" 2>/dev/null || true)"
+    EXISTING_RECYCLE_PID="$(printf '%s\n' "${EXISTING_RECYCLE_PAUSE}" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+    EXISTING_RECYCLE_HOST="$(orp_str_field "${EXISTING_RECYCLE_PAUSE}" host)"
+    EXISTING_RECYCLE_START="$(orp_str_field "${EXISTING_RECYCLE_PAUSE}" writerStart)"
+    if [ "$(orp_str_field "${EXISTING_RECYCLE_PAUSE}" reason)" = "${RECYCLE_PAUSE_REASON}" ] &&
+       [ -n "${EXISTING_RECYCLE_PID}" ] && [ -n "${EXISTING_RECYCLE_HOST}" ] &&
+       [ "${EXISTING_RECYCLE_HOST}" = "$(hostname 2>/dev/null || true)" ] &&
+       [ -n "${EXISTING_RECYCLE_START}" ] &&
+       [ "$(orp_lstart "${EXISTING_RECYCLE_PID}" || true)" = "${EXISTING_RECYCLE_START}" ]; then
+      echo "recycle-container: REFUSING — recycle pid ${EXISTING_RECYCLE_PID} (started ${EXISTING_RECYCLE_START}) is still running and owns PAUSE" >&2
+      printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.refused","lane":"deploy","reason":"live-recycle-owns-pause","writer_pid":%s,"writer_start":%s,"host":%s}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "${EXISTING_RECYCLE_PID}" \
+        "$(recycle_json_string "${EXISTING_RECYCLE_START}")" "$(recycle_json_string "${EXISTING_RECYCLE_HOST}")" >> "${LEDGER_FILE}" ||
+        echo "recycle-container: could not record live-writer refusal in ${LEDGER_FILE}" >&2
+      exit 1
+    fi
+  fi
   # W1-T9409: the body also names the container this run would stop, the writer's own start time and
   # its phase, so the watchdog tick (deploy/release-orphan-recycle-pause.sh) can PROVE a dead writer
   # stopped nothing — the one case no trap covers (SIGKILL). `reason` is unchanged: W1-T5127 and
   # W1-T5804 key on it. The start time is C-locale UTC, the exact form the release check re-reads.
   RECYCLE_PAUSE_CONTAINER_ID="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 | tr -d '"\\' || true)"
   RECYCLE_PAUSE_BODY="{\"reason\":\"${RECYCLE_PAUSE_REASON}\",\"requestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"pid\":$$,\"host\":\"$(hostname)\",\"container\":\"${RECYCLE_PAUSE_CONTAINER_ID}\",\"containerName\":\"${CONTAINER_NAME}\",\"writerStart\":\"${RECYCLE_WRITER_START}\",\"caller\":$(recycle_json_string "$RECYCLE_CALLER"),\"actor_evidence\":${RECYCLE_ACTOR_EVIDENCE},\"phase\":\"waiting\"}"
+  registry_shadow_observe recycle "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
   printf '%s\n' "${RECYCLE_PAUSE_BODY}" > "${PAUSE_FILE}"
   echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
 fi
@@ -2749,6 +2803,7 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
     RECYCLE_OUTGOING_READS="$(scratch_outgoing_reads "${CONTAINER_NAME}" 2>/dev/null || true)"
   fi
   echo "recycle-container: docker stop ${CONTAINER_NAME}"
+  registry_shadow_observe recycle "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
   record_recycled_cadence_child
   run_docker_control stop docker stop "${CONTAINER_NAME}"
   echo "recycle-container: docker rm ${CONTAINER_NAME}"
@@ -2838,6 +2893,8 @@ if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then LAUNCH_IMAGE="${PULLED_IMAGE_ID}"
 DOCKER_RUN_ARGS+=("${LAUNCH_IMAGE}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
 selected_registry_recheck
 selected_registry_mounts "${DOCKER_RUN_ARGS[@]}"
+{ ! declare -F registry_shadow_mount_args >/dev/null 2>&1 || registry_shadow_mount_args "${DOCKER_RUN_ARGS[@]}"; }
+registry_shadow_observe recycle "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
 
 # ── 7. PROVE IT — THE STARTED CONTAINER'S IMAGE MUST BE THE DIGEST JUST PULLED ──────────────────

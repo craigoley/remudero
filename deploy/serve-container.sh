@@ -112,6 +112,35 @@
 # and gives the same value to the console's and site's Vercel env as RMD_INCIDENT_INGEST_TOKEN.
 set -euo pipefail
 
+registry_shadow_observe() { :; }
+registry_shadow_session=""
+registry_shadow_pin=""
+registry_shadow_forward=()
+registry_shadow_argv=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --selected-registry-pin)
+      registry_shadow_pin="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    --selected-registry-shadow)
+      registry_shadow_session="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    *) registry_shadow_argv+=("$1"); shift ;;
+  esac
+done
+set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
 TAG="${TAG:-latest}"
@@ -267,6 +296,7 @@ if [ -n "${INSTANCE_NAME}" ]; then
     exit 1
   fi
   INSTANCE_REPO="$(registry_field repo)"
+  INSTANCE_GITHUB_REPO="$(registry_field github_repo)"
   INSTANCE_STATE_DIR="$(registry_field state_dir)"
   DAEMON_CONTAINER="$(registry_field container_name)"
   INSTANCE_IMAGE="$(registry_field image)"
@@ -375,6 +405,7 @@ if [ -f "${SCRIPT_ROOT}/deploy/scratch-mounts.sh" ]; then
   SERVE_DAEMON_CHECKOUT="$(scratch_daemon_checkout "${STATE_DIR}" "${DAEMON_CONTAINER}")" || SERVE_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
 fi
 
+{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "${STATE_DIR}" "${SERVE_REPO_DIR}" "${SERVE_GENS_DIR}"; }
 if [ -L "${SERVE_REPO_DIR}" ]; then
   echo "serve-container: REFUSING — RMD_SERVE_REPO_DIR must be a real directory, not a symlink." >&2
   echo "  A symlink can silently resolve back to the daemon checkout and reintroduce the shared-code race." >&2
@@ -671,6 +702,7 @@ if [ -z "${INSTANCE_NAME}" ] && [ -r "${INSTANCE_REGISTRY}" ]; then
       continue
     fi
     INSTANCE_STATE_ARGS+=(-v "${other_dir}:${INSTANCE_STATE_BASE}/${other_name}:ro" -v "${other_dir}/state:${INSTANCE_STATE_BASE}/${other_name}/state")
+    { ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "${other_dir}"; }
     echo "serve-container: instance ${other_name} state ${other_dir} mounted at ${INSTANCE_STATE_BASE}/${other_name} (read-only except state/)"
   done < <(list_registry_state_dirs "${INSTANCE_REGISTRY}")
 fi
@@ -810,9 +842,11 @@ RUN_ARGS=(
 SERVE_IMAGE_ARG_INDEX="${#RUN_ARGS[@]}"
 RUN_ARGS+=("${REF}" "${SERVE_CMD[@]}")
 SELECTED_REGISTRY_BROAD_MOUNT_ARGS=("${RUN_ARGS[@]}")
+{ ! declare -F registry_shadow_mount_args >/dev/null 2>&1 || registry_shadow_mount_args "${RUN_ARGS[@]}"; }
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_mounts "${RUN_ARGS[@]}"; fi
 
 if [ "${DRY_RUN}" -eq 1 ]; then
+  registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
   echo "serve-container: --dry-run, nothing changed. The launch would be:"
   echo "  docker ${RUN_ARGS[*]}"
   echo "  (-e NAME passes the NAME only; each value is read from this script's own environment —"
@@ -880,6 +914,7 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
     SERVE_OUTGOING_READS="$(scratch_outgoing_reads "${CONTAINER_NAME}" 2>/dev/null || true)"
   fi
   echo "serve-container: docker stop ${CONTAINER_NAME}"
+  registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
   docker stop "${CONTAINER_NAME}" >/dev/null
   echo "serve-container: docker rm ${CONTAINER_NAME}"
   docker rm "${CONTAINER_NAME}" >/dev/null
@@ -888,6 +923,7 @@ fi
 if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then scratch_fresh_tmp; fi
 echo "serve-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_recheck; fi
+registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
 docker "${RUN_ARGS[@]}" >/dev/null
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
   "${SCRIPT_ROOT}/deploy/container-runtime-contract.sh" --container "${CONTAINER_NAME}" \

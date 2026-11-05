@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { withGuardrailAttempt } from "./benchmark-run.js";
 import { setTimeout as waitForRegistryPoll } from "node:timers/promises";
 import { observeSelectedRegistrySync, selectedRegistryObserverInContext, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { boundChildByLoopTime, type LoopBound } from "./loop-bounded-child.js";
@@ -2476,8 +2477,9 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         cashAttempts = attempt;
         lastWorker = undefined;
         lastRequestedModel = null;
-        const worker = await deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels],
-          onRequestedModel: model => { lastRequestedModel = model; } });
+        const worker = await withGuardrailAttempt("relint-used", attempt, () =>
+          deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels],
+            onRequestedModel: model => { lastRequestedModel = model; } }));
         lastWorker = worker;
         if (dirty) {
           // NAME THE FALL-THROUGH, with the model that actually answered — a spawn that ignored `avoidModels` shows up
@@ -2519,7 +2521,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           ? `${prompt}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`
           : `${prompt}\n\nThe cash draft missed the fragment contract. Re-emit the complete fragment and STAMP using the literal markers in the prompt.`;
         try {
-          const escalated = await deps.escalate(proposal, escalationPrompt);
+          const escalate = deps.escalate;
+          const escalated = await withGuardrailAttempt("relint-used", cashAttempts + 1, () => escalate(proposal, escalationPrompt));
           if (escalated) {
             deps.log("inbox.draft_escalated", {
               proposal_id: proposal.id,

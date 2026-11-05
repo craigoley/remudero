@@ -10,6 +10,7 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { basenameResolutionNote, resolveTestPath, type TestPathResolution } from "./test-path-resolver.js";
 // Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
 export { resolveTestPath };
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -28,7 +29,7 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
+import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, rotationStampIso, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { formatTail } from "./proofExecutor.js";
@@ -5484,7 +5485,10 @@ export async function preparePromisedReviewDecision(args: {
     prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt,
   });
   const defaultProofExecutor = memoizeAsyncProofExecutor(execWhitelistedProofAsync);
-  const priorRow = existsSync(ledgerPath) ? await priorPostedReviewRow(ledgerPath, task.id, prUrl) : undefined;
+  // W1-T11340: the PR's own lifetime bounds a first review's archive scan (the admitting lane's view supplies it).
+  const priorRow = existsSync(ledgerPath) ? await priorPostedReviewRow(ledgerPath, task.id, prUrl, {
+    prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt,
+  }) : undefined;
   const priorVerdict = priorRow?.decision_verdict as ReviewVerdict | undefined;
   const priorInconclusiveLoads = new Map<string, number>();
   if (priorRow?.head_sha === input.headSha && priorRow?.state === "pending") {
@@ -6331,27 +6335,65 @@ export function reviewRowNamesPr(line: Record<string, unknown>, key: string | un
   return typeof line.pr_url === "string" ? line.pr_url === prUrl : key !== undefined && line.task_id === key;
 }
 
+/** W1-T11340: the admitting review lane's cancellation, carried through a review's awaits. sweep.ts runs each in-process
+ *  review inside it; review.ts reads it here, so a lookup this module owns stops when the lane aborts the review. */
+export const reviewLaneCancellation = new AsyncLocalStorage<AbortSignal>();
+
+/** W1-T11340: the PR an admitting lane is reviewing, as that lane's open-PR view read it. sweep.ts runs each in-process
+ *  review inside it, so the review's own lookups learn the PR's lifetime without another GitHub read. */
+export const reviewLanePr = new AsyncLocalStorage<{ prUrl: string; createdAt?: string }>();
+
+/** W1-T11340: where a prior-verdict lookup learns its PR's lifetime, and the cancellation it honors. */
+export interface PriorPostedReviewLookup {
+  /** The PR's GitHub `created_at`. No review.posted row for the PR can be older, so no archive cut before it can hold one.
+   *  Absent, the admitting lane's {@link reviewLanePr} supplies it when that lane is reviewing this same PR. */
+  prCreatedAt?: string;
+  /** Read `created_at` only when the live file missed AND archives exist to bound; a failure keeps the full read. */
+  fetchPrCreatedAt?: (prUrl: string) => Promise<string | undefined>;
+  signal?: AbortSignal;
+}
+
 /** W1-T9681: the newest `review.posted` row {@link reviewRowNamesPr} matches with a verdict — by URL, so a plan filing or
- *  hand PR with no task id finds its own. The live file answers first; on a miss the archive union does. */
+ *  hand PR with no task id finds its own. The live file answers first; on a miss the archive union does.
+ *  W1-T11340: a known `created_at` bounds that union to the archives cut at or after it, as
+ *  {@link recoverPromisedFollowUpReports} bounds its harvest; on 2026-11-04 a never-reviewed plan PR's lookup gunzipped
+ *  all ~391 archives on core's loop and its review hung for hours. An unknown `created_at` keeps the full read. */
 export async function priorPostedReviewRow(
   ledgerPath: string,
   taskId: string | undefined,
   prUrl: string,
+  lookup: PriorPostedReviewLookup = {},
 ): Promise<Record<string, unknown> | undefined> {
   const names = (line: Record<string, unknown>): boolean =>
     line.step === "review.posted" && reviewRowNamesPr(line, taskId, prUrl) && Boolean(line.decision_verdict);
   const live = readLiveLedgerRecords(ledgerPath).filter(names).at(-1);
   if (live) return live;
-  const patterns = [`"pr_url":${JSON.stringify(prUrl)}`, ...(taskId === undefined ? [] : [`"task_id":${JSON.stringify(taskId)}`])];
-  const pattern = new RegExp(patterns.map(value => value.replace(/[.*+?^${}()[\]\\]/g, "\\$&")).join("|"));
-  const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { pattern, step: "review.posted", requireArchives: true, refuseIncomplete: true });
-  return union.rawLines.flatMap((raw) => {
+  const stateDir = dirname(ledgerPath);
+  const signal = lookup.signal ?? reviewLaneCancellation.getStore();
+  signal?.throwIfAborted();
+  const fileNames = existsSync(stateDir) ? readdirSync(stateDir) : [];
+  const archived = fileNames.some((name) => rotationStampIso(name) !== undefined);
+  if (!archived) return undefined; // nothing rotated: the live miss is the whole answer
+  const lane = reviewLanePr.getStore();
+  let createdAt = lookup.prCreatedAt ?? (lane?.prUrl === prUrl ? lane.createdAt : undefined);
+  if (createdAt === undefined && lookup.fetchPrCreatedAt) {
     try {
-      return [JSON.parse(raw) as Record<string, unknown>];
+      createdAt = await lookup.fetchPrCreatedAt(prUrl);
     } catch {
-      return []; // a torn archived row names no verdict; the union reports it, this lookup skips it
+      // deliberate: an unread created_at is an unknown bound, and an unknown bound keeps today's full union read
+      createdAt = undefined;
     }
-  }).filter(names).at(-1);
+  }
+  const bounded = createdAt !== undefined && Number.isFinite(Date.parse(createdAt));
+  let newest: Record<string, unknown> | undefined;
+  for await (const row of openLedgerUnion(stateDir, {
+    step: "review.posted", dedupe: false, ...(signal ? { signal } : {}),
+    // The live file was read above; a bounded read opens only the PR's own lifetime of rotations.
+    ...(bounded ? { afterRotation: rotationBeforeTime(fileNames, createdAt!), includeLive: false } : {}),
+  })) {
+    if (names(row)) newest = row; // a torn archived row never reaches here; the union skips it
+  }
+  return newest;
 }
 
 /** W1-T9681: the one reuse fact a discriminate-only review could not read, so each fallback row names its cause. */
@@ -6915,10 +6957,11 @@ async function replayPublisher(
 ): Promise<{ trusted: boolean; canPublish: boolean; evidence: ReviewReplayPublisherEvidence }> {
   const fetch = opts.fetchPublisher ?? ghJsonAsync;
   let snapshot: RequiredStatusChecksSnapshot | undefined;
-  // status.ts's graph reaches review; load its existing reader only after both modules initialized.
-  const statusModule = "./status.js";
-  const { readRequiredStatusCheckContextsAsync } = await import(statusModule);
-  const binding = await readRequiredStatusCheckContextsAsync(opts.owner, opts.repo, encodeURIComponent(lifecycle.baseRef ?? "main"), async (args: string[]) => {
+  // status.ts's graph reaches review, so its reader is injected by the caller (which already imports status.ts)
+  // rather than loaded here: a computed import() was a runtime-relative specifier no child-entry bundle carries.
+  const readRequiredContexts = opts.readRequiredContexts;
+  if (!readRequiredContexts) throw new Error("no required-status-contexts reader is wired for this replay");
+  const binding = await readRequiredContexts(opts.owner, opts.repo, encodeURIComponent(lifecycle.baseRef ?? "main"), async (args: string[]) => {
     const raw = await fetch(args);
     snapshot = raw as RequiredStatusChecksSnapshot;
     return JSON.stringify(raw);
@@ -11406,13 +11449,36 @@ export async function acquireReviewStatusLock(
 
 /** The issue transport this posting path uses. Keep it structural so review's module graph
  * does not load the worker/escalation graph merely to judge or post a status. */
-interface ReviewIssueGateway {
+export interface ReviewIssueGateway {
   create(title: string, body: string, labels: string[]): string;
   listOpen?(label: string): Array<{ number: number; url: string; title?: string; body?: string }>;
   closeWithComment?(url: string, comment: string): void;
   comment?(url: string, body: string): void;
   ensureLabel?(label: string): boolean;
 }
+
+/** The one cannot-evaluate escalation this module asks for, as escalate.ts's Escalation reads it. Declared locally:
+ *  escalate.ts's graph reaches this module, and dependency-cruiser counts a type-only import as a cycle edge. */
+export interface CannotEvaluateEscalation {
+  class: "MANUAL";
+  taskId: string;
+  runId: string;
+  headSha: string;
+  cause: "review";
+  summary: string;
+  detail: string;
+  options: { label: string; detail: string }[];
+  recommendation: string;
+  consequence: string;
+}
+
+/** The shape of status.ts's readRequiredStatusCheckContextsAsync, typed here so review.ts never imports status.ts. */
+export type RequiredStatusContextsReader = (
+  owner: string,
+  repo: string,
+  branch: string,
+  readText: (args: string[]) => Promise<string>,
+) => Promise<{ kind: string; reason?: string }>;
 
 export interface PostReviewStatusGuardedOpts {
   owner: string;
@@ -11447,6 +11513,10 @@ export interface PostReviewStatusGuardedOpts {
   fetchCurrentStatus?: () => PostableReviewState | ReviewStatusEntry | undefined;
   fetchCurrentStatusEntry?: () => ReviewStatusEntry | undefined | Promise<ReviewStatusEntry | undefined>;
   fetchPublisher?: GhApiFetcher;
+  /** status.ts's readRequiredStatusCheckContextsAsync, which a decision replay needs to name the required publisher.
+   *  Injected because status.ts's graph reaches this module; every terminal-posting caller passes it. Absent, a replay
+   *  is withheld with a named reason rather than guessing a publisher. */
+  readRequiredContexts?: RequiredStatusContextsReader;
   /** Injected raw poster for tests. Defaults to {@link postReviewStatus}, which already retries a TRANSIENT gh error
    *  internally (rule (iv) above). May return a Promise, as the default does, or `void`. */
   post?: (o: {
@@ -11458,6 +11528,10 @@ export interface PostReviewStatusGuardedOpts {
   }) => void | Promise<void>;
   /** Injectable issue transport for the one cannot-evaluate escalation per head. */
   issues?: ReviewIssueGateway;
+  /** Files the one cannot-evaluate escalation per head and returns its issue URL. Injected because escalate.ts's graph
+   *  reaches this module; every terminal-posting caller binds tryEscalate to its own ledger, run and gateway. `issues`
+   *  is this call's injected transport, when it has one. Unwired, no escalation is filed and the pending status stands. */
+  cannotEvaluateEscalation?: (escalation: CannotEvaluateEscalation, issues: ReviewIssueGateway | undefined) => string | null;
   lockOpts?: AcquireReviewStatusLockOpts;
 }
 
@@ -11687,11 +11761,11 @@ export async function postReviewStatusGuarded(
     if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") &&
         !/^remudero-review: cannot-evaluate — promise harvest (?:unavailable:|corpus is unreadable)/.test(opts.description) && opts.prUrl &&
         !lines.some((line) => line.step === "review.cannot_evaluate_escalated" && line.task_id === opts.taskId && line.head_sha === opts.sha)) {
-      // Load escalation only for this exceptional pending path. Its worker graph reaches review
-      // through eval-card; a top-level import closes a cycle and fails the dependency gate.
-      const escalationModule = "./escalate.js";
-      const { ghIssueGateway, tryEscalate } = await import(escalationModule);
-      const issueUrl = tryEscalate({
+      // escalate.ts's worker graph reaches review through eval-card, so its two functions are injected by the caller
+      // (which already imports escalate.ts) rather than loaded here: a computed import() is a runtime-relative
+      // specifier no child-entry bundle carries. Unwired, the escalation is skipped and the pending status stands.
+      const escalate = opts.cannotEvaluateEscalation;
+      const issueUrl = escalate && escalate({
         class: "MANUAL",
         taskId: opts.taskId,
         runId: opts.runId,
@@ -11702,11 +11776,7 @@ export async function postReviewStatusGuarded(
         options: [{ label: "Repair reviewer toolchain", detail: "Refresh the canonical install, then rerun this head's review." }],
         recommendation: "Repair reviewer toolchain",
         consequence: "The required review remains pending and the PR cannot merge.",
-      }, {
-        issues: opts.issues ?? ghIssueGateway(opts.owner, opts.repo),
-        ledgerPath: opts.ledgerPath,
-        runId: opts.runId,
-      });
+      }, opts.issues);
       if (issueUrl) appendLedger(opts.ledgerPath, {
         run_id: opts.runId, task_id: opts.taskId, step: "review.cannot_evaluate_escalated",
         pr_url: opts.prUrl, head_sha: opts.sha, issue_url: issueUrl,

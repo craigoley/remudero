@@ -1,0 +1,42 @@
+- id: W1-T11314
+  title: "When main turns green again with no commit since the red touching the failing tests or the source they import, the red-main repair lane keeps its open fix PR as a flake fix instead of closing it as redundant, so an intermittent red's real repair is not discarded on a lucky pass"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, when resolveRepairs closes an open repair PR; it decides whether an intermittent red's fix survives
+  origin: operator-session#flake-repair-closed-2026-11-04
+  plan_refs:
+    - W1-T6403
+    - W1-T10235
+  files:
+    - src/lib/main-health-rung.ts
+    - test/fix-lane/a-red-main-that-recovers-with-no-change-keeps-its-repair-open.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: resolveRepairs closes an open repair PR as redundant only when some commit between the offending sha and the green head touched one of the record's failing test files or a source file they import; when none did, the red was intermittent and the PR stays open with a main.repair.flake_kept row naming the failing tests and the commits read
+      proof: "unit test: test/fix-lane/a-red-main-that-recovers-with-no-change-keeps-its-repair-open.test.ts"
+    - claim: A repair whose fix or revert merged, or a red that a touching commit cleared, closes exactly as today, and a commit range that cannot be read keeps today's close
+      proof: "grep: W1-T11314 criterion 2 in test/fix-lane/a-red-main-that-recovers-with-no-change-keeps-its-repair-open.test.ts"
+  rationale: |
+    OBSERVED 2026-11-04: main went red at abd3770704 (plan-only), on test/serve-view-events.test.ts ("a ledger row reaches an events subscriber of the assembled serve over real HTTP"). The test failed together with its flake-retry, then failed again twice on #16658, and 1 in 4 runs locally.
+    The repair lane opened #16730, a correct fix for the race: the sweep's later judge event carries the refetch etag.
+    At 12:51Z resolveRepairs (src/lib/main-health-rung.ts, the "resolved by other" close) closed #16730 as redundant, because main read green at c393901ec9. But every commit between abd3770704 and c393901ec9 was plan-only or CI-only, so the green was a lucky pass, and the race stayed on main.
+    The operator session re-landed the fix as #16736.
+    W1-T10235 had already fixed an earlier form of the same flake in October, so this test's flakiness recurs. Discarding its repair on the first green leaves main and every PR exposed.
+  design: |
+    In resolveRepairs, for a record resolved "by other" with an open fix PR:
+    1. Read the record's failing test files (main.repair.located test_files).
+    2. Read the files changed by `git log --name-only <offending_sha>..<green sha>`.
+    3. If no changed file is a failing test, or a source file the test imports (reuse the reach or import-closure reader the census uses), keep the PR open, log main.repair.flake_kept, and leave the record unresolved for the fix lane.
+    An unreadable range keeps today's close.
+    Test with a ledger fixture plus a real git fixture: a plan-only range keeps the PR open, a range touching the test closes it, and a merged fix closes it.
+  falsifier: |
+    At origin/main, resolveRepairs closes an open repair PR as redundant whenever main reads green on its head, even when no commit since the red touched the failing test or its sources.
+  note: |
+    reservation hand-off: plan-file-1793797488000 -> plan-file-1793797488000
+    Reserved with rmd next-task-id --branch plan-file-1793797488000 from the operator session's ops worktree. Test path from rmd test-place src/lib/main-health-rung.ts (test/fix-lane/).
