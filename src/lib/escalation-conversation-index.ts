@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import type { BoardSnapshotState } from "./board.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { boundedMessages, escalationIssueLocation, projectEscalationCorrespondence, type EscalationAttention } from "./escalation-conversation.js";
 import { readAllThreads, type ThreadMessage } from "./inbox-thread.js";
 import type { Route } from "./service.js";
@@ -72,7 +72,7 @@ export type EscalationIndexResult =
   | { state: "unavailable"; reason: "invalid_request" | "refresh_required" | "source_unavailable"; detail: string };
 export type EscalationIndexReader = (query: { limit?: string | null; cursor?: string | null; folder?: string | null }) => EscalationIndexResult;
 
-export interface EscalationIndexDeps {
+export interface EscalationIndexOptions {
   repository?: string;
   threadStorePath?: string;
   readBoard: () => EscalationIndexBoard;
@@ -101,7 +101,7 @@ function clip(text: string): string {
 }
 
 function isoOf(ms: number): string | null {
-  return Number.isFinite(ms) && Math.abs(ms) <= 8_640_000_000_000_000 ? new Date(ms).toISOString() : null;
+  return Number.isFinite(ms) && Math.abs(ms) <= 8_640_000_000_000_000 ? fixedClock(ms).iso() : null;
 }
 
 function defaultReadThreads(path: string): ReturnType<typeof readAllThreads> {
@@ -121,7 +121,7 @@ function parseThreadId(id: string): { taskId: string; class: string; cause?: str
 interface Snapshot { rows: EscalationIndexItem[]; coverage: EscalationIndexRead["coverage"]; complete: boolean }
 
 /** Build the whole repository snapshot from the saved thread store and the current board, writing nothing. */
-export function buildEscalationIndexSnapshot(deps: EscalationIndexDeps): Snapshot {
+export function buildEscalationIndexSnapshot(deps: EscalationIndexOptions): Snapshot {
   const reasons: string[] = [];
   const repository = deps.repository?.toLowerCase();
   let threads: Map<string, ThreadMessage[]> | undefined;
@@ -244,7 +244,7 @@ function decodeCursor(value: string): { r: string; s: string; o: number; f: stri
   }
 }
 
-export function createEscalationConversationIndexReader(deps: EscalationIndexDeps): EscalationIndexReader {
+export function createEscalationConversationIndexReader(deps: EscalationIndexOptions): EscalationIndexReader {
   const clock = deps.clock ?? systemClock;
   return query => {
     const invalid = (detail: string): EscalationIndexResult => ({ state: "unavailable", reason: "invalid_request", detail });
