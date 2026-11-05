@@ -14,6 +14,16 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 const FROZEN_DIGEST = /["'`][0-9a-f]{64}["'`]/;
 const BASE_RELATIVE = /compressionPinBase\(|"merge-base"/;
 
+// W1-T11342: a failing assert.deepEqual over two whole-module token arrays builds a diff in roughly
+// quadratic memory (10,000 tokens: 9.2 GiB), so the module comparison must use assertSameTokens. A
+// small fixture's deepEqual (an argument bound to a literal) stays allowed.
+const WHOLE_TOKEN_DEEP_EQUAL = /assert\.deepEqual\(\s*executableTokens\(\s*(\w+)\s*\)\s*,\s*executableTokens\(\s*(\w+)\s*\)/g;
+
+function deepEqualsWholeTokenArrays(text: string): boolean {
+  const modules = new Set([...text.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*(?:compressionPinBase|readFileSync)\(/g)].map((m) => m[1]));
+  return [...text.matchAll(WHOLE_TOKEN_DEEP_EQUAL)].some((m) => modules.has(m[1]!) || modules.has(m[2]!));
+}
+
 function compressionPins(dir: string): string[] {
   const found: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -41,10 +51,33 @@ test("PR-pins: every comment-compression pin compares against its PR base and fr
   assert.ok(BASE_RELATIVE.test('const before = compressionPinBase("src/lib/x.ts", import.meta.url);'));
 });
 
+test("PR-pins: no compression pin deepEquals two whole executableTokens( arrays; it uses assertSameTokens", () => {
+  const pins = compressionPins(join(REPO_ROOT, "test"));
+  // Positive control: the census reads the five pins that compare whole token streams (W1-T11342).
+  assert.ok(pins.includes("test/worker/spawn/compress-src-lib-worker-ts.test.ts"));
+  const texts = pins.map((pin) => readFileSync(join(REPO_ROOT, pin), "utf8"));
+  assert.ok(texts.filter((text) => text.includes("assertSameTokens(executableTokens(source), executableTokens(before),")).length >= 5);
+  const unbounded = pins.filter((pin) => deepEqualsWholeTokenArrays(readFileSync(join(REPO_ROOT, pin), "utf8")));
+  assert.deepEqual(unbounded, [],
+    "compare a pin's module token streams with assertSameTokens from #test/helpers/compression-pin.js, never assert.deepEqual");
+
+  // The detector's own controls: the whole-module deepEqual is caught; assertSameTokens and a fixture's deepEqual pass.
+  const pin = (compare: string) => [
+    'const source = readFileSync(modulePath, "utf8");',
+    'const before = compressionPinBase("src/lib/x.ts", import.meta.url);',
+    'const control = "return value;";',
+    compare,
+  ].join("\n");
+  assert.ok(deepEqualsWholeTokenArrays(pin("assert.deepEqual(executableTokens(source), executableTokens(before),\n  \"unchanged\");")));
+  assert.ok(!deepEqualsWholeTokenArrays(pin("assertSameTokens(executableTokens(source), executableTokens(before),\n  \"unchanged\");")));
+  assert.ok(!deepEqualsWholeTokenArrays(pin("assert.deepEqual(executableTokens(control), executableTokens(`/* explanation */ ${control}`));")));
+});
+
 test("PR-pins: the compression shard the gardener mints names compressionPinBase", () => {
   const rendered = renderCommentCompressionShard({ file: "src/subject.ts", comments: 900 }, "W1-T999903");
   assert.equal(rendered.refused, undefined);
   assert.match(rendered.text, /compressionPinBase from #test\/helpers\/compression-pin\.js, never a frozen digest/);
+  assert.match(rendered.text, /assertSameTokens from #test\/helpers\/compression-pin\.js, never assert\.deepEqual/);
 });
 
 test("PR-pins: historical compression evidence stays separate from live serve and worker pins", () => {
