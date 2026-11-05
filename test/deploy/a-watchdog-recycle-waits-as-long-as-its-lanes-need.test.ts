@@ -5,7 +5,6 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as deployer from "#src/lib/deployer.js";
-import { progressWatchdogCommand } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function fixture(t: TestContext): string {
@@ -25,14 +24,16 @@ function lock(stateDir: string, taskId: string, runId: string, startedAt: string
 }
 
 function verdict(t: TestContext, stateDir: string): Record<string, unknown> {
-  const output: string[] = [];
-  const log = t.mock.method(console, "log", (line: string) => output.push(line));
-  try {
-    assert.equal(progressWatchdogCommand(["--json", "--state-root", stateDir]), 0);
-  } finally {
-    log.mock.restore();
-  }
-  return JSON.parse(output[0]);
+  const clock = join(fixture(t), "clock.mjs");
+  writeFileSync(clock, `import { mock } from "node:test";
+mock.timers.enable({ apis: ["Date"], now: ${Date.now()} });
+`);
+  const result = spawnSync(process.execPath, [
+    "--import", "tsx", "--import", clock, join(REPO_ROOT, "src/run-task.ts"),
+    "progress-watchdog", "--json", "--state-root", stateDir,
+  ], { cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  return JSON.parse(result.stdout);
 }
 
 function observed(t: TestContext, stateDir: string): void {
