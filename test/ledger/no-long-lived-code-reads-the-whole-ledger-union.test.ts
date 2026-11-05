@@ -23,7 +23,6 @@ const DEFINING = new Set(["src/lib/ledger-union.ts", "src/lib/ledger-key-manifes
 
 /** file#function → why the read is unbounded today. Every entry is W1-T11424's to remove. */
 const ALLOWLIST: Record<string, string> = {
-  "src/run-task.ts#reconcileHold": "dep-review proposalProgress materialises the union to filter by task_id (the 11-05 OOM); hotfix #16899, then W1-T11424 moves it to ledgerRowsFor",
   "src/lib/analytics-route.ts#deriveAnalyticsSnapshotFromLedger": "whole-history analytics snapshot, no key; W1-T11424 gives it a per-archive digest",
   "src/lib/benchmark-cohort.ts#observeTimestamp": "benchmark-cohort streams one source at a time through caller-built options; W1-T11424",
   "src/lib/field-trials-flow.ts#readFieldTrialsLedger": "field-trials ledger stream, whole history; W1-T11424",
