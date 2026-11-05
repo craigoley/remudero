@@ -1,0 +1,58 @@
+- id: W1-T11436
+  title: "The 19 comment-compression pins whose absolute commentBytes/commentLines assertions act as permanent comment-volume ceilings, against their own 'not a new comment-volume ceiling' intent, follow one rule the operator rules on"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, how a comment-compression pin bounds later edits; it spans every pinned module's pin
+  band_meaning: span
+  origin: operator-session#review-infra-fail-as-fail-2026-11-05
+  plan_refs:
+    - W1-T10852
+    - W1-T11428
+  files:
+    - scripts/census-precheck.mjs
+    - test/helpers/compression-pin.ts
+    - test/rules/compression-pins-follow-one-comment-volume-rule.test.ts
+    - test/console-api/compress-src-lib-panel-graph-ts.test.ts
+    - test/console-api/serve/compress-src-lib-serve-ts.test.ts
+    - test/daemon/compress-src-lib-fleet-control-ts.test.ts
+    - test/daemon/compress-src-lib-measurement-cadence-ts.test.ts
+    - test/deploy/compress-src-lib-doctor-ts.test.ts
+    - test/deploy/compress-src-lib-report-commands-ts.test.ts
+    - test/dispatch/compress-src-lib-drain-ts.test.ts
+    - test/fix-lane/compress-src-lib-main-health-rung-ts.test.ts
+    - test/github/compress-src-lib-branch-reaper-ts.test.ts
+    - test/github/compress-src-lib-github-transport-ts.test.ts
+    - test/github/compress-src-lib-open-prs-rest-ts.test.ts
+    - test/inbox/compress-src-lib-escalate-ts.test.ts
+    - test/infra/compress-src-lib-tick-read-worker-ts.test.ts
+    - test/memory/compress-src-lib-host-memory-shadow-ts.test.ts
+    - test/plan/compress-src-lib-task-linter-ts.test.ts
+    - test/review/compress-src-lib-review-ts.test.ts
+    - test/review/compress-src-lib-risk-judge-ts.test.ts
+    - test/review/compress-src-lib-verdict-calibration-ts.test.ts
+    - test/worker/spawn/compress-src-lib-worker-provider-ts.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Every comment-compression pin's commentBytes and commentLines assertions follow the one rule the operator ruled on this task, and a census over the compression pins refuses a pin that does not
+      proof: "unit test: test/rules/compression-pins-follow-one-comment-volume-rule.test.ts"
+  rationale: |
+    OBSERVED 2026-11-05 building W1-T11428: census-precheck refused test/review/compress-src-lib-review-ts.test.ts because its UNCONDITIONAL assertions commentBytes < 319723 and commentLines < 3222 fail when a later feature adds doc comments to src/lib/review.ts. The test's own note says the captured numbers "are comparison evidence for this edit, not a new comment-volume ceiling", and #16082 already made its token/AST digest comparison apply only on the PR that adds the pin; the two absolute comparisons stayed unconditional.
+    Measured at origin/main on 2026-11-05: 19 compression pins carry such absolute comparisons. Headroom left: src/lib/review.ts 68 bytes / 27 lines; risk-judge.ts 2022 bytes / 21 lines; host-memory-shadow.ts 2885 / 19; verdict-calibration.ts 3057 / 34; panel-graph.ts 2403 / 25; the rest 3.8k-15k bytes. W1-T11428 had to trim its own doc comments to a net +55 bytes to fit.
+  design: |
+    The operator rules at review which rule the pins follow; the builder applies the ruling. The options as filed, not pre-decided:
+    (a) The absolute commentBytes/commentLines comparisons apply only on the PR that adds the pin (inside compressionPinBase's "pin added on this PR" branch, as #16082 did for the digests), so later feature edits to a compressed module are free.
+    (b) The comparisons stay as a standing ratchet on comment volume, but measured against the module's merge-base rather than a frozen pre-compression capture, so growth is visible per PR instead of a fixed number.
+    (c) Another rule the operator names.
+    The new census is a CI rule suite, so compression-pins-follow-one-comment-volume-rule.test.ts gets a PRECHECK_PARITY row in scripts/census-precheck.mjs.
+    Whichever is ruled: one shared helper in test/helpers/compression-pin.ts carries it, every listed pin uses it, and the census in test/rules/ refuses a compression pin that carries its own absolute comment-volume literal. Fixed thresholds are not introduced.
+  falsifier: |
+    At origin/main, a feature PR that adds doc comments to src/lib/review.ts fails census-precheck on a pin that was written to compare one compression edit, so the pin acts as a permanent comment ceiling.
+  note: |
+    reservation hand-off: plan-file-1793904482000 -> plan-file-1793904482000
+    Reserved with rmd next-task-id from the operator session's ops worktree. Operator ruling 2026-11-05: file the issue and rule at review; do not pre-decide.
