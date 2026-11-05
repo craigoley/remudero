@@ -101,13 +101,13 @@ function repoRelTarget(target: string): string {
 }
 
 /** GIT_LITERAL_PATHSPECS: a target is a path, never a pattern; `?` and `[` are legal in one. */
-const LS_TREE_OPTIONS = { env: { GIT_LITERAL_PATHSPECS: "1" }, maxBuffer: 1 << 26 };
+export const LS_TREE_OPTIONS = { env: { GIT_LITERAL_PATHSPECS: "1" }, maxBuffer: 1 << 26 };
 
-function lsTreeArgv(rev: string, paths: readonly string[], recursive: boolean): string[] {
+export function lsTreeArgv(rev: string, paths: readonly string[], recursive: boolean): string[] {
   return ["ls-tree", ...(recursive ? ["-r", "-t"] : []), "-z", "--full-tree", rev, "--", ...paths];
 }
 
-function lsTreeRows(out: string): BaseTreeEntry[] {
+export function lsTreeRows(out: string): BaseTreeEntry[] {
   return out
     .split("\0")
     .filter(Boolean)
@@ -122,8 +122,14 @@ function defaultListTree(cwd: string, rev: string, paths: readonly string[], rec
   return lsTreeRows(hostWorktreeGit(cwd, lsTreeArgv(rev, paths, recursive), LS_TREE_OPTIONS));
 }
 
+/** W1-T11341: the blob read {@link defaultReadBlob} runs, exported so the awaited builder reads the same bytes. */
+export function blobReadArgv(rev: string, repoRelPath: string): string[] {
+  return ["cat-file", "--filters", `${rev}:${repoRelPath}`];
+}
+export const BLOB_READ_OPTIONS = { maxBuffer: 1 << 26, encoding: "latin1" as const };
+
 function defaultReadBlob(cwd: string, rev: string, repoRelPath: string): Buffer {
-  return Buffer.from(hostWorktreeGit(cwd, ["cat-file", "--filters", `${rev}:${repoRelPath}`], { maxBuffer: 1 << 26, encoding: "latin1" }), "latin1");
+  return Buffer.from(hostWorktreeGit(cwd, blobReadArgv(rev, repoRelPath), BLOB_READ_OPTIONS), "latin1");
 }
 
 /** Every proper ancestor of `rel`: `a/b/c.ts` → `a`, `a/b`. */

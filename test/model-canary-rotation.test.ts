@@ -4,10 +4,10 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { rotatingCanarySuite } from "../src/lib/model-canary-rotation.js";
-import { canaryCommand } from "../src/lib/model-canary-command.js";
-import { commonCanarySuite, gradeCanary, canaryTools } from "../src/lib/model-canary-suite.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { rotatingCanarySuite } from "#src/lib/model-canary-rotation.js";
+import { canaryCommand } from "#src/lib/model-canary-command.js";
+import { commonCanarySuite, gradeCanary, canaryTools } from "#src/lib/model-canary-suite.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const KEY = "ab".repeat(32), DAY = "2026-10-11";
 function fixture(run: (root: string) => void) {
@@ -16,7 +16,11 @@ function fixture(run: (root: string) => void) {
 }
 test("canary rotation gives every arm one reproducible private day pack and unique instance ids", () => {
   const a = rotatingCanarySuite(DAY, KEY), b = rotatingCanarySuite(DAY, KEY);
-  assert.deepEqual(a, b); assert.equal(a.cases.length, 12); assert.equal(new Set(a.cases.map(v => v.id)).size, 12);
+  assert.deepEqual(a, b); assert.equal(a.cases.length, 13); assert.equal(new Set(a.cases.map(v => v.id)).size, 13);
+  const coding = a.cases.filter(item => item.family === "coding");
+  assert.equal(coding.length, 1);
+  const anchor = commonCanarySuite().find(item => item.family === "coding")!;
+  assert.deepEqual(coding[0], { ...anchor, id: `rotation-${DAY}-${anchor.id}` });
   assert.ok(a.cases.every(v => v.id.startsWith("rotation-" + DAY + "-") && v.id.length <= 128));
   assert.equal(a.sampleUnit, "task-instance"); assert.equal(a.inference, "descriptive-only");
   assert.notEqual(a.suiteHash, rotatingCanarySuite("2026-10-12", KEY).suiteHash);
@@ -28,11 +32,18 @@ test("canary rotation rejects invalid calendars and private seed formats", () =>
     assert.throws(() => rotatingCanarySuite(day, KEY), /day-invalid/);
   for (const key of ["", "a".repeat(63), "A".repeat(64), "x".repeat(64), KEY + "\n"])
     assert.throws(() => rotatingCanarySuite(DAY, key), /private-key-invalid/);
-  assert.equal(rotatingCanarySuite("2024-02-29", KEY).cases.length, 12);
+  assert.equal(rotatingCanarySuite("2024-02-29", KEY).cases.length, 13);
 });
 test("canary rotation preserves real scorer authority and missing evidence across varied instances", () => {
   for (const day of [DAY, "2026-10-12", "2026-11-02"]) {
     for (const item of rotatingCanarySuite(day, KEY).cases) {
+      if (item.family === "coding") {
+        for (const text of [JSON.stringify(item.expected), JSON.stringify({ completed: true })])
+          assert.deepEqual(gradeCanary(item, text, []), {
+            passed: false, reason: "coding-native-scorer-required", schemaValid: false,
+          }, item.id);
+        continue;
+      }
       const tool = canaryTools(item), trace = item.tools === "none" ? [] : item.tools === "inventory"
         ? [tool("inventory", { item: item.id.endsWith("tools-A") ? "A" : "B" })]
         : item.tools === "retry" ? [tool("lookup", {}), tool("lookup", {})] : [tool("lookup", {})];
@@ -48,7 +59,7 @@ test("canary rotation preserves real scorer authority and missing evidence acros
 test("canary rotation real command writes private scorer and inert request manifests without answers or key", () => fixture(root => {
   const keyFile = join(root, "synthetic-seed"), out = join(root, "out"); writeFileSync(keyFile, KEY + "\n", { mode: 0o600 });
   const child = spawnSync(process.execPath, ["--import", "tsx", "src/lib/model-canary-command.ts", "prepare-rotation", out, DAY, keyFile], { encoding: "utf8" });
-  assert.equal(child.status, 0, child.stderr); assert.equal(JSON.parse(child.stdout).cases, 12);
+  assert.equal(child.status, 0, child.stderr); assert.equal(JSON.parse(child.stdout).cases, 13);
   const manifest = JSON.parse(readFileSync(join(out, "model-canary-rotation-manifest.json"), "utf8"));
   const scorer = JSON.parse(readFileSync(join(out, "model-canary-rotation-scorer.json"), "utf8"));
   assert.equal(manifest.state, "prepared-not-activated"); assert.equal(manifest.suiteHash, scorer.suiteHash);
@@ -83,7 +94,7 @@ test("canary rotation seed reader bounds bytes while accepting a single CRLF", (
 test("canary rotation leaves the anchor preparation and real private projection available", () => fixture(root => {
   assert.equal(canaryCommand(["prepare", join(root, "anchors")]).state, "prepared-not-activated");
   const anchors = JSON.parse(readFileSync(join(root, "anchors/model-canary-manifest.json"), "utf8"));
-  assert.equal(anchors.dailyCases, 12);
+  assert.equal(anchors.dailyCases, 13);
   const input = join(root, "runs"); writeFileSync(input, "[]");
   assert.equal(canaryCommand(["project", join(root, "report"), input]).state, "private-projection");
   assert.throws(() => canaryCommand(["project", join(root, "wrong")]));
