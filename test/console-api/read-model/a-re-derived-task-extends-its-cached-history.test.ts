@@ -162,7 +162,9 @@ function readsOf(counted: { bodyRows(): number }, board: BoardProjection, id: st
 }
 
 test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
-  const w = world(t, [...rowsFrom(T0, 40), ...aliasRows(T0 + 50_000, "W1-T23", 1)]);
+  // JSON permits an own __proto__ key. A copied cache row must retain it as data, including when nested.
+  const protoRow = JSON.parse(`{"ts":${JSON.stringify(at(T0 + 41_000))},"host":"h1","step":"verdict","task_id":"W1-T24","run_id":"r-W1-T24","__proto__":{"marker":"own"},"detail":{"__proto__":{"nested":"own"}}}`) as Row;
+  const w = world(t, [...rowsFrom(T0, 40), ...aliasRows(T0 + 50_000, "W1-T23", 1), protoRow]);
   const board = w.board();
   drain(board);
   bucketsOf(board); // every task's bucket held
@@ -177,6 +179,8 @@ test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
     drain(board);
     const extended = bucketsOf(board);
     assert.deepEqual(extended, uncachedBuckets(w), `round ${round}: every extended bucket equals a fresh full read at the same seq`);
+    const copiedProto = extended["W1-T24"]!.map((r) => JSON.parse(r) as Row).find((r) => Object.hasOwn(r, "__proto__"));
+    assert.ok(copiedProto && Object.hasOwn(copiedProto.detail as object, "__proto__"), `round ${round}: copied rows retain top-level and nested JSON __proto__ properties`);
     const lateAt = extended["W1-T24"]!.findIndex((r) => (JSON.parse(r) as Row).late === round);
     assert.ok(lateAt >= 0 && lateAt < extended["W1-T24"]!.length - 1, `round ${round}: control, the late row is held and sorts before rows already held`);
     assert.equal(extended["W1-T23"]!.filter((r) => (JSON.parse(r) as Row).step === "dispatch.circuit_broken").length, 2 + round,
@@ -263,7 +267,9 @@ function built(w: World, db: ReadModelDb, view: ReturnType<typeof createNowView>
 }
 
 test("W1-T9716: now-view bodies are identical with the task cache on and off", (t) => {
-  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1)];
+  // A run.start with no own run_id must not inherit one from its JSON __proto__ data on the cached arm.
+  const protoStart = (ms: number): Row => JSON.parse(`{"ts":${JSON.stringify(at(ms))},"host":"h1","step":"run.start","task_id":"W1-T21","__proto__":{"run_id":"inherited"}}`) as Row;
+  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1), protoStart(T0 + 3_550_000)];
   const on = world(t, history);
   const off = world(t, history);
   const [onDb, offDb] = [counting(on.db), counting(off.db)];
@@ -273,8 +279,9 @@ test("W1-T9716: now-view bodies are identical with the task cache on and off", (
   let ms = T0 + 3_600_000;
   const [onMark, offMark] = [onDb.bodyRows(), offDb.bodyRows()];
   for (let round = 0; round < 5; round++) {
+    const protoAt = T0 + 3_550_000 + round * 31_000;
     if (round > 0) {
-      const more = [...rowsFrom(T0 + 700_000 + round * 60_000, 2, 40 + round * 2), ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T26", round + 1)];
+      const more = [...rowsFrom(T0 + 700_000 + round * 60_000, 2, 40 + round * 2), ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T26", round + 1), protoStart(protoAt)];
       on.append(more);
       off.append(more);
       // Past the clock rule's 30 s, so every aging projection re-derives as it does in serve.
@@ -284,6 +291,10 @@ test("W1-T9716: now-view bodies are identical with the task cache on and off", (
     }
     const [a, b] = [built(on, onDb.db, onView), built(off, offDb.db, offView)];
     assert.deepEqual(portable(on, a), portable(off, b), `round ${round}: the now-view bodies are byte-identical`);
+    const shown = a.board.tasks.find((item) => item.taskId === "W1-T21");
+    assert.ok(shown, `round ${round}: control, the affected task is in the now-view`);
+    assert.equal(shown.startedAt, at(protoAt), `round ${round}: control, the JSON __proto__ run.start supplies the current run`);
+    assert.equal(shown.worker?.runId, undefined, `round ${round}: the run.start JSON __proto__ cannot supply worker.runId`);
     assert.ok(JSON.stringify(a).includes("W1-T21"), `round ${round}: control, the body lists the tasks`);
   }
   const [onReads, offReads] = [onDb.bodyRows() - onMark, offDb.bodyRows() - offMark];
