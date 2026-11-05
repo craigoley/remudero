@@ -1,0 +1,43 @@
+- id: W1-T11334
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — fix_refusal:proof-repair-round-committed-no-test-edit cost 7.3 PR minute(s) across 10 round(s) on 8 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.29
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:fix_refusal:proof-repair-round-committed-no-test-edit"
+  files:
+    - src/run-task.ts
+    - test/worker/run-task/fix-refusal-proof-repair-round-committed-no-test-edit.test.ts
+  acceptance:
+    - claim: "a recorded fix_refusal:proof-repair-round-committed-no-test-edit round, replayed through the real code path in src/run-task.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11334: fix_refusal:proof-repair-round-committed-no-test-edit is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures fix_refusal:proof-repair-round-committed-no-test-edit's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: fix_refusal:proof-repair-round-committed-no-test-edit cost 7.3 PR minute(s) (seven-day half-life) across 10 fix round(s) on 8 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/run-task.ts: names "proof-repair round committed no test edit" (1 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #16652 at 2026-11-04T12:59:32.676Z: proof-repair round committed no test edit — nothing was pushed
+    - PR #16627 at 2026-11-04T06:56:06.932Z: proof-repair round committed no test edit — nothing was pushed
+    - PR #14809 at 2026-10-27T12:45:20.703Z: proof-repair round committed no test edit — nothing was pushed
+    - PR #13673 at 2026-10-23T00:27:41.386Z: proof-repair round committed no test edit — nothing was pushed
+    - PR #11201 at 2026-10-13T01:57:49.652Z: proof-repair round committed no test edit — nothing was pushed
+
+    REPLAY BOUNDARY: src/run-task.ts's proofRepairRefusal emits this reason when changedFiles is empty.
+    Reconstruct why one recorded round reached that guard with no changed files before selecting a remedy;
+    the shared refusal label alone does not establish a shared root cause. Preserve refusal of empty edits,
+    out-of-scope paths and proofs that still pass at the merge base.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.

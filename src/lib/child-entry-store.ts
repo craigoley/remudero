@@ -151,11 +151,17 @@ function holdsAnyBuild(storeRoot: string): boolean {
  * is it renamed into place, so no reader ever sees a half-copied directory and no write to one tree reaches the
  * store or another tree. A hit means "published"; the caller still re-checks childEntryIsCurrent before running it.
  */
-export function materializeFromStore(treeRoot: string, storeRoot: string, treeHash?: string, hashSource?: (root: string) => string): StoreLookup {
+export function materializeFromStore(
+  treeRoot: string, storeRoot: string, treeHash?: string, hashSource?: (root: string) => string, expectedHash?: string,
+): StoreLookup {
   try {
     if (!holdsAnyBuild(storeRoot)) return { outcome: "miss", reason: "store-empty" };
     const script = loadBuildScript();
     const hash = treeHash ?? (hashSource ?? script.sourceHash)(treeRoot);
+    // A caller that holds a bundle for one hash (an engine advancing in place) names it: a tree that now hashes
+    // elsewhere is refused BEFORE anything is published, so another hash's stored build never replaces the
+    // caller's own bundle (#16735 review, 2026-11-04).
+    if (expectedHash !== undefined && hash !== expectedHash) return { outcome: "miss", reason: "source-moved", hash };
     const stored = join(storeRoot, hash);
     if (!existsSync(stored)) return { outcome: "miss", reason: "no-stored-build", hash };
     const storedRefusal = storedBuildRefusal(script, stored, treeRoot, hash);

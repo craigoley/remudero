@@ -6,6 +6,7 @@
 // unreadable slice refuses instead of reading as an empty history.
 import assert from "node:assert/strict";
 import fs, { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -13,8 +14,8 @@ import { test } from "node:test";
 import zlib from "node:zlib";
 import { NEEDS_HUMAN_LABEL, type Escalation, type IssueGateway, type OpenIssue } from "../src/lib/escalate.js";
 import type { TriageEvidence } from "../src/lib/escalation-triage.js";
-import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
-import { createEscalationTriageHistoryReader } from "../src/lib/sweep.js";
+import { readLedgerUnionRecordsSync, realLedgerFs } from "#src/lib/ledger-union.js";
+import { createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE } from "#src/lib/sweep.js";
 import { buildEscalationTriageRuntime, refreshEscalationTriageEvidence, sweepEscalationTriage } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
@@ -190,4 +191,56 @@ test("W1-T9406: the daemon tick's evidence refresh loads the slice, and a failed
   assert.deepEqual(logged, []);
   await refreshEscalationTriageEvidence({ refresh: async () => { throw new Error("EIO: the state dir went away"); } }, fixture.path, log);
   assert.deepEqual(logged, [["escalation_triage.evidence_refresh_failed", { error: "EIO: the state dir went away" }]]);
+});
+
+test("W1-T9957: the lazy triage runtime records the snapshot read cost", async (t) => {
+  const fixture = corpus();
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const slice = ESCALATION_TRIAGE_EVIDENCE_SLICE;
+  await createEscalationTriageHistoryReader({ slice })(fixture.dir);
+  const snapshot = join(fixture.dir, "cache", "rotation-slices", `${encodeURIComponent(slice.holder).replaceAll(".", "%2E")}.json`);
+  const expectedBytes = fs.readFileSync(snapshot).length + fs.readFileSync(fixture.path).length;
+  const runtime = runtimeFor(fixture.dir);
+  const settings = runtime({ issues: {} as never, ledgerPath: fixture.path, runId: "child" });
+  const evidence = settings.evidence!(BORN);
+  assert.equal(evidence.rekick?.priorRekicks, 2);
+  assert.equal(evidence.rekick?.newFailureSinceLastStrike, true);
+  const receipt = fs.readFileSync(fixture.path, "utf8").trim().split("\n").map((line) => JSON.parse(line)).find((entry) => entry.step === "escalation_triage.evidence_read");
+  assert.ok(receipt, "the real runtime records a read receipt");
+  assert.equal(receipt.evidence_snapshot_hit, true);
+  assert.equal(receipt.evidence_rotations_read, 0);
+  assert.equal(receipt.evidence_bytes_read, expectedBytes);
+});
+
+test("W1-T9957: repeated escalations record each evidence read byte once", async (t) => {
+  const fixture = corpus();
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const slice = ESCALATION_TRIAGE_EVIDENCE_SLICE;
+  await createEscalationTriageHistoryReader({ slice })(fixture.dir);
+  let bytes = 0;
+  const counted = (buf: Buffer) => { bytes += buf.length; return buf; };
+  const reader = createEscalationTriageHistoryReader({ slice,
+    fs: { ...realLedgerFs,
+      readFileSync: (path) => counted(realLedgerFs.readFileSync(path)),
+      readRangeSync: (path, start, end) => counted(realLedgerFs.readRangeSync(path, start, end)),
+    },
+    readFile: async (path) => counted(await readFile(path)),
+  });
+  const runtime = buildEscalationTriageRuntime({ root: fixture.dir, config: { root: fixture.dir } as Config, owner: "o", repo: "r" }, {
+    evidenceHistory: reader, readPolicy: () => undefined, seenAt: () => undefined, windowMs: () => 1,
+  });
+  const settings = runtime({ issues: {} as never, ledgerPath: fixture.path, runId: "child" });
+  const receipts = () => fs.readFileSync(fixture.path, "utf8").trim().split("\n").map((line) => JSON.parse(line))
+    .filter((entry) => entry.step === "escalation_triage.evidence_read");
+  settings.evidence!(BORN);
+  settings.evidence!(BORN);
+  const first = receipts();
+  assert.equal(first.length, 2);
+  assert.ok(bytes > 0, "control: the child read the snapshot and live bytes");
+  assert.equal(first.reduce((sum, entry) => sum + entry.evidence_bytes_read, 0), bytes);
+  const before = bytes;
+  await runtime.refresh(fixture.path);
+  settings.evidence!(BORN);
+  assert.equal(receipts().at(-1).evidence_bytes_read, bytes - before);
+  assert.equal(receipts().at(-1).evidence_rotations_read, 0);
 });

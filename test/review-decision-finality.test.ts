@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { appendLedger } from "#src/lib/ledger.js";
+import { readRequiredStatusCheckContextsAsync } from "#src/lib/status.js";
 import {
   REVIEW_ENGINE_REVISION,
   claimReviewDecision,
@@ -77,6 +78,8 @@ test("a replay restores a final review displaced by pending, but never overwrite
     const fetchPublisher = async (): Promise<unknown> => ({ contexts: [], checks: [{ context: "remudero-review", app_id: null }] });
     const options = {
       fetchPublisher,
+      // Every terminal-posting caller injects status.ts's reader (review.ts cannot import it: a cycle).
+      readRequiredContexts: readRequiredStatusCheckContextsAsync,
       owner: "o", repo: "r", sha: HEAD, state: "success" as const, taskId: TASK,
       evidence: "executed" as const, ledgerPath, runId: "replay", prUrl: PR,
       reviewDecisionDigest: digest, fetchLifecycle: () => ({ merged: false, closed: false }),
