@@ -59,6 +59,11 @@ const aliasRows = (ms: number, id: string, k: number): Row[] => [
   { ts: at(ms), host: "h1", step: "dispatch.circuit_broken", task_id: "DAEMON", task: id, freshCount: k },
 ];
 
+/** JSON permits an own __proto__ key; a copy must keep it as data rather than inherit its fields. */
+const prototypeRow = (ms: number, id: string, step: string): Row => JSON.parse(
+  `{"ts":"${at(ms)}","host":"h1","step":"${step}","task_id":"${id}","__proto__":{"run_id":"inherited"}}`,
+) as Row;
+
 /** Every statement's body rows but the ingest's own read: the task reads a test can count. */
 function counting(db: ReadModelDb): { db: ReadModelDb; bodyRows(): number } {
   let rows = 0;
@@ -162,7 +167,7 @@ function readsOf(counted: { bodyRows(): number }, board: BoardProjection, id: st
 }
 
 test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
-  const w = world(t, [...rowsFrom(T0, 40), ...aliasRows(T0 + 50_000, "W1-T23", 1)]);
+  const w = world(t, [...rowsFrom(T0, 40), ...aliasRows(T0 + 50_000, "W1-T23", 1), prototypeRow(T0 + 51_000, "W1-T23", "verdict")]);
   const board = w.board();
   drain(board);
   bucketsOf(board); // every task's bucket held
@@ -181,6 +186,9 @@ test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
     assert.ok(lateAt >= 0 && lateAt < extended["W1-T24"]!.length - 1, `round ${round}: control, the late row is held and sorts before rows already held`);
     assert.equal(extended["W1-T23"]!.filter((r) => (JSON.parse(r) as Row).step === "dispatch.circuit_broken").length, 2 + round,
       `round ${round}: control, the bucket holds every alias row`);
+    const ownPrototype = extended["W1-T23"]!.find((r) => Object.hasOwn(JSON.parse(r) as Row, "__proto__"));
+    assert.ok(ownPrototype, `round ${round}: the cached bucket retains the JSON __proto__ property`);
+    assert.equal(Object.hasOwn(JSON.parse(ownPrototype) as Row, "run_id"), false, "the prototype's run_id did not become an own field");
   }
   // A/A: two uncached reads of one store agree, so the comparison above can tell a difference from noise.
   assert.deepEqual(uncachedBuckets(w), uncachedBuckets(w));
@@ -263,7 +271,9 @@ function built(w: World, db: ReadModelDb, view: ReturnType<typeof createNowView>
 }
 
 test("W1-T9716: now-view bodies are identical with the task cache on and off", (t) => {
-  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1)];
+  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1), prototypeRow(T0 + 61_000, "W1-T21", "run.start")];
+  assert.ok(Object.hasOwn(history.at(-1)!, "__proto__") && !Object.hasOwn(history.at(-1)!, "run_id"),
+    "control: the run.start input has an own JSON __proto__ and no run_id");
   const on = world(t, history);
   const off = world(t, history);
   const [onDb, offDb] = [counting(on.db), counting(off.db)];
@@ -274,7 +284,11 @@ test("W1-T9716: now-view bodies are identical with the task cache on and off", (
   const [onMark, offMark] = [onDb.bodyRows(), offDb.bodyRows()];
   for (let round = 0; round < 5; round++) {
     if (round > 0) {
-      const more = [...rowsFrom(T0 + 700_000 + round * 60_000, 2, 40 + round * 2), ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T26", round + 1)];
+      const more = [
+        ...rowsFrom(T0 + 700_000 + round * 60_000, 2, 40 + round * 2),
+        ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T26", round + 1),
+        prototypeRow(T0 + 750_000 + round * 60_000, "W1-T21", "run.start"),
+      ];
       on.append(more);
       off.append(more);
       // Past the clock rule's 30 s, so every aging projection re-derives as it does in serve.
