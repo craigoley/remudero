@@ -31,7 +31,7 @@ function assertNativeFieldPrivateDirectory(path: string): void {
   }
 }
 function nativeFieldHasGitMarker(dir: string): boolean {
-  try { lstatSync(join(dir, ".git")); return true; } catch { return false; }
+  return readdirSync(dir).includes(".git");
 }
 function readNativeFieldPrivateJson(path: string, limit: number): unknown {
   if (!Number.isInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0

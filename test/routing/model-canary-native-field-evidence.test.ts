@@ -116,3 +116,15 @@ test("native field reader refuses a broken sidecar symlink instead of classifyin
     assert.deepEqual(result, { state: "unavailable", reason: "native-field-evidence-unreadable" });
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+
+test("native field reader treats a broken git marker symlink as a private checkout boundary", () => {
+  const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-field-git-marker-`));
+  const directory = join(parent, "owner");
+  try {
+    symlinkSync("missing-git-target", join(parent, ".git"));
+    mkdirSync(directory, { mode: 0o700 }); writeSnapshot(directory);
+    const result = createNativeFieldEvidenceReader(directory)();
+    assert.deepEqual(result, { state: "unavailable", reason: "native-field-inside-git" });
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
