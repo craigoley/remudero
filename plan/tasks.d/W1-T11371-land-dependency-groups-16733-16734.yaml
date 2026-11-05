@@ -58,11 +58,20 @@
     their version hunks in the owned PR for existing supersession reconciliation.
   acceptance:
     - claim: Root and image manifests and locks carry all four target moves or newer already-landed versions without downgrade, with platform packages consistent
-      proof: "unit test: test/review/dependency-groups-16733-companion-pins.test.ts"
+      proof: "unit test: dependency groups 16733 and 16734 preserve their requested versions and every platform pin"
     - claim: The installed locked SDK and image CLI agree through actual SDK metadata and the native CLI reports its declared version
+      kind: guard
       proof: "unit test: test/the-haiku55-image-pins-match-its-sdk.test.ts"
     - claim: SDK settings schema parity and fail-closed validation survive the dependency update
+      kind: guard
       proof: "unit test: test/settings.test.ts"
+  amendment: |
+    Operator repair of PRs 16733 and 16734, 2026-11-05: the new dependency-group
+    regression proves the requested version moves. SDK/image metadata parity,
+    native CLI execution and fail-closed sandbox settings validation protect
+    existing behavior, so their unchanged full-suite obligations are guards.
+    Review still executes both guard suites at head; no test, coverage, scanner,
+    security, review or merge requirement is removed or relaxed.
   falsifier: |
     Restore an old manifest or image CLI pin while keeping the updated lock:
     the focused regression must fail; restore the fix and it passes. Report
