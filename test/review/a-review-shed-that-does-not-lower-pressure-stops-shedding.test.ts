@@ -21,7 +21,6 @@ const POLICY = {
   sampleCadenceMs: 60_000,
   telemetryCadenceMs: 300_000,
   cpuPsiLowPct: 5,
-  cpuPsiHighPct: 20,
   memoryPsiLowPct: 5,
   memoryPsiHighPct: 15,
   providerAllowancePct: 2,
@@ -41,6 +40,9 @@ function sample(nowMs: number, cpuFull: number, over: Partial<ReviewCapacityObse
     memAvailableMib: 28_000,
     cpuPsiSomeAvg10Pct: 80,
     cpuPsiFullAvg10Pct: cpuFull,
+    // W1-T11129: a learned cpu.weight share of 13/16. Against `some` 80 the weight itself predicts 15 points of `full`,
+    // so the shed starts above 15 + the low watermark 5 = 20, the line these sequences cross; calm stays at 5.
+    cpuWeightShare: 0.8125,
     memoryPsiSomeAvg10Pct: 0,
     activeWorkers: 0,
     queueDepth: 9,
