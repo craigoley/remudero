@@ -131,7 +131,7 @@ export function parseEscalationConversationSource(source: EscalationIssueSource)
   return { identity: { taskId, class: cls, ...(cause ? { cause } : {}), ...(prRef ? { prRef } : {}) }, headline, detail, recommendation, options };
 }
 
-function boundedMessages(messages: ThreadMessage[]): EscalationConversation["messages"] | undefined {
+export function boundedMessages(messages: ThreadMessage[]): EscalationConversation["messages"] | undefined {
   if (messages.length > MAX_HISTORY_MESSAGES || Buffer.byteLength(JSON.stringify(messages)) > MAX_HISTORY_BYTES
     || new Set(messages.map(m => m.seq)).size !== messages.length
     || messages.some(m => !Number.isSafeInteger(m.seq) || m.seq < 1 || !Number.isSafeInteger(m.ts)
@@ -141,6 +141,26 @@ function boundedMessages(messages: ThreadMessage[]): EscalationConversation["mes
     ...(typeof m.extra?.replyId === "string" ? { intentId: m.extra.replyId } : {}),
     ...(typeof m.extra?.sourceImport?.issueUrl === "string" && escalationIssueLocation(m.extra.sourceImport.issueUrl)
       && /^[a-f0-9]{64}$/.test(m.extra.sourceImport.revision) ? { sourceImported: true as const } : {}) }));
+}
+
+export type EscalationAttention = EscalationConversation["attention"];
+
+/**
+ * The one correspondence projection, shared by the detail reader and the mailbox index (W1-T11110).
+ * A saved answer means waiting for the agent whatever the source flag says; only an explicit agent
+ * message with question false after an operator reply archives; a later question reopens the same
+ * thread. A missing history, a failed question check or a source that is not open cannot archive
+ * or resurrect anything: it is unknown.
+ */
+export function projectEscalationCorrespondence(input: {
+  last: Pick<ThreadMessage, "role" | "extra"> | undefined; hasReply: boolean;
+  questionFailure: boolean; activeQuestion: boolean; sourceOpen: boolean;
+}): EscalationAttention {
+  const { last } = input;
+  if (input.questionFailure || !last) return "unknown";
+  if (last.role === "reply") return "waiting_for_agent";
+  if (last.extra?.question === false && input.hasReply) return "archived";
+  return input.activeQuestion || input.sourceOpen ? "needs_input" : "unknown";
 }
 
 /** Per-service bounded cache. Revalidating a reply bypasses saved source, while concurrent reads coalesce. */
@@ -294,9 +314,8 @@ export function createEscalationConversationReader(opts: {
     }
     // Only an explicit agent message can end correspondence. Saving an answer or an
     // unconfigured interpreter's "understood" does not establish that the agent needs no input.
-    const attention = questionFailure ? "unknown" : !last ? "unknown" : last.role === "reply" ? "waiting_for_agent"
-      : last.extra?.question === false && ordered.some(message => message.role === "reply") ? "archived"
-        : activeQuestion ? "needs_input" : source.state === "closed" ? "unknown" : "needs_input";
+    const attention = projectEscalationCorrespondence({ last, hasReply: ordered.some(message => message.role === "reply"),
+      questionFailure: questionFailure !== undefined, activeQuestion: activeQuestion !== undefined, sourceOpen: source.state !== "closed" });
     const canReply = !stale && !questionFailure && (source.state === "open" || Boolean(activeQuestion)) && history === "verified";
     // Starting is a separate, explicit write. Unknown/corrupt history never qualifies,
     // and generated summaries cannot supply an unstored native PR referent.

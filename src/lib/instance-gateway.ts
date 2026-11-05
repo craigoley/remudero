@@ -47,6 +47,7 @@ import {
   buildApproveManualRoute,
   buildControlStatusRoute,
   buildEscalationMarkHandledRoute,
+  buildEscalationReplyRoute,
   buildAssistantControlRoute,
   buildAssistantControlCapabilityRoute,
   buildAssistantControlReceiptRoute,
@@ -58,6 +59,8 @@ import {
   type ControlStatusDeps,
   type IssueCloser,
 } from "./panel-actions.js";
+import { buildEscalationConversationRoute, createEscalationConversationReader } from "./escalation-conversation.js";
+import { buildEscalationConversationIndexRoute, createEscalationConversationIndexReader } from "./escalation-conversation-index.js";
 import { loadPlan, type Plan } from "./plan.js";
 import { planSourceFailed, planSourceLoaded, type PlanSourceOutcome } from "./serve-plan-reload.js";
 import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
@@ -231,8 +234,29 @@ export function instanceRouteSet(
     // The answer routes `now` names for this instance's own escalations (now-decisions.ts).
     buildApproveManualRoute(panel),
     buildEscalationMarkHandledRoute(panel),
+    ...instanceEscalationConversationRoutes(root, repository, panel),
     ...(assistantControl ? [buildAssistantControlRoute(assistantControl), buildAssistantControlCapabilityRoute(assistantControl),
       buildAssistantControlReceiptRoute(assistantControl), buildAssistantActionDiscoveryRoute(assistantControl)] : []),
+  ];
+}
+
+/**
+ * W1-T11110: the escalation conversation read, reply and mailbox index for ONE instance, built over
+ * that instance's own repository, ledger and thread store. Core's handlers and message store are
+ * never shared. There is no cached board snapshot for a non-core instance and the index never fans
+ * out to GitHub, so its board source is explicitly unavailable and its counts report incomplete.
+ */
+function instanceEscalationConversationRoutes(
+  root: InstanceStateRoot, repository: string, panel: { root: string; ledgerPath: string; issues: IssueCloser },
+): Route[] {
+  const threadStorePath = inboxThreadStorePath(root.root);
+  const readEscalationConversation = createEscalationConversationReader({ repository, threadStorePath, ledgerPath: root.ledgerPath });
+  const readIndex = createEscalationConversationIndexReader({ repository, threadStorePath,
+    readBoard: () => ({ state: "unavailable", reason: "no cached board snapshot for this instance" }) });
+  return [
+    buildEscalationConversationRoute(readEscalationConversation),
+    buildEscalationConversationIndexRoute(readIndex),
+    buildEscalationReplyRoute({ ...panel, threadStorePath, readEscalationConversation }),
   ];
 }
 
