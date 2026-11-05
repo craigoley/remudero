@@ -10,7 +10,7 @@
   band_meaning: span
   budget_usd: 20
   origin: human#2026-11-02-console-email-inbox
-  plan_refs: [W1-T11096, W1-T11103, CONSOLE-T164]
+  plan_refs: [W1-T11096, W1-T11103, W1-T10572, CONSOLE-T164]
   files:
     - src/lib/escalation-conversation-index.ts
     - src/lib/escalation-conversation.ts
@@ -30,6 +30,10 @@
     A sweep of all 29 current core open PR heads at e572bfa648014f1b96bddf34e06d2159338af00c
     found no added engineering mailbox index signatures. Positive controls were 71 runtime and 99
     plan lines; added matches were the held correspondence task and an unrelated bake-off comment.
+    W1-T10572 shares the OpenAPI and generated-client files but only documents the already-existing
+    AnalyticsView gardener-spend source. This task adds repository-scoped escalation thread routes,
+    their schemas, and the conversation-index tests; the two declaration changes are in separate
+    sections. Normal branch reconciliation still applies if both tasks reach review at once.
   design: |
     Add one authenticated, repository-scoped, bounded GET /v1/escalation/threads index in the real
     serve assembly and generated contract. Mount the index and existing conversation read/reply
