@@ -734,9 +734,7 @@ interface TaskBucket {
 function copyRow<T>(value: T): T {
   if (Array.isArray(value)) return value.map(copyRow) as T;
   if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value)) out[key] = copyRow((value as Record<string, unknown>)[key]);
-    return out as T;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, copyRow(item)])) as T;
   }
   return value;
 }
