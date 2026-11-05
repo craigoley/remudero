@@ -59,6 +59,11 @@ const aliasRows = (ms: number, id: string, k: number): Row[] => [
   { ts: at(ms), host: "h1", step: "dispatch.circuit_broken", task_id: "DAEMON", task: id, freshCount: k },
 ];
 
+/** JSON permits an own `__proto__` field; assigning it onto `{}` would instead set the copy's prototype. */
+const protoRunStart = (ms: number, id: string): Row => JSON.parse(
+  `{"ts":${JSON.stringify(at(ms))},"host":"h1","step":"run.start","task_id":${JSON.stringify(id)},"__proto__":{"run_id":"inherited"}}`,
+) as Row;
+
 /** Every statement's body rows but the ingest's own read: the task reads a test can count. */
 function counting(db: ReadModelDb): { db: ReadModelDb; bodyRows(): number } {
   let rows = 0;
@@ -162,7 +167,7 @@ function readsOf(counted: { bodyRows(): number }, board: BoardProjection, id: st
 }
 
 test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
-  const w = world(t, [...rowsFrom(T0, 40), ...aliasRows(T0 + 50_000, "W1-T23", 1)]);
+  const w = world(t, [...rowsFrom(T0, 40), ...aliasRows(T0 + 50_000, "W1-T23", 1), protoRunStart(T0 + 100_000, "W1-T24")]);
   const board = w.board();
   drain(board);
   bucketsOf(board); // every task's bucket held
@@ -173,6 +178,7 @@ test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
       ...rowsFrom(T0 + 600_000 + round * 60_000, 4, 40 + round * 4),
       ...aliasRows(T0 + 650_000 + round * 60_000, "W1-T23", 2 + round),
       { ts: at(late), host: "h1", step: "verdict", task_id: "W1-T24", run_id: "r-W1-T24", verdict: "failed", cost_usd: 0.1, late: round },
+      protoRunStart(T0 + 670_000 + round * 60_000, "W1-T24"),
     ]);
     drain(board);
     const extended = bucketsOf(board);
@@ -181,6 +187,9 @@ test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
     assert.ok(lateAt >= 0 && lateAt < extended["W1-T24"]!.length - 1, `round ${round}: control, the late row is held and sorts before rows already held`);
     assert.equal(extended["W1-T23"]!.filter((r) => (JSON.parse(r) as Row).step === "dispatch.circuit_broken").length, 2 + round,
       `round ${round}: control, the bucket holds every alias row`);
+    const proto = extended["W1-T24"]!.map((r) => JSON.parse(r) as Row).find((r) => r.step === "run.start" && Object.hasOwn(r, "__proto__"));
+    assert.ok(proto, `round ${round}: the JSON own property survives extension`);
+    assert.equal(Object.hasOwn(proto, "run_id"), false, "the copied row gained no own run_id");
   }
   // A/A: two uncached reads of one store agree, so the comparison above can tell a difference from noise.
   assert.deepEqual(uncachedBuckets(w), uncachedBuckets(w));
@@ -263,7 +272,7 @@ function built(w: World, db: ReadModelDb, view: ReturnType<typeof createNowView>
 }
 
 test("W1-T9716: now-view bodies are identical with the task cache on and off", (t) => {
-  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1)];
+  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1), protoRunStart(T0 + 100_000, "W1-T24")];
   const on = world(t, history);
   const off = world(t, history);
   const [onDb, offDb] = [counting(on.db), counting(off.db)];
@@ -274,7 +283,8 @@ test("W1-T9716: now-view bodies are identical with the task cache on and off", (
   const [onMark, offMark] = [onDb.bodyRows(), offDb.bodyRows()];
   for (let round = 0; round < 5; round++) {
     if (round > 0) {
-      const more = [...rowsFrom(T0 + 700_000 + round * 60_000, 2, 40 + round * 2), ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T26", round + 1)];
+      const more = [...rowsFrom(T0 + 700_000 + round * 60_000, 2, 40 + round * 2),
+        ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T26", round + 1), protoRunStart(T0 + 720_000 + round * 60_000, "W1-T24")];
       on.append(more);
       off.append(more);
       // Past the clock rule's 30 s, so every aging projection re-derives as it does in serve.
@@ -285,6 +295,11 @@ test("W1-T9716: now-view bodies are identical with the task cache on and off", (
     const [a, b] = [built(on, onDb.db, onView), built(off, offDb.db, offView)];
     assert.deepEqual(portable(on, a), portable(off, b), `round ${round}: the now-view bodies are byte-identical`);
     assert.ok(JSON.stringify(a).includes("W1-T21"), `round ${round}: control, the body lists the tasks`);
+    const suspect = a.board.tasks.find((task) => task.taskId === "W1-T24");
+    assert.ok(suspect, `round ${round}: control, the affected task is in the serialized body`);
+    assert.equal(suspect.startedAt, at(round === 0 ? T0 + 100_000 : T0 + 720_000 + round * 60_000),
+      `round ${round}: control, the run.start row drove the task`);
+    assert.equal(suspect.worker?.runId, undefined, `round ${round}: __proto__.run_id never becomes worker.runId`);
   }
   const [onReads, offReads] = [onDb.bodyRows() - onMark, offDb.bodyRows() - offMark];
   assert.ok(onReads < offReads, `control: the cached arm read ${onReads} body rows against ${offReads} uncached`);
