@@ -472,7 +472,7 @@ recycle_json_escape() {
     printf -v escaped '\\u%04x' "$code"
     printf -v char '\\%03o' "$code"
     printf -v char '%b' "$char"
-    value="${value//"$char"/"$escaped"}"
+    value=${value//"$char"/$escaped}
   done
   printf '%s' "$value"
 }
