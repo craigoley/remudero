@@ -162,7 +162,11 @@ function readsOf(counted: { bodyRows(): number }, board: BoardProjection, id: st
 }
 
 test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
-  const w = world(t, [...rowsFrom(T0, 40), ...aliasRows(T0 + 50_000, "W1-T23", 1)]);
+  const properties = JSON.parse('{"__proto__":{"run_id":"inherited"},"detail":{"__proto__":{"kept":true},"items":[{"__proto__":null}]}}') as Row;
+  const w = world(t, [
+    ...rowsFrom(T0, 40), ...aliasRows(T0 + 50_000, "W1-T23", 1),
+    { ts: at(T0 + 500), host: "h1", step: "verdict", task_id: "W1-T24", ...properties },
+  ]);
   const board = w.board();
   drain(board);
   bucketsOf(board); // every task's bucket held
@@ -171,8 +175,8 @@ test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
     const late = T0 + 5_000 + round;
     w.append([
       ...rowsFrom(T0 + 600_000 + round * 60_000, 4, 40 + round * 4),
-      ...aliasRows(T0 + 650_000 + round * 60_000, "W1-T23", 2 + round),
-      { ts: at(late), host: "h1", step: "verdict", task_id: "W1-T24", run_id: "r-W1-T24", verdict: "failed", cost_usd: 0.1, late: round },
+      ...aliasRows(T0 + 650_000 + round * 60_000, "W1-T23", 2 + round).map((row) => ({ ...row, ...properties })),
+      { ts: at(late), host: "h1", step: "verdict", task_id: "W1-T24", run_id: "r-W1-T24", verdict: "failed", cost_usd: 0.1, late: round, ...properties },
     ]);
     drain(board);
     const extended = bucketsOf(board);
@@ -181,6 +185,11 @@ test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
     assert.ok(lateAt >= 0 && lateAt < extended["W1-T24"]!.length - 1, `round ${round}: control, the late row is held and sorts before rows already held`);
     assert.equal(extended["W1-T23"]!.filter((r) => (JSON.parse(r) as Row).step === "dispatch.circuit_broken").length, 2 + round,
       `round ${round}: control, the bucket holds every alias row`);
+    const copied = board.index(board.rows()).byTask.get("W1-T24")!.find((row) => row.detail !== undefined)!;
+    assert.equal(Object.getPrototypeOf(copied), Object.prototype, "copying a JSON key never changes the row's prototype");
+    assert.ok(Object.hasOwn(copied, "__proto__"), "the copy preserves the JSON own property");
+    assert.equal(copied.run_id, undefined, "the JSON property does not supply an inherited run_id");
+    assert.deepEqual(copied.detail, properties.detail, "nested objects and array items preserve their JSON keys too");
   }
   // A/A: two uncached reads of one store agree, so the comparison above can tell a difference from noise.
   assert.deepEqual(uncachedBuckets(w), uncachedBuckets(w));
@@ -263,7 +272,11 @@ function built(w: World, db: ReadModelDb, view: ReturnType<typeof createNowView>
 }
 
 test("W1-T9716: now-view bodies are identical with the task cache on and off", (t) => {
-  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1)];
+  const start = (ms: number): Row => ({
+    ts: at(ms), host: "h1", step: "run.start", task_id: "W1-T21", provider: "codex",
+    ...JSON.parse('{"__proto__":{"run_id":"inherited"}}') as Row,
+  });
+  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1), start(T0 + 3_600_000)];
   const on = world(t, history);
   const off = world(t, history);
   const [onDb, offDb] = [counting(on.db), counting(off.db)];
@@ -274,16 +287,19 @@ test("W1-T9716: now-view bodies are identical with the task cache on and off", (
   const [onMark, offMark] = [onDb.bodyRows(), offDb.bodyRows()];
   for (let round = 0; round < 5; round++) {
     if (round > 0) {
-      const more = [...rowsFrom(T0 + 700_000 + round * 60_000, 2, 40 + round * 2), ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T26", round + 1)];
-      on.append(more);
-      off.append(more);
       // Past the clock rule's 30 s, so every aging projection re-derives as it does in serve.
       ms += 31_000;
       on.set(ms);
       off.set(ms);
+      const more = [...rowsFrom(T0 + 700_000 + round * 60_000, 2, 40 + round * 2), ...aliasRows(T0 + 710_000 + round * 60_000, "W1-T26", round + 1), start(ms)];
+      on.append(more);
+      off.append(more);
     }
     const [a, b] = [built(on, onDb.db, onView), built(off, offDb.db, offView)];
     assert.deepEqual(portable(on, a), portable(off, b), `round ${round}: the now-view bodies are byte-identical`);
+    assert.equal(JSON.stringify(portable(on, a)), JSON.stringify(portable(off, b)), `round ${round}: serialized now-view bodies agree`);
+    assert.ok(JSON.stringify(a).includes('"provider":"codex"'), `round ${round}: control, worker telemetry reaches the body`);
+    assert.ok(!JSON.stringify(a).includes('"runId":"inherited"'), `round ${round}: JSON keys never become worker.runId`);
     assert.ok(JSON.stringify(a).includes("W1-T21"), `round ${round}: control, the body lists the tasks`);
   }
   const [onReads, offReads] = [onDb.bodyRows() - onMark, offDb.bodyRows() - offMark];
