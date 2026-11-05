@@ -271,7 +271,9 @@ test("the shipped serve drift reader honors learned memory high in its actual st
   const exec = (cmd: string, args: string[]): string => {
     if (cmd === "bash") {
       policyCalls.push(args);
-      return execFileSync(cmd, args, { encoding: "utf8", env: { ...env, RMD_MEMINFO_PATH: meminfo } });
+      // Serve's hard limit is pinned by the operator override (W1-T11130): unset, the shared budget sizes it
+      // and the 16 GiB host's floors leave serve no ceiling, which is not what this test is about.
+      return execFileSync(cmd, args, { encoding: "utf8", env: { ...env, RMD_MEMINFO_PATH: meminfo, RMD_SERVE_MEMORY_LIMIT_MIB: "7680" } });
     }
     assert.equal(cmd, "docker");
     assert.deepEqual(args, ["inspect", SERVE_POLICY_CONTAINER, "--format", "{{json .HostConfig}}"]);
