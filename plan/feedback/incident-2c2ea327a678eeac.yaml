@@ -1,0 +1,29 @@
+id: incident-2c2ea327a678eeac
+ts: 2026-11-04T20:04:18.986Z
+raw: >-
+  Incident 2c2ea327a678: intervention
+  awaiting-review:review-lane:checks-green-its-proof-was-inconclusive
+
+  First seen: 2026-11-04T16:45:46.238Z
+
+  Last seen: 2026-11-04T16:45:46.238Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#15638@c0bbf9a75 actor=cao825 cause=awaiting-review:review-lane:checks-green-its-proof-was-inconclusive — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#2c2ea327a678eeaca5b5a144e53ed1439a8271f68af8b0f49a9578e512966237
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
