@@ -25,8 +25,8 @@ import { loadRunChildMode, runChildEffectiveMode, type RunChildMode } from "./po
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { pauseDetail, stopDetail } from "./fleet-control.js";
 import {
-  classifyRunChildLoss, createRunChildModeTracker, decideRunChildMode, emptyRunChildModeEvidence, readRunChildModeUnion, readRunChildPolicy,
-  runChildModeFor, runChildModeWindow, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence,
+  bootRunChildModeTracker, classifyRunChildLoss, createRunChildModeTracker, decideRunChildMode, emptyRunChildModeEvidence, readRunChildModeUnion,
+  readRunChildPolicy, runChildModeFor, runChildModeWindow, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence, type RunChildModeTracker,
 } from "./run-child-mode.js";
 import {
   RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, realRunChildProbe, runDir, writeSpec, writeStatus,
@@ -1401,16 +1401,24 @@ export function detachedWorkPlacement(
  */
 export const HOSTED_DETACHED_WORK_KINDS: ReadonlySet<DetachedWorkKind> = new Set<DetachedWorkKind>(["review", "fix-dispatch", "retro"]);
 
-/** `sweep.runChild.mode` as detached work reads it: `auto` is decided from the ledger evidence the build runs use (W1-T9087). */
+/**
+ * `sweep.runChild.mode` as detached work reads it: `auto` is decided from the ledger evidence the build runs use (W1-T9087).
+ * W1-T11341: that evidence is the tracker this process's boot folds (`bootRunChildMode`), which read the union once and has
+ * observed every run-child row since. Re-reading the union on each spawn held core's loop 34 s in one 11-04 stall. Only a
+ * process no boot handed a tracker (a one-shot command, a test) still reads the union, as before.
+ */
 export function detachedWorkModeNow(
   stateRoot: string, read: () => RunChildMode = () => loadRunChildMode(), readUnion: typeof readRunChildModeUnion = readRunChildModeUnion,
+  tracker: Pick<RunChildModeTracker, "evidence"> | undefined = bootRunChildModeTracker(stateRoot),
 ): DetachedWorkMode {
   const policy = readRunChildPolicy(read);
   if (policy.mode === undefined) return "off";
   if (policy.mode !== "auto") return runChildModeFor(policy.mode, emptyRunChildModeEvidence()).mode;
   try {
-    const union = readUnion(stateRoot);
-    const evidence = createRunChildModeTracker(runChildModeWindow(union.rows), undefined, union.unread).evidence();
+    const evidence = tracker?.evidence() ?? (() => {
+      const union = readUnion(stateRoot);
+      return createRunChildModeTracker(runChildModeWindow(union.rows), undefined, union.unread).evidence();
+    })();
     const decision = runChildModeFor("auto", evidence);
     // Build runs retain `on` after W1-T9089. Detached work still has an in-process path and must demote on contract loss.
     if (decision.decision && (decision.decision.evidence.lost > 0 || decision.decision.evidence.misidentified > 0)) return "shadow";
@@ -1432,6 +1440,10 @@ export interface DetachedWorkHostInput {
   /** The ledger rows the measured drain cost is read from. */
   readLedger: () => ReadonlyArray<Record<string, unknown>>;
   readMode?: () => RunChildMode;
+  /** W1-T11341: the evidence `auto` decides from; the boot's own tracker for `stateRoot` by default. */
+  tracker?: RunChildModeTracker;
+  /** The union read a host with no boot tracker falls back to; injectable so a test can count it. */
+  readUnion?: typeof readRunChildModeUnion;
   spawn?: typeof spawnRunChild;
   probe?: typeof startRunChildProbe;
   selectedRegistryIntent?: RunChildSpecOptions["selectedRegistryIntent"];
@@ -1446,7 +1458,13 @@ export interface DetachedWorkHostInput {
 export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWorkChildHost {
   const intent = copySelectedRegistryIntent(input.selectedRegistryIntent);
   const options = (): RunChildSpecOptions => ({ selectedRegistryIntent: intent });
-  const mode = (): DetachedWorkMode => detachedWorkModeNow(input.stateRoot, input.readMode);
+  const tracker = (): RunChildModeTracker | undefined => input.tracker ?? bootRunChildModeTracker(input.stateRoot);
+  const mode = (): DetachedWorkMode => detachedWorkModeNow(input.stateRoot, input.readMode, input.readUnion, tracker());
+  // The rows this host writes are evidence too: the tracker observes them as the daemon's own log does for its builds.
+  const log: Log = (step, extra) => {
+    input.log(step, extra);
+    tracker()?.observe(step, extra);
+  };
   let probing = false;
   return {
     hosts: HOSTED_DETACHED_WORK_KINDS,
@@ -1454,7 +1472,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
     async spawnReview({ pr, reviewKey, reviewAttemptId }) {
       // W1-T11162: a plan-only filing is lint and grep proofs, so it never pays for a run child's start.
       if (pr.isPlanFiling === true) {
-        input.log("review.placement", { pr_number: pr.prNumber, head_sha: pr.headSha, placement: "in-process", reason: "plan-only-filing" });
+        log("review.placement", { pr_number: pr.prNumber, head_sha: pr.headSha, placement: "in-process", reason: "plan-only-filing" });
         return undefined;
       }
       const current = mode();
@@ -1468,7 +1486,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
           probing = true;
           void (input.probe ?? startRunChildProbe)({
             taskId: `review-PR${pr.prNumber}`, stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-            plan: Promise.resolve({ plan: { tasks: [] } }), options: options(), log: input.log, work,
+            plan: Promise.resolve({ plan: { tasks: [] } }), options: options(), log, work,
           }, { readMode: () => "shadow" }).finally(() => { probing = false; });
         }
         return undefined;
@@ -1480,7 +1498,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       if (placement.placement !== "child") return undefined;
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "review", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
       });
       if (!launch.started) return undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge,
@@ -1496,7 +1514,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey, inputs: { repo: input.repo, envelope } };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "sweep-fix", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
@@ -1510,7 +1528,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = { kind: "retro", inputs: { decision } };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: "DAEMON", lane: "retro", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };

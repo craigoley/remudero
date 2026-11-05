@@ -43,7 +43,7 @@ test("canary production command prepares an inert private suite and failure awar
   try {
     command.canaryCommand(["prepare", dir]);
     const m = JSON.parse(readFileSync(join(dir, "model-canary-manifest.json"), "utf8"));
-    assert.equal(m.dailyCases, 12); assert.equal(m.cash.experimentDailyCapUsd, 0); assert.equal(m.retentionProtocols.length, 2);
+    assert.equal(m.dailyCases, 13); assert.equal(m.cash.experimentDailyCapUsd, 0); assert.equal(m.retentionProtocols.length, 2);
     assert.ok(m.tasks.every((t: object) => !Object.hasOwn(t, "expected")));
     const input = join(dir, "runs.json"); writeFileSync(input, "[]");
     command.canaryCommand(["project", join(dir, "report"), input]);

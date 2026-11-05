@@ -884,6 +884,12 @@
       "grepHint": "Recon: per-tool approval (W1-T3668)"
     },
     {
+      "path": "docs/recon/rmd-instance-registry-has-two-meanings.md",
+      "title": "`RMD_INSTANCE_REGISTRY` has two meanings",
+      "summary": "Snapshot: `origin/main` at `1438f25d780f8119342dbc36dc8715f9c6670e26` (2026-11-05). The only changes between this head and the earlier `9ddfd8b4ce0734de4a67499…",
+      "grepHint": "`RMD_INSTANCE_REGISTRY` has two meanings"
+    },
+    {
       "path": "docs/recon/the-polled-404.md",
       "title": "The polled 404 — a real `gh` 404, silently caught, that leaks anyway (W1-T3679)",
       "summary": "METHOD, STATED UP FRONT. This repo (checked out here as a worktree) has no live shell into the",

@@ -1,0 +1,32 @@
+id: incident-989d84911cb697e6
+ts: 2026-11-04T20:03:20.126Z
+raw: >-
+  Incident 989d84911cb6: flow pr-stage-stall:own-red:required checks red —
+  ci-log fix, fix round <n> — judge: continue (first fix round: no round, strike
+  or parked wait yet, so there is no progress...) — NOT DISPATCHED this pass:
+  duplicate fix-dispatch key (W1-T11149@<sha>) is held by its own detached fix
+  dispatch, worker for <duration>
+
+  First seen: 2026-11-04T20:00:13.899Z
+
+  Last seen: 2026-11-04T20:00:13.899Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16756 own-red: repeat: "required checks red — ci-log fix, fix round <n> — judge: continue (first fix round: no round, strike or parked wait yet, so there is no progress...) — NOT DISPATCHED this pass: duplicate fix-dispatch key (W1-T11149@<sha>) is held by its own detached fix dispatch, worker for <duration>" x3
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#989d84911cb697e66a90f6f20d30c437724abd2201c683298aa5618c81988461
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
