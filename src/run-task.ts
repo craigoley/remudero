@@ -1290,6 +1290,7 @@ import {
   captureDiagnosticsBundle,
   decideProgressWatchdog,
   openPrCountReadingFromRows,
+  readLiveRecyclePausePid,
   renderProgressWatchdogVerdict,
 } from "./lib/progress-watchdog.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
@@ -41188,7 +41189,9 @@ export function progressWatchdogCommand(
     step: PROGRESS_WATCHDOG_READ_STEPS,
   });
   const count = openPrCountReadingFromRows(read.rows);
-  const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: count.count, openPrCountSource: count.source });
+  const liveRecyclePausePid = readLiveRecyclePausePid(stateDir, run);
+  const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: count.count,
+    openPrCountSource: count.source, liveRecyclePausePid });
   const bundle = verdict.action === "capture-diagnostics"
     ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, { run })
     : undefined;
