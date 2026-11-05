@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
-import type { BoardSnapshotState } from "./board.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { boundedMessages, escalationIssueLocation, projectEscalationCorrespondence, type EscalationAttention } from "./escalation-conversation.js";
 import { readAllThreads, type ThreadMessage } from "./inbox-thread.js";
@@ -81,8 +80,19 @@ export interface EscalationIndexOptions {
   readThreads?: (path: string) => ReturnType<typeof readAllThreads>;
 }
 
+interface EscalationIndexBoardTask {
+  taskId: string;
+  escalationIssueUrl?: string;
+  escalationTitle?: string;
+  escalationOpenedAt?: string;
+  escalationUnverified?: boolean;
+}
+type EscalationIndexBoardState =
+  | { state: "ready"; snapshot: { tasks: readonly EscalationIndexBoardTask[] } }
+  | { state: "unavailable"; reason: string; buildStartedAt?: string; checkedAt?: string };
+
 /** The board snapshot's escalation flags, or an explicit outage; an absent source is never an empty board. */
-export function boardFlagsOf(state: BoardSnapshotState | undefined): EscalationIndexBoard {
+export function boardFlagsOf(state: EscalationIndexBoardState | undefined): EscalationIndexBoard {
   if (state?.state !== "ready") return { state: "unavailable", reason: state?.reason ?? "no board snapshot source" };
   return { state: "ready", flags: state.snapshot.tasks.flatMap(task => task.escalationIssueUrl ? [{
     taskId: task.taskId, issueUrl: task.escalationIssueUrl,

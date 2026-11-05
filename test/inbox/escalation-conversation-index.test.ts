@@ -27,7 +27,7 @@ function fixture() {
     detail: "PR stage stalled: #15520 — own-red. The diagnosis is unknown.", recommendation: "Investigate the failed stage.",
     options: [{ label: "Investigate", detail: "Find the cause before changing the pull request." }] }, {
     ledgerPath: join(root, "state", "ledger.ndjson"), runId: "fixture", threadStorePath: store, now: deps.now,
-    issues: { create(title, body) { issue.title = title; issue.body = body; return ISSUE; } },
+    issues: { create(title: string, body: string) { issue.title = title; issue.body = body; return ISSUE; } },
   } as never);
   let board: EscalationIndexBoard = { state: "ready", flags: [{ taskId: "W1-T42", issueUrl: ISSUE, title: "PR #15520 needs clarification", openedAt: AT }] };
   const index = () => createEscalationConversationIndexReader({ repository: REPOSITORY, threadStorePath: store,

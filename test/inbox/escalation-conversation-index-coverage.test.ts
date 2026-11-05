@@ -52,7 +52,7 @@ test("a complete snapshot reports whole folder counts and distinct loaded counts
   assert.notEqual(first.counts.loaded.total, first.counts.total);
   assert.ok(first.page.nextCursor);
   const seen = new Set(first.items.map(i => i.id));
-  let cursor = first.page.nextCursor, pages = 1;
+  let cursor: string | null = first.page.nextCursor, pages = 1;
   while (cursor) {
     const next = f.list({ limit: "3", cursor });
     for (const item of next.items) { assert.equal(seen.has(item.id), false, "no row repeats across pages"); seen.add(item.id); }
