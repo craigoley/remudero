@@ -57,7 +57,7 @@ function table(procs: Record<string, FakeProc>, extra: Partial<ProcessCwdCensusD
       ].join("\n");
     },
     ownUid: DAEMON_UID,
-    now: () => 0,
+    clock: { now: () => 0 },
     ...extra,
   };
 }
@@ -110,7 +110,7 @@ test("W1-T10389 criterion 2: an unreadable cwd on the daemon's own uid, an unrea
     readBoundedProcessCwdCensus(OWNER, {
       readNextPid: () => pending.shift() ?? null,
       readCwd: () => { throw denied("EACCES"); },
-      now: () => 0,
+      clock: { now: () => 0 },
     }),
     { state: "unknown", scanned: 1, reason: "cwd_unreadable" },
   );

@@ -138,9 +138,8 @@ export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
 import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
 import { daemonBoot } from "./lib/daemon.js";
-import { describeProcessCwdProbe, pathIsAtOrBelow, readBoundedProcessCwdCensus, type ProcessCwdCensus, type UnreadableCwdDetail } from "./lib/process-cwd-census.js";
-// W1-T10389: the census moved to its own module; run-task re-exports it for its existing importers.
-export { readBoundedProcessCwdCensus, type ProcessCwdCensus, type ProcessCwdCensusDeps } from "./lib/process-cwd-census.js";
+import { describeProcessCwdProbe, pathIsAtOrBelow, readBoundedProcessCwdCensus as readProcessCwdCensus, type ProcessCwdCensus, type ProcessCwdCensusDeps, type UnreadableCwdDetail } from "./lib/process-cwd-census.js";
+export type { ProcessCwdCensus, ProcessCwdCensusDeps } from "./lib/process-cwd-census.js";
 import { settleRunChildBacklog } from "./lib/run-child.js";
 export { readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync };
 import { tsImport } from "tsx/esm/api";
@@ -30298,6 +30297,16 @@ export function decideRegisteredFixOwnerRecovery(
   return { kind: "reclaim-contained" };
 }
 
+/** W1-T2952's census signature, kept for its existing callers: W1-T10389 moved the census into
+ *  src/lib/process-cwd-census.ts, which takes the Clock port; this forwards a legacy `now` onto it. */
+export function readBoundedProcessCwdCensus(
+  ownerPath: string,
+  deps: Omit<ProcessCwdCensusDeps, "clock"> & { now?: () => number } = {},
+): ProcessCwdCensus {
+  const { now, ...rest } = deps;
+  return readProcessCwdCensus(ownerPath, now ? { ...rest, clock: { now } } : rest);
+}
+
 export interface CaptureRegisteredFixOwnerDeps {
   processCensus?: (ownerPath: string) => ProcessCwdCensus;
   readClaim?: (inflightDir: string, claimKey: string) => "clear" | "occupied" | "unknown";
@@ -30429,7 +30438,7 @@ export function captureRegisteredFixOwnerSnapshot(
   if (snapshot.claimState !== "clear") return snapshot;
 
   let unreadable: UnreadableCwdDetail | undefined;
-  const process = (deps.processCensus ?? ((path: string) => readBoundedProcessCwdCensus(path, {
+  const process = (deps.processCensus ?? ((path: string) => readProcessCwdCensus(path, {
     onUnreadable: (detail) => { unreadable = detail; },
   })))(ownerPath);
   snapshot.processState = process.state;

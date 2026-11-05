@@ -1,5 +1,6 @@
 import { opendirSync, readFileSync, readlinkSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 
 /** W1-T2952: the bounded `/proc` census that decides whether any live process still works inside a dead
  *  fix round's worktree. W1-T10389 moved it out of src/run-task.ts so its own suite can import it without
@@ -16,7 +17,7 @@ export interface ProcessCwdCensusDeps {
   ownUid?: number;
   /** W1-T10389: told why an unreadable cwd still answered `unknown`, so the decline row can name it. */
   onUnreadable?: (detail: UnreadableCwdDetail) => void;
-  now?: () => number;
+  clock?: Pick<Clock, "now">;
   maxEntries?: number;
   wallMs?: number;
 }
@@ -69,7 +70,8 @@ export function readBoundedProcessCwdCensus(
   ownerPath: string,
   deps: ProcessCwdCensusDeps = {},
 ): ProcessCwdCensus {
-  const now = deps.now ?? Date.now;
+  const clock = deps.clock ?? systemClock;
+  const now = () => clock.now();
   const maxEntries = deps.maxEntries ?? FIX_OWNER_PROC_ENTRY_BOUND;
   const wallMs = deps.wallMs ?? FIX_OWNER_PROC_WALL_MS;
   const started = now();
