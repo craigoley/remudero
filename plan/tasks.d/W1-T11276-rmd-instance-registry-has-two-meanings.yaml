@@ -4,7 +4,7 @@
   depends_on: []
   priority: 2
   type: recon
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: high
   origin: operator-session#registry-followups-2026-11-03
   plan_refs:
@@ -13,7 +13,8 @@
   files:
     - docs/recon/rmd-instance-registry-has-two-meanings.md
     - docs/docs-index.json
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-05T18:20:15.375Z
   attempts: 0
   acceptance:
     - claim: The report lists every reader of RMD_INSTANCE_REGISTRY in deploy/, scripts/ and src/ with file:line, which meaning each applies (legacy registry or active selection), and what each does when the variable names an instance it does not hold
