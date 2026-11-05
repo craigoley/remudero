@@ -1,10 +1,11 @@
 /**
  * W1-T11130 criterion 3, the production wiring: the memory policy reads each peer's learned peak from
  * that peer's own state root, found through the instance registry. On the host that policy runs inside
- * the RENDERED watchdog (install-host-units.sh's launcher): the revival sources it, and the memory-high
- * tuner sources it on every tick. The launcher stores the installed registry as INSTANCE_REGISTRY, so
- * both must receive it as RMD_INSTANCE_REGISTRY, or they fall back to the checkout's own registry and
- * ignore a custom selection's peer roots (#16468 review, 2026-11-04).
+ * the RENDERED watchdog (install-host-units.sh's launcher): the revival sources it, the memory-high
+ * tuner sources it on every tick, and a healthy tick's deploy-run evaluates it for its resource-policy
+ * drift read. The launcher stores the installed registry as INSTANCE_REGISTRY, so each of those calls
+ * must receive it (as RMD_RESOURCE_POLICY_REGISTRY), or it falls back to the checkout's own registry
+ * and ignores a custom selection's peer roots (#16468 reviews, 2026-11-04).
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -99,8 +100,8 @@ test("W1-T11130 criterion 3: the rendered watchdog's revival sizes memory.max fr
   assert.equal(revived.status, 0, `${revived.stdout}\n${revived.stderr}`);
   const args = readFileSync(f.argv, "utf8").split("\0").filter(Boolean);
   assert.ok(args.includes(withRegistry!), `the revival reads the installed registry's peer roots: ${withRegistry} in ${args.filter((a) => a.startsWith("--memory")).join(" ")}`);
-  // Nothing later in the launcher inherits the registry: it is restored after the one policy call.
-  assert.match(readFileSync(f.launcher, "utf8"), /unset RMD_INSTANCE_REGISTRY/);
+  // The revival never selects the registry: the launcher assigns no RMD_INSTANCE_REGISTRY of its own.
+  assert.doesNotMatch(readFileSync(f.launcher, "utf8"), /^\s*(export\s+)?RMD_INSTANCE_REGISTRY=/m);
 });
 
 test("W1-T11130 criterion 3: the rendered watchdog hands the memory-high tuner the installed registry, never exporting it", (t) => {
@@ -108,7 +109,7 @@ test("W1-T11130 criterion 3: the rendered watchdog hands the memory-high tuner t
   const seen = join(f.dir, "tuner-saw");
   // The tuner's own stand-in records the registry its environment carries, for core and for serve.
   writeFileSync(join(f.install, "deploy", "memory-high-tuner.sh"),
-    `#!/usr/bin/env bash\nprintf '%s %s\\n' "$2" "\${RMD_INSTANCE_REGISTRY-unset}" >> "${seen}"\n`, { mode: 0o755 });
+    `#!/usr/bin/env bash\nprintf '%s %s %s\\n' "$2" "\${RMD_RESOURCE_POLICY_REGISTRY-unset}" "\${RMD_INSTANCE_REGISTRY-unset}" >> "${seen}"\n`, { mode: 0o755 });
   const launcher = readFileSync(f.launcher, "utf8");
   // The two rendered tuner lines, run with the rendered POLICY_ENV setup, exactly as the tick runs them.
   const setup = /^POLICY_ENV=\(\)\n.*$/m.exec(launcher)?.[0];
@@ -120,11 +121,67 @@ test("W1-T11130 criterion 3: the rendered watchdog hands the memory-high tuner t
   const ran = spawnSync("bash", ["-euc", script], { env: f.launchEnv, encoding: "utf8", timeout: 10_000 });
   assert.equal(ran.status, 0, ran.stderr);
   assert.deepEqual(readFileSync(seen, "utf8").trim().split("\n"),
-    [`remudero-daemon ${f.registry}`, `remudero-serve ${f.registry}`]);
+    [`remudero-daemon ${f.registry} unset`, `remudero-serve ${f.registry} unset`]);
   // A legacy install with no registry hands the tuner nothing, so its checkout default stands.
   writeFileSync(seen, "");
   const legacy = spawnSync("bash", ["-euc", script.replace(`INSTANCE_REGISTRY='${f.registry}'`, "INSTANCE_REGISTRY=''")],
     { env: f.launchEnv, encoding: "utf8", timeout: 10_000 });
   assert.equal(legacy.status, 0, legacy.stderr);
-  assert.deepEqual(readFileSync(seen, "utf8").trim().split("\n"), ["remudero-daemon unset", "remudero-serve unset"]);
+  assert.deepEqual(readFileSync(seen, "utf8").trim().split("\n"), ["remudero-daemon unset unset", "remudero-serve unset unset"]);
+});
+
+test("W1-T11130 criterion 3: the rendered watchdog's healthy deploy-run reads its resource-policy drift through the installed registry", (t) => {
+  const f = watchdogFixture(t);
+  const launcher = readFileSync(f.launcher, "utf8");
+  const code = join(f.dir, "daemon-code"), seen = join(f.dir, "drift-saw"), driver = join(f.dir, "drift-driver.ts");
+  mkdirSync(join(code, "bin"), { recursive: true });
+  // deploy-run's stand-in runs the PRODUCTION drift read (readResourcePolicyDrift, real bash, the
+  // inherited environment) against the installed policy; only docker inspect is faked, at no limits.
+  writeFileSync(driver, [
+    `import { execFileSync } from "node:child_process";`,
+    `import { appendFileSync } from "node:fs";`,
+    `import { readResourcePolicyDrift } from ${JSON.stringify(join(REPO_ROOT, "src", "lib", "deployer.ts"))};`,
+    `const hostConfig = JSON.stringify({ Memory: 0, MemorySwap: 0, CpuShares: 0, MemoryReservation: 0, Annotations: null });`,
+    `const exec = (cmd: string, args: string[]) => cmd === "docker" ? hostConfig : execFileSync(cmd, args, { encoding: "utf8" });`,
+    `const drift = readResourcePolicyDrift(exec, ${JSON.stringify(f.install)}, "build", process.env.RMD_RESOURCE_POLICY_CONTAINER ?? "", ${JSON.stringify(f.state)});`,
+    `const memory = drift?.find((d) => d.field === "Memory")?.expected;`,
+    `appendFileSync(${JSON.stringify(seen)}, \`\${process.env.RMD_RESOURCE_POLICY_CONTAINER} \${memory === undefined ? "none" : \`--memory=\${memory / 1048576}m\`} \${process.env.RMD_INSTANCE_REGISTRY ?? "unset"}\\n\`);`,
+    "",
+  ].join("\n"));
+  writeFileSync(join(code, "bin", "rmd"), `#!/usr/bin/env bash\ncd ${JSON.stringify(REPO_ROOT)} && exec node --import tsx ${JSON.stringify(driver)}\n`, { mode: 0o755 });
+  // The rendered deadline wrapper and the rendered healthy-tick deploy-run call, run as the tick runs them.
+  const wrapper = /^WATCHDOG_DEPLOY_DEADLINE_S=.*\nwatchdog_deploy_run\(\) \([\s\S]*?\n\)$/m.exec(launcher)?.[0];
+  const call = /^\s*if watchdog_deploy_out="\$\(cd "\$DAEMON_CODE".*\n.*\n.*deploy-run --image-drift-only.*$/m.exec(launcher)?.[0];
+  assert.ok(wrapper && call, "the launcher renders the deploy-run deadline wrapper and the healthy tick's deploy-run call");
+  const script = (registry: string) => [`INSTANCE_REGISTRY='${registry}'`, `DAEMON_CODE='${code}'`, `STATE_DIR='${f.state}'`,
+    "DEPLOY_SHADOW_ARGS=()", wrapper, call, "  printf '%s\\n' \"$watchdog_deploy_out\"", "fi"].join("\n");
+  const withRegistry = policyMemory(f.launchEnv, "remudero-daemon", f.registry);
+  const without = policyMemory(f.launchEnv, "remudero-daemon", undefined);
+  assert.ok(withRegistry && without && withRegistry !== without, `the custom peer root moves the formula: ${withRegistry} vs ${without}`);
+  const ran = spawnSync("bash", ["-euc", script(f.registry)], { env: f.launchEnv, encoding: "utf8", timeout: 60_000 });
+  assert.equal(ran.status, 0, ran.stderr);
+  // The drift read sees the custom peer root's 9000 MiB console peak, and is handed no selection.
+  assert.deepEqual(readFileSync(seen, "utf8").trim().split("\n"), [`remudero-daemon ${withRegistry} unset`]);
+  // A legacy install with no registry leaves the drift read on the checkout default.
+  writeFileSync(seen, "");
+  const legacy = spawnSync("bash", ["-euc", script("")], { env: f.launchEnv, encoding: "utf8", timeout: 60_000 });
+  assert.equal(legacy.status, 0, legacy.stderr);
+  assert.deepEqual(readFileSync(seen, "utf8").trim().split("\n"), [`remudero-daemon ${without} unset`]);
+});
+
+test("W1-T11130 criterion 3: the rendered watchdog's edge heal, which can start serve under the serve policy, gets the installed registry", (t) => {
+  const f = watchdogFixture(t);
+  const seen = join(f.dir, "edge-heal-saw");
+  // edge-heal.sh's stand-in records what serve-container.sh (its child, which sources the policy) inherits.
+  writeFileSync(join(f.install, "deploy", "edge-heal.sh"),
+    `#!/usr/bin/env bash\nprintf '%s %s\\n' "\${RMD_RESOURCE_POLICY_REGISTRY:-unset}" "\${RMD_INSTANCE_REGISTRY-unset}" >> "${seen}"\n`, { mode: 0o755 });
+  const call = /^.*out="\$\(RMD_STATE_DIR="\$STATE_DIR".*deploy\/edge-heal\.sh"\)" \|\| hrc=\$\?$/m.exec(readFileSync(f.launcher, "utf8"))?.[0];
+  assert.ok(call, "the core launcher renders the edge-heal call");
+  const script = (registry: string) => [`INSTANCE_REGISTRY='${registry}'`, `CHECKOUT='${f.install}'`, `STATE_DIR='${f.state}'`, "hrc=0", call].join("\n");
+  for (const [registry, want] of [[f.registry, `${f.registry} unset`], ["", "unset unset"]] as const) {
+    writeFileSync(seen, "");
+    const ran = spawnSync("bash", ["-euc", script(registry)], { env: f.launchEnv, encoding: "utf8", timeout: 10_000 });
+    assert.equal(ran.status, 0, ran.stderr);
+    assert.equal(readFileSync(seen, "utf8").trim(), want);
+  }
 });

@@ -184,12 +184,17 @@ resource_policy_tuned_file() {
 # row: the primary instance's watchdog tunes it, so serve's records live under the `primary: true` row's
 # root. A retired row is skipped. Status 1 when there is no registry, no such instance, a relative
 # state_dir, or no <state_dir>/state directory here. RMD_MEMORY_HIGH_TUNED_DIR pins one shared directory
-# instead, so it also turns this lookup off.
+# instead, so it also turns this lookup off. With RMD_INSTANCE_REGISTRY unset, RMD_RESOURCE_POLICY_REGISTRY
+# names the registry for this lookup alone: the rendered watchdog hands its installed registry that way to
+# each call that reaches here (tuner, revival, deploy-run's drift read, edge heal), because those callers
+# read RMD_INSTANCE_REGISTRY as an active selection (W1-T10573).
 resource_policy_instance_state_dir() {
   local registry root
   [ -z "${RMD_MEMORY_HIGH_TUNED_DIR:-}" ] || return 1
   if [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
     registry="${RMD_INSTANCE_REGISTRY}" # set but empty: no registry
+  elif [ -n "${RMD_RESOURCE_POLICY_REGISTRY:-}" ]; then
+    registry="${RMD_RESOURCE_POLICY_REGISTRY}"
   else
     registry="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)/.remudero/daemon-instances.yaml"
   fi
