@@ -80,15 +80,21 @@ export function clockFromIsoFn(fn?: () => string): Clock {
  * When a stalled loop resumes, Node runs due timers before I/O, so a plain timer fires ahead of a result already
  * waiting in a pipe or socket. A firing late by a twentieth of the budget or more therefore re-arms for the time the
  * loop was held, and only a deadline that fires on a free loop expires (#11962's exchange deadline, generalised).
+ * W1-T11368: the grace those re-arms grant is capped at the budget itself, so a loop held at every firing still
+ * expires — after at most twice the budget plus the last held turn — instead of re-arming without end.
  */
 export function loopAvailableDeadline(clock: Clock, budgetMs: number, onExpire: () => void): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let granted = 0;
   const arm = (ms: number): void => {
     const dueAt = clock.now() + ms;
     timer = setTimeout(() => {
       const late = clock.now() - dueAt;
-      if (late >= budgetMs / 20) arm(Math.min(late, budgetMs));
-      else onExpire();
+      const grace = Math.min(late, budgetMs - granted);
+      if (late >= budgetMs / 20 && grace > 0) {
+        granted += grace;
+        arm(grace);
+      } else onExpire();
     }, ms);
   };
   arm(budgetMs);
