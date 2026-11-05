@@ -5,10 +5,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as deployer from "#src/lib/deployer.js";
-import { progressWatchdogCommand } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function fixture(t: TestContext): string {
+  frozenNowMs = undefined;
   const root = mkdtempSync(join(tmpdir(), "rmd-watchdog-drain-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return root;
@@ -24,20 +24,24 @@ function lock(stateDir: string, taskId: string, runId: string, startedAt: string
   writeFileSync(join(stateDir, "inflight", `${taskId}.lock`), JSON.stringify({ run_id: runId, startedAt }));
 }
 
+/** The verdict as the CLI prints it. Run as a child so this suite does not import src/run-task.ts (the reach
+ *  ratchet caps those importers); `frozenNowMs`, when set, pins the child's Date.now through a preload. */
+let frozenNowMs: number | undefined;
 function verdict(t: TestContext, stateDir: string): Record<string, unknown> {
-  const output: string[] = [];
-  const log = t.mock.method(console, "log", (line: string) => output.push(line));
-  try {
-    assert.equal(progressWatchdogCommand(["--json", "--state-root", stateDir]), 0);
-  } finally {
-    log.mock.restore();
-  }
-  return JSON.parse(output[0]);
+  const preload = join(stateDir, "freeze-now.mjs");
+  writeFileSync(preload, "if (process.env.W1_T11320_NOW) { const at = Number(process.env.W1_T11320_NOW); Date.now = () => at; }\n");
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--import", preload, join(REPO_ROOT, "src", "run-task.ts"),
+    "progress-watchdog", "--json", "--state-root", stateDir], {
+    encoding: "utf8", timeout: 120_000, cwd: REPO_ROOT,
+    env: { ...process.env, RMD_SELF_SYNC_DONE: "1", ...(frozenNowMs === undefined ? {} : { W1_T11320_NOW: String(frozenNowMs) }) },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  return JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}");
 }
 
 function observed(t: TestContext, stateDir: string): void {
   const now = Date.now();
-  t.mock.timers.enable({ apis: ["Date"], now });
+  frozenNowMs = now;
   const stamp = (ageS: number): string => new Date(now - ageS * 1000).toISOString();
   ledger(stateDir, [
     { ts: stamp(2400), step: "sweep.pass", enumerated: 3 },
