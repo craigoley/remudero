@@ -3,12 +3,13 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: low
   priority: 1
   # redesign: signature=edc82c8dbf9f3a4d
   # redesign: signature=8892c0e7448b5e87
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-05T18:20:15.263Z
   attempts: 0
   author_class: machine
   origin: "comment-compression:src/lib/plan.ts"
@@ -17,7 +18,7 @@
     - test/plan/compress-src-lib-plan-ts.test.ts
   acceptance:
     - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
-      proof: "grep: \"// comments compressed\" in src/lib/plan.ts"
+      proof: "unit test: test/plan/compress-src-lib-plan-ts.test.ts"
   rationale: |
     Observed 325 comment lines in src/lib/plan.ts. This is maintenance debt, never a merge ceiling.
     Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
@@ -31,3 +32,8 @@
 
     2026-11-04, by the redesign Architect (machine, rule 16): Replace unit test proof with a grep proof that checks for a new compression marker comment, preserving the original claim.
     Add a marker comment "// comments compressed" to src/lib/plan.ts after compression and change the acceptance proof to grep for this marker, ensuring the claim of reduced comment volume is directly verified.
+
+    2026-11-04, operator-approved proof correction (AskUserQuestion, "Swap proof on #16652"): the rule-16 marker proof above
+    was a comment-only grep, which review always grades executed_stale (matchedLinesAreAllComments, src/lib/review.ts), so the
+    criterion could never pass. The proof now runs the task's own regression test file, test/plan/compress-src-lib-plan-ts.test.ts,
+    in path form; lint-plan refuses the title form (proof-unit-test-base-wrapper). The claim is unchanged. Root cause: W1-T11376.

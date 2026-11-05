@@ -465,12 +465,12 @@ test("W1-T460 (5): the call site spreads BOTH of buildBaseProofDir's facts onto 
   const src = sources[0]!;
   assert.match(
     src,
-    /buildBaseProof:\s*buildBaseProofDir/,
-    "reviewCommand's injectable base-proof seam must retain buildBaseProofDir as its production default",
+    /buildBaseProof:\s*buildBaseProofDirAsync\b/,
+    "reviewCommand's injectable base-proof seam must default to the awaited builder (W1-T11341), so its base git never holds the loop",
   );
   assert.match(
     src,
-    /const baseProof = worktreePath \? buildBaseProof\(criteria, worktreePath\) : undefined/,
+    /const baseProof = worktreePath \? await buildBaseProof\(criteria, worktreePath\) : undefined/,
     "reviewCommand must build the base facts from its materialised head worktree",
   );
   // (R-11) The spread became three NAMED fields — the builder's result now also drives teardown

@@ -23,7 +23,20 @@ const TUNER = join(REPO_ROOT, "deploy", "memory-high-tuner.sh");
 const MIB = 1024 * 1024;
 const HOST_KB = 16371996; // the fleet host's MemTotal, read 2026-10-09 (15988 MiB)
 const CONSOLE = "remudero-console-daemon";
-const CONSOLE_MAX_MIB = 15988 - 5120 - 2048; // the build memory.max the policy already sets (8820)
+const CONSOLE_MAX_MIB = 15988 - 5120 - 2048; // the live memory.max the fixture cgroups report (8820)
+const FLEET = ["remudero-daemon", "remudero-serve", CONSOLE, "remudero-site-daemon"];
+
+/**
+ * W1-T11130: each container's memory.max is the host less the reserve less the OTHER containers' learned
+ * peaks, and a container with no record counts its working-set floor. On this 15988 MiB host the floors
+ * alone exceed the budget, so these fixtures record the measured peaks (MiB per container) a running fleet
+ * would have, and the policy under test sizes memory.high from a memory.max it can actually hold.
+ */
+function seedPeaks(stateRoot: string, peaks: Record<string, number>): void {
+  for (const [name, mib] of Object.entries(peaks)) {
+    writeFileSync(join(stateRoot, "state", `memory-peak-${name}.json`), `{"container":"${name}","peak_mib":${mib}}\n`);
+  }
+}
 
 /** One decision through the shipped shell: MH_* inputs in, "<action> <target>" out. */
 function decide(inputs: Record<string, string | number>): { action: string; target: number; reason: string } {
@@ -114,6 +127,7 @@ function host(container = CONSOLE): { root: string; env: NodeJS.ProcessEnv; cg: 
   mkdirSync(cg, { recursive: true });
   mkdirSync(join(root, "bin"));
   mkdirSync(join(root, "cfg", "state"), { recursive: true });
+  seedPeaks(join(root, "cfg"), Object.fromEntries(FLEET.map((name) => [name, 1024])));
   writeFileSync(join(cg, "memory.high"), `${2048 * MIB}\n`);
   writeFileSync(join(cg, "memory.max"), `${CONSOLE_MAX_MIB * MIB}\n`);
   writeFileSync(join(cg, "memory.events"), "low 0\nhigh 1124\nmax 0\noom 0\n");
@@ -147,6 +161,7 @@ function host(container = CONSOLE): { root: string; env: NodeJS.ProcessEnv; cg: 
       RMD_VMSTAT_PATH: join(root, "vmstat"),
       RMD_HOST_PSI_MEMORY_PATH: join(root, "psi"),
       RMD_MEMORY_HIGH_SUDO: "env",
+      RMD_INSTANCE_REGISTRY: "", // set but empty: the policy reads peers' records from this fixture's one state root only
     },
   };
 }
@@ -164,8 +179,10 @@ test("serve tuning honors its canonical hard-capped policy instead of the build 
       const id = "c0ffee".padEnd(64, "0");
       writeFileSync(join(h.root, "cfg", "state", `memory-high-sample-${container}.txt`),
         `v1 ${then} ${id} 1124 25000 5000 30 0\n`);
+      // Serve's hard cap is pinned by the operator override (W1-T11130): unset, the shared budget sizes
+      // serve and a build daemon alike, and this test could no longer tell the two policies apart.
       const run = spawnSync("bash", [TUNER, "--container", container, "--state-dir", join(h.root, "cfg")],
-        { encoding: "utf8", env: h.env });
+        { encoding: "utf8", env: { ...h.env, RMD_SERVE_MEMORY_LIMIT_MIB: "7680" } });
       assert.equal(run.status, 0, run.stderr);
       assert.match(run.stdout, new RegExp(`hold at ${policyMiB} MiB \\(policy ${policyMiB}\\)`));
       assert.equal(readFileSync(join(h.cg, "memory.high"), "utf8").trim(), String(policyMiB * MIB));
@@ -233,6 +250,8 @@ test("the drift check treats a learned memory.high as current, and a recycle sta
     copyFileSync(join(REPO_ROOT, "deploy", "resource-policy.sh"), join(root, "deploy", "resource-policy.sh"));
     writeFileSync(join(root, "meminfo"), `MemTotal:       ${HOST_KB} kB\n`);
     const env = { PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "meminfo") };
+    // Console's limit is the host less the reserve less the others' peaks: 13940 - (2048 + 2048 + 1024) = 8820.
+    seedPeaks(join(root, "cfg"), { "remudero-daemon": 2048, "remudero-serve": 2048, "remudero-site-daemon": 1024 });
     const limits = { Memory: CONSOLE_MAX_MIB * MIB, MemorySwap: (CONSOLE_MAX_MIB + 4096) * MIB, CpuShares: 512, MemoryReservation: 0 };
     const driftAt = (annotation: number | null): ResourcePolicyDrift[] | undefined =>
       readResourcePolicyDrift(
@@ -385,10 +404,16 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
       assert.equal(run.status, 0, run.stderr);
       assert.equal(run.signal, null, "a signalled fixture is not a result");
       const argv = readFileSync(argvPath, "utf8").split("\0\0").filter(Boolean).map(command => command.split("\0"));
-      assert.deepEqual(argv, [
-        ["inspect", "--format", "{{.Id}}", row.current],
-        ...(row.fault === "short-inspect" ? [] : [["ps", "--no-trunc", "--format", "{{.Names}} {{.ID}}"]]),
-      ], "the real shell must ask Docker for full IDs with the documented ps field");
+      // The policy read the tuner makes (W1-T11130) also records each fleet container's cgroup memory.peak,
+      // one `docker inspect --format {{.Id}} <fleet name>` per container. Those probes are the only calls
+      // allowed beyond the tuner's own; any other argv, or a probe of a non-fleet name, still fails here.
+      const fleetNames = ["remudero-daemon", "remudero-serve", "remudero-console-daemon", "remudero-site-daemon"];
+      const isPeakProbe = (c: string[]) => c.length === 4 && c[0] === "inspect" && c[1] === "--format" && c[2] === "{{.Id}}" && fleetNames.includes(c[3]!);
+      assert.deepEqual(argv[0], ["inspect", "--format", "{{.Id}}", row.current], "the tuner's first call identifies its own container");
+      assert.deepEqual(argv.slice(1).filter((c) => !isPeakProbe(c)),
+        row.fault === "short-inspect" ? [] : [["ps", "--no-trunc", "--format", "{{.Names}} {{.ID}}"]],
+        "the real shell must ask Docker for full IDs with the documented ps field");
+      if (row.fault === "short-inspect") assert.equal(argv.length, 1, "a short identity holds before any policy read or peak probe");
       assert.equal(readFileSync(join(h.cg, "memory.high"), "utf8").trim(), String(row.target * MIB), run.stdout);
       assert.match(run.stdout, new RegExp(row.action === "hold" ? "hold" : row.action + " .*via systemd"));
       const calls = readFileSync(h.calls, "utf8");

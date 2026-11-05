@@ -1,0 +1,48 @@
+- id: W1-T11424
+  title: "Every keyed ledger reader in the daemon, serve and the CLI asks ledgerRowsFor, and the whole-ledger census allowlist empties to the history readers that already digest each archive once"
+  repo: remudero
+  depends_on:
+    - W1-T11423
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span # many reader files, one concern: they ask a keyed question through one API
+  origin: operator-session#whole-ledger-reads-2026-11-05
+  plan_refs:
+    - W1-T11423
+    - W1-T11340
+  files:
+    - src/run-task.ts
+    - src/lib/review.ts
+    - src/lib/human-gate.ts
+    - src/lib/field-trials-flow.ts
+    - src/lib/routing-experiments.ts
+    - src/lib/pr-owner-ledger.ts
+    - src/lib/pr-state.ts
+    - src/lib/retro.ts
+    - src/lib/analytics-route.ts
+    - src/lib/benchmark-cohort.ts
+    - test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts
+    - test/ledger/keyed-ledger-readers-ask-ledgerrowsfor.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Dep-review proposalProgress, the review prior-verdict lookup, the human-gate measurement and field-trials' controlled read answer their task, PR or step questions through ledgerRowsFor, opening only the archives that hold their keys
+      proof: "unit test: test/ledger/keyed-ledger-readers-ask-ledgerrowsfor.test.ts"
+    - claim: The whole-ledger census allowlist holds no keyed reader; each remaining whole-history reader passes a rotationRecords digest, so a repeat pass decompresses no archive it has already reduced
+      proof: "grep: W1-T11424 criterion 2 in test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts"
+  rationale: |
+    W1-T11423 adds ledgerRowsFor and seeds the census allowlist with every reader in its inventory that still asks a keyed question by scanning the whole union, or streams whole history with no digest. This task moves each one, so the allowlist is left with only whole-history aggregates that reduce each immutable archive once (ledgerRotationDigests). The 2026-11-05 core OOMs (4.0 GB under readLedgerUnionRecordsSync from dep-review proposalProgress) and the 11-04 hung reviews (priorPostedReviewRow) were both keyed questions.
+  design: |
+    1. Keyed readers: proposalProgress (task ids of the proposal's tasks), priorPostedReviewRow (the PR number, plus step review.posted), human-gate measureFeedbackAge (its feedback steps), field-trials readControlledLedgerRows and routing-experiments (their steps). Each calls ledgerRowsFor with the narrowest key it has. Each keeps its refusal and unread contracts, and an unindexed archive still counts as read in full.
+    2. Whole-history readers (the pr-owner projection, retro, the analytics snapshot, pr-state, benchmark-cohort, field-trials readFieldTrialsLedger) pass a ledgerRotationDigests hook with a reducer equal to their own filter, so each archive is decompressed once per holder and reducer version, not once per pass.
+    3. Each migrated reader leaves the census allowlist; the census test asserts that no keyed reader remains on it.
+    Tests: for each keyed reader, a state dir where its key lives in k of N archives; the reader opens exactly those k, with the same result as at base. At base, every reader opens all N.
+  falsifier: |
+    At origin/main (with W1-T11423 merged), proposalProgress, priorPostedReviewRow, the human-gate measurement and field-trials' controlled read still open every archive for a keyed question, and the census allowlist still names them.
+  note: |
+    reservation hand-off: plan-file-1793893317000 -> plan-file-1793893317000
+    Reserved with rmd next-task-id --branch plan-file-1793893317000 from the operator session's ops worktree. If the separate proposalProgress hotfix lands first with a narrower bound, migrating it here is still in scope: the census allowlist must not keep it.

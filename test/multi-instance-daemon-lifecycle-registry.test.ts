@@ -165,15 +165,22 @@ function calls(fx: Fixture): string[] {
 test("W1-T3532: a site instance's clean exit relaunches the site instance only, never core", { skip: BASH4_REQUIRED }, () => {
   const fx = makeFixture();
   const launcher = installInstance(fx, "site");
+  // A fixed host size, so the shared memory budget runs (and reads each fleet container) on every host, not only Linux.
+  const meminfo = join(fx.root, "meminfo");
+  writeFileSync(meminfo, "MemTotal:       33554432 kB\n");
 
-  const result = run(launcher, [], fx);
+  const result = run(launcher, [], fx, { RMD_MEMINFO_PATH: meminfo });
   assert.equal(result.status, 0, result.output);
 
   const recorded = calls(fx).join("\n");
+  assert.match(recorded, /docker\tinspect\t--format\t\{\{\.Id\}\}\tremudero-daemon/, "the shared budget read core's peak");
   assert.match(recorded, /docker\trm\t-f\tremudero-site-daemon/);
   assert.match(recorded, /docker\trun\t-d\t--name\tremudero-site-daemon/);
   assert.match(recorded, /\t--repo\tremudero-site\t--allow-self-target/);
-  assert.doesNotMatch(recorded, /remudero-daemon/);
+  // W1-T11130: the shared memory budget reads each fleet container's id for its cgroup peak; a site relaunch
+  // still never acts on core, so every recorded line naming core must be a docker inspect read.
+  const namesCore = recorded.split("\n").filter((line) => /(^|\t)remudero-daemon(\t|$)/.test(line));
+  assert.ok(namesCore.every((line) => /^docker\tinspect\t/.test(line)), `a site relaunch only reads core: ${namesCore.join(" | ")}`);
 });
 
 test("W1-T3532: STOP set for the site instance blocks only site revival; core's tick is unaffected", { skip: BASH4_REQUIRED }, () => {

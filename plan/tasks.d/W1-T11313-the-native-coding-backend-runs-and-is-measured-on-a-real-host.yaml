@@ -77,5 +77,5 @@
     confidence: 1
     reasons:
       - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-11-04T16:22:14.115Z"
-    pin: "ebfdb4ddcf75039da99e5e6a235e08e01e377d2b80da80c4c70d6d88fab9c157"
+    judged_at: "2026-11-04T23:03:47.198Z"
+    pin: "952aaefc701b28b0ae5dd4fde80eb03252cf5990b6f352aeb508bd9e8d261485"

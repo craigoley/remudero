@@ -4,7 +4,7 @@
   depends_on: []
   priority: 2
   type: recon
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: high
   origin: operator-session#registry-followups-2026-11-03
   plan_refs:
@@ -13,7 +13,8 @@
   files:
     - docs/recon/rmd-instance-registry-has-two-meanings.md
     - docs/docs-index.json
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-05T18:20:15.375Z
   attempts: 0
   acceptance:
     - claim: The report lists every reader of RMD_INSTANCE_REGISTRY in deploy/, scripts/ and src/ with file:line, which meaning each applies (legacy registry or active selection), and what each does when the variable names an instance it does not hold
@@ -30,8 +31,8 @@
   risk_ruling:
     verdict: "high"
     action: escalate
-    confidence: 0.94
+    confidence: 0.96
     reasons:
-      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filed rationale explicitly states that deciding RMD_INSTANCE_REGISTRY's meaning is an operator call; the escalation rule includes decisions only the operator can make.; on the change's description/files alone, no diff was read — Acceptance requires recommending that meaning and a live-fleet migration order. The declared scope is a recon report, so this assessment does not assert that runtime or deployment changes are included."
-    judged_at: "2026-11-04T04:01:17.292Z"
-    pin: "c5a5bc7e7f0050fce51bbd966bc42de99888a9fe077b3353979ae658998fe21b"
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The filed rationale explicitly says deciding RMD_INSTANCE_REGISTRY's meaning is an operator call; the gates require HIGH for decisions only the operator can make.; on the change's description/files alone, no diff was read — Acceptance requires recommending a meaning and migration order, while the declared changes are limited to a recon report and documentation index; no deployment implementation is proposed."
+    judged_at: "2026-11-04T23:03:47.191Z"
+    pin: "1fe37843dc452768383f74c5eb744ea0da1a9f0292778a36579cc918b49e3f48"
