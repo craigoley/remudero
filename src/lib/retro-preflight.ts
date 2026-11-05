@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { acquireTestSlotAsync, lowPriorityCommand, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotOptions } from "./test-slot.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { killProcessGroup } from "./worker-containment.js";
+import { fixedClock } from "./clock.js";
 
 /** PRIMARY CONTROL: maximum combined stdout/stderr bytes retained for one preflight attempt. */
 export const RETRO_PREFLIGHT_CAPTURE_BYTES = 16 * 1024;
@@ -555,6 +556,7 @@ async function runAttempt(
   run: RetroPrepublishRunner,
   now: () => number,
   deps: RunRetroPrepublishPreflightOptions["deps"],
+  onStart?: (suites: string[], selection: SuiteSelection, startedAt: number) => void,
 ): Promise<AttemptResult> {
   const startedAt = now();
   const testSlot = deps?.testSlot;
@@ -584,6 +586,7 @@ async function runAttempt(
     };
   }
 
+  onStart?.(enumeration.suites, selection, startedAt);
   // W1-T6111: the suite run is the heavy part, so it takes a host-wide slot, niced and at the
   // concurrency the slot grants. The ASYNC acquirer is deliberate: `acquireTestSlot` waits on a
   // synchronous Atomics.wait, which would freeze the event loop this awaited preflight shares with
@@ -661,6 +664,27 @@ function provenanceFields(provenance: RetroPrepublishProvenance): Record<string,
     served_model: provenance.servedModel ?? null,
     effort: provenance.effort,
     session_id: provenance.sessionId,
+  };
+}
+
+/** W1-T11326: the start row, written once the pool is known and before the slot wait and the suite spawn,
+ *  so a long gate is visible while it runs. A broad pool lists ~270 suites, so the names are capped. */
+const STARTED_ROW_SUITE_NAMES = 50;
+function logStart(opts: RunRetroPrepublishPreflightOptions, attempt: number) {
+  return (suites: string[], selection: SuiteSelection, startedAt: number): void => {
+    opts.log("retro.preflight_started", {
+      attempt,
+      suite_count: suites.length,
+      suites: suites.slice(0, STARTED_ROW_SUITE_NAMES),
+      suites_omitted: Math.max(0, suites.length - STARTED_ROW_SUITE_NAMES),
+      suite_selection: selection.mode,
+      suite_selection_reason: selection.reason,
+      changed_path_count: selection.changedPathCount,
+      broad_suite_count: selection.broadSuiteCount,
+      remote_pr_existed: opts.remotePrExisted,
+      started_at: fixedClock(startedAt).iso(),
+      ...provenanceFields(opts.provenance),
+    });
   };
 }
 
@@ -764,7 +788,7 @@ export async function runRetroPrepublishPreflight(
 ): Promise<RetroPrepublishResult> {
   const run = opts.deps?.run ?? runRetroPrepublishCommand;
   const now = opts.deps?.now ?? Date.now;
-  const first = await runAttempt(opts.worktreePath, run, now, opts.deps);
+  const first = await runAttempt(opts.worktreePath, run, now, opts.deps, logStart(opts, 1));
   logAttempt(opts, 1, first);
   if (first.ok) return { ok: true, attempts: 1, suiteCount: first.suiteCount, repaired: false };
 
@@ -823,7 +847,7 @@ export async function runRetroPrepublishPreflight(
     return { ok: false, attempts: 2, suiteCount: first.suiteCount, repaired: true };
   }
 
-  const second = await runAttempt(opts.worktreePath, run, now, opts.deps);
+  const second = await runAttempt(opts.worktreePath, run, now, opts.deps, logStart(opts, 2));
   logAttempt(opts, 2, second);
   return { ok: second.ok, attempts: 2, suiteCount: second.suiteCount, repaired: true };
 }

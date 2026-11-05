@@ -10,7 +10,7 @@
   band_meaning: span
   budget_usd: 12.00
   priority: 1.5
-  status: queued
+  status: merged
   attempts: 0
   origin: "Operator-approved eleven-existing-file source-only remudero-ops compatibility, 2026-10-24; no live selection or image/recycle release."
   prompt: |

@@ -536,6 +536,29 @@ export function readRunSettlement(ledgerText: string): { settled: Set<string>; j
   return { settled, judged };
 }
 
+/** The unsettled lane holders under a state directory, with ages at the caller's clock. */
+export function readDrainWaitLanes(stateDir: string, ledgerText: string, clock: () => number): DrainWaitLane[] {
+  const inflightDir = join(stateDir, "inflight");
+  const { settled, judged } = readRunSettlement(ledgerText);
+  const lanes: DrainWaitLane[] = [];
+  if (!existsSync(inflightDir)) return lanes;
+  for (const name of readdirSync(inflightDir)) {
+    if (!name.endsWith(".lock")) continue;
+    const taskId = name.slice(0, -".lock".length);
+    const holder = readLockHolder(inflightDir, taskId);
+    if (!holder || settled.has(holder.run_id)) continue;
+    const startedMs = Date.parse(holder.startedAt);
+    const verdict = judged.get(holder.run_id);
+    lanes.push({
+      runId: holder.run_id,
+      taskId,
+      ageS: Number.isFinite(startedMs) ? Math.max(0, Math.floor((clock() - startedMs) / 1000)) : 0,
+      ...(verdict ? { judged: verdict } : {}),
+    });
+  }
+  return lanes;
+}
+
 export interface Decision {
   deploy: boolean;
   reason: string;
@@ -2846,22 +2869,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
   const deriveWaitFromState = (): DerivedDrainWait | undefined => {
     try {
       const text = readLedgerText();
-      const { settled, judged } = readRunSettlement(text);
-      const lanes: DrainWaitLane[] = [];
-      for (const name of readdirSync(inflightDir)) {
-        if (!name.endsWith(".lock")) continue;
-        const taskId = name.slice(0, -".lock".length);
-        const holder = readLockHolder(inflightDir, taskId);
-        if (!holder || settled.has(holder.run_id)) continue;
-        const startedMs = Date.parse(holder.startedAt);
-        const verdict = judged.get(holder.run_id);
-        lanes.push({
-          runId: holder.run_id,
-          taskId,
-          ageS: Number.isFinite(startedMs) ? Math.max(0, Math.floor((clock() - startedMs) / 1000)) : 0,
-          ...(verdict ? { judged: verdict } : {}),
-        });
-      }
+      const lanes = readDrainWaitLanes(join(o.stateRoot, "state"), text, clock);
       const derived = deriveDrainWait(readImplementDurationsMs(text), lanes);
       log("deploy.recycle_wait_derived", {
         wait_s: derived.waitS,
