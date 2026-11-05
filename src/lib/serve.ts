@@ -1,6 +1,7 @@
 import { readDaemonMemoryPolicy, recordChildHeapGrowingPercent } from "./daemon-memory-policy.js";
 import { buildImprovementThreadRoutes } from "./improvement-thread.js";
 import { buildEscalationConversationRoute, createEscalationConversationReader } from "./escalation-conversation.js";
+import { boardFlagsOf, buildEscalationConversationIndexRoute, createEscalationConversationIndexReader } from "./escalation-conversation-index.js";
 /**
  * `rmd serve` assembler: route builders, GET / shell, port resolution and token persistence
  * (W1-T139, MASTER-PLAN §7/§7B). Reuse service.ts, board.ts, panel-actions.ts and panel-graph.ts
@@ -2779,6 +2780,10 @@ function assembleServeRoutes(
       return state?.state === "ready" && state.snapshot.tasks.some(task => task.escalationIssueUrl === url
         && task.taskId === identity.taskId && task.escalationUnverified !== true);
     }, ...deps.escalationConversation });
+  // W1-T11110: the mailbox index reads the same saved thread store and the same board snapshot the
+  // detail reader's provenance check uses, and projects correspondence through the same function.
+  const readEscalationIndex = createEscalationConversationIndexReader({ repository: deps.assistantRepository,
+    threadStorePath: inboxThreadStorePath(deps.fleetControlRoot), readBoard: () => boardFlagsOf(deps.boardSnapshotSource?.current()) });
   const fleetControlDeps: PanelActionDeps = {
     root: deps.fleetControlRoot,
     ledgerPath: deps.ledgerPath,
@@ -2988,6 +2993,7 @@ function assembleServeRoutes(
     // escalation that has a thread is accepted; one with no thread is still refused, never filed
     // unattached.
     buildEscalationConversationRoute(readEscalationConversation),
+    buildEscalationConversationIndexRoute(readEscalationIndex),
     buildEscalationReplyRoute(fleetControlDeps),
     // W1-T2696: the ping's own answer links. MOUNTED for the reason the note above states — a
     // declared-but-unreachable route is this module's recurring defect. Both are
