@@ -29,7 +29,7 @@ test("canary native preparation produces a pinned inert manifest without exposin
     const child = spawnSync(process.execPath, ["--import", "tsx", "src/lib/model-canary-command.ts", "prepare", dir], { encoding: "utf8" });
     assert.equal(child.status, 0, child.stderr);
     const manifest = JSON.parse(readFileSync(join(dir, "model-canary-manifest.json"), "utf8"));
-    assert.equal(manifest.dailyCases, 12); assert.equal(manifest.cash.globalDailyCapUsd, 25);
+    assert.equal(manifest.dailyCases, 13); assert.equal(manifest.cash.globalDailyCapUsd, 25);
     assert.equal(manifest.cash.experimentDailyCapUsd, 0); assert.ok(manifest.tasks.every((t: Record<string, unknown>) => !("expected" in t)));
     assert.throws(() => canaryCommand(["prepare", dir]), /EEXIST/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
