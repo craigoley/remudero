@@ -49,6 +49,9 @@ function steadyHealthy(over: Partial<ReviewCapacityObservation> = {}): ReviewCap
     memAvailableMib: 28_000,
     cpuPsiSomeAvg10Pct: 0.03,
     cpuPsiFullAvg10Pct: 0,
+    // W1-T11129: a learned cpu.weight share of 1 (the container is the whole host, so its PSI has no weight excuse);
+    // with no share the CPU verdict holds and neither sheds nor widens on PSI alone.
+    cpuWeightShare: 1,
     memoryPsiSomeAvg10Pct: 0,
     activeWorkers: 0,
     queueDepth: 9,

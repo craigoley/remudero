@@ -341,6 +341,22 @@ export function readCgroupCpuUsageUsec(path = "/sys/fs/cgroup/cpu.stat", read: (
 }
 
 let publishedCpuLaneBound: number | null = null;
+let publishedPerLaneCpus: Readonly<Record<string, number>> = {};
+
+/** W1-T11129 — the daemon publishes each lane class's learned per-lane CPU with the bound, for audit. Unlearned is absent. */
+export function publishLaneCpuClasses(learner: LaneCpuLearnerState): void {
+  const perLane: Record<string, number> = {};
+  for (const cls of Object.keys(learner.perClass)) {
+    const figure = laneCpuReading(learner, cls).perLaneCpus;
+    if (figure !== null) perLane[cls] = figure;
+  }
+  publishedPerLaneCpus = perLane;
+}
+
+/** The last published per-lane CPU of `laneClass`, or undefined while unlearned. */
+export function publishedLaneCpuPerLane(laneClass: string): number | undefined {
+  return publishedPerLaneCpus[laneClass];
+}
 
 /** W1-T11129 — the daemon publishes the learned CPU lane bound each reading; review capacity reads it as its hold. */
 export function publishLaneCpuBound(bound: number | null): void {

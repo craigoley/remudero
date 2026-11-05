@@ -13,6 +13,7 @@ import {
   DISPATCH_LANE_CPU_CLASS,
   publishLaneCpuBound,
   publishedLaneCpuBound,
+  publishedLaneCpuPerLane,
   readCgroupCpuUsageUsec,
   readCpuWeightShare,
   readLaneCpu,
@@ -38,6 +39,7 @@ import {
   type ReviewCapacityState,
 } from "#src/lib/review-capacity.js";
 import { loadPlan } from "#src/lib/plan.js";
+import { trackInFlightReview } from "#src/lib/sweep.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -199,11 +201,11 @@ test("W1-T11129 criterion 2: with the share known, the shed and its restore keep
 });
 
 test("W1-T11129 criterion 2: the governor's learned cpu bound holds the width without stopping a lane", () => {
-  const held = run({ effectiveWidth: 3, healthySamples: 2 }, { activeWorkers: 1, laneCpuBound: 4 });
+  const held = run({ effectiveWidth: 3, healthySamples: 2 }, { activeWorkers: 1, laneCpuBound: 4, cpuWeightShare: 1 });
   assert.equal(held.reason, "cpu-capacity-held");
   assert.equal(held.effectiveWidth, 3);
   assert.equal(held.evidence.healthySamples, 0);
-  const room = run({ effectiveWidth: 3, healthySamples: 2 }, { activeWorkers: 1, laneCpuBound: 6 });
+  const room = run({ effectiveWidth: 3, healthySamples: 2 }, { activeWorkers: 1, laneCpuBound: 6, cpuWeightShare: 1 });
   assert.notEqual(room.reason, "cpu-capacity-held");
 });
 
@@ -350,11 +352,157 @@ test("W1-T11129 criterion 2: an unread weight share holds: no fixed PSI line she
     assert.equal(held.evidence.healthySamples, 0, "a hold, not calm: the width does not grow on it either");
     assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: full, cpuPsiSomeAvg10Pct: 70 }, POLICY).tier, "hold");
   }
-  // Calm is the same low watermark with or without a share, so recovery keeps its line.
-  assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: 5, cpuPsiSomeAvg10Pct: 70 }, POLICY).calm, true);
+  // With the share known, calm is the low watermark: recovery keeps its line.
+  assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: 5, cpuPsiSomeAvg10Pct: 70, cpuWeightShare: 1 }, POLICY).calm, true);
   // A stale record reads as no share (readCpuWeightShare's own suite below), so it holds the same way.
   // The same reading with the share known judges by the share: a share of 1 has no weight excuse and sheds.
   assert.equal(run(prior, { cpuPsiFullAvg10Pct: 40, cpuWeightShare: 1 }).reason, "cpu-pressure");
+});
+
+test("W1-T11129 criterion 2: an unread share holds the other way too: a quiet PSI adds no lane", () => {
+  // The reviewer's case: no share read, PSI full 0, a healthy backlog that would earn lane 5 of a 4-lane base.
+  let state: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 0 };
+  const widths: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    const step = selectAdaptiveReviewWidth(state, POLICY, observation({ nowMs: i * 60_000, cpuPsiFullAvg10Pct: 0 }), BOUNDS);
+    widths.push(step.decision.effectiveWidth);
+    state = step.state;
+  }
+  assert.deepEqual(widths, [4, 4, 4, 4, 4, 4], "held at its width: PSI with no share is no evidence to widen on");
+  assert.equal(cpuPressureTier({ cpuPsiFullAvg10Pct: 0, cpuPsiSomeAvg10Pct: 70 }, POLICY).calm, false);
+  // The same quiet host with the share known is calm, and the healthy window widens as it always did.
+  state = { effectiveWidth: 4, healthySamples: 0 };
+  for (let i = 0; i < 6; i++) {
+    state = selectAdaptiveReviewWidth(state, POLICY, observation({ nowMs: i * 60_000, cpuPsiFullAvg10Pct: 0, cpuWeightShare: 1 }), BOUNDS).state;
+  }
+  assert.equal(state.effectiveWidth, 5);
+});
+
+test("W1-T11129 criterion 2: W1-T11150's relief replay keeps its widths with a learned share, readings unchanged", () => {
+  // W1-T11150's own fixture and sequence (a-review-shed-that-does-not-lower-pressure-stops-shedding), plus only a share.
+  const policy = { ...POLICY, hostWorkerBudget: 16, settlementWindowMs: 1_800_000 } as ReviewCapacityPolicy;
+  const bounds = { minWidth: 1, baseWidth: 4, maxWidth: 4 };
+  let state: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 0 };
+  const widths: number[] = [];
+  for (const [at, full] of [[0, 25], [5_000, 25], [10_000, 25], [20_000, 19], [30_000, 12], [40_000, 6]] as const) {
+    const step = selectAdaptiveReviewWidth(state, policy, {
+      nowMs: 1_000_000 + at, memAvailableMib: 28_000, cpuPsiSomeAvg10Pct: 80, cpuPsiFullAvg10Pct: full, cpuWeightShare: 0.8125,
+      memoryPsiSomeAvg10Pct: 0, activeWorkers: 0, queueDepth: 9, hostLoad1: 40, hostCpuCount: 8,
+      settlements: { failures: 0, timeouts: 0, successes: 5, cpuPhaseMs: 60_000 },
+      provider: { fresh: true, readable: true, refused: false, headroomPct: 80, reservePct: 5 },
+    } as unknown as ReviewCapacityObservation, bounds);
+    widths.push(step.decision.effectiveWidth);
+    state = step.state;
+  }
+  assert.deepEqual(widths, [3, 2, 1, 2, 3, 4], "one lane per overloaded sample, restored in proportion to relief");
+});
+
+test("W1-T11129 criterion 2: the shed reads the governor's learned cpu bound, one lane a sample, share or no share", () => {
+  for (const share of [1, undefined]) {
+    // Two builds run and the governor has learned room for four lanes: a width of 4 is two past it.
+    let state: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 2 };
+    const steps: Array<[number, string]> = [];
+    for (let i = 0; i < 4; i++) {
+      const step = selectAdaptiveReviewWidth(state, POLICY, observation({
+        nowMs: i * 60_000, activeWorkers: 2, laneCpuBound: 4, cpuPsiFullAvg10Pct: 0, ...(share === undefined ? {} : { cpuWeightShare: share }),
+      }), BOUNDS);
+      steps.push([step.decision.effectiveWidth, step.decision.reason]);
+      state = step.state;
+    }
+    assert.deepEqual(steps.map(([w]) => w), [3, 2, 2, 2], `share ${share}: shed one a sample down to the learned capacity, then held`);
+    assert.deepEqual(steps.slice(0, 2).map(([, r]) => r), ["cpu-pressure", "cpu-pressure"]);
+  }
+  // A relief restore never climbs back past the learned capacity.
+  const prior: ReviewCapacityState = { effectiveWidth: 2, healthySamples: 0 };
+  const calm = selectAdaptiveReviewWidth(prior, POLICY, observation({ activeWorkers: 2, laneCpuBound: 4, cpuPsiFullAvg10Pct: 1, cpuWeightShare: 1 }), BOUNDS);
+  assert.equal(calm.decision.effectiveWidth, 2);
+});
+
+test("W1-T11129 criterion 1: in runDaemon, a review that starts and ends between build samples is its own lane", async (t) => {
+  const dir = cgroupDir(t);
+  const planFile = join(dir, "tasks.yaml");
+  const task = (id: string) => `- id: ${id}\n  title: ${id}\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/${id}.ts]\n`;
+  writeFileSync(planFile, task("A") + task("B"));
+  // The container's CPU integrated over the test clock: 1 CPU of non-lane work, 1 per build, 2 per review.
+  const clock = { ms: Date.parse("2026-11-05T00:00:00Z") };
+  let usageUsec = 0, buildsRunning = 0, reviewsRunning = 0, accruedAtMs = clock.ms;
+  const accrue = () => { usageUsec += (clock.ms - accruedAtMs) * 1000 * (1 + buildsRunning + 2 * reviewsRunning); accruedAtMs = clock.ms; };
+  const advance = (ms: number) => { accrue(); clock.ms += ms; accrue(); };
+  const sampledAt: number[] = [];
+  const ports: LaneGovernorPorts = {
+    mode: () => "shadow",
+    read: () => { throw new Error("memory unread in this test"); },
+    cpuCount: () => 8,
+    cpuUsageUsec: () => { accrue(); sampledAt.push(clock.ms); return usageUsec; },
+  };
+  // Reviews register through the production registry, exactly as the sweep's review lane does.
+  const startReview = () => {
+    let end!: () => void;
+    const work = new Promise<void>((resolve) => { end = resolve; });
+    accrue();
+    reviewsRunning += 1;
+    void trackInFlightReview(work, { prNumber: 1, kind: "full-review" });
+    return async () => { accrue(); reviewsRunning -= 1; end(); for (let i = 0; i < 20; i++) await drainMicrotasks(); };
+  };
+  const release: Record<string, (r: RunResult) => void> = {};
+  const started: string[] = [];
+  const merged = new Set<string>();
+  let admissions = 0;
+  publishLaneCpuBound(null);
+  t.after(() => publishLaneCpuBound(null));
+  const run = runDaemon(loadPlan(planFile), {
+    refreshMerged: () => (id: string) => merged.has(id),
+    log: () => {},
+    runOne: (id: string) => {
+      accrue();
+      buildsRunning += 1;
+      started.push(id);
+      return new Promise<RunResult>((resolve) => { release[id] = resolve; }).then((r) => { merged.add(id); return r; });
+    },
+    // The first admission: a minute of idle host, then a review runs ALONE for 50 s before any build starts.
+    categorizedRefusalRejoinFor: () => {
+      if (admissions++ === 0) {
+        advance(60_000);
+        endFirst = startReview();
+        advance(50_000);
+      }
+      return undefined;
+    },
+    sleep: async () => {},
+    now: () => new Date(clock.ms),
+    laneGovernor: ports,
+  } as unknown as DaemonDeps, { max: 2, laneCount: 2, pollIntervalMs: 1000 });
+  let endFirst: (() => Promise<void>) | undefined;
+  for (let i = 0; i < 50 && started.length < 2; i++) await drainMicrotasks();
+  assert.deepEqual(started, ["A", "B"]);
+  // The first review ends while A and B build; a second starts and ends between their samples.
+  advance(30_000);
+  const endedAt = clock.ms;
+  await endFirst!();
+  advance(40_000);
+  const secondStartedAt = clock.ms;
+  const endSecond = startReview();
+  advance(20_000);
+  const secondEndedAt = clock.ms;
+  await endSecond();
+  advance(40_000);
+  const end = async (id: string) => {
+    accrue();
+    buildsRunning -= 1;
+    release[id]!({ taskId: id, merged: true, verdict: "merged", costUsd: 0, prUrl: `https://x/${id}` } as unknown as RunResult);
+    for (let i = 0; i < 20; i++) await drainMicrotasks();
+  };
+  await end("A");
+  advance(10_000);
+  await end("B");
+  const summary = await run;
+  assert.equal(summary.stopReason, "max_reached");
+  for (const at of [endedAt, secondStartedAt, secondEndedAt]) {
+    assert.ok(sampledAt.includes(at), `the counter was sampled at the review transition (${at - Date.parse("2026-11-05T00:00:00Z")} ms)`);
+  }
+  assert.equal(publishedLaneCpuPerLane(REVIEW_LANE_CPU_CLASS), 2, "the review that ran alone is credited 2 CPUs a lane");
+  assert.equal(publishedLaneCpuPerLane(DISPATCH_LANE_CPU_CLASS), 1, "no review CPU leaks into a build interval: 1 CPU a build");
+  assert.equal(publishedLaneCpuBound(), 7, "(8 host cpus - 1 baseline) / 1 cpu per build");
 });
 
 test("W1-T11129 criterion 2: no cpuPsiHighPct remains, in the policy file or in any decision", () => {

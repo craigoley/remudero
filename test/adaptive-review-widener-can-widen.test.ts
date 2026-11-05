@@ -51,7 +51,7 @@ function healthy(nowMs: number, over: Partial<ReviewCapacityObservation> = {}): 
     cpuPsiSomeAvg10Pct: 1,
     cpuPsiFullAvg10Pct: 0,
     // W1-T11129: a learned cpu.weight share of 1 (the container is the whole host, so its PSI has no weight excuse);
-    // with no share the CPU verdict holds and never sheds on PSI alone.
+    // with no share the CPU verdict holds and neither sheds nor widens on PSI alone.
     cpuWeightShare: 1,
     memoryPsiSomeAvg10Pct: 1,
     provider: { fresh: true, readable: true, headroomPct: 80, reservePct: 5, ageMs: 1_000 },

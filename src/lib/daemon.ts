@@ -126,6 +126,8 @@ import {
   drainInFlightReviews,
   inFlightReviewCount,
   inFlightReviewRunsNow,
+  installReviewLaneTransition,
+  runningReviewLaneIds,
   restartDrainInventory,
   type RestartDrainInventoryEntry,
 } from "./sweep.js";
@@ -155,7 +157,7 @@ import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, sys
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
-import { defaultLaneGovernorPorts, DISPATCH_LANE_CPU_CLASS, initialLaneCpuLearner, LANE_TARGET_STEP, laneTarget, laneTargetPayload, publishLaneCpuBound, readLaneCpu, relabelLaneCpu, REVIEW_LANE_CPU_CLASS, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget, type RunningLane } from "./lane-governor.js";
+import { defaultLaneGovernorPorts, DISPATCH_LANE_CPU_CLASS, initialLaneCpuLearner, LANE_TARGET_STEP, laneTarget, laneTargetPayload, publishLaneCpuBound, publishLaneCpuClasses, readLaneCpu, relabelLaneCpu, REVIEW_LANE_CPU_CLASS, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget, type RunningLane } from "./lane-governor.js";
 import type { LaneGovernorMode } from "./policy.js";
 import {
   createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimBeforeMemoryRestart, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
@@ -4205,23 +4207,18 @@ export async function runDaemon(
   }
   let laneTargetReading: { atMs: number; result: LaneTarget } | undefined;
   // W1-T11129: the CPU arm learns from the container's cgroup cpu.stat, crediting each interval to the lanes that ran
-  // THROUGH it: each dispatch lane is an implement build (by task id), each in-process review a review. A lane start or
-  // end samples first, so the interval it closes is credited to the lanes from before it (never the set after a
-  // refill removed the finished lane), and the next interval opens with the new set.
+  // THROUGH it: each dispatch lane is an implement build (by task id), each review (in process or a run child) a review.
+  // EVERY lane start or end samples first, so the interval it closes is credited to the lanes from before it (never the
+  // set after a refill removed a finished build, nor a build interval a review ran inside), and the next interval opens
+  // with the new set. Builds transition below; reviews through the sweep registry's hook, installed for this run.
   let laneCpuLearner = initialLaneCpuLearner();
   const laneCpuBuilds = new Set<string>();
-  const laneCpuReviewIds = new WeakMap<object, string>();
-  let laneCpuReviewSeq = 0;
   const runningCpuLanes = (starting?: string): RunningLane[] => {
     const builds = new Set(laneCpuBuilds);
     for (const child of children.values()) if (child.work === undefined) builds.add(child.taskId);
     // The pool runs a worker before its start bookkeeping, so its child may already be registered: not yet a lane.
     if (starting !== undefined) builds.delete(starting);
-    const reviews = inFlightReviewRunsNow().map((review) => {
-      let id = laneCpuReviewIds.get(review);
-      if (id === undefined) laneCpuReviewIds.set(review, id = `review-${++laneCpuReviewSeq}`);
-      return { id, cls: REVIEW_LANE_CPU_CLASS };
-    });
+    const reviews = runningReviewLaneIds().map((id) => ({ id, cls: REVIEW_LANE_CPU_CLASS }));
     return [...[...builds].map((id) => ({ id: `build-${id}`, cls: DISPATCH_LANE_CPU_CLASS })), ...reviews];
   };
   const sampleLaneCpu = (nowMs: number, closes = false, starting?: string): ReturnType<typeof readLaneCpu> | undefined => {
@@ -4229,14 +4226,16 @@ export async function runDaemon(
     const reading = readLaneCpu(laneCpuLearner, laneGovernorPorts, nowMs, runningCpuLanes(starting), closes);
     laneCpuLearner = reading.learner;
     publishLaneCpuBound(reading.bound);
+    publishLaneCpuClasses(reading.learner);
     return reading;
   };
-  /** A build lane starts or ends: close the interval on the lanes before it, apply it, open the next on the lanes after. */
+  /** A lane (build or review) starts or ends: close the interval on the lanes before it, apply it, open the next after. */
   const laneCpuTransition = (apply: () => void, starting?: string): void => {
     sampleLaneCpu(daemonClock.now(), true, starting);
     apply();
     if (laneGovernorPorts) laneCpuLearner = relabelLaneCpu(laneCpuLearner, runningCpuLanes());
   };
+  const uninstallReviewLaneTransition = laneGovernorPorts ? installReviewLaneTransition((apply) => laneCpuTransition(apply)) : () => {};
   /** The lanes new admissions may fill: the governor's target under enforce, otherwise unbounded. */
   const enforcedLaneTarget = (inFlight: number, wipBound: number | undefined): number => {
     if (!laneGovernorPorts) return Infinity;
@@ -4306,7 +4305,7 @@ export async function runDaemon(
     catch (reason) { /* Retained in the cleanup AggregateError, after every other stop is attempted. */ failures.push(reason); }
     for (const stop of [
       () => prActionPumpRef.stop(), () => improvementActionPumpRef.stop(), () => plainBackfill?.stop(), () => recommendationBackfill?.stop(), () => fleetLane?.stop(),
-      () => inboxResponder?.stop(), () => gardenerRef.stop(), () => livenessPulse?.stop(),
+      () => inboxResponder?.stop(), () => gardenerRef.stop(), () => livenessPulse?.stop(), () => uninstallReviewLaneTransition(),
     ]) {
       try { stop(); }
       catch (reason) { /* Retained in the cleanup AggregateError, never converted into successful closure. */ failures.push(reason); }

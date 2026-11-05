@@ -66,6 +66,9 @@ function hostHealthy(nowMs: number, provider: ProviderRoutingStatus, over: Parti
     memAvailableMib: 6_700,
     cpuPsiSomeAvg10Pct: 30,
     cpuPsiFullAvg10Pct: 0,
+    // W1-T11129: a learned cpu.weight share of 1 (the container is the whole host, so its PSI has no weight excuse);
+    // with no share the CPU verdict holds and neither sheds nor widens on PSI alone.
+    cpuWeightShare: 1,
     memoryPsiSomeAvg10Pct: 0,
     provider: reviewProviderObservation(provider, nowMs),
     settlements: { successes: 4, failures: 0, timeouts: 0 },
