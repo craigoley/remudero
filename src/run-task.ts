@@ -1759,6 +1759,7 @@ import {
   type NodePinSyncIo,
   depReviewMigrationSubmissionKey,
   renderDepReviewMigrationFeedback,
+  proposalTaskLedgerRows,
 } from "./lib/dep-review.js";
 import {
   headWasCreatedAfterReflogSnapshot,
@@ -12325,7 +12326,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
           const feedback = existsSync(path) ? readFeedbackEntry(proposalRoot, feedbackId) : undefined;
           const planPath = join(proposalRoot, "plan", "tasks.yaml");
           const tasks = existsSync(planPath) ? loadPlan(planPath).tasks.filter(t => t.origin === `feedback#${feedbackId}`) : [];
-          const rows = tasks.length ? readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true }).rows : [];
+          const rows = (await proposalTaskLedgerRows(dirname(ledgerPath), new Set(tasks.map(t => t.id)), feedback?.ts)).rows;
           const outcomes = await Promise.all(tasks.map(async task => {
             const history = rows.filter(r => r.task_id === task.id);
             const taskRows = history.slice(Math.max(0, history.findLastIndex(r => r.step === "run.start" || r.step === "dispatch")));
