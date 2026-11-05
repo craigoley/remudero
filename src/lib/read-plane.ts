@@ -100,6 +100,11 @@ function siteText(site: NodeJS.CallSite): string {
 const READ_PLANE_FRAME_NAMES = new Set([
   "callerFrame", "rawCallSites", "siteText", "frameName", "callerChain", "whoCalled", "record", "wrapper", "meteredSpawn",
 ]);
+// W1-T11268: shared synchronous leaves also lose their module paths in the daemon bundle.
+const SYNC_SPAWN_LEAF_NAMES = new Set([
+  "ghExecFile", "ghExec", "ghJson", "originUrlAtCut", "vetPinnedConfig", "hostWorktreeGit", "pinnedConfigValue",
+  "runGit", "loadPlanAtRef",
+]);
 
 /** The first frame outside read-plane, `node:` and the shared leaves; `leaf` is the OUTERMOST leaf frame, the one
  *  the caller called. With no frame outside the leaves the caller is that leaf and `callerIsLeaf` says so. */
@@ -111,7 +116,8 @@ export function callerFrame(): { caller?: string; leaf?: string; callerIsLeaf?: 
   for (const [index, line] of lines.entries()) {
     if (READ_PLANE_FRAME_NAMES.has(sites[index]!.functionName)
       || /read-plane\.[cm]?[jt]s/.test(line) || /node:/.test(line)) continue;
-    if (SYNC_SPAWN_LEAF_FRAMES.some((leaf) => leaf.test(line))) { leafLine = line; continue; }
+    if (SYNC_SPAWN_LEAF_NAMES.has(sites[index]!.functionName)
+      || SYNC_SPAWN_LEAF_FRAMES.some((leaf) => leaf.test(line))) { leafLine = line; continue; }
     const chain = callerChain(line, sites.slice(index));
     return { caller: line.trim().slice(0, 200), ...(leafLine === undefined ? {} : { leaf: frameName(leafLine) }),
       ...(chain === undefined ? {} : { chain }) };
