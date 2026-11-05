@@ -10,7 +10,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSy
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
-import { materializeFromStore, type StoreBuildResult, type StoreLog, type StoreLookup } from "./child-entry-store.js";
+import { buildIntoStore, materializeFromStore, type BuildIntoStoreOptions, type StoreBuildResult, type StoreLog, type StoreLookup } from "./child-entry-store.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { classifyRunDir, readSpec, realRunChildProbe, type RunChildProbe } from "./run-child-contract.js";
@@ -672,4 +672,46 @@ export async function buildEngineAfterStore(
   } catch (error) {
     log("engine.build_failed", { source_hash: stored.hash, reason: `engine pass threw: ${String((error as Error)?.message ?? error).slice(0, 400)}` });
   }
+}
+
+// ── refresh from the running code ──────────────────────────────────────────────────────────
+
+export interface EngineRefreshLag { engineSha: string | null; mainSha: string }
+export interface EngineRefreshOptions {
+  git?: EngineGit;
+  buildIntoStore?: (treeRoot: string, opts: BuildIntoStoreOptions) => Promise<StoreBuildResult>;
+  afterStore?: typeof buildEngineAfterStore;
+}
+
+const refreshInFlight = new Map<string, Promise<void>>();
+const refreshedSha = new Map<string, string>();
+
+/**
+ * 2026-11-05: engines were cut only after a build run cut its worktree, but every build run first passes a containment
+ * probe that runs FROM the newest engine. When that engine's own code failed the probe (a stale codex profile), no build
+ * reached its worktree, no engine was cut, and the probe kept running the stale code: a self-sustaining stall, 4+ h,
+ * silent but for engine.lag. A spawn that finds the engine behind main asks this to fill the store and cut an engine
+ * from the running process's own code tree, which is at least as new as the code that found the lag. Joined while in
+ * flight, done once per code revision, never rejects; each pass is ledgered.
+ */
+export function refreshEngineFromCodeTree(
+  codeTree: string, stateRoot: string, storeRoot: string, lag: EngineRefreshLag, log: StoreLog, opts: EngineRefreshOptions = {},
+): Promise<void> {
+  const key = `${resolve(stateRoot)}\0${resolve(codeTree)}`;
+  const running = refreshInFlight.get(key);
+  if (running) return running;
+  const git = opts.git ?? hardenedEngineGit;
+  const pass = (async () => {
+    const sha = (await git(codeTree, ["rev-parse", "HEAD"])).trim();
+    if (sha === lag.engineSha || refreshedSha.get(key) === sha) return;
+    log("engine.refresh_requested", { code_sha: sha, engine_sha: lag.engineSha, main_sha: lag.mainSha });
+    const stored = await (opts.buildIntoStore ?? buildIntoStore)(codeTree, { storeRoot, log });
+    await (opts.afterStore ?? buildEngineAfterStore)(codeTree, stateRoot, storeRoot, stored, log, opts.git ? { git: opts.git } : {});
+    refreshedSha.set(key, sha);
+    log("engine.refresh_done", { code_sha: sha, store_kind: stored.kind });
+  })()
+    .catch((err: unknown) => log("engine.refresh_failed", { reason: reasonOf(err) }))
+    .finally(() => refreshInFlight.delete(key));
+  refreshInFlight.set(key, pass);
+  return pass;
 }

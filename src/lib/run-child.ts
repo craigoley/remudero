@@ -14,7 +14,9 @@ import { isDeepStrictEqual } from "node:util";
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
 import { systemClock } from "./clock.js";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
-import { type EnginePinOptions, type EngineRef, listEngines, newestCurrentEngine, type NewestEngineOptions, pinEngineForRun } from "./engine-tree.js";
+import { type EnginePinOptions, type EngineRef, type EngineRefreshLag, listEngines, newestCurrentEngine, type NewestEngineOptions, pinEngineForRun, refreshEngineFromCodeTree } from "./engine-tree.js";
+import { childEntryStoreRoot } from "./child-entry-store.js";
+import { repoRoot } from "./repo-location.js";
 import { defaultInstance, type HostMemoryLedgerOptions } from "./host-memory-ledger.js";
 import {
   createTreePeakSampler, openLearnedReservation, type LearnedReservation, type PeakStoreOptions, type TreePeakSampler,
@@ -256,6 +258,16 @@ export function pruneTerminalRunDirs(stateRoot: string, prefix: string, keep: nu
   return removed;
 }
 
+/** Asks for an engine cut from this process's own code when the newest engine lags main; never awaited by a spawn. */
+export type EngineRefresh = (input: { stateRoot: string; root: string }, lag: EngineRefreshLag, log: Log) => void;
+export const refreshEngineOnLag: EngineRefresh = (input, lag, log) => {
+  void refreshEngineFromCodeTree(repoRoot, input.stateRoot, childEntryStoreRoot(input.root), lag, log);
+};
+function askForCurrentEngine(refresh: EngineRefresh | undefined, input: { stateRoot: string; root: string }, engine: EngineRef | undefined, mainSha: string, log: Log): void {
+  if (engine?.sha === mainSha) return;
+  (refresh ?? refreshEngineOnLag)(input, { engineSha: engine?.sha ?? null, mainSha }, log);
+}
+
 // ── the probe ────────────────────────────────────────────────────────────────────────────────
 
 export interface RunChildProbeInput {
@@ -275,6 +287,8 @@ export interface RunChildProbeInput {
 }
 
 export interface RunChildProbePorts {
+  /** Asked when the newest engine lags main; default {@link refreshEngineOnLag}. */
+  refreshEngine?: EngineRefresh;
   /** `sweep.runChild.mode`; the default reads this installation's policy.yaml. */
   readMode?: () => RunChildMode;
   /** main's tip, for `newestCurrentEngine`; default {@link mainTipSha}. */
@@ -408,6 +422,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
       return skip(reasonOf(error));
     }
     let engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...seams.engine });
+    askForCurrentEngine(seams.refreshEngine, input, engine, mainSha, log);
     if (!engine) return skip("no current engine tree for main");
     const entry = (seams.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(engine, [], log);
     if (input.work) await requireDetachedWorkEntry(entry, input.work.kind);
@@ -642,6 +657,8 @@ export interface RunChildPending {
 }
 
 export interface SpawnRunChildPorts {
+  /** Asked when the newest engine lags main; default {@link refreshEngineOnLag}. */
+  refreshEngine?: EngineRefresh;
   mainSha?: (repoDir: string) => Promise<string>;
   engine?: Pick<NewestEngineOptions, "git" | "isCurrent">;
   /** The pin lock's wait and clock seams (engine-tree.ts pinEngineForRun); default the real ones. */
@@ -813,6 +830,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     if (listEngines(input.stateRoot).length === 0) return unavailable("no engine tree has been built yet");
     const mainSha = (await (ports.mainSha ?? mainTipSha)(input.repoDir)).trim();
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...ports.engine });
+    askForCurrentEngine(ports.refreshEngine, input, engine, mainSha, log);
     if (!engine) return unavailable("no current engine tree for main");
     engineSha = engine.sha;
     const engineResolvedAt = clock();
