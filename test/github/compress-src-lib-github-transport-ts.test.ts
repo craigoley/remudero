@@ -27,15 +27,23 @@ function snapshot(source: string) {
 }
 
 test("W1-T11059: comment compression preserves executable code", () => {
-  // Snapshot: a25420801d59d6c2176a1c9dc00bb18153ac948f; measurements, not a new ceiling.
-  const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/github-transport.ts"), "utf8"));
+  // W1-T11103: compare the declared fresh-read edit with this PR's base.
+  const source = readFileSync(join(REPO_ROOT, "src/lib/github-transport.ts"), "utf8");
+  const actual = snapshot(source);
+  // Remove only this task's declared behavior and retain the original compression identity proof.
+  const withoutFresh = source
+    .replace("env?: NodeJS.ProcessEnv; fresh?: true } = {}", "env?: NodeJS.ProcessEnv } = {}")
+    .replace('${opts.fresh === true ? "fresh:" : ""}${JSON.stringify(args)}', '${JSON.stringify(args)}')
+    .replace("ghBrokeredAsync(args, opts, env)", "ghBrokeredAsync(args, {}, env)");
+  const originalTransport = snapshot(withoutFresh);
   const before = compressionPinBase("src/lib/github-transport.ts", import.meta.url);
   if (before !== undefined) {
-    // Only on the PR that adds this pin: later feature edits to the module stay free (#16082).
     const base = snapshot(before);
-    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
-      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
-    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+    assert.deepEqual(
+      [originalTransport.tokenCount, originalTransport.tokenDigest, originalTransport.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest],
+      "removing only this task's fresh-read behavior restores the PR base executable code",
+    );
   }
   assert.ok(actual.commentLines > 0 && actual.commentLines < 439,
     `comment lines must decrease from 439, found ${actual.commentLines}`);

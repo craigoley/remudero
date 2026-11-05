@@ -1,0 +1,67 @@
+- id: W1-T11369
+  title: "Every daemon child that can ride the spawn helper's pipe forks through execFileRouted, so a loop_lag row names the real call site instead of execFileLoopBounded itself; a census refuses any direct execFileLoopBounded caller that is not classified with a reason the helper cannot carry"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # touches the spawn path of ~20 daemon call sites; the helper falls back to a direct spawn on any doubt
+  origin: operator-session#core-loop-lag-2026-11-04
+  plan_refs:
+    - W1-T9754
+    - W1-T10291
+    - W1-T11341
+    - W1-T11368
+  files:
+    - src/run-task.ts
+    - src/cli/commands/fix.ts
+    - src/lib/changed-files-cache.ts
+    - src/lib/child-entry-store.ts
+    - src/lib/deployer.ts
+    - src/lib/fleet-control.ts
+    - src/lib/garden-registry.ts
+    - src/lib/git-lock-reclaim.ts
+    - src/lib/github-transport.ts
+    - src/lib/host-resource-gardener.ts
+    - src/lib/onboard/inventory.ts
+    - src/lib/plan-pr-merge-safety.ts
+    - src/lib/preopen-gate.ts
+    - src/lib/proof-amendment.ts
+    - src/lib/review.ts
+    - src/lib/run-child.ts
+    - src/lib/serve-plan-reload.ts
+    - src/lib/sweep.ts
+    - src/lib/test-slot.ts
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - src/lib/worktree-git.ts
+    - test/daemon/every-loop-bounded-child-forks-through-the-spawn-helper.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A census over src/** refuses every direct execFileLoopBounded call outside loop-bounded-child.ts and spawn-helper.ts unless it is classified with a reason the helper's pipe cannot carry (it writes or reads the child's stdio through .child), and a planted unclassified call proves the census detects one
+      proof: "unit test: test/daemon/every-loop-bounded-child-forks-through-the-spawn-helper.test.ts"
+    - claim: Each routed call site keeps its own timeout, killSignal, cwd, env and maxBuffer, and a routed child stopped at its budget still rejects with LoopBoundedChildTimeout
+      proof: "grep: W1-T11369 criterion 2 in test/daemon/every-loop-bounded-child-forks-through-the-spawn-helper.test.ts"
+  rationale: |
+    W1-T9754 (#14683, merged 10-27) built the long-lived spawn helper (src/lib/spawn-helper.ts, execFileRouted) so a daemon child forks outside core's loop. execFileRouted falls back to execFileLoopBounded with no helper installed, or with options the pipe cannot carry.
+    At origin/main 1bca9dcee8, only 5 source files call execFileRouted. There are 25 direct execFileLoopBounded( calls in 22 files outside loop-bounded-child.ts and spawn-helper.ts:
+    - run-task.ts ×2, preopen-gate.ts ×2, worker-provider.ts ×2
+    - fix.ts, changed-files-cache.ts, child-entry-store.ts, deployer.ts, fleet-control.ts, garden-registry.ts, git-lock-reclaim.ts, github-transport.ts, host-resource-gardener.ts, onboard/inventory.ts, plan-pr-merge-safety.ts, proof-amendment.ts, review.ts, run-child.ts, serve-plan-reload.ts, sweep.ts, test-slot.ts, worker.ts, worktree-git.ts
+    MEASURED 2026-11-04 on core (pid 149, W1-T11341's evidence): async spawns held the loop 119 s in the fork itself, across the 10 daemon.loop_lag rows. 99 s of that, over 489 spawns, is attributed to "execFileLoopBounded (src/lib/loop-bounded-child.ts)" itself, because those calls bypass the helper and its caller naming. So the fork cost lands on core's loop, and the lag rows cannot name who paid it.
+    Some sites legitimately need the child itself: worktree-git.ts, serve-plan-reload.ts and proof-amendment.ts write command.child.stdin. execFileRouted's own doc says a caller that reads .child does not use the seam. Those are classified, not routed.
+  design: |
+    1. Route each direct call whose options are all routable (cwd, env, utf8 encoding, maxBuffer, timeout, a string killSignal, escalateAfterMs per spawn-helper.ts ROUTABLE_OPTIONS) through execFileRouted with its options unchanged. execFileRouted keeps execFileLoopBounded's resolve/reject contract, so callers change only the function name and import.
+    2. Leave a call direct only when it reads .child (stdin or stdout streaming) or passes an option the pipe cannot carry. Each one gets one classification entry naming the file and the reason, in the census's own map, following test/benchmark-worker-caller-census.test.ts: a classified map plus a planted-site control.
+    3. The census strips comments, finds `execFileLoopBounded(` call sites under src/**, excludes the two defining modules, and refuses any site beyond its file's classified count.
+    BATCHING: one PR is preferred. If the diff is too large to review, earlier batches may route sites without the census, and the census lands with the final batch, which routes the rest. The census never carries an allowlist of sites merely not yet routed: an entry must name a reason the helper cannot carry.
+    TESTS:
+    - (a) The census plus its planted control. At base, the ~20 routable sites are unclassified, so the census fails.
+    - (b) Criterion 2: with a helper installed, a routed call carries its options to the helper, and a child stopped at its budget rejects with LoopBoundedChildTimeout. With none installed, the same call runs execFileLoopBounded directly.
+  falsifier: |
+    At origin/main, 25 execFileLoopBounded( calls in 22 files bypass execFileRouted, so their fork time is charged to core's loop and their loop_lag rows name execFileLoopBounded instead of the caller.
+  note: |
+    reservation hand-off: plan-file-1793822655000 -> plan-file-1793822655000
+    Reserved with rmd next-task-id --branch plan-file-1793822655000 from the operator session. Test path from rmd test-place src/lib/spawn-helper.ts (test/daemon/). W1-T10291 (serve's read-model children through the helper) is a separate, unmerged task and does not touch these files.

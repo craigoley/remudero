@@ -1,0 +1,43 @@
+- id: W1-T11368
+  title: "A loop-available deadline still expires when the loop is held at every one of its firings: the late-firing re-arm keeps its intent (a child is never charged for time the loop stole) but its total grace is bounded by the deadline's own budget, so the gh/git child bounds hold exactly when core's loop is held for minutes"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every loop-bounded child, the gh transport escalation and the GitHub App exchange share this one deadline
+  origin: operator-session#core-loop-lag-2026-11-04
+  plan_refs:
+    - W1-T9651
+    - W1-T11341
+    - W1-T11369
+  files:
+    - src/lib/clock.ts
+    - test/infra/a-loop-available-deadline-expires-on-a-loop-held-at-every-firing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A loop-available deadline whose every firing lands late by a twentieth of its budget or more still calls onExpire, once the grace it has granted for loop-held time has reached its own budget
+      proof: "unit test: test/infra/a-loop-available-deadline-expires-on-a-loop-held-at-every-firing.test.ts"
+    - claim: A deadline whose loop is held once still re-arms for the held time, so a result already waiting in a pipe settles before expiry, and a deadline on a free loop expires at its budget exactly as today
+      proof: "grep: W1-T11368 criterion 2 in test/infra/a-loop-available-deadline-expires-on-a-loop-held-at-every-firing.test.ts"
+  rationale: |
+    loopAvailableDeadline (src/lib/clock.ts) re-arms for min(late, budgetMs) whenever a firing is late by budgetMs/20 or more. Only a firing on a free loop expires. The intent (#11962, W1-T9651) is right: when a stalled loop resumes, Node runs due timers before I/O, so a plain timer would kill a child whose result is already waiting in a pipe.
+    But the re-arm has no end. If the loop is held across each re-armed firing, the deadline re-arms forever and onExpire never runs.
+    MEASURED 2026-11-04 on core (pid 149): 10 daemon.loop_lag rows in 83 min, lag p50 142.7 s, p90 334.7 s, max 1,094.6 s (W1-T11341). On that loop a 15 s or 60 s child bound has a firing late by its twentieth on essentially every turn. So the bounds on gh and git children (loop-bounded-child.ts, github-transport.ts, the daemon's own fetch deadline, the GitHub App exchange, the codex overrun grace in worker-provider.ts) can stop bounding anything exactly when the loop is held. That is when a hung child costs the most.
+    RELATED: W1-T11341 removes the two review-path calls that held core's loop for minutes. W1-T11369 routes the remaining direct execFileLoopBounded callers through the spawn helper. This task makes the bound itself terminate regardless.
+  design: |
+    In loopAvailableDeadline, track the grace granted so far (the sum of every re-arm interval). A late firing still re-arms for min(late, budgetMs − grantedSoFar) while grantedSoFar < budgetMs. Once the grace granted equals the budget, a late firing expires.
+    The total wall time any deadline may run is therefore bounded by 2 × budgetMs plus one turn of loop-held time. The bound derives from the caller's own budget, with no new constant. Each caller's budget already comes from its own source (a learned or declared child duration), and this task changes no caller.
+    The twentieth-of-budget lateness test stays as it is: it decides whether a firing is late, not how long the deadline may live.
+    Keep the signature and the cancel function unchanged. No caller changes.
+    TESTS (infra; no fixed thresholds beyond the deadline's own budget):
+    - (a) Inject a Clock whose now() advances by at least budgetMs/20 beyond each due time whenever a firing reads it, simulating a loop held at every firing, and run real setTimeout with a small budget. Assert that onExpire is called and that the clock's elapsed time at expiry is at most 2 × budgetMs + the last lateness. At base the deadline re-arms without end, so onExpire is never called within the suite's own timeout and the test fails.
+    - (b) Criterion 2: a single late firing re-arms, so a cancel issued before the re-armed timer fires prevents expiry; and a free-loop deadline expires once, at its budget.
+  falsifier: |
+    At origin/main, loopAvailableDeadline re-arms on every firing late by budgetMs/20 or more with no bound on the number of re-arms or the grace granted, so a deadline whose loop is held at each firing never calls onExpire.
+  note: |
+    reservation hand-off: plan-file-1793822654000 -> plan-file-1793822654000
+    Reserved with rmd next-task-id --branch plan-file-1793822654000 from the operator session. Test path from rmd test-place src/lib/clock.ts (test/infra/, no import signal; loop-bounded-child.ts places to test/infra/ too).

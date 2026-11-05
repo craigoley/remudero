@@ -1,0 +1,129 @@
+- id: W1-T11411
+  title: "Every read-model test fixture awaits the diagnostic publisher before removing its state dir, through one shared helper a census enforces, so the async transaction writer can no longer race a teardown rmSync into ENOTEMPTY suite after suite"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one lifecycle concern migrated across 83 suites, each its own concern by file; no production source changes
+  band_meaning: span
+  origin: operator-session-enotempty-2026-11-05
+  plan_refs:
+    - W1-T10175
+    - W1-T5461
+    - W1-T9501
+    - W1-T11186
+    - W1-T11015
+    - W1-T10941
+  files:
+    - test/helpers/read-model-fixture-dir.ts
+    - test/console-api/read-model/every-read-model-fixture-flushes-before-removing-its-state.test.ts
+    - test/a-board-index-extends-its-step-buckets.test.ts
+    - test/a-board-projection-shares-equal-string-values-within-its-rows.test.ts
+    - test/a-cheap-view-never-waits-behind-an-expensive-one.test.ts
+    - test/a-cold-board-ingest-yields-between-chunks.test.ts
+    - test/a-cross-task-row-re-derives-only-the-tasks-it-changes.test.ts
+    - test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts
+    - test/a-github-change-re-derives-only-the-tasks-it-touches.test.ts
+    - test/a-now-view-body-is-stamped-as-of-what-its-board-read.test.ts
+    - test/a-paced-body-is-judged-by-the-build-that-made-it.test.ts
+    - test/a-producer-closes-its-own-escalation-on-recovery.test.ts
+    - test/a-promoted-standby-serves-fresh-committed-bodies.test.ts
+    - test/a-pruned-activity-row-explains-a-legacy-diff.test.ts
+    - test/a-read-model-backlog-is-caught-up-in-short-ticks.test.ts
+    - test/a-read-model-recycle-loop-escalates-once.test.ts
+    - test/a-read-of-one-instance-paces-only-that-instance.test.ts
+    - test/a-retention-row-names-its-worker-and-holder.test.ts
+    - test/a-slow-view-build-never-stalls-projection.test.ts
+    - test/a-view-lane-constructs-only-the-views-it-owns.test.ts
+    - test/a-view-lane-move-and-the-state-a-lane-holds-are-logged.test.ts
+    - test/a-view-switched-auto-serves-only-while-ready.test.ts
+    - test/a-view-with-no-switch-is-not-built.test.ts
+    - test/a-view-without-a-switch-is-dark.test.ts
+    - test/actions-view.test.ts
+    - test/an-empty-scratch-read-model-is-rebuilt-from-the-ledger.test.ts
+    - test/an-instance-decision-is-answered-on-its-own-instance.test.ts
+    - test/an-unread-view-backs-off-and-a-read-snaps-it-back.test.ts
+    - test/console-api/read-model/an-oracle-slice-runs-in-a-child-that-exits.test.ts
+    - test/console-api/read-model/daily-progress-projection.test.ts
+    - test/console-api/read-model/hand-fix-src-lib-read-model-worker-ts.test.ts
+    - test/console-api/read-model/the-oracle-child-starts-under-the-heap-growth-policy.test.ts
+    - test/every-view-build-is-counted.test.ts
+    - test/human-gate-change-management.test.ts
+    - test/human-gate-feedback.test.ts
+    - test/human-gate-operator-items.test.ts
+    - test/human-gate-pin-reviewer.test.ts
+    - test/human-gate-surface-counts.test.ts
+    - test/human-gate.test.ts
+    - test/inbox-shadow-reuses-its-paged-snapshot.test.ts
+    - test/incidents-view.test.ts
+    - test/instances-view.test.ts
+    - test/nav-badge-from-the-read-model.test.ts
+    - test/now-decisions-ledger-starts-warm.test.ts
+    - test/now-is-not-due-on-a-ledger-mtime-alone.test.ts
+    - test/now-view-parses-the-board-snapshot-once.test.ts
+    - test/now-view-rederives-only-dirtied-tasks.test.ts
+    - test/now-view.test.ts
+    - test/one-parsed-plan-per-thread.test.ts
+    - test/operator-agent-gets-read-the-read-model.test.ts
+    - test/read-model-cli.test.ts
+    - test/read-model-materialize-budget.test.ts
+    - test/read-model-threads-see-a-refreshed-token.test.ts
+    - test/read-model-view-bodies-share-the-pass-budget.test.ts
+    - test/read-model-worker.test.ts
+    - test/recent-projection.test.ts
+    - test/repository-flow-cached-wiring.test.ts
+    - test/scout-analytics-source-snapshot-failed.test.ts
+    - test/selected-registry-serve-consumers.test.ts
+    - test/serve-generation.test.ts
+    - test/serve-memory-names-what-the-heavy-view-lane-holds.test.ts
+    - test/serve-memory-sizes-the-threads-the-read-model-worker-spawns.test.ts
+    - test/serves-own-diagnostic-rows-do-not-move-the-read-model-generation.test.ts
+    - test/shadow-comparisons-follow-the-view-owner.test.ts
+    - test/shadow-readiness-accrues-without-console-traffic.test.ts
+    - test/standby-reload-removes-retired-bodies.test.ts
+    - test/the-board-oracle-audits-a-rotating-slice.test.ts
+    - test/the-board-projection-holds-per-key-state-not-history.test.ts
+    - test/the-board-projection-keeps-no-unread-blob.test.ts
+    - test/the-inbox-and-feedback-views-answer-from-memory.test.ts
+    - test/the-inbox-slow-lane-is-not-a-second-github-fetcher.test.ts
+    - test/the-now-and-feedback-views-read-the-landing-queue.test.ts
+    - test/the-now-decisions-read-the-gate-ledger-once.test.ts
+    - test/the-now-view-decisions-stage-reads-feedback-and-dependencies-once-per-change.test.ts
+    - test/the-now-view-keeps-dispatch-telemetry-and-recent-run-evidence.test.ts
+    - test/the-now-view-snapshot-indexes-the-ledger-once-per-generation.test.ts
+    - test/the-read-model-open-runs-no-integrity-check.test.ts
+    - test/the-read-model-worker-is-the-single-github-fetcher.test.ts
+    - test/the-step-cache-audit-rotates-over-the-cached-steps.test.ts
+    - test/view-shadow.test.ts
+    - test/view-sources-are-judged-by-one-budget-table.test.ts
+    - test/views-from-the-read-model.test.ts
+    - test/workers-inherit-parent-heap-flags.test.ts
+    - test/workstreams-projection-reuse.test.ts
+    - test/workstreams-view.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A shared read-model fixture helper removes its state dir only after its registered closers have run in reverse order and flushReadModelTransactions has settled, and a lifecycle case observes that order against real SQLite and the default publisher
+      proof: "unit test: test/console-api/read-model/every-read-model-fixture-flushes-before-removing-its-state.test.ts"
+    - claim: A census refuses any test suite that opens the read model and removes a temp dir without the shared helper or an awaited flushReadModelTransactions before the removal, with a planted-site control
+      proof: "grep: W1-T11411 census in test/console-api/read-model/every-read-model-fixture-flushes-before-removing-its-state.test.ts"
+  rationale: |
+    OBSERVED, 2026-11-03 to 11-05. ENOTEMPTY ("Directory not empty") from a test teardown rmSync recurs suite by suite:
+    - Fix-lane dispatches spent on it in the retained ledger window (archives from 11-03): W1-T10354 at 11-03T11:29Z (rmd-scratch-rm-state, an-empty-scratch-read-model-is-rebuilt-from-the-ledger), W1-T11100 at 11-04T00:05Z (rmd-nav-badge-rm, nav-badge-from-the-read-model), W1-T10957 at 11-04T11:54Z (rmd-now-decisions-inputs).
+    - #16468's test-slow-shard (2/3) failed the same nav-badge case on 11-04 and passed on re-run. On 11-05 three board-projection sibling suites failed ENOTEMPTY on teardown on the Mac, on different tests per run, with and without the PR's change (load 19-28).
+    - The CI-friction gardener has already filed per-suite tasks for the same class: W1-T11186 (now-view), W1-T11015 (board-projection-keeps-no-unread-blob), W1-T10941 (inbox gardener), and earlier W1-T5461 and W1-T10175 (merged, each fixing one or two suites).
+    CAUSE, documented in W1-T10175: since #12817 (W1-T9501) the read-model transaction publisher is a worker thread that writes observation files into the state dir asynchronously. A fixture whose after-hook rmSyncs that dir before the writer settles races it, and the writer's next file lands between readdir and rmdir. flushReadModelTransactions (src/lib/read-model-db.ts:292) is the barrier, but each fix so far applied it to one suite. At origin/main 83 suites open the read model and remove a temp dir without awaiting it, so the class keeps recurring wherever load stretches the window.
+  design: |
+    1. Add test/helpers/read-model-fixture-dir.ts: readModelFixtureDir(t, kind) makes the temp dir (makeTempDir) and returns it with onClose(fn). Its single async after-hook runs the registered closers in reverse order (awaiting async ones), then awaits flushReadModelTransactions(), then removes the dir. W1-T10175's design is the ordering contract.
+    2. Migrate each listed suite's local scratch/fixture removal to the helper. Register DB, cursor, ticker and worker closers with onClose instead of separate t.after hooks that could run after removal. Keep every behavioural assertion unchanged; this is fixture lifecycle only.
+    3. Add the census in the new test file. It walks git ls-files test/**/*.test.ts and selects suites that import a read-model opener (createReadModelTicker, createReadModelWorker, openReadModelDb, or a module re-exporting them) and remove a temp dir. It refuses any such suite that neither uses readModelFixtureDir nor awaits flushReadModelTransactions before its removal. Include a planted-site control that a violating fixture is caught, and a minimum-population assertion so the census cannot pass by comparing nothing.
+    4. The census lands in the same PR as the last migration. It carries no allowlist of suites that simply have not migrated yet. A suite the census names that is not in files joins by scope amendment.
+    Out of scope: rm maxRetries/retryDelay, skips or longer timeouts. A retry hides the race instead of ordering it. Also out of scope: any change to the production publisher, which W1-T10175 ruled out.
+  falsifier: |
+    At origin/main, a read-model suite whose after-hook rmSyncs its state dir while the transaction publisher still has an unsettled write fails ENOTEMPTY intermittently, and nothing refuses a new suite written that way.
+  note: |
+    reservation hand-off: plan-file branch reserved via rmd next-task-id --branch from the operator session's ops worktree.
+    The 83 listed suites were selected at origin/main 2026-11-05 by: imports createReadModelTicker|createReadModelWorker|openReadModelDb|read-model-db, removes a temp dir in an after-hook, and has no flushReadModelTransactions.

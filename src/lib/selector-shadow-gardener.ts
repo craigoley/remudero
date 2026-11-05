@@ -11,7 +11,7 @@ import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { prepareGardenTaskIds, releaseGardenTaskIds, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenTaskIdMinter, type GardenTaskIdRelease } from "./gardener.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { linkWorktreeNodeModules } from "./worker.js";
 import { loadPlan, newTestPath, SELECTOR_SHADOW_MISS_TEST_PATH } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -835,11 +835,22 @@ function selectorShadowObservationFromRow(row: Record<string, unknown>): Selecto
   };
 }
 
-/** Every stored observation, the first row per run winning; a row that does not parse is counted. An
- *  unreadable live ledger throws: a report folded over an empty store would read as less evidence. */
+/** Bump whenever the observation digest's reducer changes. */
+export const SELECTOR_SHADOW_OBSERVATION_DIGEST_VERSION = "1";
+
+/** Every stored observation in the ledger UNION, oldest first, the first row per run winning; a row that
+ *  does not parse is counted. An unreadable ledger file throws: a report folded over a partial store would
+ *  read as less evidence. Rotation keeps only the newest MAX_RETAINED_LINES_PER_STEP rows of the step live,
+ *  so a live-only read was a rolling window that could never accumulate: OBSERVED 2026-11-04 on the fleet
+ *  host, 118 live runs against 2631 in the union. A pass is a fresh child, so each archive is answered from
+ *  its durable digest and only a rotation cut since the last pass is decompressed. */
 export function readSelectorShadowObservations(stateDir: string): { observations: SelectorShadowObservation[]; unreadable: number } {
-  // ledger-read-intent: live — the step is retained live across rotation, so no archive is read.
-  const read = readLedgerUnionRecordsSync(stateDir, { pattern: SELECTOR_SHADOW_OBSERVATION_LINE, maxRotations: 0, refuseIncomplete: true });
+  // ledger-read-intent: union — rotation retains only the newest rows of the step live.
+  const read = readLedgerUnionRecordsSync(stateDir, {
+    pattern: SELECTOR_SHADOW_OBSERVATION_LINE, step: SELECTOR_SHADOW_OBSERVATION_STEP, refuseIncomplete: true,
+    rotationRecords: ledgerRotationDigests(stateDir, (rows) => rows.filter((row) => row.step === SELECTOR_SHADOW_OBSERVATION_STEP),
+      { holder: "selector-shadow.observation", reducerVersion: SELECTOR_SHADOW_OBSERVATION_DIGEST_VERSION }).rotationRecords,
+  });
   if (!read.ok) throw new Error(`selector shadow: the observation store is unreadable: ${read.unread.join(", ")}`);
   const observations = new Map<number, SelectorShadowObservation>();
   let unreadable = read.torn;
@@ -856,6 +867,67 @@ export function readSelectorShadowObservations(stateDir: string): { observations
 export const SELECTOR_SHADOW_REPLAY_RUNS_PER_PASS = 2;
 /** BACKSTOP: stored observations with a charged miss re-attributed per pass, one memoized main read per base. */
 export const SELECTOR_SHADOW_REATTRIBUTE_PER_PASS = 20;
+/** BACKSTOP: how long one stored miss's reattribution or repair answer stands before the run is asked
+ *  again. Both checks are bounded per pass, so without a kept answer a store holding more charged misses
+ *  than the bound re-asked the same first ones every pass and never reached the rest (OBSERVED 2026-11-04:
+ *  up to 77 charged narrow misses in the host union). The answer lives in a state file, never in the
+ *  ledger, so "repaired" still means today's selector selects the file — as of at most this long ago. */
+export const SELECTOR_SHADOW_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
+/** The kept answers, keyed by CI run id. */
+export const SELECTOR_SHADOW_CHECKS_FILE = "selector-shadow-checks.json";
+
+interface SelectorShadowChecks {
+  /** Each re-asked run's newly unattributed reason per file ({} when nothing changed). */
+  reattributed: Record<string, { at: number; reasons: Record<string, SelectorShadowUnattributedReasonStored> }>;
+  /** Each repair-checked run's files today's selector selects in every arm that missed them. */
+  repaired: Record<string, { at: number; files: string[] }>;
+}
+type SelectorShadowUnattributedReasonStored = NonNullable<SelectorShadowFailure["unattributed"]>;
+
+/** The kept answers younger than the TTL; an unreadable file is an empty one, so every run is asked again. */
+function readSelectorShadowChecks(deps: GardenerDeps, nowMs: number): SelectorShadowChecks {
+  const empty: SelectorShadowChecks = { reattributed: {}, repaired: {} };
+  const fresh = (at: unknown): at is number => typeof at === "number" && at <= nowMs && nowMs - at < SELECTOR_SHADOW_CHECK_TTL_MS;
+  try {
+    const raw = readFileIfExists(join(deps.stateDir, SELECTOR_SHADOW_CHECKS_FILE));
+    if (raw === undefined) return empty;
+    const parsed = JSON.parse(raw) as Partial<Record<keyof SelectorShadowChecks, Record<string, Record<string, unknown>>>>;
+    const checks = empty;
+    for (const [id, entry] of Object.entries(parsed.reattributed ?? {})) {
+      const reasons = entry?.reasons;
+      if (fresh(entry?.at) && reasons !== null && typeof reasons === "object" && !Array.isArray(reasons) &&
+          Object.values(reasons).every((r) => r === "base_red" || r === "flake_history")) {
+        checks.reattributed[id] = { at: entry.at, reasons: reasons as Record<string, SelectorShadowUnattributedReasonStored> };
+      }
+    }
+    for (const [id, entry] of Object.entries(parsed.repaired ?? {})) {
+      const files = entry?.files;
+      if (fresh(entry?.at) && Array.isArray(files) && files.every((f) => typeof f === "string")) checks.repaired[id] = { at: entry.at, files };
+    }
+    return checks;
+  } catch (error) {
+    deps.log("selector-shadow.checks_unreadable", { error: errorText(error) });
+    return empty;
+  }
+}
+
+/** `observation` with each still-unattributed failure given the kept reason for its file. */
+function withReasons(observation: SelectorShadowObservation, reasons: Readonly<Record<string, SelectorShadowUnattributedReasonStored>>): SelectorShadowObservation {
+  return { ...observation, failures: observation.failures.map((f) =>
+    f.unattributed === undefined && reasons[f.file] !== undefined ? { ...f, unattributed: reasons[f.file] } : f) };
+}
+
+/** Keep only answers about runs the store still holds; a failed write costs the next pass a re-ask. */
+function writeSelectorShadowChecks(deps: GardenerDeps, checks: SelectorShadowChecks, all: ReadonlyMap<number, SelectorShadowObservation>): void {
+  const held = <T>(entries: Record<string, T>): Record<string, T> =>
+    Object.fromEntries(Object.entries(entries).filter(([id]) => all.has(Number(id))));
+  try {
+    writeAtomic(join(deps.stateDir, SELECTOR_SHADOW_CHECKS_FILE),
+      JSON.stringify({ reattributed: held(checks.reattributed), repaired: held(checks.repaired) }) + "\n");
+  } catch (error) {
+    deps.log("selector-shadow.checks_unwritten", { error: errorText(error) });
+  }
+}
 /** BACKSTOP: replayed observations the store may hold before the backfill stops — half of the
  *  MAX_RETAINED_LINES_PER_STEP rows rotation keeps of the step, so live rows always have room. */
 export const SELECTOR_SHADOW_REPLAY_MAX_OBSERVATIONS = 100;
@@ -1134,11 +1206,24 @@ export function selectorShadowRepairedObservation(
  *  run's own diff, selects the file. Bounded per pass; an unanswerable check leaves the miss charged. */
 async function repairSelectorShadowMisses(
   deps: GardenerDeps, selector: SelectorShadowPassSelector, all: Map<number, SelectorShadowObservation>,
+  checks: SelectorShadowChecks, nowMs: number,
 ): Promise<number> {
-  const charged = [...all.values()].filter((o) => o.failures.some((f) =>
-    missedArms(f, o).length > 0 && selectorShadowUnattributedReason(f, o) === undefined)).slice(0, SELECTOR_SHADOW_REATTRIBUTE_PER_PASS);
-  if (charged.length === 0) return 0;
+  const isCharged = (o: SelectorShadowObservation): boolean => o.failures.some((f) =>
+    missedArms(f, o).length > 0 && selectorShadowUnattributedReason(f, o) === undefined);
   let repaired = 0;
+  // A kept answer stands for the TTL; the pass's bound is spent only on runs with none.
+  for (const observation of [...all.values()].filter(isCharged)) {
+    const kept = checks.repaired[String(observation.runId)];
+    if (kept === undefined || kept.files.length === 0) continue;
+    const files = new Set(kept.files);
+    const again = { ...observation, failures: observation.failures.map((f): SelectorShadowFailure =>
+      files.has(f.file) && missedArms(f, observation).length > 0 && selectorShadowUnattributedReason(f, observation) === undefined
+        ? { ...f, unattributed: "repaired" } : f) };
+    all.set(observation.runId, again);
+    repaired += 1;
+  }
+  const charged = [...all.values()].filter((o) => isCharged(o) && checks.repaired[String(o.runId)] === undefined)
+    .slice(0, SELECTOR_SHADOW_REATTRIBUTE_PER_PASS);
   {
     for (const observation of charged) {
       const run: SelectorShadowReplayRun = { id: observation.runId, headSha: observation.headSha,
@@ -1148,6 +1233,7 @@ async function repairSelectorShadowMisses(
         const today = await selector.selectAtMain(run, observation.failures.map((f) => f.file));
         const again = selectorShadowRepairedObservation(observation, today.record);
         const files = again.failures.filter((f, i) => f.unattributed !== observation.failures[i]?.unattributed).map((f) => f.file);
+        checks.repaired[String(observation.runId)] = { at: nowMs, files };
         if (files.length > 0) {
           all.set(observation.runId, again);
           repaired += 1;
@@ -1182,12 +1268,28 @@ async function accumulateSelectorShadow(
   }
   // A stored miss was attributed once, by the reader of its day. Ask again each pass (bounded), so a
   // corrected base-red reader reaches it; the store keeps its first row, so nothing is re-appended.
+  // Each answer is kept for SELECTOR_SHADOW_CHECK_TTL_MS, so the bound walks the whole store over passes.
+  const nowMs = (deps.clock ?? systemClock).now();
+  const checks = readSelectorShadowChecks(deps, nowMs);
   let reattributed = 0;
-  const charged = [...all.values()].filter((o) => o.failures.some((f) => f.unattributed === undefined &&
-    (f.floor === "missed" || f.narrow === "missed" || f.impact === "missed"))).slice(0, SELECTOR_SHADOW_REATTRIBUTE_PER_PASS);
+  const isCharged = (o: SelectorShadowObservation): boolean => o.failures.some((f) => f.unattributed === undefined &&
+    (f.floor === "missed" || f.narrow === "missed" || f.impact === "missed"));
+  for (const observation of [...all.values()].filter(isCharged)) {
+    const kept = checks.reattributed[String(observation.runId)];
+    if (kept === undefined || Object.keys(kept.reasons).length === 0) continue;
+    all.set(observation.runId, withReasons(observation, kept.reasons));
+    reattributed += 1;
+  }
+  const charged = [...all.values()].filter((o) => isCharged(o) && checks.reattributed[String(o.runId)] === undefined)
+    .slice(0, SELECTOR_SHADOW_REATTRIBUTE_PER_PASS);
   for (const observation of charged) {
     const again = await reattribute(observation);
-    if (again.failures.some((f, i) => f.unattributed !== observation.failures[i]?.unattributed)) {
+    const reasons: Record<string, SelectorShadowUnattributedReasonStored> = {};
+    again.failures.forEach((f, i) => {
+      if (f.unattributed !== undefined && f.unattributed !== observation.failures[i]?.unattributed) reasons[f.file] = f.unattributed;
+    });
+    checks.reattributed[String(observation.runId)] = { at: nowMs, reasons };
+    if (Object.keys(reasons).length > 0) {
       all.set(observation.runId, again);
       reattributed += 1;
     }
@@ -1207,11 +1309,12 @@ async function accumulateSelectorShadow(
         replayPass = { error: errorText(error) };
       }
       // After the replay, so a miss it just stored is asked about today's selector in the same pass.
-      repaired = await repairSelectorShadowMisses(deps, selector, all);
+      repaired = await repairSelectorShadowMisses(deps, selector, all, checks, nowMs);
     } finally {
       await selector.dispose();
     }
   }
+  writeSelectorShadowChecks(deps, checks, all);
   const observations = [...all.values()];
   const fold = foldSelectorShadowObservations(observations, window.fullSuiteSize);
   const source = (name: SelectorShadowObservation["source"]): SelectorShadowSourceReport => {
