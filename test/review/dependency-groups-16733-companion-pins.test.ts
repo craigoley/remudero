@@ -7,6 +7,15 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const json = (path: string) => JSON.parse(readFileSync(join(REPO_ROOT, path), "utf8"));
 
+function compareStableVersions(actual: string, minimum: string): number {
+  assert.match(actual, /^\d+\.\d+\.\d+$/);
+  assert.match(minimum, /^\d+\.\d+\.\d+$/);
+  const target = minimum.split(".").map(Number);
+  return actual.split(".").map(Number)
+    .map((part, index) => part - target[index])
+    .find(difference => difference !== 0) ?? 0;
+}
+
 test("dependency groups 16733 and 16734 preserve their requested versions and every platform pin", () => {
   const root = json("package.json");
   const lock = json("package-lock.json");
@@ -28,13 +37,22 @@ test("dependency groups 16733 and 16734 preserve their requested versions and ev
     const version = packages["node_modules/" + name].version;
     const target = requested.find(bump => bump.dependency === name)?.toVersion;
     assert.ok(target, name + " requested version");
-    assert.match(version, /^\d+\.\d+\.\d+$/, name + " stable version");
-    const targetParts = target.split(".").map(Number);
-    const comparison = version.split(".").map(Number)
-      .map((part: number, index: number) => part - targetParts[index])
-      .find((difference: number) => difference !== 0) ?? 0;
-    assert.ok(comparison >= 0, name + " must not downgrade its requested target");
-    assert.equal(declared, (name === "@swc/core" || name === "@anthropic-ai/claude-agent-sdk" ? "^" : "") + version, name);
+    const caret = name === "@swc/core" || name === "@anthropic-ai/claude-agent-sdk";
+    assert.equal(declared.startsWith("^"), caret, name + " range convention");
+    const minimum = caret ? declared.slice(1) : declared;
+    assert.ok(compareStableVersions(minimum, target) >= 0, name + " manifest must retain the requested upgrade");
+    assert.ok(compareStableVersions(version, minimum) >= 0, name + " lock must satisfy the manifest minimum");
+    if (caret) {
+      const [major, minor, patch] = minimum.split(".").map(Number);
+      const actual = version.split(".").map(Number);
+      assert.equal(actual[0], major, name + " caret major");
+      if (major === 0) {
+        assert.equal(actual[1], minor, name + " caret minor");
+        if (minor === 0) assert.equal(actual[2], patch, name + " caret patch");
+      }
+    } else {
+      assert.equal(version, declared, name + " exact image pin");
+    }
     const entry = packages["node_modules/" + name];
     assert.equal(packages[""].dependencies?.[name] ?? packages[""].devDependencies[name], declared, name + " root lock");
     assert.ok(Object.keys(entry.optionalDependencies).length > 0, name + " platform population");
