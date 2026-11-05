@@ -680,8 +680,6 @@ export interface CriterionVerdict {
   proof_exec: ProofExecOutcome;
   /** The bounded runner diagnostic when `proof_exec` is `cannot_evaluate`. */
   loadError?: string;
-  /** (W1-T11428) The reviewer reported UNABLE for this criterion: its own tools or sandbox could not inspect the
-   *  proof. It is the reviewer's stated reason, never a judgement; the criterion keeps its floor verdict. */
   reviewerUnavailable?: string;
   /** Host load at the start and end of a proof that did not pass (W1-T11132): the sweep's re-review reads it. */
   load?: ProofLoadRecord;
@@ -774,8 +772,6 @@ export interface ReviewEvidence {
    *  parseReviewerVerdictClauses}. Index-aligned, read ONLY where `semantic[i] === false`, and never a second reviewer
    *  call: captured off the SAME transcript {@link parseReviewerVerdicts} already parses. */
   semanticClauses?: (string | undefined)[];
-  /** (W1-T11428) Per-criterion UNABLE markers off the SAME transcript, see {@link parseReviewerUnable}. A defined
-   *  entry (the reason, possibly empty) means the reviewer could not inspect that criterion. Index-aligned. */
   reviewerUnable?: (string | undefined)[];
   /** The checkout whitelisted proofs execute in — MUST be the PR HEAD sha, NEVER the operator's working checkout (HEAD
    *  DISCIPLINE, W1-T65). Absent ⇒ execution is skipped and the keyword floor is byte-identical to pre-W1-T65. */
@@ -4361,8 +4357,6 @@ export function judgeCriterion(
   /** A syntactically valid implementation-worker refusal. It is advisory evidence with one
    * deterministic consequence: the worker may make its own criterion fail, never pass. */
   refusal?: CriterionRefusal,
-  /** (W1-T11428) The reviewer's UNABLE reason for this criterion, `""` when it gave none. Present means the reviewer
-   *  could not look: the criterion is never downgraded and is marked reviewer-unavailable instead. */
   reviewerUnable?: string,
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
@@ -4761,8 +4755,6 @@ export function judgeCriterion(
   // and can never rescue an unpasted or executed-fail proof. W1-T2263: APPEND to the floor's accumulated `reason`,
   // never replace it — a bare overwrite threw away everything earlier branches built, in the one branch where an
   // author most needs to know what was weighed. A bounded `semanticClause` rides after the downgrade note.
-  // W1-T11428: a reviewer that reported UNABLE did not look, so it has no judgement to fold in. A witnessed FAIL on
-  // the same criterion still wins below: that reviewer did inspect something and named a defect.
   const reviewerUnavailable = reviewerUnable !== undefined && semantic !== false
     ? (reviewerUnable || "the reviewer gave no reason") : undefined;
   if (reviewerUnavailable !== undefined) {
@@ -6161,8 +6153,6 @@ export function judgeReview(
   // happened not to execute" — the same shape `criteriaTampered` uses. A code diff is byte-identical: `unmetForState
   // === unmet`.
   const unmetForState = planOnly ? floorUnmet : unmet;
-  // W1-T11428: a criterion the reviewer could not inspect was not judged, so the review cannot be concluded: it is
-  // cannot-evaluate (pending, the existing one-per-head escalation), never a FAILURE and never withheld.
   const reviewerUnavailable = verdicts.find((v) => v.reviewerUnavailable !== undefined)?.reviewerUnavailable;
   const cannotEvaluate = verdicts.some((v) => v.proof_exec === "cannot_evaluate") || reviewerUnavailable !== undefined;
   const planLintRefusal = planOnly ? planLintRefusalText(evidence.planLint) : undefined;
@@ -7956,7 +7946,6 @@ export function parseReviewerVerdicts(text: string, count: number): (boolean | u
     const token = m[2].toUpperCase();
     if (token === "FAIL") semantic[n] = false;
     else if (token === "PASS" && semantic[n] !== false) semantic[n] = true;
-    // W1-T11428: UNABLE is no verdict at all; parseReviewerUnable reads it.
   }
   return semantic;
 }
@@ -7999,9 +7988,7 @@ function extractBoundedClause(trailing: string): string | undefined {
 /** (W1-T2263) Companion to {@link parseReviewerVerdicts}, reading the SAME transcript through the SAME regex for the
  *  bounded clause a FAIL line may carry — no second question, no second spawn. Index-aligned to `count`. `undefined`
  *  at an index whose line was PASS, absent, or a FAIL with no clause: a PASS line is never annotated. */
-/** (W1-T11428) The criteria the reviewer said it could NOT inspect: `REVIEW_VERDICT <n>: UNABLE <why>`. A defined
- *  entry is the bounded reason (`""` when it gave none); `undefined` means the reviewer did not say UNABLE there. The
- *  contract token is the only signal: a FAIL line's prose is never read as inability. Index-aligned to `count`. */
+/** W1-T11428: criteria the reviewer could not inspect. */
 export function parseReviewerUnable(text: string, count: number): (string | undefined)[] {
   const unable: (string | undefined)[] = new Array(count).fill(undefined);
   for (const m of text.matchAll(REVIEW_VERDICT_LINE_RE)) {
