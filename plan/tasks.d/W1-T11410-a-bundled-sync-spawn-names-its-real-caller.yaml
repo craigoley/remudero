@@ -1,0 +1,43 @@
+- id: W1-T11410
+  title: The bundled sync-spawn caller identifies its shared ghExecFile leaf by function name
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # caller and leaf attribution only; no execution or admission decision reads these rows
+  origin: operator-session#repair-PR-16817
+  plan_refs:
+    - W1-T7745
+    - W1-T11268
+  files:
+    - src/lib/read-plane.ts
+    - test/console-api/read-model/a-bundled-sync-spawn-names-its-real-caller.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: An esbuild single-file fixture that calls production ghExecFile from actualCaller records actualCaller as the caller and ghExecFile as the leaf even when every stack frame uses run-task.mjs
+      proof: "unit test: test/console-api/read-model/a-bundled-sync-spawn-names-its-real-caller.test.ts"
+      kind: guard
+    - claim: callerFrame recognizes the shared ghExecFile leaf by function name while retaining the existing path-based leaf matches
+      proof: 'grep: SYNC_SPAWN_LEAF_FRAME_NAMES\.has in src/lib/read-plane.ts'
+  rationale: |
+    OBSERVED on PR #16817 after merge b9051d28:
+    - The PR's bundled fixture exercised direct child_process spawns and asserted caller names, but it did not call production ghExecFile or assert a leaf.
+    - remudero-review at 2026-11-05T00:36:28Z found that an in-memory bundle recorded ghExecFile as caller and omitted leaf because the leaf filter still required github-transport source paths, which disappear in a single-file run-task.mjs bundle.
+    - A later review on unchanged head 82c7f317 returned a partial pass with reviewer_outcome not_attempted and executed only one of two proofs; it did not evaluate the reported semantic failure.
+    - W1-T7745 already established the unbundled caller-behind-ghExecFile contract. This task extends that contract to the daemon's bundled runtime.
+    Subject sweep across all 17 open PR head trees found no competing task proposal for bundled ghExecFile leaf attribution; unlike W1-T11268, this follow-up calls production ghExecFile inside the bundle and asserts both caller and leaf.
+  design: |
+    - Keep the existing source-path checks for unbundled stacks.
+    - Recognize the shared ghExecFile leaf by its stable function name when the source path is bundled away.
+    - Extend the existing esbuild fixture to import production ghExecFile, make one synchronous child call from actualCaller, and assert the emitted caller and leaf fields against the bundle filename.
+    NOT IN SCOPE:
+    - removing synchronous spawns;
+    - changing telemetry decisions or spawn admission;
+    - weakening or rewriting W1-T11268's acceptance criteria.
+  note: |
+    reservation hand-off: run-unfiled-1793884960326 -> run-unfiled-1793884960326
+    Reserved with rmd next-task-id on the operator's unfiled worktree after PR #16817's merged code failed the reviewer's production-ghExecFile bundle probe.
