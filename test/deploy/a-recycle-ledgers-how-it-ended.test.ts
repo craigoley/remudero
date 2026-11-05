@@ -89,17 +89,27 @@ describe("test/deploy/a-recycle-ledgers-how-it-ended.test.ts", () => {
   for (const [signal, rc, duringPull] of [["SIGHUP", 129, false], ["SIGINT", 130, false], ["SIGTERM", 143, false], ["SIGHUP", 129, true]] as const) {
     test(`${signal} during ${duringPull ? "pull" : "drain"} before docker stop records an aborted receipt`, { timeout: 30_000 }, async (t) => {
       const f = fixture(t, true);
-      const child = spawn("bash", [SCRIPT], { cwd: REPO_ROOT, env: { ...f.env, RMD_RECYCLE_WAIT_S: "60", PULL_HOLD: duringPull ? "1" : "0" } });
-      t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+      const child = spawn("bash", [SCRIPT], {
+        cwd: REPO_ROOT, detached: true,
+        env: { ...f.env, RMD_RECYCLE_WAIT_S: "60", PULL_HOLD: duringPull ? "1" : "0" },
+      });
+      t.after(() => {
+        if (child.pid && child.exitCode === null && child.signalCode === null) {
+          try { process.kill(-child.pid, "SIGKILL"); } catch { /* the process group already exited */ }
+        }
+      });
       let output = "", sent = false;
       child.stdout.on("data", (b) => {
         output += b;
-        if (!sent && output.includes(duringPull ? "fixture pull waiting" : "— polling")) { sent = true; child.kill(signal); }
+        if (!sent && output.includes(duringPull ? "fixture pull waiting" : "— polling")) {
+          sent = true;
+          process.kill(-child.pid!, signal);
+        }
       });
       child.stderr.on("data", (b) => { output += b; });
       const status = await new Promise<number | null>((resolve, reject) => {
         child.on("error", reject);
-        child.on("close", resolve);
+        child.on("exit", resolve);
       });
       assert.equal(status, rc, output);
       const ended = f.rows().filter((row) => row.step === "recycle.ended");

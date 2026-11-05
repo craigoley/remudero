@@ -1255,7 +1255,8 @@ test("W1-T1046: a hung fix-rung worker alone is passed, printed before clearing,
   assert.match(run.stderr, /predicate: fix-rung shape .* AND age >= 7200s AND zero inflight locks/);
   // AND THE RECORD SURVIVES THE CONTAINER, on the bind mount the daemon already owns.
   const ledger = readFileSync(join(state, "state", "ledger.ndjson"), "utf8").trim().split("\n");
-  const row = JSON.parse(ledger[ledger.length - 1]);
+  const row = ledger.map((line) => JSON.parse(line)).find((entry) => entry.step === "recycle.hung_worker_passed");
+  assert.ok(row, "the hung worker has its own durable ledger row");
   assert.equal(row.step, "recycle.hung_worker_passed");
   assert.equal(row.pid, 363439);
   assert.equal(row.age_s, 8970);
@@ -2016,11 +2017,14 @@ test("recycler refuses invalid or duplicate mode before effects", t => {
     assert.match(run.stderr, /mode/);
     assert.deepEqual(run.calls, [], "not even the first Docker/Azure read or mutation is allowed");
     const fixtureState = join(root, "state", "state");
-    assert.deepEqual(readdirSync(fixtureState), ["ledger.ndjson"], "only invocation evidence, no PAUSE, receipt or lifecycle state before refusal");
+    assert.deepEqual(readdirSync(fixtureState), ["ledger.ndjson"], "only ledger evidence, no PAUSE or lifecycle state before refusal");
     const rows = readFileSync(join(fixtureState, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.deepEqual(rows.map((row) => row.step), ["recycle.invoked"]);
+    assert.deepEqual(rows.map((row) => row.step), ["recycle.invoked", "recycle.ended"]);
     assert.equal(rows[0].instance, "fixture");
     assert.equal(typeof rows[0].pid, "number");
+    assert.equal(rows[1].run_id, rows[0].run_id);
+    assert.equal(rows[1].outcome, "refused");
+    assert.equal(rows[1].rc, 2);
   }
 });
 

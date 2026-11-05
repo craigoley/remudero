@@ -576,6 +576,11 @@ record_recycle_ended() {
     *) wait_s="${wait_s#"${wait_s%%[!0]*}"}"; wait_s="${wait_s:-0}" ;;
   esac
   reason="${RECYCLE_FINAL_REASON:-recycle-container: exited with status $status}"
+  # A post-start action can fail after the OK line; only a zero exit is replaced.
+  if [ "$status" -ne 0 ] && [ "$RECYCLE_OUTCOME" = replaced ]; then
+    RECYCLE_OUTCOME=aborted
+    reason="recycle-container: exited with status $status after starting the replacement"
+  fi
   if [ "$RECYCLE_OUTCOME" = refused ] && [ -n "$RECYCLE_BLOCKERS_JSON" ]; then
     blockers=",\"blockers\":$RECYCLE_BLOCKERS_JSON"
   fi
