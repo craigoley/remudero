@@ -1,7 +1,7 @@
 import type { WorkerStreamEvent } from "../../lib/worker.js";
 import type { GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure, type CensusChildResult } from "./run-task-verb.js";
-import { buildBaseProofDir, hostWorktreeGitAtTopLevel } from "../../lib/check-proof.js";
+import { buildBaseProofDirAsync, hostWorktreeGitAtTopLevel, type BaseProofDir } from "../../lib/check-proof.js";
 import { execFileSync, spawn } from "node:child_process";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow } from "../../lib/sweep.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
@@ -1594,7 +1594,8 @@ export interface ReviewCommandDeps {
   loadConfig?: () => Config;
   materialize?: ReviewCommandHost["materializeReviewWorktree"];
   withMaterialized?: typeof withMaterializedWorktree;
-  buildBaseProof?: typeof buildBaseProofDir;
+  /** W1-T11341: awaited by default, so an in-process review's base git never holds the daemon loop; a sync fake still fits. */
+  buildBaseProof?: (criteria: Parameters<typeof buildBaseProofDirAsync>[0], headCheckoutDir: string) => BaseProofDir | Promise<BaseProofDir>;
   runReview?: (args: Parameters<typeof runReview>[1]) => ReturnType<typeof runReview>;
   postStatus?: typeof postReviewStatusGuarded;
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
@@ -1817,7 +1818,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     loadConfig,
     materialize: materializeReviewWorktree,
     withMaterialized: withMaterializedWorktree,
-    buildBaseProof: buildBaseProofDir,
+    buildBaseProof: buildBaseProofDirAsync,
     runReview: runReview.bind(null, host),
     postStatus: postReviewStatusGuarded,
     reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
@@ -2194,7 +2195,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // fallback (or undefined when the PR has no dialect proof / no resolvable base — the check then
   // stays inert, exactly as it was for its first 1,180 verdicts). W1-T460's `baseUnreadablePaths`
   // rides along: a per-proof fact the dir alone cannot carry.
-  const baseProof = worktreePath ? buildBaseProof(criteria, worktreePath) : undefined;
+  const baseProof = worktreePath ? await buildBaseProof(criteria, worktreePath) : undefined;
   const materializeMs = systemClock.now() - materializeStartedMs;
 
   // W1-T185 (Gap 2, criterion 6): withMaterializedWorktree guarantees teardown
