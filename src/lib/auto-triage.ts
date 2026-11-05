@@ -927,8 +927,9 @@ export async function refreshFeedbackFromMain(
 ): Promise<void> {
   const git = deps.git ?? hostWorktreeGitAsync;
   const dirs = gitDirsOf(root);
-  const known = dirs === undefined ? undefined : refSha(dirs.commonDir, "refs/remotes/origin/main");
-  const headSha = dirs === undefined ? undefined : headShaOf(dirs);
+  if (dirs === undefined) return dropView(root, "not a git checkout", deps.log);
+  const known = refSha(dirs.commonDir, "refs/remotes/origin/main");
+  const headSha = headShaOf(dirs);
   const cached = mainFeedbackViews.get(root);
   if (known !== undefined && cached?.mainSha === known && cached.headSha === headSha) return;
   try {
@@ -952,11 +953,33 @@ export async function refreshFeedbackFromMain(
     mainFeedbackViews.delete(root);
     // A missing ref or tree is an unreadable main, so the checkout walk governs; a security refusal from the leaf still propagates.
     if (error === null || typeof error !== "object" || !("status" in error || "code" in error)) throw error;
-    const reason = String(error instanceof Error ? error.message : error).split("\n")[0];
-    // Once per distinct reason: a main that stays unreadable is one row, not one per tick.
-    if (fallbackReasons.get(root) !== reason) deps.log?.("auto_triage.candidates_fallback", { reason });
-    fallbackReasons.set(root, reason);
+    dropView(root, String(error instanceof Error ? error.message : error).split("\n")[0], deps.log);
   }
+}
+
+/** The checkout walk governs; ledgered once per distinct reason, so a main that stays unreadable is one row, not one per tick. */
+function dropView(root: string, reason: string, log: ((step: string, extra: Record<string, unknown>) => void) | undefined): void {
+  mainFeedbackViews.delete(root);
+  if (fallbackReasons.get(root) !== reason) log?.("auto_triage.candidates_fallback", { reason });
+  fallbackReasons.set(root, reason);
+}
+
+/** The two readers {@link triageCandidateReaders} hands back: the queue's count and its age, off one walk. */
+export interface TriageCandidateReaders {
+  newFeedbackIdsOldestFirst: typeof newFeedbackIdsOldestFirst;
+  oldestFeedbackAgeMs: typeof oldestFeedbackAgeMs;
+}
+
+/**
+ * W1-T11374: the only way auto-triage obtains its candidate readers. It refreshes origin/main's feedback
+ * view first, so a reader built without that refresh cannot reach the daemon by construction.
+ */
+export async function triageCandidateReaders(
+  root: string,
+  deps: Parameters<typeof refreshFeedbackFromMain>[1] = {},
+): Promise<TriageCandidateReaders> {
+  await refreshFeedbackFromMain(root, deps);
+  return { newFeedbackIdsOldestFirst, oldestFeedbackAgeMs };
 }
 
 /** The view, unless origin/main has moved past it unrefreshed; the checkout walk governs then, as before. */

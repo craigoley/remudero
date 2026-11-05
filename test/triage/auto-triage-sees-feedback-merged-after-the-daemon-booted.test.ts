@@ -2,15 +2,15 @@
 // entry merged after the daemon booted is a candidate on the next pass, not after the next restart.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 import {
   newFeedbackIdsOldestFirst,
-  oldestFeedbackAgeMs,
   refreshFeedbackFromMain,
+  triageCandidateReaders,
   type MainFeedbackGit,
 } from "#src/lib/auto-triage.js";
 
@@ -49,10 +49,10 @@ test("W1-T11374: a status new entry merged to origin/main after boot is a candid
     f.boot.git("fetch", "-q", "origin");
     assert.deepEqual(newFeedbackIdsOldestFirst(f.boot.dir), ["fb-old", "fb-triaged-on-main"],
       "control: the boot checkout alone cannot see the merged entry; this is the defect");
-    await refreshFeedbackFromMain(f.boot.dir);
-    assert.deepEqual(newFeedbackIdsOldestFirst(f.boot.dir), ["fb-old", "fb-triaged-on-main", "fb-merged-after-boot"]);
+    const readers = await triageCandidateReaders(f.boot.dir);
+    assert.deepEqual(readers.newFeedbackIdsOldestFirst(f.boot.dir), ["fb-old", "fb-triaged-on-main", "fb-merged-after-boot"]);
     assert.equal(f.boot.git("rev-parse", "HEAD"), bootHead, "the checkout itself never moved; only origin/main was read");
-    assert.equal(oldestFeedbackAgeMs(f.boot.dir, new Date("2026-11-04T00:00:00.000Z")), 3 * 86_400_000,
+    assert.equal(readers.oldestFeedbackAgeMs(f.boot.dir, new Date("2026-11-04T00:00:00.000Z")), 3 * 86_400_000,
       "the age reader reads the same list");
   } finally {
     f.cleanup();
@@ -122,10 +122,39 @@ test("W1-T11374: an unreadable origin/main falls back to the checkout walk and l
   }
 });
 
-test("W1-T11374: the daemon's autoTriageCheck refreshes from origin/main before it builds both readers", () => {
-  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
-  const fn = src.slice(src.indexOf("export async function autoTriageCheck("), src.indexOf("export function buildRetroDaemonHooks("));
-  const refresh = fn.indexOf("await refreshFeedbackFromMain(feedbackRoot");
-  assert.ok(refresh > 0, "autoTriageCheck awaits the refresh off its own feedbackRoot");
-  assert.ok(refresh < fn.indexOf("candidates: newFeedbackIdsOldestFirst(feedbackRoot)"), "before the candidate read");
+test("W1-T11374: a linked worktree with packed refs and a detached HEAD reads the same origin/main view", async () => {
+  const f = fleet();
+  const linked = join(mkdtempSync(join(tmpdir(), "rmd-w1-t11374-linked-")), "wt");
+  try {
+    f.boot.git("worktree", "add", "-q", "--detach", linked, "HEAD");
+    commitEntry(f.seed, "fb-merged-after-boot", "2026-11-03T00:00:00.000Z", "new");
+    f.boot.git("fetch", "-q", "origin");
+    f.boot.git("pack-refs", "--all");
+    const { git, calls } = countingGit();
+    await refreshFeedbackFromMain(linked, { git });
+    assert.ok(newFeedbackIdsOldestFirst(linked).includes("fb-merged-after-boot"));
+    calls.length = 0;
+    await refreshFeedbackFromMain(linked, { git });
+    assert.deepEqual(calls, [], "the packed origin/main ref is read from the common dir, so nothing respawns");
+  } finally {
+    f.boot.git("worktree", "remove", "--force", linked);
+    rmSync(join(linked, ".."), { recursive: true, force: true });
+    f.cleanup();
+  }
+});
+
+test("W1-T11374: a feedback root that is not a git checkout spawns no git and keeps the checkout walk", async () => {
+  const plain = mkdtempSync(join(tmpdir(), "rmd-w1-t11374-plain-"));
+  try {
+    mkdirSync(join(plain, "plan", "feedback"), { recursive: true });
+    writeFileSync(join(plain, "plan", "feedback", "fb-plain.yaml"), entry("fb-plain", "2026-11-01T00:00:00.000Z", "new"));
+    const { git, calls } = countingGit();
+    const rows: string[] = [];
+    await refreshFeedbackFromMain(plain, { git, log: (step) => rows.push(step) });
+    assert.deepEqual(calls, []);
+    assert.deepEqual(rows, ["auto_triage.candidates_fallback"]);
+    assert.deepEqual(newFeedbackIdsOldestFirst(plain), ["fb-plain"]);
+  } finally {
+    rmSync(plain, { recursive: true, force: true });
+  }
 });
