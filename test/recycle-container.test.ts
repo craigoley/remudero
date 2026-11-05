@@ -161,6 +161,7 @@ function writeStubs(dir: string): void {
     'rec() { printf "%s" "docker" >> "$STUB_REC/calls"; for a in "$@"; do a="${a//$\'\\n\'/ }"; printf "\\t%s" "$a" >> "$STUB_REC/calls"; done; printf "\\n" >> "$STUB_REC/calls"; }',
     'rec "$@"',
     'case "$1" in',
+    '  ps) if [ "${FIXTURE_LAUNCHER_RUNNING:-}" = 1 ] && [ "${2:-}" = -q ] && [ "${3:-}" = -f ]; then echo fixture-id; fi; exit 0 ;;',
     '  context) case "$STUB_MODE" in private-remote) echo "ssh://unqualified.example.invalid" ;; *) echo "unix:///fixture/docker.sock" ;; esac; exit 0 ;;',
     "  image)",
     '    if [ "$2" = "inspect" ]; then',
@@ -306,9 +307,65 @@ interface RunOpts {
   extraEnv?: Record<string, string>;
   instanceRoot?: string;
   shellPath?: string;
+  pathTail?: string;
   unsetDockerHost?: boolean;
   unselectedRegistry?: boolean;
   forbidHostEffects?: boolean;
+}
+
+test("selected shell shadow reaches real lifecycle and heartbeat consumers: recycler preserves actual child argv", async t => {
+  const { registryShellFixture } = await import("#test/helpers/registry-shell-fixture.js");
+  const f = registryShellFixture(t), pin = f.capture();
+  const legacy = runRecycle("good");
+  // W1-T10573 (#15532) made RMD_INSTANCE_REGISTRY the ACTIVE selection; the legacy control is its genuine absence.
+  const selected = runRecycle("good", { args: ["--selected-registry-shadow", f.session], unselectedRegistry: true,
+    extraEnv: { HOME: f.env.HOME!, RMD_SCRATCH: "off" } });
+  assert.equal(legacy.status, 0, legacy.stderr);
+  assert.equal(selected.status, legacy.status, selected.stderr);
+  const launched = (run: Run) => run.calls.filter(c => c.bin === "docker" && c.argv[0] === "run")
+    .map(c => c.argv.map(a => a.replace(/recycle-state-[^/\s:]+/g, "recycle-state-FIXTURE")
+      .replace(/recycle-rec-[^/\s:]+/g, "recycle-rec-FIXTURE")));
+  assert.ok(launched(selected).length > 0, "actual recycler must launch its replacement child");
+  assert.deepEqual(launched(selected), launched(legacy));
+  assert.ok(f.rows().some(r => r.action === "recycle" && r.selected_outcome === "would-refuse"));
+  assert.ok(!JSON.stringify(selected.calls).includes(f.session));
+  assert.equal(createHash("sha256").update(readFileSync(f.session)).digest("hex"), pin);
+});
+
+test("selected shell shadow reaches real lifecycle and heartbeat consumers: generated watchdog invokes the real recycler", async t => {
+  const { registryShellFixture } = await import("#test/helpers/registry-shell-fixture.js");
+  const f = registryShellFixture(t), pin = f.capture();
+  // W1-T10573 (#15532) makes RMD_INSTANCE_REGISTRY the ACTIVE selection, and the generated launcher forwards whatever
+  // it was installed with. An unselected host installs with it genuinely absent; the shadow session is the candidate.
+  const installed = f.run(join(REPO_ROOT, "deploy/install-host-units.sh"), ["--install", "--selected-registry-shadow", f.session],
+    { RMD_INSTANCE_REGISTRY: undefined });
+  assert.equal(installed.status, 0, installed.stderr);
+  mkdirSync(join(f.state, "remudero/bin"));
+  writeFileSync(join(f.state, "remudero/bin/rmd"), '#!/bin/sh\nprintf \'%s\\n\' \'{"state":"FROZEN","action":"recycle","progressAgeMs":900000}\'\n', { mode: 0o700 });
+  const run = runRecycle("good", { scriptPath: join(f.output, "launcher"), stateDir: f.state,
+    pathTail: f.env.PATH, unselectedRegistry: true, extraEnv: {
+      HOME: f.env.HOME!, TMPDIR: f.root, FIXTURE_LAUNCHER_RUNNING: "1",
+      FIXTURE_CALLS: f.env.FIXTURE_CALLS!, FIXTURE_UID: f.env.FIXTURE_UID!,
+      FIXTURE_PAYLOAD: f.payload, FIXTURE_SELECTED: f.selected,
+      RMD_UNIT_DIR: f.env.RMD_UNIT_DIR!, RMD_BIN_DIR: f.env.RMD_BIN_DIR!,
+      RMD_LAUNCHER_PATH: f.env.RMD_LAUNCHER_PATH!, RMD_SYSTEMCTL_CMD: f.env.RMD_SYSTEMCTL_CMD!,
+      RMD_MEMINFO_PATH: f.env.RMD_MEMINFO_PATH!, RMD_MEMINFO: f.env.RMD_MEMINFO!,
+      RMD_SCRATCH: "off", RMD_SCRATCH_CHECKOUTS: "off",
+    } });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, /progress-watchdog -- FROZEN/);
+  assert.match(run.stdout, /recycling remudero-daemon via/);
+  assert.ok(f.rows().some(r => r.action === "recycle"), "the actual generated recycler child observes its inherited binding");
+  assert.ok(run.calls.some(c => c.bin === "docker" && c.argv[0] === "run"), "the actual recycler reaches the replacement effect");
+  assert.ok(!JSON.stringify(run.calls).includes(f.session), "no private session goes to container transports");
+  assert.equal(createHash("sha256").update(readFileSync(f.session)).digest("hex"), pin);
+});
+
+/** A 64 GiB fixture host: every fleet floor fits its shared budget, so the policy records no overcommit. */
+function recycleFixtureMeminfo(dir: string): string {
+  const path = join(dir, "meminfo");
+  writeFileSync(path, "MemTotal:       67108864 kB\n");
+  return path;
 }
 
 function runRecycle(mode: string, opts: RunOpts = {}): Run {
@@ -344,7 +401,7 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
       cwd: REPO_ROOT,
       env: {
         ...process.env,
-        PATH: `${dir}:${github ? `${github.dir}:` : ""}${process.env.PATH ?? ""}`,
+        PATH: `${dir}:${github ? `${github.dir}:` : ""}${opts.pathTail ?? process.env.PATH ?? ""}`,
         STUB_REC: rec,
         STUB_MODE: mode,
         STUB_READER_ROOT: REPO_ROOT,
@@ -379,6 +436,10 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
         // this suite's own environment, not about the script under test. The dedicated guard test below
         // overrides this deliberately to point at a real file.
         RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-container-test-no-such-dockerenv-marker"),
+        // W1-T11130: the memory policy reads the host's MemTotal. Pinned to a roomy fixture host so a
+        // recycle here never depends on the runner's real RAM: on Linux an overcommitted runner made the
+        // policy append host.memory_max.overcommitted into this ledger (the Mac has no /proc/meminfo).
+        RMD_MEMINFO_PATH: recycleFixtureMeminfo(dir),
         ...opts.extraEnv,
         ...(opts.unsetDockerHost ? { DOCKER_HOST: undefined } : {}),
         ...(opts.unselectedRegistry ? { RMD_INSTANCE_REGISTRY: undefined, RMD_INSTANCE_REGISTRY_DIGEST: undefined,
@@ -479,6 +540,32 @@ function privateRecyclerFixture(extra: string[] = []) {
   } };
 }
 
+
+test("selected shell shadow coexists with the active selection: the recycler's launch is unchanged and still observed", () => {
+  const fixture = privateRecyclerFixture();
+  const session = join(fixture.root, "session.json");
+  try {
+    const captured = spawnSync(process.execPath, ["--import", join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"),
+      join(REPO_ROOT, "src/lib/child-entry-argv.ts"), "--selected-registry-shadow", REPO_ROOT, "--shadow", "--capture",
+      "--session", session, "--registry", fixture.selected], { env: { ...process.env, RMD_INSTANCE_REGISTRY: undefined }, encoding: "utf8" });
+    assert.equal(captured.status, 0, captured.stderr);
+    const opts = (shadow: boolean): RunOpts => ({ args: ["--instance", "fixture", ...(shadow ? ["--selected-registry-shadow", session] : [])],
+      stateDir: join(fixture.root, "state"), unsetDockerHost: true, forbidHostEffects: true,
+      extraEnv: { RMD_INSTANCE_REGISTRY: fixture.selected, RMD_RECYCLE_HOST_LOCK: join(fixture.root, "own-recycle.lock") } });
+    const active = runRecycle("private-good", opts(false));
+    const shadowed = runRecycle("private-good", opts(true));
+    for (const run of [active, shadowed]) for (const dir of [run.fixtureRecordingDir, run.fixtureStubDir]) rmSync(dir, { recursive: true, force: true });
+    assert.equal(active.status, 0, active.stderr);
+    assert.equal(shadowed.status, active.status, shadowed.stderr);
+    const launches = (run: Run) => run.calls.filter(c => isRun(c) && c.argv.includes("-d")).map(c => c.argv.join(" "));
+    assert.ok(launches(active).length > 0, "the active selection reaches its real final launch");
+    assert.deepEqual(launches(shadowed), launches(active), "the shadow never changes the active selection's launch");
+    const rows = readFileSync(session + ".observations", "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.ok(rows.some(row => row.action === "recycle" && row.target_instance === "fixture"), "the recycler under an active selection still observes");
+    assert.ok(rows.every(row => row.publication_permission === "not-granted"));
+    assert.ok(!JSON.stringify(shadowed.calls).includes(session), "no private session reaches a container transport");
+  } finally { fixture.cleanup(); }
+});
 
 test("private registry selection reaches real host and daemon readers: recorded readonly mount and image reader", async () => {
   const fixture = privateRecyclerFixture();
@@ -922,6 +1009,47 @@ test("W1-T1010: with no in-flight workers the wait clears immediately and the re
   assert.ok(run.calls.filter(isRun).length > 0, "a replacement must start");
 });
 
+test("selected shell shadow reaches real lifecycle and heartbeat consumers through the recycler", t => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-selected-recycle-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const selected = join(root, "private.yaml"), session = join(root, "session.json");
+  const scratch = join(root, "scratch"), mounts = join(root, "mounts");
+  mkdirSync(scratch);
+  writeFileSync(mounts, `/dev/fixture ${scratch} ext4 rw 0 0\n`);
+  const scratchEnv = { RMD_SCRATCH: "on", RMD_SCRATCH_ROOT: scratch, RMD_SCRATCH_MOUNTS_FILE: mounts, RMD_SCRATCH_CHECKOUTS: "off" };
+  const plan = spawnSync("bash", ["-c", '. "$1"; scratch_plan "$2" remudero-daemon || exit; printf "%s\\n" "$SCRATCH_BINDS"',
+    "fixture", join(REPO_ROOT, "deploy/scratch-mounts.sh"), join(root, "state-root")], {
+    env: { ...process.env, ...scratchEnv }, encoding: "utf8",
+  });
+  assert.equal(plan.status, 0, plan.stderr);
+  const mounted = plan.stdout.trim().split("\n").map(line => line + "\ttrue").join("\n");
+  writeFileSync(selected, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
+  // The shadow candidate is captured explicitly; RMD_INSTANCE_REGISTRY is W1-T10573's active selection, left absent.
+  const captured = spawnSync(process.execPath, ["--import", join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"),
+    join(REPO_ROOT, "src/lib/child-entry-argv.ts"), "--selected-registry-shadow", REPO_ROOT, "--shadow", "--capture",
+    "--session", session, "--registry", selected], { env: { ...process.env, RMD_INSTANCE_REGISTRY: undefined }, encoding: "utf8" });
+  assert.equal(captured.status, 0, captured.stderr);
+  const run = runRecycle("good", { stateDir: join(root, "state-root"), args: ["--selected-registry-shadow", session], unselectedRegistry: true,
+    extraEnv: { HOME: root, RMD_RECYCLE_HOST_LOCK: join(root, "host.lock"), ...scratchEnv, STUB_EXTRA_MOUNTS: mounted } });
+  t.after(() => {
+    rmSync(run.fixtureRecordingDir, { recursive: true, force: true });
+    rmSync(run.fixtureStubDir, { recursive: true, force: true });
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.calls.filter(isRun).length, 1, "the real unchanged docker launch reaches the recorder");
+  assert.doesNotMatch(run.stderr, /instance_registry\.shell_shadow_unrecorded/);
+  const launch = run.calls.find(isRun)!;
+  assert.ok(launch.argv.includes(`${join(root, "state-root")}:/home/node/Remudero`), "the actual state mount excludes the private session");
+  assert.ok(launch.argv.includes(`${scratch}/rmd/state-root/worker-homes:/home/node/rmd-scratch/worker-homes`),
+    "the real scratch plan also reaches the unchanged Docker launch");
+  const rows = readFileSync(session + ".observations", "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(rows.at(-1).action, "recycle");
+  assert.equal(rows.at(-1).selected_outcome, "would-refuse", "missing actual selected identity cannot borrow fixture authority");
+  assert.equal(rows.at(-1).publication_permission, "not-granted");
+  assert.ok(!JSON.stringify(run.calls).includes(selected));
+  assert.ok(!JSON.stringify(run.calls).includes(session));
+});
+
 test("a hung docker removal refuses with the pause retained and no replacement", () => {
   const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
   const run = runRecycle("rm-hang", { stateDir: state, extraEnv: { RMD_RECYCLE_DOCKER_TIMEOUT_S: "1" } });
@@ -1138,7 +1266,8 @@ test("W1-T1046: a hung fix-rung worker alone is passed, printed before clearing,
   assert.match(run.stderr, /predicate: fix-rung shape .* AND age >= 7200s AND zero inflight locks/);
   // AND THE RECORD SURVIVES THE CONTAINER, on the bind mount the daemon already owns.
   const ledger = readFileSync(join(state, "state", "ledger.ndjson"), "utf8").trim().split("\n");
-  const row = JSON.parse(ledger[ledger.length - 1]);
+  const row = ledger.map((line) => JSON.parse(line)).find((entry) => entry.step === "recycle.hung_worker_passed");
+  assert.ok(row, "the hung worker has its own durable ledger row");
   assert.equal(row.step, "recycle.hung_worker_passed");
   assert.equal(row.pid, 363439);
   assert.equal(row.age_s, 8970);
@@ -1899,11 +2028,14 @@ test("recycler refuses invalid or duplicate mode before effects", t => {
     assert.match(run.stderr, /mode/);
     assert.deepEqual(run.calls, [], "not even the first Docker/Azure read or mutation is allowed");
     const fixtureState = join(root, "state", "state");
-    assert.deepEqual(readdirSync(fixtureState), ["ledger.ndjson"], "only invocation evidence, no PAUSE, receipt or lifecycle state before refusal");
+    assert.deepEqual(readdirSync(fixtureState), ["ledger.ndjson"], "only ledger evidence, no PAUSE or lifecycle state before refusal");
     const rows = readFileSync(join(fixtureState, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.deepEqual(rows.map((row) => row.step), ["recycle.invoked"]);
+    assert.deepEqual(rows.map((row) => row.step), ["recycle.invoked", "recycle.ended"]);
     assert.equal(rows[0].instance, "fixture");
     assert.equal(typeof rows[0].pid, "number");
+    assert.equal(rows[1].run_id, rows[0].run_id);
+    assert.equal(rows[1].outcome, "refused");
+    assert.equal(rows[1].rc, 2);
   }
 });
 

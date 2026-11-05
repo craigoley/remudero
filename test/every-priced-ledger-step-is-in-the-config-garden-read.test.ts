@@ -161,6 +161,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "review.diff_local_fallback": AFTER_PR_OPENED,
   "review.diff_unreadable": AFTER_PR_OPENED,
   "review.finding": AFTER_PR_OPENED,
+  "review.plan_lint_retry": AFTER_PR_OPENED, // W1-T11390: an explicit retry of a review that already ran
   "review.post_failed": AFTER_PR_OPENED,
   "review.posted_reappended": AFTER_PR_OPENED,
   "review.skipped_closed_lifecycle": AFTER_PR_OPENED,

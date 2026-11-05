@@ -1,0 +1,48 @@
+- id: W1-T11323
+  title: The pr-owner projection skips a ledger row stamped more than the future-stamp tolerance past now, so a future row can neither become the corpus's newest timestamp nor the latest fix or sweep that holds a PR OWNED
+  repo: remudero
+  depends_on: []
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one reader's row filter; the ownership verdict reads the same rows minus those stamped in the future
+  origin: operator-session#recycle-and-ledger-2026-11-04
+  plan_refs:
+    - W1-T4923
+    - W1-T5407
+    - W1-T5484
+  files:
+    - src/lib/pr-owner-ledger.ts
+    - test/github/a-future-stamped-row-is-not-the-pr-owner-corpus-newest.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: readPrOwnerLedgerProjection, given a clock, ignores every row whose ts is more than LEDGER_FUTURE_STAMP_TOLERANCE_MS past it when choosing corpusNewestTs, latestFix and latestSweep, reports how many it skipped, and over a corpus with no future rows returns exactly what it returns today
+      proof: "unit test: test/github/a-future-stamped-row-is-not-the-pr-owner-corpus-newest.test.ts"
+    - claim: The projection's future-row filter names this task
+      proof: "grep: W1-T11323 in src/lib/pr-owner-ledger.ts"
+  rationale: |
+    OBSERVED 2026-11-04 on the Azure host:
+    - `rmd pr-owner 16606` printed corpus_newest_ts 2027-10-14T21:24:52.494Z. The newest real row was 2026-11-04.
+    - The value comes from five cli.invoked rows (host 8f3e86a35d09; verbs onboard, alert-fix --bogus, daemon --not-a-real-flag, wipe-test, peek). W1-T4923 recorded that they were written on 2026-09-30 by test/run-task.test.ts's in-process main() under a shifted clock; its fix (#8090) closed the writer.
+    - They predate W1-T5407's ledger.future_stamp flag, so no flag row names them. On 2026-11-03T18:21:51Z they rotated into their own archive, ledger.2026-11-03T18-21-51-731Z.ndjson.gz, which holds only those 5 rows.
+    - A scan of all 398 archives found 9,611,709 timestamped rows: 5 newer than their archive's rotation time, all of them these. The live file had 15,808 rows and none in the future.
+    - In src/lib/pr-owner-ledger.ts, the projection keeps the max-ts row as corpusNewestTs. It picks latestFix and latestSweep with ORDER BY ms DESC, with no future bound.
+    - The corpus's newest ts is the positive control CLAUDE.md asks for ("check the corpus's newest ts covers the window"). A future row makes that control pass whatever the corpus covers.
+    - A future-stamped fix.dispatch or sweep.disposed would win latestFix or latestSweep and hold a PR OWNED until real time passed its stamp. INFERRED: none observed; the five rows are cli.invoked.
+    - fleet-liveness.ts already applies this backstop for its own rows (W1-T5484, withoutFutureStamped). This reader never got it.
+  design: |
+    - Add an optional nowMs to readPrOwnerLedgerProjection, read from the repo's clock module at the call site; the clock-signature census applies.
+    - In onAcceptedRecord, a row whose parsed ts is more than LEDGER_FUTURE_STAMP_TOLERANCE_MS (src/lib/ledger.ts) past nowMs neither competes for corpusNewestTs nor enters the evidence table. Count such rows in a new futureStampedSkipped field on the projection.
+    - Use the time backstop only. In a streaming read the ledger.future_stamp flag row arrives after the row it names, and the backstop covers both flagged rows and the pre-flag five.
+    - Mark it with a comment naming W1-T11323.
+    NOT IN SCOPE:
+    - rewriting or quarantining the five archived rows (the ledger is append-only, per W1-T4923);
+    - the writer side (closed by W1-T4923);
+    - other max-ts readers, including run-task.ts's sync compatibility path (newestLedgerRow);
+    - printing futureStampedSkipped in `rmd pr-owner`, which lives in src/run-task.ts (a separate concern).
+  note: |
+    reservation hand-off: run-unfiled-1793801339784 -> run-unfiled-1793801339784
+    Reserved with rmd next-task-id (W1-T11323 on run-unfiled-1793801339784). From the operator session's 2026-11-04 recycle and ledger recon.

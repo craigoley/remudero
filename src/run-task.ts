@@ -626,11 +626,13 @@ import { defaultListCandidates, defaultReadMarkers, killProcessGroup, type Orpha
 import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
-import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { daemonInstanceRegistryPath, deriveDrainWait, IMAGE_BUILD_SHA_PATH, readDrainWaitLanes, readImplementDurationsMs, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, spoolingStarvationAlert } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { testPlaceOutcome } from "./lib/test-placement.js";
+import { selectedRegistryShadowMain } from "./selected-registry-shadow-main.js";
+import { recordEscalationIntakeOutcome } from "./lib/escalation-correspondence.js";
 import { readPlanBase } from "./lib/plan-base-reader.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
@@ -1288,6 +1290,7 @@ import {
   captureDiagnosticsBundle,
   decideProgressWatchdog,
   openPrCountReadingFromRows,
+  readLiveRecyclePausePid,
   renderProgressWatchdogVerdict,
 } from "./lib/progress-watchdog.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
@@ -1321,7 +1324,7 @@ import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhR
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, observeSelectedRegistrySync,
-  selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+  selectedRegistryLifecycleExec, selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -1756,6 +1759,7 @@ import {
   type NodePinSyncIo,
   depReviewMigrationSubmissionKey,
   renderDepReviewMigrationFeedback,
+  proposalTaskLedgerRows,
 } from "./lib/dep-review.js";
 import {
   headWasCreatedAfterReflogSnapshot,
@@ -1765,7 +1769,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, failedFireBackoff, feedbackChangedAtOnMain, AUTO_TRIAGE_FAILURE_STEPS, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, failedFireBackoff, feedbackChangedAtOnMain, AUTO_TRIAGE_FAILURE_STEPS, triageCandidateReaders, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, releaseDispatchClaimAsync, gitDispatchClaimReserver, gitDispatchClaimReserverAsync, gitClaimRunnerAsync, dispatchClaimRef, claimDropRefusal, pidIsPresent, readNamespaceBootMs, reclaimSilentDispatchClaim, holdDispatchClaim, renewDispatchClaim, DISPATCH_CLAIM_RENEW_INTERVAL_MS, type DispatchClaimRenewal, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
@@ -2995,6 +2999,7 @@ export function buildEscalationTriageRuntime(
 ): ((deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings) & { refresh(ledgerPath: string): Promise<void> } {
   const { root, config, owner, repo } = context;
   let pass: ReturnType<typeof newTriagePass> | undefined;
+  let reportedBytes = 0, reportedRotations = 0;
   const evidenceHistory = io.evidenceHistory ?? createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE });
   const readRows = io.readRows ?? ((path) => {
     const read = evidenceHistory.current(dirname(path));
@@ -3026,7 +3031,10 @@ export function buildEscalationTriageRuntime(
     if (!id || e.taskId !== `TRIAGE-${id}`) throw new Error("feedback referent is unreadable");
     return id;
   };
-  const refresh = async (ledgerPath: string): Promise<void> => void (await evidenceHistory(dirname(ledgerPath)));
+  const refresh = async (ledgerPath: string): Promise<void> => {
+    reportedBytes = 0; reportedRotations = 0;
+    await evidenceHistory(dirname(ledgerPath));
+  };
   return Object.assign((deps: EscalateDeps<AsyncIssueGateway>): EscalateTriageSettings => {
     const policy = parseEscalationTriagePolicy((io.readPolicy ?? (() => readEscalationTriagePolicySource(root)))());
     pass ??= newTriagePass(policy.maxAutoResolvesPerPass);
@@ -3034,7 +3042,21 @@ export function buildEscalationTriageRuntime(
     return {
       mode: policy.mode, pass, asyncExecutors: true,
       evidence: (e) => {
-        const history = readRows(deps.ledgerPath);
+        let history: Record<string, unknown>[];
+        try {
+          history = readRows(deps.ledgerPath);
+        } finally {
+          if (!io.readRows) {
+            const cost = evidenceHistory.lastLoad();
+            appendSliceReadRow(deps.ledgerPath, deps.runId, "escalation_triage.evidence_read", {
+              evidence_bytes_read: cost.bytesRead - reportedBytes,
+              evidence_rotations_read: cost.rotationsRead - reportedRotations,
+              evidence_snapshot_hit: cost.snapshotHit,
+              ...(cost.snapshotError ? { evidence_snapshot_error: cost.snapshotError } : {}),
+            });
+            reportedBytes = cost.bytesRead; reportedRotations = cost.rotationsRead;
+          }
+        }
         const strike = [...history].reverse().find((row) => row.step === "fix.dispatch" && row.task_id === e.taskId &&
           row.head_sha === e.headSha && row.kind !== "proof_amendment");
         const previousCause = strike?.mode === "ci-log" ? "ci" : strike?.mode === "merge-conflict" ? "conflict" :
@@ -10845,13 +10867,23 @@ function* fixCensusSnapshotSteps(
   const precheck = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
     { cwd: scriptsRoot, env, encoding: "utf8", timeout: controllerTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
   const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
-  let refusal = censusPushRefusal(text);
   let unmeasured = precheck.status === 2 ? text.trim() : undefined;
   const unavailable = (subject: string, result: CensusChildResult, output: string) => {
     unmeasured = `${subject}: ${String(result.error ?? result.signal ?? (output || `exit ${result.status} without a complete test summary`)).slice(-4000)}`;
     return { text: `census-precheck: NOT MEASURED — ${unmeasured}`, censuses: [], offeredBaselines: [] };
   };
-  if (!refusal && (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2))) {
+  const timedOutChildren: string[] = [];
+  const timedOut = (child: string, result: CensusChildResult, boundMs: number): boolean => {
+    const error = result.error as (Error & { code?: unknown }) | undefined;
+    if (!(error instanceof LoopBoundedChildTimeout || error?.code === "ETIMEDOUT")) return false;
+    timedOutChildren.push(child);
+    const line = `census-precheck: not measured — ${child} timed out at ${(error instanceof LoopBoundedChildTimeout ? error.budgetMs : boundMs) / 1000} s (${result.signal ?? "SIGTERM"}); CI and pre-push still measure`;
+    unmeasured = unmeasured ? `${unmeasured}\n${line}` : line;
+    return true;
+  };
+  const precheckTimedOut = timedOut("scripts/census-precheck.mjs", precheck, controllerTimeBoundMs);
+  let refusal = precheckTimedOut ? undefined : censusPushRefusal(text);
+  if (!refusal && !precheckTimedOut && (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2))) {
     refusal = unavailable("census precheck child", precheck, text);
   }
   if (!refusal) {
@@ -10865,10 +10897,11 @@ function* fixCensusSnapshotSteps(
       const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
       const stopped = (reason: string): CensusPushRefusal => ({ text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
         censuses: ["census-suite"], offeredBaselines: [] });
-      if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
-        refusal = unavailable(`census suite ${reach}`, result, output);
+      const reachTimedOut = timedOut(reach, result, childTimeBoundMs);
+      if (reachTimedOut || result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
+        if (!reachTimedOut) refusal = unavailable(`census suite ${reach}`, result, output);
       } else if (result.status !== 0) {
-        refusal = stopped(String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000));
+        refusal = stopped(output.slice(-4000));
         refusal.inheritedMain = yield* inheritedCensusContextSteps(root, path, runGit);
       } else {
         const verdict = judged.judge(0);
@@ -10879,7 +10912,8 @@ function* fixCensusSnapshotSteps(
     }
   }
   log("fix.census_check", { outcome: refusal ? "refused" : unmeasured ? "partially-measured" : "passed",
-    ...(refusal ? { refusal: refusal.text } : {}), ...(unmeasured ? { reason: unmeasured } : {}) });
+    ...(refusal ? { refusal: refusal.text } : {}), ...(unmeasured ? { reason: unmeasured } : {}),
+    ...(timedOutChildren.length > 0 ? { timed_out_child: timedOutChildren.join(", ") } : {}) });
   return { refusal, unmeasured };
 }
 
@@ -12292,7 +12326,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
           const feedback = existsSync(path) ? readFeedbackEntry(proposalRoot, feedbackId) : undefined;
           const planPath = join(proposalRoot, "plan", "tasks.yaml");
           const tasks = existsSync(planPath) ? loadPlan(planPath).tasks.filter(t => t.origin === `feedback#${feedbackId}`) : [];
-          const rows = tasks.length ? readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true }).rows : [];
+          const rows = (await proposalTaskLedgerRows(dirname(ledgerPath), new Set(tasks.map(t => t.id)), feedback?.ts)).rows;
           const outcomes = await Promise.all(tasks.map(async task => {
             const history = rows.filter(r => r.task_id === task.id);
             const taskRows = history.slice(Math.max(0, history.findLastIndex(r => r.step === "run.start" || r.step === "dispatch")));
@@ -21086,6 +21120,9 @@ export async function autoTriageCheck(
   const held = readDrainLock(triageLockPath(config.root));
   const now = opts.now ?? new Date();
   const feedbackRoot = opts.feedbackRoot ?? repoRoot;
+  // W1-T11374: the readers come only from a refresh of origin/main's feedback, so an entry merged after boot is a candidate now.
+  const { newFeedbackIdsOldestFirst, oldestFeedbackAgeMs } = await triageCandidateReaders(feedbackRoot, (step, extra) =>
+    appendProducerLedger(ledgerPathFor(config), "daemon", { run_id: "AUTO-TRIAGE", step, ...extra }));
   const inputs: AutoTriageInputs = {
     policy: policy.values.autoTriage,
     // W1-T469 — WAS HARDCODED `idle: true`, WHICH IS WHY THE GUARD WAS DOUBLY UNREACHABLE: the rung
@@ -28454,7 +28491,7 @@ async function deployCommand(rest: string[]): Promise<number> {
  */
 async function deployRunCommand(rest: string[]): Promise<number> {
   markLedgerProcessActor("host_automation");
-  const badArg = unknownArgError("deploy-run", rest, ["--state-root"], ["--dry-run", "--image-drift-only"]);
+  const badArg = unknownArgError("deploy-run", rest, ["--state-root", "--selected-registry-shadow", "--selected-registry-pin"], ["--dry-run", "--image-drift-only"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -28489,8 +28526,12 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     return 0;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const lifecycleExec = selectedRegistryLifecycleExec(assessment.installRoot, {
+    session: flagValue(rest, "--selected-registry-shadow"), pin: flagValue(rest, "--selected-registry-pin"),
+  });
   const deps = {
     ...realDeps().deployFor({
+      execFile: lifecycleExec,
       installPath: assessment.installRoot,
       stateRoot: effectiveConfig.root,
       daemonLabel: DAEMON_LABEL,
@@ -28534,7 +28575,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
       record: (step, fields) => deps.log(step, fields),
     } : undefined,
-  }) }, {
+  }, lifecycleExec) }, {
     dryRun: rest.includes("--dry-run"),
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
@@ -34743,6 +34784,19 @@ async function triageCommandLocked(
     }
     log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
     say(`triage PR (plan-only, ${decision.action}): ${prUrl}`);
+    // Publication ownership, plan-only scope and feedback provenance were verified above.
+    // Acknowledging intake ends the ask; it does not claim CI, merge or work completion.
+    try {
+      const outcome = decision.action === "grill"
+        ? grillIssueUrl ? { action: "grill" as const, publicationPr: prUrl, detail: decision.detail, questionIssueUrl: grillIssueUrl }
+          : { action: "error" as const, reason: "The intake question has no verified publication." }
+        : { action: decision.action, publicationPr: prUrl, detail: decision.detail };
+      const response = recordEscalationIntakeOutcome(entry, outcome,
+        { threadStorePath: inboxThreadStorePath(config.root), repository: `${owner}/${repo}` });
+      log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
+    } catch (error) {
+      log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
+    }
 
     // Gate: ci green -> post remudero-review -> arm auto-merge (identical shape to every other
     // Architect skill's output — "PROPOSES anything, MERGES nothing" until the gate clears it).
@@ -41141,11 +41195,20 @@ export function progressWatchdogCommand(
     step: PROGRESS_WATCHDOG_READ_STEPS,
   });
   const count = openPrCountReadingFromRows(read.rows);
-  const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: count.count, openPrCountSource: count.source });
+  const liveRecyclePausePid = readLiveRecyclePausePid(stateDir, run);
+  const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: count.count,
+    openPrCountSource: count.source, liveRecyclePausePid });
   const bundle = verdict.action === "capture-diagnostics"
     ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, { run })
     : undefined;
-  if (rest.includes("--json")) console.log(JSON.stringify({ stateDir, rowsRead: read.rows.length, ...verdict, bundle }));
+  if (rest.includes("--json")) {
+    const text = readLedgerUnionRecordsSync(stateDir, {
+      step: ["implement.done", "verdict", "run.freshness_handoff", "worker.recycle_yield"],
+    }).rows.map(row => JSON.stringify(row)).join("\n");
+    const drainWait = deriveDrainWait(readImplementDurationsMs(text), readDrainWaitLanes(stateDir, text, () => nowMs));
+    console.log(JSON.stringify({ stateDir, rowsRead: read.rows.length, ...verdict, bundle,
+      drainWaitS: drainWait.waitS, drainWaitSource: drainWait.source }));
+  }
   else {
     console.log(renderProgressWatchdogVerdict(verdict));
     if (bundle?.written) console.log(`diagnostics bundle: ${bundle.dir}`);
@@ -42737,7 +42800,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-proof", (rest) => withSyncChildReservation("check-proof", () => checkProofCommand(rest, {}, USAGE), { bindSelf: true })],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
-  ["inspect", (rest) => readOnlyInspectionCommand(rest)],
+  ["inspect", (rest) => rest[0] === "selected-registry-shadow"
+    ? selectedRegistryShadowMain(rest.slice(1)) : readOnlyInspectionCommand(rest)],
   ["gh", async (rest) => await ghCommand(rest)],
   ["gh-broker", async (rest) => await ghBrokerCommand(
     rest,
@@ -42962,6 +43026,9 @@ export async function main(
   } = {},
 ): Promise<void> {
   const inspectionArgv = stripRepoRootFlag(process.argv.slice(2));
+  if (inspectionArgv[0] === "inspect" && inspectionArgv[1] === "selected-registry-shadow") {
+    return await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
+  }
   if (inspectionArgv[0] === "pr-state") {
     if (inspectionArgv.includes("--help") || inspectionArgv.includes("-h")) {
       console.log(commandHelp(commandSpec("pr-state")));

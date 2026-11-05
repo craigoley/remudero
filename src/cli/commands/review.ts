@@ -1,7 +1,7 @@
 import type { WorkerStreamEvent } from "../../lib/worker.js";
 import type { GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure, type CensusChildResult } from "./run-task-verb.js";
-import { buildBaseProofDir, hostWorktreeGitAtTopLevel } from "../../lib/check-proof.js";
+import { buildBaseProofDirAsync, hostWorktreeGitAtTopLevel, type BaseProofDir } from "../../lib/check-proof.js";
 import { execFileSync, spawn } from "node:child_process";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow } from "../../lib/sweep.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
@@ -226,7 +226,7 @@ export function materializeReviewerSnapshot(
   reviewRoot: string,
   sourceDir: string | undefined,
   expectedHeadSha: string,
-): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules>; dependencyReadRoots: string[] } {
+): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules>; dependencyReadRoots: string[]; originMain: string | null } {
   if (!sourceDir || !existsSync(sourceDir)) {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -258,10 +258,15 @@ export function materializeReviewerSnapshot(
   }
 
   const cwd = join(reviewRoot, "checkout");
+  let originMain: string | null;
   try {
     execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceRepo, cwd], {
       stdio: ["ignore", "pipe", "ignore"],
     });
+    // W1-T11343: a clone maps the source's LOCAL main, which the daemon never moves, to origin/main.
+    // Pin the source's own origin/main instead; with none keep none, not a stale base posing as main.
+    originMain = hostWorktreeGit(sourceRepo, ["for-each-ref", "--format=%(objectname)", "refs/remotes/origin/main"]).trim() || null;
+    hostWorktreeGit(cwd, originMain ? ["update-ref", "refs/remotes/origin/main", originMain] : ["update-ref", "-d", "refs/remotes/origin/main"]);
     hostWorktreeGit(cwd, ["checkout", "--quiet", "--detach", "--force", expectedHeadSha]);
   } catch {
     throw new ReviewerSnapshotError(
@@ -285,17 +290,15 @@ export function materializeReviewerSnapshot(
     );
   }
 
-  // The clone's exclude may change; source/common Git metadata remain untouched.
-  // This keeps a linked dependency tree invisible to the post-review cleanliness proof.
-  // Dependency roots outside the disposable checkout are passed to Codex as read-only.
-  // The source checkout still does not receive a broader writable sandbox grant.
-  // Repositories whose committed .gitignore omits node_modules still get a clean review checkout.
+  // Only the clone's exclude changes, so a linked dependency tree stays invisible to the post-review
+  // cleanliness proof even where .gitignore omits node_modules. Dependency roots outside the
+  // checkout reach Codex read-only; the source checkout gets no broader writable sandbox grant.
   excludeNodeModulesFromGit(cwd);
   const dependencyRoot = (() => { try { const source = resolveNodeModulesSource(sourceDir); return source ? realpathSync(source) : undefined; } catch { /* No source earns no grant. */ return undefined; } })();
   const nodeModules = linkWorktreeNodeModules(sourceDir, cwd, dependencyRoot ? { resolveSource: () => dependencyRoot } : {});
   const dependencyRelative = dependencyRoot ? relative(cwd, dependencyRoot) : "";
   const dependencyReadRoots = dependencyRoot && (dependencyRelative === ".." || dependencyRelative.startsWith(`..${sep}`) || isAbsolute(dependencyRelative)) ? [dependencyRoot] : [];
-  return { cwd, nodeModules, dependencyReadRoots };
+  return { cwd, nodeModules, dependencyReadRoots, originMain };
 }
 
 /** A semantic result is usable only while the disposable checkout remains exact and clean. */
@@ -581,6 +584,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
 }): Promise<ReviewRunResult> {
   const phases: Record<string, number> = { started: systemClock.now() };
+  // W1-T11149: the phase reaches the CPU bound (setup, proofs) or the provider bound (judge, posting), in process or as a child.
+  const reportPhase = (phase: string): void => (args.onPhase ?? reportReviewPhase)(phase);
+  reportPhase("setup");
   const { attributeWorkerStreamEvent, ledgeredNonDispatchSpawn, lintPlanForReview, readHeadShaRest, reviewPostedDescription } = host;
   const { owner, repo, prUrl, task, report, log, say } = args;
   const laneSignal = currentReviewSignal();
@@ -782,6 +788,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     taskDeclaredFiles: task.files,
     openTaskIds: args.openTaskIds,
   };
+  // The proofs run here when a reviewer follows, else in the binding judge below; either way the CPU work starts now.
+  reportPhase("proofs");
   const preliminaryProofs = attemptReviewer ? await preparedDecision.judge(proofEvidence) : undefined;
   let reviewerSubtype: string | undefined;
   let reviewerExit: WorkerResult["exit"];
@@ -793,6 +801,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     log("review.reviewer.skipped", { reason: "plan-only", criteria: criteria.length });
   }
   if (attemptReviewer) {
+    // The proofs are done; the LLM judge waits on its provider, not this host's CPU (the binding judge after it reuses them).
+    reportPhase("judge");
     try {
       // W1-T115: routed through withTempDir so this throwaway cwd is ALWAYS
       // removed on exit — success or thrown error — instead of the bare
@@ -804,6 +814,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         log("review.reviewer.materialized", {
           head_sha: headSha,
           node_modules: snapshot.nodeModules,
+          origin_main: snapshot.originMain,
         });
         const evidencePath = join(snapshot.cwd, ".git", "rmd-review-input.json");
         writeFileSync(evidencePath, JSON.stringify({
@@ -1175,6 +1186,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     replayReviewerCodeSha = reviewerCodeFreshness.codeSha;
   }
   phases.postStart = systemClock.now();
+  reportPhase("posting");
   const poster = failureRecordingPoster();
   const posted = await postReviewStatusGuarded({
     post: poster.post,
@@ -1195,6 +1207,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     evaluatorProvenance,
     reviewerCodeFreshness,
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
+    readRequiredContexts: readRequiredStatusCheckContextsAsync,
+    cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath: args.ledgerPath, runId: args.runId }),
   });
   phases.post = systemClock.now();
   // W1-T11151: `posted` releases admission once the outcome is terminal: posted, refused (review.post_refused) or a
@@ -1584,7 +1598,8 @@ export interface ReviewCommandDeps {
   loadConfig?: () => Config;
   materialize?: ReviewCommandHost["materializeReviewWorktree"];
   withMaterialized?: typeof withMaterializedWorktree;
-  buildBaseProof?: typeof buildBaseProofDir;
+  /** W1-T11341: awaited by default, so an in-process review's base git never holds the daemon loop; a sync fake still fits. */
+  buildBaseProof?: (criteria: Parameters<typeof buildBaseProofDirAsync>[0], headCheckoutDir: string) => BaseProofDir | Promise<BaseProofDir>;
   runReview?: (args: Parameters<typeof runReview>[1]) => ReturnType<typeof runReview>;
   postStatus?: typeof postReviewStatusGuarded;
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
@@ -1807,7 +1822,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     loadConfig,
     materialize: materializeReviewWorktree,
     withMaterialized: withMaterializedWorktree,
-    buildBaseProof: buildBaseProofDir,
+    buildBaseProof: buildBaseProofDirAsync,
     runReview: runReview.bind(null, host),
     postStatus: postReviewStatusGuarded,
     reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
@@ -2184,7 +2199,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // fallback (or undefined when the PR has no dialect proof / no resolvable base — the check then
   // stays inert, exactly as it was for its first 1,180 verdicts). W1-T460's `baseUnreadablePaths`
   // rides along: a per-proof fact the dir alone cannot carry.
-  const baseProof = worktreePath ? buildBaseProof(criteria, worktreePath) : undefined;
+  const baseProof = worktreePath ? await buildBaseProof(criteria, worktreePath) : undefined;
   const materializeMs = systemClock.now() - materializeStartedMs;
 
   // W1-T185 (Gap 2, criterion 6): withMaterializedWorktree guarantees teardown
@@ -2274,6 +2289,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       fetchCurrentStatus: () => reviewStatusEntryFromCombined(fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)))?.state,
       fetchCurrentStatusEntry: () => readReviewStatusEntry(owner, repo, view.headRefOid, deps.fetchView),
       fetchPublisher: deps.fetchView,
+      readRequiredContexts: readRequiredStatusCheckContextsAsync,
+      cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
     });
     if (restored.posted) {
       replayStatusAction = "restored";

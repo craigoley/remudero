@@ -262,7 +262,7 @@ test("W1-T2857: MUTANT deleting the runtime-contract call lets a missing selecte
 }, () => {
   const source = readFileSync(RECYCLE, "utf8");
   const start = "# ── 7.5. PROVE THE PROVIDER RUNTIME MOUNTS SELECTED BEFORE LAUNCH ──";
-  const end = 'echo "recycle-container: OK —';
+  const end = 'recycle_reason "recycle-container: OK —';
   const startAt = source.indexOf(start);
   const endAt = source.indexOf(end);
   assert.ok(startAt >= 0 && endAt > startAt, "the runtime-contract integration block must be present and uniquely bounded");

@@ -1,0 +1,28 @@
+- id: W1-T11377
+  title: "Research host-side delivery of running-container CPU weights"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: human
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=66c644f867557fc4
+  # backlog gardener: placed=2026-11-05T18:26:24.203Z
+  attempts: 0
+  files:
+    - DECISIONS.md
+  design: "Research only; do not change production code. Confirm whether cpuWeightShare exists on origin/main and identify its implementation location before assessing how to supply sibling-container weights. Measure whether a container can observe sibling cpu.weight values, how Docker CPU shares map to cgroup weights on the fleet host, and how frequently those weights change. Compare a host-written, read-only mounted data file refreshed during deploy or by a host timer with an environment variable fixed at container creation. For both options, state freshness limits, failure behavior, and operational cost. Recommend one approach with a falsifier. Record the findings in DECISIONS.md as an unruled entry; do not claim unverified measurements."
+  acceptance:
+    - claim: "DECISIONS.md contains an unruled entry comparing host-file and environment-variable delivery, with freshness limits, failure behavior, a recommendation, and a falsifier."
+      proof: "grep: unruled entry in DECISIONS.md"
+    - claim: "The entry identifies whether cpuWeightShare is present on origin/main and records evidence about sibling cpu.weight visibility and Docker-to-cgroup weight mapping."
+      proof: "grep: cpuWeightShare in DECISIONS.md"
+  origin: "followup:W1-T11129-1793711455047:2026-11-03T14:30:17.847Z:2"
+  rationale: >-
+    From the 2026-11-03 follow-up on https://github.com/craigoley/remudero/pull/16523, ratified
+    via rmd approve:
+  
+    follow-up harvest [research]: a container can't see its siblings' `cpu.weight`, so work out
+    how to supply running-container weights to `cpuWeightShare` (host-side file or env). — from
+    W1-T11129 (run W1-T11129-1793711455047, https://github.com/craigoley/remudero/pull/16523)

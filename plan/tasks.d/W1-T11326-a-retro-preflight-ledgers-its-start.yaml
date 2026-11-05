@@ -1,0 +1,45 @@
+- id: W1-T11326
+  title: A retro's prepublish preflight ledgers when it starts, with its pool and changed files, so a recycle, the progress watchdog and the operator can see a long retro gate instead of a silent hour-old worker
+  repo: remudero
+  depends_on: []
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one new start row before an existing gate, plus the two suites that pin the gate's exact row list; the verdict and end rows are unchanged
+  band_meaning: span
+  origin: operator-session#recycle-and-status-2026-11-04
+  plan_refs:
+    - W1-T4766
+  files:
+    - src/lib/retro-preflight.ts
+    - test/learning/a-retro-preflight-ledgers-its-start.test.ts
+    - test/retro-prepublish-validation.test.ts # its row-list pins gain the start row
+    - test/learning/scout-retro-preflight-failed.test.ts # likewise
+  # redesign: signature=622563fc631539c6
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: runRetroPrepublishPreflight ledgers one retro.preflight_started row, with the retro run id, the changed-file count and the test pool it will run, before it spawns its preflight, and its passed/failed end rows are unchanged
+      proof: "unit test: test/learning/a-retro-preflight-ledgers-its-start.test.ts"
+    - claim: The retro preflight writes its start row under its own step
+      proof: "grep: retro\\.preflight_started in src/lib/retro-preflight.ts"
+  rationale: |
+    OBSERVED 2026-11-04, remudero-daemon:
+    - Both of today's container recycles refused on it. RECYCLE-3864750 refused at 14:00:25Z: "0 lane-holding and 2 lane-less worker(s) still in flight after 3000s". One was a retro (run-task.ts retro, PID 2031531), 6,929 s old at refusal.
+    - RETRO-1793795675454 started at 12:34:37Z, synthesized at 12:59:19Z and regenerated orientation at 12:59:21Z. It then wrote no row of its own while its child (PID 2343080, plus a grandchild) ran Node in worktrees/run-RETRO-1793795675454 from about 13:24Z.
+    - That child held /tmp/rmd-pool-run-*/tally.json open, a test pool, still running at 14:06Z.
+    - runRetroPrepublishPreflight (src/lib/retro-preflight.ts) ledgers only its end (retro.preflight_passed / retro.preflight_failed), so the gate is invisible while it runs.
+    - deploy/recycle-container.sh counts a retro as busy at any age (W1-T4766), which is right when nothing says what it is doing. The fleet stayed paused from 12:26:41Z to 14:00:25Z behind it, with no recycle.
+  design: |
+    Before the preflight spawn in runRetroPrepublishPreflight, ledger retro.preflight_started with run_id, task_id, changed_files (count), pool (the suite selection it will run) and started_at.
+    Register the step wherever ledger steps are declared, or in the ledger-literal census if it requires it.
+    The two existing suites that pin the exact row list (test/retro-prepublish-validation.test.ts, test/learning/scout-retro-preflight-failed.test.ts) filter retro.preflight_started out before their row-list assertions; their other assertions are unchanged.
+    NOT IN SCOPE: changing how a recycle classifies a retro. That needs this row's evidence first, then a predicate filed separately.
+  note: |
+    reservation hand-off: run-unfiled-1793801339784 -> run-unfiled-1793801339784
+    Reserved with rmd next-task-id (W1-T11326 on run-unfiled-1793801339784). From the operator session's 2026-11-04 recycle diagnosis.
+  amendment: |
+    2026-11-05, by the redesign Architect (machine, rule 16): Add start‑row ledger in runRetroPrepublishPreflight to satisfy the grep claim
+    Insert a ledger entry for retro.preflight_started (including run_id, task_id, changed_files count, pool, started_at) at the start of runRetroPrepublishPreflight before it spawns the preflight.
