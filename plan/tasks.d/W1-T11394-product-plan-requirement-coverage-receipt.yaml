@@ -1,7 +1,7 @@
 - repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles:
     tdd: strict
   priority: 3
@@ -47,3 +47,12 @@
       proof: "unit test: product plan coverage observation reaches the bounded served response contract"
   falsifier: Substitute the current brief after its digest changes, erase an entry from an independently pinned reviewed inventory, treat absent inventory as zero requirements, label a link implemented, mutate operation state because report generation fails, or drop the optional report at the actual served response. Each corresponding physical case must fail with its isolated guard removed and pass when restored; retain control/mutant/restored receipts. A proposal omitting arbitrary source meaning remains semantic-review-unverified, with no claim that structural tests infer all requirements. Healthy exact-source and legacy-without-report controls must preserve existing operation/admission results.
   note: "Authorized by the operator on 2026-11-05 to research Conductor and dex.rip and file and update the plan. This is an implementation proposal entering normal ownership, capacity, budget, author, hosted CI, adversarial review and protected merge gates; it is not a delivered feature or adoption result. Preserve existing dispatch holds, cash routing and spending caps, credentials, schedules, archives and other owners. No new model/evaluation spend, automatic retry, deployment, service restart, permission expansion or gate waiver is granted. Reservation holder: codex/conductor-dex-plan-20261105. Source audit and all 12 open PR head subject counts are recorded in plan/notes/conductor-dex-2026-11-05.md; unpushed work is outside that census."
+  risk_ruling:
+    verdict: operator
+    action: proceed
+    confidence: 1
+    reasons:
+      - The operator explicitly approved this exact four-file observation-only scope in this chat on 2026-11-05 after reviewing the native low-risk 0.68 confidence escalation.
+      - Approval permits normal task filing only; operation states, proof verification and product-case/product-build admission remain unchanged, and normal ownership, capacity, author, hosted CI, review and protected merge gates still apply.
+    judged_at: 2026-11-05T12:45:40.314Z
+    pin: 0fa525ae83d553e0e6920ebcff7234eb9b9b0f663bca957cbf8738613be0f0db
