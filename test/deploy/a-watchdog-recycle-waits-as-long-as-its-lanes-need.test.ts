@@ -5,7 +5,6 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as deployer from "#src/lib/deployer.js";
-import { progressWatchdogCommand } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function fixture(t: TestContext): string {
@@ -24,15 +23,21 @@ function lock(stateDir: string, taskId: string, runId: string, startedAt: string
   writeFileSync(join(stateDir, "inflight", `${taskId}.lock`), JSON.stringify({ run_id: runId, startedAt }));
 }
 
-function verdict(t: TestContext, stateDir: string): Record<string, unknown> {
-  const output: string[] = [];
-  const log = t.mock.method(console, "log", (line: string) => output.push(line));
-  try {
-    assert.equal(progressWatchdogCommand(["--json", "--state-root", stateDir]), 0);
-  } finally {
-    log.mock.restore();
-  }
-  return JSON.parse(output[0]);
+function verdict(stateDir: string): Record<string, unknown> {
+  const home = join(stateDir, "cli-home");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"),
+    JSON.stringify({ claudeBin: process.execPath, root: join(home, "runtime") }));
+  // Exercise the CLI boundary with the same frozen instant as the lane fixtures.
+  const clock = `import { mock } from "node:test"; mock.timers.enable({ apis: ["Date"], now: ${Date.now()} });`;
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--import",
+    `data:text/javascript,${encodeURIComponent(clock)}`, join(REPO_ROOT, "src/run-task.ts"),
+    "progress-watchdog", "--json", "--state-root", stateDir], {
+    cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000,
+    env: { ...process.env, HOME: home, TMPDIR: home, GH_TOKEN: "fixture", RMD_SELF_SYNC_DONE: "1" },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  return JSON.parse(result.stdout);
 }
 
 function observed(t: TestContext, stateDir: string): void {
@@ -117,29 +122,29 @@ describe("test/deploy/a-watchdog-recycle-waits-as-long-as-its-lanes-need.test.ts
   test("watchdog json derives its wait from archived durations and the longest lane remainder", t => {
     const stateDir = fixture(t);
     observed(t, stateDir);
-    const first = verdict(t, stateDir);
+    const first = verdict(stateDir);
     assert.equal(first.action, "recycle");
     assert.equal(first.drainWaitS, 10_740);
     assert.equal(first.drainWaitSource, "observed");
     rmSync(join(stateDir, "inflight", "young.lock"));
-    assert.equal(verdict(t, stateDir).drainWaitS, 10_200);
+    assert.equal(verdict(stateDir).drainWaitS, 10_200);
   });
 
   test("watchdog json labels no history and beyond-history fallbacks", t => {
     const stateDir = fixture(t);
-    assert.equal(verdict(t, stateDir).drainWaitS, 3000);
-    assert.equal(verdict(t, stateDir).drainWaitSource, "no_history_fallback");
+    assert.equal(verdict(stateDir).drainWaitS, 3000);
+    assert.equal(verdict(stateDir).drainWaitSource, "no_history_fallback");
     ledger(stateDir, [{ ts: new Date().toISOString(), step: "implement.done", worker_duration_ms: 1000 }]);
     lock(stateDir, "older", "older", new Date(Date.now() - 60_000).toISOString());
-    assert.equal(verdict(t, stateDir).drainWaitS, 3000);
-    assert.equal(verdict(t, stateDir).drainWaitSource, "observed_with_fallback_lane");
+    assert.equal(verdict(stateDir).drainWaitS, 3000);
+    assert.equal(verdict(stateDir).drainWaitSource, "observed_with_fallback_lane");
   });
 
   for (const override of [undefined, "", "7777"]) {
     test(`the rendered launcher forwards the derived wait with override ${JSON.stringify(override)}`, t => {
       const stateDir = fixture(t);
       observed(t, stateDir);
-      const progress = verdict(t, stateDir);
+      const progress = verdict(stateDir);
       const h = launcher(t, progress);
       const result = spawnSync("bash", [h.script], {
         env: { ...h.env, RMD_RECYCLE_WAIT_S: override }, encoding: "utf8", timeout: 30_000,
