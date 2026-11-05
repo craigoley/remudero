@@ -15,6 +15,11 @@
   files:
     - test/helpers/registry-shell-fixture.ts
     - test/infra/the-registry-shell-fixture-never-reads-the-host-tunnel-token.test.ts
+  # refusal-amendment (W1-T11370, run DAEMON-1793897932969@c6718c97d31484968b8dcd9eb599dbd0a510e4a7, 2026-11-05T19:52:49.922Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The missing sandbox executable prevents verifying the fixture’s token-path override.
+  # refusal-amendment (W1-T11370, run DAEMON-1793897932969@c6718c97d31484968b8dcd9eb599dbd0a510e4a7, 2026-11-05T19:52:49.922Z): the worker refused criterion 2 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The missing sandbox executable prevents inspecting or running the containment and nonexistence test.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:

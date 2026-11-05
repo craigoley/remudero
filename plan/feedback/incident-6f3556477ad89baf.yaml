@@ -1,0 +1,32 @@
+id: incident-6f3556477ad89baf
+ts: 2026-11-05T18:49:47.079Z
+raw: >-
+  Incident 6f3556477ad8: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  sandbox launcher is missing; required inspection and proofs cannot execute, so
+  no concrete code failure has been established
+
+  First seen: 2026-11-05T18:46:36.701Z
+
+  Last seen: 2026-11-05T18:46:36.701Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16523 escalated: already escalated (reason unreadable: no escalation of this PR at head dffa3ec is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793897932969:1:1793904210561) — sandbox launcher is missing; required inspection and proofs cannot execute, so no concrete code failure has been established
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#6f3556477ad89baf0f076528daad335d3d7cde34dd9e80aa92d2e420f43ab9de
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

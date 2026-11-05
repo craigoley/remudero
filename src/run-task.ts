@@ -628,7 +628,7 @@ import { defaultListCandidates, defaultReadMarkers, killProcessGroup, type Orpha
 import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
-import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { daemonInstanceRegistryPath, deriveDrainWait, IMAGE_BUILD_SHA_PATH, readDrainWaitLanes, readImplementDurationsMs, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, spoolingStarvationAlert } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
@@ -1761,6 +1761,7 @@ import {
   type NodePinSyncIo,
   depReviewMigrationSubmissionKey,
   renderDepReviewMigrationFeedback,
+  proposalTaskLedgerRows,
 } from "./lib/dep-review.js";
 import {
   headWasCreatedAfterReflogSnapshot,
@@ -12327,7 +12328,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
           const feedback = existsSync(path) ? readFeedbackEntry(proposalRoot, feedbackId) : undefined;
           const planPath = join(proposalRoot, "plan", "tasks.yaml");
           const tasks = existsSync(planPath) ? loadPlan(planPath).tasks.filter(t => t.origin === `feedback#${feedbackId}`) : [];
-          const rows = tasks.length ? readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true }).rows : [];
+          const rows = (await proposalTaskLedgerRows(dirname(ledgerPath), new Set(tasks.map(t => t.id)), feedback?.ts)).rows;
           const outcomes = await Promise.all(tasks.map(async task => {
             const history = rows.filter(r => r.task_id === task.id);
             const taskRows = history.slice(Math.max(0, history.findLastIndex(r => r.step === "run.start" || r.step === "dispatch")));
@@ -41142,7 +41143,14 @@ export function progressWatchdogCommand(
   const bundle = verdict.action === "capture-diagnostics"
     ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, { run })
     : undefined;
-  if (rest.includes("--json")) console.log(JSON.stringify({ stateDir, rowsRead: read.rows.length, ...verdict, bundle }));
+  if (rest.includes("--json")) {
+    const text = readLedgerUnionRecordsSync(stateDir, {
+      step: ["implement.done", "verdict", "run.freshness_handoff", "worker.recycle_yield"],
+    }).rows.map(row => JSON.stringify(row)).join("\n");
+    const drainWait = deriveDrainWait(readImplementDurationsMs(text), readDrainWaitLanes(stateDir, text, () => nowMs));
+    console.log(JSON.stringify({ stateDir, rowsRead: read.rows.length, ...verdict, bundle,
+      drainWaitS: drainWait.waitS, drainWaitSource: drainWait.source }));
+  }
   else {
     console.log(renderProgressWatchdogVerdict(verdict));
     if (bundle?.written) console.log(`diagnostics bundle: ${bundle.dir}`);

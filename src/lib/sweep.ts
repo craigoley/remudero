@@ -112,7 +112,7 @@ import {
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
   createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
-  readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
+  readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
@@ -2378,6 +2378,14 @@ export function productionDispatchBreakJudge(opts: {
     return parseFixProgressVerdict(result.text);
   };
 }
+
+// W1-T11267: retain the digest-backed reconciliation slice and immutable commit files across passes.
+const FLEET_STATE_HISTORY_SLICE: EscalationTriageSlice = {
+  holder: "sweep.fleet-state-history",
+  steps: ["reconcile.repaired", "reconcile.repair_failed", "reconcile.escalated", "main.run_gap.dispatched", "deploy.ok"],
+};
+let fleetStateHistoryReader: EscalationTriageHistoryReader | undefined;
+const fleetStateChangedFiles = new Map<string, readonly string[]>();
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
@@ -5043,12 +5051,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const unionStarted = nowMsImpl();
       readdirSync(dirname(ledgerPath));
       const freshLive = readFileSync(ledgerPath, "utf8");
-      const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), {
-        requireArchives: false, refuseIncomplete: true,
-        step: ["reconcile.repaired", "reconcile.repair_failed", "reconcile.escalated", "main.run_gap.dispatched", "deploy.ok"],
-      });
+      fleetStateHistoryReader ??= createEscalationTriageHistoryReader({ slice: FLEET_STATE_HISTORY_SLICE });
+      const union = await fleetStateHistoryReader(dirname(ledgerPath));
       if (!union.ok || union.unclassified.length > 0) throw new Error(`fleet reconciliation history unreadable: ${[...union.unread, ...union.unclassified].join(", ")}`);
-      const history = [...parseLedger(union.rawLines.join("\n")), ...parseLedger(freshLive), ...live];
+      const history = [...union.rows, ...parseLedger(freshLive), ...live];
       parts.union_ms = Math.max(0, nowMsImpl() - unionStarted);
       parts.union_rotations = union.archiveCount;
       const rows: FleetStateRow[] = [];
@@ -5079,9 +5085,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           countRunsForSha: (sha) => { parts.commits_walked++; return runCount(sha); },
           countWorkflowRuns: runCount,
           changedFiles: async (sha) => {
+            const cached = fleetStateChangedFiles.get(sha);
+            if (cached !== undefined) return cached;
             const body = await readCommit(["api", `repos/${owner}/${repo}/commits/${sha}`]) as
               { files?: Array<{ filename: string }> } | undefined;
-            return body?.files?.map((f) => f.filename);
+            const files = body?.files?.map((f) => f.filename);
+            if (files !== undefined) fleetStateChangedFiles.set(sha, files);
+            return files;
           },
           dispatch: (workflow) => ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`, "-f", "ref=main"]),
         }, readWorkflowPushTriggers(repoDir), history, MAIN_RUN_GAP_LOOKBACK));
@@ -6890,7 +6900,6 @@ const REVIEW_CAPACITY_FIELDS = [
   "sampleCadenceMs",
   "telemetryCadenceMs",
   "cpuPsiLowPct",
-  "cpuPsiHighPct",
   "memoryPsiLowPct",
   "memoryPsiHighPct",
   "providerAllowancePct",
@@ -6929,7 +6938,8 @@ export function validateReviewCapacityPolicy(raw: unknown): ReviewCapacityPolicy
     }
     output[field] = value;
   }
-  if (output.cpuPsiLowPct >= output.cpuPsiHighPct || output.memoryPsiLowPct >= output.memoryPsiHighPct) {
+  // W1-T11129: CPU has no high watermark to order against (the shed judges PSI against the cpu.weight share).
+  if (output.memoryPsiLowPct >= output.memoryPsiHighPct) {
     throw new PolicyError("policy.yaml: review-capacity PSI low watermarks must be below their high watermarks.");
   }
   for (const field of ["hostWorkerBudget", "healthyWindowSamples", "unhealthySettlementThreshold", "minHealthySettlements"] as const) {
@@ -16891,8 +16901,31 @@ export function detachedSweepActionCount(): number {
 
 /** Reviews in flight in this process. A freshness exit used to wait only for detached actions, so a
  *  review started by a light pass the exit never awaits was killed mid-judgement (PR 6993, 2026-09-24). */
-interface ReviewRegistration { taskId?: string; prNumber?: number; admittedAtMs: number; kind?: string }
+interface ReviewRegistration { taskId?: string; prNumber?: number; admittedAtMs: number; kind?: string; laneId?: string }
 const inFlightReviewRuns = new Map<Promise<void>, ReviewRegistration>();
+let reviewLaneSeq = 0;
+
+/**
+ * W1-T11129 — a review starting or ending changes the set of lanes the daemon's CPU learner credits an interval to, so
+ * every such change runs through this hook: the learner samples on the lanes from before it, the change applies, and
+ * the next interval opens on the lanes after it. The daemon installs it; unset, the change just applies.
+ */
+type ReviewLaneTransition = (apply: () => void) => void;
+const applyOnly: ReviewLaneTransition = (apply) => apply();
+let reviewLaneTransition: ReviewLaneTransition = applyOnly;
+
+/** Install the daemon's CPU-learner transition; returns the uninstaller, which leaves a later installer's hook alone. */
+export function installReviewLaneTransition(hook: ReviewLaneTransition): () => void {
+  reviewLaneTransition = hook;
+  return () => { if (reviewLaneTransition === hook) reviewLaneTransition = applyOnly; };
+}
+
+/** W1-T11129 — one id per review running in this container: each in-process review and each review run child. */
+export function runningReviewLaneIds(): string[] {
+  const ids = [...inFlightReviewRuns.values()].map((review) => review.laneId ?? "review");
+  for (const work of childWork.values()) if (work.kind === "review") ids.push(`review-child-${work.runId}`);
+  return ids;
+}
 // W1-T11340: review.ts owns the store, so a lookup inside a review (priorPostedReviewRow) honors the lane's abort too.
 const reviewCancellation = reviewLaneCancellation;
 const inFlightReviewStops = new Map<Promise<void>, AbortController>();
@@ -16937,10 +16970,11 @@ export function trackInFlightReview(start: Promise<void> | (() => Promise<void>)
     () => undefined,
     () => undefined,
   );
-  inFlightReviewRuns.set(held, { ...review, admittedAtMs: review?.admittedAtMs ?? systemClock.now() });
+  const laneId = `review-${++reviewLaneSeq}`;
+  reviewLaneTransition(() => inFlightReviewRuns.set(held, { ...review, laneId, admittedAtMs: review?.admittedAtMs ?? systemClock.now() }));
   inFlightReviewStops.set(held, stop);
   void held.finally(() => {
-    inFlightReviewRuns.delete(held);
+    if (inFlightReviewRuns.has(held)) reviewLaneTransition(() => inFlightReviewRuns.delete(held));
     inFlightReviewStops.delete(held);
   });
   return work;
@@ -16966,7 +17000,7 @@ export function abortInProcessReviewPastCeiling(prNumber: number, ceilingMs: num
 
 /** W1-T11340: forget an aborted review that never settled, so a restart drain and the review count stop waiting on it. */
 export function abandonInProcessReview(settled: Promise<void>): void {
-  inFlightReviewRuns.delete(settled);
+  if (inFlightReviewRuns.has(settled)) reviewLaneTransition(() => inFlightReviewRuns.delete(settled));
   inFlightReviewStops.delete(settled);
 }
 
@@ -17046,7 +17080,8 @@ function refreshChildReviewPhase(work: RegisteredChildWork): void {
 export function registerChildWork(work: ChildWorkRegistration): void {
   if (childWork.has(work.runId)) return;
   const registered: RegisteredChildWork = { ...work, refusalEpoch: reviewProviderRefusalEpoch };
-  childWork.set(work.runId, registered);
+  if (work.kind === "review") reviewLaneTransition(() => childWork.set(work.runId, registered));
+  else childWork.set(work.runId, registered);
   if (work.reviewKey !== undefined) inFlightReviewKeys.add(work.reviewKey);
   if (work.fixKey !== undefined) inFlightFixKeys.add(work.fixKey);
   if (work.kind === "review" && work.readPhase) {
@@ -17086,7 +17121,8 @@ export function settleChildWork(runId: string): boolean {
   const settleKey = childWorkSettleKey(runId, work.headSha);
   refreshChildReviewPhase(work);
   clearInterval(work.phaseTimer);
-  childWork.delete(runId);
+  if (work.kind === "review") reviewLaneTransition(() => childWork.delete(runId));
+  else childWork.delete(runId);
   if (work.reviewKey !== undefined) inFlightReviewKeys.delete(work.reviewKey);
   if (work.fixKey !== undefined) inFlightFixKeys.delete(work.fixKey);
   if (work.releasedAtPost === undefined) releaseReviewSlot();

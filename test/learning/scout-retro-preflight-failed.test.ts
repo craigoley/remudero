@@ -54,7 +54,7 @@ async function preflight(run: RetroPrepublishRunner, changed: RetroChangedFiles,
     remotePrExisted: false,
     repair: async () => {},
     regenerateHarnessArtifacts: () => {},
-    log: (step, row) => rows.push({ step, extra: row }),
+    log: (step, row) => { if (step !== "retro.preflight_started") rows.push({ step, extra: row }); },
     deps: {
       run,
       changedFiles: async () => changed,

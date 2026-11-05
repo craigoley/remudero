@@ -1,0 +1,59 @@
+- repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  priority: 3
+  risk: high
+  band_meaning: span
+  author_class: machine
+  status: queued
+  attempts: 0
+  id: W1-T11395
+  title: A task supervisor reads bounded incremental activity with explicit run and retention gaps
+  budget_usd: 20
+  origin: research:conductor-dex-2026-11-05:activity
+  plan_refs:
+    - §1
+    - §4G
+    - W1-T10942
+    - W1-T10572
+  files:
+    - src/lib/task-view.ts
+    - src/lib/views.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/task-view.test.ts
+    - test/task-view-wire-contract.test.ts
+    - test/views-from-the-read-model.test.ts
+  rationale: "OBSERVED at 1438f25d780f8119342dbc36dc8715f9c6670e26: task-view provides a latest-run peek of 40 lines clipped to 300 characters and a latest fact list of 50 from a 400-row read. The task fact table retains selected decision steps, so querying it for all worker activity would silently omit events. Workstreams already has activity IDs/cursors (W1-T10942) using activity_ring, but its cross-instance operator feed is not a per-task/run continuation contract. Conductor documents cursor transcript reads for supervisors and distinguishes waiting for idle from waiting for completion. Reuse Remudero projection/ring primitives to expose incremental observation without rereading all history or adding agent execution authority. Sources: https://www.conductor.build/docs/api ; https://github.com/craigoley/remudero/blob/1438f25d780f8119342dbc36dc8715f9c6670e26/src/lib/task-view.ts ; https://github.com/craigoley/remudero/blob/1438f25d780f8119342dbc36dc8715f9c6670e26/src/lib/views.ts .
+    W1-T10572 owns a separate schema contract; shared OpenAPI/generated-client files express API ownership overlap, while this task adds per-task/run cursor observation and demand bounds. It neither replaces nor repeats that task."
+  design: |-
+    Extend the existing keyed task view and views query contract with an optional per-run activity cursor and bounded page. Scope every query/cursor to the authorized repository, instance, task, exact run and existing projection generation/sequence identity. Reuse activity_ring and existing Workstreams cursor/gap behavior; do not build a second ring, query the decision fact table as if it contained all activity, scan the raw ledger or read provider transcript databases. If activity_ring lacks a needed task/run discriminator, return unavailable and narrowly propose that producer contract instead of pretending arbitrary matches are complete.
+    Keep default task view behavior backward-compatible. Validate malformed, foreign, future, stale-generation and changed-run cursors explicitly. Use stable sequence identity rather than timestamps alone so equal-time events and duplicate deliveries do not skip or duplicate entries. Bound event count, event bytes and query work by existing maintained ring/server bounds. Also cap cursor bytes, retained/page demand keys per task and total materialization/query work across cursors; reuse the existing DemandBook admission/eviction bounds so an arbitrary cursor is not an unbounded new ten-minute materialization demand. Many distinct or malicious cursors must stay bounded. Return next cursor and explicit has-more, retention-gap, reset, unavailable/unknown states; ring rollover must not look like successful complete history. A valid caught-up page is an empty page with the exact validated corpus identity, not an unbound silence claim.
+    Wire viewKey/query validation and the real materializer demand path through the maintained route. Update OpenAPI and regenerate the client schema rather than hand-maintaining another contract. Preserve authenticated read scopes and existing redaction: no prompts, credentials, private transcript bodies or sensitive raw tool arguments. This is an observation feed; idle, running, canceled, error and verified task outcome remain separate. It cannot start, resume, retry, reassign or complete a worker. Test the actual route/materialization and projection with an authorized positive control, interleaved tasks/runs, equal timestamps, page continuation, rollover and unreadable projection. Do not add a new read-model-worker registry special case unless its actual existing demand path requires it; stop and amend task scope if a producer migration is necessary.
+  acceptance:
+    - claim: the real keyed task view returns stable task and run scoped cursor pages from the existing activity projection
+      proof: "unit test: task activity cursor pages preserve exact task run and sequence identity"
+    - claim: same-timestamp activity and page replay do not silently skip events or leak another task
+      proof: "unit test: task activity cursor handles equal timestamps replay and foreign scope"
+    - claim: retention gaps resets invalid cursors and unreadable projections cannot appear as complete empty history
+      proof: "unit test: task activity cursor distinguishes caught up gaps resets and unavailable history"
+    - claim: the served route and generated client retain privacy limits and read-only outcome semantics
+      proof: "unit test: task activity cursor wire contract preserves bounds privacy and observational authority"
+    - claim: many distinct cursors cannot create unbounded demand keys or aggregate materialization work
+      proof: "unit test: task activity cursor bounds demand cardinality and total materialization work"
+  falsifier: Remove the task/run scope predicate, use timestamp-only pagination, query decision facts instead of the activity ring, erase the generation/gap check, or collapse a failed projection read into an empty page. The corresponding interleaved/equal-time/rollover/unreadable production-path cases must fail; retain control/mutant/restored receipts. A healthy nonempty authorized page is the positive control before trusting any empty result. No lower latency or reduced model cost is claimed before measurement.
+  note: "Authorized by the operator on 2026-11-05 to research Conductor and dex.rip and file and update the plan. This is an implementation proposal entering normal ownership, capacity, budget, author, hosted CI, adversarial review and protected merge gates; it is not a delivered feature or adoption result. Preserve existing dispatch holds, cash routing and spending caps, credentials, schedules, archives and other owners. No new model/evaluation spend, automatic retry, deployment, service restart, permission expansion or gate waiver is granted. Reservation holder: codex/conductor-dex-plan-20261105. Source audit and all 12 open PR head subject counts are recorded in plan/notes/conductor-dex-2026-11-05.md; unpushed work is outside that census."
+  risk_ruling:
+    verdict: low
+    action: proceed
+    confidence: 0.78
+    reasons:
+      - The gates state shows a plan-only filing at filing time. The only lint note is a refused verify:human draft, and no implementation is under judgment.
+      - The description says it reuses existing activity_ring, Workstreams cursor/gap behavior and DemandBook bounds. It explicitly rules out a second ring, raw ledger scans and transcript reads, which is consistent with established practice.
+      - The declared files (task-view, views, openapi, generated client schema, and tests) match the described scope. The description preserves backward compatibility, read-only authority, redaction, and existing holds and spend caps. It includes a stop-and-amend clause if a producer migration is needed.
+      - No ACTUAL CHANGE view was supplied, so the touched-file shape could not be cross-checked. The cursor, bounded-demand and wire contract work is somewhat broad, but five acceptance tests and a falsifier cover it.
+    judged_at: 2026-11-05T12:32:29.707Z
+    pin: 1febb8631922550f4ac451558ba2d874d2f285d90234d54d0df56abb1f663122

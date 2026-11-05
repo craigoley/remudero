@@ -3138,6 +3138,37 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   ];
 }
 
+/**
+ * The read grants a private-registry Codex profile needs so Codex's own Linux sandbox can start: the
+ * directory holding the native executable it re-execs (as `codex-linux-sandbox`, through PATH aliases)
+ * and `$CODEX_HOME/tmp`, where it writes those aliases. Without them `":root"="deny"` hides the helper
+ * and every sandboxed command fails `execvp codex-linux-sandbox` before running (2026-11-05).
+ * Derived from the resolved executable, never a fixed install path: a node launcher (`codex.js`)
+ * contributes its package's `vendor` dir and each sibling platform package's (`codex-linux-x64`…);
+ * a native executable contributes its own directory. Read only: nothing here grants write.
+ */
+export function codexPrivateProfileExecutableReads(codexBin: string, realCodexHome: string): string[] {
+  const reads = new Set<string>();
+  const real = realpathSync(codexBin);
+  if (/\.[cm]?js$/.test(real)) {
+    let pkgRoot = dirname(real);
+    while (!existsSync(join(pkgRoot, "package.json")) && dirname(pkgRoot) !== pkgRoot) pkgRoot = dirname(pkgRoot);
+    const vendorOf = (dir: string): void => {
+      const vendor = join(dir, "vendor");
+      if (existsSync(vendor) && lstatSync(realpathSync(vendor)).isDirectory()) reads.add(realpathSync(vendor));
+    };
+    vendorOf(pkgRoot);
+    const scope = dirname(pkgRoot), prefix = `${basename(pkgRoot)}-`;
+    for (const entry of readdirSync(scope)) if (entry.startsWith(prefix)) vendorOf(join(scope, entry));
+  } else {
+    reads.add(dirname(real));
+  }
+  const aliases = join(realCodexHome, "tmp");
+  // Codex creates tmp on first use; an existing entry is canonicalised so a planted symlink cannot widen the grant.
+  reads.add(existsSync(aliases) ? realpathSync(aliases) : aliases);
+  return [...reads];
+}
+
 async function withPrivateRegistryCodexProfile<T>(
   args: CodexSpawnArgs, config: Config, selected: string, operation: (profile: PrivateRegistryCodexProfile) => Promise<T>,
   nativeCacheRoot?: string,
@@ -3182,13 +3213,16 @@ async function withPrivateRegistryCodexProfile<T>(
     // policy is therefore also supplied through supported CLI overrides. Neither surface names private paths.
     // --add-dir also expands :workspace_roots. Its verified cache grant must remain disjoint
     // from both private inputs, even though the public-only profile never names those inputs.
-    const grantRoots = nativeCacheRoot === undefined ? [...roots] : [...roots, directory(nativeCacheRoot)];
+    const executableReads = codexPrivateProfileExecutableReads(resolveCodexBin(config), realpathSync(codexHome(config)));
+    const grantRoots = nativeCacheRoot === undefined ? [...roots, ...executableReads]
+      : [...roots, ...executableReads, directory(nativeCacheRoot)];
     if (grantRoots.some(root => isWithin(root, selected) || isWithin(root, path))) {
       throw new InstanceRegistryRuntimeError("worker_scope_contains_private_file");
     }
     const filesystem = new Map<string, string>([[":root", "deny"], [":minimal", "read"],
       [":workspace_roots", readOnly ? "read" : "write"], [":slash_tmp", "deny"], [":tmpdir", readOnly ? "read" : "write"],
-      ...[...roots].filter(root => root !== cwd && root !== slotRoot).map(root => [root, "read"] as [string, string])]);
+      ...[...roots].filter(root => root !== cwd && root !== slotRoot).map(root => [root, "read"] as [string, string]),
+      ...executableReads.filter(root => !roots.has(root)).map(root => [root, "read"] as [string, string])]);
     text = `default_permissions=${JSON.stringify(name)}\n[permissions.${name}]\nextends="${readOnly ? ":read-only" : ":workspace"}"\n`
       + `[permissions.${name}.network]\nenabled=${review || !readOnly}\n[permissions.${name}.filesystem]\n`
       + [...filesystem].map(([target, access]) => `${JSON.stringify(target)}=${JSON.stringify(access)}`).join("\n") + "\n";

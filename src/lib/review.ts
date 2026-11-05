@@ -239,6 +239,12 @@ export interface ReviewDecisionTerminal {
   evaluatorProvenance: ReviewEvaluatorProvenance;
 }
 
+function isReviewDecisionTerminalRow(line: Record<string, unknown>, taskId: string, prUrl: string, digest: string): boolean {
+  if (line.step !== "review.posted" || !reviewRowNamesPr(line, taskId, prUrl) || line.review_decision_digest !== digest) return false;
+  const verdict = line.decision_verdict as ReviewVerdict | undefined;
+  return !!verdict && (verdict.state === "success" || verdict.state === "failure") && Array.isArray(verdict.criteria);
+}
+
 export function lastReviewDecisionTerminal(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -247,9 +253,8 @@ export function lastReviewDecisionTerminal(
 ): ReviewDecisionTerminal | undefined {
   let terminal: ReviewDecisionTerminal | undefined;
   for (const line of lines) {
-    if (line.step !== "review.posted" || !reviewRowNamesPr(line, taskId, prUrl) || line.review_decision_digest !== digest) continue;
-    const verdict = line.decision_verdict as ReviewVerdict | undefined;
-    if (!verdict || (verdict.state !== "success" && verdict.state !== "failure") || !Array.isArray(verdict.criteria)) continue;
+    if (!isReviewDecisionTerminalRow(line, taskId, prUrl, digest)) continue;
+    const verdict = line.decision_verdict as ReviewVerdict;
     terminal = {
       state: verdict.state,
       verdict,
@@ -283,6 +288,167 @@ function isReopenableDegradedTerminal(
   return hasHeadCheckout && terminal.verdict.capped && terminal.verdict.keywordOnly;
 }
 
+/** W1-T11390: an `admitted` row is the only bound; a run that dies stays consumed. */
+const PLAN_LINT_RETRY_STEP = "review.plan_lint_retry";
+const PLAN_LINT_RETRY_REASON_MAX = 300;
+const PLAN_LINT_NO_SUMMARY_REASON = /^lint-plan exited \d+ with no summary(?:; it printed: [\s\S]*)?$/;
+
+/** `checks` excludes `remudero-review`, the failure being re-evaluated. */
+interface PlanLintRetryObservation {
+  headSha: string;
+  mergeBaseSha: string;
+  baseRef: string;
+  checks: { headSha: string; fresh: boolean; complete: boolean; passing: boolean };
+}
+type PlanLintRetryObserver = () => PlanLintRetryObservation | Promise<PlanLintRetryObservation>;
+type ReviewPublisherReaders = Pick<PostReviewStatusGuardedOpts, "owner" | "repo" | "fetchPublisher" | "readRequiredContexts">;
+
+interface PlanLintRetryRequest extends ReviewPublisherReaders {
+  attemptId: string;
+  runId: string;
+  headSha: string;
+  mergeBaseSha: string;
+  observe: PlanLintRetryObserver;
+  clock?: Clock;
+  assessPendingOwner?: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment;
+}
+
+interface PlanLintRetryIdentity {
+  runId: string;
+  taskId: string;
+  attemptId: string;
+  prUrl?: string;
+  headSha: string;
+  mergeBaseSha?: unknown;
+  digest?: string;
+  priorRunId?: unknown;
+}
+
+function appendPlanLintRetryRow(
+  ledgerPath: string,
+  id: PlanLintRetryIdentity,
+  outcome: "admitted" | "refused" | "incomplete" | "published" | "post_failed",
+  reason?: string,
+): void {
+  appendLedger(ledgerPath, {
+    run_id: id.runId, task_id: id.taskId, step: PLAN_LINT_RETRY_STEP, attempt_id: id.attemptId, pr_url: id.prUrl,
+    head_sha: id.headSha, merge_base_sha: id.mergeBaseSha, review_decision_digest: id.digest,
+    prior_run_id: id.priorRunId, outcome,
+    ...(reason !== undefined ? { reason: reason.slice(0, PLAN_LINT_RETRY_REASON_MAX) } : {}),
+  });
+}
+
+/** Whole corpus: this step rotates away while a replay keeps its terminal row live. */
+async function readPlanLintRetryRows(ledgerPath: string): Promise<Array<Record<string, unknown>>> {
+  const read = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { step: PLAN_LINT_RETRY_STEP, refuseIncomplete: true });
+  if (!read.ok) throw new Error(`ledger unreadable: ${read.unread.join(", ")}`);
+  return read.rawLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** judgeReview renders exactly planLintRefusalText only when nothing else failed. */
+function isPlanLintRetryEligible(terminal: ReviewDecisionTerminal): boolean {
+  const { state, verdict } = terminal;
+  const lint: unknown = verdict.planLint;
+  if (state !== "failure" || verdict.planOnly !== true || verdict.capped !== false || verdict.keywordOnly !== false) return false;
+  if (typeof lint !== "object" || lint === null) return false;
+  const { ran, reason } = lint as { ran?: unknown; reason?: unknown };
+  return ran === false && typeof reason === "string" && PLAN_LINT_NO_SUMMARY_REASON.test(reason) &&
+    verdict.summary === planLintRefusalText({ ran, reason });
+}
+
+function foreignPendingClaim(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  prUrl: string,
+  retry: PlanLintRetryRequest,
+): string | undefined {
+  const now = (retry.clock ?? systemClock).now();
+  const assess = retry.assessPendingOwner ??
+    ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
+  for (const row of rows) {
+    if (row.step !== "review.pending_posted" || !reviewRowNamesPr(row, taskId, prUrl) || row.run_id === retry.runId) continue;
+    const record = pendingReviewStatusRecord(row);
+    const ageMs = now - Date.parse(record?.postedAt ?? "");
+    if (!record || Number.isNaN(ageMs) || (ageMs < REVIEW_LOCK_TTL_MS && assess(record) !== "dead")) return String(row.run_id);
+  }
+  return undefined;
+}
+
+async function planLintRetryPublisherRefusal(publisher: ReviewPublisherReaders, baseRef: string): Promise<string | undefined> {
+  if (typeof baseRef !== "string" || baseRef.length === 0) return "the PR's base branch is unreadable";
+  const { canPublish, evidence } = await replayPublisher(publisher, { baseRef }, undefined);
+  if (evidence.requiredAppId === null) return `remudero-review has no pinned App id on ${baseRef}`;
+  return canPublish ? undefined : `the current credential cannot publish as App ${evidence.requiredAppId}`;
+}
+
+async function planLintRetryRefusal(
+  opts: { ledgerPath: string; taskId: string; prUrl: string; digest: string; headCheckoutDir?: string },
+  retry: PlanLintRetryRequest,
+  terminal: ReviewDecisionTerminal,
+  terminalRow: Record<string, unknown>,
+  afterTerminal: ReadonlyArray<Record<string, unknown>>,
+): Promise<string | undefined> {
+  try {
+    if (!isPlanLintRetryEligible(terminal)) return "the terminal is not a lone lint-plan failure with no summary";
+    if (terminalRow.head_sha !== retry.headSha) return `the terminal judged head ${String(terminalRow.head_sha)}, not the requested head`;
+    const recordedBases = [terminalRow.merge_base_sha, terminal.verdict.mergeBaseSha].filter((base) => base !== undefined);
+    if (recordedBases.length === 0) return "the terminal recorded no merge base";
+    if (recordedBases.some((base) => base !== retry.mergeBaseSha)) return "the terminal judged a different merge base";
+    if (opts.headCheckoutDir === undefined) return "no PR-head checkout is materialized";
+    const foreignRun = foreignPendingClaim(afterTerminal, opts.taskId, opts.prUrl, retry);
+    if (foreignRun !== undefined) return `run ${foreignRun} holds a live pending claim on this PR`;
+    const observed = await retry.observe();
+    if (observed.headSha !== retry.headSha) return `the PR head moved to ${observed.headSha}`;
+    if (observed.mergeBaseSha !== retry.mergeBaseSha) return `the merge base moved to ${observed.mergeBaseSha}`;
+    const { checks } = observed;
+    if (checks.headSha !== retry.headSha || checks.fresh !== true || checks.complete !== true || checks.passing !== true) {
+      return "the head's check set is not fresh, complete and passing";
+    }
+    const checkoutHead = (await hostWorktreeGitAsync(opts.headCheckoutDir, ["rev-parse", "HEAD"], { timeout: 15_000 })).trim();
+    if (checkoutHead !== retry.headSha) return `the checkout is at ${checkoutHead}, not the requested head`;
+    const publisherRefusal = await planLintRetryPublisherRefusal(retry, observed.baseRef);
+    if (publisherRefusal !== undefined) return publisherRefusal;
+    const consumed = (await readPlanLintRetryRows(opts.ledgerPath)).some((row) => row.outcome === "admitted" &&
+      row.pr_url === opts.prUrl && row.head_sha === retry.headSha && row.merge_base_sha === retry.mergeBaseSha &&
+      row.review_decision_digest === opts.digest);
+    return consumed ? "this PR, head, base and digest already spent their retry" : undefined;
+  } catch (error) {
+    return `a retry read failed: ${String(error)}`;
+  }
+}
+
+async function admitPlanLintRetry(
+  opts: Parameters<typeof planLintRetryRefusal>[0],
+  retry: PlanLintRetryRequest,
+  handle: ReviewStatusLockHandle,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  terminal: ReviewDecisionTerminal,
+): Promise<ReviewDecisionClaim> {
+  const terminalIndex = lines.findLastIndex((line) => isReviewDecisionTerminalRow(line, opts.taskId, opts.prUrl, opts.digest));
+  const terminalRow = lines[terminalIndex]!;
+  let admitted = false;
+  try {
+    const refusal = await planLintRetryRefusal(opts, retry, terminal, terminalRow, lines.slice(terminalIndex + 1));
+    appendPlanLintRetryRow(opts.ledgerPath, {
+      ...retryRowIdentity(opts, retry), priorRunId: terminalRow.run_id,
+    }, refusal === undefined ? "admitted" : "refused", refusal);
+    admitted = refusal === undefined;
+  } finally {
+    if (!admitted) handle.release();
+  }
+  return admitted ? { kind: "owned", release: () => handle.release(), reopenedDegradedTerminal: true } : { kind: "replay", terminal };
+}
+
+function retryRowIdentity(
+  opts: { taskId: string; prUrl: string; digest: string },
+  retry: PlanLintRetryRequest,
+): PlanLintRetryIdentity {
+  return {
+    runId: retry.runId, taskId: opts.taskId, attemptId: retry.attemptId, prUrl: opts.prUrl,
+    headSha: retry.headSha, mergeBaseSha: retry.mergeBaseSha, digest: opts.digest,
+  };
+}
+
 /** Acquire-before-read closes the terminal-check/create race; a live owner makes the loser stand down. */
 export async function claimReviewDecision(opts: {
   ledgerPath: string;
@@ -292,23 +458,32 @@ export async function claimReviewDecision(opts: {
   /** A successfully materialized checkout at the exact PR head; absent means replay remains final. */
   headCheckoutDir?: string;
   lockOpts?: AcquireReviewStatusLockOpts;
+  /** W1-T11390: an explicit request; absent, nothing below changes. */
+  planLintRetry?: PlanLintRetryRequest;
 }): Promise<ReviewDecisionClaim> {
+  const retry = opts.planLintRetry;
   const lockPath = join(dirname(opts.ledgerPath), "review-decision-claims", `${opts.digest.replace(":", "-")}.lock`);
   let handle: ReviewStatusLockHandle;
   try {
     handle = await acquireReviewStatusLock(lockPath, { timeoutMs: 0, ...opts.lockOpts });
   } catch (error) {
-    if (error instanceof ReviewStatusLockTimeoutError) return { kind: "in_flight" };
+    if (error instanceof ReviewStatusLockTimeoutError) {
+      if (retry) appendPlanLintRetryRow(opts.ledgerPath, retryRowIdentity(opts, retry), "refused", "another run holds the decision lock");
+      return { kind: "in_flight" };
+    }
     throw error;
   }
-  const terminal = lastReviewDecisionTerminal(readLiveLedgerRecords(opts.ledgerPath), opts.taskId, opts.prUrl, opts.digest);
+  const lines = readLiveLedgerRecords(opts.ledgerPath);
+  const terminal = lastReviewDecisionTerminal(lines, opts.taskId, opts.prUrl, opts.digest);
   if (terminal) {
+    if (retry) return await admitPlanLintRetry(opts, retry, handle, lines, terminal);
     if (isReopenableDegradedTerminal(terminal, opts.headCheckoutDir !== undefined)) {
       return { kind: "owned", release: () => handle.release(), reopenedDegradedTerminal: true };
     }
     handle.release();
     return { kind: "replay", terminal };
   }
+  if (retry) appendPlanLintRetryRow(opts.ledgerPath, retryRowIdentity(opts, retry), "refused", "no terminal exists for this decision");
   return { kind: "owned", release: () => handle.release() };
 }
 
@@ -6952,8 +7127,8 @@ export async function refreshReviewPublisherToken(opts: RefreshOptions = {}): Re
 }
 
 async function replayPublisher(
-  opts: PostReviewStatusGuardedOpts,
-  lifecycle: PrLifecycleState,
+  opts: ReviewPublisherReaders,
+  lifecycle: Pick<PrLifecycleState, "baseRef">,
   entry: ReviewStatusEntry | undefined,
 ): Promise<{ trusted: boolean; canPublish: boolean; evidence: ReviewReplayPublisherEvidence }> {
   const fetch = opts.fetchPublisher ?? ghJsonAsync;
@@ -11500,6 +11675,8 @@ export interface PostReviewStatusGuardedOpts {
   reviewDecisionDigest?: string;
   /** Permit replacement only of the matching CAPPED keyword-only terminal reopened after exact-head materialization. */
   reopenedDegradedTerminal?: boolean;
+  /** W1-T11390: this post is an admitted lint retry's fresh result. */
+  planLintRetry?: PlanLintRetryPublicationRequest;
   reviewEngineRevision?: string;
   evaluatorProvenance?: ReviewEvaluatorProvenance;
   /** A just-in-time reading of the module graph producing this terminal verdict. When supplied,
@@ -11573,6 +11750,50 @@ function reviewerCodePublicationRefusal(
   return `reviewer code freshness is unprovable; withholding a terminal verdict: ${freshness.reason}`;
 }
 
+interface PlanLintRetryPublicationRequest {
+  attemptId: string;
+  outcome?: PlanLintOutcome;
+  observe: PlanLintRetryObserver;
+}
+
+/** Only a clean lint may publish success, so a retry cannot launder a violation. */
+async function decidePlanLintRetryPublication(
+  opts: PostReviewStatusGuardedOpts,
+  retry: PlanLintRetryPublicationRequest,
+  priorDecision: ReviewDecisionTerminal | undefined,
+  prior: PostedReviewStatusRecord | undefined,
+  lifecycle: PrLifecycleState,
+): Promise<{ identity: PlanLintRetryIdentity; refusal?: { outcome: "refused" | "incomplete"; reason: string } }> {
+  const identity: PlanLintRetryIdentity = {
+    runId: opts.runId, taskId: opts.taskId, attemptId: retry.attemptId, prUrl: opts.prUrl,
+    headSha: opts.sha, digest: opts.reviewDecisionDigest,
+  };
+  const refuse = (reason: string, outcome: "refused" | "incomplete" = "refused") => ({ identity, refusal: { outcome, reason } });
+  try {
+    const rows = await readPlanLintRetryRows(opts.ledgerPath);
+    const admitted = rows.findLastIndex((row) => row.outcome === "admitted" && row.attempt_id === retry.attemptId &&
+      row.pr_url === opts.prUrl && row.head_sha === opts.sha && row.review_decision_digest === opts.reviewDecisionDigest);
+    if (admitted < 0) return refuse("no admitted lint retry exists for this attempt, head and digest");
+    identity.mergeBaseSha = rows[admitted]!.merge_base_sha;
+    identity.priorRunId = rows[admitted]!.prior_run_id;
+    if (rows.slice(admitted + 1).some((row) => row.attempt_id === retry.attemptId)) return refuse("this lint retry attempt is already settled");
+    if (!priorDecision || !isPlanLintRetryEligible(priorDecision)) return refuse("the terminal is no longer a lint-plan failure with no summary");
+    if (retry.outcome?.ran !== true) return refuse(`the retried lint-plan did not finish: ${retry.outcome?.reason ?? "no lint was run"}`, "incomplete");
+    const expected = retry.outcome.violations.length === 0 ? "success" : "failure";
+    if (opts.state !== expected) return refuse(`a retried lint-plan with ${retry.outcome.violations.length} violation(s) cannot publish ${opts.state}`);
+    const guarded = decideReviewStatusPost({ headSha: opts.sha, state: opts.state, evidence: opts.evidence,
+      ...(opts.reviewInputDigest !== undefined ? { reviewInputDigest: opts.reviewInputDigest } : {}) }, prior, lifecycle);
+    if (!guarded.post) return refuse(guarded.reason);
+    const observed = await retry.observe();
+    if (observed.headSha !== opts.sha) return refuse(`the PR head moved to ${observed.headSha}`);
+    if (observed.mergeBaseSha !== identity.mergeBaseSha) return refuse(`the merge base moved to ${observed.mergeBaseSha}`);
+    const publisherRefusal = await planLintRetryPublisherRefusal(opts, observed.baseRef);
+    return publisherRefusal === undefined ? { identity } : refuse(publisherRefusal);
+  } catch (error) {
+    return refuse(`a retry read failed: ${String(error)}`);
+  }
+}
+
 /** Single `remudero-review` posting path (W1-T228): lock, read fresh ledger and lifecycle, then
  * {@link decideReviewStatusPost} posts or refuses. Ledger every attempt, including `review.post_refused`.
  * W1-T135: catch exhausted transient or permanent {@link postReviewStatus} errors here, ledger `review.post_failed`
@@ -11640,8 +11861,17 @@ export async function postReviewStatusGuarded(
       });
       return { posted: false, reason };
     };
+    let planLintRetryIdentity: PlanLintRetryIdentity | undefined;
+    if (opts.planLintRetry !== undefined) {
+      const { identity, refusal } = await decidePlanLintRetryPublication(opts, opts.planLintRetry, priorDecision, prior, lifecycle);
+      if (refusal !== undefined) {
+        appendPlanLintRetryRow(opts.ledgerPath, identity, refusal.outcome, refusal.reason);
+        return withholdReplay(refusal.reason);
+      }
+      planLintRetryIdentity = identity;
+    }
     let restoreTerminal = false;
-    if (!lifecycle.merged && !lifecycle.closed && priorDecision && !replacingDegradedTerminal) {
+    if (!lifecycle.merged && !lifecycle.closed && priorDecision && !replacingDegradedTerminal && planLintRetryIdentity === undefined) {
       if (opts.state === "pending") {
         return { posted: false, replayed: true, effectiveState: priorDecision.state,
           reason: "cannot-evaluate hold cannot overwrite a terminal verdict for the same review decision" };
@@ -11741,6 +11971,7 @@ export async function postReviewStatusGuarded(
     } catch (e) {
       // W1-T135 exhaustion path: ledger-and-continue, never crash the run.
       const message = e instanceof Error ? e.message : String(e);
+      if (planLintRetryIdentity !== undefined) appendPlanLintRetryRow(opts.ledgerPath, planLintRetryIdentity, "post_failed", message);
       appendLedger(opts.ledgerPath, {
         run_id: opts.runId,
         task_id: opts.taskId,
@@ -11759,6 +11990,7 @@ export async function postReviewStatusGuarded(
         reason: `posting remudero-review failed and was not applied (see the review.post_failed ledger line): ${message}`,
       };
     }
+    if (planLintRetryIdentity !== undefined) appendPlanLintRetryRow(opts.ledgerPath, planLintRetryIdentity, "published");
     if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") &&
         !/^remudero-review: cannot-evaluate — promise harvest (?:unavailable:|corpus is unreadable)/.test(opts.description) && opts.prUrl &&
         !lines.some((line) => line.step === "review.cannot_evaluate_escalated" && line.task_id === opts.taskId && line.head_sha === opts.sha)) {

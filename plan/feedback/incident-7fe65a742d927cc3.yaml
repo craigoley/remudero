@@ -1,0 +1,33 @@
+id: incident-7fe65a742d927cc3
+ts: 2026-11-05T18:47:22.953Z
+raw: >-
+  Incident 7fe65a742d92: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  Restore the missing codex-linux-sandbox launcher or provide working repository
+  read/edit/check tools; this round cannot inspect instructions or verify any
+  acceptance criterion.
+
+  First seen: 2026-11-05T18:46:36.058Z
+
+  Last seen: 2026-11-05T18:46:36.058Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16903 escalated: already escalated (reason unreadable: no escalation of this PR at head 581fddd is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793897932969:1:1793904211048) — Restore the missing codex-linux-sandbox launcher or provide working repository read/edit/check tools; this round cannot inspect instructions or verify any acceptance criterion.
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#7fe65a742d927cc38ec5831ba9357ca2d51312784026187af838026d9b986e62
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

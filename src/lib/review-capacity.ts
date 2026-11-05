@@ -7,7 +7,12 @@
  */
 import { readFileSync } from "node:fs";
 import { cpus, loadavg } from "node:os";
+import { join } from "node:path";
+import { cpuWeightShare, publishedLaneCpuBound, readCpuWeightShare } from "./lane-governor.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
+
+/** W1-T11129 — the share now lives beside its reader in lane-governor.ts; re-exported for this module's callers. */
+export { cpuWeightShare };
 
 export function initialReviewCapacityState(baseWidth: number): ReviewCapacityState {
   return { effectiveWidth: Math.max(1, Math.trunc(baseWidth)), healthySamples: 0 };
@@ -20,7 +25,6 @@ export interface ReviewCapacityPolicy {
   sampleCadenceMs: number;
   telemetryCadenceMs: number;
   cpuPsiLowPct: number;
-  cpuPsiHighPct: number;
   memoryPsiLowPct: number;
   memoryPsiHighPct: number;
   providerAllowancePct: number;
@@ -79,6 +83,11 @@ export interface ReviewCapacityObservation {
   cpuPsiSomeAvg10Pct?: number;
   /** W1-T2985 — PSI `full`: the starvation signal the CPU shed decides on. */
   cpuPsiFullAvg10Pct?: number;
+  /** W1-T11129 — this container's cpu.weight over the sum of the running containers' weights, in (0, 1]. Unread or
+   *  stale, the CPU verdict holds: PSI alone never sheds. */
+  cpuWeightShare?: number;
+  /** W1-T11129 — the lane governor's learned CPU lane bound (`cpuLaneBound`); absent while unlearned or unread. */
+  laneCpuBound?: number;
   memoryPsiSomeAvg10Pct?: number;
   /** 1-minute load average and core count: attribution only (`pressureSource`), never a gate. */
   hostLoad1?: number;
@@ -273,6 +282,36 @@ export function absentHostReadings(
   return absent;
 }
 
+export type CpuPressureTier = "calm" | "hold" | "shed";
+
+/**
+ * W1-T11129 — the CPU shed's verdict, with no fixed high line. `full` PSI is judged against what the container's own
+ * cpu.weight share predicts: with share s and `some` PSI S, contention the weight alone explains is (1 - s) * S, so
+ * only `full` beyond that is the container's own overload. The shed line is the larger of that prediction and the low
+ * watermark, plus one low-watermark width; beyond it the overload is the container's own: shed. Calm stays the low
+ * watermark itself: the weight excuses contention from a shed, never from a widening, so a lane is added only on PSI
+ * that is low outright. Between the two the verdict holds. HOW MUCH is shed and restored stays W1-T11150's (one review
+ * per overloaded sample, restore in proportion to relief, the effect check). An UNREAD or stale share holds in BOTH
+ * directions: PSI with no share cannot tell the container's own overload from the contention its low weight predicts
+ * (MEASURED 2026-10-27: core's `full` of 36-44 was serve's weight, not core's load), nor its calm from a quiet moment
+ * of a contended host, so nothing is shed and nothing added on PSI alone, and no fixed line stands in. The governor's
+ * learned CPU lane bound is the controller's other CPU verdict (see `cpuOverloaded` there), not a tier. An unread PSI
+ * is never calm and never sheds; a `some` below `full` is inconsistent and predicts nothing.
+ */
+export function cpuPressureTier(
+  observation: Pick<ReviewCapacityObservation, "cpuPsiFullAvg10Pct" | "cpuPsiSomeAvg10Pct" | "cpuWeightShare" | "laneCpuBound">,
+  policy: Pick<ReviewCapacityPolicy, "cpuPsiLowPct">,
+): { tier: CpuPressureTier; calm: boolean } {
+  const full = observation.cpuPsiFullAvg10Pct;
+  if (!finite(full)) return { tier: "calm", calm: false };
+  if (!(finite(observation.cpuWeightShare) && observation.cpuWeightShare > 0)) return { tier: "hold", calm: false };
+  const share = Math.min(1, observation.cpuWeightShare);
+  const some = finite(observation.cpuPsiSomeAvg10Pct) && observation.cpuPsiSomeAvg10Pct >= full ? observation.cpuPsiSomeAvg10Pct : 0;
+  if (full > Math.max(policy.cpuPsiLowPct, (1 - share) * some) + policy.cpuPsiLowPct) return { tier: "shed", calm: false };
+  if (full > policy.cpuPsiLowPct) return { tier: "hold", calm: false };
+  return { tier: "calm", calm: true };
+}
+
 /** How many CPU readings the noise band looks back over. */
 const CPU_READING_HISTORY = 16;
 
@@ -319,6 +358,19 @@ export function selectAdaptiveReviewWidth(
       : [...priorReadings, { atMs: observation.nowMs, v: readingNow }].slice(-CPU_READING_HISTORY);
   let shed: ReviewCpuShed | undefined = prior.shed ? { ...prior.shed } : undefined;
   let suspended: ReviewCpuShedSuspension | undefined = prior.suspended;
+  // W1-T11129 — the weight-relative verdict replaces the fixed cpuPsiHighPct line everywhere this controller read it.
+  // An unread or stale share holds both ways: no shed, and no calm to grow on.
+  const cpu = cpuPressureTier(observation, policy);
+  // W1-T11129 — THE SHED READS THE GOVERNOR'S CPU VERDICT too: reviews past the learned capacity (the CPU the host has,
+  // less its measured baseline, over what a lane is measured to use) are CPU overload while PSI still shows pressure
+  // (`full` above the low watermark, the latency arm's corroboration): past the bound on a calm host there is nothing
+  // for W1-T11150's relief to measure, and a widening the healthy window earned there stays untouched. It sheds through
+  // the SAME path as a PSI shed, so W1-T11150's record, effect check, suspension and proportional restore treat it like
+  // any shed. Not PSI alone: the bound is learned from cgroup cpu.stat, so an unread share does not stop it.
+  const overLearnedCapacity = readingNow !== undefined && readingNow > policy.cpuPsiLowPct &&
+    finite(observation.laneCpuBound) && observation.activeWorkers + effectiveWidth > observation.laneCpuBound;
+  const cpuOverloaded = cpu.tier === "shed" || overLearnedCapacity;
+  const cpuCalm = cpu.calm;
 
   const directPressure = (nextReason: ReviewCapacityReason): void => {
     effectiveWidth = Math.max(minWidth, effectiveWidth - 1);
@@ -334,7 +386,7 @@ export function selectAdaptiveReviewWidth(
   const psiCalm =
     finite(observation.cpuPsiFullAvg10Pct) &&
     finite(observation.memoryPsiSomeAvg10Pct) &&
-    observation.cpuPsiFullAvg10Pct <= policy.cpuPsiLowPct &&
+    cpuCalm &&
     observation.memoryPsiSomeAvg10Pct <= policy.memoryPsiLowPct;
   // Back to base in one sample, never past what the host worker budget leaves room for, and never
   // above base: lanes above it stay earned by the healthy window below.
@@ -369,7 +421,7 @@ export function selectAdaptiveReviewWidth(
     }
   }
   const previousReading = priorReadings.length > 0 ? priorReadings[priorReadings.length - 1]!.v : undefined;
-  if (shed && readingNow !== undefined && readingNow < policy.cpuPsiHighPct) {
+  if (shed && readingNow !== undefined && !cpuOverloaded) {
     shed.lowest = Math.min(shed.lowest, readingNow);
     if (previousReading !== undefined && readingNow <= previousReading && effectiveWidth < baseWidth) {
       // Proportional restore: relief is the fraction of the shedding reading's excess (over the calm
@@ -391,7 +443,12 @@ export function selectAdaptiveReviewWidth(
   // `active_workers` was 0. A bound that fires on a healthy condition is this repo's recurring
   // defect (W1-T312, W1-T380, W1-T382); here the number was not mis-sized, the SIGNAL was wrong.
   // `some` still rides along in the decision row below, where it is diagnosis rather than input.
-  if (readingNow !== undefined && readingNow >= policy.cpuPsiHighPct && !suspended) {
+  // W1-T11129 — NO FIXED SHED LINE. MEASURED 2026-10-27: core's cpu `full` of 36-44 crossed a fixed 20 and held review
+  // at width 1 of 4 with 10 PRs queued, though core's cpu.weight was 59 against serve's 303, so its PSI measured the
+  // weight's own contention. PSI over what the weight share predicts sheds, and so do reviews past the governor's learned
+  // capacity; an unread share holds. Either way the shed is W1-T11150's: one lane per overloaded sample, recorded here,
+  // and its effect check judges each one.
+  if (readingNow !== undefined && cpuOverloaded && !suspended) {
     const widthBefore = effectiveWidth;
     directPressure("cpu-pressure");
     if (effectiveWidth < widthBefore) {
@@ -498,7 +555,7 @@ export function selectAdaptiveReviewWidth(
       lastHealthySampleAtMs = undefined;
       reason = "host-worker-budget";
     } else if (
-      observation.cpuPsiFullAvg10Pct! > policy.cpuPsiLowPct ||
+      !cpuCalm ||
       observation.memoryPsiSomeAvg10Pct! > policy.memoryPsiLowPct
     ) {
       healthySamples = 0;
@@ -844,6 +901,10 @@ export interface RuntimeReviewCapacityInput extends ReviewCapacityBounds {
   ledgerLines: ReadonlyArray<Record<string, unknown>>;
   policy: ReviewCapacityPolicy;
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T11129 — the container's weight share; absent, the host tuner's record under `root` is read. */
+  cpuWeightShare?: number;
+  /** W1-T11129 — the governor's learned CPU lane bound; absent, the daemon's last published one is read. */
+  laneCpuBound?: number;
   /** W1-T11149: hands the sample's provider reading to the sweep's provider bound and returns the review phase split the row
    *  records. Absent: no split is recorded. */
   observeReviewPhases?: (provider: ReviewProviderCapacityObservation, width: number) => {
@@ -856,11 +917,16 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
   const prior = runtimeStates.get(input.root) ?? initialReviewCapacityState(input.baseWidth);
   const providerStatus = readProviderRoutingStatus(input.root, { now: () => input.nowMs });
   const settlements = summarizeReviewSettlements(input.ledgerLines, input.nowMs, input.policy.settlementWindowMs);
+  // W1-T11129 — the share's producer is the host tuner's cpu-weights.json in this instance's state dir; unread or
+  // stale, the observation carries no share and the CPU verdict holds rather than shedding on PSI alone.
+  const weightShare = input.cpuWeightShare ?? readCpuWeightShare(join(input.root, "state"), input.nowMs);
   const observation: ReviewCapacityObservation = {
     nowMs: input.nowMs,
     queueDepth: input.queueDepth,
     activeWorkers: input.activeWorkers,
     ...readReviewHostObservation(),
+    ...(weightShare !== undefined ? { cpuWeightShare: weightShare } : {}),
+    ...((input.laneCpuBound ?? publishedLaneCpuBound()) !== undefined ? { laneCpuBound: input.laneCpuBound ?? publishedLaneCpuBound() } : {}),
     // W1-T11150 — the review lane's own CPU share: reviews attempted and still inside their CPU phase.
     // Absent from the fold means none were counted: always supplied, so a later rise is visible.
     reviewCpuChildren: settlements.cpuPhaseChildren ?? 0,
@@ -890,6 +956,9 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       // beside it: the `cpu-pressure` arm still consults it, and dropping it would trade one blind
       // spot for another.
       cpu_psi_full_avg10_pct: result.decision.evidence.cpuPsiFullAvg10Pct ?? null,
+      // W1-T11129 — the CPU verdict's two learned inputs, so a shed or hold is auditable from its own row.
+      cpu_weight_share: observation.cpuWeightShare ?? null,
+      lane_cpu_bound: observation.laneCpuBound ?? null,
       // Which host readings were non-finite. Empty whenever telemetry was complete.
       telemetry_absent: result.decision.evidence.absentHostReadings,
       provider_fresh: result.decision.evidence.providerFresh,
