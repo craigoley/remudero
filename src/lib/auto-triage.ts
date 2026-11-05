@@ -923,11 +923,11 @@ export type MainFeedbackGit = (cwd: string, args: readonly string[],
  */
 export async function refreshFeedbackFromMain(
   root: string,
-  deps: { git?: MainFeedbackGit; log?: (step: string, extra: Record<string, unknown>) => void } = {},
+  log?: (step: string, extra: Record<string, unknown>) => void,
+  git: MainFeedbackGit = hostWorktreeGitAsync,
 ): Promise<void> {
-  const git = deps.git ?? hostWorktreeGitAsync;
   const dirs = gitDirsOf(root);
-  if (dirs === undefined) return dropView(root, "not a git checkout", deps.log);
+  if (dirs === undefined) return dropView(root, "not a git checkout", log);
   const known = refSha(dirs.commonDir, "refs/remotes/origin/main");
   const headSha = headShaOf(dirs);
   const cached = mainFeedbackViews.get(root);
@@ -953,7 +953,7 @@ export async function refreshFeedbackFromMain(
     mainFeedbackViews.delete(root);
     // A missing ref or tree is an unreadable main, so the checkout walk governs; a security refusal from the leaf still propagates.
     if (error === null || typeof error !== "object" || !("status" in error || "code" in error)) throw error;
-    dropView(root, String(error instanceof Error ? error.message : error).split("\n")[0], deps.log);
+    dropView(root, String(error instanceof Error ? error.message : error).split("\n")[0], log);
   }
 }
 
@@ -976,9 +976,10 @@ export interface TriageCandidateReaders {
  */
 export async function triageCandidateReaders(
   root: string,
-  deps: Parameters<typeof refreshFeedbackFromMain>[1] = {},
+  log?: (step: string, extra: Record<string, unknown>) => void,
+  git: MainFeedbackGit = hostWorktreeGitAsync,
 ): Promise<TriageCandidateReaders> {
-  await refreshFeedbackFromMain(root, deps);
+  await refreshFeedbackFromMain(root, log, git);
   return { newFeedbackIdsOldestFirst, oldestFeedbackAgeMs };
 }
 

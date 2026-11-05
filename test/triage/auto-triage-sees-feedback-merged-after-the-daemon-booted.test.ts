@@ -85,18 +85,18 @@ test("W1-T11374 criterion 3: the read is asynchronous and re-reads the tree only
     const { git, calls } = countingGit();
     let loopTurned = false;
     setImmediate(() => { loopTurned = true; });
-    const pending = refreshFeedbackFromMain(f.boot.dir, { git });
+    const pending = refreshFeedbackFromMain(f.boot.dir, undefined, git);
     assert.ok(pending instanceof Promise, "the refresh is awaited, never a synchronous walk of git");
     await pending;
     assert.ok(loopTurned, "the loop turned while the refresh's git children ran");
     assert.ok(calls.length > 0, "the first read spawns git for the tree");
     calls.length = 0;
-    await refreshFeedbackFromMain(f.boot.dir, { git });
+    await refreshFeedbackFromMain(f.boot.dir, undefined, git);
     newFeedbackIdsOldestFirst(f.boot.dir);
     assert.deepEqual(calls, [], "an unchanged origin/main pays no git spawn for candidates");
     commitEntry(f.seed, "fb-next", "2026-11-03T00:00:00.000Z", "new");
     f.boot.git("fetch", "-q", "origin");
-    await refreshFeedbackFromMain(f.boot.dir, { git });
+    await refreshFeedbackFromMain(f.boot.dir, undefined, git);
     assert.ok(calls.some((args) => args[0] === "ls-tree"), "a moved origin/main re-reads the tree");
     assert.ok(newFeedbackIdsOldestFirst(f.boot.dir).includes("fb-next"));
   } finally {
@@ -111,8 +111,8 @@ test("W1-T11374: an unreadable origin/main falls back to the checkout walk and l
     writeFileSync(join(lone.dir, "plan", "feedback", "fb-here.yaml"), entry("fb-here", "2026-11-01T00:00:00.000Z", "new"));
     const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
     const log = (step: string, extra: Record<string, unknown>) => rows.push({ step, extra });
-    await refreshFeedbackFromMain(lone.dir, { log });
-    await refreshFeedbackFromMain(lone.dir, { log });
+    await refreshFeedbackFromMain(lone.dir, log);
+    await refreshFeedbackFromMain(lone.dir, log);
     assert.deepEqual(newFeedbackIdsOldestFirst(lone.dir), ["fb-here"], "the checkout walk governs, as before");
     assert.equal(rows.length, 1, "a main that stays unreadable is one row, not one per pass");
     assert.equal(rows[0].step, "auto_triage.candidates_fallback");
@@ -131,10 +131,10 @@ test("W1-T11374: a linked worktree with packed refs and a detached HEAD reads th
     f.boot.git("fetch", "-q", "origin");
     f.boot.git("pack-refs", "--all");
     const { git, calls } = countingGit();
-    await refreshFeedbackFromMain(linked, { git });
+    await refreshFeedbackFromMain(linked, undefined, git);
     assert.ok(newFeedbackIdsOldestFirst(linked).includes("fb-merged-after-boot"));
     calls.length = 0;
-    await refreshFeedbackFromMain(linked, { git });
+    await refreshFeedbackFromMain(linked, undefined, git);
     assert.deepEqual(calls, [], "the packed origin/main ref is read from the common dir, so nothing respawns");
   } finally {
     f.boot.git("worktree", "remove", "--force", linked);
@@ -150,7 +150,7 @@ test("W1-T11374: a feedback root that is not a git checkout spawns no git and ke
     writeFileSync(join(plain, "plan", "feedback", "fb-plain.yaml"), entry("fb-plain", "2026-11-01T00:00:00.000Z", "new"));
     const { git, calls } = countingGit();
     const rows: string[] = [];
-    await refreshFeedbackFromMain(plain, { git, log: (step) => rows.push(step) });
+    await refreshFeedbackFromMain(plain, (step) => rows.push(step), git);
     assert.deepEqual(calls, []);
     assert.deepEqual(rows, ["auto_triage.candidates_fallback"]);
     assert.deepEqual(newFeedbackIdsOldestFirst(plain), ["fb-plain"]);

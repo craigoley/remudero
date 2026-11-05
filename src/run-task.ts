@@ -21120,8 +21120,8 @@ export async function autoTriageCheck(
   const now = opts.now ?? new Date();
   const feedbackRoot = opts.feedbackRoot ?? repoRoot;
   // W1-T11374: the readers come only from a refresh of origin/main's feedback, so an entry merged after boot is a candidate now.
-  const { newFeedbackIdsOldestFirst, oldestFeedbackAgeMs } = await triageCandidateReaders(feedbackRoot, { log: (step, extra) =>
-    appendProducerLedger(ledgerPathFor(config), "daemon", { run_id: "AUTO-TRIAGE", step, ...extra }) });
+  const { newFeedbackIdsOldestFirst, oldestFeedbackAgeMs } = await triageCandidateReaders(feedbackRoot, (step, extra) =>
+    appendProducerLedger(ledgerPathFor(config), "daemon", { run_id: "AUTO-TRIAGE", step, ...extra }));
   const inputs: AutoTriageInputs = {
     policy: policy.values.autoTriage,
     // W1-T469 — WAS HARDCODED `idle: true`, WHICH IS WHY THE GUARD WAS DOUBLY UNREACHABLE: the rung
