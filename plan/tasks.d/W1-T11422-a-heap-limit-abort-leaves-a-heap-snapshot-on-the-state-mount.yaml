@@ -1,0 +1,46 @@
+- id: W1-T11422
+  title: "A heap-limit abort leaves a heap snapshot on the state mount — core aborted on its 7.5 GB heap limit about every 25 minutes on 2026-11-05, and each abort printed an empty JS stack, so naming the allocator took an operator-approved live profile; the daemon runs with Node's --heapsnapshot-near-heap-limit into state/diagnostics/heap instead"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern (the entrypoint's heap-snapshot flags and retention) spanning entrypoint.sh, the daemon process it starts and the test
+  band_meaning: span
+  origin: operator-session#review-throughput-2026-11-05
+  plan_refs: [W1-T3335, W1-T11421]
+  files:
+    - deploy/entrypoint.sh
+    - test/deploy/a-heap-limit-abort-leaves-a-heap-snapshot.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The daemon process the entrypoint starts runs with --heapsnapshot-near-heap-limit and a --diagnostic-dir under the state mount, so a heap-limit abort leaves a snapshot that outlives the container
+      proof: "unit test: test/deploy/a-heap-limit-abort-leaves-a-heap-snapshot.test.ts"
+    - claim: The snapshot count comes from the state disk's free space against the heap ceiling, and with no room the flag is left off and one ledger row says why
+      proof: "grep: W1-T11422 criterion 2 in test/deploy/a-heap-limit-abort-leaves-a-heap-snapshot.test.ts"
+    - claim: Before each start the oldest snapshots are pruned to fit, the newest is never pruned, and one ledger row records the policy chosen
+      proof: "grep: W1-T11422 criterion 3 in test/deploy/a-heap-limit-abort-leaves-a-heap-snapshot.test.ts"
+  rationale: |
+    MEASURED 2026-11-05: core exited 134 at 14:36:30 and 15:04:47, each after "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory" with about 7.1 GB live after Mark-Compact. The `<--- JS stacktrace --->` section is empty (the same as on 2026-09-23). The allocator could only be named by attaching an inspector to a live process and sampling across a crash, which needed an operator approval and a person watching.
+    Node can write a heap snapshot automatically as the heap nears its limit: `--heapsnapshot-near-heap-limit=<n>` together with `--diagnostic-dir=<dir>`. Any heap-limit abort then documents itself.
+    READ at origin/main 629ad177de:
+    - deploy/entrypoint.sh starts the daemon as a child (`"$@" &`, about :757) and restarts it in-container or exits for docker.
+    - CONFIG_ROOT="$HOME/Remudero" (:86) is the state mount. The host's revive logs already live under <state>/state/diagnostics (install-host-units.sh:1579).
+    - The container's own /tmp is wiped on recreate, so the snapshot must not go there.
+    - --max-old-space-size reaches the daemon through NODE_OPTIONS (recycle-container.sh :1418-1437; install-host-units.sh :313; deploy/resource-policy.sh resource_policy_node_options).
+  design: |
+    In deploy/entrypoint.sh, right before the daemon child starts:
+    1. The heap ceiling is the --max-old-space-size in NODE_OPTIONS (bytes). The free space is read from `df` on $CONFIG_ROOT/state.
+    2. n = the number of ceiling-sized snapshots that fit in half of that free space, so writing every one of them leaves at least half of what was free. If n is 0 or either input is unreadable, add no flag, and ledger entrypoint.heap_snapshot_policy with the reason.
+    3. Prune *.heapsnapshot files in $CONFIG_ROOT/state/diagnostics/heap oldest-first until the kept files plus n fit that same half. Always keep the newest.
+    4. Start only the daemon child (not the entrypoint's other probes) with NODE_OPTIONS extended by `--heapsnapshot-near-heap-limit=<n> --diagnostic-dir=$CONFIG_ROOT/state/diagnostics/heap`, and leave every existing flag untouched.
+    5. Ledger one entrypoint.heap_snapshot_policy row per start: n, the free bytes, the ceiling, the files kept and the files pruned.
+    The bound comes from the disk's own free space and the heap's own ceiling. There is no fixed count or size.
+  note: |
+    Filed 2026-11-05 by the operator session with W1-T11421; that task's crash-loop incident links the newest snapshot this leaves.
+    deploy/entrypoint.sh is a BAKED path. A merge ships itself through the automatic image build and recycle (doctrine: a-baked-path-merge-ships-itself), so check `docker inspect` before calling it live.
+    Writing a snapshot of a ~7 GB heap needs memory beyond the heap and takes time. Core's memory.max sits well above its heap ceiling (W1-T11130), but the builder should measure one snapshot's cost on the real heap size first and record it in the PR.
+    W1-T11137 (queued) also edits deploy/entrypoint.sh, in its crash-throttle sleep. Its hunks are separate from this start-of-child hunk.
