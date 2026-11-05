@@ -695,7 +695,17 @@ export function assessOperatorHomeReadContainment(e: ContainmentEvidence): {
  * filesystem denial can never be read as an egress denial or the reverse.
  */
 const EGRESS_DENIAL_RE =
-  /could not resolve host|couldn't resolve host|connection refused|failed to connect|blocked|not allowed|denied by|proxy/i;
+  /could not resolve host|couldn't resolve host|connection refused|failed to connect|connect tunnel failed|blocked by (?:the )?(?:network|allowlist|proxy|sandbox)|not allowed|denied by/i;
+
+/**
+ * W1-T11437: whether a probe transcript carries a genuine egress refusal. The bare words `blocked` and
+ * `proxy` used to match every probe, through the command's own `EGRESS-RESULT blocked=…` echo and the
+ * tripwire's "Command blocked by PreToolUse hook" line, so a reached non-allowlisted host always read
+ * UNPROVEN and never PROVEN-BROKEN. {@link EGRESS_DENIAL_RE} now names only curl's and the proxy's refusals.
+ */
+export function egressRefusalObserved(transcript: string): boolean {
+  return EGRESS_DENIAL_RE.test(transcript);
+}
 
 /** Regex marking an OS or sandbox-level write denial, as opposed to a hook denial, mirroring the
  *  WS-0 verdict-7 transcript check. Kept SEPARATE from {@link EGRESS_DENIAL_RE} in both directions. */
@@ -1041,7 +1051,7 @@ export async function probeContainment(opts: {
     // which test/deny-floor-probe.test.ts pins as the precondition of its mutation guard — that
     // guard counts occurrences in the raw SOURCE TEXT, so even a comment quoting it would break it.
     egressDenialSeen:
-      r.egressBlockedReached === undefined ? undefined : EGRESS_DENIAL_RE.test(r.transcript),
+      r.egressBlockedReached === undefined ? undefined : egressRefusalObserved(r.transcript),
     turnsExhausted: r.turnsExhausted,
     numTurns: r.numTurns,
     maxTurns: r.maxTurns,
@@ -1125,6 +1135,16 @@ export async function probeContainment(opts: {
     // field, both arms being false.
     ...(r.isError || !verdict.contained ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
   });
+  // W1-T11437 criterion 3: a PROVEN-BROKEN egress verdict gets its own row, SHADOW ONLY. Gating dispatch on it
+  // is a tightening that waits for the operator's explicit yes, so nothing here throws or changes `verdict`.
+  if (egress.reason.startsWith("egress PROVEN-BROKEN")) {
+    log("containment.egress_proven_open", {
+      shadow: true,
+      egress_reason: egress.reason,
+      egress_blocked_remote_ip: evidence.egressBlockedRemoteIp,
+      egress_allowed_remote_ip: evidence.egressAllowedRemoteIp,
+    });
+  }
   if (!verdict.contained && attempt === 0 &&
       !evidence.outsideWriteCreated && !evidence.credentialExpired &&
       !evidence.credentialFailure && !evidence.spawnTransportFailure) {

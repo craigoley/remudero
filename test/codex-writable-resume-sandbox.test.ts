@@ -86,8 +86,9 @@ test("W1-T3792: writable Codex resume retains workspace-write sandbox", async ()
     const args = await captureArgs(root, initializedWorktree(root), ["Read", "Write", "Edit", "Bash"], "failed-fix-session");
     assert.equal(args[0], "exec");
     assert.equal(args.includes("resume"), false, "a writer cannot use the containment-less resume form");
-    assert.equal(args[args.indexOf("--sandbox") + 1], "workspace-write");
-    assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
+    // W1-T11437 (operator 2026-11-05): writers run the allowlist-proxied :workspace profile, not --sandbox workspace-write.
+    assert.ok(args.includes('permissions.rmd_writer.extends=":workspace"'));
+    assert.ok(args.includes("permissions.rmd_writer.network.enabled=true"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
