@@ -1,0 +1,114 @@
+- id: W1-T11382
+  title: "The daemon keeps bounded, boot-keyed near-limit heap telemetry at its tick and worker-admission boundaries, with shadow-only hold measurements — PID 138 read 12.59% of V8's limit and died near 99.56% 7m50s later with no sample between, its tuples carry no boot identity, and today's cadence cannot show how fast the heap climbs between checks"
+  repo: remudero
+  depends_on:
+    - W1-T11129
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high  # Rule 19: one concern, measuring heap growth between admission checks; it spans a new report-only module and the daemon loop that feeds it
+  band_meaning: span
+  origin: architect
+  plan_refs:
+    - W1-T3335
+    - W1-T8883
+    - W1-T9106
+    - W1-T9647
+    - W1-T11134
+    - W1-T11129
+  files:
+    - src/lib/daemon-heap-near-limit.ts
+    - src/lib/daemon.ts
+    - test/memory/near-limit-heap-telemetry-is-kept-per-boot.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each daemon tick boundary, in-flight ticker beat and worker-admission seam read records one sample naming its timestamp, boot_key (pid plus boot start, so a reused PID is a different boot), surface, V8 used and limit, RSS, swap, cgroup budget, memory PSI, active, admitted and in-flight work counts, and elapsed_ms since the same boot's previous sample; an unreadable input is absent, never zero, and a boot's first sample has no elapsed_ms"
+      proof: "unit test: test/memory/near-limit-heap-telemetry-is-kept-per-boot.test.ts"
+    - claim: "Inter-check growth and recovery are computed only between samples with the same boot_key: two boots that share one PID produce no pair, and a boot whose file has no clean-close marker is reported with its last sample and an unmeasured final gap, never as a boot that stopped growing"
+      proof: "grep: W1-T11382 criterion 2 in test/memory/near-limit-heap-telemetry-is-kept-per-boot.test.ts"
+    - claim: "TELEMETRY BOUND: after ten times the retention in samples and boots, the ring, the per-boot summaries and the persisted file all stay at their named bounds, quiet samples cannot evict a boot summary's worst rise, a rising band transition persists at once, and a torn file is named and never read as empty"
+      proof: "grep: W1-T11382 criterion 3 in test/memory/near-limit-heap-telemetry-is-kept-per-boot.test.ts"
+    - claim: "The ledger gets rows only on a report-only band transition, at most one per HEAP_SAMPLE_MIN_GAP_MS and within a per-boot backstop, and the next row carries the count suppressed; steady samples at any level write no row"
+      proof: "grep: W1-T11382 criterion 4 in test/memory/near-limit-heap-telemetry-is-kept-per-boot.test.ts"
+    - claim: "Shadow rows carry shadow true and report candidate high and reserve figures from measured same-boot growth and recovery, or the named reason each is unlearned; no fixed hold threshold exists and nothing outside the row reads these figures"
+      proof: "grep: W1-T11382 criterion 5 in test/memory/near-limit-heap-telemetry-is-kept-per-boot.test.ts"
+    - claim: "NO DECISIONS: the same daemon run with telemetry present, absent or throwing admits the same work, returns the same worker-admission holds, takes the same 75% restart decision, leaves the heap ceiling and growth flags unset, and signals no process"
+      proof: "grep: W1-T11382 criterion 6 in test/memory/near-limit-heap-telemetry-is-kept-per-boot.test.ts"
+    - claim: "The daemon loop feeds the telemetry through one named call"
+      proof: "grep: recordNearLimitHeapSample( in src/lib/daemon.ts"
+  rationale: |
+    THIS TASK DOES NOT FIX THE UNKNOWN HEAP ALLOCATION OR ITS ROOT CAUSE. It measures growth between checks so a later
+    hold can be justified or refused. W1-T9647, W1-T9765 and W1-T11134 remain the holder and generation work.
+
+    OBSERVED (the initiative's research; retained rows were not re-read in this filing, which has no ledger access):
+    - 1,110 of 1,114 heap-shadow samples join same-PID daemon.memory rows within 10 minutes; 4 are unmatched.
+    - Matched heap-used/limit is max 55.23%, p99 41.78%. All daemon.memory rows are max 56.85%, p99 40.05%.
+    - The fatal-window cohort is 8 samples, all at or below 15.61%. PID 138 at 04:43:32Z matched 04:43:44Z at 12.59%,
+      then V8 fataled near 99.56% 7m50s later.
+    - Sample tuples lack boot identity, so only that cited row is confirmed to the same run.
+    - This cadence cannot justify a numeric high or low watermark or a dwell interval. That is why this task comes first.
+
+    READ at this checkout:
+    - daemon.ts HEAP_PRESSURE_RESTART_FRACTION is 0.75. heapPressureDetail is asked once per tick (heapStats beside
+      memoryGovernor.step()), then drainBeforeRestart waits for existing work. Nothing reads the heap at admission.
+    - HEAP_SAMPLE_MIN_GAP_MS is 60 s and DAEMON_MEMORY_SAMPLE_MS is 180 s. HeapSample's tuple is at, used, size, after_gc,
+      pid. A pid is not a boot: a container restart can reuse one.
+    - createHeapShadow keeps the used and physical heap for the ceiling proposal. It keeps no limit, RSS, pressure or
+      work counts, and its 7-day series is a different shape and purpose, so this adds a small separate store.
+    - heapShadow.flush runs in the daemon's exit path, so a V8 fatal skips it. The same exit path can write a clean-close
+      marker, and its absence is what tells a fatal's unmeasured final gap from a clean boot end.
+
+    Settled by lookup: is this already filed or decided? -> No. W1-T8883 and W1-T9106 learn and apply the heap ceiling, W1-T9647 names holders, W1-T11134 compares generations, W1-T9765 bounds named books, and none keeps boot-keyed inter-check growth at admission boundaries. MASTER-PLAN.md, LEARNINGS.md and DECISIONS.md record no heap hold; an exact-phrase grep for this subject across plan/, src/ and test/ found nothing.
+    Settled by lookup: does the 75% guard read the heap at admission? -> No, only at the tick boundary (src/lib/daemon.ts, heapPressureDetail call beside memoryGovernor.step()).
+    Settled by lookup: where is the admission boundary? -> holdWorkerAdmission(surface) and runGatedSweep's workerAdmissionHold closure, both in src/lib/daemon.ts, so this task needs no sweep.ts or worker.ts edit.
+    Settled by lookup: can the existing readers be reused? -> Yes: readDaemonMemory and quantileOf (src/lib/daemon-memory-policy.ts). readPsi in src/lib/host-memory-shadow.ts is not exported, so this module reads memory.pressure through its own injected port and does not widen that file's scope.
+    Settled by lookup: does W1-T11129 overlap? -> Yes. It declares src/lib/daemon.ts and its open PR #16523 changes it, so this task depends on W1-T11129 and rebases after it merges (plan/tasks.d/W1-T11129-the-lane-governor-sheds-on-learned-cpu-not-a-fixed-psi-line.yaml).
+  design: |
+    A new module, src/lib/daemon-heap-near-limit.ts, built and installed like createHeapShadow: an injected clock, reader
+    and store, and never in the path. Every failure is swallowed into one named persist-failed row.
+
+    1. SAMPLE. recordNearLimitHeapSample(surface, work) takes getHeapStatistics, readDaemonMemory, memory.pressure and the
+       caller's work counts, and returns the sample. Surfaces are tick, in-flight-tick and admission:<surface>, the
+       last from holdWorkerAdmission and runGatedSweep's closure. Add no timer: a sample at a boundary is the point, and
+       a blocked event loop must show as a large elapsed_ms, not be hidden. boot_key is pid plus the boot's start time.
+       A named BACKSTOP coalesces reads that land closer together than the sample's own read cost justifies; a
+       coalesced read returns the last sample and writes nothing.
+    2. WORK COUNTS. in-flight tasks, in-flight reviews, detached sweep actions, and admissions passed since the last
+       sample, from what runDaemon already counts. Add no new owner state.
+    3. RETENTION. A ring of FOOTPRINT_MAX_SAMPLES raw samples, plus one fixed-shape summary per boot over
+       HEAP_SAMPLE_RETAIN_MS with a named BACKSTOP count: worst same-boot rise with its two samples, peak, largest
+       recovery with its time, last sample, and clean_close. Persist with writeAtomic to
+       <state>/daemon-heap-near-limit.json on HEAP_SAMPLE_PERSIST_GAP_MS and at once on a rising band transition, because
+       a V8 fatal gives no flush. Write clean_close beside heapShadow.flush in the daemon's exit path.
+    4. TRANSITIONS. Report-only bands are four equal steps of the guard. Read the guard as HEAP_LIMIT_EXIT_FRACTION, the
+       mirror of HEAP_PRESSURE_RESTART_FRACTION in src/lib/daemon-memory-policy.ts, because daemon.ts imports this module.
+       Bands are measurement buckets and no decision reads them. Row step daemon.heap_near_limit fires on a band change
+       only.
+    5. SHADOW. Row step daemon.heap_hold_shadow at boot and every HEAP_PROPOSAL_EVERY_MS, shadow true: worst and p99
+       same-boot rise, rise per second, peak, recovery, reserve (guard less peak), and candidate high (guard less worst
+       rise less the largest rise that followed an admission). Each is absent with a named reason when unlearned.
+    6. Keep the daemon.ts additions to the wiring. This task does not touch src/lib/sweep.ts or src/lib/worker.ts.
+
+    NOT IN SCOPE: any admission decision, any hold, any change to HEAP_PRESSURE_RESTART_FRACTION, heapPressureDetail or
+    the heap ceiling, any kill or signal to the daemon or a worker, provider or model calls, paid canaries, schedules,
+    allowance increases, and routing or promotion effects. Finding the allocation is also out of scope.
+
+    TESTS: test/memory/near-limit-heap-telemetry-is-kept-per-boot.test.ts, Rule 18 injected ports, with one test title
+    carrying "W1-T11382 criterion N" for each of criteria 1 to 6. Criterion 1's whole-file proof executes them all.
+  falsifier: |
+    DELETE-THE-FIX, each read against the suite:
+    - Telemetry bound: delete the ring and summary trims and persist unbounded. Criterion 3's size assertions fail.
+    - Boot key: key pairs on pid alone. Criterion 2's reused-PID fixture yields a false pair and fails.
+    - Unmeasured gap: delete clean_close. Criterion 2 reads a fatal's final gap as a quiet end and fails.
+    - Flood: write a row per sample. Criterion 4's row count fails.
+    - No decisions: let a hold read the shadow figures. Criterion 6's present-versus-absent comparison diverges and fails.
+    At this checkout no such store exists, so the suite cannot pass.
+  note: |
+    verify:auto, because every criterion runs on injected ports with no provider and no live daemon.
+    W1-T11383 depends on this task's persisted trace. Neither task fixes the allocation.
+    SERIALIZED BEHIND W1-T11129 by depends_on, because both edit src/lib/daemon.ts.
+    A SAMPLED LOOP CANNOT SEE INSIDE A SYNCHRONOUS ALLOCATION. If the heap climbs inside one blocked turn, this telemetry
+    shows that as one large gap. That is the evidence W1-T11383 needs in order to refuse, not a defect here.
