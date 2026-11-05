@@ -11,7 +11,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { RepoLayout } from "./repo-layout.js";
 import { PLACEMENT_DIR, placeTest, type SubsystemMap } from "./test-placement.js";
 
-// comments compressed
+// "// comments compressed"
 /** Read-only plan/tasks.yaml loader/validator (schema v1, MASTER-PLAN §2); control plane owns status, prompts are pre-authored (G-2). */
 
 export const TASK_STATUSES = [
