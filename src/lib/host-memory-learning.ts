@@ -475,6 +475,8 @@ export interface TreeSamplerPorts {
 
 /** A test run the sampler found inside a tracked tree, ended once the runner's whole tree has exited. */
 export interface NestedTestRun {
+  /** A nested reservation may own its member decisions and evidence; otherwise inherit its parent's hook. */
+  onMember?: TrackHooks["onMember"];
   /** The runner tree's peak in MiB, or undefined when it was never observed. Called once. */
   finish(peakMib: number | undefined, legacyPeakMib?: number, peakAgeMs?: number, cliPeakMib?: number): void;
 }
@@ -674,7 +676,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         if (!run) continue;
         const nestedId = `${id}>test:${key}`;
         tracked.set(nestedId, { roots: [{ pid, start }], peakMib: 0, observed: false, nested: run,
-          hooks: { onTestFilePeak: entry.hooks?.onTestFilePeak, onMember: entry.hooks?.onMember, openedAtMs: ports.clock.now() } });
+          hooks: { onTestFilePeak: entry.hooks?.onTestFilePeak, onMember: run.onMember ?? entry.hooks?.onMember, openedAtMs: ports.clock.now() } });
         rootOwner.set(key, nestedId);
       }
     }
@@ -823,7 +825,7 @@ export interface LearnedReservationOptions {
 /** The ledger reservation and learned peak of one test runner found inside a tracked tree. NEVER throws. */
 function openNestedTestRun(
   pid: number,
-  context: { root?: string; ledger?: HostMemoryLedgerOptions; store: PeakStoreOptions },
+  context: { root?: string; ledger?: HostMemoryLedgerOptions; store: PeakStoreOptions; boundPorts: DescendantBoundPorts },
 ): NestedTestRun {
   let estimate: LearnedEstimate = { estimateMib: DEFAULT_ESTIMATE_MIB.test, samples: 0 };
   try {
@@ -837,10 +839,13 @@ function openNestedTestRun(
     ...(estimate.samples > 0 ? { measured: { estimateMib: estimate.estimateMib, samples: estimate.samples } } : {}),
   }, context.ledger);
   handle.bindRoot(pid);
+  const bound = descendantMemoryBoundHook({ workerClass: "test", reservationId: handle.id }, context.boundPorts);
   return {
+    onMember: bound.onMember,
     finish(peakMib, legacyPeakMib, peakAgeMs, cliPeakMib) {
       if (peakMib !== undefined) recordPeak("test", peakMib, { ...context.store, measurementBasis: "concurrent-rss", legacyPeakMib, peakAgeMs, cliPeakMib });
       else if (legacyPeakMib !== undefined) recordPeak("test", legacyPeakMib, { ...context.store, measurementBasis: "legacy-hwm", cliPeakMib });
+      bound.release();
       handle.releaseOccupancy();
     },
   };
@@ -887,14 +892,15 @@ function learnedHandle(
   const key = handle.id ?? `untracked-${Math.random().toString(36).slice(2)}`;
   let finished = false;
   // W1-T11344: every learned reservation's trees, nested test runs included, carry the descendant memory bound.
-  const bound = descendantMemoryBoundHook({ workerClass, reservationId: handle.id }, {
-    ...descendantBoundPorts({ root: root ?? deps.ledger?.root, daemonOwned: daemonOwnedProcess }), ...deps.descendantBound });
+  const boundPorts = {
+    ...descendantBoundPorts({ root: root ?? deps.ledger?.root, daemonOwned: daemonOwnedProcess }), ...deps.descendantBound };
+  const bound = descendantMemoryBoundHook({ workerClass, reservationId: handle.id }, boundPorts);
   const hooks: TrackHooks = {
     openedAtMs,
     onMember: (pid, start, rssKb, facts) => bound.onMember(pid, start, rssKb, facts),
     ...(workerClass === "test" ? {} : {
       onTestRunner: (pid: number) => openNestedTestRun(pid, { ...(root ? { root } : {}),
-        ledger: deps.ledger, store: { ...store, entryKind: undefined } }),
+        ledger: deps.ledger, store: { ...store, entryKind: undefined }, boundPorts }),
     }),
     onTestFilePeak: (path, peak) => { recordTestFilePeak(path, peak, { ...store, entryKind: undefined }); },
   };
@@ -926,8 +932,8 @@ function learnedHandle(
         } catch (error) {
           recordError(store, "finish", error);
         }
-        bound.release();
       }
+      bound.release();
       handle.releaseOccupancy();
     },
   };

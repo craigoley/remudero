@@ -227,8 +227,9 @@ test("W1-T11344 criterion 2: a test-file child of a node --test runner adopted a
   const rows = killedRows(fake.rows);
   assert.equal(rows.length, 1, JSON.stringify(fake.rows));
   assert.equal(rows[0]!.rss_mib, 19661);
-  assert.equal(rows[0]!.worker_class, "review");
-  assert.equal(rows[0]!.reservation_id, reservation.id);
+  assert.equal(rows[0]!.worker_class, "test");
+  assert.equal(typeof rows[0]!.reservation_id, "string");
+  assert.notEqual(rows[0]!.reservation_id, reservation.id);
   assert.equal(rows[0]!.test_file, "test/x.test.ts");
   reservation.releaseOccupancy();
 });
@@ -244,15 +245,25 @@ test("at release every sampled tree ledgers one row with its largest member's pe
   procs.get(14)!.rssKb = 1 * GIB_KB;
   tick();
   assert.deepEqual(peakRows(fake.rows), [], "nothing is written before release");
+  for (const pid of [12, 13, 14]) procs.delete(pid);
+  tick();
+  assert.equal(peakRows(fake.rows).length, 1, "the nested tree releases before its parent");
+  const nested = peakRows(fake.rows)[0]!;
+  assert.equal(nested.worker_class, "test");
+  assert.equal(typeof nested.reservation_id, "string");
+  assert.notEqual(nested.reservation_id, reservation.id);
+  assert.equal(nested.max_member_rss_mib, 3072);
+  assert.equal(nested.test_file, "test/x.test.ts");
+  assert.equal(nested.member_is_root, false);
   reservation.releaseOccupancy();
   reservation.releaseOccupancy();
   const rows = peakRows(fake.rows);
-  assert.equal(rows.length, 1, "one row, however often release is called");
-  assert.equal(rows[0]!.worker_class, "review");
-  assert.equal(rows[0]!.reservation_id, reservation.id);
-  assert.equal(rows[0]!.max_member_rss_mib, 3072);
-  assert.equal(rows[0]!.test_file, "test/x.test.ts");
-  assert.equal(rows[0]!.member_is_root, false);
+  assert.equal(rows.length, 2, "one row per tree, however often release is called");
+  assert.equal(rows[1]!.worker_class, "review");
+  assert.equal(rows[1]!.reservation_id, reservation.id);
+  assert.equal(rows[1]!.max_member_rss_mib, 300, "nested members never enter the parent's peak");
+  assert.equal(rows[1]!.test_file, undefined);
+  assert.equal(rows[1]!.member_is_root, true);
   assert.deepEqual(fake.kills, []);
 
   const never = boundPorts(new Map());
@@ -260,6 +271,89 @@ test("at release every sampled tree ledgers one row with its largest member's pe
   unseen.reservation.bindRoot(10);
   unseen.reservation.releaseOccupancy();
   assert.deepEqual(never.rows, [], "a tree never sampled records nothing, never a zero");
+});
+
+test("a failed ledger write is retained with its error until sampling recovers the writer", () => {
+  const procs = plainTree();
+  procs.get(12)!.rssKb = 9 * GIB_KB;
+  const fake = boundPorts(procs);
+  let writable = false;
+  const { reservation, tick } = learned("implement", procs, {
+    ...fake.ports,
+    write: (row) => {
+      if (!writable) throw Object.assign(new Error("read-only ledger"), { code: "EROFS" });
+      fake.ports.write(row);
+    },
+  });
+  reservation.bindRoot(10);
+  assert.deepEqual(fake.kills, [12]);
+  assert.deepEqual(fake.rows, []);
+  writable = true;
+  tick();
+  const rows = killedRows(fake.rows);
+  assert.equal(rows.length, 1, "the failed stop row survives until a later sample");
+  assert.equal(rows[0]!.pid, 12);
+  assert.equal(rows[0]!.signalled, true);
+  assert.match(String(rows[0]!.error), /write: EROFS/);
+  reservation.releaseOccupancy();
+  assert.deepEqual(fake.kills, [12], "recovering evidence never repeats the signal");
+  assert.equal(killedRows(fake.rows).length, 1);
+  assert.equal(peakRows(fake.rows).length, 1);
+});
+
+test("release retries a failed peak write without duplicating it or losing an earlier operation error", () => {
+  const fake = boundPorts(new Map());
+  let writable = false;
+  const bound = descendantMemoryBoundHook({ workerClass: "test", reservationId: "nested" }, {
+    ...fake.ports,
+    readStart: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+    write: (row) => {
+      if (!writable) throw Object.assign(new Error("read-only ledger"), { code: "EROFS" });
+      fake.ports.write(row);
+    },
+  });
+  bound.onMember(7, "s7", 9 * GIB_KB, { root: false });
+  assert.doesNotThrow(() => bound.release());
+  assert.deepEqual(fake.rows, []);
+  writable = true;
+  bound.release();
+  bound.release();
+  assert.equal(killedRows(fake.rows).length, 1);
+  assert.match(String(killedRows(fake.rows)[0]!.error), /read-start: EACCES/);
+  assert.match(String(killedRows(fake.rows)[0]!.error), /write: EROFS/);
+  assert.equal(peakRows(fake.rows).length, 1);
+  assert.match(String(peakRows(fake.rows)[0]!.error), /write: EROFS/);
+  assert.equal(peakRows(fake.rows)[0]!.max_member_rss_mib, 9216);
+});
+
+test("a nested tree's failed release write recovers through its parent's next sample", () => {
+  const procs = reviewWithTestRun();
+  procs.get(12)!.rssKb = 9 * GIB_KB;
+  const fake = boundPorts(procs);
+  let writable = false;
+  const { reservation, tick } = learned("review", procs, {
+    ...fake.ports,
+    write: (row) => {
+      if (!writable) throw Object.assign(new Error("read-only ledger"), { code: "EROFS" });
+      fake.ports.write(row);
+    },
+  });
+  reservation.bindRoot(10);
+  assert.deepEqual(fake.kills, [], "the nested reservation's bound root is also protected");
+  for (const pid of [12, 13, 14]) procs.delete(pid);
+  tick();
+  assert.deepEqual(fake.rows, []);
+  writable = true;
+  tick();
+  assert.equal(peakRows(fake.rows).length, 1, "evidence survives removal of the nested tree");
+  const row = peakRows(fake.rows)[0]!;
+  assert.equal(row.worker_class, "test");
+  assert.notEqual(row.reservation_id, reservation.id);
+  assert.equal(row.max_member_rss_mib, 9216);
+  assert.equal(row.member_is_root, true);
+  assert.match(String(row.error), /write: EROFS/);
+  reservation.releaseOccupancy();
+  assert.equal(peakRows(fake.rows).length, 2);
 });
 
 test("the hook's own decisions: roots and the bound, once per process, and a release after it", () => {

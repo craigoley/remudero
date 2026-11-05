@@ -77,7 +77,10 @@ export function descendantBoundPorts(
 const reasonOf = (error: unknown): string =>
   (error as NodeJS.ErrnoException | undefined)?.code ?? String((error as Error)?.message ?? error).slice(0, 120);
 
-/** The bound for one learned reservation's trees (its nested test runs included). NEVER throws. */
+// Trees sharing a writer can recover each other's evidence after a nested tree has ended.
+const pendingWrites = new WeakMap<DescendantBoundPorts, Array<{ row: LedgerLine; priorError: unknown }>>();
+
+/** The bound and peak evidence for one sampled tree. NEVER throws. */
 export function descendantMemoryBoundHook(
   input: { workerClass: string; reservationId?: string; boundMib?: number },
   ports: DescendantBoundPorts,
@@ -89,15 +92,26 @@ export function descendantMemoryBoundHook(
   let largest: { rssMib: number; root: boolean; testFile?: string } | undefined;
   let stopped = 0;
   let released = false;
-  const write = (row: LedgerLine): void => {
-    try {
-      ports.write(row);
-    } catch (error) {
-      void error; // The ledger is unwritable: the stop stands, and sampling goes on.
+  const pending = pendingWrites.get(ports) ?? [];
+  pendingWrites.set(ports, pending);
+  const flush = (): void => {
+    for (const { row, priorError } of pending.splice(0)) {
+      try {
+        ports.write(row);
+      } catch (error) {
+        pending.push({ priorError, row: { ...row,
+          error: [priorError, `write: ${reasonOf(error)}`].filter(Boolean).join("; ") } });
+      }
     }
+  };
+  const write = (row: LedgerLine): void => {
+    pending.push({ row, priorError: row.error });
+    flush();
   };
   return {
     onMember(pid, start, rssKb, facts) {
+      flush(); // Retry evidence on later samples, even if no member needs another signal.
+      if (released) return;
       const rssMib = rssKb / 1024;
       if (!Number.isFinite(rssMib)) return;
       if (largest === undefined || rssMib > largest.rssMib) largest = { rssMib, root: facts.root, testFile: facts.testFile };
@@ -122,6 +136,7 @@ export function descendantMemoryBoundHook(
       }
     },
     release() {
+      flush(); // Repeated release may recover a failed peak write, but never creates a second peak.
       if (released) return;
       released = true;
       if (largest === undefined) return;
