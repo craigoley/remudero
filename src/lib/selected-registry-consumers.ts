@@ -51,6 +51,15 @@ const consumerScope = new AsyncLocalStorage<ConsumerScope>();
 /** W1-T10573's deployer wrapper that binds an active selection before `exec bash "$@"` (src/lib/deployer.ts). */
 export const SELECTED_REGISTRY_LAUNCH_WRAPPER =
   'export RMD_INSTANCE_REGISTRY="$1" RMD_INSTANCE_REGISTRY_DIGEST="$2" RMD_INSTANCE_REGISTRY_LAUNCH_BINDING="$3"; shift 3; exec bash "$@"';
+
+/** The argv prefix and bound command sent by deployer through the shared selected-registry wrapper. */
+export function selectedRegistryLaunchArgs(
+  registryPath: string, digest: string, launchBinding: string, command: readonly string[],
+): string[] {
+  return [
+    "-c", SELECTED_REGISTRY_LAUNCH_WRAPPER, "selected-registry-launch", registryPath, digest, launchBinding, ...command,
+  ];
+}
 /** BACKSTOP on one trusted child script's size; the whole file is read, since option cases can sit anywhere. */
 export const TRUSTED_CHILD_SCRIPT_MAX_BYTES = 4 * 1024 * 1024;
 
