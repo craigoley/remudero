@@ -1,5 +1,5 @@
 /** Read private field-trial snapshots/candidates without refresh, publication, or promotion effects. */
-import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import type { CanaryFieldComparisonIdentityV1, FieldTrialComparisonCohortV1 } from "./model-canary-field-comparison.js";
@@ -114,16 +114,16 @@ export function createNativeFieldEvidenceReader(outDir: string): () => NativeFie
         if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700
           || (typeof process.getuid === "function" && info.uid !== process.getuid()))
           throw new Error("native-field-controlled-directory-private-required");
-        const names = readdirSync(controlledDir).filter(name => /^controlled-[a-f0-9]{16}\.candidate\.json$/.test(name)).sort();
+        const directoryEntries = readdirSync(controlledDir);
+        const entryNames = new Set(directoryEntries);
+        const names = directoryEntries.filter(name => /^controlled-[a-f0-9]{16}\.candidate\.json$/.test(name)).sort();
         if (names.length > MAX_CANDIDATES) throw new Error("native-field-controlled-candidate-bound");
         for (const name of names) {
           const expectedReleaseId = name.slice(0, -".candidate.json".length);
           const candidatePath = join(controlledDir, name);
           const sidecarPath = join(controlledDir, expectedReleaseId + ".sidecar.private.json");
-          if (!existsSync(candidatePath)) {
-            unmatchedControlledCandidates++; unmatchedControlledReasons.push({ candidateDigest: nativeFieldSha256(name), reason: "controlled-candidate-disappeared" }); continue;
-          }
-          if (!existsSync(sidecarPath)) {
+          const sidecarName = expectedReleaseId + ".sidecar.private.json";
+          if (!entryNames.has(sidecarName)) {
             unmatchedControlledCandidates++; unmatchedControlledReasons.push({ candidateDigest: nativeFieldSha256(name), reason: "controlled-sidecar-missing" }); continue;
           }
           const candidate: unknown = readNativeFieldPrivateJson(candidatePath, 1024 * 1024);

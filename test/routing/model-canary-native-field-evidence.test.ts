@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -103,5 +103,16 @@ test("native field reader refuses a sidecar whose release id does not match the 
       assert.equal(result.evidence.unmatchedControlledReasons[0]!.reason, "controlled-sidecar-release-id-mismatch");
       assert.equal(result.evidence.fieldTrials.length, 0);
     }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("native field reader refuses a broken sidecar symlink instead of classifying it as missing", () => {
+  const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-field-broken-sidecar-link-`));
+  try {
+    chmodSync(directory, 0o700); mkdirSync(join(directory, "controlled"), { mode: 0o700 }); writeSnapshot(directory);
+    const id = writeCandidate(join(directory, "controlled"));
+    symlinkSync("target-does-not-exist", join(directory, "controlled", id + ".sidecar.private.json"));
+    const result = createNativeFieldEvidenceReader(directory)();
+    assert.deepEqual(result, { state: "unavailable", reason: "native-field-evidence-unreadable" });
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
