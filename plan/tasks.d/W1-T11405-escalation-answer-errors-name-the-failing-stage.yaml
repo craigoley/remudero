@@ -15,9 +15,10 @@
   status: queued
   attempts: 0
   rationale: |
-    THE GAP. The complete ledger union holds 56 deduplicated rows, all step escalation_answers.error and all
-    with the exact message "Maximum call stack size exceeded", across 44 daemon runs from
-    2026-11-04 06:28:51Z to 2026-11-05 12:29:32Z. The count covers 392 gzip archives and the live ledger.
+    THE GAP. The latest complete ledger union holds 59 deduplicated rows, all step escalation_answers.error and
+    all with the exact message "Maximum call stack size exceeded", from 2026-11-04 06:28:51Z through
+    2026-11-05 13:43:29Z. rmd ledger-grep covered 393 gzip archives and the live ledger; the positive-control
+    query for panel.question_answered returned rows from that same corpus.
     src/cli/commands/sweep.ts catches the whole readEscalationAnswers call and records only the error message,
     and a stack overflow's message names no location, so nothing says which part of the reader failed.
     The underlying root cause remains UNKNOWN. This task names the stage. It does not repair the cause.
@@ -55,6 +56,10 @@
 
     4. TESTS go in test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts and write first, red,
        against the current reader. Each drives an injected fault with no network, using a temp root:
+       Use five distinct top-level node:test cases with literal title prefixes W1-T11405 criterion 1 through
+       W1-T11405 criterion 5, matching the five unit-test proofs below. Criterion 1 covers all seven stage
+       throws; criterion 2 covers the real overflow and sweep row; criterion 3 covers disclosure; criterion 4
+       preserves deliberate unreadable behavior; criterion 5 covers no-fault behavior, idempotency and no retries.
        - refusal_history_read: deps.history rejects, with a set gateway.refusalIssues.
        - refusal_history_fold: deps.history resolves ok with a rows value whose iterator throws.
        - recorded_origins: plan/questions.ndjson is a directory.
@@ -80,15 +85,15 @@
     - spend, routing changes, or dispatching any matrix task.
   acceptance:
     - claim: "a throw at each of the refusal history read, refusal history fold, recorded-origin read, answer parse, answer landing, feedback handling and refusal alarm stages rejects with a message naming exactly that stage"
-      proof: "unit test: test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts"
+      proof: "unit test: W1-T11405 criterion 1"
     - claim: "a real Maximum call stack size exceeded overflow keeps that exact phrase and gains its stage, and the row from the real sweep caller stays step escalation_answers.error with no escalation_answers.unreadable row"
-      proof: "unit test: test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts"
+      proof: "unit test: W1-T11405 criterion 2"
     - claim: "answer text, issue body text, a raw response, a credential-shaped string, a stack and a 100,000-character message never enter the row, whose text comes wholly from the code-owned stage and class vocabularies"
-      proof: "unit test: test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts"
+      proof: "unit test: W1-T11405 criterion 3"
     - claim: "listOpen, listComments and listReactions read failures still resolve with their existing unreadable counts, and the feedback_unreadable and refusal_alarm_unreadable rows are still written with no error thrown"
-      proof: "unit test: test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts"
+      proof: "unit test: W1-T11405 criterion 4"
     - claim: "a pass with no fault returns the same counts, issue writes, answers and ledger rows, a second pass lands no duplicate answer, and a stage failure rejects once with no retry of any gateway or store call"
-      proof: "unit test: test/dispatch/escalation-answer-errors-name-the-failing-stage.test.ts"
+      proof: "unit test: W1-T11405 criterion 5"
     - claim: "the stage vocabulary is one exported finite constant"
       proof: "grep: ESCALATION_ANSWER_STAGES in src/lib/escalation-answers.ts"
     - claim: "the reader throws the one code-owned message shape"
