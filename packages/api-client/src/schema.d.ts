@@ -6549,30 +6549,30 @@ export interface components {
       /** Stable `issue:<canonical issue URL>`. */
       id: string;
       issueUrl: string;
-      threadId: string;
+      threadId: string | null;
       identity: {
         taskId: string;
         class: "BLOCKED" | "MANUAL" | "HARD_STOP" | "GRILL";
         cause?: string;
         prRef?: string;
-      };
+      } | null;
       identityState: "verified" | "unverified";
       source: {
         kind: "saved_thread" | "board_flag" | "saved_thread_and_board_flag";
         taskId: string;
-        headline: string;
+        headline: string | null;
       };
       correspondence: {
         state: "needs_input" | "waiting_for_agent" | "archived" | "unknown";
         reason?: "identity_unverified" | "history_incomplete" | "source_unverified";
       };
       history: "verified" | "partial" | "absent";
-      lastActivityAt: string;
+      lastActivityAt: string | null;
       messageCount: number;
       preview: {
         from: "operator" | "daemon";
         text: string;
-      };
+      } | null;
     };
     EscalationConversationIndex: {
       state: "served";
@@ -6601,12 +6601,12 @@ export interface components {
         scope: "repository_snapshot";
         complete: boolean;
         /** Null unless every source was read completely. */
-        total: number;
+        total: number | null;
         folders: {
-          needs_input: number;
-          waiting_for_agent: number;
-          archived: number;
-          unknown: number;
+          needs_input: number | null;
+          waiting_for_agent: number | null;
+          archived: number | null;
+          unknown: number | null;
         };
         /** Rows on this page only; never a folder total. */
         loaded: {
@@ -6622,8 +6622,8 @@ export interface components {
       items: (EscalationConversationIndexItem)[];
       page: {
         limit: number;
-        folder: "needs_input" | "waiting_for_agent" | "archived" | "unknown" | null;
-        nextCursor: string;
+        folder: ("needs_input" | "waiting_for_agent" | "archived" | "unknown") | (null);
+        nextCursor: string | null;
       };
     };
     /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */

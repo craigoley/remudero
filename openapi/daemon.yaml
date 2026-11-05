@@ -15173,10 +15173,9 @@ components:
       properties:
         id: {type: string, description: "Stable `issue:<canonical issue URL>`."}
         issueUrl: {type: string}
-        threadId: {type: string, nullable: true}
+        threadId: {type: [string, "null"]}
         identity:
-          type: object
-          nullable: true
+          type: [object, "null"]
           required: [taskId, class]
           properties:
             taskId: {type: string}
@@ -15190,7 +15189,7 @@ components:
           properties:
             kind: {type: string, enum: [saved_thread, board_flag, saved_thread_and_board_flag]}
             taskId: {type: string}
-            headline: {type: string, nullable: true, maxLength: 200}
+            headline: {type: [string, "null"], maxLength: 200}
         correspondence:
           type: object
           required: [state]
@@ -15198,11 +15197,10 @@ components:
             state: {type: string, enum: [needs_input, waiting_for_agent, archived, unknown]}
             reason: {type: string, enum: [identity_unverified, history_incomplete, source_unverified]}
         history: {type: string, enum: [verified, partial, absent]}
-        lastActivityAt: {type: string, format: date-time, nullable: true}
+        lastActivityAt: {type: [string, "null"], format: date-time}
         messageCount: {type: integer, minimum: 0}
         preview:
-          type: object
-          nullable: true
+          type: [object, "null"]
           required: [from, text]
           properties:
             from: {type: string, enum: [operator, daemon]}
@@ -15244,15 +15242,15 @@ components:
             unit: {type: string, enum: [unique_conversations]}
             scope: {type: string, enum: [repository_snapshot]}
             complete: {type: boolean}
-            total: {type: integer, nullable: true, minimum: 0, description: Null unless every source was read completely.}
+            total: {type: [integer, "null"], minimum: 0, description: Null unless every source was read completely.}
             folders:
               type: object
               required: [needs_input, waiting_for_agent, archived, unknown]
               properties:
-                needs_input: {type: integer, nullable: true, minimum: 0}
-                waiting_for_agent: {type: integer, nullable: true, minimum: 0}
-                archived: {type: integer, nullable: true, minimum: 0}
-                unknown: {type: integer, nullable: true, minimum: 0}
+                needs_input: {type: [integer, "null"], minimum: 0}
+                waiting_for_agent: {type: [integer, "null"], minimum: 0}
+                archived: {type: [integer, "null"], minimum: 0}
+                unknown: {type: [integer, "null"], minimum: 0}
             loaded:
               type: object
               description: Rows on this page only; never a folder total.
@@ -15277,8 +15275,12 @@ components:
           required: [limit, folder, nextCursor]
           properties:
             limit: {type: integer, minimum: 1, maximum: 50}
-            folder: {type: string, nullable: true, enum: [needs_input, waiting_for_agent, archived, unknown, null]}
-            nextCursor: {type: string, nullable: true}
+            folder:
+              oneOf:
+                - type: string
+                  enum: [needs_input, waiting_for_agent, archived, unknown]
+                - type: "null"
+            nextCursor: {type: [string, "null"]}
 
     EscalationReplyRequest:
       type: object
