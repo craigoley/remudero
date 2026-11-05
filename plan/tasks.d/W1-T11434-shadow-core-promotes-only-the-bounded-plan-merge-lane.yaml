@@ -1,7 +1,7 @@
 - id: W1-T11434
   title: A shadow core promotes only the one W1-T5901 plan-merge candidate per light pass
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T11431]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -22,6 +22,7 @@
     chose to keep the core registry shadow and requested a lane-only promotion. W1-T5901 already
     bounds this path to one selected plan PR per light pass and overlapping pass.
   design: |
+    Depend on W1-T11431 so this promotion uses the corrected explicit active-selection reader.
     Preserve the repository-wide shadow setting. Add the smallest explicit capability that lets
     only the exact plan PR already selected by W1-T5901 take that pass's existing plan merge path.
     Keep its fresh exact-head, review, required-check, security, operator-hold and W1-T5748
@@ -29,10 +30,10 @@
     evidence refuses. Code PRs, non-selected plan PRs and every other shadow-mode mutation remain
     refused. The per-pass and overlapping-pass single-candidate claim remains unchanged.
   acceptance:
-    - claim: "With the core still in shadow mode, only the exact W1-T5901-selected plan PR uses the existing one-per-light-pass merge path after fresh exact-head, review, required-check, security, operator-hold and W1-T5748 safety checks; unknown selection evidence refuses."
-      proof: "unit test: test/shadow-instance-safety.test.ts"
-    - claim: "The promoted path preserves the one-plan-PR-per-light-pass bound, W1-T4405 merge-queue behavior, and current code-PR deferral."
-      proof: "unit test: test/a-ready-plan-pr-merges-on-the-next-pass.test.ts"
+    - claim: "With the core still in shadow mode, only the exact W1-T5901-selected plan PR uses the existing one-per-light-pass merge path after fresh exact-head, review, required-check, security, operator-hold and W1-T5748 safety checks; unknown selection evidence refuses. The proving test title includes the exact marker W1-T11434 criterion 1: selected plan merge passes shadow guards."
+      proof: "unit test: W1-T11434 criterion 1: selected plan merge passes shadow guards"
+    - claim: "The promoted path preserves the one-plan-PR-per-light-pass bound, W1-T4405 merge-queue behavior, and current code-PR deferral. The proving test title includes the exact marker W1-T11434 criterion 2: plan merge remains one per light pass and code PRs defer."
+      proof: "unit test: W1-T11434 criterion 2: plan merge remains one per light pass and code PRs defer"
   falsifier: |
     Keep the blanket shadow refusal for the selected plan merge. The new positive shadow-mode
     case must fail, while code PRs and non-selected plan PRs remain refused.
