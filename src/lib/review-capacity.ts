@@ -141,8 +141,6 @@ export interface ReviewCapacityBounds {
 
 export type ReviewCapacityReason =
   | "cpu-pressure"
-  /** W1-T11129 — the lane governor's learned CPU capacity is reached: no lane is added, none is stopped. */
-  | "cpu-capacity-held"
   | "memory-pressure"
   | "memory-reserve"
   | "provider-refused"
@@ -297,9 +295,8 @@ export type CpuPressureTier = "calm" | "hold" | "shed";
  * directions: PSI with no share cannot tell the container's own overload from the contention its low weight predicts
  * (MEASURED 2026-10-27: core's `full` of 36-44 was serve's weight, not core's load), nor its calm from a quiet moment
  * of a contended host, so nothing is shed and nothing added on PSI alone, and no fixed line stands in. The governor's
- * learned CPU lane bound turns a calm into a hold (no lane is added at the learned capacity); the controller sheds on
- * the bound itself. An unread PSI is never calm and never sheds; a `some` below `full` is inconsistent and predicts
- * nothing.
+ * learned CPU lane bound is the controller's other CPU verdict (see `cpuOverloaded` there), not a tier. An unread PSI
+ * is never calm and never sheds; a `some` below `full` is inconsistent and predicts nothing.
  */
 export function cpuPressureTier(
   observation: Pick<ReviewCapacityObservation, "cpuPsiFullAvg10Pct" | "cpuPsiSomeAvg10Pct" | "cpuWeightShare" | "laneCpuBound">,
@@ -312,7 +309,7 @@ export function cpuPressureTier(
   const some = finite(observation.cpuPsiSomeAvg10Pct) && observation.cpuPsiSomeAvg10Pct >= full ? observation.cpuPsiSomeAvg10Pct : 0;
   if (full > Math.max(policy.cpuPsiLowPct, (1 - share) * some) + policy.cpuPsiLowPct) return { tier: "shed", calm: false };
   if (full > policy.cpuPsiLowPct) return { tier: "hold", calm: false };
-  return { tier: finite(observation.laneCpuBound) ? "hold" : "calm", calm: true };
+  return { tier: "calm", calm: true };
 }
 
 /** How many CPU readings the noise band looks back over. */
@@ -364,7 +361,15 @@ export function selectAdaptiveReviewWidth(
   // W1-T11129 — the weight-relative verdict replaces the fixed cpuPsiHighPct line everywhere this controller read it.
   // An unread or stale share holds both ways: no shed, and no calm to grow on.
   const cpu = cpuPressureTier(observation, policy);
-  const cpuOverloaded = cpu.tier === "shed";
+  // W1-T11129 — THE SHED READS THE GOVERNOR'S CPU VERDICT too: reviews past the learned capacity (the CPU the host has,
+  // less its measured baseline, over what a lane is measured to use) are CPU overload while PSI still shows pressure
+  // (`full` above the low watermark, the latency arm's corroboration): past the bound on a calm host there is nothing
+  // for W1-T11150's relief to measure, and a widening the healthy window earned there stays untouched. It sheds through
+  // the SAME path as a PSI shed, so W1-T11150's record, effect check, suspension and proportional restore treat it like
+  // any shed. Not PSI alone: the bound is learned from cgroup cpu.stat, so an unread share does not stop it.
+  const overLearnedCapacity = readingNow !== undefined && readingNow > policy.cpuPsiLowPct &&
+    finite(observation.laneCpuBound) && observation.activeWorkers + effectiveWidth > observation.laneCpuBound;
+  const cpuOverloaded = cpu.tier === "shed" || overLearnedCapacity;
   const cpuCalm = cpu.calm;
 
   const directPressure = (nextReason: ReviewCapacityReason): void => {
@@ -385,12 +390,9 @@ export function selectAdaptiveReviewWidth(
     observation.memoryPsiSomeAvg10Pct <= policy.memoryPsiLowPct;
   // Back to base in one sample, never past what the host worker budget leaves room for, and never
   // above base: lanes above it stay earned by the healthy window below.
-  // W1-T11129: the governor's learned CPU lane bound is room too: nothing restores past the learned capacity.
-  const capacity = finite(observation.laneCpuBound)
-    ? Math.min(Math.trunc(policy.hostWorkerBudget), Math.trunc(observation.laneCpuBound)) : Math.trunc(policy.hostWorkerBudget);
   const restoreBase = (): void => {
     if (!psiCalm || effectiveWidth >= baseWidth) return;
-    const room = capacity - Math.max(0, Math.trunc(observation.activeWorkers));
+    const room = Math.trunc(policy.hostWorkerBudget) - Math.max(0, Math.trunc(observation.activeWorkers));
     effectiveWidth = Math.max(effectiveWidth, Math.min(baseWidth, room));
   };
 
@@ -402,7 +404,7 @@ export function selectAdaptiveReviewWidth(
     suspended = undefined; // the source changed, the lane's own CPU share rose, or the pressure ended
   }
   const band = cpuNoiseBand(cpuReadings, (shed?.atMs ?? observation.nowMs) - settleMs);
-  const roomNow = capacity - Math.max(0, Math.trunc(observation.activeWorkers));
+  const roomNow = Math.trunc(policy.hostWorkerBudget) - Math.max(0, Math.trunc(observation.activeWorkers));
   if (shed && shed.effect === "pending" && readingNow !== undefined && observation.nowMs - shed.atMs >= settleMs) {
     if (shed.reading - readingNow > band) {
       shed.effect = "effective";
@@ -443,8 +445,9 @@ export function selectAdaptiveReviewWidth(
   // `some` still rides along in the decision row below, where it is diagnosis rather than input.
   // W1-T11129 — NO FIXED SHED LINE. MEASURED 2026-10-27: core's cpu `full` of 36-44 crossed a fixed 20 and held review
   // at width 1 of 4 with 10 PRs queued, though core's cpu.weight was 59 against serve's 303, so its PSI measured the
-  // weight's own contention. PSI over what the weight share predicts sheds; an unread share holds. The shed is still
-  // W1-T11150's: one lane per overloaded sample, and its effect check judges each one.
+  // weight's own contention. PSI over what the weight share predicts sheds, and so do reviews past the governor's learned
+  // capacity; an unread share holds. Either way the shed is W1-T11150's: one lane per overloaded sample, recorded here,
+  // and its effect check judges each one.
   if (readingNow !== undefined && cpuOverloaded && !suspended) {
     const widthBefore = effectiveWidth;
     directPressure("cpu-pressure");
@@ -462,12 +465,6 @@ export function selectAdaptiveReviewWidth(
         };
       }
     }
-  } else if (finite(observation.laneCpuBound) && observation.activeWorkers + effectiveWidth > observation.laneCpuBound) {
-    // W1-T11129 — THE SHED READS THE GOVERNOR'S CPU VERDICT. Past the learned capacity (the CPU the host has, less its
-    // measured baseline, over what a lane is measured to use), one review is shed per sample, W1-T11150's cadence, and
-    // the bound holds it there. Not a PSI shed: no PSI excess was judged, so W1-T11150's effect check has nothing to
-    // judge it by, and an unread share does not stop it.
-    directPressure("cpu-pressure");
   } else if (
     finite(observation.memoryPsiSomeAvg10Pct) &&
     observation.memoryPsiSomeAvg10Pct >= policy.memoryPsiHighPct
@@ -564,10 +561,6 @@ export function selectAdaptiveReviewWidth(
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
       reason = "backlog-not-sustained";
-    } else if (cpu.tier === "hold" && observation.activeWorkers + effectiveWidth >= observation.laneCpuBound!) {
-      healthySamples = 0;
-      lastHealthySampleAtMs = undefined;
-      reason = "cpu-capacity-held";
     } else if (
       observation.provider.headroomPct! < observation.provider.reservePct! + policy.providerAllowancePct
     ) {

@@ -34,6 +34,7 @@ import {
   cpuWeightShare,
   selectAdaptiveReviewWidth,
   selectRuntimeReviewWidth,
+  type ReviewCapacityDecision,
   type ReviewCapacityObservation,
   type ReviewCapacityPolicy,
   type ReviewCapacityState,
@@ -200,13 +201,24 @@ test("W1-T11129 criterion 2: with the share known, the shed and its restore keep
   assert.equal(cpuPressureTier({ cpuPsiSomeAvg10Pct: 70 }, POLICY).calm, false);
 });
 
-test("W1-T11129 criterion 2: the governor's learned cpu bound holds the width without stopping a lane", () => {
-  const held = run({ effectiveWidth: 3, healthySamples: 2 }, { activeWorkers: 1, laneCpuBound: 4, cpuWeightShare: 1 });
-  assert.equal(held.reason, "cpu-capacity-held");
-  assert.equal(held.effectiveWidth, 3);
-  assert.equal(held.evidence.healthySamples, 0);
-  const room = run({ effectiveWidth: 3, healthySamples: 2 }, { activeWorkers: 1, laneCpuBound: 6, cpuWeightShare: 1 });
-  assert.notEqual(room.reason, "cpu-capacity-held");
+test("W1-T11129 criterion 2: healthy-window widening is untouched by the learned cpu bound", () => {
+  // A calm host with a backlog: the widths the healthy window earns are the same with the bound at the occupancy as
+  // with no bound at all (design 2: healthy-window widening is untouched).
+  const widen = (laneCpuBound: number | undefined) => {
+    let state: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 0 };
+    const out: Array<[number, number]> = [];
+    for (let i = 0; i < 6; i++) {
+      const step = selectAdaptiveReviewWidth(state, POLICY, observation({
+        nowMs: i * 60_000, activeWorkers: 1, cpuPsiFullAvg10Pct: 1, cpuWeightShare: 1, ...(laneCpuBound === undefined ? {} : { laneCpuBound }),
+      }), BOUNDS);
+      out.push([step.decision.effectiveWidth, step.decision.evidence.healthySamples]);
+      state = step.state;
+    }
+    return out;
+  };
+  const free = widen(undefined);
+  assert.equal(free[free.length - 1]![0], 5, "the healthy window widens past base");
+  assert.deepEqual(widen(5), free, "a bound at the occupancy neither resets the healthy window nor stops the widening");
 });
 
 test("W1-T11129 criterion 2: width grows back on its own once the pressure eases", () => {
@@ -397,25 +409,42 @@ test("W1-T11129 criterion 2: W1-T11150's relief replay keeps its widths with a l
   assert.deepEqual(widths, [3, 2, 1, 2, 3, 4], "one lane per overloaded sample, restored in proportion to relief");
 });
 
-test("W1-T11129 criterion 2: the shed reads the governor's learned cpu bound, one lane a sample, share or no share", () => {
+test("W1-T11129 criterion 2: a shed on the learned cpu bound is W1-T11150's shed: recorded, judged, handed back", () => {
+  // The reviewer's replay: two builds run, the governor has learned room for four lanes, review width is 4, and PSI full
+  // sits unchanged in the band above calm for ten minutes. Share or no share: the bound is learned from cpu.stat.
   for (const share of [1, undefined]) {
-    // Two builds run and the governor has learned room for four lanes: a width of 4 is two past it.
     let state: ReviewCapacityState = { effectiveWidth: 4, healthySamples: 2 };
-    const steps: Array<[number, string]> = [];
-    for (let i = 0; i < 4; i++) {
+    const decisions: ReviewCapacityDecision[] = [];
+    for (let i = 0; i <= 10; i++) {
       const step = selectAdaptiveReviewWidth(state, POLICY, observation({
-        nowMs: i * 60_000, activeWorkers: 2, laneCpuBound: 4, cpuPsiFullAvg10Pct: 0, ...(share === undefined ? {} : { cpuWeightShare: share }),
+        nowMs: i * 60_000, activeWorkers: 2, laneCpuBound: 4, cpuPsiFullAvg10Pct: 8, ...(share === undefined ? {} : { cpuWeightShare: share }),
       }), BOUNDS);
-      steps.push([step.decision.effectiveWidth, step.decision.reason]);
+      decisions.push(step.decision);
       state = step.state;
     }
-    assert.deepEqual(steps.map(([w]) => w), [3, 2, 2, 2], `share ${share}: shed one a sample down to the learned capacity, then held`);
-    assert.deepEqual(steps.slice(0, 2).map(([, r]) => r), ["cpu-pressure", "cpu-pressure"]);
+    // One lane a sample down to the learned capacity, each shed recorded for the effect check.
+    assert.deepEqual(decisions.slice(0, 2).map((d) => [d.effectiveWidth, d.reason, d.evidence.shedEffect]), [
+      [3, "cpu-pressure", "pending"], [2, "cpu-pressure", "pending"],
+    ], `share ${share}`);
+    assert.equal(decisions[0]!.evidence.shedReading, 8, "the shedding reading is recorded");
+    // Once the settle time passes with pressure unchanged, the shed is judged ineffective and its lanes handed back.
+    const judged = decisions.findIndex((d) => d.evidence.shedEffect === "ineffective");
+    assert.ok(judged > 1 && judged <= 5, `judged within the settle time, at sample ${judged}`);
+    assert.equal(decisions[judged]!.effectiveWidth, 4, "an ineffective shed hands its lanes back");
+    assert.equal(decisions[judged]!.evidence.shedSuspended, true);
+    for (const later of decisions.slice(judged + 1)) {
+      assert.equal(later.effectiveWidth, 4, "and further sheds on that source stay suspended");
+      assert.notEqual(later.reason, "cpu-pressure");
+    }
   }
-  // A relief restore never climbs back past the learned capacity.
-  const prior: ReviewCapacityState = { effectiveWidth: 2, healthySamples: 0 };
-  const calm = selectAdaptiveReviewWidth(prior, POLICY, observation({ activeWorkers: 2, laneCpuBound: 4, cpuPsiFullAvg10Pct: 1, cpuWeightShare: 1 }), BOUNDS);
-  assert.equal(calm.decision.effectiveWidth, 2);
+});
+
+test("W1-T11129 criterion 2: past the learned bound on a calm host there is nothing to shed", () => {
+  // PSI full at or under the low watermark: no observed contention for W1-T11150's relief to measure, so the bound alone
+  // does not shed (the latency arm's corroboration rule).
+  const calm = run({ effectiveWidth: 4, healthySamples: 0 }, { activeWorkers: 2, laneCpuBound: 4, cpuPsiFullAvg10Pct: 1, cpuWeightShare: 1 });
+  assert.notEqual(calm.reason, "cpu-pressure");
+  assert.equal(calm.effectiveWidth, 4);
 });
 
 test("W1-T11129 criterion 1: in runDaemon, a review that starts and ends between build samples is its own lane", async (t) => {
