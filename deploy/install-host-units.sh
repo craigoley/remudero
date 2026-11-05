@@ -737,9 +737,11 @@ PROGRESS_ACTION=""
 
 watchdog_stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-# A string field of the verdict's one-line JSON (JSON.stringify writes no spaces).
+# A string or non-negative integer field of the verdict's one-line JSON (JSON.stringify writes no spaces).
 verdict_field() {
-  printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' | head -n 1
+  printf '%s\n' "$PROGRESS_VERDICT" | sed -n \
+    -e 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' \
+    -e 's/.*"'"$1"'":\([0-9][0-9]*\)[,}].*/\1/p' | head -n 1
 }
 
 # RMD_SELF_SYNC_DONE=1 skips checkCliFreshness, which would fetch and fast-forward the tree the
@@ -773,11 +775,14 @@ note_progress_verdict() {
 
 # Returns 0 only when it RAN recycle-container.sh, so the caller ends the tick on one action.
 recycle_on_verdict() {
-  local age
+  local age wait_s
   [ "$PROGRESS_ACTION" = "recycle" ] || return 1
   # W1-T6597: the verdict rides along, so the recycle may prove a FROZEN daemon owns what blocks it.
   age="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"progressAgeMs":\([0-9]*\).*/\1/p' | head -n 1)"
-  watchdog_recycle "$1" "progress-watchdog" "${PROGRESS_STATE}" "${PROGRESS_STATE} progressAgeMs=${age:-unknown}"
+  # W1-T11320: use the lanes' derived wait unless the environment already supplies one.
+  wait_s="$(verdict_field drainWaitS)"
+  RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$wait_s}" \
+    watchdog_recycle "$1" "progress-watchdog" "${PROGRESS_STATE}" "${PROGRESS_STATE} progressAgeMs=${age:-unknown}"
 }
 
 # One recycle-container.sh run, shared by every rung that hands the daemon to its pause-and-drain
