@@ -735,7 +735,9 @@ function copyRow<T>(value: T): T {
   if (Array.isArray(value)) return value.map(copyRow) as T;
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value)) out[key] = copyRow((value as Record<string, unknown>)[key]);
+    for (const key of Object.keys(value)) Object.defineProperty(out, key, {
+      value: copyRow((value as Record<string, unknown>)[key]), enumerable: true, writable: true, configurable: true,
+    });
     return out as T;
   }
   return value;
