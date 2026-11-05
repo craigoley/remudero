@@ -17,6 +17,8 @@
   files:
     - deploy/recycle-container.sh
     - test/deploy/a-recycle-ledgers-how-it-ended.test.ts
+    - test/recycle-container.test.ts # two row-list pins gain recycle.ended
+    - test/every-recycle-names-who-invoked-it.test.ts # its rows()[1] read gains recycle.ended
   status: queued
   attempts: 0
   acceptance:
@@ -32,6 +34,8 @@
     - The first recycle's outcome exists nowhere on the host. Its 3,000 s bound would have expired at about 13:16:41Z and it left the container untouched, but whether it refused, and on what, is unknowable.
     - recycle-container.sh ledgers only recycle.invoked, hung_worker_passed, control_timeout, cadence_child_killed and git_author_commission.
   design: |
+    - Amended 2026-11-04 by the operator session (builder finding): three existing tests assume no row after recycle.invoked. In test/recycle-container.test.ts ("recycler refuses invalid or duplicate mode before effects", "W1-T1046: a hung fix-rung worker") and test/every-recycle-names-who-invoked-it.test.ts ("W1-T9515"), filter rows by step before the row-list reads; no other assertion changes.
+    - The last reason line is taken generally, not per refusal site: stderr is also tee'd to a private temp file, and the EXIT trap records the last line naming a refusal or failure, else "exited <rc>".
     Install an EXIT handler beside the existing cleanup that appends one recycle.ended JSON row to LEDGER_FILE: run_id RECYCLE-<pid>, outcome from the exit path (replaced on success, refused on a refusal exit, aborted on a signal), rc, the final reason line, wait_s, wait_source, waited_s, and blockers when a refusal printed recycle-blockers-json.
     It reuses the script's existing ledger-append form (the hung_worker_passed row). A failed append never changes the exit status.
     Mark it with a comment naming W1-T11322.

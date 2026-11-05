@@ -1,0 +1,22 @@
+id: incident-b1ee96b0b24fc28e
+ts: 2026-11-04T20:03:03.467Z
+raw: |-
+  Incident b1ee96b0b24f: flow pr-stage-stall:conflict:merge conflict (mergeState dirty) — head is not this PR task's rmd-owned run branch — not dispatched — files: plan/tasks.d/W1-T10877-the-field-trials-snapshot-counts-guardrail-fires-per-model.yaml (ours -<n>, theirs -<n>) — escalating
+  First seen: 2026-11-04T17:58:37.303Z
+  Last seen: 2026-11-04T17:58:37.303Z
+  Count: 1, burn: 1.00/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=16754 conflict: repeat: "merge conflict (mergeState dirty) — head is not this PR task's rmd-owned run branch — not dispatched — files: plan/tasks.d/W1-T10877-the-field-trials-snapshot-counts-guardrail-fires-per-model.yaml (ours -<n>, theirs -<n>) — escalating" x3
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#b1ee96b0b24fc28ec50931f7ca0050208c36909a7129a27fd7c37c1a7c9e7a40
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -46,15 +46,39 @@
     3. The census row or decline row records the number of foreign pids skipped. `decideRegisteredFixOwnerRecovery`
        is unchanged: a census that reaches `clear` past foreign pids reclaims through the existing paths.
     4. No new bound, config key or env var. The wall and entry bounds are unchanged.
-    5. Tests (new file, titles verbatim as in the proofs; injected readCwd and uid seams plus one real /proc pass):
+    5. Tests (new file; criteria 2 and 3 each carry a `W1-T10389 criterion <n>` marker in their titles; injected readCwd and uid seams plus one real /proc pass):
        an EACCES pid owned by another uid is skipped and the census reaches clear. The same failure on the daemon's
        own uid, or with an unreadable uid, stays unknown. The decline row names the errno.
+    6. AMENDED 2026-11-05: A SAME-UID SANDBOXED PID IS JUDGED BY ITS NEAREST READABLE ANCESTOR. Review proof sandboxes
+       (`bwrap --unshare-user --unshare-pid`, src/lib/review.ts) and worker sandboxes (src/lib/worker-provider.ts) run as
+       the daemon's own uid but are non-dumpable in a child user namespace, so readlink of their /proc/<pid>/cwd fails with
+       EACCES on the SAME uid. Point 2 alone never skips them, and any sandbox in flight wedges the census. When a cwd read
+       fails with EACCES or EPERM on the daemon's uid, read the pid's PPid from its /proc status (status stays readable
+       for a non-dumpable process) and walk up to the nearest ancestor whose cwd IS readable. That ancestor's cwd decides:
+       at or below the owner path answers occupied, otherwise the pid is skipped and counted as attributed. The walk
+       counts against the census's existing entry and wall bounds; an unreadable PPid, a cycle, or reaching pid 1 without
+       a readable cwd still answers unknown, as today. Before relying on this, the builder confirms from both spawn paths
+       that a sandbox's launcher (the timeout or bwrap parent outside the sandbox) runs with its cwd in the workspace the
+       sandbox serves. If a fix-worker sandbox's launcher cwd is NOT its worktree, stop and report: attribution would then
+       miss a live owner. The decline row names the attributed ancestor pid and the count of attributed pids.
   acceptance:
     - claim: "an unreadable cwd on another uid's pid no longer makes the census unknown"
-      proof: "unit test: W1-T10389: a foreign pid with an unreadable cwd is skipped by the census"
+      proof: "unit test: test/ci/a-foreign-pid-whose-cwd-is-unreadable-does-not-hold-a-dead-fix-worktree.test.ts"
     - claim: "an unreadable cwd on the daemon's own uid, or an unreadable uid, still keeps the worktree"
-      proof: "unit test: W1-T10389: an unreadable same-uid pid still keeps the worktree"
+      proof: "grep: W1-T10389 criterion 2 in test/ci/a-foreign-pid-whose-cwd-is-unreadable-does-not-hold-a-dead-fix-worktree.test.ts"
+    - claim: "an unreadable cwd on a same-uid sandboxed pid is decided by its nearest readable ancestor's cwd"
+      proof: "grep: W1-T10389 criterion 3 in test/ci/a-foreign-pid-whose-cwd-is-unreadable-does-not-hold-a-dead-fix-worktree.test.ts"
   falsifier: |
     Return unknown on every non-ENOENT error again, and the foreign-pid fixture keeps the dead round's worktree.
   note: |
     Reservation refs/rmd-id/W1-T10389 is held by filing branch file-1022-fleet-routing.
+    Amended 2026-11-05 (operator session): the queued design skips only FOREIGN-uid pids, but today's wedge is same-uid.
+    Core ledger, live plus 12 archives back to 11-04T23Z, read-only: 22 `sweep.fix.checkout_claim_declined` rows,
+    `registered_worktree_owner` / `process_cwd_probe_unreadable` / `cwd_unreadable`, on 9 PRs (16821, 16817, 16758, 16468,
+    16860, 15602, 16240, 15638, 16652). They are 22 of the 32 registered_worktree_owner declines in that window. #16821's
+    merge-conflict worker was declined on every pass from 02:31Z to 14:21Z on 11-05, and the conflict was resolved by hand.
+    Inside the container every process runs as uid 1000. At decline time the review lane had
+    `timeout -> bwrap -> bwrap -> node` proof sandboxes in flight (src/lib/review.ts `--unshare-user --unshare-pid`), and
+    from 11-05 14:35Z, with none in flight, all container cwds read cleanly. Design point 6 and the third claim cover it.
+    Proof form modernised in the same amendment (claims unchanged): the title-form `unit test:` proofs no longer lint for an
+    unbuilt task, so criterion 1 names the declared test file and criteria 2-3 grep their criterion markers in it.

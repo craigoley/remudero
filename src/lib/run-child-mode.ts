@@ -10,6 +10,7 @@
 // an outside kill (an OOM kill, a container stop) is named as such and does not count against the contract; an OOM kill
 // still holds promotion for its window. There is no count and no cooldown: the window moves one boot at a time.
 
+import { resolve } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { RunChildMode } from "./policy.js";
@@ -256,12 +257,21 @@ export function bootRunChildMode(a: {
 }): { tracker: RunChildModeTracker; settledRunIds: Set<string> } {
   const union = readRunChildModeUnion(a.stateDir, a.read);
   const tracker = createRunChildModeTracker(a.auto ? runChildModeWindow(union.rows) : a.liveRows, undefined, a.auto ? union.unread : []);
+  bootTrackers.set(resolve(a.stateDir), tracker);
   if (union.unread.length) {
     if (a.auto) tracker.record(runChildModeFor("auto", tracker.evidence()).decision, a.log, true);
     throw new Error(`run child settlements unreadable: ${union.unread.join(", ")}`);
   }
   const settled = union.rows.flatMap((row) => (row.step === "run_child.settled" && typeof row.run_id === "string" ? [row.run_id] : []));
   return { tracker, settledRunIds: new Set(settled) };
+}
+
+/** W1-T11341: the tracker each boot folds, by state dir. Detached work decides from it instead of re-reading the union. */
+const bootTrackers = new Map<string, RunChildModeTracker>();
+
+/** The tracker this process's boot under `stateDir` folds, or undefined when no boot under `on` or `auto` built one. */
+export function bootRunChildModeTracker(stateDir: string): RunChildModeTracker | undefined {
+  return bootTrackers.get(resolve(stateDir));
 }
 
 export interface RunChildModeTracker {
