@@ -9,6 +9,7 @@ import * as review from "#src/lib/review.js";
 import { reviewCommand, reviewAttemptsForInput, type ReviewRunResult } from "#src/run-task.js";
 import type { Config } from "#src/lib/config.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { readRequiredStatusCheckContextsAsync } from "#src/lib/status.js";
 
 const HEAD = "1234567890abcdef1234567890abcdef12345678";
 const PR = "https://github.com/acme/portal/pull/8";
@@ -63,6 +64,8 @@ function fixture(t: TestContext) {
     fetchLifecycle: () => lifecycle,
     fetchCurrentStatus: () => status as review.ReviewStatusEntry,
     fetchPublisher: fetch,
+    // Every terminal-posting caller injects status.ts's reader (review.ts cannot import it: a cycle).
+    readRequiredContexts: readRequiredStatusCheckContextsAsync,
     post: ({ state }: { state: string }) => { posts.push(state); },
   };
   return {
