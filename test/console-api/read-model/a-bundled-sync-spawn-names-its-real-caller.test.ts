@@ -16,7 +16,9 @@ test("test/console-api/read-model/a-bundled-sync-spawn-names-its-real-caller.tes
 import childProcess from "node:child_process";
 import { callerFrame, startReadPlaneTelemetry } from "#src/lib/read-plane.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
-function actualCaller() { return callerFrame(); }
+import { ghExecFile } from "#src/lib/github-transport.js";
+function frameCaller() { return callerFrame(); }
+function actualCaller() { ghExecFile(process.execPath, ["-e", ""]); }
 function spawnOwner() { childProcess.execFileSync(process.execPath, ["-e", ""]); }
 function shellOwner() { childProcess.execSync("true"); }
 function syncOwner() { childProcess.spawnSync(process.execPath, ["-e", ""]); }
@@ -26,7 +28,9 @@ try {
   spawnOwner();
   shellOwner();
   syncOwner();
-  console.log(JSON.stringify({ frame: actualCaller(), sample: telemetry.sample() }));
+  const sample = telemetry.sample();
+  actualCaller();
+  console.log(JSON.stringify({ frame: frameCaller(), sample, shared: telemetry.sample() }));
 } finally { telemetry.stop(); }
 `, resolveDir: REPO_ROOT, sourcefile: "bundled-spawn-fixture.ts" },
       outfile, bundle: true, platform: "node", format: "esm", keepNames: true,
@@ -38,8 +42,11 @@ try {
     })) as { frame: { caller: string }; sample: {
       sync_spawn_by_caller: { caller: string; calls: number; total_ms: number }[];
       sync_spawn_top: { caller: string; duration_ms: number }[];
+    }; shared: {
+      sync_spawn_by_caller: { caller: string; leaf?: string; calls: number; total_ms: number }[];
+      sync_spawn_top: { caller: string; leaf?: string; duration_ms: number }[];
     } };
-    assert.match(result.frame.caller, /^at actualCaller \(.*[/\\]run-task\.mjs:\d+:\d+\)$/);
+    assert.match(result.frame.caller, /^at frameCaller \(.*[/\\]run-task\.mjs:\d+:\d+\)$/);
     const totals = result.sample.sync_spawn_by_caller;
     const top = result.sample.sync_spawn_top;
     assert.equal(totals.length, 3);
@@ -49,6 +56,17 @@ try {
       assert.ok(totals.some(row => pattern.test(row.caller) && row.calls === 1 && row.total_ms === 3000), owner);
       assert.ok(top.some(row => pattern.test(row.caller) && row.duration_ms === 3000), owner);
     }
+    const sharedTotals = result.shared.sync_spawn_by_caller;
+    const sharedTop = result.shared.sync_spawn_top;
+    assert.equal(sharedTotals.length, 1);
+    assert.equal(sharedTop.length, 1);
+    for (const row of [...sharedTotals, ...sharedTop]) {
+      assert.match(row.caller, /^at actualCaller \(.*[/\\]run-task\.mjs:\d+:\d+\)$/);
+      assert.equal(row.leaf, "ghExecFile");
+    }
+    assert.equal(sharedTotals[0]!.calls, 1);
+    assert.equal(sharedTotals[0]!.total_ms, 3000);
+    assert.equal(sharedTop[0]!.duration_ms, 3000);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
