@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { DatabaseSync } from "node:sqlite";
+import { systemClock } from "./clock.js";
+import { LEDGER_FUTURE_STAMP_TOLERANCE_MS } from "./ledger.js";
 import { ledgerLivePath, listedLedgerFiles, openLedgerUnion } from "./ledger-union.js";
 
 type Row = Record<string, unknown>;
@@ -17,6 +19,7 @@ export interface PrOwnerLedgerProjection {
   latestFix?: Row;
   latestSweep?: Row;
   relatedClaimKeys: string[];
+  futureStampedSkipped: number;
 }
 
 function prNumber(row: Row): number | undefined {
@@ -50,9 +53,10 @@ export async function readPrOwnerLedgerProjection(
   stateDir: string,
   targetPr: number,
   readClaimKeys: () => string[],
+  nowMs: number = systemClock.now(),
 ): Promise<PrOwnerLedgerProjection> {
   const result: PrOwnerLedgerProjection = {
-    archiveFiles: [], liveFileRead: false, filesRead: 0, unread: [], ok: false, relatedClaimKeys: [],
+    archiveFiles: [], liveFileRead: false, filesRead: 0, unread: [], ok: false, relatedClaimKeys: [], futureStampedSkipped: 0,
   };
   const livePath = ledgerLivePath(stateDir);
   let liveFd: number | undefined;
@@ -102,6 +106,11 @@ export async function readPrOwnerLedgerProjection(
         try {
           ordinal += 1;
           const ms = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+          // W1-T11323: a row stamped past the tolerance (a clock-shifted writer) is neither newest nor evidence.
+          if (Number.isFinite(ms) && ms - nowMs > LEDGER_FUTURE_STAMP_TOLERANCE_MS) {
+            result.futureStampedSkipped += 1;
+            return;
+          }
           if (Number.isFinite(ms) && ms >= newestMs) {
             if (ms > newestMs) {
               clearTies.run();
