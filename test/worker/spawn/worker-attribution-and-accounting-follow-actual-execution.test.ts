@@ -231,7 +231,7 @@ test("W1-T10956: attempt metrics join actual execution and measured identity wit
   const root = temporaryRoot();
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const now = Date.now();
-  let requestOptions: { model?: string; effort?: string } | undefined;
+  let requestOptions: { model?: string; effort?: string; disallowedTools?: string[] } | undefined;
   const stream = async function* () {
     yield { type: "assistant", message: { model: "served-by-provider", content: [{ type: "text", text: "done" }] } };
     yield { type: "result", subtype: "success", is_error: false, result: "done", session_id: "sdk-session",
@@ -245,6 +245,7 @@ test("W1-T10956: attempt metrics join actual execution and measured identity wit
     prompt: "synthetic fixture",
     model: "requested-model",
     effort: "high",
+    disallowedTools: ["Write", "Edit", "Bash"],
     mountProvider: "claude",
     config,
     egress: { mode: "off" },
@@ -255,14 +256,16 @@ test("W1-T10956: attempt metrics join actual execution and measured identity wit
     keychain: { platform: "linux", readCredentialFile: () => JSON.stringify({
       claudeAiOauth: { accessToken: "fixture-only", expiresAt: now + 3_600_000 },
     }) },
-    queryFn: ((input: { options: { model?: string; effort?: string } }) => {
-      requestOptions = { model: input.options.model, effort: input.options.effort };
+    queryFn: ((input: { options: { model?: string; effort?: string; disallowedTools?: string[] } }) => {
+      requestOptions = { model: input.options.model, effort: input.options.effort,
+        disallowedTools: input.options.disallowedTools ? [...input.options.disallowedTools] : undefined };
       return stream();
     }) as unknown as SpawnWorkerArgs["queryFn"],
   });
 
   assert.equal(requestOptions?.effort, "high");
   assert.equal(requestOptions?.model, "requested-model");
+  assert.ok(["Write", "Edit", "Bash"].every(tool => requestOptions?.disallowedTools?.includes(tool)));
   assert.deepEqual(worker.sdkRequest?.effort, { state: "observed", value: "high" });
   assert.deepEqual(worker.sdkRequest?.model, { state: "observed", value: "requested-model" });
   assert.equal(worker.servedModel, "served-by-provider");
