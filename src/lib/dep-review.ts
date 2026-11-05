@@ -5,6 +5,7 @@ import { fixedClock } from "./clock.js";
 import { checkCommitMessage, CONVENTIONAL_LIMITS } from "./commit-message.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { openLedgerUnion, rotationBeforeTime, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { REVIEW_CONTEXT } from "./review.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, jobsForRunRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
@@ -1167,6 +1168,44 @@ interface HoldProgress {
   remedies: Partial<Record<HoldRemedyKind, HoldRemedyProgress>>;
 }
 export interface DepReviewProposalProgress { evidence: unknown; terminal: boolean }
+
+/**
+ * The ledger rows of a proposal's tasks, streamed. A held bump's `proposalProgress` once read the
+ * whole union into memory to filter it by task id: ~4 GB retained on the 2026-11-05 live heap profile,
+ * aborting the daemon every ~25 min while #16733/#16734 were held. A proposal's tasks are minted from
+ * its feedback, so none of their rows predates the feedback's capture `sinceTs`: rotations cut before
+ * it are never opened, and only the named tasks' rows are kept. An unknown `sinceTs` still streams the
+ * whole union, filtered. Any unread rotation or live file answers `ok: false` with no rows, as the
+ * strict whole-union read did.
+ */
+export async function proposalTaskLedgerRows(
+  stateDir: string,
+  taskIds: ReadonlySet<string>,
+  sinceTs: string | undefined,
+  io?: LedgerUnionStreamIO,
+): Promise<{ ok: boolean; rows: Array<Record<string, unknown>> }> {
+  if (taskIds.size === 0) return { ok: true, rows: [] };
+  const bounded = sinceTs !== undefined && Number.isFinite(Date.parse(sinceTs));
+  const names = bounded && existsSync(stateDir) ? readdirSync(stateDir) : [];
+  let unread = 0;
+  const rows: Array<Record<string, unknown>> = [];
+  // The union's own replay dedupe would remember every line it streams; dedupe only the rows kept.
+  const kept = new Set<string>();
+  for await (const row of openLedgerUnion(stateDir, {
+    dedupe: false,
+    onUnreadArchive: () => { unread += 1; },
+    onUnreadLive: () => { unread += 1; },
+    onUnreadDirectory: () => { unread += 1; },
+    ...(bounded ? { afterRotation: rotationBeforeTime(names, sinceTs!) } : {}),
+  }, io)) {
+    if (typeof row.task_id !== "string" || !taskIds.has(row.task_id)) continue;
+    const key = JSON.stringify(row);
+    if (kept.has(key)) continue;
+    kept.add(key);
+    rows.push(row);
+  }
+  return unread > 0 ? { ok: false, rows: [] } : { ok: true, rows };
+}
 
 function validGaps(gaps: Partial<Record<HoldRemedyKind, number>>): boolean {
   return !!gaps && typeof gaps === "object" && !Array.isArray(gaps) &&
