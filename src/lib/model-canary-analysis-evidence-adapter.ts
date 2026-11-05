@@ -16,15 +16,15 @@ export type NativeAnalysisEvidenceResultV1 =
       receipts: readonly NativeAnalysisReceiptV1[] } }
   | { state: "unavailable"; reason: string };
 const MAX_ROWS = 100_000, MAX_RECEIPT_BYTES = 128 * 1024, MAX_TOTAL_RECEIPT_BYTES = 64 * 1024 * 1024;
-function rec(v: unknown): v is Record<string, unknown> { return v !== null && typeof v === "object" && !Array.isArray(v); }
+function canaryAnalysisRecord(v: unknown): v is Record<string, unknown> { return v !== null && typeof v === "object" && !Array.isArray(v); }
 export function nativeAnalysisEvidenceWithinBounds(rows: number, totalBytes: number): boolean {
   return Number.isSafeInteger(rows) && rows >= 0 && rows <= MAX_ROWS
     && Number.isSafeInteger(totalBytes) && totalBytes >= 0 && totalBytes <= MAX_TOTAL_RECEIPT_BYTES;
 }
-function project(raw: unknown): NativeAnalysisReceiptV1 {
-  if (!rec(raw) || !rec(raw.slot) || !rec(raw.run)) throw new Error("native-analysis-receipt-invalid");
+function projectCanaryAnalysisReceipt(raw: unknown): NativeAnalysisReceiptV1 {
+  if (!canaryAnalysisRecord(raw) || !canaryAnalysisRecord(raw.slot) || !canaryAnalysisRecord(raw.run)) throw new Error("native-analysis-receipt-invalid");
   const slot = raw.slot, run = raw.run;
-  if (typeof slot.id !== "string" || typeof slot.caseId !== "string" || !rec(slot.pin)
+  if (typeof slot.id !== "string" || typeof slot.caseId !== "string" || !canaryAnalysisRecord(slot.pin)
     || typeof slot.pin.model !== "string" || typeof slot.pin.route !== "string"
     || typeof slot.pin.effort !== "string" || typeof slot.pin.suiteHash !== "string"
     || !["api", "subscription"].includes(String(slot.pin.billing))
@@ -33,7 +33,7 @@ function project(raw: unknown): NativeAnalysisReceiptV1 {
     || !Array.isArray(run.attempts) || !(run.verified === null || typeof run.verified === "boolean"))
     throw new Error("native-analysis-receipt-invalid");
   const gradeRaw = raw.grade;
-  const grade = gradeRaw === null ? null : rec(gradeRaw) && typeof gradeRaw.passed === "boolean"
+  const grade = gradeRaw === null ? null : canaryAnalysisRecord(gradeRaw) && typeof gradeRaw.passed === "boolean"
     && typeof gradeRaw.reason === "string" && typeof gradeRaw.schemaValid === "boolean"
     ? { passed: gradeRaw.passed, reason: gradeRaw.reason, schemaValid: gradeRaw.schemaValid } : null;
   if (gradeRaw !== null && grade === null) throw new Error("native-analysis-grade-invalid");
@@ -68,7 +68,7 @@ export function createAnalysisEvidenceReader(privateDirectory: string): () => Na
       const receipts = rows.map(row => {
         if (row.phase !== "terminal" || typeof row.receipt !== "string"
           || Buffer.byteLength(row.receipt, "utf8") > MAX_RECEIPT_BYTES) throw new Error("native-analysis-receipt-invalid");
-        return project(JSON.parse(row.receipt));
+        return projectCanaryAnalysisReceipt(JSON.parse(row.receipt));
       });
       if (!receipts.length) return { state: "unavailable", reason: "native-analysis-no-terminal-receipts" };
       return { state: "available", evidence: { version: "native-canary-analysis-evidence-v1", private: true, receipts } };

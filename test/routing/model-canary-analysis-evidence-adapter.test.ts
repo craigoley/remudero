@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,9 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { createAnalysisEvidenceReader, nativeAnalysisEvidenceWithinBounds } from "#src/lib/model-canary-analysis-evidence-adapter.js";
 
 function ownerDb(directory: string, receipt?: string) {
-  const db = new DatabaseSync(join(directory, "model-canary-slots.sqlite"));
+  const path = join(directory, "model-canary-slots.sqlite");
+  closeSync(openSync(path, "wx", 0o600));
+  const db = new DatabaseSync(path);
   db.exec(`CREATE TABLE canary_slots_v1 (
     id TEXT PRIMARY KEY, binding TEXT NOT NULL, owner TEXT NOT NULL,
     phase TEXT NOT NULL CHECK(phase IN ('started','terminal')), receipt TEXT);
@@ -17,7 +19,6 @@ function ownerDb(directory: string, receipt?: string) {
   if (receipt) db.prepare("INSERT INTO canary_slots_v1(id,binding,owner,phase,receipt) VALUES(?,?,?,?,?)")
     .run("a".repeat(64), "binding", "owner", "terminal", receipt);
   db.close();
-  chmodSync(join(directory, "model-canary-slots.sqlite"), 0o600);
 }
 function receipt() {
   return JSON.stringify({
@@ -33,7 +34,7 @@ function receipt() {
 test("analysis evidence reader consumes existing same-owner terminal rows read-only", () => {
   const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-canary-owner-`));
   try {
-    chmodSync(directory, 0o700); ownerDb(directory, receipt());
+    ownerDb(directory, receipt());
     const result = createAnalysisEvidenceReader(directory)();
     assert.equal(result.state, "available");
     if (result.state === "available") {
@@ -47,7 +48,6 @@ test("analysis evidence reader consumes existing same-owner terminal rows read-o
 test("analysis evidence reader refuses missing owner state without creating a database", () => {
   const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-canary-owner-missing-`));
   try {
-    chmodSync(directory, 0o700);
     const result = createAnalysisEvidenceReader(directory)();
     assert.equal(result.state, "unavailable");
     assert.equal(result.reason, "canary-owner-db-not-private");

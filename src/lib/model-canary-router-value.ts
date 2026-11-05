@@ -46,7 +46,7 @@ export interface EvaluateCanaryRouterValueResultV1 {
   exclusions: { syntheticRows: number; incompleteSelectedOutcome: number };
 }
 const MAX_ROWS = 50_000, MAX_BASELINES = 64;
-function unavailable(input: EvaluateCanaryRouterValueInputV1): EvaluateCanaryRouterValueResultV1 {
+function routerValueUnavailable(input: EvaluateCanaryRouterValueInputV1): EvaluateCanaryRouterValueResultV1 {
   const syntheticRows = input.rows.filter(row => row?.executionSource === "synthetic-control-replay").length;
   return { version: "model-canary-router-value-v1", private: true, state: "unavailable",
     selection: { state: "unavailable", split: "development", configId: null,
@@ -66,5 +66,5 @@ export function evaluateCanaryRouterValue(input: EvaluateCanaryRouterValueInputV
     || !Array.isArray(input.baselines) || input.baselines.length < 1 || input.baselines.length > MAX_BASELINES
     || typeof input.analysisSeed !== "string" || input.analysisSeed.length < 1 || input.analysisSeed.length > 128)
     throw new Error("canary-router-input-invalid");
-  return unavailable(input);
+  return routerValueUnavailable(input);
 }

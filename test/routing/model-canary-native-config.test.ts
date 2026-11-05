@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -17,7 +17,6 @@ test("native config reader reads only an existing config and does not provision 
     mkdirSync(join(home, ".config", "remudero"), { recursive: true, mode: 0o700 });
     const path = join(home, ".config", "remudero", "config.json");
     writeFileSync(path, JSON.stringify({ claudeBin: "/bin/true", root: join(home, "Remudero") }), { mode: 0o600 });
-    chmodSync(path, 0o600);
     const found = readExistingNativeCanaryConfig();
     assert.equal(found.state, "available");
     if (found.state === "available") assert.equal(found.config.root, join(home, "Remudero"));

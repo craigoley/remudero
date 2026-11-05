@@ -1,5 +1,5 @@
 /** Read private field-trial snapshots/candidates without refresh, publication, or promotion effects. */
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import type { CanaryFieldComparisonIdentityV1, FieldTrialComparisonCohortV1 } from "./model-canary-field-comparison.js";
@@ -17,23 +17,23 @@ export interface NativeFieldEvidenceV1 {
 export type NativeFieldEvidenceResultV1 = { state: "available"; evidence: NativeFieldEvidenceV1 }
   | { state: "unavailable"; reason: string };
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024, MAX_CANDIDATES = 128;
-const sha = (value: string) => createHash("sha256").update(value).digest("hex");
-const rec = (value: unknown): value is Record<string, unknown> =>
+const nativeFieldSha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+const nativeFieldRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
-function privateDirectory(path: string): void {
+function assertNativeFieldPrivateDirectory(path: string): void {
   const requested = resolve(path), info = lstatSync(requested), real = realpathSync(requested), stat = lstatSync(real);
   if (!info.isDirectory() || info.isSymbolicLink() || !stat.isDirectory() || (stat.mode & 0o777) !== 0o700
     || (typeof process.getuid === "function" && stat.uid !== process.getuid()))
     throw new Error("native-field-private-directory-required");
   for (let parent = real; ; parent = dirname(parent)) {
-    if (lstatSync(parent).isDirectory() && (hasGitMarker(parent))) throw new Error("native-field-inside-git");
+    if (lstatSync(parent).isDirectory() && (nativeFieldHasGitMarker(parent))) throw new Error("native-field-inside-git");
     if (dirname(parent) === parent) break;
   }
 }
-function hasGitMarker(dir: string): boolean {
+function nativeFieldHasGitMarker(dir: string): boolean {
   try { lstatSync(join(dir, ".git")); return true; } catch { return false; }
 }
-function readPrivateJson(path: string, limit: number): unknown {
+function readNativeFieldPrivateJson(path: string, limit: number): unknown {
   if (!Number.isInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0
     || !Number.isInteger(constants.O_NONBLOCK) || constants.O_NONBLOCK <= 0)
     throw new Error("native-field-platform-unsupported");
@@ -49,8 +49,8 @@ function readPrivateJson(path: string, limit: number): unknown {
     return JSON.parse(buffer.subarray(0, length).toString("utf8"));
   } finally { closeSync(fd); }
 }
-function incompleteIdentity(cohort: Record<string, unknown>): CanaryFieldComparisonIdentityV1 {
-  const revisions = rec(cohort.revisions) ? cohort.revisions : {};
+function nativeFieldIncompleteIdentity(cohort: Record<string, unknown>): CanaryFieldComparisonIdentityV1 {
+  const revisions = nativeFieldRecord(cohort.revisions) ? cohort.revisions : {};
   const text = (value: unknown): string | null => typeof value === "string" && value.length > 0 ? value : null;
   return {
     provider: text(cohort.provider), deployment: null, requestedModel: text(cohort.selectedModel),
@@ -59,36 +59,36 @@ function incompleteIdentity(cohort: Record<string, unknown>): CanaryFieldCompari
     corpusDigest: null, scorerDigest: null, role: null, observationWindow: null,
   };
 }
-function observationalRows(snapshot: Record<string, unknown>): FieldTrialComparisonCohortV1[] {
+function nativeFieldObservationalRows(snapshot: Record<string, unknown>): FieldTrialComparisonCohortV1[] {
   if (!Array.isArray(snapshot.servedTrialCohorts)) return [];
   const result: FieldTrialComparisonCohortV1[] = [];
   for (const source of snapshot.servedTrialCohorts) {
-    if (!rec(source) || !rec(source.evidence) || source.evidence.observational !== true || source.evidence.causalClaims !== "none"
+    if (!nativeFieldRecord(source) || !nativeFieldRecord(source.evidence) || source.evidence.observational !== true || source.evidence.causalClaims !== "none"
       || !Array.isArray(source.evidence.cohorts)) throw new Error("native-field-observational-contract-invalid");
     for (const raw of source.evidence.cohorts) {
-      if (!rec(raw) || !Number.isSafeInteger(raw.assignments) || Number(raw.assignments) < 0
+      if (!nativeFieldRecord(raw) || !Number.isSafeInteger(raw.assignments) || Number(raw.assignments) < 0
         || !Number.isSafeInteger(raw.workerSucceeded) || Number(raw.workerSucceeded) < 0
         || !Number.isSafeInteger(raw.workerFailed) || Number(raw.workerFailed) < 0
         || Number(raw.workerSucceeded) + Number(raw.workerFailed) > Number(raw.assignments))
         throw new Error("native-field-observational-cohort-invalid");
-      const id = sha(JSON.stringify([source.source, source.repo, raw.host, raw.period, raw.provider,
+      const id = nativeFieldSha256(JSON.stringify([source.source, source.repo, raw.host, raw.period, raw.provider,
         raw.selectedModel, raw.servedModel, raw.selectedEffort, raw.taskClass, raw.risk, raw.workLane, raw.revisions]));
       const assigned = Number(raw.assignments), observed = Number(raw.workerSucceeded) + Number(raw.workerFailed);
-      result.push({ id, design: "observational", state: "observed", identity: incompleteIdentity(raw),
+      result.push({ id, design: "observational", state: "observed", identity: nativeFieldIncompleteIdentity(raw),
         assignedTasks: assigned, observedTasks: observed, successfulTasks: Number(raw.workerSucceeded),
         assignmentAudit: null, randomizationUnit: null, analysis: null, assignmentProbabilities: null });
     }
   }
   return result;
 }
-function controlledCandidateRefusal(release: unknown, sidecar: unknown, expectedReleaseId: string): string | null {
-  if (!rec(release)) return "controlled-candidate-invalid";
+function nativeControlledCandidateRefusal(release: unknown, sidecar: unknown, expectedReleaseId: string): string | null {
+  if (!nativeFieldRecord(release)) return "controlled-candidate-invalid";
   if (release.releaseId !== expectedReleaseId || typeof release.releaseId !== "string"
     || !/^controlled-[a-f0-9]{16}$/.test(release.releaseId))
     return "controlled-release-id-filename-mismatch";
-  if ("controlled-" + sha(JSON.stringify({ ...release, releaseId: "" })).slice(0, 16) !== expectedReleaseId)
+  if ("controlled-" + nativeFieldSha256(JSON.stringify({ ...release, releaseId: "" })).slice(0, 16) !== expectedReleaseId)
     return "controlled-release-content-digest-mismatch";
-  if (!rec(sidecar)) return "controlled-sidecar-invalid";
+  if (!nativeFieldRecord(sidecar)) return "controlled-sidecar-invalid";
   if (typeof sidecar.releaseId !== "string") return "controlled-sidecar-release-id-unavailable";
   if (sidecar.releaseId !== expectedReleaseId) return "controlled-sidecar-release-id-mismatch";
   if (typeof sidecar.epochId !== "string" || sidecar.epochId.length < 1 || sidecar.epochId.length > 160)
@@ -100,12 +100,12 @@ function controlledCandidateRefusal(release: unknown, sidecar: unknown, expected
 export function createNativeFieldEvidenceReader(outDir: string): () => NativeFieldEvidenceResultV1 {
   return () => {
     try {
-      privateDirectory(outDir);
-      const snapshot = readPrivateJson(join(outDir, "field-trials-flow-v1.json"), MAX_SNAPSHOT_BYTES);
-      if (!rec(snapshot) || (snapshot.state !== "observed" && snapshot.state !== "observed-partial")
+      assertNativeFieldPrivateDirectory(outDir);
+      const snapshot = readNativeFieldPrivateJson(join(outDir, "field-trials-flow-v1.json"), MAX_SNAPSHOT_BYTES);
+      if (!nativeFieldRecord(snapshot) || (snapshot.state !== "observed" && snapshot.state !== "observed-partial")
         || snapshot.observational !== true || snapshot.causalClaims !== "none" || typeof snapshot.asOf !== "string")
         return { state: "unavailable", reason: "native-field-snapshot-contract-unavailable" };
-      const fieldTrials = observationalRows(snapshot);
+      const fieldTrials = nativeFieldObservationalRows(snapshot);
       const controlledDir = join(outDir, "controlled");
       let unmatchedControlledCandidates = 0;
       const unmatchedControlledReasons: { candidateDigest: string; reason: string }[] = [];
@@ -118,26 +118,19 @@ export function createNativeFieldEvidenceReader(outDir: string): () => NativeFie
         if (names.length > MAX_CANDIDATES) throw new Error("native-field-controlled-candidate-bound");
         for (const name of names) {
           const expectedReleaseId = name.slice(0, -".candidate.json".length);
-          let candidate: unknown, sidecar: unknown;
-          try {
-            candidate = readPrivateJson(join(controlledDir, name), 1024 * 1024);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-              unmatchedControlledCandidates++; unmatchedControlledReasons.push({ candidateDigest: sha(name), reason: "controlled-candidate-disappeared" }); continue;
-            }
-            throw error;
+          const candidatePath = join(controlledDir, name);
+          const sidecarPath = join(controlledDir, expectedReleaseId + ".sidecar.private.json");
+          if (!existsSync(candidatePath)) {
+            unmatchedControlledCandidates++; unmatchedControlledReasons.push({ candidateDigest: nativeFieldSha256(name), reason: "controlled-candidate-disappeared" }); continue;
           }
-          try {
-            sidecar = readPrivateJson(join(controlledDir, expectedReleaseId + ".sidecar.private.json"), 1024 * 1024);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-              unmatchedControlledCandidates++; unmatchedControlledReasons.push({ candidateDigest: sha(name), reason: "controlled-sidecar-missing" }); continue;
-            }
-            throw error;
+          if (!existsSync(sidecarPath)) {
+            unmatchedControlledCandidates++; unmatchedControlledReasons.push({ candidateDigest: nativeFieldSha256(name), reason: "controlled-sidecar-missing" }); continue;
           }
-          const refusal = controlledCandidateRefusal(candidate, sidecar, expectedReleaseId);
+          const candidate: unknown = readNativeFieldPrivateJson(candidatePath, 1024 * 1024);
+          const sidecar: unknown = readNativeFieldPrivateJson(sidecarPath, 1024 * 1024);
+          const refusal = nativeControlledCandidateRefusal(candidate, sidecar, expectedReleaseId);
           if (refusal) {
-            unmatchedControlledCandidates++; unmatchedControlledReasons.push({ candidateDigest: sha(name), reason: refusal }); continue;
+            unmatchedControlledCandidates++; unmatchedControlledReasons.push({ candidateDigest: nativeFieldSha256(name), reason: refusal }); continue;
           }
         }
       } catch (error) {

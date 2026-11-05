@@ -46,9 +46,9 @@ const FAILURE_CLASSES: readonly ImprovementFailureClassV1[] = [
   "latency-regression", "cost-regression", "scorer-disagreement",
 ];
 const MAX_EVIDENCE = 10_000, MAX_ID = 160, MAX_PROPOSALS = 32;
-const text = (value: unknown, max = MAX_ID): value is string => typeof value === "string" && value.length > 0 && value.length <= max;
-const cmp = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
-const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+const proposalExportText = (value: unknown, max = MAX_ID): value is string => typeof value === "string" && value.length > 0 && value.length <= max;
+const proposalExportCompare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+const proposalExportSha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 class Union {
   parent = new Map<string, string>();
   find(x: string): string {
@@ -59,10 +59,10 @@ class Union {
   }
   join(a: string, b: string) {
     const x = this.find(a), y = this.find(b);
-    if (x !== y) this.parent.set(cmp(x, y) < 0 ? y : x, cmp(x, y) < 0 ? x : y);
+    if (x !== y) this.parent.set(proposalExportCompare(x, y) < 0 ? y : x, proposalExportCompare(x, y) < 0 ? x : y);
   }
 }
-const hypothesis: Record<ImprovementFailureClassV1, { hypothesis: string; falsifier: string }> = {
+const proposalExportHypothesis: Record<ImprovementFailureClassV1, { hypothesis: string; falsifier: string }> = {
   "wrong-model-selection": { hypothesis: "A bounded router feature or calibration change may reduce wrong-model selection on the affected evaluation slice.",
     falsifier: "On a preregistered sealed holdout, the changed router does not reduce wrong-model selections versus the frozen qualified baseline." },
   "fallback-mismatch": { hypothesis: "A bounded fallback-selection change may preserve task fit when the primary route is unavailable.",
@@ -78,13 +78,13 @@ const hypothesis: Record<ImprovementFailureClassV1, { hypothesis: string; falsif
   "scorer-disagreement": { hypothesis: "A bounded scorer-calibration review may resolve systematic disagreement without changing router policy.",
     falsifier: "Independent adjudication does not confirm a repeated scorer disagreement on the preregistered sample." },
 };
-function validateRow(value: unknown): ImprovementEvidenceRowV1 {
+function validateProposalEvidenceRow(value: unknown): ImprovementEvidenceRowV1 {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("experiment-proposal-evidence-invalid");
   const row = value as Record<string, unknown>;
   const keys = ["signatureId", "failureClass", "caseId", "sourceFamilyId", "incidentRootId", "evidenceDigest", "executionSource"];
   if (Object.keys(row).sort().join("\0") !== [...keys].sort().join("\0")
-    || !text(row.signatureId, 128) || !FAILURE_CLASSES.includes(row.failureClass as ImprovementFailureClassV1)
-    || !text(row.caseId) || !text(row.sourceFamilyId) || !text(row.incidentRootId)
+    || !proposalExportText(row.signatureId, 128) || !FAILURE_CLASSES.includes(row.failureClass as ImprovementFailureClassV1)
+    || !proposalExportText(row.caseId) || !proposalExportText(row.sourceFamilyId) || !proposalExportText(row.incidentRootId)
     || typeof row.evidenceDigest !== "string" || !DIGEST.test(row.evidenceDigest)
     || (row.executionSource !== "native-provider-execution" && row.executionSource !== "synthetic-control-replay"))
     throw new Error("experiment-proposal-evidence-invalid");
@@ -99,7 +99,7 @@ export function buildExperimentProposal(input: BuildExperimentProposalInputV1): 
   const unique = new Map<string, ImprovementEvidenceRowV1>();
   let syntheticControlEvidence = 0;
   for (const raw of input.evidence) {
-    const row = validateRow(raw);
+    const row = validateProposalEvidenceRow(raw);
     if (row.executionSource === "synthetic-control-replay") { syntheticControlEvidence++; continue; }
     const key = JSON.stringify([row.signatureId, row.caseId, row.sourceFamilyId, row.incidentRootId]);
     const prior = unique.get(key);
@@ -113,17 +113,17 @@ export function buildExperimentProposal(input: BuildExperimentProposalInputV1): 
     const rows = groups.get(key) ?? []; rows.push(row); groups.set(key, rows);
   }
   const proposals: ExperimentProposalDraftV1[] = [];
-  for (const [key, rows] of [...groups.entries()].sort(([a], [b]) => cmp(a, b))) {
+  for (const [key, rows] of [...groups.entries()].sort(([a], [b]) => proposalExportCompare(a, b))) {
     if (proposals.length >= maxProposals) break;
     const union = new Union();
     for (const row of rows) union.join(JSON.stringify(["family", row.sourceFamilyId]), JSON.stringify(["root", row.incidentRootId]));
     const clusters = new Set(rows.map(row => union.find(JSON.stringify(["family", row.sourceFamilyId]))));
     const cases = new Set(rows.map(row => row.caseId));
     if (clusters.size < 2 || cases.size < 2) continue;
-    const category = rows[0]!.failureClass, statements = hypothesis[category];
-    const sourceEvidenceDigests = [...new Set(rows.map(row => row.evidenceDigest))].sort(cmp);
+    const category = rows[0]!.failureClass, statements = proposalExportHypothesis[category];
+    const sourceEvidenceDigests = [...new Set(rows.map(row => row.evidenceDigest))].sort(proposalExportCompare);
     const body = JSON.stringify([key, sourceEvidenceDigests, clusters.size, cases.size]);
-    proposals.push({ proposalDigest: sha(body), failureClass: category, repeatedEvidence: rows.length,
+    proposals.push({ proposalDigest: proposalExportSha256(body), failureClass: category, repeatedEvidence: rows.length,
       independentClusters: clusters.size, sourceEvidenceDigests, ...statements,
       boundedScope: { area: "smart-router-evaluation", maxFiles: 3, maxChangedLines: 200 },
       verification: ["predeclare the endpoint and sealed holdout before observing outcomes",

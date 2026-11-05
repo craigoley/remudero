@@ -35,7 +35,7 @@ import { registerQualifiedCodingExecutionPort } from "./model-canary-coding-port
 import { codingLedgerSave, type CodingLedgerWriter } from "./model-canary-ledger.js";
 import type { ValidatedPrivateCorpus } from "./model-canary-private-corpus.js";
 
-function boundedInput(input: string, limit = 8 * 1024 * 1024, privateOwned = false): string {
+function boundedCanaryAnalysisInput(input: string, limit = 8 * 1024 * 1024, privateOwned = false): string {
   if (!Number.isInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0
     || !Number.isInteger(constants.O_NONBLOCK) || constants.O_NONBLOCK <= 0)
     throw new Error("canary-input-platform-unsupported");
@@ -60,7 +60,7 @@ function boundedInput(input: string, limit = 8 * 1024 * 1024, privateOwned = fal
   }
 }
 
-function privateOutput(dir: string, name: string, data: string) {
+function writePrivateCanaryAnalysisOutput(dir: string, name: string, data: string) {
   const requirePrivateDirectory = () => {
     const info = lstatSync(dir);
     if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700
@@ -85,11 +85,11 @@ function privateOutput(dir: string, name: string, data: string) {
   writeFileSync(join(dir, name), data, { encoding: "utf8", flag: "wx", mode: 0o600 });
 }
 
-function privateTrustAnchors(flag: string | undefined, file: string | undefined): Readonly<Record<string, string>> {
+function readPrivateCanaryTrustAnchors(flag: string | undefined, file: string | undefined): Readonly<Record<string, string>> {
   if (flag === undefined && file === undefined) return {};
   if (flag !== "--trust-anchors" || !file) throw new Error("canary-private-trust-anchor-argument-invalid");
   // This separate, operator-selected file is the trust source; corpus JSON cannot select a key.
-  const parsed: unknown = JSON.parse(boundedInput(file, 64 * 1024, true));
+  const parsed: unknown = JSON.parse(boundedCanaryAnalysisInput(file, 64 * 1024, true));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
     || Object.keys(parsed).length > 16 || Object.entries(parsed).some(([id, key]) =>
       !/^[a-zA-Z0-9._-]{1,100}$/.test(id) || typeof key !== "string" || key.length > 4096))
@@ -162,17 +162,17 @@ export function projectNativeCanaryEstimands(run: Pick<CanaryRun, "attempts" | "
     } };
 }
 
-function analysisCanonical(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(analysisCanonical);
+function canonicalCanaryAnalysisValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalCanaryAnalysisValue);
   if (value && typeof value === "object")
-    return Object.fromEntries(Object.keys(value).sort().map(key => [key, analysisCanonical((value as Record<string, unknown>)[key])]));
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalCanaryAnalysisValue((value as Record<string, unknown>)[key])]));
   return value;
 }
-function analysisDigest(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(analysisCanonical(value))).digest("hex");
+function canaryAnalysisDigest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(canonicalCanaryAnalysisValue(value))).digest("hex");
 }
 
-function assertNativeAnalysisSourcePath(configRoot: string, path: string): void {
+function assertCanaryAnalysisSourcePath(configRoot: string, path: string): void {
   const root = realpathSync(configRoot), requested = resolve(path), link = lstatSync(requested);
   const real = realpathSync(requested), info = lstatSync(real), withinRoot = relative(root, real);
   if (!link.isDirectory() || link.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o777) !== 0o700
@@ -181,26 +181,26 @@ function assertNativeAnalysisSourcePath(configRoot: string, path: string): void 
     throw new Error("native-analysis-source-path-outside-private-config-root");
 }
 
-function nativePrivateAnalysis(argv: readonly string[]) {
+function runPrivateCanaryAnalysis(argv: readonly string[]) {
   const [, outDir, ownerDirectory, analysisInputFile, fieldTrialsOutDir, corpusFile, flag, keyFile] = argv;
   if (![6, 8].includes(argv.length) || !outDir || !ownerDirectory || !analysisInputFile || !fieldTrialsOutDir || !corpusFile)
     throw new Error("usage: model-canary-command analyze-private <private-out-dir> <existing-private-owner-dir> <private-analysis-input.json> <existing-field-trials-out-dir> <private-corpus.json> [--trust-anchors <private-anchor-file>]");
   const existingConfig = readExistingNativeCanaryConfig();
   if (existingConfig.state !== "available") throw new Error(existingConfig.reason);
-  assertNativeAnalysisSourcePath(existingConfig.config.root, ownerDirectory);
-  assertNativeAnalysisSourcePath(existingConfig.config.root, fieldTrialsOutDir);
+  assertCanaryAnalysisSourcePath(existingConfig.config.root, ownerDirectory);
+  assertCanaryAnalysisSourcePath(existingConfig.config.root, fieldTrialsOutDir);
   const ownerEvidence = createAnalysisEvidenceReader(ownerDirectory)();
   const nativeFieldEvidence = createNativeFieldEvidenceReader(fieldTrialsOutDir)();
-  const corpus = validatePrivateCorpus(JSON.parse(boundedInput(corpusFile, 2 * 1024 * 1024, true)),
-    privateTrustAnchors(flag, keyFile));
-  const input = parseNativeCanaryAnalysisInput(JSON.parse(boundedInput(analysisInputFile, 8 * 1024 * 1024, true)));
+  const corpus = validatePrivateCorpus(JSON.parse(boundedCanaryAnalysisInput(corpusFile, 2 * 1024 * 1024, true)),
+    readPrivateCanaryTrustAnchors(flag, keyFile));
+  const input = parseNativeCanaryAnalysisInput(JSON.parse(boundedCanaryAnalysisInput(analysisInputFile, 8 * 1024 * 1024, true)));
   if (corpus.state !== "available") throw new Error(corpus.reason);
   const census = buildEffectiveConfigCensus(input.censusInput);
   const matrix = planCanaryMatrix({ census, cases: input.censusInput.cases,
     day: input.matrixOptions.day, seed: input.matrixOptions.seed, replicates: input.matrixOptions.replicates,
     ...(input.matrixOptions.aa === undefined ? {} : { aa: input.matrixOptions.aa }) });
   if (matrix.digest !== input.matrixDigest) throw new Error("canary-analysis-matrix-digest-mismatch");
-  const derivedAnalysisSeed = analysisDigest(["model-canary-analysis-seed-v1", matrix.digest, matrix.seed]);
+  const derivedAnalysisSeed = canaryAnalysisDigest(["model-canary-analysis-seed-v1", matrix.digest, matrix.seed]);
   if (input.seed !== derivedAnalysisSeed) throw new Error("canary-analysis-seed-not-predeclared-by-matrix");
   if (input.design.comparisons.length !== input.comparisons.length
     || input.comparisons.some(pair => !input.design.comparisons.some(declared => declared.id === pair.id
@@ -268,7 +268,7 @@ function nativePrivateAnalysis(argv: readonly string[]) {
       for (const estimand of declaration.estimands) {
         const a = estimand === "first-attempt" ? leftOutcome : null;
         const b = estimand === "first-attempt" ? rightOutcome : null;
-        pairs.push({ pairId: analysisDigest([pairSpec.id, pairSpec.endpoint, blockKey, estimand]),
+        pairs.push({ pairId: canaryAnalysisDigest([pairSpec.id, pairSpec.endpoint, blockKey, estimand]),
           comparisonId: pairSpec.id, endpoint: pairSpec.endpoint, estimand, split: meta.split, caseId,
           sourceFamilyId: meta.sourceFamilyId, incidentRootId: meta.incidentRootId, executionSource: source,
           complete: a !== null && b !== null, leftValue: a === null ? null : Number(a), rightValue: b === null ? null : Number(b) });
@@ -291,7 +291,7 @@ function nativePrivateAnalysis(argv: readonly string[]) {
     return row.outcomes["first-attempt"] === false && typeof reason === "string" && allowedFailures.includes(reason)
       ? [{ signatureId: reason, failureClass: reason as ImprovementEvidenceRowV1["failureClass"], caseId: row.caseId,
         sourceFamilyId: row.sourceFamilyId, incidentRootId: row.incidentRootId,
-        evidenceDigest: analysisDigest([row.runId, row.caseId, row.outcomes]), executionSource: row.executionSource }] : [];
+        evidenceDigest: canaryAnalysisDigest([row.runId, row.caseId, row.outcomes]), executionSource: row.executionSource }] : [];
   });
   const proposals = buildExperimentProposal({ evidence: proposalEvidence });
   const result = { version: "model-canary-analysis-v1", state: ownerEvidence.state === "available" ? "analyzed" : "unavailable",
@@ -308,8 +308,8 @@ function nativePrivateAnalysis(argv: readonly string[]) {
       "best-of-k": "unavailable-current-terminal-grade-schema-has-no-per-attempt-outcomes",
     },
     clustered, fieldComparison, router, proposals };
-  privateOutput(outDir, "model-canary-analysis.json", JSON.stringify(result, null, 2) + "\n");
-  privateOutput(outDir, "model-canary-improvement-proposals.json", JSON.stringify(proposals, null, 2) + "\n");
+  writePrivateCanaryAnalysisOutput(outDir, "model-canary-analysis.json", JSON.stringify(result, null, 2) + "\n");
+  writePrivateCanaryAnalysisOutput(outDir, "model-canary-improvement-proposals.json", JSON.stringify(proposals, null, 2) + "\n");
   return { state: "analyzed-private", nativeReceipts: receipts.length, benchmarkCases: benchmarkCases.length,
     comparisons: clustered.comparisons.length, fieldComparisons: fieldComparison.comparisons.length,
     proposals: proposals.proposals.length };
@@ -318,13 +318,13 @@ function nativePrivateAnalysis(argv: readonly string[]) {
 
 
 export function canaryCommand(argv: readonly string[]): { state: string; runs?: number; [key: string]: unknown } {
-  if (argv[0] === "analyze-private") return nativePrivateAnalysis(argv);
+  if (argv[0] === "analyze-private") return runPrivateCanaryAnalysis(argv);
   if (argv[0] === "prepare-coding") {
     const [, outDir, corpusFile, flag, keyFile] = argv;
     if (![3, 5].includes(argv.length) || !outDir || !corpusFile)
       throw new Error("usage: model-canary-command prepare-coding <private-out-dir> <private-corpus.json> [--trust-anchors <private-anchor-file>]");
-    const validated = validatePrivateCorpus(JSON.parse(boundedInput(corpusFile, 2 * 1024 * 1024, true)),
-      privateTrustAnchors(flag, keyFile));
+    const validated = validatePrivateCorpus(JSON.parse(boundedCanaryAnalysisInput(corpusFile, 2 * 1024 * 1024, true)),
+      readPrivateCanaryTrustAnchors(flag, keyFile));
     if (validated.state !== "available") throw new Error(validated.reason);
     const cases = validated.metadata.cases.filter(item => item.family === "coding");
     const requests = cases.map(item => {
@@ -333,13 +333,13 @@ export function canaryCommand(argv: readonly string[]): { state: string; runs?: 
       return { request: projected.request, join: { requestId: projected.request.requestId,
         caseId: item.caseId, corpusDigest: validated.metadata.digest, scorerDigest: item.scorerDigest } };
     });
-    privateOutput(outDir, "model-canary-coding-requests.json", JSON.stringify({
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-coding-requests.json", JSON.stringify({
       version: "model-canary-coding-requests-v1", state: "prepared-not-activated",
       requests: requests.map(item => item.request) }, null, 2) + "\n");
-    privateOutput(outDir, "model-canary-coding-joins.json", JSON.stringify({
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-coding-joins.json", JSON.stringify({
       version: "model-canary-coding-joins-v1", corpusDigest: validated.metadata.digest,
       joins: requests.map(item => item.join), execution: "requires-native-owner-and-qualified-linux-profile" }, null, 2) + "\n");
-    privateOutput(outDir, "model-canary-coding-native.json", JSON.stringify({
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-coding-native.json", JSON.stringify({
       version: "model-canary-coding-native-v1", corpusDigest: validated.metadata.digest,
       cases: privateCorpusCases(validated.corpus)!.filter(item => item.family === "coding"),
       plan: null, seed: null, released: false,
@@ -353,8 +353,8 @@ export function canaryCommand(argv: readonly string[]): { state: string; runs?: 
     const [, outDir, input, flag, keyFile] = argv;
     if (![3, 5].includes(argv.length) || !outDir || !input)
       throw new Error("usage: model-canary-command prepare-private <private-out-dir> <private-corpus.json> [--trust-anchors <private-anchor-file>]");
-    const bundle: unknown = JSON.parse(boundedInput(input, 2 * 1024 * 1024, true));
-    const corpus = validatePrivateCorpus(bundle, privateTrustAnchors(flag, keyFile));
+    const bundle: unknown = JSON.parse(boundedCanaryAnalysisInput(input, 2 * 1024 * 1024, true));
+    const corpus = validatePrivateCorpus(bundle, readPrivateCanaryTrustAnchors(flag, keyFile));
     if (corpus.state !== "available") throw new Error(corpus.reason);
     const requests = corpus.metadata.cases.map(item => {
       const projected = buildPrivateCanaryRequest(corpus.corpus, item.caseId);
@@ -363,11 +363,11 @@ export function canaryCommand(argv: readonly string[]): { state: string; runs?: 
         caseId: item.caseId, corpusDigest: corpus.metadata.digest, scorerDigest: item.scorerDigest } };
     });
     // Request payload and scorer/provenance joins are separate files; none grants execution.
-    privateOutput(outDir, "model-canary-private-scorer.json", JSON.stringify(bundle, null, 2) + "\n");
-    privateOutput(outDir, "model-canary-private-requests.json", JSON.stringify({
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-private-scorer.json", JSON.stringify(bundle, null, 2) + "\n");
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-private-requests.json", JSON.stringify({
       version: "model-canary-private-requests-v1", state: "prepared-not-activated",
       requests: requests.map(item => item.request) }, null, 2) + "\n");
-    privateOutput(outDir, "model-canary-private-joins.json", JSON.stringify({
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-private-joins.json", JSON.stringify({
       version: "model-canary-private-joins-v1", metadata: corpus.metadata,
       joins: requests.map(item => item.join) }, null, 2) + "\n");
     return { state: "prepared-not-activated", corpusDigest: corpus.metadata.digest,
@@ -378,10 +378,10 @@ export function canaryCommand(argv: readonly string[]): { state: string; runs?: 
     const [, outDir, corpusFile, ownerDirectory, bindingFile, flag, keyFile] = argv;
     if (![5, 7].includes(argv.length) || !outDir || !corpusFile || !ownerDirectory || !bindingFile)
       throw new Error("usage: model-canary-command grade-private <private-out-dir> <private-corpus.json> <operator-selected-private-owner-dir> <binding.json> [--trust-anchors <private-anchor-file>]");
-    const corpus = validatePrivateCorpus(JSON.parse(boundedInput(corpusFile, 2 * 1024 * 1024, true)),
-      privateTrustAnchors(flag, keyFile));
+    const corpus = validatePrivateCorpus(JSON.parse(boundedCanaryAnalysisInput(corpusFile, 2 * 1024 * 1024, true)),
+      readPrivateCanaryTrustAnchors(flag, keyFile));
     if (corpus.state !== "available") throw new Error(corpus.reason);
-    const value: unknown = JSON.parse(boundedInput(bindingFile, 128 * 1024, true));
+    const value: unknown = JSON.parse(boundedCanaryAnalysisInput(bindingFile, 128 * 1024, true));
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("canary-private-binding-required");
     const request = value as Record<string, unknown>;
     if (request.version !== "model-canary-private-grade-input-v1" || Object.keys(request).length !== 3
@@ -400,7 +400,7 @@ export function canaryCommand(argv: readonly string[]): { state: string; runs?: 
       ? gradePrivateTrace(corpus.corpus, slot.caseId, loaded.finalText, loaded.trace, binding)
       : { state: "unavailable" as const, reason: loaded.state === "unavailable"
         ? loaded.reason : "private-trace-capture-unavailable" };
-    privateOutput(outDir, "model-canary-private-grade.json", JSON.stringify({
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-private-grade.json", JSON.stringify({
       version: "model-canary-private-grade-v1", corpusDigest: corpus.metadata.digest,
       evidenceSource: custodyAvailable ? "operator-selected-private-owner-custody" : "unavailable",
       binding: captured?.binding ?? null,
@@ -414,7 +414,7 @@ export function canaryCommand(argv: readonly string[]): { state: string; runs?: 
     const [, outDir, input] = argv;
     if (argv.length !== 3 || !outDir || !input)
       throw new Error("usage: model-canary-command prepare-matrix <private-out-dir> <matrix-input.json>");
-    const value: unknown = JSON.parse(boundedInput(input));
+    const value: unknown = JSON.parse(boundedCanaryAnalysisInput(input));
     if (typeof value !== "object" || value === null || Array.isArray(value))
       throw new Error("canary-matrix-input-required");
     const request = value as Record<string, unknown>;
@@ -433,9 +433,9 @@ export function canaryCommand(argv: readonly string[]): { state: string; runs?: 
       ...(options.aa === undefined ? {} : { aa: options.aa }) });
     // These are private preparation artifacts. Native ownership, admission and execution remain separate.
     const state = "prepared-not-activated" as const;
-    privateOutput(outDir, "model-canary-configuration-census.json", JSON.stringify(census, null, 2) + "\n");
-    privateOutput(outDir, "model-canary-matrix-manifest.json", JSON.stringify({ ...matrix, state,
-      analysisSeed: analysisDigest(["model-canary-analysis-seed-v1", matrix.digest, matrix.seed]),
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-configuration-census.json", JSON.stringify(census, null, 2) + "\n");
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-matrix-manifest.json", JSON.stringify({ ...matrix, state,
+      analysisSeed: canaryAnalysisDigest(["model-canary-analysis-seed-v1", matrix.digest, matrix.seed]),
       requires: ["published-source", "qualified-adapter", "capacity-admission", "shared-owner", "agreed-experiment-budget"] }, null, 2) + "\n");
     return { state, censusDigest: census.digest, matrixDigest: matrix.digest,
       configurations: census.rows.length, shards: matrix.shards.length, readiness: matrix.readiness };
@@ -444,12 +444,12 @@ export function canaryCommand(argv: readonly string[]): { state: string; runs?: 
     const [, outDir, day, keyFile] = argv;
     if (argv.length !== 4 || !outDir || !day || !keyFile)
       throw new Error("usage: model-canary-command prepare-rotation <private-out-dir> <day> <private-key-file>");
-    const key = boundedInput(keyFile, 66);
+    const key = boundedCanaryAnalysisInput(keyFile, 66);
     const pack = rotatingCanarySuite(day, key.replace(/\r?\n$/, ""));
     const { cases, ...metadata } = pack;
     // Private scorer records retain expectations; the separate request manifest never does.
-    privateOutput(outDir, "model-canary-rotation-scorer.json", JSON.stringify(pack, null, 2) + "\n");
-    privateOutput(outDir, "model-canary-rotation-manifest.json", JSON.stringify({ ...metadata,
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-rotation-scorer.json", JSON.stringify(pack, null, 2) + "\n");
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-rotation-manifest.json", JSON.stringify({ ...metadata,
       state: "prepared-not-activated", tasks: cases.map(({ expected: _scorerOnly, ...task }) => task),
       cash: { globalDailyCapUsd: 25, experimentDailyCapUsd: 0, premiumCashEligible: false },
       requires: ["published-source", "qualified-adapter", "capacity-admission", "shared-owner", "agreed-experiment-budget"] }, null, 2) + "\n");
@@ -480,15 +480,15 @@ export function canaryCommand(argv: readonly string[]): { state: string; runs?: 
           tasks: p.cases.map(({ expected: _scorerOnly, ...task }) => task) };
       })),
       deeperWeekly: { patchExecution: "pending-isolated-scorer", retention25And50Turns: "native-protocol-prepared-adapter-pending", cacheProfiles: "native-byte-protocol-prepared-adapter-pending" } };
-    privateOutput(outDir, "model-canary-manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+    writePrivateCanaryAnalysisOutput(outDir, "model-canary-manifest.json", JSON.stringify(manifest, null, 2) + "\n");
     return { state: manifest.state, suiteHash: manifest.suiteHash };
   }
   if (!input) throw new Error("canary-input-bound");
-  const value: unknown = JSON.parse(boundedInput(input));
+  const value: unknown = JSON.parse(boundedCanaryAnalysisInput(input));
   if (!Array.isArray(value)) throw new Error("canary-run-array-required");
   const runs = value as CanaryRun[], projection = projectCanaryRuns(runs);
-  privateOutput(outDir, "model-canary-metrics.json", JSON.stringify(projection, null, 2) + "\n");
-  privateOutput(outDir, "model-canary-report.html", renderCanaryReport(runs));
+  writePrivateCanaryAnalysisOutput(outDir, "model-canary-metrics.json", JSON.stringify(projection, null, 2) + "\n");
+  writePrivateCanaryAnalysisOutput(outDir, "model-canary-report.html", renderCanaryReport(runs));
   return { state: "private-projection", runs: projection.uniqueRuns };
 }
 
@@ -574,14 +574,14 @@ export async function replayPrivateCli(argv: readonly string[], internal: OwnedC
   const [, corpusFile, responseFile, ownerDir, flag, keyFile] = argv;
   if (![4, 6].includes(argv.length) || !corpusFile || !responseFile || !ownerDir)
     throw new Error("usage: model-canary-command replay-private <private-corpus.json> <response-script.json> <operator-selected-private-owner-dir> [--trust-anchors <private-anchor-file>]");
-  const rawCorpus: unknown = JSON.parse(boundedInput(corpusFile, 2 * 1024 * 1024, true));
-  const replayInput: unknown = JSON.parse(boundedInput(responseFile, 128 * 1024, true));
+  const rawCorpus: unknown = JSON.parse(boundedCanaryAnalysisInput(corpusFile, 2 * 1024 * 1024, true));
+  const replayInput: unknown = JSON.parse(boundedCanaryAnalysisInput(responseFile, 128 * 1024, true));
   if (replayInput !== null && typeof replayInput === "object" && !Array.isArray(replayInput)
     && "version" in replayInput && replayInput.version === "model-canary-coding-native-v1") {
     const request = replayInput as Record<string, unknown>;
     if (Object.keys(request).sort().join(",") !== "cases,corpusDigest,eligibility,plan,released,seed,version")
       throw new Error("coding-native-prepared-input-invalid");
-    const validation = validatePrivateCorpus(rawCorpus, privateTrustAnchors(flag, keyFile));
+    const validation = validatePrivateCorpus(rawCorpus, readPrivateCanaryTrustAnchors(flag, keyFile));
     if (validation.state !== "available") throw new Error(validation.reason);
     if (request.corpusDigest !== validation.metadata.digest || !Array.isArray(request.cases)
       || !request.cases.length || request.cases.some(item => !privateCorpusCaseMatches(validation.corpus, item)
@@ -623,7 +623,7 @@ export async function replayPrivateCli(argv: readonly string[], internal: OwnedC
     } finally { owner.close(); }
   }
   return replayPrivateControl({ rawCorpus, replayInput, ownerDir,
-    trustAnchors: privateTrustAnchors(flag, keyFile) });
+    trustAnchors: readPrivateCanaryTrustAnchors(flag, keyFile) });
 }
 
 // diff-cov: process-boundary — standalone CLI stdout flush and exit; the native child control proves this entry.

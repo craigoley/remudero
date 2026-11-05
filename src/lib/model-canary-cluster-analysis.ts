@@ -72,20 +72,20 @@ const MAX_VALUE = Number.MAX_SAFE_INTEGER;
 const estimands: readonly CanaryAnalysisEstimandV1[] = ["first-attempt", "all-repeats", "best-of-k"];
 const splits: readonly CanaryAnalysisSplitV1[] = ["development", "sealed-holdout"];
 const executionSources: readonly CanaryAnalysisExecutionSourceV1[] = ["native-provider-execution", "synthetic-control-replay"];
-const record = (value: unknown): value is Record<string, unknown> =>
+const clusterAnalysisRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
-const text = (value: unknown, max: number): value is string =>
+const clusterAnalysisText = (value: unknown, max: number): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= max;
-const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
-const finite = (value: unknown): value is number =>
+const clusterAnalysisCompare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+const clusterAnalysisFinite = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= MAX_VALUE;
-const exactKeys = (value: Record<string, unknown>, keys: readonly string[]) =>
+const clusterAnalysisExactKeys = (value: Record<string, unknown>, keys: readonly string[]) =>
   Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
 
 interface DeclaredComparison { endpoints: Set<string>; estimands: Set<CanaryAnalysisEstimandV1> }
 
-function validateDesign(design: ClusterAnalysisDesignV1): Map<string, DeclaredComparison> {
-  if (!record(design) || !exactKeys(design, ["comparisons", "splits"])
+function validateClusterAnalysisDesign(design: ClusterAnalysisDesignV1): Map<string, DeclaredComparison> {
+  if (!clusterAnalysisRecord(design) || !clusterAnalysisExactKeys(design, ["comparisons", "splits"])
     || !Array.isArray(design.comparisons) || design.comparisons.length < 1
     || design.comparisons.length > MAX_COMPARISONS || !Array.isArray(design.splits)
     || design.splits.length < 1 || design.splits.length > splits.length
@@ -94,9 +94,9 @@ function validateDesign(design: ClusterAnalysisDesignV1): Map<string, DeclaredCo
   const declared = new Map<string, DeclaredComparison>();
   let groups = 0;
   for (const item of design.comparisons) {
-    if (!record(item) || !exactKeys(item, ["id", "endpoints", "estimands"])
-      || !text(item.id, 128) || !Array.isArray(item.endpoints) || item.endpoints.length < 1
-      || item.endpoints.length > MAX_ENDPOINTS || item.endpoints.some(endpoint => !text(endpoint, 64))
+    if (!clusterAnalysisRecord(item) || !clusterAnalysisExactKeys(item, ["id", "endpoints", "estimands"])
+      || !clusterAnalysisText(item.id, 128) || !Array.isArray(item.endpoints) || item.endpoints.length < 1
+      || item.endpoints.length > MAX_ENDPOINTS || item.endpoints.some(endpoint => !clusterAnalysisText(endpoint, 64))
       || new Set(item.endpoints).size !== item.endpoints.length || !Array.isArray(item.estimands)
       || item.estimands.length < 1 || item.estimands.some(estimand => !estimands.includes(estimand))
       || new Set(item.estimands).size !== item.estimands.length || declared.has(item.id))
@@ -108,19 +108,19 @@ function validateDesign(design: ClusterAnalysisDesignV1): Map<string, DeclaredCo
   return declared;
 }
 
-function validatePair(value: unknown, declared: Map<string, DeclaredComparison>, allowedSplits: readonly CanaryAnalysisSplitV1[]): ClusteredCanaryPairV1 {
+function validateClusterAnalysisPair(value: unknown, declared: Map<string, DeclaredComparison>, allowedSplits: readonly CanaryAnalysisSplitV1[]): ClusteredCanaryPairV1 {
   const keys = ["pairId", "comparisonId", "endpoint", "estimand", "split", "caseId", "sourceFamilyId", "incidentRootId",
     "executionSource", "complete", "leftValue", "rightValue"];
-  if (!record(value) || !exactKeys(value, keys) || !text(value.pairId, 128)
-    || !text(value.comparisonId, 128) || !declared.has(value.comparisonId)
-    || !text(value.endpoint, 64) || !declared.get(value.comparisonId)!.endpoints.has(value.endpoint)
+  if (!clusterAnalysisRecord(value) || !clusterAnalysisExactKeys(value, keys) || !clusterAnalysisText(value.pairId, 128)
+    || !clusterAnalysisText(value.comparisonId, 128) || !declared.has(value.comparisonId)
+    || !clusterAnalysisText(value.endpoint, 64) || !declared.get(value.comparisonId)!.endpoints.has(value.endpoint)
     || !estimands.includes(value.estimand as CanaryAnalysisEstimandV1)
     || !declared.get(value.comparisonId)!.estimands.has(value.estimand as CanaryAnalysisEstimandV1)
     || !splits.includes(value.split as CanaryAnalysisSplitV1) || !allowedSplits.includes(value.split as CanaryAnalysisSplitV1)
-    || !text(value.caseId, 160) || !text(value.sourceFamilyId, 160) || !text(value.incidentRootId, 160)
+    || !clusterAnalysisText(value.caseId, 160) || !clusterAnalysisText(value.sourceFamilyId, 160) || !clusterAnalysisText(value.incidentRootId, 160)
     || !executionSources.includes(value.executionSource as CanaryAnalysisExecutionSourceV1)
     || typeof value.complete !== "boolean"
-    || !(value.leftValue === null || finite(value.leftValue)) || !(value.rightValue === null || finite(value.rightValue)))
+    || !(value.leftValue === null || clusterAnalysisFinite(value.leftValue)) || !(value.rightValue === null || clusterAnalysisFinite(value.rightValue)))
     throw new Error("canary-cluster-pair-invalid");
   return value as unknown as ClusteredCanaryPairV1;
 }
@@ -132,7 +132,7 @@ interface PairGroup {
   split: CanaryAnalysisSplitV1;
   rows: ClusteredCanaryPairV1[];
 }
-const groupKey = (comparisonId: string, endpoint: string, estimand: string, split: string) =>
+const clusterAnalysisGroupKey = (comparisonId: string, endpoint: string, estimand: string, split: string) =>
   JSON.stringify([comparisonId, endpoint, estimand, split]);
 
 class UnionFind {
@@ -146,22 +146,22 @@ class UnionFind {
   union(left: string, right: string): void {
     const a = this.find(left), b = this.find(right);
     if (a === b) return;
-    if (compare(a, b) <= 0) this.parent.set(b, a); else this.parent.set(a, b);
+    if (clusterAnalysisCompare(a, b) <= 0) this.parent.set(b, a); else this.parent.set(a, b);
   }
 }
 
-function mean(values: readonly number[]): number {
+function clusterAnalysisMean(values: readonly number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function quantile(sorted: readonly number[], probability: number): number {
+function clusterAnalysisQuantile(sorted: readonly number[], probability: number): number {
   const position = (sorted.length - 1) * probability;
   const lower = Math.floor(position), upper = Math.ceil(position);
   if (lower === upper) return sorted[lower]!;
   return sorted[lower]! + (sorted[upper]! - sorted[lower]!) * (position - lower);
 }
 
-function randomIndexGenerator(seed: string, key: string): (bound: number) => number {
+function clusterAnalysisRandomIndexGenerator(seed: string, key: string): (bound: number) => number {
   const stateBytes = createHash("sha256").update(seed).update("\0").update(key).digest();
   let state = stateBytes.readUInt32LE(0) || 0x9e3779b9;
   return (bound: number) => {
@@ -170,19 +170,19 @@ function randomIndexGenerator(seed: string, key: string): (bound: number) => num
   };
 }
 
-function withhold(group: PairGroup, reason: string, pairCount: number, caseCount: number,
+function withholdClusterAnalysis(group: PairGroup, reason: string, pairCount: number, caseCount: number,
   independentClusterCount: number): ClusteredCanaryComparisonV1 {
   return { comparisonId: group.comparisonId, endpoint: group.endpoint, estimand: group.estimand, split: group.split,
     state: "withheld", reason, pairCount, caseCount, independentClusterCount,
     unit: "independent-family-root-component", difference: null };
 }
 
-function estimate(group: PairGroup, seed: string, resamples: number, minIndependentClusters: number,
+function estimateClusterAnalysis(group: PairGroup, seed: string, resamples: number, minIndependentClusters: number,
   leakedAcrossSplits: boolean, remainingWork: number): { result: ClusteredCanaryComparisonV1; work: number } {
   const native = group.rows.filter(row => row.executionSource === "native-provider-execution")
-    .sort((a, b) => compare(a.pairId, b.pairId));
+    .sort((a, b) => clusterAnalysisCompare(a.pairId, b.pairId));
   if (native.length === 0)
-    return { result: withhold(group, "no-observed-native-pairs", 0, 0, 0), work: 0 };
+    return { result: withholdClusterAnalysis(group, "no-observed-native-pairs", 0, 0, 0), work: 0 };
   const pairCount = native.length;
   const caseCount = new Set(native.map(row => row.caseId)).size;
   const uf = new UnionFind();
@@ -193,9 +193,9 @@ function estimate(group: PairGroup, seed: string, resamples: number, minIndepend
     uf.union(family, root); uf.union(task, family);
   }
   if (leakedAcrossSplits)
-    return { result: withhold(group, "source-family-cross-split", pairCount, caseCount, 0), work: 0 };
+    return { result: withholdClusterAnalysis(group, "source-family-cross-split", pairCount, caseCount, 0), work: 0 };
   if (native.some(row => !row.complete || row.leftValue === null || row.rightValue === null))
-    return { result: withhold(group, "incomplete-or-missing-paired-outcome", pairCount, caseCount,
+    return { result: withholdClusterAnalysis(group, "incomplete-or-missing-paired-outcome", pairCount, caseCount,
       new Set(native.map(row => uf.find(JSON.stringify(["family", row.sourceFamilyId])))).size), work: 0 };
 
   const clusterCases = new Map<string, Map<string, number[]>>();
@@ -206,15 +206,15 @@ function estimate(group: PairGroup, seed: string, resamples: number, minIndepend
     values.push(row.rightValue! - row.leftValue!);
     cases.set(row.caseId, values); clusterCases.set(cluster, cases);
   }
-  const clusterMeans = [...clusterCases.values()].map(cases => mean([...cases.values()].map(mean))).sort((a, b) => a - b);
+  const clusterMeans = [...clusterCases.values()].map(cases => clusterAnalysisMean([...cases.values()].map(clusterAnalysisMean))).sort((a, b) => a - b);
   const independentClusterCount = clusterMeans.length;
   if (independentClusterCount < minIndependentClusters)
-    return { result: withhold(group, "insufficient-independent-clusters", pairCount, caseCount, independentClusterCount), work: 0 };
+    return { result: withholdClusterAnalysis(group, "insufficient-independent-clusters", pairCount, caseCount, independentClusterCount), work: 0 };
   const work = independentClusterCount * resamples;
   if (work > remainingWork || work > MAX_TOTAL_BOOTSTRAP_WORK)
-    return { result: withhold(group, "bootstrap-work-bound", pairCount, caseCount, independentClusterCount), work: 0 };
+    return { result: withholdClusterAnalysis(group, "bootstrap-work-bound", pairCount, caseCount, independentClusterCount), work: 0 };
 
-  const randomIndex = randomIndexGenerator(seed, groupKey(group.comparisonId, group.endpoint, group.estimand, group.split));
+  const randomIndex = clusterAnalysisRandomIndexGenerator(seed, clusterAnalysisGroupKey(group.comparisonId, group.endpoint, group.estimand, group.split));
   const draws = new Array<number>(resamples);
   for (let sample = 0; sample < resamples; sample++) {
     let total = 0;
@@ -225,14 +225,14 @@ function estimate(group: PairGroup, seed: string, resamples: number, minIndepend
   return { result: { comparisonId: group.comparisonId, endpoint: group.endpoint, estimand: group.estimand, split: group.split,
     state: "estimated", reason: null, pairCount, caseCount, independentClusterCount,
     unit: "independent-family-root-component",
-    difference: { estimate: mean(clusterMeans), lower95: quantile(draws, 0.025), upper95: quantile(draws, 0.975) } }, work };
+    difference: { estimate: clusterAnalysisMean(clusterMeans), lower95: clusterAnalysisQuantile(draws, 0.025), upper95: clusterAnalysisQuantile(draws, 0.975) } }, work };
 }
 
 /** Resample connected source-family/incident-root components; attempts never become independent units. */
 export function analyzeClusterPairedCanaries(input: ClusteredCanaryAnalysisInputV1): ClusteredCanaryAnalysisV1 {
-  if (!record(input) || !Array.isArray(input.pairs) || input.pairs.length > MAX_PAIRS
-    || !text(input.seed, 128)) throw new Error("canary-cluster-input-invalid");
-  const declared = validateDesign(input.design);
+  if (!clusterAnalysisRecord(input) || !Array.isArray(input.pairs) || input.pairs.length > MAX_PAIRS
+    || !clusterAnalysisText(input.seed, 128)) throw new Error("canary-cluster-input-invalid");
+  const declared = validateClusterAnalysisDesign(input.design);
   const resamples = input.resamples ?? 2000;
   const minIndependentClusters = input.minIndependentClusters ?? 10;
   if (!Number.isSafeInteger(resamples) || resamples < 100 || resamples > MAX_RESAMPLES
@@ -242,8 +242,8 @@ export function analyzeClusterPairedCanaries(input: ClusteredCanaryAnalysisInput
   const unique = new Map<string, { row: ClusteredCanaryPairV1; identity: string }>();
   let syntheticControlPairs = 0;
   for (const raw of input.pairs) {
-    const row = validatePair(raw, declared, input.design.splits);
-    const key = groupKey(row.comparisonId, row.endpoint, row.estimand, row.split) + "\0" + row.pairId;
+    const row = validateClusterAnalysisPair(raw, declared, input.design.splits);
+    const key = clusterAnalysisGroupKey(row.comparisonId, row.endpoint, row.estimand, row.split) + "\0" + row.pairId;
     const identity = JSON.stringify([row.caseId, row.sourceFamilyId, row.incidentRootId, row.executionSource,
       row.complete, row.leftValue, row.rightValue]);
     const prior = unique.get(key);
@@ -267,21 +267,21 @@ export function analyzeClusterPairedCanaries(input: ClusteredCanaryAnalysisInput
   const groups = new Map<string, PairGroup>();
   for (const item of input.design.comparisons) for (const endpoint of item.endpoints)
     for (const estimand of item.estimands) for (const split of input.design.splits) {
-      const key = groupKey(item.id, endpoint, estimand, split);
+      const key = clusterAnalysisGroupKey(item.id, endpoint, estimand, split);
       groups.set(key, { comparisonId: item.id, endpoint, estimand, split, rows: [] });
     }
   for (const { row } of unique.values()) {
-    const group = groups.get(groupKey(row.comparisonId, row.endpoint, row.estimand, row.split));
+    const group = groups.get(clusterAnalysisGroupKey(row.comparisonId, row.endpoint, row.estimand, row.split));
     if (!group) throw new Error("canary-cluster-unpredeclared-group");
     group.rows.push(row);
   }
 
   const comparisons: ClusteredCanaryComparisonV1[] = [];
   let remainingWork = MAX_TOTAL_BOOTSTRAP_WORK;
-  for (const [key, group] of [...groups].sort(([a], [b]) => compare(a, b))) {
+  for (const [key, group] of [...groups].sort(([a], [b]) => clusterAnalysisCompare(a, b))) {
     const groupHasLeak = group.rows.some(row =>
       leaked.has(JSON.stringify(["family", row.sourceFamilyId])) || leaked.has(JSON.stringify(["incident", row.incidentRootId])));
-    const result = estimate(group, input.seed, resamples, minIndependentClusters, groupHasLeak, remainingWork);
+    const result = estimateClusterAnalysis(group, input.seed, resamples, minIndependentClusters, groupHasLeak, remainingWork);
     remainingWork -= result.work;
     comparisons.push(result.result);
   }
