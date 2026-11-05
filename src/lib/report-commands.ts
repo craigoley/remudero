@@ -810,6 +810,19 @@ export interface StatusDeps extends ReportRepoContext {
 export const STATUS_JSON_DEADLINE_MS = 30_000;
 const STATUS_JSON_FINALIZE_RESERVE_MS = 5_000;
 
+/** W1-T11325: the board calls these remote-ref reads after its local derivation; run each once now, while the shared budget is fresh, and answer the board from the result. */
+function prefetchRemoteReads<R extends Record<string, (dir: string) => unknown>>(dir: string, reads: R): R {
+  const held = Object.fromEntries(Object.entries(reads).map(([name, read]) => {
+    const answers = new Map<string, unknown>();
+    return [name, (at: string) => {
+      if (!answers.has(at)) answers.set(at, read(at));
+      return answers.get(at);
+    }];
+  })) as R;
+  for (const read of Object.values(held)) read(dir);
+  return held;
+}
+
 export async function statusCommand(rest: string[], deps: StatusDeps = {}): Promise<number> {
   const out = deps.out ?? ((l: string) => console.log(l));
   const err = deps.err ?? ((l: string) => console.error(l));
@@ -906,7 +919,7 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   const ledgerPath = (deps.ledgerPathFor ?? ledgerPathFor)(config);
   const repoDir = reportRepoRoot(deps);
   let pushedBranchesUnavailable = false;
-  const jsonRemoteReads = jsonMode ? {
+  const jsonRemoteReads = jsonMode ? prefetchRemoteReads(repoDir, {
     resolveOriginMainSha: (dir: string): string | undefined => {
       try {
         const sha = boundedGit(dir, ["rev-parse", "origin/main"]).trim();
@@ -936,7 +949,7 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
         return claims.length ? { status: "held" as const, claims } : { status: "clear" as const };
       } catch (err) { recordError("dispatchClaims", err); return { status: "unreachable" as const }; }
     },
-  } : {};
+  }) : {};
   // GITHUB IS DECORATION, NEVER A GATE: `resolveOwnerRepo`/`buildBatchedGithub` can themselves
   // fail (no `git` remote, no network) — caught here so a status read NEVER throws on a bad
   // network day; the board degrades the rows that needed it to a stated unknown instead.
