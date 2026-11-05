@@ -162,7 +162,9 @@ function readsOf(counted: { bodyRows(): number }, board: BoardProjection, id: st
 }
 
 test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
-  const w = world(t, [...rowsFrom(T0, 40), ...aliasRows(T0 + 50_000, "W1-T23", 1)]);
+  const ownProto = JSON.parse(`{"ts":"${at(T0 + 1_000)}","host":"h1","step":"verdict","task_id":"W1-T24","__proto__":{"source":"own JSON key"}}`) as Row;
+  assert.ok(Object.hasOwn(ownProto, "__proto__"), "control: the parsed fact has an own __proto__ key");
+  const w = world(t, [...rowsFrom(T0, 40), ownProto, ...aliasRows(T0 + 50_000, "W1-T23", 1)]);
   const board = w.board();
   drain(board);
   bucketsOf(board); // every task's bucket held
@@ -181,6 +183,8 @@ test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
     assert.ok(lateAt >= 0 && lateAt < extended["W1-T24"]!.length - 1, `round ${round}: control, the late row is held and sorts before rows already held`);
     assert.equal(extended["W1-T23"]!.filter((r) => (JSON.parse(r) as Row).step === "dispatch.circuit_broken").length, 2 + round,
       `round ${round}: control, the bucket holds every alias row`);
+    assert.ok(extended["W1-T24"]!.some((r) => Object.hasOwn(JSON.parse(r) as Row, "__proto__")),
+      `round ${round}: the extended bucket preserves the own JSON __proto__ key`);
   }
   // A/A: two uncached reads of one store agree, so the comparison above can tell a difference from noise.
   assert.deepEqual(uncachedBuckets(w), uncachedBuckets(w));
@@ -263,7 +267,10 @@ function built(w: World, db: ReadModelDb, view: ReturnType<typeof createNowView>
 }
 
 test("W1-T9716: now-view bodies are identical with the task cache on and off", (t) => {
-  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1)];
+  const protoStart = JSON.parse(`{"ts":"${at(T0 + 60_000)}","host":"h1","step":"run.start","task_id":"W1-T21","__proto__":{"run_id":"inherited"}}`) as Row;
+  assert.ok(Object.hasOwn(protoStart, "__proto__") && !Object.hasOwn(protoStart, "run_id"),
+    "control: run_id appears only inside an own JSON __proto__ key");
+  const history = [...rowsFrom(T0, 40), protoStart, ...aliasRows(T0 + 60_000, "W1-T26", 1)];
   const on = world(t, history);
   const off = world(t, history);
   const [onDb, offDb] = [counting(on.db), counting(off.db)];
