@@ -1,0 +1,63 @@
+- id: W1-T11376
+  title: "A grep proof whose every match is a comment is refused where it is written, not only at review: lint-plan, rmd check-proof and the redesign Architect's edit guard apply review's comment-only rule, so no filer can emit a proof review always grades executed_stale"
+  repo: remudero
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, the comment-only grep rule, applied across four subsystems: review owns the predicate, and lint-plan, check-proof and the redesign Architect each call it
+  origin: operator-session#16652-proof-swap-2026-11-04
+  plan_refs:
+    - W1-T3210
+    - W1-T10372
+    - W1-T11190
+  files:
+    - src/lib/review.ts
+    - src/lib/task-linter.ts
+    - src/lib/check-proof.ts
+    - src/lib/redesign-gardener.ts
+    - test/plan/a-comment-only-grep-proof-is-refused-before-review.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: lint-plan refuses a new or changed grep proof whose pattern can only match comment text in its target, either because the pattern starts with that file's comment opener or because every line it matches at head is a comment, and says review grades it executed_stale
+      proof: "grep: W1-T11376: lint-plan refuses a comment-only grep proof in test/plan/a-comment-only-grep-proof-is-refused-before-review.test.ts"
+    - claim: rmd check-proof reports executed_stale for a grep proof whose every head match is a comment, as review does, instead of discriminates
+      proof: "grep: W1-T11376: check-proof grades a comment-only grep proof executed_stale in test/plan/a-comment-only-grep-proof-is-refused-before-review.test.ts"
+    - claim: the redesign Architect's edit guard refuses a proof that lint-plan's comment-only rule refuses, so the edit is recorded refused and never written to the shard
+      proof: "grep: W1-T11376: the redesign Architect refuses a comment-only grep proof in test/plan/a-comment-only-grep-proof-is-refused-before-review.test.ts"
+  rationale: |
+    OBSERVED 2026-11-04 on #16652 (W1-T11190, compress src/lib/plan.ts comments):
+    - The redesign Architect amended W1-T11190 in #16752 (68f5c1d57e, 16:55:50Z). It replaced the proof with
+      `grep: "// comments compressed" in src/lib/plan.ts` and told the build to add that marker comment.
+    - Review grades a grep proof whose every matched line is a comment as executed_stale (matchedLinesAreAllComments,
+      src/lib/review.ts, W1-T3210; per-language masks from W1-T10372). So the criterion could never pass, whatever the build did.
+      #16652 failed review on it from 18:51Z, and its fix lane reached round 7 with the judge at change-approach.
+    - The operator ruled a proof swap by hand (AskUserQuestion, "Swap proof on #16652").
+    WHY nothing caught it:
+    - redesignEditRefusal (src/lib/redesign-gardener.ts) checks only that a proof has a dialect prefix and one line.
+    - lint-plan (src/lib/task-linter.ts) has grep checks for self-certifying, already-true and unmatchable patterns, but none for comment-only.
+    - rmd check-proof (src/lib/check-proof.ts) prints `discriminates` for a grep that misses at base and hits a comment at head,
+      so a filer who checks the proof is told it is good.
+  design: |
+    1. One predicate, exported from src/lib/review.ts beside matchedLinesAreAllComments, decides "this grep proof can only certify
+       comment text in its target". It is true when either:
+       a. the pattern's literal text begins with a comment opener of the target path's grammar (commentGrammarForPath), so no match
+          can ever be code; or
+       b. the pattern has matches in the given file text and matchedLinesAreAllComments holds for them, with the same comment context
+          review builds.
+       Review keeps calling matchedLinesAreAllComments exactly as today; nothing about its verdicts changes.
+    2. lint-plan gains check `proof-grep-comment-only`, severity block, on criteria added or whose proof changed against the base
+       (the proofGrepAlreadyTrueViolations selection). Part a needs no file read. Part b uses readGrepProofFile. A target that does
+       not exist yet is judged by part a only. The message names review's executed_stale grading and asks for a `unit test:` proof
+       or a grep on a code line the build adds.
+    3. rmd check-proof, after a grep proof passes at head, applies the predicate and prints
+       `discrimination: executed_stale — every matching line is a comment` instead of discriminates.
+    4. redesignEditRefusal refuses a proof the predicate holds for (part a, and part b when the target exists at the Architect's
+       head), returning a reason that names the comment-only rule, so the Architect's outcome is ledgered `refused`.
+    5. No fixed thresholds and no new config. A `kind: guard` criterion is out of scope for the lint check, as it is for already-true.
+  falsifier: |
+    Revert any one of lint-plan's check, check-proof's grading or the Architect's guard, and its named test reddens: the lint test
+    expects a proof-grep-comment-only violation for W1-T11190's original marker proof, the check-proof test expects executed_stale,
+    and the Architect test expects a refusal reason.
