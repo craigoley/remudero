@@ -26,8 +26,8 @@ import { createHash } from "node:crypto";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { READ_MODEL_DIRNAME, openShadowCounterDb, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
-import { renderView, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewBody, type ViewDefinition, type ViewSource } from "./views.js";
-import { readShadowCounters, saveShadowCounter, shadowCounterPath, type ShadowClassification, type ShadowKeyChange, type ShadowPopulation, type ShadowPopulationEvidence, type ViewShadowState } from "./view-shadow-store.js";
+import { computeViewBody, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewBody, type ViewDefinition, type ViewSource } from "./views.js";
+import { readShadowCounters, saveShadowCounter, shadowCounterPath, SHADOW_KEY_RETIRE_MS, type ShadowClassification, type ShadowKeyChange, type ShadowPopulation, type ShadowPopulationEvidence, type ViewShadowState } from "./view-shadow-store.js";
 
 export type { ShadowClassification, ShadowPopulation, ShadowPopulationEvidence, ViewShadowState } from "./view-shadow-store.js";
 
@@ -708,6 +708,8 @@ export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys" | "s
 
 export interface ShadowStore {
   load(): Record<string, ViewShadowState>;
+  /** When each loaded streak key of `view` was last sampled; absent for a store saved before W1-T11330. */
+  keyTimes?(view: string): ReadonlyMap<string, number> | undefined;
   save(view: string, state: ViewShadowState, keys?: ShadowKeyChange): void;
   close?(): void;
 }
@@ -718,17 +720,22 @@ export function viewShadowPath(stateDir: string): string {
 }
 
 /** Counters survive a restart and a scratch wipe in `path`, written only behind the home read model's lease. */
-export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelLease, activeQualifications?: Readonly<Record<string, string>>): ShadowStore {
-  const states = storedShadowStates(path, db, activeQualifications);
+export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelLease, activeQualifications?: Readonly<Record<string, string>>, clock: Clock = systemClock): ShadowStore {
+  // W1-T11330: keys an older build stored without a sample time count as sampled when this store loaded them.
+  const loadedAtMs = clock.now();
+  const counters = readShadowCounters(path, true, activeQualifications, loadedAtMs);
+  const states = counters?.states ?? storedShadowStates(path, db, activeQualifications);
+  const keyTimes = counters?.keyTimes;
   let connection: ReadModelDb | undefined;
   let closed = false;
   return {
     load: () => ({ ...states }),
+    keyTimes: view => keyTimes?.get(view),
     save: (view, state, keys) => {
       if (closed) throw new Error("shadow store is closed");
       withWriteTransaction(db, lease, () => {
         connection ??= openShadowCounterDb(shadowCounterPath(path));
-        saveShadowCounter(path, states, view, state, keys, connection);
+        saveShadowCounter(path, states, view, state, keys, connection, loadedAtMs);
       });
       states[view] = state;
     },
@@ -884,18 +891,81 @@ export interface ViewShadow {
 export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
   const clock = opts.clock ?? systemClock;
   const states = new Map<string, ViewShadowState>(Object.entries(opts.store?.load() ?? {}));
-  const streakKeys = new Map<string, Set<string>>();
+  /** Each streak's keys, least recently sampled first, with the time each was last sampled (W1-T11330). */
+  const streakKeys = new Map<string, Map<string, number>>();
   const persistenceFailed = new Set<string>();
+  const keysOf = (stateKey: string, state: ViewShadowState, now: number): Map<string, number> => {
+    const known = streakKeys.get(stateKey);
+    if (known) return known;
+    // The file store times an older build's keys at its load (W1-T11330); a store with no times at all counts them as sampled now.
+    const times = opts.store?.keyTimes?.(stateKey);
+    const keys = new Map((state.streakKeys ?? []).map(key => [key, times?.get(key) ?? now] as const).sort((a, b) => a[1] - b[1]));
+    streakKeys.set(stateKey, keys);
+    return keys;
+  };
+  /** Retires keys unsampled for a day; the persisted list catches up once it holds twice the live keys, or before a full write. */
+  const retireKeys = (stateKey: string, state: ViewShadowState, now: number, exact = false): void => {
+    const keys = streakKeys.get(stateKey);
+    if (!keys) return;
+    for (const [key, sampled] of keys) {
+      if (now - sampled < SHADOW_KEY_RETIRE_MS) break;
+      keys.delete(key);
+    }
+    const listed = state.streakKeys?.length ?? 0;
+    if (listed !== keys.size && (exact || listed >= 2 * keys.size)) state.streakKeys = (state.streakKeys ?? []).filter(key => keys.has(key));
+  };
   const qualifications = opts.qualifications ?? {};
   const populationOf = (view: string) => requiredPopulation(view, opts.populations, opts.populationViews);
   const persist = (key: string, state: ViewShadowState, keys: ShadowKeyChange): void => {
     // A later delta cannot replay a lost append or reset. Reconcile exact membership once after failure.
+    if (persistenceFailed.has(key)) retireKeys(key, state, clock.now(), true);
     try { opts.store?.save(key, state, persistenceFailed.has(key) ? undefined : keys); persistenceFailed.delete(key); }
     catch (error) { persistenceFailed.add(key); throw error; }
   };
   const stateOf = (view: string): ViewShadowState => {
     const generation = qualifications[view], key = qualifiedStateKey(view, generation);
     return states.get(key) ?? states.set(key, { ...emptyState(), ...(generation === undefined ? {} : { view, qualificationGeneration: generation }) }).get(key)!;
+  };
+  /** An archive of `view` under qualification `required`, carrying a well-formed population (W1-T11329); an
+   * archive with no qualification generation belongs to no qualification. */
+  const archivedPopulationOf = (archived: ViewShadowState, view: string, required: string | undefined): archived is ViewShadowState & { population: ShadowPopulationEvidence } =>
+    archived.view === view && required !== undefined && typeof archived.qualificationGeneration === "string" && archived.qualificationGeneration.startsWith(`${required}:retired:`)
+    && archived.population !== undefined && populationEvidenceShape(archived.population);
+  /** Archived population records of this view's current qualification, newest life first per logical page (W1-T11329). */
+  const retiredPages = (view: string, required: string | undefined): Map<string, ShadowPopulationEvidence["pages"][number]> => {
+    const byKey = new Map<string, ShadowPopulationEvidence["pages"][number]>();
+    if (required === undefined) return byKey;
+    for (const archived of states.values()) {
+      if (!archivedPopulationOf(archived, view, required)) continue;
+      for (const page of archived.population.pages) {
+        if (page.samples === 0 || page.lastSampleMs === null) continue;
+        const seen = byKey.get(page.logicalKey);
+        if (!seen || (seen.lastSampleMs ?? -Infinity) < page.lastSampleMs) byKey.set(page.logicalKey, page);
+      }
+    }
+    return byKey;
+  };
+  /** The evidence a returning page left with, when it is the same incarnation, left under a day ago, and no real diff landed since. */
+  const retiredPageEvidence = (view: string, required: string | undefined, logicalKey: string, incarnation: string, now: number,
+    lastRealMs: number | null): ShadowPopulationEvidence["pages"][number] | undefined => {
+    const left = retiredPages(view, required).get(logicalKey);
+    if (!left || left.incarnation !== incarnation || left.lastSampleMs === null || now - left.lastSampleMs >= DAY_MS) return undefined;
+    if (lastRealMs !== null && lastRealMs >= left.lastSampleMs) return undefined;
+    return { ...left };
+  };
+  /** Paged views: current pages younger than a day, and how many of those had lived before (W1-T11329 criterion 2). A page
+   * re-appeared when an archived population holds it and a later archived population lacks it: it left and came back. */
+  const youngPages = (view: string, state: ViewShadowState, now: number): { pages_young: number; pages_young_reappeared: number } | undefined => {
+    if (!state.population) return undefined;
+    const lives: Array<{ atMs: number; keys: Set<string> }> = [];
+    for (const archived of states.values()) {
+      if (!archivedPopulationOf(archived, view, state.qualificationGeneration)) continue;
+      const atMs = Math.max(...archived.population.pages.map(page => page.lastSampleMs ?? -Infinity), archived.streakSinceMs ?? -Infinity);
+      if (Number.isFinite(atMs)) lives.push({ atMs, keys: new Set(archived.population.pages.map(page => page.logicalKey)) });
+    }
+    const reappeared = (key: string) => lives.some(held => held.keys.has(key) && lives.some(left => !left.keys.has(key) && left.atMs > held.atMs));
+    const young = state.population.pages.filter(page => page.sinceMs === null || now - page.sinceMs < DAY_MS);
+    return { pages_young: young.length, pages_young_reappeared: young.filter(page => reappeared(page.logicalKey)).length };
   };
   /** Adds one sample to the view's summary window, and writes the window's row once it spans an hour. */
   const summarize = (view: string, state: ViewShadowState, now: number, sample: { skipped?: boolean; diffs?: ReadonlyArray<{ classification: ShadowClassification }> }): void => {
@@ -905,7 +975,8 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
     for (const d of sample.diffs ?? []) w.diffs[d.classification]++;
     if (now - w.sinceMs < VIEW_SHADOW_SUMMARY_MS) return;
     const { streakSamples, streakSinceMs, lastRealMs, ready } = shadowReadiness(view, state, now, undefined, populationOf(view));
-    opts.log(VIEW_SHADOW_SUMMARY_STEP, { view, ...(state.qualificationGeneration === undefined ? {} : { qualificationGeneration: state.qualificationGeneration }), ...w, streakSamples, streakSinceMs, lastRealMs, ready });
+    opts.log(VIEW_SHADOW_SUMMARY_STEP, { view, ...(state.qualificationGeneration === undefined ? {} : { qualificationGeneration: state.qualificationGeneration }), ...w, streakSamples, streakSinceMs, lastRealMs, ready,
+      ...youngPages(view, state, now) });
     state.summary = { sinceMs: now, samples: 0, skipped: 0, diffs: noDiffs() };
   };
   return {
@@ -945,6 +1016,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       let populationChanged = false;
       if (population && (!state.population || !samePopulation(state.population, population))) {
         const previous = state.population;
+        retireKeys(qualifiedStateKey(view, required), state, now, true);
         if (previous || state.samples > 0 || (state.streakKeys?.length ?? 0) > 0) {
           const digest = createHash("sha256").update(JSON.stringify([previous, state.streakSamples, state.streakKeys])).digest("hex");
           const archiveGeneration = `${required}:retired:${digest}`, archiveKey = qualifiedStateKey(view, archiveGeneration);
@@ -956,7 +1028,11 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         const old = new Map(previous?.pages.map(page => [page.logicalKey, page]) ?? []);
         state.population = { generation: population.generation, scope: { ...population.scope }, pages: population.pages.map(page => {
           const kept = old.get(page.logicalKey);
-          return kept?.incarnation === page.incarnation ? { ...kept } : { logicalKey: page.logicalKey, incarnation: page.incarnation, samples: 0, sinceMs: null, lastSampleMs: null };
+          if (kept?.incarnation === page.incarnation) return { ...kept };
+          // W1-T11329: a page absent from the previous population that returns with its own incarnation gets back the
+          // evidence it measured before it left, unless a real diff landed since or it has been gone a day.
+          const returned = kept === undefined ? retiredPageEvidence(view, required, page.logicalKey, page.incarnation, now, state.lastRealMs) : undefined;
+          return returned ?? { logicalKey: page.logicalKey, incarnation: page.incarnation, samples: 0, sinceMs: null, lastSampleMs: null };
         }) };
         state.streakKeys = population.pages.map(page => page.logicalKey);
         populationChanged = true;
@@ -997,9 +1073,10 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
           own.sinceMs ??= now; own.lastSampleMs = now; own.samples++; state.streakSamples++;
         }
       } else {
-        const keys = streakKeys.get(stateKey) ?? new Set(state.streakKeys ?? []);
-        streakKeys.set(stateKey, keys);
-        if (!keys.has(key)) { keys.add(key); (state.streakKeys ??= []).push(key); }
+        const keys = keysOf(stateKey, state, now);
+        if (!keys.has(key)) (state.streakKeys ??= []).push(key);
+        keys.delete(key); keys.set(key, now);
+        retireKeys(stateKey, state, now);
         state.streakSamples++;
       }
       if (diffs.some((d) => d.classification === "real")) {
@@ -1011,11 +1088,17 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, ...(required === undefined ? {} : { qualificationGeneration: required }), classes, ...(legacy.inputs ? { inputs: legacy.inputs } : {}), ...(legacy.paired ? { paired: legacy.paired } : {}), diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
       }
       summarize(view, state, now, { diffs });
-      persist(stateKey, state, population ? { reset: reset || populationChanged, ...(reset || populationChanged ? { replace: state.population!.pages.map(page => page.logicalKey) } : {}) } : { reset, ...(reset ? {} : { add: key }) });
+      persist(stateKey, state, population ? { reset: reset || populationChanged, ...(reset || populationChanged ? { replace: state.population!.pages.map(page => page.logicalKey) } : {}) } : { reset, ...(reset ? {} : { add: key, atMs: now }) });
       return { view, key, diffs };
     },
-    readiness: () => activeReadiness(new Map([...states].map(([key, state]) => [key, persistenceFailed.has(key)
-      ? { ...state, qualificationRefusal: "shadow persistence failed; current counters are not committed" } : state])), qualifications, clock.now(), undefined, populationOf),
+    readiness: () => {
+      const now = clock.now();
+      // A key unsampled for a day owes no more cadence, so readiness counts only the live keys.
+      for (const [key, state] of states) retireKeys(key, state, now);
+      return activeReadiness(new Map([...states].map(([key, state]) => [key, persistenceFailed.has(key)
+        ? { ...state, qualificationRefusal: "shadow persistence failed; current counters are not committed" } : state])), qualifications, now,
+      new Map([...streakKeys].map(([key, keys]) => [key, keys.size])), populationOf);
+    },
     close: () => opts.store?.close?.(),
   };
 }
@@ -1082,7 +1165,8 @@ export function legacyViewSampler(opts: { legacy: readonly ViewDefinition[]; pos
     clock, ...(opts.defer ? { defer: opts.defer } : {}), ...(opts.identity ? { identity: opts.identity } : {}),
     send: ({ view, key, params, requests }) => {
       const definition = legacy.get(view);
-      const rendered = definition ? renderView(definition, clock, params) : undefined;
+      // The comparator reads only the body, so the legacy side never pays for an entity tag (W1-T11328).
+      const rendered = definition ? computeViewBody(definition, clock, params) : undefined;
       if (rendered === undefined || "error" in rendered) return opts.post({ view, key, requests });
       const asOf = rendered.body.asOf === null ? Number.NaN : Date.parse(rendered.body.asOf);
       const unready = unreadySources(rendered.body.sources);

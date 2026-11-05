@@ -1,0 +1,43 @@
+- id: W1-T11320
+  title: A watchdog-initiated recycle waits as long as its in-flight lanes need, from deriveDrainWait, instead of the 3,000 s no-history fallback
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the launcher every watchdog recycle runs, the deployer's lane read and the verb that carries the wait; a lane still bounds the wait, nothing is cut short
+  band_meaning: span
+  origin: operator-session#recycle-efficiency-2026-11-04
+  plan_refs:
+    - W1-T8138
+    - W1-T5688
+    - W1-T2598
+  files:
+    - src/lib/deployer.ts
+    - src/run-task.ts
+    - deploy/install-host-units.sh
+    - test/deploy/a-watchdog-recycle-waits-as-long-as-its-lanes-need.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: rmd progress-watchdog --json carries drainWaitS and drainWaitSource from deriveDrainWait over the in-flight lane locks and recorded implement durations, the rendered launcher passes that value to recycle-container.sh as RMD_RECYCLE_WAIT_S on a recycle verdict, and an RMD_RECYCLE_WAIT_S already in the environment still wins
+      proof: "unit test: test/deploy/a-watchdog-recycle-waits-as-long-as-its-lanes-need.test.ts"
+    - claim: The launcher's verdict recycle names this task
+      proof: "grep: W1-T11320 in deploy/install-host-units.sh"
+  rationale: |
+    OBSERVED 2026-11-04:
+    - The progress watchdog's recycle (RECYCLE-3864750, 13:04:08Z) ran recycle-container.sh through the launcher's watchdog_recycle (deploy/install-host-units.sh). It passes RMD_RECYCLE_CALLER and RMD_RECYCLE_VERDICT and no RMD_RECYCLE_WAIT_S.
+    - So the script used "no-history fallback (nothing supplied RMD_RECYCLE_WAIT_S)", 3,000 s, and refused at 14:00:25Z with "0 lane-holding and 2 lane-less worker(s) still in flight after 3000s". It held state/PAUSE the whole time.
+    - The only lane in flight, W1-T10332, ended during the wait.
+    - W1-T8138 derives the wait from the lanes actually in flight (deriveDrainWait, src/lib/deployer.ts, ledgered as deploy.recycle_wait_derived), but only on the deploy supervisor's own path. Its lane read is inline in deployer.ts and not exported, so the watchdog path cannot reach it.
+  design: |
+    - Extract deployer.ts's inline lane read (state/inflight/*.lock holders less settled or judged runs) into an exported readDrainWaitLanes(stateDir, ledgerText, clock).
+    - progressWatchdogCommand (src/run-task.ts) adds drainWaitS and drainWaitSource to its JSON from deriveDrainWait(readImplementDurationsMs(text), lanes).
+    - In the rendered ladder, recycle_on_verdict reads drainWaitS with verdict_field and passes RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-<derived>}" to watchdog_recycle.
+    - Mark the ladder change with a comment naming W1-T11320.
+    NOT IN SCOPE: what the wait counts (lane-less workers keep their own rules), the fallback value, and recycle-container.sh.
+  note: |
+    reservation hand-off: run-unfiled-1793801339784 -> run-unfiled-1793801339784
+    Reserved with rmd next-task-id (W1-T11320 on run-unfiled-1793801339784). From the operator session's recycle-efficiency research.

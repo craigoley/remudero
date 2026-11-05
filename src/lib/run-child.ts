@@ -14,7 +14,7 @@ import { isDeepStrictEqual } from "node:util";
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
 import { systemClock } from "./clock.js";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
-import { type EngineRef, listEngines, newestCurrentEngine, type NewestEngineOptions } from "./engine-tree.js";
+import { type EnginePinOptions, type EngineRef, listEngines, newestCurrentEngine, type NewestEngineOptions, pinEngineForRun } from "./engine-tree.js";
 import { defaultInstance, type HostMemoryLedgerOptions } from "./host-memory-ledger.js";
 import {
   createTreePeakSampler, openLearnedReservation, type LearnedReservation, type PeakStoreOptions, type TreePeakSampler,
@@ -25,8 +25,8 @@ import { loadRunChildMode, runChildEffectiveMode, type RunChildMode } from "./po
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { pauseDetail, stopDetail } from "./fleet-control.js";
 import {
-  classifyRunChildLoss, createRunChildModeTracker, decideRunChildMode, emptyRunChildModeEvidence, readRunChildModeUnion, readRunChildPolicy,
-  runChildModeFor, runChildModeWindow, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence,
+  bootRunChildModeTracker, classifyRunChildLoss, createRunChildModeTracker, decideRunChildMode, emptyRunChildModeEvidence, readRunChildModeUnion,
+  readRunChildPolicy, runChildModeFor, runChildModeWindow, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence, type RunChildModeTracker,
 } from "./run-child-mode.js";
 import {
   RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, realRunChildProbe, runDir, writeSpec, writeStatus,
@@ -280,6 +280,8 @@ export interface RunChildProbePorts {
   /** main's tip, for `newestCurrentEngine`; default {@link mainTipSha}. */
   mainSha?: (repoDir: string) => Promise<string>;
   engine?: Pick<NewestEngineOptions, "git" | "isCurrent">;
+  /** The pin lock's wait and clock seams (engine-tree.ts pinEngineForRun); default the real ones. */
+  enginePin?: EnginePinOptions;
   /** The launch argv for the probe; the default resolves a bundle in the engine tree, else tsx from it. */
   launch?: (engine: EngineRef, args: readonly string[], log: Log) => EngineChildLaunch;
   spawn?: (command: string, args: readonly string[], options: { cwd: string }) => ChildProcess;
@@ -405,7 +407,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
       // Not erased: the skip row carries the reason. A tip that cannot be read is never answered with HEAD.
       return skip(reasonOf(error));
     }
-    const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...seams.engine });
+    let engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...seams.engine });
     if (!engine) return skip("no current engine tree for main");
     const entry = (seams.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(engine, [], log);
     if (input.work) await requireDetachedWorkEntry(entry, input.work.kind);
@@ -424,12 +426,20 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
       { workerClass: "run-child-probe", root: input.root, entryKind },
       { sampler: s, ...(seams.ledger ? { ledger: seams.ledger } : {}), ...(seams.store ? { store: seams.store } : {}) },
     )))(launch.kind, sampler);
-    writeSpec(dir, {
+    // The spec names the revision the engine's record holds under the pin, never the one resolved before the wait.
+    const probeReservation = reservation;
+    const pinnedProbe = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (pinned) => writeSpec(dir, {
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
-      engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
-      reservationId: reservation.id ?? "", options,
+      engine: pinned, planSnapshotPath: snapshot.path,
+      reservationId: probeReservation.id ?? "", options,
       ...(input.work ? { work: input.work } : {}),
-    } as RunChildSpec);
+    } as RunChildSpec), seams.enginePin);
+    if ("unavailable" in pinnedProbe) {
+      reservation.releaseOccupancy();
+      reservation = undefined;
+      return skip(pinnedProbe.unavailable);
+    }
+    engine = { ...engine, sha: pinnedProbe.sha };
     inFlightRunDirs.add(dir);
     const child = probeChild = (seams.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], { cwd: options.cwd, stdio: ["ignore", "ignore", "pipe"] })))(
       process.execPath, launch.argv, { cwd: launch.cwd },
@@ -634,6 +644,8 @@ export interface RunChildPending {
 export interface SpawnRunChildPorts {
   mainSha?: (repoDir: string) => Promise<string>;
   engine?: Pick<NewestEngineOptions, "git" | "isCurrent">;
+  /** The pin lock's wait and clock seams (engine-tree.ts pinEngineForRun); default the real ones. */
+  enginePin?: EnginePinOptions;
   launch?: (engine: EngineRef, args: readonly string[], log: Log) => EngineChildLaunch;
   spawn?: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; stderrFd: number }) => ChildProcess;
   /** Admission and the reservation, in the daemon, before the spawn. The default is {@link reserveRunChild}. */
@@ -841,12 +853,16 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     // The snapshot and the spec are written back to back, so a prune between them cannot take a snapshot a spec is about to name.
     const snapshot = writePlanSnapshot(input.stateRoot, admitted.plan.tasks);
     inFlightRunDirs.add(dir);
-    writeSpec(dir, {
+    // The spec names the revision the engine's record holds under the pin, never the one resolved before the wait.
+    const runReservation = reservation;
+    const pinned = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (current) => writeSpec(dir, {
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
-      engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
-      reservationId: reservation.id ?? "", options,
+      engine: current, planSnapshotPath: snapshot.path,
+      reservationId: runReservation.id ?? "", options,
       ...(input.work ? { work: input.work } : {}),
-    } as RunChildSpec);
+    } as RunChildSpec), ports.enginePin);
+    if ("unavailable" in pinned) throw new Error(pinned.unavailable);
+    engineSha = pinned.sha;
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
     spawnedAt = clock();
@@ -1385,16 +1401,24 @@ export function detachedWorkPlacement(
  */
 export const HOSTED_DETACHED_WORK_KINDS: ReadonlySet<DetachedWorkKind> = new Set<DetachedWorkKind>(["review", "fix-dispatch", "retro"]);
 
-/** `sweep.runChild.mode` as detached work reads it: `auto` is decided from the ledger evidence the build runs use (W1-T9087). */
+/**
+ * `sweep.runChild.mode` as detached work reads it: `auto` is decided from the ledger evidence the build runs use (W1-T9087).
+ * W1-T11341: that evidence is the tracker this process's boot folds (`bootRunChildMode`), which read the union once and has
+ * observed every run-child row since. Re-reading the union on each spawn held core's loop 34 s in one 11-04 stall. Only a
+ * process no boot handed a tracker (a one-shot command, a test) still reads the union, as before.
+ */
 export function detachedWorkModeNow(
   stateRoot: string, read: () => RunChildMode = () => loadRunChildMode(), readUnion: typeof readRunChildModeUnion = readRunChildModeUnion,
+  tracker: Pick<RunChildModeTracker, "evidence"> | undefined = bootRunChildModeTracker(stateRoot),
 ): DetachedWorkMode {
   const policy = readRunChildPolicy(read);
   if (policy.mode === undefined) return "off";
   if (policy.mode !== "auto") return runChildModeFor(policy.mode, emptyRunChildModeEvidence()).mode;
   try {
-    const union = readUnion(stateRoot);
-    const evidence = createRunChildModeTracker(runChildModeWindow(union.rows), undefined, union.unread).evidence();
+    const evidence = tracker?.evidence() ?? (() => {
+      const union = readUnion(stateRoot);
+      return createRunChildModeTracker(runChildModeWindow(union.rows), undefined, union.unread).evidence();
+    })();
     const decision = runChildModeFor("auto", evidence);
     // Build runs retain `on` after W1-T9089. Detached work still has an in-process path and must demote on contract loss.
     if (decision.decision && (decision.decision.evidence.lost > 0 || decision.decision.evidence.misidentified > 0)) return "shadow";
@@ -1416,6 +1440,10 @@ export interface DetachedWorkHostInput {
   /** The ledger rows the measured drain cost is read from. */
   readLedger: () => ReadonlyArray<Record<string, unknown>>;
   readMode?: () => RunChildMode;
+  /** W1-T11341: the evidence `auto` decides from; the boot's own tracker for `stateRoot` by default. */
+  tracker?: RunChildModeTracker;
+  /** The union read a host with no boot tracker falls back to; injectable so a test can count it. */
+  readUnion?: typeof readRunChildModeUnion;
   spawn?: typeof spawnRunChild;
   probe?: typeof startRunChildProbe;
   selectedRegistryIntent?: RunChildSpecOptions["selectedRegistryIntent"];
@@ -1430,7 +1458,13 @@ export interface DetachedWorkHostInput {
 export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWorkChildHost {
   const intent = copySelectedRegistryIntent(input.selectedRegistryIntent);
   const options = (): RunChildSpecOptions => ({ selectedRegistryIntent: intent });
-  const mode = (): DetachedWorkMode => detachedWorkModeNow(input.stateRoot, input.readMode);
+  const tracker = (): RunChildModeTracker | undefined => input.tracker ?? bootRunChildModeTracker(input.stateRoot);
+  const mode = (): DetachedWorkMode => detachedWorkModeNow(input.stateRoot, input.readMode, input.readUnion, tracker());
+  // The rows this host writes are evidence too: the tracker observes them as the daemon's own log does for its builds.
+  const log: Log = (step, extra) => {
+    input.log(step, extra);
+    tracker()?.observe(step, extra);
+  };
   let probing = false;
   return {
     hosts: HOSTED_DETACHED_WORK_KINDS,
@@ -1438,7 +1472,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
     async spawnReview({ pr, reviewKey, reviewAttemptId }) {
       // W1-T11162: a plan-only filing is lint and grep proofs, so it never pays for a run child's start.
       if (pr.isPlanFiling === true) {
-        input.log("review.placement", { pr_number: pr.prNumber, head_sha: pr.headSha, placement: "in-process", reason: "plan-only-filing" });
+        log("review.placement", { pr_number: pr.prNumber, head_sha: pr.headSha, placement: "in-process", reason: "plan-only-filing" });
         return undefined;
       }
       const current = mode();
@@ -1452,7 +1486,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
           probing = true;
           void (input.probe ?? startRunChildProbe)({
             taskId: `review-PR${pr.prNumber}`, stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-            plan: Promise.resolve({ plan: { tasks: [] } }), options: options(), log: input.log, work,
+            plan: Promise.resolve({ plan: { tasks: [] } }), options: options(), log, work,
           }, { readMode: () => "shadow" }).finally(() => { probing = false; });
         }
         return undefined;
@@ -1464,7 +1498,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       if (placement.placement !== "child") return undefined;
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "review", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
       });
       if (!launch.started) return undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge,
@@ -1480,7 +1514,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey, inputs: { repo: input.repo, envelope } };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "sweep-fix", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
@@ -1494,7 +1528,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = { kind: "retro", inputs: { decision } };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: "DAEMON", lane: "retro", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };

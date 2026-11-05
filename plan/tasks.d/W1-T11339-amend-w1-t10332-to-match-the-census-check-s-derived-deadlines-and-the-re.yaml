@@ -1,0 +1,25 @@
+- id: W1-T11339
+  title: Amend W1-T10332 to match the census check's derived deadlines and the refusal sites that consume it
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T10332-a-timed-out-census-child-is-not-measured.yaml
+  acceptance:
+    - claim: W1-T10332's design names the derived controller deadline and the 120 s child bound, replacing its fixed 60 s bound
+      proof: "grep: controllerTimeBoundMs in plan/tasks.d/W1-T10332-a-timed-out-census-child-is-not-measured.yaml"
+    - claim: W1-T10332's declared files include src/cli/commands/fix.ts, where a census refusal stops the round's commit
+      proof: "grep: src/cli/commands/fix.ts in plan/tasks.d/W1-T10332-a-timed-out-census-child-is-not-measured.yaml"
+    - claim: W1-T10332's design states how a timeout is treated now that the check already prints a NOT MEASURED refusal and the fix prompt says NOT MEASURED is not a passing verdict, and names the operator ruling to keep or change that
+      proof: "grep: NOT MEASURED is not a passing verdict in plan/tasks.d/W1-T10332-a-timed-out-census-child-is-not-measured.yaml"
+  origin: followup:W1-T10332-1793747905592:2026-11-03T23:23:36.658Z:0
+  rationale: >-
+    From the 2026-11-03 follow-up on W1-T10332-1793747905592, ratified via rmd approve:
+  
+    follow-up harvest [task]: Reconcile W1-T10332 with current controller deadlines before
+    implementation, because bounds and refusal handling have changed since filing. — from
+    W1-T10332 (run W1-T10332-1793747905592)

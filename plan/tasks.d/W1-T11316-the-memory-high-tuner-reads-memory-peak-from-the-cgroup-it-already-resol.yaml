@@ -1,0 +1,30 @@
+- id: W1-T11316
+  title: The memory-high tuner reads memory.peak from the cgroup it already resolved instead of re-running docker inspect on each policy read
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=3fe5bae3fd97df4e
+  # backlog gardener: placed=2026-11-04T18:42:37.506Z
+  attempts: 0
+  files:
+    - deploy/memory-high-tuner.sh
+    - test/a-squeezed-page-cache-grows-its-memory-high.test.ts
+  acceptance:
+    - claim: The tuner reads memory.peak from the container cgroup path it has already resolved
+      proof: "grep: memory.peak in deploy/memory-high-tuner.sh"
+    - claim: A policy read makes no extra docker inspect call for the peak once the cgroup is resolved
+      proof: "unit test: the tuner reads memory.peak from the resolved cgroup without extra docker inspect calls"
+  origin: followup:DAEMON-1793737148911:2026-11-03T22:52:27.064Z:2
+  rationale: >-
+    From the 2026-11-03 follow-up on https://github.com/craigoley/remudero/pull/16468, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: the tuner could write memory.peak from the cgroup it already
+    resolved, avoiding about four extra `docker inspect` calls per policy read. That change is in
+    `deploy/memory-high-tuner.sh`, outside this task's declared scope. — from W1-T11130 (run
+    DAEMON-1793737148911, https://github.com/craigoley/remudero/pull/16468)

@@ -1,0 +1,37 @@
+- id: W1-T11303
+  title: Defuse the four expiring wire-name fixtures crossing 2026-11-05 to 2026-11-10 with the census exempt marker
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - test/a-flapping-stalled-stage-escalates-once-per-head.test.ts
+    - test/a-posted-gate-check-stays-rerunnable.test.ts
+    - test/a-dependabot-refusal-names-its-own-security-verdict.test.ts
+    - test/the-fix-progress-judge-sees-the-red-it-rules-on.test.ts
+  acceptance:
+    - claim: The stalled-stage fixture's lastActivityAt stamp carries the expiring-fixture exempt marker with its reason, since its tests compare only against a fixed injected clock
+      proof: "grep: expiring-fixture: exempt in test/a-flapping-stalled-stage-escalates-once-per-head.test.ts"
+    - claim: The posted-gate-check fixtures carry the exempt marker with a reason
+      proof: "grep: expiring-fixture: exempt in test/a-posted-gate-check-stays-rerunnable.test.ts"
+    - claim: The dependabot-refusal fixture carries the exempt marker with a reason
+      proof: "grep: expiring-fixture: exempt in test/a-dependabot-refusal-names-its-own-security-verdict.test.ts"
+    - claim: The fix-progress-judge fixtures (stamp 2026-10-28) carry the exempt marker with a reason
+      proof: "grep: expiring-fixture: exempt in test/the-fix-progress-judge-sees-the-red-it-rules-on.test.ts"
+  origin: architect
+  rationale: >-
+    From the 2026-11-03 follow-up on https://github.com/craigoley/remudero/pull/16468, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: defuse (exempt marker or clock-derived stamp)
+    `test/a-flapping-stalled-stage-escalates-once-per-head.test.ts:25`,
+    `test/a-posted-gate-check-stays-rerunnable.test.ts:123,143` and
+    `test/a-dependabot-refusal-names-its-own-security-verdict.test.ts:90` on main. They cross
+    between 2026-11-05 and 2026-11-10.
+    `test/the-fix-progress-judge-sees-the-red-it-rules-on.test.ts:222,247` (stamp 2026-10-28)
+    enters the window about 2026-11-04. — from W1-T11130 (run DAEMON-1793714229512,
+    https://github.com/craigoley/remudero/pull/16468)

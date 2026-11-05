@@ -182,9 +182,8 @@ import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-upda
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { revisionedRead, type ReadGeneration } from "./lib/read-plane.js";
-import { LightPassPreReviewTiming, observeLightPassReviewEligibility } from "./lib/sweep.js";
-import { createDistanceProbeSequence, distanceRefreshProbeTargets } from "./lib/tick-read-worker.js";
-import { GITHUB_COMPARE_FILES_LISTED } from "./lib/base-reproduction.js";
+import { observeLightPassReviewEligibility } from "./lib/sweep.js";
+import { createReadyPrCompareReader } from "./lib/light-pass-compare.js";
 import { readPlaneWorkerInput } from "./lib/read-plane.worker.js";
 import { globSync, renameSync } from "node:fs";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
@@ -216,7 +215,7 @@ import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { admittedFixTestPaths } from "./lib/fix-test-scope.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
-  type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
+  type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, setGhReadActorResolver, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -632,6 +631,8 @@ import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, spoolingStarvationAlert } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { testPlaceOutcome } from "./lib/test-placement.js";
+import { selectedRegistryShadowMain } from "./selected-registry-shadow-main.js";
+import { recordEscalationIntakeOutcome } from "./lib/escalation-correspondence.js";
 import { readPlanBase } from "./lib/plan-base-reader.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
@@ -1289,6 +1290,7 @@ import {
   captureDiagnosticsBundle,
   decideProgressWatchdog,
   openPrCountReadingFromRows,
+  readLiveRecyclePausePid,
   renderProgressWatchdogVerdict,
 } from "./lib/progress-watchdog.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
@@ -1322,7 +1324,7 @@ import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhR
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, observeSelectedRegistrySync,
-  selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+  selectedRegistryLifecycleExec, selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -2996,6 +2998,7 @@ export function buildEscalationTriageRuntime(
 ): ((deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings) & { refresh(ledgerPath: string): Promise<void> } {
   const { root, config, owner, repo } = context;
   let pass: ReturnType<typeof newTriagePass> | undefined;
+  let reportedBytes = 0, reportedRotations = 0;
   const evidenceHistory = io.evidenceHistory ?? createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE });
   const readRows = io.readRows ?? ((path) => {
     const read = evidenceHistory.current(dirname(path));
@@ -3027,7 +3030,10 @@ export function buildEscalationTriageRuntime(
     if (!id || e.taskId !== `TRIAGE-${id}`) throw new Error("feedback referent is unreadable");
     return id;
   };
-  const refresh = async (ledgerPath: string): Promise<void> => void (await evidenceHistory(dirname(ledgerPath)));
+  const refresh = async (ledgerPath: string): Promise<void> => {
+    reportedBytes = 0; reportedRotations = 0;
+    await evidenceHistory(dirname(ledgerPath));
+  };
   return Object.assign((deps: EscalateDeps<AsyncIssueGateway>): EscalateTriageSettings => {
     const policy = parseEscalationTriagePolicy((io.readPolicy ?? (() => readEscalationTriagePolicySource(root)))());
     pass ??= newTriagePass(policy.maxAutoResolvesPerPass);
@@ -3035,7 +3041,21 @@ export function buildEscalationTriageRuntime(
     return {
       mode: policy.mode, pass, asyncExecutors: true,
       evidence: (e) => {
-        const history = readRows(deps.ledgerPath);
+        let history: Record<string, unknown>[];
+        try {
+          history = readRows(deps.ledgerPath);
+        } finally {
+          if (!io.readRows) {
+            const cost = evidenceHistory.lastLoad();
+            appendSliceReadRow(deps.ledgerPath, deps.runId, "escalation_triage.evidence_read", {
+              evidence_bytes_read: cost.bytesRead - reportedBytes,
+              evidence_rotations_read: cost.rotationsRead - reportedRotations,
+              evidence_snapshot_hit: cost.snapshotHit,
+              ...(cost.snapshotError ? { evidence_snapshot_error: cost.snapshotError } : {}),
+            });
+            reportedBytes = cost.bytesRead; reportedRotations = cost.rotationsRead;
+          }
+        }
         const strike = [...history].reverse().find((row) => row.step === "fix.dispatch" && row.task_id === e.taskId &&
           row.head_sha === e.headSha && row.kind !== "proof_amendment");
         const previousCause = strike?.mode === "ci-log" ? "ci" : strike?.mode === "merge-conflict" ? "conflict" :
@@ -10846,13 +10866,23 @@ function* fixCensusSnapshotSteps(
   const precheck = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
     { cwd: scriptsRoot, env, encoding: "utf8", timeout: controllerTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
   const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
-  let refusal = censusPushRefusal(text);
   let unmeasured = precheck.status === 2 ? text.trim() : undefined;
   const unavailable = (subject: string, result: CensusChildResult, output: string) => {
     unmeasured = `${subject}: ${String(result.error ?? result.signal ?? (output || `exit ${result.status} without a complete test summary`)).slice(-4000)}`;
     return { text: `census-precheck: NOT MEASURED — ${unmeasured}`, censuses: [], offeredBaselines: [] };
   };
-  if (!refusal && (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2))) {
+  const timedOutChildren: string[] = [];
+  const timedOut = (child: string, result: CensusChildResult, boundMs: number): boolean => {
+    const error = result.error as (Error & { code?: unknown }) | undefined;
+    if (!(error instanceof LoopBoundedChildTimeout || error?.code === "ETIMEDOUT")) return false;
+    timedOutChildren.push(child);
+    const line = `census-precheck: not measured — ${child} timed out at ${(error instanceof LoopBoundedChildTimeout ? error.budgetMs : boundMs) / 1000} s (${result.signal ?? "SIGTERM"}); CI and pre-push still measure`;
+    unmeasured = unmeasured ? `${unmeasured}\n${line}` : line;
+    return true;
+  };
+  const precheckTimedOut = timedOut("scripts/census-precheck.mjs", precheck, controllerTimeBoundMs);
+  let refusal = precheckTimedOut ? undefined : censusPushRefusal(text);
+  if (!refusal && !precheckTimedOut && (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2))) {
     refusal = unavailable("census precheck child", precheck, text);
   }
   if (!refusal) {
@@ -10866,10 +10896,11 @@ function* fixCensusSnapshotSteps(
       const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
       const stopped = (reason: string): CensusPushRefusal => ({ text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
         censuses: ["census-suite"], offeredBaselines: [] });
-      if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
-        refusal = unavailable(`census suite ${reach}`, result, output);
+      const reachTimedOut = timedOut(reach, result, childTimeBoundMs);
+      if (reachTimedOut || result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
+        if (!reachTimedOut) refusal = unavailable(`census suite ${reach}`, result, output);
       } else if (result.status !== 0) {
-        refusal = stopped(String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000));
+        refusal = stopped(output.slice(-4000));
         refusal.inheritedMain = yield* inheritedCensusContextSteps(root, path, runGit);
       } else {
         const verdict = judged.judge(0);
@@ -10880,7 +10911,8 @@ function* fixCensusSnapshotSteps(
     }
   }
   log("fix.census_check", { outcome: refusal ? "refused" : unmeasured ? "partially-measured" : "passed",
-    ...(refusal ? { refusal: refusal.text } : {}), ...(unmeasured ? { reason: unmeasured } : {}) });
+    ...(refusal ? { refusal: refusal.text } : {}), ...(unmeasured ? { reason: unmeasured } : {}),
+    ...(timedOutChildren.length > 0 ? { timed_out_child: timedOutChildren.join(", ") } : {}) });
   return { refusal, unmeasured };
 }
 
@@ -28455,7 +28487,7 @@ async function deployCommand(rest: string[]): Promise<number> {
  */
 async function deployRunCommand(rest: string[]): Promise<number> {
   markLedgerProcessActor("host_automation");
-  const badArg = unknownArgError("deploy-run", rest, ["--state-root"], ["--dry-run", "--image-drift-only"]);
+  const badArg = unknownArgError("deploy-run", rest, ["--state-root", "--selected-registry-shadow", "--selected-registry-pin"], ["--dry-run", "--image-drift-only"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -28490,8 +28522,12 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     return 0;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const lifecycleExec = selectedRegistryLifecycleExec(assessment.installRoot, {
+    session: flagValue(rest, "--selected-registry-shadow"), pin: flagValue(rest, "--selected-registry-pin"),
+  });
   const deps = {
     ...realDeps().deployFor({
+      execFile: lifecycleExec,
       installPath: assessment.installRoot,
       stateRoot: effectiveConfig.root,
       daemonLabel: DAEMON_LABEL,
@@ -28535,7 +28571,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
       record: (step, fields) => deps.log(step, fields),
     } : undefined,
-  }) }, {
+  }, lifecycleExec) }, {
     dryRun: rest.includes("--dry-run"),
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
@@ -33243,55 +33279,9 @@ interface LightPassReadPorts {
   clock?: Pick<Clock, "now">;
 }
 
+/** W1-T11293: the light pass reads every READY PR's distance; the reader lives in src/lib/light-pass-compare.ts. */
 function createLightPassCompareReader(owner: string, repo: string, read: (args: string[]) => Promise<unknown>) {
-  type Facts = { behindBy: number; baseFiles?: BaseChangedFiles };
-  const memo = new Map<number, { head: string; main: string | undefined; value: Promise<Facts | undefined> }>();
-  const nextDistanceProbe = createDistanceProbeSequence();
-  return {
-    retain: (prs: readonly OpenPrView[]) => {
-      const heads = new Map(prs.map((pr) => [pr.prNumber, pr.headSha]));
-      for (const [number, entry] of memo) if (heads.get(number) !== entry.head) memo.delete(number);
-    },
-    read: async (prs: readonly OpenPrView[], main: string | undefined, timing: LightPassPreReviewTiming) => {
-      const behindMainByPr = new Map<number, number>();
-      const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
-      await timing.measure("compare", () => Promise.all(distanceRefreshProbeTargets(prs, nextDistanceProbe()).map(async (pr) => {
-        const start = timing.clock.now();
-        let entry = memo.get(pr.prNumber);
-        const cacheHit = main !== undefined && entry?.head === pr.headSha && entry.main === main;
-        if (!cacheHit) {
-          const value = Promise.resolve().then(async (): Promise<Facts | undefined> => {
-            const compare = await read(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...${main ?? "main"}`]) as {
-              ahead_by?: unknown; files?: unknown;
-            };
-            if (typeof compare?.ahead_by !== "number" || !Number.isFinite(compare.ahead_by)) return undefined;
-            return { behindBy: compare.ahead_by, ...(Array.isArray(compare.files) ? { baseFiles: {
-              files: compare.files.flatMap((f) => typeof f?.filename === "string" ? [f.filename] : []),
-              truncated: compare.files.length >= GITHUB_COMPARE_FILES_LISTED,
-            } } : {}) };
-          });
-          entry = { head: pr.headSha, main, value };
-          if (main !== undefined) memo.set(pr.prNumber, entry);
-        }
-        const row: Record<string, unknown> = { pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: main ?? null, cache_hit: cacheHit };
-        try {
-          const facts = await entry!.value;
-          row.outcome = facts ? "read" : "unreadable";
-          if (facts) {
-            behindMainByPr.set(pr.prNumber, facts.behindBy);
-            if (facts.baseFiles) baseChangedFilesByPr.set(pr.prNumber, facts.baseFiles);
-          } else if (memo.get(pr.prNumber) === entry) memo.delete(pr.prNumber);
-        } catch (error) {
-          Object.assign(row, { outcome: "error", error: String(error) });
-          if (memo.get(pr.prNumber) === entry) memo.delete(pr.prNumber);
-        } finally {
-          row.elapsed_ms = timing.clock.now() - start;
-          timing.compareReads.push(row);
-        }
-      })));
-      return { behindMainByPr, baseChangedFilesByPr };
-    },
-  };
+  return createReadyPrCompareReader(owner, repo, read);
 }
 
 export function buildSweepLightHook(
@@ -34790,6 +34780,19 @@ async function triageCommandLocked(
     }
     log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
     say(`triage PR (plan-only, ${decision.action}): ${prUrl}`);
+    // Publication ownership, plan-only scope and feedback provenance were verified above.
+    // Acknowledging intake ends the ask; it does not claim CI, merge or work completion.
+    try {
+      const outcome = decision.action === "grill"
+        ? grillIssueUrl ? { action: "grill" as const, publicationPr: prUrl, detail: decision.detail, questionIssueUrl: grillIssueUrl }
+          : { action: "error" as const, reason: "The intake question has no verified publication." }
+        : { action: decision.action, publicationPr: prUrl, detail: decision.detail };
+      const response = recordEscalationIntakeOutcome(entry, outcome,
+        { threadStorePath: inboxThreadStorePath(config.root), repository: `${owner}/${repo}` });
+      log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
+    } catch (error) {
+      log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
+    }
 
     // Gate: ci green -> post remudero-review -> arm auto-merge (identical shape to every other
     // Architect skill's output — "PROPOSES anything, MERGES nothing" until the gate clears it).
@@ -41186,7 +41189,9 @@ export function progressWatchdogCommand(
     step: PROGRESS_WATCHDOG_READ_STEPS,
   });
   const count = openPrCountReadingFromRows(read.rows);
-  const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: count.count, openPrCountSource: count.source });
+  const liveRecyclePausePid = readLiveRecyclePausePid(stateDir, run);
+  const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: count.count,
+    openPrCountSource: count.source, liveRecyclePausePid });
   const bundle = verdict.action === "capture-diagnostics"
     ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, { run })
     : undefined;
@@ -42782,7 +42787,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-proof", (rest) => withSyncChildReservation("check-proof", () => checkProofCommand(rest, {}, USAGE), { bindSelf: true })],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
-  ["inspect", (rest) => readOnlyInspectionCommand(rest)],
+  ["inspect", (rest) => rest[0] === "selected-registry-shadow"
+    ? selectedRegistryShadowMain(rest.slice(1)) : readOnlyInspectionCommand(rest)],
   ["gh", async (rest) => await ghCommand(rest)],
   ["gh-broker", async (rest) => await ghBrokerCommand(
     rest,
@@ -43007,6 +43013,9 @@ export async function main(
   } = {},
 ): Promise<void> {
   const inspectionArgv = stripRepoRootFlag(process.argv.slice(2));
+  if (inspectionArgv[0] === "inspect" && inspectionArgv[1] === "selected-registry-shadow") {
+    return await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
+  }
   if (inspectionArgv[0] === "pr-state") {
     if (inspectionArgv.includes("--help") || inspectionArgv.includes("-h")) {
       console.log(commandHelp(commandSpec("pr-state")));

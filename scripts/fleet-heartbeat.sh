@@ -110,6 +110,35 @@
 # `-e` would turn the most alarming states this script exists to report into silence.
 set -uo pipefail
 
+registry_shadow_observe() { :; }
+registry_shadow_session=""
+registry_shadow_pin=""
+registry_shadow_forward=()
+registry_shadow_argv=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --selected-registry-pin)
+      registry_shadow_pin="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    --selected-registry-shadow)
+      registry_shadow_session="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    *) registry_shadow_argv+=("$1"); shift ;;
+  esac
+done
+set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/deploy/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+
 # Resolve the install directory the same way bin/rmd does, symlink chain included, so this script
 # and the verb it reports on can never disagree about which checkout they mean.
 SOURCE="${BASH_SOURCE[0]}"
@@ -184,7 +213,7 @@ if [ -z "${RMD_HEARTBEAT_LOCK_HELD:-}" ]; then
   # existed before this block, whereas refusing to beat at all would delete the signal entirely.
   if command -v flock >/dev/null 2>&1; then
     export RMD_HEARTBEAT_LOCK_HELD=1
-    exec flock -n "$HEARTBEAT_LOCK" "$0" "$@"
+    exec flock -n "$HEARTBEAT_LOCK" "$0" ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"} "$@"
   fi
 fi
 
@@ -976,6 +1005,7 @@ fi
 #
 # Seams for the fixtures: RMD_CGROUP_ROOT, RMD_HEARTBEAT_DOCKER, RMD_INSTANCE_REGISTRY.
 MEM_REGISTRY="${RMD_INSTANCE_REGISTRY:-${INSTALL_DIR}/.remudero/daemon-instances.yaml}"
+registry_shadow_observe heartbeat "" "" host
 MEM_CGROUP_ROOT="${RMD_CGROUP_ROOT:-/sys/fs/cgroup}"
 MEM_STATE_FILE="${RMD_ROOT}/state/heartbeat-mem.txt"
 MEM_LINES=""
@@ -986,9 +1016,11 @@ if [ -n "$MEM_CONTAINERS" ]; then
   # shellcheck disable=SC2046 # one argument per container name, by design
   MEM_ANNOTATIONS="$("$MEM_RUNTIME" inspect $(printf '%s\n' "$MEM_CONTAINERS" | awk '{print $2}') \
     --format '{{.Name}} {{index .HostConfig.Annotations "org.systemd.property.MemoryHigh"}}' 2>/dev/null)" || MEM_ANNOTATIONS=""
-  MEM_STATE_DIRS="$(awk '{ sub(/[[:space:]]+#.*/, "") } /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { if (c != "" && d != "") print c, d; c = d = ""; next }
+  MEM_STATE_DIRS="$(awk 'function emit() { if (c != "" && d != "") print c, d, n, (r == "" ? "-" : r) }
+    { sub(/[[:space:]]+#.*/, "") } /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { emit(); c = d = r = ""; n = $1; sub(/:$/, "", n); next }
     /^    container_name:/ { c = $2; gsub(/"/, "", c) } /^    state_dir:/ { d = $2; gsub(/"/, "", d) }
-    END { if (c != "" && d != "") print c, d }' "$MEM_REGISTRY" 2>/dev/null)" # container_name state_dir, recycle-container.sh's grammar
+    /^    github_repo:/ { r = $2; gsub(/"/, "", r) }
+    END { emit() }' "$MEM_REGISTRY" 2>/dev/null)" # container_name state_dir instance github_repo; maintained shell grammar
   MEM_PREV_EPOCH=""; MEM_PREV=""
   if [ -r "$MEM_STATE_FILE" ]; then
     MEM_PREV_EPOCH="$(awk '$1 == "epoch" {print $2; exit}' "$MEM_STATE_FILE" 2>/dev/null)"
@@ -1002,6 +1034,14 @@ if [ -n "$MEM_CONTAINERS" ]; then
   mem_one_line() { printf '%s' "$1" | tr '\n\r' '  ' | cut -c1-400; }
   while read -r _mem_id _mem_name; do
     [ -n "$_mem_name" ] || continue
+    # A container name is not a repository identity. Ambiguous/missing registry rows stay unknown;
+    # the actual Docker id still distinguishes independent children with the same name.
+    _mem_instance=""; _mem_repo=""
+    read -r _mem_instance _mem_repo <<EOF_MEM_TARGET
+$(printf '%s\n' "$MEM_STATE_DIRS" | awk -v n="$_mem_name" '$1 == n { count++; instance = $3; repo = $4 }
+  END { if (count == 1 && repo != "-") print instance, repo }')
+EOF_MEM_TARGET
+    registry_shadow_observe heartbeat "$_mem_instance" "$_mem_repo" host "$_mem_id|$_mem_name"
     _mem_cg=""
     for _d in "$MEM_CGROUP_ROOT/system.slice/docker-${_mem_id}.scope" "$MEM_CGROUP_ROOT/docker/${_mem_id}"; do
       [ -r "$_d/memory.high" ] && { _mem_cg="$_d"; break; }

@@ -1,0 +1,7 @@
+{
+  "revision": "f936be06908593755b64b37f79c56e563203fc55",
+  "files": {
+    "deploy/field-trials-refresh.sh": "93b64b8979780c1d80f9d629ad52679b22a69f6a057ead82d7aba6e24d64b82d",
+    "deploy/install-host-units.sh": "070dd56195b4e9d8875aafc3149841161e374d8c579e28bb5bf69ea043edb160"
+  }
+}

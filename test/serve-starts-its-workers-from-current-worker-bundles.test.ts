@@ -179,12 +179,15 @@ test("a bundled worker names the threads it spawns by their source module and fu
   await build(root);
   const bundle = join(root, "dist", "child-entries", "worker-lib-fixture-worker.mjs");
   const text = readFileSync(bundle, "utf8").split("\n");
-  const lineOf = (pattern: RegExp): number => {
-    const at = text.findIndex((line) => pattern.test(line));
+  const lineOf = (pattern: RegExp, after = 0): number => {
+    const at = text.findIndex((line, index) => index >= after && pattern.test(line));
     assert.ok(at >= 0, `the bundle holds ${pattern}`);
     return at + 1;
   };
-  assert.ok(lineOf(/^function spawn\d+\(/) > 0, "esbuild renamed the worker's spawn, so only keepNames restores it");
+  const workerHeader = text.findLastIndex((line) => line === `// ${WORKER}`) + 1;
+  assert.ok(workerHeader > 0, "the bundle holds the worker's source section");
+  const workerSpawn = lineOf(/^function spawn\d+\(/, workerHeader);
+  assert.ok(workerSpawn > workerHeader, "esbuild renamed the worker's spawn, so only keepNames restores it");
 
   // In this thread: a stack as V8 prints it inside the bundle, every frame naming the bundle's own file.
   const url = pathToFileURL(bundle).href;
@@ -194,7 +197,7 @@ test("a bundled worker names the threads it spawns by their source module and fu
     "    at new Worker (node:internal/worker:297:28)",
     `    at construct (${url}:${lineOf(/^function startWorker\(/) + 1}:9)`,
     `    at startWorker (${url}:${lineOf(/^function startWorker\(/) + 3}:22)`,
-    `    at spawn (${url}:${lineOf(/^function spawn\d+\(/) + 1}:10)`,
+    `    at spawn (${url}:${workerSpawn + 1}:10)`,
   ].join("\n");
   assert.equal(spawnSite(stack), "fixture-worker:spawn");
   assert.equal(spawnSite(`Error\n    at file://${bundle}:1:1`), "worker-lib-fixture-worker:<module>", "the banner lies before any module");
