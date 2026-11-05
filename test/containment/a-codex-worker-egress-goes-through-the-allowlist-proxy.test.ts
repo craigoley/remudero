@@ -4,7 +4,6 @@
 // profile with `network.domains` and `--enable network_proxy` answered api.github.com through 127.0.0.1 and
 // refused example.com with a 403 CONNECT, keeping the worktree writable and its git config protected.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +15,7 @@ import { ALLOWED_NETWORK_DOMAINS } from "#src/lib/settings.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { codexNetworkDomains, spawnCodexWorker } from "#src/lib/worker-provider.js";
 import type { ContainedSpawnOptions } from "#src/lib/worker-containment.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const BOUND = { timeout: 60_000 };
@@ -41,15 +41,15 @@ function legacyConfig(root: string) {
 }
 
 async function legacyArgs(root: string, tools: string[]): Promise<string[]> {
-  const cwd = join(root, "worktree");
-  execFileSync("git", ["init", "-q", "-b", "main", cwd]);
+  const repo = gitRepo({ seedCommit: false });
+  const cwd = repo.dir;
   let captured: ContainedSpawnOptions | undefined;
   const child = finishingChild();
   await spawnCodexWorker({
     workerHome: mkdtempSync(join(root, "home-")), cwd, prompt: "egress fixture",
     settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools,
     containment: { spawn: (options) => { captured = options; return { process: child as never, pid: 11_437 }; }, teardown: () => {} },
-  }, legacyConfig(root));
+  }, legacyConfig(root)).finally(() => repo.cleanup());
   assert.ok(captured, "the containment adapter received the Codex argv");
   return captured.args;
 }
