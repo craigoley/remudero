@@ -1064,7 +1064,7 @@ render_edge_heal() {
 edge_heal_on_exit() {
   local rc=$? out hrc=0 why
   if [ "$rc" -eq 0 ] && [ -x "$CHECKOUT/deploy/edge-heal.sh" ]; then
-    out="$(RMD_STATE_DIR="$STATE_DIR" "$CHECKOUT/deploy/edge-heal.sh")" || hrc=$?
+    out="$(RMD_STATE_DIR="$STATE_DIR" RMD_RESOURCE_POLICY_REGISTRY="$INSTANCE_REGISTRY" "$CHECKOUT/deploy/edge-heal.sh")" || hrc=$?
     [ -z "$out" ] || printf '%s\n' "$out"
     if [ "$hrc" -eq 3 ]; then
       why="$(printf '%s\n' "$out" | sed -n 's/^edge-heal: tunnel roll failed -- //p' | tail -n 1)"
@@ -1086,7 +1086,7 @@ EDGE_HEAL
 render_serve_memory_tuning() {
   case "${INSTANCE_NAME:-core}" in core) : ;; *) return 0 ;; esac
   cat <<'SERVE_MEMORY_TUNING'
-    ${MHT_TMO[@]+"${MHT_TMO[@]}"} bash "$CHECKOUT/deploy/memory-high-tuner.sh" \
+    ${MHT_TMO[@]+"${MHT_TMO[@]}"} env ${POLICY_ENV[@]+"${POLICY_ENV[@]}"} bash "$CHECKOUT/deploy/memory-high-tuner.sh" \
       --container 'remudero-serve' --state-dir "$STATE_DIR" || true
 SERVE_MEMORY_TUNING
 }
@@ -1188,6 +1188,12 @@ CHECKOUT=${STATE_DIR}/daemon-install
 UNITS_HEAP_MB=${MAX_OLD_SPACE_MB}
 INSTANCE_NAME=${INSTANCE_NAME:-}
 INSTANCE_REGISTRY=${REGISTRY_FILE:-}
+# W1-T11130: the memory policy reads each peer's learned peak from that peer's own root, found through
+# the registry this unit was installed from. It goes to every call that reaches the policy -- the tuner,
+# the revival, deploy-run's drift read and the edge heal -- as RMD_RESOURCE_POLICY_REGISTRY, one call at
+# a time and never exported: those callers read RMD_INSTANCE_REGISTRY as an active selection (W1-T10573).
+POLICY_ENV=()
+if [ -n "\$INSTANCE_REGISTRY" ]; then POLICY_ENV=(RMD_RESOURCE_POLICY_REGISTRY="\$INSTANCE_REGISTRY"); fi
 HOST_ALERT_INSTANCE=${CONTAINER_NAME}
 BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
@@ -1450,7 +1456,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # moves while the code does not. Bounded, and never fatal to the tick.
   if [ "\$BOOT" -eq 0 ] && [ -f "\$CHECKOUT/deploy/memory-high-tuner.sh" ]; then
     MHT_TMO=(); command -v timeout >/dev/null 2>&1 && MHT_TMO=(timeout 60)
-    \${MHT_TMO[@]+"\${MHT_TMO[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
+    \${MHT_TMO[@]+"\${MHT_TMO[@]}"} env \${POLICY_ENV[@]+"\${POLICY_ENV[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
       --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
 $(render_serve_memory_tuning)
   fi
@@ -1498,7 +1504,7 @@ $(render_serve_memory_tuning)
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
     if watchdog_deploy_out="\$(cd "\$DAEMON_CODE" && \\
-      RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
+      RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build RMD_RESOURCE_POLICY_REGISTRY="\$INSTANCE_REGISTRY" \\
       watchdog_deploy_run "\$DAEMON_CODE/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR" \${DEPLOY_SHADOW_ARGS[@]+"\${DEPLOY_SHADOW_ARGS[@]}"})"; then
       printf '%s\\n' "\$watchdog_deploy_out"
       host_alert_clear deploy-run-problem
@@ -1556,7 +1562,9 @@ if [ ! -r "\$RESOURCE_POLICY_LIB" ]; then
   exit 1
 fi
 . "\$RESOURCE_POLICY_LIB"
-resource_policy_build_args '${CONTAINER_NAME}'
+# W1-T11130: the installed registry names each peer's root for this one policy call only; a prefix
+# assignment on a function call lasts for that call, so nothing later inherits it.
+RMD_RESOURCE_POLICY_REGISTRY="\$INSTANCE_REGISTRY" resource_policy_build_args '${CONTAINER_NAME}'
 echo "rmd-relaunch: resource policy from \$RESOURCE_POLICY_LIB -- \$RESOURCE_POLICY_NOTE"
 
 # W1-T9627 -- THE DEAD CONTAINER'S LAST WORDS ARE KEPT BEFORE \`docker rm -f\` DELETES THEM. On

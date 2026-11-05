@@ -34,6 +34,7 @@ import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } f
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { recyclePauseDetail } from "./recycle-yield.js";
+import { isRecyclePauseDetail } from "./fleet-control.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
   baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingRuleSuitesFromCiFailures, failingTestFilesFromCiFailures,
@@ -25201,13 +25202,28 @@ export async function runSweepLightPass(
       policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson,
     ).spawning);
   };
+  let recycleRefillHeld = false;
+  const refillHeldForRecycle = (): boolean => {
+    // W1-T11321: a pass begun before the recycle PAUSE must not refill the drain with new reviews.
+    const detail = workerAdmissionHoldReason(deps, "review")?.replace(/^fleet PAUSE hold: /, "") ??
+      recyclePauseDetail(dirname(dirname(deps.ledgerPath)));
+    if (!isRecyclePauseDetail(detail)) return false;
+    if (!recycleRefillHeld && !deps.dryRun) {
+      append(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step: "sweep.review_refill_held",
+        reason: "recycle_pause", detail });
+      recycleRefillHeld = true;
+    }
+    return true;
+  };
   const admitOneRefill = async (): Promise<boolean> => {
     if (providerFloorMet || deps.restartAdmission?.("review", "light-refill") === false) return false;
+    if (refillHeldForRecycle()) return false;
     // Read the queue only when a lane is actually free, so a refill that admits nothing reads nothing.
     const freeWidth = effectiveReviewWidth(deps, policy, Math.max(1, refillTail.length), deps.now ? deps.now() : systemClock.now(),
       selectionLedgerLines, (deps.readActiveWorkerCount ?? activeWorkerCount)());
     if (reviewAdmissionBound(freeWidth).bound === 0) return false;
     await refreshRefillTail();
+    if (refillHeldForRecycle()) return false;
     if (refillTail.length === 0) return false;
     const nowMs = deps.now ? deps.now() : systemClock.now();
     const width = effectiveReviewWidth(deps, policy, refillTail.length, nowMs, selectionLedgerLines,
@@ -25254,6 +25270,12 @@ export async function runSweepLightPass(
       return true;
     }
     try {
+      if (refillHeldForRecycle()) {
+        unreserve();
+        refilledHeads.delete(key);
+        refillTail.unshift(next);
+        return false;
+      }
       append(deps.ledgerPath, { ...row, step: "sweep.review_refilled" });
     } catch (error) {
       unreserve();

@@ -1,0 +1,46 @@
+- id: W1-T11374
+  title: "Auto-triage reads its status: new candidates from origin/main's plan/feedback (plus the checkout's own untracked captures), so feedback merged after the daemon booted is triaged on the next pass instead of waiting for the next restart"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, which tree auto-triage enumerates; it gates every feedback item's path to a task, including the dependency-repair priority
+  origin: operator-session#coupled-dependabot-pair-2026-11-04
+  plan_refs:
+    - W1-T2749
+    - W1-T2289
+    - W1-T9586
+    - W1-T10054
+  files:
+    - src/lib/auto-triage.ts
+    - src/run-task.ts
+    - test/triage/auto-triage-sees-feedback-merged-after-the-daemon-booted.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The daemon's auto-triage candidate list includes a status new feedback entry that reached origin/main after the boot checkout was taken, on the first pass after the fetch, without a restart
+      proof: "unit test: test/triage/auto-triage-sees-feedback-merged-after-the-daemon-booted.test.ts"
+    - claim: An entry whose origin/main status is no longer new is not a candidate even when the boot checkout still says new, and a locally captured untracked entry not yet on origin/main stays a candidate
+      proof: "grep: W1-T11374 criterion 2 in test/triage/auto-triage-sees-feedback-merged-after-the-daemon-booted.test.ts"
+    - claim: The origin/main read is asynchronous and re-reads the tree only when origin/main's sha moves, so a tick with an unchanged main pays no git spawn for candidates
+      proof: "grep: W1-T11374 criterion 3 in test/triage/auto-triage-sees-feedback-merged-after-the-daemon-booted.test.ts"
+  rationale: |
+    OBSERVED 2026-11-04. Dependabot #16733 (agent SDK 0.3.310 to 0.3.316) and #16734 (image claude-code 2.1.310 to 2.1.316) can only pass together ("Haiku 5.5 image pins the CLI declared by its actual locked SDK"). W1-T9586 worked as designed: at 14:17Z dep-review.own_red.feedback_captured filed fb-dep-review-c083f0178c7ea7f1 naming all four bumps, and #16734 was folded into it. The feedback landed through #16765, merged 17:19:41Z. Both PRs then stayed red for about 8 h.
+    - auto_triage.repair_priority_unavailable reported reasonCode no-matching-repair-binding on every pass from 16:58Z to 20:48Z in core pid 149 (booted 16:32Z), with candidate_count fixed at 195 the whole time. The binding requires the feedback id to be among the triage candidates (prioritizeDepReviewRepairs, src/lib/dep-review.ts).
+    - The first pass of the next process (pid 814180, after the 20:57Z restart) matched it: auto_triage.repair_priority at 21:22Z, then triage.id_minted W1-T11371 at 21:30Z.
+    - Cause: autoTriageCheck (src/run-task.ts) builds candidates with newFeedbackIdsOldestFirst(feedbackRoot), feedbackRoot defaulting to repoRoot, the daemon's boot checkout. feedbackEntriesOldestFirst (src/lib/auto-triage.ts) is a readdirSync/readFileSync walk of <root>/plan/feedback. That checkout advances only when core restarts, so feedback merged mid-process is invisible until then, and freshness restarts starve while core is busy.
+    - feedbackStatusOnMain already reads origin/main for one entry's status because "the daemon's own checkout can lag a merged triage" (#10265); the candidate walk never got the same treatment.
+  design: |
+    1. Enumerate candidates from origin/main's tree: one async `git ls-tree` of origin/main:plan/feedback plus one `git cat-file --batch` of the .yaml blobs, keeping entries whose committed status is new. Use the fetch the daemon already does each tick; this task adds no fetch.
+    2. Union in the checkout's untracked plan/feedback entries at status new: machine captures not yet landed, which W1-T2749 acknowledges and removes once origin/main holds them byte-identical. A tracked entry is judged by origin/main's copy, never the stale checkout's.
+    3. Cache the result keyed by origin/main's sha, so an unchanged main costs no spawn. An unreadable origin/main falls back to today's checkout walk and ledgers auto_triage.candidates_fallback with the reason (fail soft, as feedbackStatusOnMain does).
+    4. oldestFeedbackAgeMs uses the same list. The hand route (rmd triage <id>) is unchanged.
+    Tests: a real local repository and bare origin. Boot a checkout, then merge a status new entry to origin/main and fetch. The candidate list includes it with no checkout move; at base it does not. Controls cover an entry triaged on main but new in the checkout, an untracked local capture, an unchanged main (zero git spawns on the second read, by an injected counter), and an unreadable origin/main (fallback plus ledger row).
+  falsifier: |
+    At origin/main, a status new feedback entry merged after the daemon booted never appears in newFeedbackIdsOldestFirst(repoRoot) until the checkout is moved, i.e. until core restarts.
+  note: |
+    reservation hand-off: plan-file-1793827962000 -> plan-file-1793827962000
+    Reserved with rmd next-task-id --branch plan-file-1793827962000 from the operator session's ops worktree. Not a dep-review defect: W1-T9586's capture and fold both fired. A combined hand-built bump was deliberately not opened, because triage minted W1-T11371 for exactly that build at 21:30Z and a hand build would duplicate it.
