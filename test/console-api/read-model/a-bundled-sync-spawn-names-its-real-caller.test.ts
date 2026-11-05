@@ -38,8 +38,8 @@ try {
     const result = JSON.parse(execFileSync(process.execPath, [outfile], {
       cwd: REPO_ROOT, env, encoding: "utf8",
     })) as { frame: { caller: string }; sample: {
-      sync_spawn_by_caller: { caller: string; calls: number; total_ms: number }[];
-      sync_spawn_top: { caller: string; duration_ms: number }[];
+      sync_spawn_by_caller: { caller: string; leaf?: string; calls: number; total_ms: number }[];
+      sync_spawn_top: { caller: string; leaf?: string; duration_ms: number }[];
     } };
     const totals = result.sample.sync_spawn_by_caller;
     const top = result.sample.sync_spawn_top;
