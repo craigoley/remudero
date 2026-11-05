@@ -41,7 +41,7 @@ import { fixedClock } from "./clock.js";
 import { InstanceRegistryRuntimeError, runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryText,
   runtimeInstanceRegistryInstanceName, assertInstanceRegistryRuntimeCurrent, trustedInstanceRegistryLaunchPacket } from "./instance-registry-selection.js";
 import { createSelectedRegistryObserver, observeSelectedRegistry, selectedRegistryObserverInContext,
-  SELECTED_REGISTRY_LAUNCH_WRAPPER, type SelectedRegistryConsumerOptions } from "./selected-registry-consumers.js";
+  selectedRegistryLaunchArgs, type SelectedRegistryConsumerOptions } from "./selected-registry-consumers.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
@@ -2912,8 +2912,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
         if (selectedPacket === undefined) return exec("bash", command, options);
         const packet = selectedPacket.split("\n");
         try {
-          return exec("bash", ["-c", SELECTED_REGISTRY_LAUNCH_WRAPPER,
-            "selected-registry-launch", packet[1]!, packet[2]!, packet[3]!, ...command], options);
+          return exec("bash", selectedRegistryLaunchArgs(packet[1]!, packet[2]!, packet[3]!, command), options);
         } catch {
           // Child/OS errors can quote private argv; unknown launch failure is never a public diagnostic of those bytes.
           throw new InstanceRegistryRuntimeError("launcher_failed");

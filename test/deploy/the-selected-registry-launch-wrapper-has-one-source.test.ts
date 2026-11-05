@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { daemonInstanceRegistryPath, realDeployDeps, type RealDeployOpts } from "#src/lib/deployer.js";
 import { withInstanceRegistryRuntime } from "#src/lib/instance-registry-selection.js";
-import { SELECTED_REGISTRY_LAUNCH_WRAPPER, selectedRegistryLifecycleExec } from "#src/lib/selected-registry-consumers.js";
+import {
+  SELECTED_REGISTRY_LAUNCH_WRAPPER, selectedRegistryLaunchArgs, selectedRegistryLifecycleExec,
+} from "#src/lib/selected-registry-consumers.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 
 test("deployer and the selected-registry shell adapter share the exact launcher command", async t => {
@@ -30,10 +32,12 @@ test("deployer and the selected-registry shell adapter share the exact launcher 
 
   const launch = calls.find(call => call.cmd === "bash");
   assert.ok(launch, "the real deployer must launch its container recycler through bash");
-  assert.equal(launch.args[0], "-c");
-  assert.equal(launch.args[1], SELECTED_REGISTRY_LAUNCH_WRAPPER);
-  assert.equal(launch.args[2], "selected-registry-launch");
-  assert.deepEqual(launch.args.slice(6), [recycler, "--instance", "owner"]);
+  assert.deepEqual(launch.args, selectedRegistryLaunchArgs(launch.args[3]!, launch.args[4]!, launch.args[5]!,
+    [recycler, "--instance", "owner"]));
+  assert.deepEqual(
+    selectedRegistryLaunchArgs("/private/selected.yaml", "digest", "binding", [recycler]),
+    ["-c", SELECTED_REGISTRY_LAUNCH_WRAPPER, "selected-registry-launch", "/private/selected.yaml", "digest", "binding", recycler],
+  );
 
   const output = selectedRegistryLifecycleExec(root, { session: "private-session", pin: "a".repeat(64) })(launch.cmd, launch.args);
   assert.deepEqual(output.trim().split("\n"), ["--instance", "owner", "--selected-registry-shadow", "private-session",
