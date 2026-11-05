@@ -59,6 +59,10 @@ const aliasRows = (ms: number, id: string, k: number): Row[] => [
   { ts: at(ms), host: "h1", step: "dispatch.circuit_broken", task_id: "DAEMON", task: id, freshCount: k },
 ];
 
+/** A parsed fact body with a JSON own key that ordinary object assignment would turn into a prototype setter. */
+const withJsonProto = (row: Row, data: Record<string, unknown>): Row =>
+  JSON.parse(JSON.stringify({ ...row, ["__proto__"]: data })) as Row;
+
 /** Every statement's body rows but the ingest's own read: the task reads a test can count. */
 function counting(db: ReadModelDb): { db: ReadModelDb; bodyRows(): number } {
   let rows = 0;
@@ -162,7 +166,9 @@ function readsOf(counted: { bodyRows(): number }, board: BoardProjection, id: st
 }
 
 test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
-  const w = world(t, [...rowsFrom(T0, 40), ...aliasRows(T0 + 50_000, "W1-T23", 1)]);
+  const protoAlias = withJsonProto(aliasRows(T0 + 50_000, "W1-T23", 1)[0]!, { marker: "retained" });
+  assert.ok(Object.hasOwn(protoAlias, "__proto__"), "control: the parsed alias row has a JSON own property");
+  const w = world(t, [...rowsFrom(T0, 40), protoAlias]);
   const board = w.board();
   drain(board);
   bucketsOf(board); // every task's bucket held
@@ -181,6 +187,8 @@ test("W1-T9716: an extended task bucket equals a fresh full read", (t) => {
     assert.ok(lateAt >= 0 && lateAt < extended["W1-T24"]!.length - 1, `round ${round}: control, the late row is held and sorts before rows already held`);
     assert.equal(extended["W1-T23"]!.filter((r) => (JSON.parse(r) as Row).step === "dispatch.circuit_broken").length, 2 + round,
       `round ${round}: control, the bucket holds every alias row`);
+    assert.ok(extended["W1-T23"]!.some((r) => Object.hasOwn(JSON.parse(r) as Row, "__proto__")),
+      `round ${round}: the held alias retains its JSON own property`);
   }
   // A/A: two uncached reads of one store agree, so the comparison above can tell a difference from noise.
   assert.deepEqual(uncachedBuckets(w), uncachedBuckets(w));
@@ -263,7 +271,10 @@ function built(w: World, db: ReadModelDb, view: ReturnType<typeof createNowView>
 }
 
 test("W1-T9716: now-view bodies are identical with the task cache on and off", (t) => {
-  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1)];
+  const protoStart = withJsonProto({ ts: at(T0 + 80_000), host: "h1", step: "run.start", task_id: "W1-T21" }, { run_id: "inherited" });
+  assert.ok(Object.hasOwn(protoStart, "__proto__") && !Object.hasOwn(protoStart, "run_id"),
+    "control: the run start has a JSON own property and no run_id");
+  const history = [...rowsFrom(T0, 40), ...aliasRows(T0 + 60_000, "W1-T26", 1), protoStart];
   const on = world(t, history);
   const off = world(t, history);
   const [onDb, offDb] = [counting(on.db), counting(off.db)];
@@ -283,7 +294,10 @@ test("W1-T9716: now-view bodies are identical with the task cache on and off", (
       off.set(ms);
     }
     const [a, b] = [built(on, onDb.db, onView), built(off, offDb.db, offView)];
+    if (round === 0) console.error("PROTO_DIAG", JSON.stringify({ on: a.board.tasks.find((task) => task.taskId === "W1-T21"), off: b.board.tasks.find((task) => task.taskId === "W1-T21") }));
     assert.deepEqual(portable(on, a), portable(off, b), `round ${round}: the now-view bodies are byte-identical`);
+    assert.ok(!a.board.tasks.some((task) => task.worker?.runId === "inherited"),
+      `round ${round}: the JSON property did not become a worker run ID`);
     assert.ok(JSON.stringify(a).includes("W1-T21"), `round ${round}: control, the body lists the tasks`);
   }
   const [onReads, offReads] = [onDb.bodyRows() - onMark, offDb.bodyRows() - offMark];
