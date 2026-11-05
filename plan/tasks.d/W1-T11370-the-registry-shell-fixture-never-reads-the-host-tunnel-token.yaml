@@ -1,0 +1,44 @@
+- id: W1-T11370
+  title: The registry shell fixture points RMD_CLOUDFLARED_TOKEN_FILE inside its own root, so a generated launcher's edge heal never finds the host's real tunnel token and the selected-shell suite passes on the Azure host as it does in hosted CI
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one fixture environment entry and its own test; no deploy script changes
+  origin: operator-session#review-runaway-memory-2026-11-04
+  plan_refs:
+    - W1-T9795
+    - W1-T10844
+  files:
+    - test/helpers/registry-shell-fixture.ts
+    - test/infra/the-registry-shell-fixture-never-reads-the-host-tunnel-token.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: registryShellFixture's environment sets RMD_CLOUDFLARED_TOKEN_FILE to a path under the fixture root that does not exist, so deploy/edge-heal.sh, reached from a generated launcher's boot, never reads /etc/remudero/cloudflared-token
+      proof: "grep: RMD_CLOUDFLARED_TOKEN_FILE in test/helpers/registry-shell-fixture.ts"
+    - claim: A test asserts that registryShellFixture(t).env.RMD_CLOUDFLARED_TOKEN_FILE lies under the fixture's root and does not exist, so the selected-shell suite (including "selected shell defaults and failures remain shadow only without live effects", "registry-derived mounts precede capture" and "the generated launcher's own mounts never hold the session") cannot read a host's real tunnel token
+      proof: "unit test: test/infra/the-registry-shell-fixture-never-reads-the-host-tunnel-token.test.ts"
+  rationale: |
+    OBSERVED 2026-11-04 on the Azure host:
+    - Three tests in test/selected-registry-shell-consumers.test.ts (W1-T9795, #15638, merged 16:48Z) fail on origin/main f9871b36d, while main's hosted ci-shards are green:
+      - "selected shell defaults and failures remain shadow only without live effects: input matrix and healthy stop";
+      - "selected shell qualification does not disclose private inputs: registry-derived mounts precede capture";
+      - "… the generated launcher's own mounts never hold the session".
+    - The first failure lists a recorded `docker run -d --name cloudflared … -v /etc/remudero/cloudflared-token:/etc/cloudflared/token:ro …` receipt under STOP.
+    - The generated launcher runs `$CHECKOUT/deploy/edge-heal.sh` on boot. edge-heal reads TOKEN_FILE="${RMD_CLOUDFLARED_TOKEN_FILE:-/etc/remudero/cloudflared-token}". The host has that file, and the fixture sets no RMD_CLOUDFLARED_TOKEN_FILE.
+    - The extra receipt breaks the STOP assertion, and it becomes `.at(-1)` for the two mount positive controls.
+    - With RMD_CLOUDFLARED_TOKEN_FILE set to join(root, "no-cloudflared-token") in the fixture's env, the same run reads `# tests 17`, `# pass 14`, `# fail 0` (name-pattern scoped) on this host.
+    - Effect: every hand-built author preflight whose affected set selects this suite (deploy/recycle-container.sh, deploy/install-host-units.sh) fails on this host. W1-T11318's preflight failed on exactly these three tests.
+  design: |
+    In registryShellFixture's env object (test/helpers/registry-shell-fixture.ts), add `RMD_CLOUDFLARED_TOKEN_FILE: join(root, "no-cloudflared-token")` beside the other RMD_* path overrides. Nothing creates that path.
+    NOT IN SCOPE:
+    - edge-heal's default path;
+    - the other suites that drive edge-heal, which already set the variable.
+  note: |
+    The suite's full file exceeded 300 s on this host at load 35+. Run it with no outer timeout.
+    reservation hand-off: run-unfiled-1793824165331 -> run-unfiled-1793824165331
+    Reserved with rmd next-task-id (W1-T11370 on run-unfiled-1793824165331). From the operator session's 2026-11-04 diagnosis of W1-T11318's preflight failure.

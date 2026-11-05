@@ -9,11 +9,13 @@
  * `decideProgressWatchdog` is pure; the verb in run-task.ts reads the ledger union and prints it.
  * Acting on `recycle` / `hold-revive` is W1-T5688's, not this module's.
  */
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { fixedClock } from "./clock.js";
 
-export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "IN_PASS" | "RECOVERING" | "CRASH_LOOP" | "UNKNOWN";
+export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "IN_PASS" | "IN_RECYCLE" | "RECOVERING" | "CRASH_LOOP" | "UNKNOWN";
 export type ProgressWatchdogAction = "none" | "capture-diagnostics" | "recycle" | "hold-revive";
 /** W1-T9702: where the open-PR count came from. A light pass writes one `sweep.pass` per PR, so only a full one counts. */
 export type OpenPrCountSource = "full_pass" | "full_pass_raised" | "max_over_window";
@@ -70,6 +72,29 @@ export interface ProgressWatchdogInput {
    *  launcher sets it), so the verb needs no new argument; neither present reads as no revivals. */
   revivalLog?: string;
   openPrCountSource?: OpenPrCountSource;
+  liveRecyclePausePid?: number;
+}
+
+/** W1-T11319: verify the recycle writer's identity before excluding its PAUSE from stall handling. */
+export function readLiveRecyclePausePid(
+  stateDir: string,
+  run: (file: string, args: string[]) => string = (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 30_000 }),
+): number | undefined {
+  try {
+    const pause = JSON.parse(readFileSync(join(stateDir, "PAUSE"), "utf8"));
+    if (pause?.reason === "container recycle (deploy/recycle-container.sh)"
+      && Number.isSafeInteger(pause.pid) && pause.pid > 0 && pause.host === hostname()
+      && typeof pause.writerStart === "string" && pause.writerStart.length > 0) {
+      const start = run("env", ["LC_ALL=C", "TZ=UTC", "ps", "-o", "lstart=", "-p", String(pause.pid)])
+        .trim().replace(/[ \t]+/g, " ");
+      if (start === pause.writerStart) return pause.pid;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(`progress-watchdog: cannot verify recycle PAUSE writer: ${(error as Error).message}`);
+    }
+  }
+  return undefined;
 }
 
 function rowMs(row: Record<string, unknown>): number | undefined {
@@ -307,6 +332,10 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
     ({ state, action, progressAgeMs, generationBootMs, loopResumedMs, failedBoots15m, preNodeDeaths: preNode.count,
       ...(openPrCountSource ? { openPrCountSource } : {}), reason });
 
+  // W1-T11319: a live recycle's own PAUSE is not evidence of a stalled fleet.
+  if (input.liveRecyclePausePid !== undefined) {
+    return verdict("IN_RECYCLE", "none", `a live recycle (pid ${input.liveRecyclePausePid}) owns PAUSE; its pause is not a stall`);
+  }
   if (failedBoots15m >= CRASH_LOOP_BOOTS) {
     return verdict("CRASH_LOOP", "hold-revive", `${failedBoots15m} boots in 15 min logged daemon.paths and never reached daemon.boot`);
   }

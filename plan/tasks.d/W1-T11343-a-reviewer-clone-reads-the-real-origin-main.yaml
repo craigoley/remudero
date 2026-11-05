@@ -1,0 +1,46 @@
+- id: W1-T11343
+  title: A semantic reviewer's disposable clone points origin/main at the source repository's own origin/main, not the source's local main branch that git clone maps there, so every base-relative check a reviewer runs reads the real base instead of one frozen on 2026-10-16
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one ref set after the existing clone; the clone, its HEAD checks and the reviewer's sandbox are unchanged
+  origin: operator-session#review-runaway-memory-2026-11-04
+  plan_refs:
+    - W1-T115
+    - W1-T10821
+  files:
+    - src/cli/commands/review.ts
+    - test/review/a-reviewer-clone-reads-the-real-origin-main.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: materializeReviewerSnapshot sets the disposable clone's refs/remotes/origin/main to the source repository's refs/remotes/origin/main, so in a real fixture whose local main lags its origin/main by several commits, the clone's origin/main and its `git merge-base origin/main HEAD` equal the source's; when the source has no origin/main the clone keeps no origin/main ref, so no review reads a stale base as if it were main
+      proof: "unit test: test/review/a-reviewer-clone-reads-the-real-origin-main.test.ts"
+    - claim: The review.reviewer.materialized row records the clone's origin/main sha, or null when the source has none
+      proof: "grep: origin_main in src/cli/commands/review.ts"
+  rationale: |
+    OBSERVED 2026-11-04, remudero-daemon:
+    - In /home/node/Remudero/remudero, refs/heads/main is 55723aac7 (2026-10-16T15:00Z) and refs/remotes/origin/main is f9871b36d (2026-11-04T19:31Z). The daemon fetches origin/main and never moves its local main.
+    - materializeReviewerSnapshot (src/cli/commands/review.ts) runs `git clone --quiet --shared --no-checkout -- <source> <cwd>`. A clone maps the source's refs/heads/* to its own refs/remotes/origin/*, so every reviewer clone's origin/main has been that 10-16 commit.
+    - #16240's reviewer (rollout 2026-11-04T18:50:09Z) wrote "Several census assertions compare against the local origin/main, which is 2,851 commits behind the reviewed head", and discounted those failures by hand.
+    - The same stale base made test/worker/spawn/compress-src-lib-worker-ts.test.ts think the PR adds it (compressionPinBase reads `git merge-base origin/main HEAD`). It then compared worker.ts against the 10-16 source. The failing assert.deepEqual grew one test process to 19.2 GiB and pushed the container past memory.high 4.2 million times (W1-T11342 has the mechanism). It happened twice: about 16:50Z and 19:09Z, both in #16240's reviews. The operator approved stopping the second one.
+    - Reproduced in a scratch clone with origin/main at ec0eb2ce2: the pin test reached 3.4 GiB in 8 s and was still growing.
+    - ci-parity's isolated merge clone is not affected: it resets its origin URL and fetches main from the real remote.
+  design: |
+    In materializeReviewerSnapshot, after the clone and before the HEAD checks:
+    - Resolve refs/remotes/origin/main in the source repository (the same top level the clone used).
+    - If it resolves, `git update-ref refs/remotes/origin/main <sha>` in the clone. The clone shares the source's objects, so the commit is present.
+    - If it does not resolve, delete the clone's refs/remotes/origin/main.
+    - A git failure here throws the existing ReviewerSnapshotError("materialization", "clone-failed"), as the clone step does.
+    - Return the sha (or null) and log it as origin_main on the existing review.reviewer.materialized row.
+    NOT IN SCOPE:
+    - moving the daemon repository's own local main;
+    - the deterministic proof floor's base checkout, which reads the PR's base directly.
+  note: |
+    W1-T11149 (open, run-W1-T11149-1793803384000) adds lines next to the review.reviewer.materialized row. Merge origin/main first if it lands.
+    reservation hand-off: run-unfiled-1793821353770 -> run-unfiled-1793821353770
+    Reserved with rmd next-task-id (W1-T11343 on run-unfiled-1793821353770). From the operator session's 2026-11-04 runaway-review diagnosis.

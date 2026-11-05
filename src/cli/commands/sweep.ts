@@ -334,7 +334,8 @@ export function buildSweepEffects(
 
     if (mode.kind === "discriminate-only") {
       const reuseInputs = pr as OpenPrView & Partial<ReviewReuseInputs>;
-      const prior = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl))?.decision_verdict as ReviewVerdict | undefined;
+      // W1-T11340: the PR's own created_at bounds the archive scan behind a live miss.
+      const prior = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt }))?.decision_verdict as ReviewVerdict | undefined;
       const missing = missingReviewReuseFact(prior, reuseInputs);
       if (!prior || missing !== undefined) return fallbackToFullReview(missing ?? "no-prior-verdict");
 
@@ -456,7 +457,7 @@ export function buildSweepEffects(
     if (mode.kind !== "reuse") {
       return fallbackToFullReview("unknown review reuse mode");
     }
-    const verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl))?.decision_verdict as ReviewVerdict | undefined;
+    const verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt }))?.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
       return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase);
