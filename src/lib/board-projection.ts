@@ -700,8 +700,8 @@ function bucketDigest(bucket: StepBucket, more: readonly StepRow[] = []): StepDi
 }
 
 /** W1-T9716: the task-bucket cache's reads since the last `read_model.board_oracle` row: hits (extended_rows the only
- *  store rows they read), full_reads, evictions at the bound, not_admitted (no room but the buckets this index already
- *  used: a re-derive larger than the bound keeps what it holds rather than evicting each bucket before its next use),
+ *  store rows they read), full_reads, evictions at the bound, not_admitted (a bucket larger than the whole bound, read but
+ *  not held),
  *  resets on a moved digest; and what it holds (tasks, bytes). */
 export interface BoardTaskReads {
   hits: number;
@@ -728,6 +728,17 @@ interface TaskBucket {
   readonly high: number;
   readonly n: number;
   readonly s: number;
+}
+
+/** W1-T9716: a held row's deep copy (rows are parsed JSON), so a reader's writes never reach the cache. */
+function copyRow<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(copyRow) as T;
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) out[key] = copyRow((value as Record<string, unknown>)[key]);
+    return out as T;
+  }
+  return value;
 }
 
 function mergeTaskRows(held: Pick<TaskBucket, "rows" | "tsMs" | "seqs">, more: Pick<TaskBucket, "rows" | "tsMs" | "seqs">): { rows: Row[]; tsMs: number[]; seqs: number[] } {
@@ -931,8 +942,6 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const cacheStrings = strings ? new Map<string, string>() : undefined;
   let stepReads = noStepReads();
   const taskCache = new Map<string, TaskBucket>();
-  const taskUsedBy = new Map<string, number>();
-  let indexGeneration = 0;
   const taskCacheLimit = Math.max(0, opts.taskCacheBytes ?? BOARD_TASK_CACHE_BYTES);
   let taskCacheHeld = 0;
   let taskReads = noTaskReads();
@@ -1353,7 +1362,6 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     planOnlyPending = [];
     planOnlyDigest = undefined;
     taskCache.clear();
-    taskUsedBy.clear();
     taskCacheHeld = 0;
     cacheStrings?.clear();
   }
@@ -1431,7 +1439,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     let bytes = 0;
     for (const r of rowsOf) {
       const body = String(r.body);
-      bytes += body.length;
+      bytes += Buffer.byteLength(body, "utf8");
       const row = parse(body);
       if (cacheStrings) internRowStrings(row, cacheStrings);
       read.push({ row, tsMs: Number(r.ts_ms), seq: Number(r.seq) });
@@ -1442,7 +1450,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
 
   /** W1-T9716: `id`'s held bucket, made current to `upTo`: extended by the rows past its high seq when its digest still
    *  matches the store, read in full otherwise. Held most recently used last; the least recent go at the bound. */
-  function cachedTask(id: string, upTo: number, generation: number): TaskBucket {
+  function cachedTask(id: string, upTo: number): TaskBucket {
     let bucket = taskCache.get(id);
     if (bucket) {
       const digest = taskDigest(id, bucket.high);
@@ -1468,16 +1476,15 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     }
     forgetTask(id);
     taskCache.set(id, bucket);
-    taskUsedBy.set(id, generation);
     taskCacheHeld += bucket.bytes;
-    for (const [oldest, held] of taskCache) {
+    // Strictly least recently re-derived first (design 3); only a bucket larger than the whole bound is not held.
+    for (const oldest of taskCache.keys()) {
       if (taskCacheHeld <= taskCacheLimit) break;
-      if (oldest === id || taskUsedBy.get(oldest) === generation) {
-        forgetTask(id);
+      forgetTask(oldest);
+      if (oldest === id) {
         taskReads.not_admitted++;
         break;
       }
-      forgetTask(oldest);
       taskReads.evictions++;
     }
     return bucket;
@@ -1487,7 +1494,6 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const held = taskCache.get(id);
     if (!held) return;
     taskCache.delete(id);
-    taskUsedBy.delete(id);
     taskCacheHeld -= held.bytes;
   }
 
@@ -1555,7 +1561,6 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
    */
   function storeIndex(bound: ReadonlyArray<Row>, cached = true, tally?: { rows: number; bytes: number }): LedgerIndex {
     const upTo = lastSeq;
-    const generation = cached ? ++indexGeneration : 0;
     if (cached) {
       stepReads.indexes++;
       checkStepCache();
@@ -1583,8 +1588,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const taskBucket = (id: string): Row[] => {
       const facts: Array<{ row: Row; key: [number, number, number] }> = [];
       if (cached && aliasReady && taskCacheLimit > 0) {
-        const held = cachedTask(id, upTo, generation);
-        for (let at = 0; at < held.rows.length; at++) if (held.seqs[at]! <= upTo) facts.push({ row: held.rows[at]!, key: [held.tsMs[at]!, 0, held.seqs[at]!] });
+        const held = cachedTask(id, upTo);
+        // Design 4: a reader that mutates a handed-out row gets a copy, never the held row.
+        for (let at = 0; at < held.rows.length; at++) if (held.seqs[at]! <= upTo) facts.push({ row: copyRow(held.rows[at]!), key: [held.tsMs[at]!, 0, held.seqs[at]!] });
       } else {
         const source = aliasReady ? sql.taskFacts.iterate(id, upTo, ...unread, id, upTo, ...unread) : sql.taskFacts.iterate(id, upTo, ...unread, "\u0000", 0, ...unread);
         for (const r of source) facts.push({ row: parse(counted(r.body)), key: [Number(r.ts_ms), 0, Number(r.seq)] });

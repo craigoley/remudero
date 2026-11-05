@@ -299,36 +299,71 @@ test("W1-T9716: the board oracle finds a held task bucket that drifted and drops
   const clean = logged.at(-1)?.step_cache as { audit: { mismatches: string[]; tasks: number } };
   assert.deepEqual(clean.audit.mismatches, [], "the audit (cached against the oracle's uncached read) agrees");
   assert.ok(clean.audit.tasks > 0, "control: the audit compared held task buckets");
-  // A reader writing into a row it was handed changes the held bucket: the next audit names the task and drops the cache.
-  const handed = board.index(board.rows()).byTask.get("W1-T23") ?? [];
-  (handed[0] as Row).run_id = "mutated";
+  // A stored body rewritten in place keeps the task's count and seq sum, so only the audit can see the held bucket drift.
+  const first = w.db.prepare("SELECT seq, body FROM fact WHERE task_id = ? ORDER BY ts_ms, seq LIMIT 1").get("W1-T23")!;
+  const rewritten = { ...(JSON.parse(String(first.body)) as Row), run_id: "rewritten" };
+  w.db.prepare("UPDATE fact SET body = ? WHERE seq = ?").run(JSON.stringify(rewritten), Number(first.seq));
   board.oracle();
   const drifted = logged.at(-1)?.step_cache as { audit: { mismatches: string[] }; resets: { audit: number } };
   assert.ok(drifted.audit.mismatches.includes("task:W1-T23"), "the audit names the task that drifted");
   assert.equal(drifted.resets.audit, 1, "and drops the cache");
-  assert.notEqual((board.index(board.rows()).byTask.get("W1-T23") ?? [])[0]?.run_id, "mutated", "the next index reads the task again");
+  assert.equal((board.index(board.rows()).byTask.get("W1-T23") ?? [])[0]?.run_id, "rewritten", "the next index reads the task again");
 });
 
-test("W1-T9716: a re-derive larger than the bound keeps the buckets it already used", (t) => {
+test("W1-T9716: a reader that mutates a handed-out row never changes the held bucket", (t) => {
+  const nested = { ts: at(T0 + 500), host: "h1", step: "verdict", task_id: "W1-T24", run_id: "r-W1-T24", detail: { attempts: [1, 2], why: "kept" } };
+  const w = world(t, [...rowsFrom(T0, 20), nested, ...aliasRows(T0 + 30_000, "W1-T24", 1)]);
+  const board = w.board();
+  drain(board);
+  const handed = board.index(board.rows()).byTask.get("W1-T24") ?? [];
+  assert.ok(handed.length > 20, `control: the bucket is held (${handed.length} rows)`);
+  // The reviewer's case: write into rows a reader was handed, then extend the bucket by an alias row and a late row.
+  (handed[0] as Row).run_id = "mutated";
+  const held = handed.find((r) => (r as Row).detail !== undefined) as Row & { detail: { attempts: number[]; why: string } };
+  held.detail.why = "mutated";
+  held.detail.attempts.push(99);
+  w.append([...aliasRows(T0 + 40_000, "W1-T24", 2), { ts: at(T0 + 100), host: "h1", step: "verdict", task_id: "W1-T24", run_id: "r-W1-T24", late: true }]);
+  drain(board);
+  const extended = bucketsOf(board);
+  assert.deepEqual(extended, uncachedBuckets(w), "the extended bucket equals a fresh full read: no write reached the cache");
+  assert.ok(!extended["W1-T24"]!.some((r) => r.includes("mutated") || r.includes("99")), "neither the top-level nor the nested write is held");
+  assert.ok(extended["W1-T24"]!.some((r) => (JSON.parse(r) as Row).late === true), "control: the late row was merged in");
+});
+
+test("W1-T9716: one index evicts strictly the least recently re-derived task", (t) => {
   const w = world(t, rowsFrom(T0, 30));
-  const bytes = (id: string): number => Number(w.db.prepare("SELECT sum(length(body)) AS b FROM fact WHERE task_id = ?").get(id)?.b ?? 0);
-  const bound = Math.floor(Math.max(...IDS.map(bytes)) * 2.5);
+  const bytes = (id: string): number => Number(w.db.prepare("SELECT sum(length(CAST(body AS BLOB))) AS b FROM fact WHERE task_id = ?").get(id)?.b ?? 0);
+  const bound = Math.floor(Math.max(...IDS.map(bytes)) * 2.5); // two tasks fit, three do not
   const counted = counting(w.db);
   const board = w.board({ db: counted.db, taskCacheBytes: bound });
   drain(board);
-  // One index re-derives four tasks in a fixed order, as a clock pass does, twice: plain LRU would evict each bucket just
-  // before its next use and hit nothing. The buckets this index already used are kept; the rest are read but not held.
-  const order = ["W1-T21", "W1-T22", "W1-T23", "W1-T24"];
-  const pass = (): number[] => {
-    const index = board.index(board.rows());
-    return order.map((id) => {
-      const mark = counted.bodyRows();
-      index.byTask.get(id);
-      return counted.bodyRows() - mark;
-    });
-  };
-  pass();
-  const second = pass();
-  assert.deepEqual(second.slice(0, 2), [0, 0], `the two buckets that fit are served without a store read (${second.join(", ")})`);
-  assert.ok(second[2]! > 0 && second[3]! > 0, "control: the rest are read in full, not held");
+  const [a, b, c] = ["W1-T21", "W1-T22", "W1-T23"];
+  // The reviewer's case: one index re-derives A, B and C under a two-task bound. The oldest, A, goes; B and C stay.
+  const index = board.index(board.rows());
+  for (const id of [a, b, c]) index.byTask.get(id);
+  assert.equal(readsOf(counted, board, c).reads, 0, "c, the newest, is held");
+  assert.equal(readsOf(counted, board, b).reads, 0, "b is held");
+  const aAgain = readsOf(counted, board, a);
+  assert.equal(aAgain.reads, aAgain.rows, "a, the least recently re-derived, was evicted and is read in full");
+});
+
+test("W1-T9716: the task cache bound counts body bytes, not characters", (t) => {
+  const wide = (i: number): Row => ({ ts: at(T0 + i * 1_000), host: "h1", step: "verdict", task_id: "W1-T21", run_id: "r-W1-T21", note: "\u00e9".repeat(40), n: i });
+  const w = world(t, Array.from({ length: 6 }, (_, i) => wide(i)));
+  const sizes = w.db.prepare("SELECT sum(length(body)) AS chars, sum(length(CAST(body AS BLOB))) AS bytes FROM fact WHERE task_id = ?").get("W1-T21")!;
+  const [chars, bytes] = [Number(sizes.chars), Number(sizes.bytes)];
+  assert.ok(bytes > chars + 200, `control: the history is ${bytes} bytes in ${chars} characters`);
+  const bound = Math.floor((chars + bytes) / 2); // more than its characters, fewer than its bytes
+  const counted = counting(w.db);
+  const logged: Array<Record<string, unknown>> = [];
+  const board = w.board({ db: counted.db, taskCacheBytes: bound, oracleSlices: 1, log: (step, extra) => void (step === "read_model.board_oracle" && logged.push(extra)) });
+  drain(board);
+  const first = readsOf(counted, board, "W1-T21");
+  assert.ok(first.rows >= 6, `control: the task holds ${first.rows} rows`);
+  const again = readsOf(counted, board, "W1-T21");
+  assert.equal(again.reads, again.rows, `a ${bytes}-byte history is not held under a ${bound}-byte bound`);
+  board.oracle();
+  const cache = (logged.at(-1)?.step_cache as { task_cache: { bytes: number; not_admitted: number } }).task_cache;
+  assert.ok(cache.bytes <= bound, `the cache holds ${cache.bytes} bytes, at most its bound ${bound}`);
+  assert.ok(cache.not_admitted > 0, "and counts the history it could not hold");
 });
