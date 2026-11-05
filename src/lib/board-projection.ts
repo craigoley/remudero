@@ -735,7 +735,12 @@ function copyRow<T>(value: T): T {
   if (Array.isArray(value)) return value.map(copyRow) as T;
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value)) out[key] = copyRow((value as Record<string, unknown>)[key]);
+    for (const key of Object.keys(value)) {
+      const copied = copyRow((value as Record<string, unknown>)[key]);
+      // JSON.parse makes __proto__ an own data property; assigning it to {} would change the copy's prototype.
+      if (key === "__proto__") Object.defineProperty(out, key, { value: copied, enumerable: true, writable: true, configurable: true });
+      else out[key] = copied;
+    }
     return out as T;
   }
   return value;
