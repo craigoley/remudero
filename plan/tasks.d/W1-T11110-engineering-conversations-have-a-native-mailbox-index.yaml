@@ -11,15 +11,7 @@
   budget_usd: 20
   origin: human#2026-11-02-console-email-inbox
   plan_refs: [W1-T11096, W1-T11103, W1-T10572, CONSOLE-T164]
-  files:
-    - src/lib/escalation-conversation-index.ts
-    - src/lib/escalation-conversation.ts
-    - src/lib/serve.ts
-    - src/lib/instance-gateway.ts
-    - openapi/daemon.yaml
-    - packages/api-client/src/schema.d.ts
-    - test/inbox/escalation-conversation.test.ts
-    - test/inbox/escalation-conversation-serving.test.ts
+  files: [src/lib/escalation-conversation-index.ts, src/lib/escalation-conversation.ts, src/lib/serve.ts, src/lib/instance-gateway.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/inbox/escalation-conversation-index.test.ts, test/inbox/escalation-conversation-index-coverage.test.ts, test/inbox/escalation-conversation-index-serving.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -59,24 +51,20 @@
     or truncated history remains visible as incomplete/unknown coverage. Counts name the same unit
     (unique conversations) and their complete scope; a partial page or unreadable source cannot claim
     an empty folder, zero asks, complete history or a verified global total. Keep loaded counts distinct.
-    Extend the existing real-store escalation conversation and assembled-service suites with the
-    index behaviors. Cover healthy and legacy source-only rows, exact native issue binding, saved answer
-    while the board flag remains open, archive while work runs, reopen, closed-origin preserved history,
-    page changes, duplicate/conflicting source rows and absent/corrupt/oversize sources. Preserve their
-    current test titles as literal proof anchors while strengthening those cases with index assertions.
-    Prove the repository-prefixed read through the assembled authenticated service, including foreign
-    scope refusal, bounded reads and no source fan-out or live fixture write.
+    Add dedicated real-store index tests and an assembled-service test. Cover healthy and legacy
+    source-only rows, exact native issue binding, a saved answer while the board flag remains open,
+    archive while work runs, reopen, closed-origin preserved history, page changes, duplicate or
+    conflicting source rows and absent, corrupt or oversized sources. Use new test files so this
+    plan-only filing names forward proofs that discriminate the later implementation. Prove the
+    repository-prefixed read through the assembled authenticated service, including foreign-scope
+    refusal, bounded reads and no source fan-out or live fixture write.
   acceptance:
-    - claim: the real service mounts the native engineering conversation index
-      proof: 'grep: buildEscalationConversationIndexRoute( in src/lib/serve.ts'
-    - claim: a saved answer clears the ask while its original flag remains open
-      proof: 'unit test: an existing native escalation without saved history starts one conversation on the first reply'
-    - claim: correspondence archives and reopens without claiming work is complete
-      proof: 'unit test: an answered escalation archives only on an explicit agent response and a later question reopens it'
-    - claim: incomplete sources and pagination cannot fabricate complete folder counts
-      proof: 'unit test: oversized or ambiguous saved discussions remain explicitly partial'
-    - claim: the selected repository read is served through the real authenticated gateway
-      proof: 'unit test: assembled service serves an authenticated escalation conversation'
+    - claim: the real service mounts the repository-scoped index through authenticated service reads
+      proof: 'unit test: test/inbox/escalation-conversation-index-serving.test.ts'
+    - claim: saved answers and agent follow-ups keep one thread with honest archive and reopen states
+      proof: 'unit test: test/inbox/escalation-conversation-index.test.ts'
+    - claim: incomplete or conflicting sources and pagination cannot fabricate complete folder counts
+      proof: 'unit test: test/inbox/escalation-conversation-index-coverage.test.ts'
   falsifier: |
     Restore the open flag as Action required after a saved answer, archive on capture, substitute a
     foreign issue/thread, remove the actual mount, or count a partial page as the whole mailbox:
