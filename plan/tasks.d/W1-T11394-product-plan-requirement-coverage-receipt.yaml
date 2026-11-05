@@ -1,0 +1,58 @@
+- repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  priority: 3
+  risk: high
+  band_meaning: span
+  author_class: machine
+  status: queued
+  attempts: 0
+  id: W1-T11394
+  title: A product plan operation exposes observational requirement coverage without changing admission
+  budget_usd: 20
+  origin: research:conductor-dex-2026-11-05:requirements
+  plan_refs:
+    - §2
+    - §4G
+    - §7B
+    - W1-T10823
+    - W1-T10572
+  files:
+    - src/lib/product-plan-operation.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/dispatch/product-plan-operation.test.ts
+  rationale: "OBSERVED at 1438f25d780f8119342dbc36dc8715f9c6670e26: product plan operations freeze briefDigest, targetHead, objectiveRevision and request identity; ProductPlanObservation is assigned directly to the served product-case planOperation response. Whole brief inclusion does not show a requirement inventory or task/proof mapping. Dex puts decomposition in its agent skill while the CLI preserves whole-plan Markdown. This first slice adds a bounded observational report to the existing operation response only; it does not alter verifyProductPlanEvidence, product-case verification or product-build admission. The frozen operation currently does not hold raw brief bytes, so changed or unavailable source must stay source-unavailable instead of mapping the current brief as if it were the frozen one. Sources: https://dex.rip/skills ; https://dex.rip/guide ; https://github.com/dcramer/dex/blob/3f55b2a3ec9746fc56cf62037ca6a828555ce17d/plugins/dex/skills/dex-plan/SKILL.md ;
+    https://github.com/craigoley/remudero/blob/1438f25d780f8119342dbc36dc8715f9c6670e26/src/lib/product-plan-operation.ts . W1-T10823 owns the original operation; this follow-up adds an observation, not a second operation. W1-T10572 separately owns Analytics schema wording; shared OpenAPI/generated files are contract ownership overlap, not duplicate work. An earlier broader version touching record/build verification received a low-confidence escalation; its receipt is preserved, and this design removes those effects rather than rejudging the unchanged request."
+  design: >-
+    Extend only ProductPlanObservation and the existing operation report returned by ProductPlanOperationService. Add an optional bounded, versioned observational requirementCoverage field to the existing served planOperation response. product-case currently passes the observation through directly; leave product-case.ts, product-build.ts and verifyProductPlanEvidence unchanged. Update the existing OpenAPI response and regenerate the API client schema. No operation state, success criterion, requestKey/payloadDigest handling, journal/replay decision, readiness, proof verdict or build admission may change.
+
+    Produce an independently addressable structural source inventory from the approved brief's explicit typed constraints/decisions using source-relative field/index pointers plus digest. Preserve free-form idea text as one nonexhaustive unreviewed source item; do not invent atomic semantic extraction. New native planning handoffs may carry bounded untrusted inventory/report-format guidance through briefArgument while preserving the canonical approved brief text. The existing command digest captures the actual new handoff bytes; never rewrite an existing journal command or replay. When existing proposed-plan evidence identifies a committed proposal PR head, capture at most one optional versioned task/proof mapping report from that exact head through the existing bounded transport; validate against the pinned inventory and task/proof snapshot. Missing or invalid mapping leaves inventory entries unmapped/coverage-unavailable rather than silently claiming coverage. This is the actual
+    producer path, not a helper with no caller. A report binds to the existing operation ID, frozen briefDigest, objectiveRevision and targetHead plus an independently enumerated/reviewed requirement inventory and candidate task/proof snapshot identity when those are available through existing operation evidence. Inventory extraction is an untrusted proposal, not a deterministic oracle for every meaning in arbitrary prose. Resolvable source-relative anchors and concrete task/proof references yield structural linked, unmapped or explicitly deferred with rationale states; semantic review and implementation outcomes remain separate and unverified. Do not label links tested, implemented, exhaustive or complete. Missing inventory, missing candidate plan/proofs or unreadable references are explicit unavailable states, never a successful zero-requirement report.
+
+    The existing frozen record holds a brief digest but not raw source bytes. Use exact source bytes only when existing native custody or a checked unchanged current brief actually matches the frozen digest. When the current brief changes, is unavailable, or cannot be verified, report source-unavailable; never silently substitute today's brief or require a new journal migration merely to fill this field. If exact approved inventory cannot be produced or no compatible committed candidate map is available, return inventory-unavailable/mapping-unavailable. Keep the existing planning model and operation; do not add a separate model call or service. Maintain exact-input report identity and clearly invalidate reports for incompatible source/inventory/task-map revisions. Legacy operations render coverage unavailable without changing their validity or requiring replay.
+
+    Bound source excerpts, item count, reference count, output bytes and total read work using maintained operation/report limits; no full transcript, raw ledger scan, new service or scheduled job. Prepare any needed observation asynchronously through the existing propose/observe production path, with optional bounded receipt custody only if the current strict record reader can preserve legacy and exact replay behavior. Report failure cannot change the native operation outcome. Keep untrusted excerpts labelled, existing authorization/redaction and all admission/verification authority unchanged. Exercise actual operation creation/replay plus the served response contract with real existing product route fixtures within the declared physical suite; extend the same suite and OpenAPI strict contract helper rather than adding an unused pure helper. New tests use package aliases and the shared repo-root helper.
+  acceptance:
+    - claim: the native operation response binds a structural report to available frozen source inventory and mapping revisions without claiming semantic completeness
+      proof: "unit test: product plan coverage observation binds source inventory and mapping identity"
+    - claim: changed or unreadable brief legacy custody absent inventory and unmapped or deferred entries remain explicit unknown states
+      proof: "unit test: product plan coverage observation preserves source inventory and mapping unknown states"
+    - claim: same-input replay is stable and reporting failure cannot change operation state proof verdict or build admission
+      proof: "unit test: product plan coverage observation preserves operation and admission behavior"
+    - claim: the real served observation and generated response schema retain bounds privacy and optional legacy compatibility
+      proof: "unit test: product plan coverage observation reaches the bounded served response contract"
+  falsifier: Substitute the current brief after its digest changes, erase an entry from an independently pinned reviewed inventory, treat absent inventory as zero requirements, label a link implemented, mutate operation state because report generation fails, or drop the optional report at the actual served response. Each corresponding physical case must fail with its isolated guard removed and pass when restored; retain control/mutant/restored receipts. A proposal omitting arbitrary source meaning remains semantic-review-unverified, with no claim that structural tests infer all requirements. Healthy exact-source and legacy-without-report controls must preserve existing operation/admission results.
+  note: "Authorized by the operator on 2026-11-05 to research Conductor and dex.rip and file and update the plan. This is an implementation proposal entering normal ownership, capacity, budget, author, hosted CI, adversarial review and protected merge gates; it is not a delivered feature or adoption result. Preserve existing dispatch holds, cash routing and spending caps, credentials, schedules, archives and other owners. No new model/evaluation spend, automatic retry, deployment, service restart, permission expansion or gate waiver is granted. Reservation holder: codex/conductor-dex-plan-20261105. Source audit and all 12 open PR head subject counts are recorded in plan/notes/conductor-dex-2026-11-05.md; unpushed work is outside that census."
+  risk_ruling:
+    verdict: operator
+    action: proceed
+    confidence: 1
+    reasons:
+      - The operator explicitly approved this exact four-file observation-only scope in this chat on 2026-11-05 after reviewing the native low-risk 0.68 confidence escalation.
+      - Approval permits normal task filing only; operation states, proof verification and product-case/product-build admission remain unchanged, and normal ownership, capacity, author, hosted CI, review and protected merge gates still apply.
+    judged_at: 2026-11-05T12:45:40.314Z
+    pin: 0fa525ae83d553e0e6920ebcff7234eb9b9b0f663bca957cbf8738613be0f0db
