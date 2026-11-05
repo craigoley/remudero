@@ -1,0 +1,38 @@
+- id: W1-T11434
+  title: A shadow core promotes only the one W1-T5901 plan-merge candidate per light pass
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-05 queue recovery: #16895 is green and reviewed but the core daemon is intentionally shadow, so its existing bounded plan-merge path refuses"
+  plan_refs: [W1-T5901, W1-T5615, W1-T5748, W1-T4405, W1-T3596]
+  files: [src/lib/sweep.ts, test/a-ready-plan-pr-merges-on-the-next-pass.test.ts, test/shadow-instance-safety.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    On 2026-11-05, plan PR #16895 (head f0d252779b0fd4477bfdf25bd256128e95654328) was OPEN,
+    CLEAN/MERGEABLE, with 0 red, 0 pending and 75 okay checks including semantic review and
+    security-merge-policy. The light pass selected the existing W1-T5901 direct-merge path, but
+    the core instance's repository-wide shadow mode returned shadow-refused. A later attempt
+    failed closed when selected-instance registry revalidation timed out. The operator explicitly
+    chose to keep the core registry shadow and requested a lane-only promotion. W1-T5901 already
+    bounds this path to one selected plan PR per light pass and overlapping pass.
+  design: |
+    Preserve the repository-wide shadow setting. Add the smallest explicit capability that lets
+    only the exact plan PR already selected by W1-T5901 take that pass's existing plan merge path.
+    Keep its fresh exact-head, review, required-check, security, operator-hold and W1-T5748
+    plan-safety decisions, including W1-T4405 merge-queue behavior. Unknown or changed selection
+    evidence refuses. Code PRs, non-selected plan PRs and every other shadow-mode mutation remain
+    refused. The per-pass and overlapping-pass single-candidate claim remains unchanged.
+  acceptance:
+    - claim: "With the core still in shadow mode, only the exact W1-T5901-selected plan PR uses the existing one-per-light-pass merge path after fresh exact-head, review, required-check, security, operator-hold and W1-T5748 safety checks; unknown selection evidence refuses."
+      proof: "unit test: test/shadow-instance-safety.test.ts"
+    - claim: "The promoted path preserves the one-plan-PR-per-light-pass bound, W1-T4405 merge-queue behavior, and current code-PR deferral."
+      proof: "unit test: test/a-ready-plan-pr-merges-on-the-next-pass.test.ts"
+  falsifier: |
+    Keep the blanket shadow refusal for the selected plan merge. The new positive shadow-mode
+    case must fail, while code PRs and non-selected plan PRs remain refused.
