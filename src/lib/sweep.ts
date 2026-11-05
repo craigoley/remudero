@@ -34,6 +34,7 @@ import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } f
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { recyclePauseDetail } from "./recycle-yield.js";
+import { isRecyclePauseDetail } from "./fleet-control.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
   baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingRuleSuitesFromCiFailures, failingTestFilesFromCiFailures,
@@ -111,8 +112,13 @@ import {
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
   createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
+<<<<<<< HEAD
   readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerUnionRecordRead,
+=======
+  readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
+  type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
+>>>>>>> origin/main
 } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
@@ -203,6 +209,8 @@ import {
   recordedLoad1,
   sampleHostLoad,
   reviewLedgerKeyFor,
+  reviewLaneCancellation,
+  reviewLanePr,
   reviewTaskNarrative,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
@@ -16900,7 +16908,8 @@ export function detachedSweepActionCount(): number {
  *  review started by a light pass the exit never awaits was killed mid-judgement (PR 6993, 2026-09-24). */
 interface ReviewRegistration { taskId?: string; prNumber?: number; admittedAtMs: number; kind?: string }
 const inFlightReviewRuns = new Map<Promise<void>, ReviewRegistration>();
-const reviewCancellation = new AsyncLocalStorage<AbortSignal>();
+// W1-T11340: review.ts owns the store, so a lookup inside a review (priorPostedReviewRow) honors the lane's abort too.
+const reviewCancellation = reviewLaneCancellation;
 const inFlightReviewStops = new Map<Promise<void>, AbortController>();
 
 /** The cancellation owned by the admitting review lane, carried through reviewCommand's awaits. */
@@ -16954,6 +16963,26 @@ export function trackInFlightReview(start: Promise<void> | (() => Promise<void>)
 
 export function inFlightReviewCount(): number {
   return inFlightReviewRuns.size;
+}
+
+/** W1-T11340: abort this process's in-process review of `prNumber` once it has run `ceilingMs` or longer, returning its
+ *  settlement and age. `undefined` when none is registered (a child review, or none) or it is under the ceiling. */
+export function abortInProcessReviewPastCeiling(prNumber: number, ceilingMs: number, now: number):
+  { settled: Promise<void>; ageMs: number } | undefined {
+  for (const [settled, review] of inFlightReviewRuns) {
+    if (review.prNumber !== prNumber) continue;
+    const ageMs = now - review.admittedAtMs;
+    if (ageMs < ceilingMs) return undefined;
+    inFlightReviewStops.get(settled)?.abort();
+    return { settled, ageMs };
+  }
+  return undefined;
+}
+
+/** W1-T11340: forget an aborted review that never settled, so a restart drain and the review count stop waiting on it. */
+export function abandonInProcessReview(settled: Promise<void>): void {
+  inFlightReviewRuns.delete(settled);
+  inFlightReviewStops.delete(settled);
 }
 
 export function inFlightReviewRunsNow(): Promise<void>[] {
@@ -23926,7 +23955,9 @@ export async function runSweep(
   let passReviewsInFlight = 0;
   let widthStopReason: string | undefined;
   const workerCount = Math.min(reviewLanes, codeLane.jobs.length);
-  const startReview = (job: (typeof orderedReviews)[number], onPhase?: (phase: string) => void): Promise<void> => trackInFlightReview(() => runReview(job, onPhase), {
+  // W1-T11340: the review runs inside this lane's view of its PR, so its archive scans stay within the PR's lifetime.
+  const startReview = (job: (typeof orderedReviews)[number], onPhase?: (phase: string) => void): Promise<void> => trackInFlightReview(
+    () => reviewLanePr.run({ prUrl: job.pr.prUrl, createdAt: job.pr.createdAt }, () => runReview(job, onPhase)), {
     taskId: job.pr.taskId, prNumber: job.pr.prNumber, kind: job.mode.kind, admittedAtMs: deps.now?.() ?? systemClock.now(),
   });
   const lightAdmitted = deps.repairAdmissionSurface === "light"; // its light pass already bounded and reserved each plan review
@@ -24537,6 +24568,53 @@ const lightPassReservedHeads = new Set<string>();
 // overlapping pass's ready plan PR (#11367, #11368, #11371 waited 16-22 min, all green).
 let lightPassPlanMergeOwner: symbol | undefined;
 const lightPassHeadKey = (pr: OpenPrView): string => `${pr.prNumber}@${pr.headSha}`;
+// W1-T11340: each reserved head's release (its pass's `releases` entry), and the in-process reviews a pass aborted.
+const lightPassHeadReleases = new Map<string, () => void>();
+const reclaimedInProcessReviews = new Map<string, Promise<void>>();
+export const REVIEW_IN_PROCESS_RECLAIMED_STEP = "review.in_process_reclaimed";
+
+/**
+ * W1-T11340 — A STALE PENDING HELD BY THIS PROCESS IS RECLAIMED, NOT STOOD DOWN. On 2026-11-04 the stale-pending rule
+ * re-ran #16763 and #16764 at 107 and 129 minutes, and each re-run stood down as "already in flight" (W1-T7955): the
+ * head stayed reserved until a review that never settled did. W1-T8088's dead-owner takeover could not fire, since the
+ * owner was this live process. Runs before the pass reads its reservations, so a freed head is admitted as usual.
+ */
+async function reclaimStuckInProcessReviews(openPrs: OpenPrView[], deps: SweepDeps, policy: SweepPolicy, now: number): Promise<void> {
+  const ceilingMs = policy.pendingCeilingMinutes * 60_000;
+  const record = (pr: OpenPrView, fields: Record<string, unknown>): void => {
+    if (!deps.dryRun) (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+      step: REVIEW_IN_PROCESS_RECLAIMED_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+      ceiling_minutes: policy.pendingCeilingMinutes, ...fields });
+  };
+  const freeHead = (key: string): void => {
+    reclaimedInProcessReviews.delete(key);
+    lightPassHeadReleases.get(key)?.();
+    lightPassReservedHeads.delete(key); // also a reservation with no release registered
+  };
+  for (const pr of openPrs) {
+    const key = lightPassHeadKey(pr);
+    if (!lightPassReservedHeads.has(key)) { reclaimedInProcessReviews.delete(key); continue; }
+    const aborted = reclaimedInProcessReviews.get(key);
+    if (aborted !== undefined) {
+      // Aborted a pass ago and still unsettled: free the head now. Its late post meets the pending-owner guard.
+      abandonInProcessReview(aborted);
+      // W1-T513's review-key mutex releases only when an attempt settles; this one never did.
+      inFlightReviewKeys.delete(reviewOutcomeKeyForPr(pr));
+      freeHead(key);
+      record(pr, { outcome: "released-unsettled" });
+      continue;
+    }
+    if (pr.reviewState !== "pending" || !reviewPendingIsStale(pr, policy, now)) continue;
+    const stuck = abortInProcessReviewPastCeiling(pr.prNumber, ceilingMs, now);
+    if (stuck === undefined) continue;
+    reclaimedInProcessReviews.set(key, stuck.settled);
+    record(pr, { outcome: "aborted", run_age_ms: stuck.ageMs });
+    // The head frees when the REVIEW settles, not when its admitting pass finishes disposing of it.
+    void stuck.settled.then(() => { if (reclaimedInProcessReviews.get(key) === stuck.settled) freeHead(key); });
+    // One loop turn for an abort that settles at once, so this pass admits the freed head itself.
+    await Promise.race([stuck.settled, new Promise<void>((resolve) => setImmediate(resolve))]);
+  }
+}
 // W1-T5931: full-pass reviews in flight; with the light reservations, one process-wide review count.
 let fullPassReviewsInFlight = 0;
 const reviewPhaseObserver = new AsyncLocalStorage<(phase: string) => void>();
@@ -24821,6 +24899,8 @@ export async function runSweepLightPass(
   observeReviewEligibility(openPrs, deps, policy, now, selectionLedgerLines, outcomes, "light");
   await resolveUnreadPlanLanes(openPrs.filter((pr) => !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)), deps, policy, now);
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
+  // W1-T11340: free a head whose in-process review outlived its pending ceiling before reading the reservations.
+  await reclaimStuckInProcessReviews(openPrs, deps, policy, now);
   // W1-T7095: candidates for the host-memory demand row, read BEFORE this pass reserves its own spawning heads.
   const demandCandidates = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
   // W1-T7955: the heads an OVERLAPPING pass already holds, keyed by head (`<pr>@<head>`), never by PR number
@@ -24918,17 +24998,22 @@ export async function runSweepLightPass(
   let unsettledSpawning = spawning.length;
   for (const pr of [...spawning, ...planFilings]) {
     let released = false;
-    releases.set(pr.prNumber, () => {
+    const headKey = lightPassHeadKey(pr);
+    const release = (): void => {
       if (released) return;
       released = true;
+      if (lightPassHeadReleases.get(headKey) === release) lightPassHeadReleases.delete(headKey);
       if (spawningNumbers.has(pr.prNumber)) {
         lightPassSpawningReservations--;
         unsettledSpawning--;
       } else planLaneReviewsInFlight--;
-      lightPassReservedHeads.delete(lightPassHeadKey(pr));
+      lightPassReservedHeads.delete(headKey);
       releaseReviewSlot();
       if (spawningNumbers.has(pr.prNumber)) onOwnLaneFreed();
-    });
+    };
+    releases.set(pr.prNumber, release);
+    // W1-T11340: a later pass that reclaims this head's stuck review releases it through the same, once-only path.
+    lightPassHeadReleases.set(headKey, release);
   }
   try {
   // W1-T2931 — one host budget, with review/merge work served before new repair work. The light
@@ -25132,13 +25217,28 @@ export async function runSweepLightPass(
       policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson,
     ).spawning);
   };
+  let recycleRefillHeld = false;
+  const refillHeldForRecycle = (): boolean => {
+    // W1-T11321: a pass begun before the recycle PAUSE must not refill the drain with new reviews.
+    const detail = workerAdmissionHoldReason(deps, "review")?.replace(/^fleet PAUSE hold: /, "") ??
+      recyclePauseDetail(dirname(dirname(deps.ledgerPath)));
+    if (!isRecyclePauseDetail(detail)) return false;
+    if (!recycleRefillHeld && !deps.dryRun) {
+      append(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step: "sweep.review_refill_held",
+        reason: "recycle_pause", detail });
+      recycleRefillHeld = true;
+    }
+    return true;
+  };
   const admitOneRefill = async (): Promise<boolean> => {
     if (providerFloorMet || deps.restartAdmission?.("review", "light-refill") === false) return false;
+    if (refillHeldForRecycle()) return false;
     // Read the queue only when a lane is actually free, so a refill that admits nothing reads nothing.
     const freeWidth = effectiveReviewWidth(deps, policy, Math.max(1, refillTail.length), deps.now ? deps.now() : systemClock.now(),
       selectionLedgerLines, (deps.readActiveWorkerCount ?? activeWorkerCount)());
     if (reviewAdmissionBound(freeWidth).bound === 0) return false;
     await refreshRefillTail();
+    if (refillHeldForRecycle()) return false;
     if (refillTail.length === 0) return false;
     const nowMs = deps.now ? deps.now() : systemClock.now();
     const width = effectiveReviewWidth(deps, policy, refillTail.length, nowMs, selectionLedgerLines,
@@ -25185,6 +25285,12 @@ export async function runSweepLightPass(
       return true;
     }
     try {
+      if (refillHeldForRecycle()) {
+        unreserve();
+        refilledHeads.delete(key);
+        refillTail.unshift(next);
+        return false;
+      }
       append(deps.ledgerPath, { ...row, step: "sweep.review_refilled" });
     } catch (error) {
       unreserve();
@@ -27232,6 +27338,8 @@ export interface EscalationTriageSlice {
   steps: readonly string[];
   project?: (row: Record<string, unknown>) => Record<string, unknown>;
   version?: string;
+  /** Share this holder's reduced rotations with readers in fresh processes. */
+  sharedSnapshot?: boolean;
 }
 
 /** The rung's own slice (W1-T9390): its births and the state keys it already rejudged. */
@@ -27246,6 +27354,7 @@ export const ESCALATION_TRIAGE_HISTORY_SLICE: EscalationTriageSlice = {
  */
 export const ESCALATION_TRIAGE_EVIDENCE_SLICE: EscalationTriageSlice = {
   holder: "run-task.escalation-triage-evidence",
+  sharedSnapshot: true,
   steps: ["fix.dispatch", "escalation.auto_resolve_attempted", ...ESCALATION_TRIAGE_BIRTH_STEPS, "panel.escalation_marked_handled"],
 };
 
@@ -27263,7 +27372,25 @@ export type EscalationTriageHistoryReader = ((stateDir: string) => Promise<Ledge
 };
 
 /** What one {@link EscalationTriageHistoryReader} call loaded off the loop; a restarted reader's digest hits show here. */
-export interface EscalationTriageHistoryLoad { rotations: number; digestHits: number; digestMisses: number }
+export interface EscalationTriageHistoryLoad {
+  rotations: number; digestHits: number; digestMisses: number;
+  /** Successful bytes and archive attempts since the last async refresh, including subsequent current() reads. */
+  bytesRead: number; rotationsRead: number; snapshotHit: boolean; snapshotError?: string;
+}
+
+interface TriageSliceSnapshotRotation {
+  name: string; size: number; mtimeMs: number; read: LedgerRotationRecords;
+}
+
+function validTriageSnapshotRotation(value: unknown): value is TriageSliceSnapshotRotation {
+  if (!value || typeof value !== "object") return false;
+  const { name, size, mtimeMs, read } = value as TriageSliceSnapshotRotation;
+  return typeof name === "string" && basename(name) === name && Number.isSafeInteger(size) && size >= 0 &&
+    Number.isFinite(mtimeMs) && !!read && Array.isArray(read.rows) &&
+    read.rows.every((row) => row !== null && typeof row === "object" && !Array.isArray(row)) &&
+    Number.isSafeInteger(read.torn) && read.torn >= 0 && Array.isArray(read.tornLines) &&
+    read.tornLines.length === read.torn && read.tornLines.every((line) => typeof line === "string");
+}
 
 /**
  * Builds the rung's history reader, once per daemon start (`buildSweepHook`), or once per call where no
@@ -27286,7 +27413,18 @@ export function createEscalationTriageHistoryReader(
   const steps = [...slice.steps];
   const project = slice.project ?? ((row: Record<string, unknown>) => row);
   const identity = { holder: slice.holder, reducerVersion: `${slice.version ?? "1"}${io.parseAll ? "-all-record-objects-v2" : ""}`, project };
-  const union = createIncrementalLedgerUnion(identity, fsDeps);
+  let lastLoad: EscalationTriageHistoryLoad = { rotations: 0, digestHits: 0, digestMisses: 0,
+    bytesRead: 0, rotationsRead: 0, snapshotHit: false };
+  const counted = (path: string, read: () => Buffer): Buffer => {
+    if (ledgerRotationEntries([basename(path)], dirname(path)).length) lastLoad.rotationsRead++;
+    const buf = read();
+    lastLoad.bytesRead += buf.length;
+    return buf;
+  };
+  const union = createIncrementalLedgerUnion(identity, { ...fsDeps,
+    readFileSync: (path) => counted(path, () => fsDeps.readFileSync(path)),
+    readRangeSync: (path, start, end) => counted(path, () => (fsDeps.readRangeSync ?? realLedgerFs.readRangeSync)(path, start, end)),
+  });
   // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
   const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
   // Only a line naming one of the steps is parsed while loading; the reducer drops every other row anyway.
@@ -27296,9 +27434,71 @@ export function createEscalationTriageHistoryReader(
     return `${s.size}:${s.mtimeMs}`;
   };
   let loaded = new Map<string, string>();
-  let lastLoad: EscalationTriageHistoryLoad = { rotations: 0, digestHits: 0, digestMisses: 0 };
+  const kept = new Map<string, { key: string; read: LedgerRotationRecords }>();
+  const snapshotTried = new Set<string>();
+  const snapshotPath = (stateDir: string): string => join(stateDir, "cache", "rotation-slices",
+    `${encodeURIComponent(identity.holder).replaceAll(".", "%2E")}.json`);
+  const seedSnapshot = (stateDir: string): void => {
+    if (!slice.sharedSnapshot || snapshotTried.has(stateDir)) return;
+    snapshotTried.add(stateDir);
+    try {
+      const snapshot = JSON.parse(counted(snapshotPath(stateDir), () => fsDeps.readFileSync(snapshotPath(stateDir))).toString("utf8"));
+      if (snapshot?.schema !== 1 || snapshot.holder !== identity.holder || snapshot.reducerVersion !== durableDigest.reducerVersion ||
+          !Array.isArray(snapshot.rotations) || !snapshot.rotations.every(validTriageSnapshotRotation) ||
+          new Set(snapshot.rotations.map((entry: TriageSliceSnapshotRotation) => entry.name)).size !== snapshot.rotations.length) return;
+      const available = new Set(ledgerRotationEntries(fsDeps.readdirSync(stateDir), stateDir).map((entry) => entry.path));
+      lastLoad.snapshotHit = snapshot.rotations.length === 0 && available.size === 0;
+      for (const entry of snapshot.rotations as TriageSliceSnapshotRotation[]) {
+        const path = join(stateDir, entry.name);
+        if (!available.has(path)) continue;
+        const key = `${entry.size}:${entry.mtimeMs}`;
+        try {
+          if (statKey(path) !== key) continue;
+        } catch (error) {
+          const reason = String(error);
+          lastLoad.snapshotError = reason;
+          continue;
+        }
+        union.seed(path, key, entry.read);
+        loaded.set(path, key);
+        kept.set(path, { key, read: entry.read });
+        lastLoad.snapshotHit = true;
+      }
+    } catch (error) {
+      const reason = String(error);
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") lastLoad.snapshotError = reason;
+    }
+  };
+  const writeSnapshot = async (stateDir: string, stats: Map<string, string>): Promise<void> => {
+    if (!slice.sharedSnapshot) return;
+    const path = snapshotPath(stateDir);
+    const temp = `${path}.${randomUUID()}.tmp`;
+    try {
+      const rotations: TriageSliceSnapshotRotation[] = [];
+      for (const [archive, key] of stats) {
+        const hit = kept.get(archive);
+        if (hit?.key !== key || statKey(archive) !== key) return;
+        const [size, mtimeMs] = key.split(":").map(Number);
+        rotations.push({ name: basename(archive), size: size!, mtimeMs: mtimeMs!, read: hit.read });
+      }
+      await fs.promises.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      await fs.promises.writeFile(temp, JSON.stringify({ schema: 1, holder: identity.holder,
+        reducerVersion: durableDigest.reducerVersion, rotations }), { flag: "wx", mode: 0o600, flush: true });
+      await fs.promises.rename(temp, path);
+    } catch (error) {
+      const reason = String(error);
+      lastLoad.snapshotError = reason;
+    } finally {
+      try { await fs.promises.unlink(temp); }
+      catch (error) {
+        const reason = String(error);
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") lastLoad.snapshotError = reason;
+      }
+    }
+  };
   const strictUnread = new Set<string>();
   const current = (stateDir: string): LedgerUnionRecordRead => {
+    seedSnapshot(stateDir);
     if (strictUnread.size > 0) {
       // Do not let the permissive sync fallback write a clean digest under the strict identity.
       const archiveFiles = [...new Set([...loaded.keys(), ...strictUnread])];
@@ -27308,7 +27508,8 @@ export function createEscalationTriageHistoryReader(
     return union(stateDir, { step: steps, refuseIncomplete: true });
   };
   return Object.assign(async (stateDir: string): Promise<LedgerUnionRecordRead> => {
-    lastLoad = { rotations: 0, digestHits: 0, digestMisses: 0 };
+    lastLoad = { rotations: 0, digestHits: 0, digestMisses: 0, bytesRead: 0, rotationsRead: 0, snapshotHit: false };
+    seedSnapshot(stateDir);
     let names: string[] = [];
     try {
       names = fsDeps.readdirSync(stateDir);
@@ -27332,9 +27533,31 @@ export function createEscalationTriageHistoryReader(
       const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)).map(project), {
         holder: identity.holder, durableDigest, statKey, ...(io.parseAll ? { requireObjects: true } : { pattern }), ...(io.readFile ? { readFile: io.readFile } : {}),
       });
-      await memo.load(fresh);
+      if (slice.sharedSnapshot) {
+        for (const entry of fresh) {
+          const before = memo.retention();
+          const bytes = memo.approxBytes();
+          let digestBytes = 0;
+          try {
+            digestBytes = stat(join(stateDir, "cache", "rotation-digests",
+              encodeURIComponent(identity.holder).replaceAll(".", "%2E"), `${basename(entry.path)}.json`)).size;
+          } catch (error) {
+            const reason = String(error);
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") lastLoad.snapshotError = reason;
+          }
+          await memo.load([entry]);
+          const after = memo.retention();
+          if ((after.digestHits ?? 0) > (before.digestHits ?? 0)) lastLoad.bytesRead += memo.approxBytes() - bytes;
+          else {
+            if (["corrupt", "identity", "version"].some((kind) =>
+              (after.digestOutcomes?.[kind] ?? 0) > (before.digestOutcomes?.[kind] ?? 0))) lastLoad.bytesRead += digestBytes;
+            lastLoad.rotationsRead++;
+            if (memo.kept(entry.path, stats.get(entry.path)!)) lastLoad.bytesRead += Number(stats.get(entry.path)!.split(":")[0]);
+          }
+        }
+      } else await memo.load(fresh);
       const { digestHits = 0, digestMisses = 0 } = memo.retention();
-      lastLoad = { rotations: fresh.length, digestHits, digestMisses };
+      Object.assign(lastLoad, { rotations: fresh.length, digestHits, digestMisses });
       // W1-T9710: hand the union what the load just kept, so its pass never re-reads those digests on the loop.
       for (const entry of fresh) {
         const key = stats.get(entry.path) as string;
@@ -27342,13 +27565,17 @@ export function createEscalationTriageHistoryReader(
         if (read) {
           strictUnread.delete(entry.path);
           union.seed(entry.path, key, read);
+          if (slice.sharedSnapshot) kept.set(entry.path, { key, read });
         } else if (io.parseAll) strictUnread.add(entry.path);
       }
     }
     for (const path of strictUnread) if (!stats.has(path)) strictUnread.delete(path);
     loaded = stats;
     for (const path of strictUnread) loaded.delete(path);
-    return current(stateDir);
+    for (const path of kept.keys()) if (!stats.has(path)) kept.delete(path);
+    const read = current(stateDir);
+    if (read.ok) await writeSnapshot(stateDir, stats);
+    return read;
   }, { current, lastPass: union.lastPass, lastLoad: (): EscalationTriageHistoryLoad => ({ ...lastLoad }) });
 }
 

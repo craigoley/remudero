@@ -1905,6 +1905,26 @@ mkdir -p "$(dirname "${PAUSE_FILE}")"
 if [ -e "${PAUSE_FILE}" ] && ! grep -qF -- "\"reason\":\"${RECYCLE_PAUSE_REASON}\"" "${PAUSE_FILE}" 2>/dev/null; then
   echo "recycle-container: PAUSE already engaged by someone else — left in place, and never removed by this recycle"
 else
+  # W1-T11318: a live writer still owns its PAUSE; use the orphan release check's identity helpers.
+  if [ -f "${PAUSE_FILE}" ]; then
+    . "${SCRIPT_DIR}/release-orphan-recycle-pause.sh"
+    EXISTING_RECYCLE_PAUSE="$(cat "${PAUSE_FILE}" 2>/dev/null || true)"
+    EXISTING_RECYCLE_PID="$(printf '%s\n' "${EXISTING_RECYCLE_PAUSE}" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+    EXISTING_RECYCLE_HOST="$(orp_str_field "${EXISTING_RECYCLE_PAUSE}" host)"
+    EXISTING_RECYCLE_START="$(orp_str_field "${EXISTING_RECYCLE_PAUSE}" writerStart)"
+    if [ "$(orp_str_field "${EXISTING_RECYCLE_PAUSE}" reason)" = "${RECYCLE_PAUSE_REASON}" ] &&
+       [ -n "${EXISTING_RECYCLE_PID}" ] && [ -n "${EXISTING_RECYCLE_HOST}" ] &&
+       [ "${EXISTING_RECYCLE_HOST}" = "$(hostname 2>/dev/null || true)" ] &&
+       [ -n "${EXISTING_RECYCLE_START}" ] &&
+       [ "$(orp_lstart "${EXISTING_RECYCLE_PID}" || true)" = "${EXISTING_RECYCLE_START}" ]; then
+      echo "recycle-container: REFUSING — recycle pid ${EXISTING_RECYCLE_PID} (started ${EXISTING_RECYCLE_START}) is still running and owns PAUSE" >&2
+      printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.refused","lane":"deploy","reason":"live-recycle-owns-pause","writer_pid":%s,"writer_start":%s,"host":%s}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "${EXISTING_RECYCLE_PID}" \
+        "$(recycle_json_string "${EXISTING_RECYCLE_START}")" "$(recycle_json_string "${EXISTING_RECYCLE_HOST}")" >> "${LEDGER_FILE}" ||
+        echo "recycle-container: could not record live-writer refusal in ${LEDGER_FILE}" >&2
+      exit 1
+    fi
+  fi
   # W1-T9409: the body also names the container this run would stop, the writer's own start time and
   # its phase, so the watchdog tick (deploy/release-orphan-recycle-pause.sh) can PROVE a dead writer
   # stopped nothing — the one case no trap covers (SIGKILL). `reason` is unchanged: W1-T5127 and

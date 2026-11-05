@@ -4,7 +4,7 @@
 // mass run. A miss the diff did not cause is scored `unattributed`: it leaves the gate's arithmetic,
 // files no repair shard, and is ledgered with its reason.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -12,7 +12,8 @@ import { test } from "node:test";
 // Namespace import: the attribution exports are new, so this suite still loads (and fails) at base.
 import * as gardener from "#src/lib/selector-shadow-gardener.js";
 import { shadowRecord } from "#src/lib/affected-suites.js";
-import { appendLedger } from "#src/lib/ledger.js";
+import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
 import * as shadowScript from "#scripts/select-affected-suites.mjs";
@@ -48,7 +49,9 @@ function harness() {
   mkdirSync(join(root, "state"), { recursive: true });
   const landed: Array<{ paths: string[]; title: string; body: string }> = [];
   const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let nowMs = Date.parse("2026-11-04T12:00:00Z");
   const deps = {
+    clock: clockFromMillisFn(() => nowMs),
     stateDir: join(root, "state"),
     repoRoot: root,
     openWorkspace: () => ({
@@ -67,7 +70,9 @@ function harness() {
   const rows = (step: string) => events.filter((e) => e.step === step).map((e) => e.extra!);
   const pass = (runs: gardener.SelectorShadowRun[], mainFailures?: gardener.SelectorShadowMainFailures) =>
     gardener.runSelectorShadowGardener(deps, () => runs, () => ["src/lib/changed.ts"], mint, () => [], undefined, mainFailures);
-  return { root, landed, deps, rows, pass };
+  /** Move the clock past every kept reattribution and repair answer. */
+  const expireChecks = () => { nowMs += gardener.SELECTOR_SHADOW_CHECK_TTL_MS; };
+  return { root, landed, deps, rows, pass, expireChecks };
 }
 
 test("a missed failure that main also failed in the window is scored unattributed, not missed", async () => {
@@ -204,6 +209,7 @@ test("a stored miss is re-asked about main at its base each pass, so a corrected
   const stored = harness();
   const first = await stored.pass([run(8120, [miss], { baseSha: "base-slow" })], async () => []);
   assert.equal(first.narrow.missed, 1, "the reader of its day read main green, so the miss was charged and stored");
+  stored.expireChecks();
   const later = await stored.pass([], async (sha) => (sha === "base-slow" ? [miss.file] : []));
   assert.equal(later.narrow.missed, 0, "the stored miss is base-red once main's failure at its base is read");
   assert.equal(later.observations.reattributed, 1);
@@ -211,6 +217,7 @@ test("a stored miss is re-asked about main at its base each pass, so a corrected
 
   const green = harness();
   await green.pass([run(8121, [miss], { baseSha: "base-green" })], async () => []);
+  green.expireChecks();
   const still = await green.pass([], async () => []);
   assert.equal(still.narrow.missed, 1, "main green at the base keeps the miss charged");
   assert.equal(still.observations.reattributed, 0);
@@ -248,6 +255,7 @@ test("a stored miss stops counting only while today's selector, re-run on its ow
   assert.deepEqual(asked, [{ id: 8130, headSha: "head-8130", baseSha: "base-edge", failed: [miss.file] }], "the run's own diff is what is re-selected");
 
   today = "selected";
+  h.expireChecks();
   const fixed = await pass([]);
   assert.equal(fixed.narrow.missed, 0, "a repaired edge clears the stored miss");
   assert.equal(fixed.observations.repaired, 1);
@@ -257,10 +265,64 @@ test("a stored miss stops counting only while today's selector, re-run on its ow
 
   for (const answer of ["missed", "flake", "full", "throws"] as const) {
     today = answer;
+    h.expireChecks();
     const again = await pass([]);
-    assert.equal(again.narrow.missed, 1, `${answer}: repaired is re-asked each pass, never stored, so the miss is charged again`);
+    assert.equal(again.narrow.missed, 1, `${answer}: repaired is re-asked once its kept answer expires, never stored, so the miss is charged again`);
     assert.equal(again.observations.repaired, 0);
   }
   assert.equal(h.rows("selector-shadow.repair_unchecked").length, 1, "an unanswerable check is ledgered and leaves the miss charged");
   assert.equal(h.rows("selector-shadow.repair_checked").at(-1)!.full_run, "unreadable input", "a full run is not a repair, and says why");
+});
+
+test("more charged misses than one pass may check all clear over passes, each run asked once until its answer expires", async () => {
+  const h = harness();
+  const runs = Array.from({ length: gardener.SELECTOR_SHADOW_REATTRIBUTE_PER_PASS + 5 }, (_, i) =>
+    run(8200 + i, [{ file: `test/edge-${i}.test.ts`, floor: "selected", narrow: "missed", retry: "failed" }], { baseSha: "base-green" }));
+  const asked: number[] = [];
+  let today: "missed" | "selected" = "missed";
+  const replay: gardener.SelectorShadowReplay = {
+    owner: "acme", repo: "remudero",
+    readJson: async () => ({ workflow_runs: [] }),
+    select: async () => { throw new Error("no history to replay"); },
+    selectAtMain: async (r, failed) => {
+      asked.push(r.id);
+      return { record: { fullRun: false, floorSize: 10, narrowSize: 3, failures: failed.map((file) => ({ file, floor: "selected", narrow: today })) }, reasons: [] };
+    },
+  };
+  const pass = (window: gardener.SelectorShadowRun[]) =>
+    gardener.runSelectorShadowGardener(h.deps, () => window, () => ["src/lib/changed.ts"], () => "W1-T9190", () => [], undefined, async () => [], { replay });
+  const first = await pass(runs);
+  assert.equal(first.narrow.missed, runs.length, "today's selector still misses every one");
+  assert.equal(asked.length, gardener.SELECTOR_SHADOW_REATTRIBUTE_PER_PASS, "one pass checks only its bound");
+  const second = await pass([]);
+  assert.equal(asked.length, runs.length, "the next pass spends its bound on the runs not yet asked, not the same first ones");
+  assert.equal(new Set(asked).size, runs.length);
+  assert.equal(second.narrow.missed, runs.length, "a kept 'still missed' answer keeps each charged");
+  await pass([]);
+  assert.equal(asked.length, runs.length, "no run is asked again while its answer is fresh");
+
+  today = "selected";
+  h.expireChecks();
+  const fixed = await pass([]);
+  assert.equal(fixed.narrow.missed, 5, "the bound repairs 20 runs in the first pass after expiry");
+  const done = await pass([]);
+  assert.equal(done.narrow.missed, 0, "the kept repairs stand and the rest are asked, so every miss clears");
+  assert.equal(done.observations.repaired, runs.length);
+  assert.notEqual(done.verdict, "misses");
+});
+
+test("the verdict folds observations rotation archived, not only the rows it keeps live", () => {
+  const h = harness();
+  const ledgerPath = join(h.deps.stateDir, "ledger.ndjson");
+  const total = 205;
+  for (let id = 1; id <= total; id++) {
+    appendLedger(ledgerPath, { run_id: "GARDEN-test", task_id: "DAEMON", step: gardener.SELECTOR_SHADOW_OBSERVATION_STEP,
+      ci_run_id: id, head_sha: `head-${id}`, source: "live", full_run: false, floor_size: 10, recovered: 0, failures: [] });
+  }
+  assert.equal(rotateLedger(ledgerPath, { ceilingBytes: 1, smoothingWindowMs: 0 }).rotated, true);
+  const live = readFileSync(ledgerPath, "utf8").split("\n").filter((l) => l.includes(`"step":"${gardener.SELECTOR_SHADOW_OBSERVATION_STEP}"`)).length;
+  assert.ok(live < total, `control: rotation must archive some observation rows (live keeps ${live} of ${total})`);
+  assert.equal(gardener.readSelectorShadowObservations(h.deps.stateDir).observations.length, total);
+  assert.equal(gardener.readSelectorShadowObservations(h.deps.stateDir).observations.length, total, "a second read answers the archive from its digest");
+  assert.ok(readdirSync(join(h.deps.stateDir, "cache", "rotation-digests")).length > 0, "the archive's digest is kept for the next pass");
 });
