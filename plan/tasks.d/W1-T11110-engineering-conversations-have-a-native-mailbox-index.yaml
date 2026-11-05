@@ -19,9 +19,11 @@
     producers select proposal identities. A separate reading page does not make engineering asks
     discoverable in the mailbox or remove an answered ask from Action required. The operator says
     archive when the agent needs no more input, while work can continue, and reopen on a new question.
-    A sweep of all 29 current core open PR heads at e572bfa648014f1b96bddf34e06d2159338af00c
-    found no added engineering mailbox index signatures. Positive controls were 71 runtime and 99
-    plan lines; added matches were the held correspondence task and an unrelated bake-off comment.
+    A fresh sweep at main 542d312490d43b2825427a8134a833ff5cdf3a4e covered all 17 open Core PR heads.
+    API head SHAs matched git ls-remote for all 17. Each head had zero overlap with this task's
+    nine implementation and test paths, zero changed plan files matching the mailbox-index subject,
+    and zero added index-route signatures. The positive control returned four task/index matches
+    from main, confirming the search terms resolved in the repository corpus.
     W1-T10572 shares the OpenAPI and generated-client files but only documents the already-existing
     AnalyticsView gardener-spend source. This task adds repository-scoped escalation thread routes,
     their schemas, and the conversation-index tests; the two declaration changes are in separate
