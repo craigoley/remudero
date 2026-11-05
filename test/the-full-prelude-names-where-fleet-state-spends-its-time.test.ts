@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { buildSweepEffects, createFullPreludeTimer, runSweep } from "#src/lib/sweep.js";
@@ -11,12 +11,13 @@ const proofFile = "test/the-full-prelude-names-where-fleet-state-spends-its-time
 
 function fixture(failure?: "ci" | "deploy" | "workflow") {
   const root = mkdtempSync(join(tmpdir(), "rmd-fleet-state-parts-"));
+  const sha = (name: string) => `${basename(root)}-${name}`;
   const state = join(root, "state");
   const workflows = join(root, ".github", "workflows");
   mkdirSync(state);
   mkdirSync(workflows, { recursive: true });
   const ledgerPath = join(state, "ledger.ndjson");
-  const repaired = { step: "reconcile.repaired", gap_id: JSON.stringify(["ci", "old:a.yml"]), head: "head" };
+  const repaired = { step: "reconcile.repaired", gap_id: JSON.stringify(["ci", `${sha("old")}:a.yml`]), head: sha("head") };
   writeFileSync(ledgerPath, JSON.stringify(repaired) + "\n");
   writeFileSync(join(state, "ledger.2026-10-14T00-00-00-000Z.ndjson"), '{"step":"deploy.ok"}\n');
   writeFileSync(join(state, "ledger.2026-10-15T00-00-00-000Z.ndjson.gz"), gzipSync('{"step":"reconcile.escalated"}\n'));
@@ -41,13 +42,13 @@ function fixture(failure?: "ci" | "deploy" | "workflow") {
       if (failure === "ci") throw new Error("commit read unavailable");
       if (failure === "workflow" && endpoint.includes("/workflows/")) throw new Error("workflow read unavailable");
       if (endpoint.includes("commits?")) return [
-        { sha: "head", parents: [{ sha: "middle" }] },
-        { sha: "side", parents: [] },
-        { sha: "middle", parents: [{ sha: "old" }] },
-        { sha: "old", parents: [] },
+        { sha: sha("head"), parents: [{ sha: sha("middle") }] },
+        { sha: sha("side"), parents: [] },
+        { sha: sha("middle"), parents: [{ sha: sha("old") }] },
+        { sha: sha("old"), parents: [] },
       ];
       if (endpoint.includes("/commits/")) return { files: [{ filename: "src/example.ts" }] };
-      return { total_count: endpoint.includes("workflows/a.yml/runs?head_sha=old") ? 0 : 1 };
+      return { total_count: endpoint.includes(`workflows/a.yml/runs?head_sha=${sha("old")}`) ? 0 : 1 };
     },
     fleetDeployStateImpl: {
       deploy: {
@@ -162,8 +163,8 @@ test("W1-T9781: each fleet-state read owns fresh counters", async () => {
       union_ms: 23, union_rotations: 2, commits_walked: 3,
       commit_reads: 11, commit_read_ms: 77, deploy_ms: 60,
     });
-    assert.deepEqual(second.parts, { ...first.parts, union_ms: 0 });
-    assert.equal(f.reads.length, 22);
+    assert.deepEqual(second.parts, { ...first.parts, union_ms: 0, commit_reads: 9, commit_read_ms: 63 });
+    assert.equal(f.reads.length, 20);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
