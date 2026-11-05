@@ -15,18 +15,23 @@ test("test/console-api/read-model/a-bundled-sync-spawn-names-its-real-caller.tes
       stdin: { contents: `
 import childProcess from "node:child_process";
 import { callerFrame, startReadPlaneTelemetry } from "#src/lib/read-plane.js";
+import { ghExecFile } from "#src/lib/github-transport.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
-function actualCaller() { return callerFrame(); }
+function inspectCaller() { return callerFrame(); }
+function actualCaller() { ghExecFile(process.execPath, ["-e", ""]); }
 function spawnOwner() { childProcess.execFileSync(process.execPath, ["-e", ""]); }
 function shellOwner() { childProcess.execSync("true"); }
 function syncOwner() { childProcess.spawnSync(process.execPath, ["-e", ""]); }
 let now = 0;
 const telemetry = startReadPlaneTelemetry({ clock: clockFromMillisFn(() => now += 3000) });
 try {
+  actualCaller();
+  const shared = telemetry.sample();
+  const lag = telemetry.sample.takeLagInterval("shared");
   spawnOwner();
   shellOwner();
   syncOwner();
-  console.log(JSON.stringify({ frame: actualCaller(), sample: telemetry.sample() }));
+  console.log(JSON.stringify({ frame: inspectCaller(), shared, lag, sample: telemetry.sample() }));
 } finally { telemetry.stop(); }
 `, resolveDir: REPO_ROOT, sourcefile: "bundled-spawn-fixture.ts" },
       outfile, bundle: true, platform: "node", format: "esm", keepNames: true,
@@ -35,11 +40,26 @@ try {
     const env = { ...process.env, NODE_V8_COVERAGE: undefined };
     const result = JSON.parse(execFileSync(process.execPath, [outfile], {
       cwd: REPO_ROOT, env, encoding: "utf8",
-    })) as { frame: { caller: string }; sample: {
+    })) as { frame: { caller: string }; shared: {
+      sync_spawn_by_caller: { caller: string; leaf?: string; calls: number; total_ms: number }[];
+      sync_spawn_top: { caller: string; leaf?: string; caller_is_leaf?: true; duration_ms: number }[];
+    }; lag: { top: { caller: string; leaf?: string }; by_caller: { caller: string; leaf?: string }[] }; sample: {
       sync_spawn_by_caller: { caller: string; calls: number; total_ms: number }[];
       sync_spawn_top: { caller: string; duration_ms: number }[];
     } };
-    assert.match(result.frame.caller, /^at actualCaller \(.*[/\\]run-task\.mjs:\d+:\d+\)$/);
+    assert.match(result.frame.caller, /^at inspectCaller \(.*[/\\]run-task\.mjs:\d+:\d+\)$/);
+    assert.equal(result.shared.sync_spawn_by_caller.length, 1);
+    assert.equal(result.shared.sync_spawn_top.length, 1);
+    assert.equal(result.lag.by_caller.length, 1);
+    for (const row of [...result.shared.sync_spawn_by_caller, ...result.shared.sync_spawn_top,
+      result.lag.top, ...result.lag.by_caller]) {
+      assert.match(row.caller, /^at actualCaller \(.*[/\\]run-task\.mjs:\d+:\d+\)$/);
+      assert.equal(row.leaf, "ghExecFile");
+    }
+    assert.equal(result.shared.sync_spawn_by_caller[0]!.calls, 1);
+    assert.equal(result.shared.sync_spawn_by_caller[0]!.total_ms, 3000);
+    assert.equal(result.shared.sync_spawn_top[0]!.duration_ms, 3000);
+    assert.equal(result.shared.sync_spawn_top[0]!.caller_is_leaf, undefined);
     const totals = result.sample.sync_spawn_by_caller;
     const top = result.sample.sync_spawn_top;
     assert.equal(totals.length, 3);

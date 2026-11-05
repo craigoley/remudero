@@ -41,6 +41,12 @@ export const SYNC_SPAWN_LEAF_FRAMES: readonly RegExp[] = [
   /\bat (?:runGit|loadPlanAtRef) \(.*[/\\]plan\.[cm]?[jt]s/,
 ];
 
+// W1-T11268: shared leaves also lose their source filenames in the daemon bundle; keep their own names.
+const SYNC_SPAWN_LEAF_NAMES = new Set([
+  "originUrlAtCut", "vetPinnedConfig", "hostWorktreeGit", "pinnedConfigValue",
+  "ghExecFile", "ghExec", "ghJson", "runGit", "loadPlanAtRef",
+]);
+
 export const SYNC_SPAWN_RECORD_MIN_MS = 2000;
 export const SYNC_SPAWN_TOP_N = 3;
 const ARG_MAX_CHARS = 80;
@@ -111,7 +117,8 @@ export function callerFrame(): { caller?: string; leaf?: string; callerIsLeaf?: 
   for (const [index, line] of lines.entries()) {
     if (READ_PLANE_FRAME_NAMES.has(sites[index]!.functionName)
       || /read-plane\.[cm]?[jt]s/.test(line) || /node:/.test(line)) continue;
-    if (SYNC_SPAWN_LEAF_FRAMES.some((leaf) => leaf.test(line))) { leafLine = line; continue; }
+    if (SYNC_SPAWN_LEAF_NAMES.has(sites[index]!.functionName)
+      || SYNC_SPAWN_LEAF_FRAMES.some((leaf) => leaf.test(line))) { leafLine = line; continue; }
     const chain = callerChain(line, sites.slice(index));
     return { caller: line.trim().slice(0, 200), ...(leafLine === undefined ? {} : { leaf: frameName(leafLine) }),
       ...(chain === undefined ? {} : { chain }) };
