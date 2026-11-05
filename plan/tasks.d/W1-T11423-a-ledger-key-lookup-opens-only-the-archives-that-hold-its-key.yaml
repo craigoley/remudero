@@ -21,6 +21,9 @@
     - src/lib/ledger-union.ts
     - test/ledger/a-ledger-key-lookup-opens-only-the-archives-that-hold-its-key.test.ts
     - test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts
+    - deploy/install-host-units.sh
+    - src/lib/baked-runtime-inputs.ts
+    - .github/workflows/acr-build.yml
   status: queued
   attempts: 0
   acceptance:
@@ -46,6 +49,7 @@
   falsifier: |
     At origin/main there is no ledgerRowsFor and no key manifest. A lookup of a dozen rows for one task decompresses and parses all 394 archives (about 9 million rows), and nothing refuses a new reader that does the same.
   note: |
+    Amended 2026-11-05 (scope, from the hand build): ledger-union.ts imports the new ledger-key-manifest module, so it joins the baked supervisor's runtime closure and the deploy-logic paths. The deploy-logic census (test/a-busy-primary-reaches-its-image-recycle.test.ts, DEPLOY_LOGIC_PATHS in deploy/install-host-units.sh) and the baked-runtime census (test/baked-supervisor-inputs.test.ts, src/lib/baked-runtime-inputs.ts and .github/workflows/acr-build.yml) require it catalogued; each file gains one line.
     reservation hand-off: plan-file-1793893317000 -> plan-file-1793893317000
     Reserved with rmd next-task-id --branch plan-file-1793893317000 from the operator session's ops worktree.
     Alternatives weighed. (i) A SQLite side-index of row bodies: random access into gzip is impossible, so it must copy the rows. About 9 million rows and hundreds of MB, plus cross-process write contention between daemon, serve and garden children. Rejected. (ii) A time bound only: it does not help a long-lived task whose rows span weeks, and it does nothing for steps-only questions. Rejected. (iii) Per-archive key manifests in the store that already holds per-archive digests: one small file per immutable archive, built once, and a lookup's I/O is proportional to the archives that hold its key. Chosen.
