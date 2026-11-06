@@ -45,7 +45,7 @@ import { appendFileSync, readFileSync, writeFileSync, readdirSync, mkdirSync, mk
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { POOL_ISOLATION_FLAG, runShardWithPool, spawnJudgedRun } from "./pure-test-pool.mjs";
+import { POOL_ISOLATION_FLAG, runShardWithPool, spawnJudgedRun, testFilesInArgv } from "./pure-test-pool.mjs";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -82,6 +82,27 @@ export const FAST_TIER_TEST_TIMEOUT_FACTOR = 24;
 export function fastTierHangBoundArgs(manifest) {
   const thresholdMs = Number.isFinite(manifest?.thresholdMs) && manifest.thresholdMs > 0 ? manifest.thresholdMs : DEFAULT_SLOW_THRESHOLD_MS;
   return [`--test-timeout=${thresholdMs * FAST_TIER_TEST_TIMEOUT_FACTOR}`, "--test-force-exit"];
+}
+
+/** Native local runners use the selected files' measured duration, with the existing fast-tier
+ * floor and safety factor. This adds only a deadline: targets, reporters and admission stay intact.
+ * Explicit finite positive caller bounds take precedence; zero must never silently disable it. */
+export function boundedNodeTestArgs(args, root = ".", manifest) {
+  if (!args.includes("--test")) return [...args];
+  let explicit = false;
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] !== "--test-timeout" && !args[i].startsWith("--test-timeout=")) continue;
+    const value = Number(args[i] === "--test-timeout" ? args[i + 1] : args[i].slice("--test-timeout=".length));
+    if (!Number.isFinite(value) || value <= 0) throw new RangeError("test timeout must be finite and positive");
+    explicit = true;
+  }
+  if (explicit) return [...args];
+  manifest ??= loadManifest(join(root, DEFAULT_MANIFEST_RELATIVE_PATH));
+  const threshold = Number.isFinite(manifest.thresholdMs) && manifest.thresholdMs > 0 ? manifest.thresholdMs : DEFAULT_SLOW_THRESHOLD_MS;
+  const durations = testFilesInArgv(args, root).map(file => manifestEntryFor(manifest,
+    isAbsolute(file) ? relative(root, file).split(sep).join("/") : file));
+  const longest = Math.max(threshold, ...durations.filter(ms => Number.isFinite(ms) && ms > 0));
+  return [`--test-timeout=${Math.ceil(longest * FAST_TIER_TEST_TIMEOUT_FACTOR)}`, ...args];
 }
 
 /**

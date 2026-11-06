@@ -50,6 +50,7 @@ import { scanSource as scanChildCoverage } from "./coverage-session-blanking-che
 import { captureStepSync } from "./lib/author-step-capture.mjs";
 import { describeJudgedRun, judgedNodeTestArgs, judgeRun, prepareJudgedRun } from "./pure-test-pool.mjs";
 import { retainFixture } from "./lib/retained-fixtures.mjs";
+import { boundedNodeTestArgs } from "./test-tier-manifest.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
   DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE,
@@ -809,7 +810,7 @@ function censusReaderContext(root, child, options) {
 export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
   readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0],
   history = { path: censusReaderHistoryPath(), mode: process.env[CENSUS_READER_HISTORY_ENV] === "act" ? "act" : "shadow" } }) {
-  const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
+  const args = boundedNodeTestArgs(["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files], root);
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
   const options = childOptions(root, timeoutMs);
