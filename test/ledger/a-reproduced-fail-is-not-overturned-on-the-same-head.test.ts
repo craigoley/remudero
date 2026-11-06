@@ -271,17 +271,21 @@ test("W1-T11443 criterion 1: the recorded classifier-check counterexample is sti
 });
 
 test("W1-T11443 criterion 1: the recorded in-process delivery counterexamples remain sticky", () => {
+  const observations: { findings: number; state: string }[] = [];
   for (const reason of [
     "Named suite passes 16/16, but an additional in-process counterexample shows that one temporary issue-creation refusal permanently suppresses the incident.",
     "Grep resolves and the named tests pass, but an additional in-process counterexample shows that a refused comment is permanently lost.",
+    "A probe classified three short fatal exits as zero abnormal exits; removing only their error-summary rows in memory yielded a trailing run of three.",
+    "Grep resolves all seven proof markers, but the unlearned-history preservation constraint fails: six fatal exits with zero clean exits became six learned clean samples in a read-only probe.",
   ]) {
     const body = `remudero-review=failure\n1. claim\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive (semantic downgrade): ${reason}`;
     const failures = review.reproducedReviewFailuresFromHistory(history, [{ commit_id: SHA, body }], SHA);
-    assert.equal(failures.length, 1, "PR16971 review at 2026-11-06T16:24:44Z records an executed counterexample");
     const result = review.applyReviewStatusHistoryGuard({ ...computed, criteria: [{ ...computed.criteria[0], claim: "claim" }] } as never,
       SHA, { kind: "readable", failures });
-    assert.equal(result.verdict.state, "failure", reason);
+    observations.push({ findings: failures.length, state: result.verdict.state });
   }
+  assert.deepEqual(observations, Array.from({ length: 4 }, () => ({ findings: 1, state: "failure" })),
+    "both recorded delivery counterexamples and both fatal-exit probe observations must remain sticky");
 });
 
 test("W1-T11443 criterion 2: hypothetical or explicitly unperformed checks are not reproduced findings", () => {
@@ -294,11 +298,131 @@ test("W1-T11443 criterion 2: hypothetical or explicitly unperformed checks are n
     "A counterexample would show a permanently suppressed incident.",
     "An in-process counterexample was not run and could show a permanently lost comment.",
     "The counterexample did not show an incident suppressed by a temporary refusal.",
+    "A probe would have classified three short fatal exits as zero abnormal exits.",
+    "No probe classified three short fatal exits as zero abnormal exits.",
+    "Six fatal exits never became six learned clean samples in a read-only probe.",
+    "Six fatal exits would have become six learned clean samples in a read-only probe.",
+    "Six fatal exits became six learned clean samples in a read-only probe that was not run.",
   ]) {
     const body = `remudero-review=failure\n1. claim\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: ${reason}`;
     const failures = review.reproducedReviewFailuresFromHistory(history, [{ commit_id: SHA, body }], SHA);
     assert.equal(failures.length, 0, reason);
     const result = review.applyReviewStatusHistoryGuard(computed as never, SHA, { kind: "readable", failures });
     assert.equal(result.verdict.state, "success", reason);
+  }
+});
+
+
+test("W1-T11443 criterion 1: cached CLI restoration rechecks the current shared history", async t => {
+  for (const scenario of ["late", "lost", "clear", "withheld"] as const) {
+    await t.test(scenario, async st => {
+      const fixture = gitRepo({ scope: st, kind: "cached-history-restore" });
+      const root = fixture.dir;
+      writeFileSync(join(root, "changed.ts"), "export const changed = true;\n");
+      fixture.git("add", "changed.ts"); fixture.git("commit", "-qm", "changed");
+      const head = fixture.git("rev-parse", "HEAD");
+      const prUrl = "https://github.com/acme/remudero/pull/1";
+      const body = "## Acceptance\n- changed exists | grep: changed in changed.ts\n";
+      const diff = "diff --git a/changed.ts b/changed.ts\n+++ b/changed.ts\n@@ -0,0 +1 @@\n+export const changed = true;\n";
+      const failures = review.reproducedReviewFailuresFromHistory(history,
+        [{ commit_id: head, body: failureBody.replace("laneTarget's CPU bound is measured", "changed exists") }], head);
+      const host = { ...reviewFixtureHost(head), reviewPostedDescription: (verdict: { summary: string }) => verdict.summary };
+      const view = { number: 1, state: "open", merged_at: null, body, html_url: prUrl, head: { ref: "topic", sha: head } };
+      const shim = ghShim([
+        { when: "pulls/1/reviews", stdout: "[]" },
+        { when: "pulls/1", stdout: JSON.stringify(view) },
+        { when: "pr diff", stdout: diff },
+        { when: "pr view", stdout: '{"state":"OPEN"}' },
+        { when: "/status", stdout: '{"statuses":[]}' },
+        { when: "api ", stdout: "{}" },
+      ], { kind: "cached-history-restore" });
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
+      let reads = 0, modelRuns = 0, attempt = 0;
+      const decisions: Awaited<ReturnType<typeof reviewCommand.runReview>>[] = [];
+      const restoration: Parameters<NonNullable<reviewCommand.ReviewCommandDeps["postStatus"]>>[0][] = [];
+      const published: { state: string; description: string }[] = [];
+      const phases: string[] = [];
+      try {
+        const drive = () => reviewCommand.reviewCommand(host, "1", ["--repo", "acme/remudero"], {
+          resolveOwnerRepo: () => ({ owner: "acme", repo: "remudero" }),
+          fetchView: () => view,
+          loadConfig: () => ({ root, installRoot: REPO_ROOT, claudeBin: "/unused" }) as never,
+          fetchHead: () => {},
+          executionMode: "deterministic",
+          materialize: () => ({ worktreePath: root }),
+          withMaterialized: async (_path, _repo, run) => run(),
+          buildBaseProof: () => ({ baseCheckoutDir: undefined, baseUnreadablePaths: new Set(), baseIsCheckout: false, addedTestFiles: new Set() }),
+          postReviewPending: async () => ({ posted: true }),
+          reviewerCodeFreshness: () => ({ status: "fresh", codeSha: head, originMainSha: head, advance: "none" }),
+          readReviewStatusHistory: async () => {
+            reads++;
+            if (reads >= 4 && scenario === "late") return { kind: "readable", failures, revision: "late-shared-finding" };
+            if (reads >= 4 && scenario === "lost") return { kind: "unreadable", reason: "history lost during cached replay" };
+            return { kind: "readable", failures: [] };
+          },
+          onPhase: phase => phases.push(phase),
+          runReview: async args => {
+            const result = await reviewCommand.runReview(host, {
+              ...args, headCheckoutDir: root, readReviewReuseFacts: () => undefined,
+              spawnReviewer: true, requireSemanticReview: false,
+              reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120_000 },
+              reviewerClockBoundMs: 120_000,
+              reviewerSpawnWorker: async () => { modelRuns++; return successfulReviewWorker("REVIEW_VERDICT 1: PASS (the changed file proves the claim)"); },
+              disarm: () => "not-armed", arm: () => ({ armed: false, reason: "fixture" }),
+            });
+            if (attempt === 1 && scenario === "withheld") {
+              result.verdictWithheld = "a prior publication guard already withheld this cached result";
+              args.onPhase?.("posted");
+            }
+            decisions.push(result);
+            return result;
+          },
+          postStatus: async args => {
+            restoration.push(args);
+            if (scenario === "late") {
+              assert.equal(args.state, "failure", "a newly readable reproduction cannot restore cached PASS");
+              assert.notEqual(args.reviewDecisionDigest, decisions[0].reviewDecisionDigest, "late shared evidence is a new decision input");
+              return review.postReviewStatusGuarded({ ...args,
+                fetchLifecycle: () => ({ headSha: head, merged: false, closed: false, reviewInputDigest: args.reviewInputDigest }),
+                post: async post => { published.push({ state: post.state, description: post.description }); },
+              });
+            }
+            published.push({ state: args.state, description: args.description });
+            return { posted: true };
+          },
+        });
+        assert.equal(await drive(), 0, "the real first review computes a cached PASS");
+        assert.equal(decisions[0].state, "success");
+        assert.equal(decisions[0].decisionDisposition, "computed");
+        assert.equal(modelRuns, 1);
+        attempt = 1;
+        const code = await drive();
+        assert.equal(decisions[1].decisionDisposition, "replayed", "the second run must exercise the actual cache path");
+        assert.equal(modelRuns, 1, "the cached decision does not dispatch another reviewer");
+        if (scenario === "clear") {
+          assert.equal(code, 0);
+          assert.equal(restoration.length, 1);
+          assert.equal(restoration[0].state, "success");
+          assert.equal(restoration[0].reviewDecisionDigest, decisions[0].reviewDecisionDigest);
+        } else if (scenario === "late") {
+          assert.equal(code, 1);
+          assert.equal(reads, 4, "cached SUCCESS rechecks shared history before restoration");
+          assert.deepEqual(published.map(post => post.state), ["failure"]);
+          assert.match(published[0].description, /prior reproduced failure/);
+          const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+          assert.equal(rows.some(row => row.step === "review.verdict_conflict"), false, "new evidence must not be treated as same-input disagreement");
+          const original = review.lastReviewDecisionTerminal(rows, restoration[0].taskId, prUrl, decisions[0].reviewDecisionDigest!);
+          assert.equal(original?.state, "success", "the previous cached terminal remains immutable");
+        } else {
+          assert.equal(code, 2);
+          assert.equal(restoration.length, 0, "a withheld cached result cannot reach the status poster");
+          assert.ok(phases.includes("posted"), "withheld replay releases its phase without claiming a publication");
+        }
+      } finally {
+        process.env.PATH = previousPath;
+        rmSync(shim.dir, { recursive: true, force: true });
+      }
+    });
   }
 });
