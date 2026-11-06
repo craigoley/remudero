@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { acquireTestSlotAsync, lowPriorityCommand, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotOptions } from "./test-slot.js";
+import { acquireTestSlotAsync, lowPriorityCommand, startTestSlotHeartbeat, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotHeartbeatHandle, type TestSlotOptions } from "./test-slot.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { killProcessGroup } from "./worker-containment.js";
 import { fixedClock } from "./clock.js";
@@ -174,6 +174,7 @@ export interface RunRetroPrepublishPreflightOptions {
     now?: () => number;
     /** Seams for the host-wide test slot the suite run takes. Production omits this. */
     testSlot?: Omit<TestSlotOptions, "sleep">;
+    startHeartbeat?: (handle: TestSlotHeartbeatHandle, log: (row: Record<string, unknown>) => void) => { stop(coveredWorkEnded: boolean): void };
     /** W1-T10144: production reads {@link retroBranchChangedFiles}; `tmpRoot` holds the path list. */
     changedFiles?: (worktreePath: string) => Promise<RetroChangedFiles>;
     tmpRoot?: string;
@@ -557,6 +558,7 @@ async function runAttempt(
   now: () => number,
   deps: RunRetroPrepublishPreflightOptions["deps"],
   onStart?: (suites: string[], selection: SuiteSelection, startedAt: number) => void,
+  onHeartbeatEvent?: (row: Record<string, unknown>) => void,
 ): Promise<AttemptResult> {
   const startedAt = now();
   const testSlot = deps?.testSlot;
@@ -597,8 +599,16 @@ async function runAttempt(
   });
   let result: RetroPrepublishCommandResult;
   let slotRow: AttemptSlot;
+  let heartbeat: { stop(coveredWorkEnded: boolean): void } | undefined;
   try {
     if (!testSlotExecutionAllowed(slot)) throw new Error(`retro preflight NOT_RUN (${slot.note})`);
+    if (slot.heartbeat) {
+      try {
+        heartbeat = (deps?.startHeartbeat ?? startTestSlotHeartbeat)(slot.heartbeat, row => onHeartbeatEvent?.(row));
+      } catch (error) {
+        onHeartbeatEvent?.({ step: "test_slot.heartbeat_start_failed", path: slot.heartbeat.path, error: String(error) });
+      }
+    }
     const argv = testRunArgv(
       [
         "scripts/test-with-retry.mjs",
@@ -616,8 +626,8 @@ async function runAttempt(
     const options = commandOptions(worktreePath);
     result = await run(child.file, child.args, { ...options, env: { ...options.env, ...slot.childEnvironment } });
   } finally {
-    // Pass, fail, timeout and spawn error all leave through here.
-    slot.release();
+    // Pass, fail, timeout and spawn error all leave through here. Stop the cadence before releasing its owner.
+    try { heartbeat?.stop(true); } finally { slot.release(); }
   }
   const stdout = normalizedOutput(result.stdout);
   const stderr = normalizedOutput(result.stderr);
@@ -788,7 +798,8 @@ export async function runRetroPrepublishPreflight(
 ): Promise<RetroPrepublishResult> {
   const run = opts.deps?.run ?? runRetroPrepublishCommand;
   const now = opts.deps?.now ?? Date.now;
-  const first = await runAttempt(opts.worktreePath, run, now, opts.deps, logStart(opts, 1));
+  const first = await runAttempt(opts.worktreePath, run, now, opts.deps, logStart(opts, 1),
+    row => { opts.log("retro.preflight_slot_heartbeat", row); });
   logAttempt(opts, 1, first);
   if (first.ok) return { ok: true, attempts: 1, suiteCount: first.suiteCount, repaired: false };
 
@@ -847,7 +858,8 @@ export async function runRetroPrepublishPreflight(
     return { ok: false, attempts: 2, suiteCount: first.suiteCount, repaired: true };
   }
 
-  const second = await runAttempt(opts.worktreePath, run, now, opts.deps, logStart(opts, 2));
+  const second = await runAttempt(opts.worktreePath, run, now, opts.deps, logStart(opts, 2),
+    row => { opts.log("retro.preflight_slot_heartbeat", row); });
   logAttempt(opts, 2, second);
   return { ok: second.ok, attempts: 2, suiteCount: second.suiteCount, repaired: true };
 }
