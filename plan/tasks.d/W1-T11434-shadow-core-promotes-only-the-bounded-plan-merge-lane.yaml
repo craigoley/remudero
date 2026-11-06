@@ -11,7 +11,10 @@
   origin: "2026-11-05 queue recovery: #16895 is green and reviewed but the core daemon is intentionally shadow, so its existing bounded plan-merge path refuses"
   plan_refs: [W1-T5901, W1-T5615, W1-T5748, W1-T4405, W1-T3596]
   files: [src/lib/sweep.ts, test/a-ready-plan-pr-merges-on-the-next-pass.test.ts, test/shadow-instance-safety.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=fcf8a82ae72d758b
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
     On 2026-11-05, plan PR #16895 (head f0d252779b0fd4477bfdf25bd256128e95654328) was OPEN,

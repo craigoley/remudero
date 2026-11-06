@@ -81,6 +81,24 @@ function fixture(baseline: Record<string, string> = {}) {
   return { root, git, receipt: () => JSON.parse(readFileSync(join(root, 'coverage/preflight-author.json'), 'utf8')) };
 }
 
+test('native author affected children carry duration-derived per-test deadlines', () => {
+  const f = fixture({ 'scripts/test-tier-manifest.json': JSON.stringify({ files: { 'test/leaf.test.ts': 9000 } }) });
+  const seen: string[][] = [];
+  const spawn = ((file: string, args: string[], opts: Parameters<typeof spawnSync>[2]) => {
+    if (args.includes('--test')) {
+      seen.push(args);
+      assert.ok(args.includes('--test-timeout=216000'), args.join(' '));
+      assert.ok(args.includes('--test-reporter=tap'));
+      assert.ok(args.includes('test/leaf.test.ts'));
+    }
+    return spawnSync(file, args, opts);
+  }) as typeof spawnSync;
+  assert.equal(mod.main([], { root: f.root, spawn,
+    select: () => ({ fullRun: false, suites: ['test/leaf.test.ts'], reasons: ['bounded native child'] }) }), 0);
+  assert.equal(seen.length, 1, 'positive control: the affected child actually ran');
+  assert.equal(f.receipt().steps.at(-1).testSummary.fail, 0);
+});
+
 test('author docs freshness refuses stale generated metadata before a heavy slot and admits the corrected committed tree', () => {
   const f = fixture(); mkdirSync(join(f.root, 'docs'));
   writeFileSync(join(f.root, 'docs/fixture.md'), 'stale');

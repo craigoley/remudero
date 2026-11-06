@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { parseReviewerVerdicts } from "./review.js";
+import { parseReviewerUnable, parseReviewerVerdicts } from "./review.js";
 import { requiredSemanticRefusal } from "./required-semantic-review.js";
 
 export type ReviewOutcomeClass = "posted" | "withheld" | "refused";
@@ -32,7 +32,8 @@ export function classifyReviewOutcome(input: ReviewReplayInput): ReviewOutcomeDe
   if (input.stage === "semantic" && input.verdict_lines !== "unrecorded") {
     const reason = requiredSemanticRefusal({ required: input.required_semantic, planOnly: input.plan_only,
       outcome: input.reviewer_outcome, criteriaCount: input.criteria_count,
-      verdicts: parseReviewerVerdicts(input.verdict_lines.join("\n"), input.criteria_count) });
+      verdicts: parseReviewerVerdicts(input.verdict_lines.join("\n"), input.criteria_count),
+      unable: parseReviewerUnable(input.verdict_lines.join("\n"), input.criteria_count) });
     if (reason !== undefined) return { class: "withheld", reason };
   }
   if (input.publication_refusal) return { class: "withheld", reason: input.publication_refusal };
@@ -43,7 +44,8 @@ export function classifyReviewOutcome(input: ReviewReplayInput): ReviewOutcomeDe
 export function recordedReviewVerdictLines(transcript: string, count: number): string[] {
   const byCriterion = new Map<number, Map<string, string>>();
   for (const line of transcript.split(/\r?\n/)) {
-    for (const match of line.matchAll(/REVIEW_VERDICT[ \t]+(\d+)[ \t]*:[ \t]*(PASS|FAIL)\b/gi)) {
+    // W1-T11428: UNABLE is recorded as its own token, so a replay sees an answered-but-unable criterion.
+    for (const match of line.matchAll(/REVIEW_VERDICT[ \t]+(\d+)[ \t]*:[ \t]*(PASS|FAIL|UNABLE)\b/gi)) {
       if (match[0].length > 128) continue;
       const criterion = Number(match[1]);
       if (criterion < 1 || criterion > count) continue;

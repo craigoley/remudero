@@ -3846,6 +3846,15 @@ export async function runDaemon(
   // must not add a row of zeros to the ledger. The account is rolled, so a second call cannot double-count.
   const flushIdleLaneWindow = (report: typeof emitLog = emitLog): void => {
     const atMs = idleLaneClock.now();
+    const state = idleLaneAccount.state;
+    idleLaneAccount = accountIdleLaneMinutes(idleLaneAccount, {
+      atMs,
+      busyLanes: idleLaneCapacity - state.idleSlots,
+      capacity: idleLaneCapacity,
+      dispatchable: state.dispatchable,
+      cause: state.cause ?? undefined,
+      hold: state.hold ?? undefined,
+    });
     const row = summarizeIdleLaneAccount(idleLaneAccount, atMs);
     idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
     if (row.idle_minutes > 0) report("lane.idle_summary", { ...row, partial: true });
@@ -4235,7 +4244,8 @@ export async function runDaemon(
     apply();
     if (laneGovernorPorts) laneCpuLearner = relabelLaneCpu(laneCpuLearner, runningCpuLanes());
   };
-  const uninstallReviewLaneTransition = laneGovernorPorts ? installReviewLaneTransition((apply) => laneCpuTransition(apply)) : () => {};
+  // Installed once `children` exists (below, beside the boot adoption): the lane reader above reads it.
+  let uninstallReviewLaneTransition: () => void = () => {};
   /** The lanes new admissions may fill: the governor's target under enforce, otherwise unbounded. */
   const enforcedLaneTarget = (inFlight: number, wipBound: number | undefined): number => {
     if (!laneGovernorPorts) return Infinity;
@@ -4363,10 +4373,13 @@ export async function runDaemon(
   // pass returns or the BACKSTOP passes (10-05: first `sweep.pass` 6.7-15.8 min after `daemon.boot`). It holds
   // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.
   const adoptedAll = deps.adoptRunChildren ? deps.adoptRunChildren() : [];
-  // W1-T9114: a child hosting a review or a fix dispatch holds a review slot, never a lane: it is registered with the sweep.
-  for (const child of adoptedAll) if (child.work) void adoptChildWork({ ...child, work: child.work }, log);
   const adoptedChildren = adoptedAll.filter((child) => child.work === undefined);
   const children = new Map<string, AdoptedRunChild>(adoptedChildren.map((child) => [child.runId, child]));
+  // W1-T11129: the review-lane hook reads `children` and the build lanes, so it is installed only now that both exist,
+  // and BEFORE the boot adoption below, so an adopted review child is a lane transition the CPU learner samples.
+  if (laneGovernorPorts) uninstallReviewLaneTransition = installReviewLaneTransition((apply) => laneCpuTransition(apply));
+  // W1-T9114: a child hosting a review or a fix dispatch holds a review slot, never a lane: it is registered with the sweep.
+  for (const child of adoptedAll) if (child.work) void adoptChildWork({ ...child, work: child.work }, log);
   let childMode = deps.adoptRunChildren !== undefined;
   const childTaskIds = (): string[] => [...children.values()].map((child) => child.taskId);
   const hasChildTask = (id: string): boolean => childTaskIds().includes(id);
