@@ -20,13 +20,23 @@ const bounded = (args: string[], root: string, manifest: object) => {
   assert.equal(typeof api.boundedNodeTestArgs, 'function', 'native child argv must carry a per-test deadline');
   return api.boundedNodeTestArgs!(args, root, manifest);
 };
+const timeoutFlag = (args: string[], root: string, manifest: object) => {
+  const flag = bounded(args, root, manifest).find(arg => arg.startsWith('--test-timeout='));
+  assert.ok(flag, 'the comparison must inspect a real deadline flag');
+  return flag;
+};
 
 test('native test deadlines derive from selected durations and preserve explicit positive bounds', () => {
   const manifest = { thresholdMs: 5000, files: { 'test/slow.test.ts': 9000, 'test/unselected.test.ts': 1_000_000 } };
   const args = ['--test', '--test-reporter=tap', 'test/slow.test.ts'];
-  assert.deepEqual(bounded(args, REPO_ROOT, manifest), ['--test-timeout=216000', ...args]);
+  assert.deepEqual(bounded(args, REPO_ROOT, manifest),
+    ['--test', '--test-reporter=tap', '--test-timeout=216000', 'test/slow.test.ts']);
+  assert.deepEqual(bounded(['--test', '--test-reporter', 'tap', 'test/slow.test.ts'], REPO_ROOT, manifest),
+    ['--test', '--test-reporter', 'tap', '--test-timeout=216000', 'test/slow.test.ts']);
+  assert.deepEqual(bounded(['--test', '--import', 'tsx', 'test/slow.test.ts'], REPO_ROOT, manifest),
+    ['--test', '--test-timeout=216000', '--import', 'tsx', 'test/slow.test.ts']);
   assert.deepEqual(bounded(['--test', 'test/new.test.ts'], REPO_ROOT, manifest),
-    ['--test-timeout=120000', '--test', 'test/new.test.ts']);
+    ['--test', '--test-timeout=120000', 'test/new.test.ts']);
   for (const explicit of [['--test-timeout=8000'], ['--test-timeout', '8000']]) {
     const given = ['--test', ...explicit, 'test/slow.test.ts'];
     assert.deepEqual(bounded(given, REPO_ROOT, manifest), given);
@@ -36,7 +46,7 @@ test('native test deadlines derive from selected durations and preserve explicit
   }
   assert.deepEqual(bounded(['scripts/ordinary.mjs'], REPO_ROOT, manifest), ['scripts/ordinary.mjs']);
   assert.deepEqual(bounded(['--test', join(REPO_ROOT, 'test/slow.test.ts')], REPO_ROOT, manifest),
-    ['--test-timeout=216000', '--test', join(REPO_ROOT, 'test/slow.test.ts')]);
+    ['--test', '--test-timeout=216000', join(REPO_ROOT, 'test/slow.test.ts')]);
 });
 
 test('native rule-suite children keep their population and reporter while gaining per-test deadlines', () => {
@@ -69,7 +79,7 @@ test('native census precheck bounds argv before either its real or injected runn
   assert.throws(() => runCensusSuitesViaChild({ root: REPO_ROOT, files: ['test/cycle-ratchet.test.ts'],
     priority: { wrap: (_file: string, args: string[]) => {
       const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'scripts/test-tier-manifest.json'), 'utf8'));
-      const expected = bounded(['--test', 'test/cycle-ratchet.test.ts'], REPO_ROOT, manifest)[0];
+      const expected = timeoutFlag(['--test', 'test/cycle-ratchet.test.ts'], REPO_ROOT, manifest);
       assert.ok(args.includes(expected));
       assert.ok(args.includes('--test-reporter=tap'));
       assert.equal(args.at(-1), 'test/cycle-ratchet.test.ts');
@@ -107,7 +117,7 @@ test('native judged parity leaves retain judgment and derive per-test deadlines'
   const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'scripts/test-tier-manifest.json'), 'utf8'));
   const prepared = prepareJudgedTestRun(args, REPO_ROOT, 'native timeout test');
   try {
-    assert.ok(prepared.args.includes(bounded(args, REPO_ROOT, manifest)[0]!));
+    assert.ok(prepared.args.includes(timeoutFlag(args, REPO_ROOT, manifest)));
     assert.ok(prepared.args.includes('--test-reporter=tap'));
     assert.ok(prepared.args.includes('test/cycle-ratchet.test.ts'));
     assert.ok(prepared.args.length > args.length + 1, 'the existing judge remains attached');

@@ -102,7 +102,11 @@ export function boundedNodeTestArgs(args, root = ".", manifest) {
   const durations = testFilesInArgv(args, root).map(file => manifestEntryFor(manifest,
     isAbsolute(file) ? relative(root, file).split(sep).join("/") : file));
   const longest = Math.max(threshold, ...durations.filter(ms => Number.isFinite(ms) && ms > 0));
-  return [`--test-timeout=${Math.ceil(longest * FAST_TIER_TEST_TIMEOUT_FACTOR)}`, ...args];
+  // Preserve the entry/reporter header without splitting an option from its value.
+  let insertion = args.indexOf("--test") + 1;
+  if (args[insertion] === "--test-reporter") insertion += 2;
+  else if (args[insertion]?.startsWith("--test-reporter=")) insertion += 1;
+  return [...args.slice(0, insertion), `--test-timeout=${Math.ceil(longest * FAST_TIER_TEST_TIMEOUT_FACTOR)}`, ...args.slice(insertion)];
 }
 
 /**
