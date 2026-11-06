@@ -22,3 +22,11 @@
     Last 24 h: n 6, p50 96.9, p90 149.4 min.
     Slowest PRs: #16819 (149.4 min), #16822 (130.9 min), #16824 (117.4 min).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The supplied evidence reports latency aggregates and three PR references, but provides no stage records or shared-cause finding that verifies the reported regression.; on the change's description/files alone, no diff was read — Acceptance uses grep for a test declaration; that verifies text presence, not recovery of the live p50 below twice baseline. The stated escalation rule includes findings that cannot be verified from what is shown."
+    judged_at: "2026-11-05T21:00:21.279Z"
+    pin: "7dcd063e37dd12542e2cfbf3bec16dcef04d123b234556d3912d0503cc2c056c"
