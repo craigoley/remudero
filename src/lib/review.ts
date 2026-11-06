@@ -4360,22 +4360,27 @@ export function judgeCriterion(
   reviewerUnable?: string,
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
+  const reviewerUnavailable = reviewerUnable !== undefined && semantic !== false
+    ? (reviewerUnable || "the reviewer gave no reason") : undefined;
+  // W1-T11428: an UNABLE line rides every early return too, so judgeReview always sees cannot-evaluate.
+  const unable = (v: CriterionVerdict): CriterionVerdict => reviewerUnavailable === undefined ? v
+    : { ...v, reason: `${v.reason} — NOTE: reviewer could not inspect this proof (UNABLE): ${reviewerUnavailable}`, reviewerUnavailable };
 
   // ARCHITECT-ONLY `satisfied_by`: a criterion already satisfied by an EARLIER PR is MET, cited to that PR. The
   // reviewer judges diff and report, never repo state, so without this an earlier-PR criterion is permanently
   // unsatisfiable by a later one. Setting it is a human act in a plan PR.
   if (criterion.satisfied_by) {
-    return {
+    return unable({
       ...base,
       met: true,
       reason: `satisfied by ${criterion.satisfied_by} (prior merge)`,
       proof_exec: "not_executable",
       holdout: !!criterion.holdout,
-    };
+    });
   }
 
   if (refusal) {
-    return {
+    return unable({
       ...base,
       met: false,
       floorMet: false,
@@ -4383,7 +4388,7 @@ export function judgeCriterion(
       proof_exec: "not_executable",
       holdout: !!criterion.holdout,
       refusal,
-    };
+    });
   }
 
   // R-15: `floorTokens` is ALWAYS `reportTokens`. No arm lets the floor read the criterion it is judging — that is
@@ -4755,8 +4760,6 @@ export function judgeCriterion(
   // and can never rescue an unpasted or executed-fail proof. W1-T2263: APPEND to the floor's accumulated `reason`,
   // never replace it — a bare overwrite threw away everything earlier branches built, in the one branch where an
   // author most needs to know what was weighed. A bounded `semanticClause` rides after the downgrade note.
-  const reviewerUnavailable = reviewerUnable !== undefined && semantic !== false
-    ? (reviewerUnable || "the reviewer gave no reason") : undefined;
   if (reviewerUnavailable !== undefined) {
     reason = `${reason} — NOTE: reviewer could not inspect this proof (UNABLE): ${reviewerUnavailable}`;
   }

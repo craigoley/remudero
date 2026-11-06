@@ -121,3 +121,36 @@ test("W1-T11428 criterion 2: a required semantic review whose reviewer was UNABL
     assert.match(ledger, /reviewer could not inspect the proofs/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// #16956's 02:01Z review: judgeCriterion's satisfied_by and worker-refusal early returns dropped the UNABLE marker.
+function judgedWith(list: Array<{ claim: string; proof: string; satisfied_by?: string }>, transcript: string, implementationReport?: string) {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-unable-early-"));
+  try {
+    return judgeReview(list, {
+      diff, report, headCheckoutDir: dir, execProof: () => "pass",
+      semantic: parseReviewerVerdicts(transcript, list.length),
+      semanticClauses: parseReviewerVerdictClauses(transcript, list.length),
+      reviewerUnable: parseReviewerUnable(transcript, list.length),
+      ...(implementationReport === undefined ? {} : { implementationReport }),
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+test("W1-T11428 criterion 1: an UNABLE line on a satisfied_by criterion is cannot-evaluate, not success", () => {
+  const list = [{ ...criteria[0]!, satisfied_by: "#16000" }, criteria[1]!];
+  const verdict = judgedWith(list, "REVIEW_VERDICT 1: UNABLE sandbox launcher failed\nREVIEW_VERDICT 2: PASS");
+  assert.equal(verdict.cannotEvaluate, true);
+  assert.equal(verdict.state, "pending");
+  assert.match(verdict.criteria[0]!.reviewerUnavailable ?? "", /sandbox launcher failed/);
+  assert.equal(verdict.criteria[0]!.met, true, "the prior merge still satisfies it");
+});
+
+test("W1-T11428 criterion 1: an UNABLE line on a worker-refused criterion is cannot-evaluate, not failure", () => {
+  const verdict = judgedWith(criteria.slice(0, 2),
+    "REVIEW_VERDICT 1: UNABLE shell failed before execution\nREVIEW_VERDICT 2: PASS",
+    "REFUSED:\n1. [premise-rotted] the cache this criterion names was removed upstream\n");
+  assert.ok(verdict.criteria[0]!.refusal, "the refusal path judged criterion 1");
+  assert.equal(verdict.cannotEvaluate, true);
+  assert.equal(verdict.state, "pending");
+  assert.match(verdict.criteria[0]!.reviewerUnavailable ?? "", /shell failed/);
+});
