@@ -842,7 +842,7 @@ export async function daemonCommand(
   }
   const target = resolved.target;
 
-  const runId = `DAEMON-${Date.now()}`;
+  const runId = process.env.RMD_SUPERVISED_DAEMON_RUN_ID ?? `DAEMON-${Date.now()}`;
   let lastReadPlaneStep: string | undefined;
   let onMainEntryStep: ((step: string) => void) | undefined;
   const log = (step: string, extra: Record<string, unknown> = {}) => {

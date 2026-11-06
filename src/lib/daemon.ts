@@ -3192,13 +3192,15 @@ export interface DaemonProcessEnd {
   bootTs: string;
   endedTs: string;
   lifetimeMs: number;
-  /** `last_row`: the process's own newest row. `next_boot`: it left none, so the next boot bounds it. */
-  endedBasis: "last_row" | "next_boot";
+  /** Even a boot-only process ends at its own last row, never at a later restart. */
+  endedBasis: "last_row";
   /** The clean-exit row it wrote, or undefined for an abnormal exit. */
   cleanStep?: string;
   lastMemory?: DaemonMemoryEvidence;
   /** A heap-limit message from one of its rows, when the ledger holds one. V8's fatal stderr line is not one. */
   heapLimitLine?: string;
+  exitCode?: number;
+  heapLimitBytes?: number;
 }
 
 const finiteNumber = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
@@ -3224,7 +3226,7 @@ function heapLimitLineOf(row: Record<string, unknown>): string | undefined {
 }
 
 /** Pure: every prior daemon process in `rows` that has ended and has no lifetime row yet, oldest first. Its lifetime
- *  runs from its boot to its own newest row; with no row past the boot, to the next boot. `currentBootTs` is the boot
+ *  runs from its boot to its own newest row, including the boot itself. `currentBootTs` is the boot
  *  doing the judging, so the newest prior process has a next boot too. Unparseable timestamps are dropped. */
 export function classifyEndedDaemonProcesses(
   rows: ReadonlyArray<Record<string, unknown>>,
@@ -3232,22 +3234,18 @@ export function classifyEndedDaemonProcesses(
 ): DaemonProcessEnd[] {
   const judged = new Set<string>();
   const boots: { runId: string; ts: string; ms: number }[] = [];
-  const perRun = new Map<string, { rows: { ms: number; ts: string }[]; cleanStep?: string; memory?: DaemonMemoryEvidence; heapLine?: string }>();
+  const perRun = new Map<string, { ms: number; row: Record<string, unknown> }[]>();
   for (const row of rows) {
     const step = row.step;
     if ((step === DAEMON_ABNORMAL_EXIT_STEP || step === DAEMON_CLEAN_EXIT_OBSERVED_STEP) && typeof row.prior_run_id === "string") {
       judged.add(row.prior_run_id);
-      continue;
     }
     const runId = row.run_id;
     const ms = Date.parse(String(row.ts ?? ""));
-    if (typeof runId !== "string" || !Number.isFinite(ms)) continue;
+    if (typeof runId !== "string" || !runId.startsWith("DAEMON-") || !Number.isFinite(ms)) continue;
     if (step === "daemon.boot") boots.push({ runId, ts: String(row.ts), ms });
-    const seen = perRun.get(runId) ?? { rows: [] };
-    seen.rows.push({ ms, ts: String(row.ts) });
-    if (typeof step === "string" && DAEMON_CLEAN_EXIT_STEPS.has(step)) seen.cleanStep ??= step;
-    if (step === "daemon.memory") seen.memory = memoryEvidenceOf(row);
-    seen.heapLine ??= heapLimitLineOf(row);
+    const seen = perRun.get(runId) ?? [];
+    seen.push({ ms, row });
     perRun.set(runId, seen);
   }
   const currentMs = Date.parse(currentBootTs);
@@ -3258,21 +3256,28 @@ export function classifyEndedDaemonProcesses(
     judged.add(boot.runId);
     const nextBoot = boots.slice(i + 1).find((b) => b.runId !== boot.runId);
     const nextMs = nextBoot?.ms ?? currentMs;
-    const nextTs = nextBoot?.ts ?? currentBootTs;
     if (!Number.isFinite(nextMs) || nextMs < boot.ms) return;
-    const own = perRun.get(boot.runId);
-    // Its newest row inside its own life: a row stamped past the next boot cannot be this process's last act.
-    const last = own?.rows.reduce<{ ms: number; ts: string } | undefined>(
-      (best, r) => (r.ms > boot.ms && r.ms <= nextMs && (best === undefined || r.ms > best.ms) ? r : best), undefined);
+    const own = (perRun.get(boot.runId) ?? []).filter((r) => r.ms >= boot.ms && r.ms <= nextMs).sort((a, b) => a.ms - b.ms);
+    const last = own[own.length - 1];
+    const clean = own.find(({ row }) => DAEMON_CLEAN_EXIT_STEPS.has(String(row.step)) ||
+      (row.step === "daemon.process.exit" && row.clean_exit === true));
+    const memory = own.filter(({ row }) => row.step === "daemon.memory").at(-1)?.row;
+    const policy = (perRun.get(boot.runId) ?? []).filter(({ ms, row }) => ms <= nextMs && row.step === "daemon.memory_policy").at(-1)?.row;
+    const exit = own.find(({ row }) => row.step === "daemon.process.exit")?.row;
+    const heapLine = own.filter(({ row }) => row.step !== DAEMON_ABNORMAL_EXIT_STEP)
+      .map(({ row }) => heapLimitLineOf(row)).filter(Boolean).at(-1);
+    const freshness = rows.find((r) => r.step === "daemon.boot" && r.run_id === nextBoot?.runId)?.priorExitReason === "freshness";
     ended.push({
       runId: boot.runId,
       bootTs: boot.ts,
-      endedTs: last ? last.ts : nextTs,
-      lifetimeMs: (last ? last.ms : nextMs) - boot.ms,
-      endedBasis: last ? "last_row" : "next_boot",
-      ...(own?.cleanStep ? { cleanStep: own.cleanStep } : {}),
-      ...(own?.memory ? { lastMemory: own.memory } : {}),
-      ...(own?.heapLine ? { heapLimitLine: own.heapLine } : {}),
+      endedTs: String(last.row.ts),
+      lifetimeMs: last.ms - boot.ms,
+      endedBasis: "last_row",
+      ...(clean || freshness ? { cleanStep: freshness ? "daemon.freshness_exit" : String(clean!.row.step) } : {}),
+      ...(memory ? { lastMemory: memoryEvidenceOf(memory) } : {}),
+      ...(heapLine ? { heapLimitLine: heapLine } : {}),
+      exitCode: finiteNumber(exit?.exit_code),
+      heapLimitBytes: finiteNumber(policy?.heap_size_limit),
     });
   });
   return ended;

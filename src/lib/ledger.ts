@@ -1977,6 +1977,28 @@ function rotateLedgerLocked(
     return withinWindow;
   });
 
+  // Keep the evidence of each surviving boot's own lifetime. Restart downtime is not uptime;
+  // dropping its final row or heap sample would make the next boot judge a different process.
+  const bootRuns = new Set(candidates.filter((p) => p.step === "daemon.boot").map((p) => p.json?.run_id)
+    .filter((run): run is string => typeof run === "string" && run.startsWith("DAEMON-")));
+  const lifetimeEvidence = new Map<string, Map<string, ParsedLedgerLine>>();
+  for (const p of originalOrder) {
+    const run = p.json?.run_id;
+    if (typeof run !== "string" || !bootRuns.has(run) || p.tsMs === undefined) continue;
+    const evidence = lifetimeEvidence.get(run) ?? new Map<string, ParsedLedgerLine>();
+    for (const key of ["last", ...(p.step === "daemon.memory" || p.step === "daemon.memory_policy" ? [p.step] : [])]) {
+      if ((evidence.get(key)?.tsMs ?? -Infinity) <= p.tsMs) evidence.set(key, p);
+    }
+    lifetimeEvidence.set(run, evidence);
+  }
+  const preserved = new Set([...lifetimeEvidence.values()].flatMap((e) => [...e.values()]));
+  const included = new Set(candidates);
+  for (const p of preserved) {
+    if (included.has(p)) continue;
+    candidates.push(p);
+    archivedLineCount--;
+  }
+
   const carried = dropSupersededReviews(pruneCarriedRows(candidates));
   const reviewMarkers = planOnlyReviewMarkers(candidates, carried);
   archivedLineCount += candidates.length - carried.length;

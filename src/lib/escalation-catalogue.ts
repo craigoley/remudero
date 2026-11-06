@@ -11,6 +11,10 @@ import type { ReplayStranded } from "./inbox-replay.js";
 import type { Task } from "./plan.js";
 import { DEFAULT_MAX_TASK_LIFETIME_DISPATCHES, readLedgerLines } from "./status.js";
 import type { PostReviewStallVerdict } from "./sweep.js";
+import { dirname } from "node:path";
+import { hostname } from "node:os";
+import { systemClock } from "./clock.js";
+import { deliveredEscalationUrl, spoolIssueAction, withdrawSpooledEscalation } from "./host-escalation-spool.js";
 
 /**
  * P29(ii)'s escalation side — called once `nextRunnable`'s `isCircuitTripped`
@@ -167,7 +171,9 @@ const CRASHLOOP_OPTIONS = [
       "The crash is whatever kills the process between `daemon.boot` and its next clean-exit row. On the host, " +
       "`docker events --filter container=<name> --filter event=die` gives each exit code (134 is a V8 heap abort) " +
       "and `docker logs` the heap-limit line; compare the last `daemon.memory` sample with the heap ceiling in " +
-      "force. Disk-full, a thrown ledger write, a whole-ledger reader and a bad deploy are the observed causes.",
+      "force. The entrypoint records that same wait status and heap-limit line before its crash throttle and exit. " +
+      "Freshness (75), blocked (76) and environmental (77) exits instead take its in-container sync/restart path. " +
+      "Disk-full, a thrown ledger write, a whole-ledger reader and a bad deploy are the observed causes.",
   },
   {
     label: "pause the fleet while diagnosing",
@@ -182,12 +188,13 @@ export const DAEMON_CRASHLOOP_UPDATED_STEP = "daemon.crashloop.updated";
 export const DAEMON_CRASHLOOP_CLEARED_STEP = "daemon.crashloop.cleared";
 /** The incident's title. It names no count, so every later exit in the run reads as the same incident. */
 export const LEARNED_CRASHLOOP_SUMMARY = "daemon crash-loop: abnormal exits shorter than its learned clean lifetime";
-const EXIT_CODE_SOURCE = "not visible in-container: the entrypoint exits the container with it";
+const EXIT_CODE_SOURCE = "no supervisor exit row in this ledger tail";
 
 /** An open learned crash-loop incident, keyed by the first process of its run. */
 export interface CrashLoopIncident {
   runFirst: string;
   issueUrl: string | null;
+  p90Ms?: number;
 }
 
 export interface CrashSentinelCtx {
@@ -211,8 +218,9 @@ function lifetimeRowOf(end: DaemonProcessEnd, runId: string): Record<string, unk
   return {
     ...base,
     step: DAEMON_ABNORMAL_EXIT_STEP,
-    exit_code: null,
-    exit_code_source: EXIT_CODE_SOURCE,
+    exit_code: end.exitCode ?? null,
+    exit_code_source: end.exitCode === undefined ? EXIT_CODE_SOURCE : "entrypoint wait (container die status)",
+    heap_limit_bytes: memory?.heapLimitBytes ?? end.heapLimitBytes ?? null,
     last_memory: memory === undefined ? null : {
       ts: memory.ts,
       heap_used_bytes: memory.heapUsedBytes ?? null,
@@ -234,14 +242,14 @@ function lifetimeRecordOf(row: Record<string, unknown>): DaemonLifetimeRecord | 
 function exitEvidence(row: Record<string, unknown>): string {
   const memory = row.last_memory as { ts?: string; heap_used_bytes?: number | null; heap_limit_bytes?: number | null; rss_bytes?: number | null } | null | undefined;
   const used = memory?.heap_used_bytes ?? undefined;
-  const limit = memory?.heap_limit_bytes ?? undefined;
+  const limit = memory?.heap_limit_bytes ?? (typeof row.heap_limit_bytes === "number" ? row.heap_limit_bytes : undefined);
   const heap = used === undefined ? "no heap reading"
     : limit === undefined ? `heap ${mib(used)} MiB`
     : `heap ${mib(used)} of ${mib(limit)} MiB in force (${Math.round((100 * used) / limit)}%)`;
   const rss = memory?.rss_bytes == null ? "" : `, rss ${mib(memory.rss_bytes)} MiB`;
-  const sample = memory ? `last daemon.memory sample ${memory.ts}: ${heap}${rss}` : "no daemon.memory sample";
-  const basis = row.ended_basis === "last_row" ? "to its last row" : "to the next boot";
-  return `- ${String(row.prior_run_id)}: booted ${String(row.boot_ts)}, lived ${minutes(Number(row.lifetime_ms))} min (${basis}); ` +
+  const sample = memory ? `last daemon.memory sample ${memory.ts}: ${heap}${rss}`
+    : `no daemon.memory sample${limit === undefined ? "" : `; heap ceiling ${mib(limit)} MiB in force`}`;
+  return `- ${String(row.prior_run_id)}: booted ${String(row.boot_ts)}, lived ${minutes(Number(row.lifetime_ms))} min (to its last row); ` +
     `exit code ${typeof row.exit_code === "number" ? row.exit_code : `unknown (${EXIT_CODE_SOURCE})`}; ${sample}; ` +
     `heap-limit line: ${typeof row.heap_limit_line === "string" ? row.heap_limit_line : "none in the ledger"}`;
 }
@@ -259,7 +267,8 @@ function incidentState(lines: ReadonlyArray<Record<string, unknown>>): { open?: 
     if (typeof line.run_first !== "string") continue;
     if (line.step === DAEMON_CRASHLOOP_ESCALATED_STEP && line.basis === "learned") {
       escalatedRuns.add(line.run_first);
-      open = { runFirst: line.run_first, issueUrl: typeof line.issue_url === "string" ? line.issue_url : null };
+      open = { runFirst: line.run_first, issueUrl: typeof line.issue_url === "string" ? line.issue_url : null,
+        ...(typeof line.clean_lifetime_p90_ms === "number" ? { p90Ms: line.clean_lifetime_p90_ms } : {}) };
     } else if (line.step === DAEMON_CRASHLOOP_CLEARED_STEP) {
       cleared.add(line.run_first);
     }
@@ -267,23 +276,21 @@ function incidentState(lines: ReadonlyArray<Record<string, unknown>>): { open?: 
   return { open: open && !cleared.has(open.runFirst) ? open : undefined, escalatedRuns };
 }
 
-/** Close the incident: the issue with a citation, and a `daemon.crashloop.cleared` row either way. */
+/** Hand recovery to the launcher's durable withdraw-or-close path before clearing the incident. */
 export function clearDaemonCrashLoopIncident(incident: CrashLoopIncident, reason: string, ctx: CrashSentinelCtx): void {
-  let delivered = false;
-  if (incident.issueUrl) {
-    try {
-      const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
-      if (issues.closeWithComment) {
-        issues.closeWithComment(incident.issueUrl, `W1-T11421: ${reason}, so the crash loop has ended — closing.`);
-        delivered = true;
-      }
-    } catch (error) {
-      void error; // An undelivered close costs one operator read; the cleared row below still ends the incident.
-    }
+  const stateDir = dirname(ctx.ledgerPath);
+  const identity = { taskId: "DAEMON", summary: LEARNED_CRASHLOOP_SUMMARY };
+  const meta = { source: "daemon-crashloop", host: hostname(), clock: systemClock };
+  const comment = `W1-T11421: ${reason}, so the crash loop has ended — closing.`;
+  const deliveredUrl = deliveredEscalationUrl(stateDir, identity);
+  withdrawSpooledEscalation(stateDir, identity, comment, meta);
+  // Older incidents were posted directly rather than through the spool; retain their known URL.
+  if (incident.issueUrl && incident.issueUrl !== deliveredUrl) {
+    spoolIssueAction(stateDir, { kind: "close", url: incident.issueUrl, body: comment }, meta);
   }
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_CLEARED_STEP,
-    run_first: incident.runFirst, issue_url: incident.issueUrl, reason, delivered,
+    run_first: incident.runFirst, issue_url: incident.issueUrl, reason, close_queued: Boolean(incident.issueUrl || deliveredUrl),
   });
 }
 
@@ -314,7 +321,9 @@ export function runDaemonCrashSentinel(
   const state = incidentState(lines);
   let open = state.open;
   let incident: LearnedCrashLoopSummary["incident"] = open ? "open" : "none";
-  const outlived = ended.find((end) => end.lifetimeMs >= learned.p90Ms);
+  const newestEnd = ended.at(-1);
+  const recoveryP90 = open?.p90Ms ?? learned.p90Ms;
+  const outlived = newestEnd?.cleanStep && newestEnd.lifetimeMs > recoveryP90 ? newestEnd : undefined;
   if (open && outlived) {
     clearDaemonCrashLoopIncident(open, `${outlived.runId} lived ${minutes(outlived.lifetimeMs)} min, past the learned p90 (${learnedLine(learned)})`, ctx);
     open = undefined;
@@ -351,7 +360,8 @@ export function runDaemonCrashSentinel(
         detail:
           `W1-T11421: ${run.length} consecutive daemon processes ended with no clean-exit row before the next boot, ` +
           `each living less than this instance's learned clean lifetime (${learnedLine(learned)}). In the container an ` +
-          `abnormal exit is a heap abort (exit 134), a kill or a crash: the entrypoint exits the container with it and ` +
+          `abnormal exit is a heap abort (exit 134), a kill or a crash: the entrypoint records its wait status and ` +
+          `heap-limit stderr line, then exits the container with that status and ` +
           `docker's restart policy starts the daemon again, so the loop runs until its cause is fixed. No ten-minute ` +
           `window needs to hold six boots for this to fire. This issue is updated with each further exit and closes ` +
           `itself once a process outlives the p90. Exits, oldest first:\n${evidence.join("\n")}`,
@@ -366,7 +376,7 @@ export function runDaemonCrashSentinel(
       clean_lifetime_median_ms: learned.medianMs, clean_lifetime_p90_ms: learned.p90Ms,
       issue_url: issueUrl, delivered: issueUrl !== null,
     });
-    open = { runFirst: run[0].runId, issueUrl };
+    open = { runFirst: run[0].runId, issueUrl, p90Ms: learned.p90Ms };
     incident = "opened";
   }
   return {
@@ -395,14 +405,26 @@ export function daemonCrashSentinel(
     try {
       const { summary, incident } = runDaemonCrashSentinel(lines, nowIso, ctx);
       if (summary && incident) {
-        let remaining = summary.learned.p90Ms;
+        let remaining = summary.learned.p90Ms + 1;
+        const knownExits = new Set(readLedgerLines(ctx.ledgerPath)
+          .filter((r) => r.step === DAEMON_ABNORMAL_EXIT_STEP).map((r) => r.prior_run_id));
         let handle: unknown;
         const arm = (): void => {
           const wait = Math.min(remaining, MAX_TIMER_DELAY_MS);
           remaining -= wait;
           const timer = setTimer(() => {
             if (remaining > 0) return arm();
-            clearDaemonCrashLoopIncident(incident, `${ctx.runId} outlived the learned p90 (${learnedLine(summary.learned)})`, ctx);
+            if (readLedgerLines(ctx.ledgerPath).some((r) => r.step === DAEMON_ABNORMAL_EXIT_STEP && !knownExits.has(r.prior_run_id))) return;
+            try {
+              clearDaemonCrashLoopIncident(incident, `${ctx.runId} outlived the learned p90 (${learnedLine(summary.learned)})`, ctx);
+            } catch (error) {
+              appendLedger(ctx.ledgerPath, {
+                run_id: ctx.runId, task_id: "DAEMON", step: "daemon.crashloop_sentinel_failed",
+                error: `queue recovery close: ${String((error as Error)?.message ?? error)}`.slice(0, 240),
+              });
+              remaining = summary.learned.p90Ms + 1;
+              arm();
+            }
           }, wait);
           timer.unref?.();
           handle = timer;
@@ -457,7 +479,8 @@ export function escalateCrashLoop(
   const newest = verdict.windowBoots[verdict.windowBoots.length - 1];
   const newestMs = Date.parse(newest ?? "");
   if (!verdict.breached || !Number.isFinite(newestMs)) return;
-  const already = readLedgerLines(ctx.ledgerPath).some((l) => {
+  const tail = readLedgerLines(ctx.ledgerPath);
+  const already = tail.some((l) => {
     if (l.step !== "daemon.crashloop.escalated") return false;
     const priorMs = Date.parse(String(l.window_newest ?? ""));
     return Number.isFinite(priorMs) && newestMs - priorMs <= verdict.windowMs;
@@ -478,7 +501,8 @@ export function escalateCrashLoop(
         `DYING during or shortly after boot, being restarted, and dying again — the 2026-08-03 shape, where an ` +
         `ENOSPC write in the boot path crash-looped ten boots with no signal. The densest window's boots, oldest ` +
         `first: ${verdict.windowBoots.join(", ")}. Boot itself is NOT blocked by this notice; the loop is still ` +
-        `running until acted on.`,
+        `running until acted on. Exit evidence:\n` +
+        tail.filter((r) => r.step === DAEMON_ABNORMAL_EXIT_STEP).map(exitEvidence).join("\n"),
       options: CRASHLOOP_OPTIONS,
       recommendation: "read the last boot's failure and fix the cause",
     },
