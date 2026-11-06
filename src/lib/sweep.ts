@@ -14859,7 +14859,9 @@ export function reviewerUnavailableProvidersForReadmission(
       pending.review_input_digest !== pr.reviewInputDigest) return undefined;
   if (pr.reviewPendingSince && typeof pending.ts === "string" && Date.parse(pr.reviewPendingSince) > Date.parse(pending.ts)) return undefined;
   const verdict = pending.decision_verdict as ReviewVerdict | undefined;
-  if (verdict?.cannotEvaluate !== true || !verdict.criteria?.some((criterion) => criterion.reviewerUnavailable !== undefined)) return undefined;
+  if (verdict?.cannotEvaluate !== true) return undefined;
+  const criteria = verdict.criteria;
+  if (!Array.isArray(criteria) || !criteria.some((criterion) => criterion.reviewerUnavailable !== undefined)) return undefined;
   const reviewer = lines.findLast((row) => row.step === "review.reviewer" && row.run_id === pending.run_id);
   if (typeof reviewer?.unable !== "number" || reviewer.unable <= 0 || !isWorkerProviderId(reviewer.provider)) return undefined;
   return [reviewer.provider];

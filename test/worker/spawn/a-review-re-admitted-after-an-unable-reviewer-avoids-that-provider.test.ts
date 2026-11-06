@@ -50,6 +50,9 @@ test("W1-T11432 criterion 2: only the provider from the matching cannot-evaluate
   ];
   assert.deepEqual(reviewerUnavailableProvidersForReadmission(pr, rows), ["codex"]);
   assert.equal(reviewerUnavailableProvidersForReadmission(pr, [
+    ...rows.slice(0, 2), { ...rows[2]!, decision_verdict: { cannotEvaluate: true, criteria: [] } },
+  ]), undefined, "missing reviewer-unavailable evidence does not exclude a provider");
+  assert.equal(reviewerUnavailableProvidersForReadmission(pr, [
     ...rows.slice(0, 1), { ...rows[2]!, run_id: "review-PR16758-current" },
   ]), undefined, "a reviewer row from another attempt cannot choose the exclusion");
 });
