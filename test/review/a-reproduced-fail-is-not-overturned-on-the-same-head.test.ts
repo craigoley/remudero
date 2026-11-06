@@ -7,6 +7,7 @@ import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { appendLedger } from "#src/lib/ledger.js";
 
 const SHA = "90be1a69eaea5510184cf6eec69f7c72afd13c39";
 const failureBody = `**remudero-review=failure**\n\n1. laneTarget's CPU bound is measured\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: an in-memory runDaemon replay adopting a review child in shadow mode throws ReferenceError at daemon.ts:4218. The proof omits review-child adoption.`;
@@ -89,7 +90,7 @@ test("W1-T11443 criterion 1: compressed unmet numbering maps back to the affecte
 });
 
 test("W1-T11443 criteria 1/2: production publication guards shared history and presents the prior finding", async () => {
-  for (const scenario of ["sticky", "addressed", "unreadable", "unreproduced", "late"] as const) {
+  for (const scenario of ["sticky", "addressed", "unreadable", "unreproduced", "late", "replay"] as const) {
     const fixture = gitRepo({ kind: "reproduced-failure-publication" });
     const root = fixture.dir;
     const oldPath = process.env.PATH;
@@ -103,6 +104,8 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
       const failures = review.reproducedReviewFailuresFromHistory(history,
         [{ commit_id: head, body: failureBody.replace("laneTarget's CPU bound is measured", "changed exists") }], head);
       let reads = 0;
+      let replayPhase = false;
+      let historyRevision = "external-failure-v1";
       const prompts: string[] = [];
       shim = ghShim([
         { when: "pulls/1/reviews", stdout: "[]" },
@@ -113,16 +116,16 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
         { when: "api ", stdout: "{}" },
       ], { kind: "reproduced-failure-publication" });
       process.env.PATH = `${shim.dir}:${oldPath}`;
-      const verdict = await runReview({
+      const drive = () => runReview({
         owner: "acme", repo: "remudero", prUrl,
         task: { id: "W1-T11443", files: ["changed.ts"], acceptance: [{ claim: "changed exists", proof: "grep: changed in changed.ts" }] },
         report: "changed", settingsFile: join(root, "settings.json"), config: { root, claudeBin: "/unused" },
-        log: () => {}, say: () => {}, account: (worker: unknown) => worker,
+        log: (step: string, extra: Record<string, unknown> = {}) => appendLedger(join(root, "ledger.ndjson"), { run_id: `history-${scenario}`, task_id: "W1-T11443", step, ...extra }), say: () => {}, account: (worker: unknown) => worker,
         spawnReviewer: true, readReviewReuseFacts: () => undefined,
         readReviewStatusHistory: async () => {
           reads++;
           if (scenario === "unreadable") return { kind: "unreadable", reason: "history unavailable in fixture" };
-          return { kind: "readable", failures: scenario === "unreproduced" || (scenario === "late" && reads === 1) ? [] : failures };
+          return { kind: "readable", failures: scenario === "unreproduced" || (scenario === "late" && reads === 1) || (scenario === "replay" && !replayPhase) ? [] : failures, ...(scenario === "replay" && replayPhase ? { revision: historyRevision } : {}) };
         },
         reviewerSpawnWorker: async (args: { prompt: string }) => {
           prompts.push(args.prompt);
@@ -140,6 +143,7 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
         headCheckoutDir: root, ledgerPath: join(root, "ledger.ndjson"), runId: `history-${scenario}`,
         disarm: () => "not-armed", arm: () => ({ armed: false, reason: "fixture" }),
       } as never);
+      const verdict = await drive();
       assert.equal(reads, 2, `${scenario}: history is checked before the prompt and again before publication`);
       if (scenario === "unreadable") {
         assert.match(verdict.verdictWithheld ?? "", /history unavailable in fixture/);
@@ -151,11 +155,26 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
       }
       const posts = shim.calls().filter(call => call.includes(`statuses/${head}`));
       assert.ok(posts.some(call => call.includes("state=pending")), `${scenario}: pending is visible`);
-      assert.equal(posts.some(call => call.includes("state=success")), scenario === "addressed" || scenario === "unreproduced", scenario);
+      assert.equal(posts.some(call => call.includes("state=success")), scenario === "addressed" || scenario === "unreproduced" || scenario === "replay", scenario);
       if (scenario === "sticky" || scenario === "late") {
         assert.ok(posts.some(call => call.includes("state=failure")), scenario);
         const submitted = shim.calls().join("\n");
         assert.ok(submitted.includes("pulls/1/reviews") && submitted.includes("prior reproduced failure remains unaddressed: ReferenceError"), submitted);
+      }
+      if (scenario === "replay") {
+        replayPhase = true;
+        const changed = await drive();
+        assert.equal(changed.decisionDisposition, "computed", "new shared reproduction cannot replay the cached PASS");
+        assert.equal(changed.state, "failure");
+        assert.notEqual(changed.reviewDecisionDigest, verdict.reviewDecisionDigest);
+        assert.equal(reads, 4);
+        historyRevision = "later-foreign-pass-v2";
+        const contradicted = await drive();
+        assert.equal(contradicted.decisionDisposition, "computed", "a later terminal status must revalidate the same finding");
+        assert.equal(contradicted.state, "failure");
+        assert.notEqual(contradicted.reviewDecisionDigest, changed.reviewDecisionDigest);
+        assert.equal(reads, 6);
+        assert.equal(shim.events().filter(event => event.phase === "start" && event.args.includes("state=failure")).length, 2);
       }
     } finally {
       if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
@@ -163,4 +182,13 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
       fixture.cleanup();
     }
   }
+});
+
+test("W1-T11443 criterion 1: a reproduced finding and a later terminal status invalidate cached decision identity", () => {
+  const input = { headSha: SHA, diff: "", report: "", acceptance: [] };
+  const original = review.reviewDecisionDigest(input);
+  assert.equal(review.reviewDecisionDigest({ ...input, sharedReviewHistory: { failureIds: [] } } as never), original);
+  const failure = review.reviewDecisionDigest({ ...input, sharedReviewHistory: { failureIds: ["finding"], revision: "failure-v1" } } as never);
+  assert.notEqual(failure, original);
+  assert.notEqual(review.reviewDecisionDigest({ ...input, sharedReviewHistory: { failureIds: ["finding"], revision: "foreign-pass-v2" } } as never), failure);
 });

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { WorkerStreamEvent } from "../../lib/worker.js";
 import type { GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure, type CensusChildResult } from "./run-task-verb.js";
@@ -449,7 +450,18 @@ export async function readReviewStatusHistory(
         (typeof (row as Record<string, unknown>).body !== "string" && (row as Record<string, unknown>).body !== null))) {
       throw new Error("GitHub returned an incomplete pull request review history");
     }
-    return { kind: "readable", failures: reproducedReviewFailuresFromHistory(statuses, reviews, headSha) };
+    const failures = reproducedReviewFailuresFromHistory(statuses, reviews, headSha);
+    const terminals = statuses.filter((row) => {
+      const status = row as Record<string, unknown>;
+      return status.context === REVIEW_CONTEXT && String(status.state).toLowerCase() !== "pending";
+    }).map((row) => {
+      const status = row as Record<string, unknown>;
+      return { id: status.id ?? null, state: String(status.state).toLowerCase(),
+        createdAt: status.created_at ?? null, description: status.description ?? null, targetUrl: status.target_url ?? null };
+    }).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    return { kind: "readable", failures, ...(failures.length ? {
+      revision: createHash("sha256").update(JSON.stringify(terminals)).digest("hex"),
+    } : {}) };
   } catch (error) {
     return { kind: "unreadable", reason: `GitHub remudero-review status history unreadable: ${String((error as Error)?.message ?? error)}` };
   }
@@ -747,7 +759,11 @@ export async function runReview(host: ReviewCommandHost, args: {
   const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
   const ownership = taskIdEvidence.ownership;
   const preparedDecision = await preparePromisedReviewDecision({
-    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership, ...narrative },
+    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership,
+      sharedReviewHistory: initialStatusHistory.kind === "readable" ? {
+        failureIds: initialStatusHistory.failures.filter((finding) => finding.headSha === headSha).map((finding) => finding.id),
+        revision: initialStatusHistory.revision,
+      } : undefined, ...narrative },
     headCheckoutDir: args.headCheckoutDir, task, ledgerPath: args.ledgerPath, prUrl,
   });
   // W1-T9970: read once per review; a reviewer-image re-review of this head is its own decision.

@@ -102,6 +102,7 @@ export interface ReviewDecisionDigestInput extends ReviewTaskNarrativeInput {
    * digest identities stable, while a current worker refusal cannot replay a prior clean verdict. */
   implementationReport?: string;
   promisedFollowUpObservation?: PromisedFollowUpObservation;
+  sharedReviewHistory?: { failureIds: readonly string[]; revision?: string };
   body?: string;
   acceptance: readonly AcceptanceCriterion[];
   declaredFiles?: readonly string[];
@@ -138,6 +139,10 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
           unfiled: unreportedFollowUps(input.promisedFollowUpObservation.promised, "", input.promisedFollowUpObservation.planRecords),
           harvested: input.promisedFollowUpObservation.harvested ?? [] } } : {}),
     body: input.body ?? null,
+    ...(input.sharedReviewHistory?.failureIds.length ? { sharedReviewHistory: {
+      failureIds: [...new Set(input.sharedReviewHistory.failureIds)].sort(),
+      revision: input.sharedReviewHistory.revision ?? null,
+    } } : {}),
     acceptance,
     declaredFiles: input.declaredFiles ?? [],
     ...(input.ownership !== undefined ? { ownership: input.ownership.map((finding) => finding.kind === "unknown"
@@ -6705,7 +6710,7 @@ export interface PriorReproducedReviewFailure {
 }
 
 export type ReviewStatusHistory =
-  | { kind: "readable"; failures: PriorReproducedReviewFailure[] }
+  | { kind: "readable"; failures: PriorReproducedReviewFailure[]; revision?: string }
   | { kind: "unreadable"; reason: string };
 
 export type ReviewStatusHistoryGate =

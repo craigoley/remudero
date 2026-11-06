@@ -83,3 +83,18 @@ test("W1-T11443 criterion 2: shared status and finding reads explicitly revalida
   assert.equal(result.kind, "readable");
   assert.equal(options.length, 2);
 });
+
+test("W1-T11443 criterion 1: shared history identity follows terminal changes and ignores pending bookkeeping", async () => {
+  const body = "remudero-review=failure\n1. claim\n   - proof executed: reproduction throws ReferenceError at daemon.ts:4218";
+  const statuses = [{ id: 1, context: "remudero-review", state: "failure" }];
+  const read = () => reviewCommand.readReviewStatusHistory("acme", "remudero", "https://github.com/acme/remudero/pull/1", SHA,
+    async args => args.at(-1)?.includes("/statuses?") ? [statuses] : [[{ commit_id: SHA, body }]]);
+  const first = await read();assert.equal(first.kind, "readable");
+  assert.equal(typeof first.revision, "string");
+  statuses.push({ id: 2, context: "remudero-review", state: "success" });
+  const changed = await read();assert.equal(changed.kind, "readable");
+  assert.notEqual(changed.revision, first.revision);
+  statuses.push({ id: 3, context: "remudero-review", state: "pending" });
+  const pending = await read();assert.equal(pending.kind, "readable");
+  assert.equal(pending.revision, changed.revision);
+});
