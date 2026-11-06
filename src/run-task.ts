@@ -2928,7 +2928,7 @@ import {
   liveWritesExempt,
   LIVE_WRITE_OVERRIDE_ENV,
 } from "./lib/live-write-guard.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail } from "./lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
 import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
@@ -41329,12 +41329,14 @@ export function progressWatchdogCommand(
   rest: string[],
   run: (file: string, args: string[]) => string = (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 30_000 }),
 ): number {
-  const badArg = unknownArgError("progress-watchdog", rest, ["--state-root"], ["--json"]);
+  const badArg = unknownArgError("progress-watchdog", rest, ["--state-root"], ["--json", "--request-restart"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
   const stateDir = flagValue(rest, "--state-root") ?? join(loadConfig().root, "state");
+  // W1-T11327: the launcher's restart-in-place rung writes the daemon's one-shot request (fleet-control.ts).
+  if (rest.includes("--request-restart")) return restartInPlaceVerb(stateDir, (line) => console.log(line));
   const nowMs = systemClock.now();
   const read = readLedgerUnionRecordsSync(stateDir, {
     since: new Date(nowMs - 24 * 3_600_000).toISOString(),

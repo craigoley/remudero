@@ -167,12 +167,13 @@ path_is_live_or_unknown() {
   if printf '%s\n' "$ps_text" | grep -F -- "$path" >/dev/null; then
     echo 'process command references path'; return 0
   fi
-  if [ "$ROOT_REAL" = /private/tmp ]; then
-    alt="/tmp/${path##*/}"
+  case "$path" in /private/tmp|/private/tmp/*)
+    alt="/tmp${path#/private/tmp}"
     if printf '%s\n' "$ps_text" | grep -F -- "$alt" >/dev/null; then
       echo 'process command references /tmp alias'; return 0
     fi
-  fi
+    ;;
+  esac
   if ! command -v "$LSOF_CMD" >/dev/null 2>&1; then
     echo 'lsof unavailable'; return 0
   fi
@@ -191,9 +192,12 @@ path_is_live_or_unknown() {
   if printf '%s\n' "$cwd_text" | awk -v p="$cwd_target" '/^n/ { x=substr($0,2); if (x==p || index(x,p "/")==1) found=1 } END { exit !found }'; then
     echo 'process working directory is inside path'; return 0
   fi
-  if [ "$ROOT_REAL" = /private/tmp ] && printf '%s\n' "$cwd_text" | awk -v p="/tmp/${cwd_target##*/}" '/^n/ { x=substr($0,2); if (x==p || index(x,p "/")==1) found=1 } END { exit !found }'; then
-    echo 'process working directory uses /tmp alias'; return 0
-  fi
+  case "$cwd_target" in /private/tmp|/private/tmp/*)
+    if printf '%s\n' "$cwd_text" | awk -v p="/tmp${cwd_target#/private/tmp}" '/^n/ { x=substr($0,2); if (x==p || index(x,p "/")==1) found=1 } END { exit !found }'; then
+      echo 'process working directory uses /tmp alias'; return 0
+    fi
+    ;;
+  esac
   if [ -d "$path" ]; then
     open_text=$("$LSOF_CMD" -nP -Fn +D "$path" 2>"$LSOF_ERR"); status=$?
   else
@@ -613,11 +617,16 @@ done
 fi
 discover_tsx_caches
 TMP_REAL=$(cd "$TSX_TMP_ROOT" 2>/dev/null && pwd -P)
-if [ "$TSX_ONLY" = 0 ] && [ -n "$TMP_REAL" ] && [ "$TMP_REAL" != "$ROOT_REAL" ]; then
-  for p in "$TSX_TMP_ROOT"/tsx-*; do
-    [ -d "$p" ] && [ ! -L "$p" ] && prune_tsx_cache "$p"
+if [ -n "$TMP_REAL" ] && [ "$TMP_REAL" != "$ROOT_REAL" ]; then
+  for p in "$TMP_REAL"/tsx-*; do
+    [ -d "$p" ] && [ ! -L "$p" ] || continue
+    cache_uid=${p##*/}; cache_uid=${cache_uid#tsx-}
+    case "$cache_uid" in ''|*[!0-9]*) continue ;; esac
+    prune_tsx_cache "$p" 1
   done
-  prune_node_compile_cache "$TMP_REAL/node-compile-cache"
+  if [ "$TSX_ONLY" = 0 ]; then
+    prune_node_compile_cache "$TMP_REAL/node-compile-cache"
+  fi
 fi
 
 # The account-local Remudero session scratch root is opt-in by existence, never created here.

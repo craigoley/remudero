@@ -160,7 +160,7 @@ import { getHeapStatistics } from "node:v8";
 import { defaultLaneGovernorPorts, DISPATCH_LANE_CPU_CLASS, initialLaneCpuLearner, LANE_TARGET_STEP, laneTarget, laneTargetPayload, publishLaneCpuBound, publishLaneCpuClasses, readLaneCpu, relabelLaneCpu, REVIEW_LANE_CPU_CLASS, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget, type RunningLane } from "./lane-governor.js";
 import type { LaneGovernorMode } from "./policy.js";
 import {
-  createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimBeforeMemoryRestart, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
+  createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, quantileOf, reclaimBeforeMemoryRestart, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
 } from "./daemon-memory-policy.js";
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
@@ -1139,7 +1139,9 @@ export type DaemonFreshness =
   | { stale: false; notStale?: DaemonFreshnessNotStale }
   | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[];
       /** The tree was behind before this reading could say so (a live edit held it, live-edit-ladder.ts). */
-      staleSinceMs?: number };
+      staleSinceMs?: number;
+      /** W1-T11327: a requested restart in place, whose sha pair is this process's own boot sha twice. */
+      restartRequest?: { origin: string; requestedAt: string } };
 
 /** W1-T5282 — the real wiring's reading is awaited, its `git fetch` off the loop; a sync reading stays sync. */
 /** W1-T5723: start, adopt, restart or discard the cadence child; only its settle is detached. */
@@ -1591,6 +1593,9 @@ export interface DaemonDeps {
   /** Read and delete the "drain now" marker, consumed once; a defined return means the operator
    *  asked for one immediate dispatch cycle. */
   consumeDrainNow?: () => { origin: string } | null;
+  /** W1-T11327: read and delete the `RESTART_REQUESTED` marker, consumed once. A defined return asks this process to
+   *  leave through its freshness exit (DAEMON_EXIT_STALE), leaving run children for the next boot to adopt. */
+  consumeRestartRequest?: () => { origin: string; requestedAt: string; codeSha?: string } | null;
   /** Pending bounded PR repair/review requests recorded by the authenticated console. The daemon
    * consumes at most one per poll and keeps final fix/review authority in its established command
    * path; the HTTP writer never starts a process. */
@@ -3166,6 +3171,174 @@ export function detectDaemonCrashLoop(
   };
 }
 
+/** W1-T11421: the rows a daemon process writes when it ends on purpose. A fatal summary is not a clean exit, and a
+ *  supervisor's explicit failed exit overrides a summary. A process with no clean end before the next boot ended
+ *  abnormally: a heap abort (exit 134), a kill, or a crash. */
+export const DAEMON_CLEAN_EXIT_STEPS: ReadonlySet<string> = new Set([
+  "daemon.stop", "daemon.stop_drain.completed", "daemon.freshness_exit",
+  "daemon.freshness_drain.completed", "daemon.memory_exit", "daemon.memory_drain.completed", "daemon.signal_exit",
+]);
+/** One row per ended process, written by the boot after it. Both are retained across rotation: the live tail keeps only
+ *  the newest boot, so these rows are the instance's lifetime history. */
+export const DAEMON_ABNORMAL_EXIT_STEP = "daemon.crash.abnormal_exit";
+export const DAEMON_CLEAN_EXIT_OBSERVED_STEP = "daemon.clean_exit.observed";
+
+/** The last `daemon.memory` sample an ended process wrote. */
+export interface DaemonMemoryEvidence {
+  ts: string;
+  heapUsedBytes?: number;
+  heapLimitBytes?: number;
+  rssBytes?: number;
+}
+
+/** How one prior daemon process ended, derived from the boot-ledger tail. */
+export interface DaemonProcessEnd {
+  runId: string;
+  bootTs: string;
+  endedTs: string;
+  lifetimeMs: number;
+  /** Even a boot-only process ends at its own last row, never at a later restart. */
+  endedBasis: "last_row";
+  /** The clean-exit row it wrote, or undefined for an abnormal exit. */
+  cleanStep?: string;
+  lastMemory?: DaemonMemoryEvidence;
+  /** A heap-limit message from one of its rows, when the ledger holds one. V8's fatal stderr line is not one. */
+  heapLimitLine?: string;
+  exitCode?: number;
+  heapLimitBytes?: number;
+}
+
+const finiteNumber = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
+
+function memoryEvidenceOf(row: Record<string, unknown>): DaemonMemoryEvidence {
+  const heap = (row.heap ?? {}) as Record<string, unknown>;
+  const used = finiteNumber(heap.used_bytes);
+  const limit = finiteNumber(heap.limit_bytes);
+  const rss = finiteNumber(row.rss_bytes);
+  return {
+    ts: String(row.ts),
+    ...(used === undefined ? {} : { heapUsedBytes: used }),
+    ...(limit === undefined ? {} : { heapLimitBytes: limit }),
+    ...(rss === undefined ? {} : { rssBytes: rss }),
+  };
+}
+
+function heapLimitLineOf(row: Record<string, unknown>): string | undefined {
+  for (const value of Object.values(row)) {
+    if (typeof value === "string" && /heap limit/i.test(value)) return value.slice(0, 240);
+  }
+  return undefined;
+}
+
+/** Pure: every prior daemon process in `rows` that has ended and has no lifetime row yet, oldest first. Its lifetime
+ *  runs from its boot to its own newest row, including the boot itself. `currentBootTs` is the boot
+ *  doing the judging, so the newest prior process has a next boot too. Unparseable timestamps are dropped. */
+export function classifyEndedDaemonProcesses(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  currentBootTs: string,
+): DaemonProcessEnd[] {
+  const judged = new Set<string>();
+  const boots: { runId: string; ts: string; ms: number }[] = [];
+  const perRun = new Map<string, { ms: number; row: Record<string, unknown> }[]>();
+  for (const row of rows) {
+    const step = row.step;
+    if ((step === DAEMON_ABNORMAL_EXIT_STEP || step === DAEMON_CLEAN_EXIT_OBSERVED_STEP) && typeof row.prior_run_id === "string") {
+      judged.add(row.prior_run_id);
+    }
+    const runId = row.run_id;
+    const ms = Date.parse(String(row.ts ?? ""));
+    if (typeof runId !== "string" || !runId.startsWith("DAEMON-") || !Number.isFinite(ms)) continue;
+    if (step === "daemon.boot") boots.push({ runId, ts: String(row.ts), ms });
+    const seen = perRun.get(runId) ?? [];
+    seen.push({ ms, row });
+    perRun.set(runId, seen);
+  }
+  const currentMs = Date.parse(currentBootTs);
+  boots.sort((a, b) => a.ms - b.ms);
+  const ended: DaemonProcessEnd[] = [];
+  boots.forEach((boot, i) => {
+    if (judged.has(boot.runId)) return;
+    judged.add(boot.runId);
+    const nextBoot = boots.slice(i + 1).find((b) => b.runId !== boot.runId);
+    const nextMs = nextBoot?.ms ?? currentMs;
+    if (!Number.isFinite(nextMs) || nextMs < boot.ms) return;
+    const own = (perRun.get(boot.runId) ?? []).filter((r) => r.ms >= boot.ms && r.ms <= nextMs).sort((a, b) => a.ms - b.ms);
+    const last = own[own.length - 1];
+    const exit = own.find(({ row }) => row.step === "daemon.process.exit")?.row;
+    const summary = own.find(({ row }) => row.step === "daemon.summary")?.row;
+    // When present, the supervisor receipt is authoritative regardless of summary or launcher rows.
+    // Without it, only stop reasons whose exit mapping is clean may teach clean lifetime history.
+    const cleanSummary = summary && ["stopped", "max_reached", "stale", "heap_pressure"].includes(String(summary.stopReason))
+      ? { row: summary } : undefined;
+    const clean = exit
+      ? (exit.clean_exit === true ? { row: exit } : undefined)
+      : (own.find(({ row }) => DAEMON_CLEAN_EXIT_STEPS.has(String(row.step))) ?? cleanSummary);
+    const memory = own.filter(({ row }) => row.step === "daemon.memory").at(-1)?.row;
+    const policy = (perRun.get(boot.runId) ?? []).filter(({ ms, row }) => ms <= nextMs && row.step === "daemon.memory_policy").at(-1)?.row;
+    const heapLine = own.filter(({ row }) => row.step !== DAEMON_ABNORMAL_EXIT_STEP)
+      .map(({ row }) => heapLimitLineOf(row)).filter(Boolean).at(-1);
+    const freshnessMarker = rows.find((r) => r.step === "daemon.boot" && r.run_id === nextBoot?.runId)?.priorExitReason === "freshness";
+    const freshness = freshnessMarker && (!exit || exit.clean_exit === true);
+    ended.push({
+      runId: boot.runId,
+      bootTs: boot.ts,
+      endedTs: String(last.row.ts),
+      lifetimeMs: last.ms - boot.ms,
+      endedBasis: "last_row",
+      ...(clean || freshness ? { cleanStep: freshness ? "daemon.freshness_exit" : String(clean!.row.step) } : {}),
+      ...(memory ? { lastMemory: memoryEvidenceOf(memory) } : {}),
+      ...(heapLine ? { heapLimitLine: heapLine } : {}),
+      exitCode: finiteNumber(exit?.exit_code),
+      heapLimitBytes: finiteNumber(policy?.heap_size_limit),
+    });
+  });
+  return ended;
+}
+
+/** The instance's learned clean lifetime: the median and p90 of how long its cleanly-ended processes lived. */
+export interface LearnedCleanLifetime {
+  medianMs: number;
+  p90Ms: number;
+  samples: number;
+}
+
+/** Pure: undefined below two clean lifetimes. One sample has no spread to learn from, so the caller keeps the window. */
+export function learnedCleanLifetime(cleanLifetimesMs: readonly number[]): LearnedCleanLifetime | undefined {
+  const usable = cleanLifetimesMs.filter((ms) => Number.isFinite(ms) && ms >= 0);
+  if (usable.length < 2) return undefined;
+  return { medianMs: quantileOf(usable, 0.5) as number, p90Ms: quantileOf(usable, 0.9) as number, samples: usable.length };
+}
+
+/** One ended process as the lifetime history records it. */
+export interface DaemonLifetimeRecord {
+  runId: string;
+  endedTs: string;
+  lifetimeMs: number;
+  clean: boolean;
+}
+
+/** Pure: the trailing run of abnormal exits, oldest first, each shorter than the learned median. A clean exit or a
+ *  process that lived the median or longer ends the run. A loop repeats, so a lone short exit is not yet one. */
+export function crashLoopRunOf(history: readonly DaemonLifetimeRecord[], learned: LearnedCleanLifetime): DaemonLifetimeRecord[] {
+  const ordered = [...history].sort((a, b) => Date.parse(a.endedTs) - Date.parse(b.endedTs));
+  const run: DaemonLifetimeRecord[] = [];
+  for (let i = ordered.length - 1; i >= 0; i--) {
+    const exit = ordered[i];
+    if (exit.clean || exit.lifetimeMs >= learned.medianMs) break;
+    run.unshift(exit);
+  }
+  return run;
+}
+
+/** What the boot's crash-loop sentinel decided, logged on `daemon.crashloop_check`. */
+export interface LearnedCrashLoopSummary {
+  basis: "learned";
+  learned: LearnedCleanLifetime;
+  runLength: number;
+  abnormalExits: number;
+  incident: "none" | "opened" | "updated" | "cleared" | "open";
+}
+
 /** W1-T9754: the environment switch that starts the spawn helper at boot. Its default, off, is an operator decision. */
 export const SPAWN_HELPER_SWITCH = "RMD_SPAWN_HELPER";
 
@@ -3193,6 +3366,9 @@ export async function daemonBoot(
     /** Called only on breach, with the evidence attached. The real command escalates, so a loop opens a
      *  needs-human issue instead of waiting for someone to read raw timestamps. */
     onBreach: (verdict: CrashLoopVerdict) => void;
+    /** W1-T11421: the learned-lifetime sentinel, given this boot's timestamp. It returns undefined while the instance
+     *  has no learned clean lifetime, and only then does the ten-minute window above decide. */
+    sentinel?: (nowIso: string) => LearnedCrashLoopSummary | undefined;
   },
   resolveClaudeBin?: () => string,
   /** True iff config.overflow === "api_key" (§9): the daemon deliberately drains
@@ -3245,17 +3421,32 @@ export async function daemonBoot(
     // Adapted through the Clock port (W1-T2897): the field keeps its legacy `() => string` shape
     // (tests inject a fixed ISO instant directly), read here through `clockFromIsoFn`.
     const nowIso = clockFromIsoFn(crashLoopCheck.now).iso();
-    const verdict = detectDaemonCrashLoop(
+    const learned = crashLoopCheck.sentinel?.(nowIso);
+    if (learned) {
+      log("daemon.crashloop_check", {
+        basis: learned.basis,
+        breached: learned.incident !== "none" && learned.incident !== "cleared",
+        incident: learned.incident,
+        run_length: learned.runLength,
+        abnormal_exits: learned.abnormalExits,
+        clean_lifetime_median_ms: learned.learned.medianMs,
+        clean_lifetime_p90_ms: learned.learned.p90Ms,
+        clean_lifetime_samples: learned.learned.samples,
+      });
+    }
+    const verdict = learned ? undefined : detectDaemonCrashLoop(
       [...crashLoopCheck.priorBoots(), nowIso],
       crashLoopCheck.window ?? DEFAULT_CRASHLOOP_WINDOW,
     );
-    log("daemon.crashloop_check", {
-      breached: verdict.breached,
-      boot_count: verdict.windowBoots.length,
-      window_ms: verdict.windowMs,
-      max_boots: verdict.maxBoots,
-    });
-    if (verdict.breached) crashLoopCheck.onBreach(verdict);
+    if (verdict) {
+      log("daemon.crashloop_check", {
+        breached: verdict.breached,
+        boot_count: verdict.windowBoots.length,
+        window_ms: verdict.windowMs,
+        max_boots: verdict.maxBoots,
+      });
+      if (verdict.breached) crashLoopCheck.onBreach(verdict);
+    }
   }
   // The boot-time worker-keychain unlock, explicit and ledgered, so the credential store comes up as
   // a named boot step rather than as a side effect of unlocking the operator's login keychain. A
@@ -4879,15 +5070,35 @@ export async function runDaemon(
     freshness: Extract<DaemonFreshness, { stale: true }>, dispatchLatchAtMs?: number,
   ): Promise<DaemonSummary> => {
     const preExitPass = await (preparedFreshnessExit ?? prepareFreshnessExit(freshness, dispatchLatchAtMs));
-    const detail =
-      `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
-      `past this process's boot sha`;
+    const requested = freshness.restartRequest;
+    const detail = requested
+      ? `restart in place requested by ${requested.origin} at ${requested.requestedAt}`
+      : `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
+        `past this process's boot sha`;
     log("daemon.freshness_exit", { children_left_running: [...children.values()].map((child) => child.runId),
       phases_ms: { ...freshnessPhases, ...(freshnessDecidedAtMs === undefined ? {} : {
         total: Math.max(0, daemonClock.now() - freshnessDecidedAtMs),
-      }) } });
+      }) },
+      // W1-T11327: the request-to-exit time; the next `daemon.boot` row closes the request-to-boot span.
+      ...(requested ? { restart_request: { origin: requested.origin, requested_at: requested.requestedAt,
+        request_to_exit_ms: Math.max(0, daemonClock.now() - Date.parse(requested.requestedAt)) } } : {}) });
     log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass });
     return summary("stale", detail);
+  };
+  // W1-T11327: a RESTART_REQUESTED marker is a freshness decision with no advance, so it skips scoring, coalescing and
+  // the minimum-lifetime hold. One written before this loop started was answered by this boot and is only ledgered.
+  const takeRestartRequest = (at: "cycle_top" | "dispatch_tick"): Extract<DaemonFreshness, { stale: true }> | undefined => {
+    const request = deps.consumeRestartRequest?.();
+    if (!request) return undefined;
+    const nowMs = daemonClock.now();
+    const requestedAtMs = Date.parse(request.requestedAt);
+    const answeredByBoot = requestedAtMs < bootGateStartedAtMs;
+    log("daemon.restart_request_consumed", { origin: request.origin, requested_at: request.requestedAt, at,
+      request_age_ms: Math.max(0, nowMs - requestedAtMs), ...(answeredByBoot ? { answered_by_boot: true } : {}) });
+    if (answeredByBoot) return undefined;
+    freshnessDecidedAtMs ??= nowMs;
+    const sha = request.codeSha ?? "unknown";
+    return { stale: true, oldSha: sha, newSha: sha, restartRequest: { origin: request.origin, requestedAt: request.requestedAt } };
   };
 
   // One per-task block-reasoning processor, shared by the single-task tick and the multi-lane batch, so how a solo
@@ -6112,6 +6323,9 @@ export async function runDaemon(
       const drain = deps.consumeDrainNow();
       if (drain) log("console.drain_consumed", { origin: drain.origin });
     }
+    // W1-T11327: a requested restart in place, read once here where the holds above already outrank it.
+    const requestedRestart = takeRestartRequest("cycle_top");
+    if (requestedRestart) return stopForFreshness(requestedRestart);
 
     const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     for (const taskId of pendingMergedCredit) {
@@ -7583,6 +7797,9 @@ export async function runDaemon(
     const onDispatchTick = checkFreshness || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
       wakeParkedLanes();
       if (inFlightTasks.size === 0 || deps.checkPause?.()) return;
+      // W1-T11327: a requested restart releases child lanes and awaits in-process ones, as a decided restart does.
+      const requestedRestart = restartDecided || deps.checkStop?.() ? undefined : takeRestartRequest("dispatch_tick");
+      if (requestedRestart) decideRestart(requestedRestart);
       // The light sweep reads this live binding; admitted workers retain their captured planForBatch.
       const reload = (): void | Promise<void> => deps.reloadPlan ? reloadPlanBinding() : undefined;
       if (restartDecided || !checkFreshness) return reload();

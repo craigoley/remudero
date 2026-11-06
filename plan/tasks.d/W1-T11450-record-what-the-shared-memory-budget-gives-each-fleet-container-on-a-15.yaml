@@ -33,5 +33,5 @@
     confidence: 1
     reasons:
       - "deterministic backstop: it declares deploy/resource-policy.sh, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-11-06T14:30:15.104Z"
-    pin: "fcf662344b76b1b402da999797e937349b0e119dbbffef3ab05b555cce1b59d5"
+    judged_at: "2026-11-06T16:38:26.991Z"
+    pin: "d3cf1776a220348e128f145441316cfca75c6c3cc5167868ca8e3ea5e8991170"
