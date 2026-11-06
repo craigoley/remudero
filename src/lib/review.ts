@@ -6749,8 +6749,10 @@ export function reproducedReviewFailuresFromHistory(
     }
     if (current) blocks.push(current.join("\n").trim());
     for (const finding of blocks) {
-      if (!/proof executed\b/i.test(finding) || !/\b(?:replay|reproduction|counterexample)\b/i.test(finding) ||
-          !/\b(?:throws?|failed?|fails?|ReferenceError|TypeError)\b/i.test(finding)) continue;
+      const executedFailure = /proof executed and FAILED\b/i.test(finding);
+      const semanticCounterexample = /proof executed\b/i.test(finding) && /\b(?:replay|reproduction|counterexample)\b/i.test(finding) &&
+        /\b(?:throws?|failed?|fails?|ReferenceError|TypeError)\b/i.test(finding);
+      if (!executedFailure && !semanticCounterexample) continue;
       const criterion = Number(/^\s*(\d+)\./.exec(finding)?.[1]);
       if (!Number.isSafeInteger(criterion) || criterion < 1) continue;
       const id = createHash("sha256").update(finding).digest("hex");
@@ -6804,7 +6806,7 @@ export function applyReviewStatusHistoryGuard(
   }
   const first = unaddressed[0]!;
   const affected = new Set(unaddressed.map((finding) => finding.criterion));
-  const hasAffectedCriterion = [...affected].some((criterion) => criterion <= computed.criteria.length);
+  const hasAffectedCriterion = [...affected].some((criterion) => criterion > 0 && criterion <= computed.criteria.length);
   const criteria = computed.criteria.map((criterion, index) =>
     affected.has(index + 1) || (!hasAffectedCriterion && index === 0)
       ? { ...criterion, met: false, reason: `prior reproduced failure remains unaddressed: ${first.summary}` }

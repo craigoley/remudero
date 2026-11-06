@@ -91,10 +91,27 @@ test("W1-T11443 criterion 1: shared history identity follows terminal changes an
     async args => args.at(-1)?.includes("/statuses?") ? [statuses] : [[{ commit_id: SHA, body }]]);
   const first = await read();assert.equal(first.kind, "readable");
   assert.equal(typeof first.revision, "string");
-  statuses.push({ id: 2, context: "remudero-review", state: "success" });
+  statuses.unshift({ id: 2, context: "remudero-review", state: "success" });
   const changed = await read();assert.equal(changed.kind, "readable");
   assert.notEqual(changed.revision, first.revision);
   statuses.push({ id: 3, context: "remudero-review", state: "pending" });
   const pending = await read();assert.equal(pending.kind, "readable");
   assert.equal(pending.revision, changed.revision);
+});
+
+test("W1-T11443 criterion 1: guarded failure publication settles the history identity", async () => {
+  const body = "remudero-review=failure\n1. claim\n   - proof executed: reproduction throws ReferenceError at daemon.ts:4218";
+  const statuses = [{ id: 1, context: "remudero-review", state: "failure" }];
+  const read = () => reviewCommand.readReviewStatusHistory("acme", "remudero", "https://github.com/acme/remudero/pull/1", SHA,
+    async args => args.at(-1)?.includes("/statuses?") ? [statuses] : [[{ commit_id: SHA, body }]]);
+  const first = await read();assert.equal(first.kind, "readable");
+  statuses.unshift({ id: 2, context: "remudero-review", state: "failure" });
+  const settled = await read();assert.equal(settled.kind, "readable");
+  assert.equal(settled.revision, first.revision, "posting the guarded FAILURE must not invalidate its own decision forever");
+  statuses.unshift({ id: 3, context: "remudero-review", state: "success" });
+  const contradicted = await read();assert.equal(contradicted.kind, "readable");
+  assert.notEqual(contradicted.revision, settled.revision);
+  statuses.push({ id: 0, context: "remudero-review", state: "error" });
+  const older = await read();assert.equal(older.kind, "readable");
+  assert.equal(older.revision, contradicted.revision, "older terminal history is not a fresh competing PASS");
 });

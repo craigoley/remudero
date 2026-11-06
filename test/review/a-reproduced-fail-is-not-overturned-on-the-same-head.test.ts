@@ -192,3 +192,21 @@ test("W1-T11443 criterion 1: a reproduced finding and a later terminal status in
   assert.notEqual(failure, original);
   assert.notEqual(review.reviewDecisionDigest({ ...input, sharedReviewHistory: { failureIds: ["finding"], revision: "foreign-pass-v2" } } as never), failure);
 });
+
+test("W1-T11443 criterion 1: an unmatched acceptance claim still renders an unmet criterion", () => {
+  const failures = review.reproducedReviewFailuresFromHistory(history, reviews, SHA);
+  const changedClaim = { ...computed, criteria: [{ ...computed.criteria[0], claim: "claim changed by an amendment" }] };
+  const result = review.applyReviewStatusHistoryGuard(changedClaim as never, SHA, { kind: "readable", failures });
+  assert.equal(result.verdict.state, "failure");
+  assert.ok(result.verdict.criteria.some(criterion => !criterion.met), "the rendered review must include the blocking finding");
+  assert.match(result.verdict.criteria[0].reason, /prior reproduced failure/);
+});
+
+test("W1-T11443 criterion 1: an executed failing proof is a reproduced counterexample", () => {
+  const body = "remudero-review=failure\n1. claim\n   - proof executed and FAILED on the PR head (unit test: regression) — overrides any keyword coverage";
+  const failures = review.reproducedReviewFailuresFromHistory(history, [{ commit_id: SHA, body }], SHA);
+  assert.equal(failures.length, 1, "a concrete executed failing test is not an unexplained downgrade");
+  const result = review.applyReviewStatusHistoryGuard({ ...computed, criteria: [{ ...computed.criteria[0], claim: "claim" }] } as never,
+    SHA, { kind: "readable", failures });
+  assert.equal(result.verdict.state, "failure");
+});
