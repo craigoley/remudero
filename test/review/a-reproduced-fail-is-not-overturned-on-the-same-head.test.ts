@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as review from "#src/lib/review.js";
 import * as reviewCommand from "#src/cli/commands/review.js";
+import { runReview } from "#src/run-task.js";
+import { writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const SHA = "90be1a69eaea5510184cf6eec69f7c72afd13c39";
 const failureBody = `**remudero-review=failure**\n\n1. laneTarget's CPU bound is measured\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: an in-memory runDaemon replay adopting a review child in shadow mode throws ReferenceError at daemon.ts:4218. The proof omits review-child adoption.`;
@@ -81,4 +86,80 @@ test("W1-T11443 criterion 1: compressed unmet numbering maps back to the affecte
   const cleared = review.applyReviewStatusHistoryGuard(twoCriteria as never, SHA, { kind: "readable", failures },
     `REVIEW_ADDRESSED_FAILURE 2: ${failures[0].id}\nREVIEW_VERDICT 2: PASS (re-ran the shadow adoption reproduction)`, [], [failures[0].id]);
   assert.equal(cleared.verdict.state, "success");
+});
+
+test("W1-T11443 criteria 1/2: production publication guards shared history and presents the prior finding", async () => {
+  for (const scenario of ["sticky", "addressed", "unreadable", "unreproduced", "late"] as const) {
+    const fixture = gitRepo({ kind: "reproduced-failure-publication" });
+    const root = fixture.dir;
+    const oldPath = process.env.PATH;
+    let shim: ReturnType<typeof ghShim> | undefined;
+    try {
+      writeFileSync(join(root, "changed.ts"), "export const changed = true;\n");
+      fixture.git("add", "changed.ts");
+      fixture.git("commit", "-qm", "changed");
+      const head = fixture.git("rev-parse", "HEAD");
+      const prUrl = "https://github.com/acme/remudero/pull/1";
+      const failures = review.reproducedReviewFailuresFromHistory(history,
+        [{ commit_id: head, body: failureBody.replace("laneTarget's CPU bound is measured", "changed exists") }], head);
+      let reads = 0;
+      const prompts: string[] = [];
+      shim = ghShim([
+        { when: "pulls/1/reviews", stdout: "[]" },
+        { when: "pulls/1", stdout: JSON.stringify({ number: 1, html_url: prUrl, state: "open", merged_at: null, head: { ref: "b", sha: head } }) },
+        { when: "pr diff", stdout: "diff --git a/changed.ts b/changed.ts\n+++ b/changed.ts\n@@ -0,0 +1 @@\n+export const changed = true;\n" },
+        { when: "pr view", stdout: '{"state":"OPEN"}' },
+        { when: "/status", stdout: '{"statuses":[]}' },
+        { when: "api ", stdout: "{}" },
+      ], { kind: "reproduced-failure-publication" });
+      process.env.PATH = `${shim.dir}:${oldPath}`;
+      const verdict = await runReview({
+        owner: "acme", repo: "remudero", prUrl,
+        task: { id: "W1-T11443", files: ["changed.ts"], acceptance: [{ claim: "changed exists", proof: "grep: changed in changed.ts" }] },
+        report: "changed", settingsFile: join(root, "settings.json"), config: { root, claudeBin: "/unused" },
+        log: () => {}, say: () => {}, account: (worker: unknown) => worker,
+        spawnReviewer: true, readReviewReuseFacts: () => undefined,
+        readReviewStatusHistory: async () => {
+          reads++;
+          if (scenario === "unreadable") return { kind: "unreadable", reason: "history unavailable in fixture" };
+          return { kind: "readable", failures: scenario === "unreproduced" || (scenario === "late" && reads === 1) ? [] : failures };
+        },
+        reviewerSpawnWorker: async (args: { prompt: string }) => {
+          prompts.push(args.prompt);
+          const acknowledgement = scenario === "addressed" || scenario === "late"
+            ? `REVIEW_ADDRESSED_FAILURE 1: ${failures[0].id}\n` : "";
+          return {
+            sessionId: "reproduction-fixture", costUsd: 0, numTurns: 1,
+            text: `${acknowledgement}REVIEW_VERDICT 1: PASS (re-ran the shadow adoption reproduction and it no longer throws)`,
+            blocks: [], stderr: "", subtype: "success", isError: false, apiError: false,
+            permissionDenials: [], childEnvKeys: [], model: "sonnet", provider: "codex", servedModel: "fixture", effort: "high",
+            tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
+          };
+        },
+        reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120_000 },
+        headCheckoutDir: root, ledgerPath: join(root, "ledger.ndjson"), runId: `history-${scenario}`,
+        disarm: () => "not-armed", arm: () => ({ armed: false, reason: "fixture" }),
+      } as never);
+      assert.equal(reads, 2, `${scenario}: history is checked before the prompt and again before publication`);
+      if (scenario === "unreadable") {
+        assert.match(verdict.verdictWithheld ?? "", /history unavailable in fixture/);
+      } else {
+        assert.equal(verdict.state, scenario === "sticky" || scenario === "late" ? "failure" : "success", scenario);
+      }
+      if (scenario === "sticky" || scenario === "addressed") {
+        assert.ok(prompts.some(prompt => prompt.includes(JSON.stringify(failures[0].finding))), "the reviewer receives the complete finding");
+      }
+      const posts = shim.calls().filter(call => call.includes(`statuses/${head}`));
+      assert.ok(posts.some(call => call.includes("state=pending")), `${scenario}: pending is visible`);
+      assert.equal(posts.some(call => call.includes("state=success")), scenario === "addressed" || scenario === "unreproduced", scenario);
+      if (scenario === "sticky" || scenario === "late") {
+        assert.ok(posts.some(call => call.includes("state=failure")), scenario);
+        assert.ok(shim.calls().some(call => call.includes("pulls/1/reviews") && call.includes("prior reproduced failure remains unaddressed: ReferenceError")), "the published finding cites the prior reproduction");
+      }
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+      if (shim) rmSync(shim.dir, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  }
 });
