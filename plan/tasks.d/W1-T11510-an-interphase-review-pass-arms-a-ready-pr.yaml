@@ -101,15 +101,15 @@
     stays green while the hook is wrong, and several existing test files use it.
   acceptance:
     - claim: "An interphase-review pass arms a ready code PR at its exact head exactly once through deps.arm, and its sweep.disposed row carries arm_surface light and light_pass_scope interphase-review; the pass's fix admission stays false"
-      proof: "unit test: test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts"
+      proof: "unit test: the interphase-review pass arms a ready code PR through the guarded path"
     - claim: "Pause, drain, boot and idle passes do not arm a ready code PR and each writes its own review-only stand-down, while an ordinary light pass still arms it"
-      proof: "unit test: test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts"
+      proof: "unit test: pause drain boot and idle passes hold arms while an ordinary pass arms"
     - claim: "On an interphase pass a moved live head, an operator hold, a standing risk refusal, a decideSweepArm refusal and an arm already in flight for the head from an overlapping pass each refuse without calling deps.arm, and each row names its own reason"
-      proof: "unit test: test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts"
+      proof: "unit test: interphase arm refusals name head hold risk judge and in-flight reasons"
     - claim: "On an interphase pass a ready head with an unreadable compare is held with the ready PR distance reason, a head the ready-overlap selection picks or the refresh admission lists as waiting is held with a named reason, and no update-branch call is made"
-      proof: "unit test: test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts"
+      proof: "unit test: interphase pass holds compare and refresh-selected heads without update-branch"
     - claim: "On an interphase pass blocked-fixable and worker-needing conflicted heads stand down with the review-only text and no requeue or fix starts, and a mergeable head whose CodeQL gate rules a fix reaches neither dispatchFix nor escalate while its ruling row survives for the next ordinary pass"
-      proof: "unit test: test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts"
+      proof: "unit test: fix conflict and CodeQL repair lanes stay closed on an interphase pass"
   falsifier: |
     Pass the predicate as armAllowed but leave readyPrs empty on review-only passes: the unreadable-compare
     fixture arms and criterion 4 fails. Widen the predicate to every review-only scope: criterion 2 fails
