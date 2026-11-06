@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "2026-11-05 incident: #16523 merged head 90be1a69ea, carrying a boot-adoption ReferenceError a review had already reproduced"
   plan_refs: [W1-T178, W1-T5839, W1-T3704]
-  files: [src/lib/review.ts, src/cli/commands/review.ts, test/review/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts, test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts]
+  files: [src/lib/review.ts, src/cli/commands/review.ts, test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts, test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts, test/review-finding-receipts.test.ts]
   priority: 3
   status: queued
   # backlog gardener: band=3 evidence=c7d0eff7a219e1f9
@@ -30,6 +30,10 @@
     review.posted rows, so a local review cannot see a FAIL core posted, and the reverse holds too.
     GitHub's commit-status history for the remudero-review context is the only record every
     reviewer shares.
+    Operator-approved fixture compatibility amendment (2026-11-06): add
+    test/review-finding-receipts.test.ts only to replace its generic malformed GitHub API
+    response for the new history read with valid empty history. Keep every existing assertion,
+    expected value and test timeout unchanged; malformed history still fails closed in production.
   design: |
     Before posting a terminal SUCCESS for a head, read that head's remudero-review status history
     from GitHub (the statuses list, not only the combined current state) and join each FAILURE to
@@ -45,7 +49,7 @@
     to both directions and to every poster without adding a store. No fixed thresholds.
   acceptance:
     - claim: "A PASS computed on the same head as a prior FAILURE whose finding carried a reproduction posts FAILURE citing the prior finding unless its reviewer explicitly addressed that reproduction; the prior FAILURE is read from GitHub status history, so a FAILURE another machine posted is honoured"
-      proof: "unit test: test/review/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts"
+      proof: "unit test: test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts"
     - claim: "A prior FAILURE without a reproduction keeps today's behaviour, and an unreadable status history withholds SUCCESS as pending with a named reason"
       proof: "unit test: test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts"
   note: |

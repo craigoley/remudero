@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "2026-11-05 core loop-hold incident: #16943, #16944 and #16945 green plan PRs waited 40+ min; the W1-T5901 one-per-pass claim deferred two of them each pass"
   plan_refs: [W1-T5901, W1-T9212, W1-T5748, W1-T5615, W1-T4405, W1-T11434]
-  files: [src/lib/sweep.ts, test/ledger/a-ready-plan-pr-merges-on-the-next-pass.test.ts]
+  files: [src/lib/sweep.ts, src/lib/ledger.ts, test/sweep/a-ready-plan-pr-merges-on-the-next-pass.test.ts]
   priority: 3
   status: queued
   # backlog gardener: band=3 evidence=b9d53b979d20e381
@@ -25,6 +25,9 @@
     10 ms apart, which is bookkeeping latency, not merge duration. The zero-result
     `daemon.idle_light_pass` query lacked a positive control and is inconclusive. Per-PR rows and
     neighboring judge timings cannot establish a pass boundary or merge cost.
+
+    Because the cadence reader consumes `sweep.pass` and `sweep.summary` across ledger rotation, register
+    those steps in `src/lib/ledger.ts` so the interval sample survives retention.
 
     First add correlated, durable measurements to the existing retained sweep rows: a unique pass id
     and scope on the light-pass start row, the same id and monotonic elapsed time on its completion
