@@ -405,8 +405,8 @@ export class CanarySlotOwner {
     if (startedAt !== null && (!validCanaryOwnerTimestamp(startedAt) || !validCanaryOwnerTimestamp(completedAt)
       || Date.parse(completedAt) < Date.parse(startedAt)))
       throw new Error("canary-owner-execution-window-invalid");
-    const persistedRun = startedAt === null ? run : { ...run, executionWindow: { startedAt, completedAt } };
-    const receipt = JSON.stringify({ slot, run: persistedRun, grade: outcome.grade, state: outcome.state, reason: outcome.reason,
+    const receipt = JSON.stringify({ slot, run, grade: outcome.grade, state: outcome.state, reason: outcome.reason,
+      ...(startedAt === null ? {} : { executionWindow: { startedAt, completedAt } }),
       ...(privateTrace === undefined ? {} : { privateTrace }),
       ...(run.family === "coding" ? { codingTrace } : {}),
       ...(codingOutcome.codingResult === undefined ? {} : { codingResult: codingOutcome.codingResult,
