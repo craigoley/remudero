@@ -11,7 +11,10 @@
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
   plan_refs: [W1-T11423, W1-T11424, W1-T11455]
   files: [test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=1dd58ed539e33432
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
     W1-T11423's census (test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts)
