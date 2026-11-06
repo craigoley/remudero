@@ -6,7 +6,7 @@
  * asserted to be exactly the ones holding a requested key.
  */
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test, type TestContext } from "node:test";
@@ -14,6 +14,8 @@ import { ledgerRowsFor, ledgerRowsForSync, readLedgerUnionRecords } from "#src/l
 import {
   LEDGER_KEY_MANIFEST_VERSION,
   ledgerKeyManifestDirectory,
+  pruneLedgerKeyManifests,
+  realLedgerKeyManifestFs,
   ledgerRowMatchesKeys,
   type LedgerKeyQuery,
 } from "#src/lib/ledger-key-manifest.js";
@@ -147,6 +149,32 @@ test("W1-T11423: an archive whose manifest cannot be built is read in full and r
   assert.deepEqual(archiveNames(got.unindexed), [name]);
   assert.ok(got.unread.some((p) => p.endsWith(name)), "the unreadable archive is reported unread");
   assert.equal((await ledgerRowsFor(dir, { taskIds: ["W1-T7"] }, { refuseIncomplete: true })).ok, false);
+});
+
+test("W1-T11423: the sync lookup also reads an archive whose manifest cannot be built in full and reports it", TIMEOUT, (t) => {
+  const { dir } = corpus(t);
+  const name = "ledger.2026-10-07T00-00-00-000Z.ndjson.gz";
+  writeFileSync(join(dir, name), Buffer.from("not gzip"));
+  const got = ledgerRowsForSync(dir, { taskIds: ["W1-T7"] });
+  assert.deepEqual(archiveNames(got.unindexed), [name]);
+  assert.ok(got.unread.some((p) => p.endsWith(name)), "the unreadable archive is reported unread");
+  assert.equal(ledgerRowsForSync(dir, { taskIds: ["W1-T7"] }, { refuseIncomplete: true }).ok, false);
+});
+
+test("W1-T11423: a manifest whose archive is gone is pruned, and one already removed by another process is not an error", TIMEOUT, async (t) => {
+  const { dir } = corpus(t);
+  const manifests = ledgerKeyManifestDirectory(dir);
+  await ledgerRowsFor(dir, { taskIds: ["W1-T7"] });
+  const gone = "ledger.2026-10-07T00-00-00-000Z.ndjson.gz";
+  assert.ok(readdirSync(manifests).includes(`${gone}.json`));
+  unlinkSync(join(dir, gone));
+  await ledgerRowsFor(dir, { taskIds: ["W1-T7"] });
+  assert.ok(!readdirSync(manifests).includes(`${gone}.json`), "the next lookup prunes the orphaned manifest");
+  assert.equal(readdirSync(manifests).filter((n) => n.endsWith(".json")).length, 6);
+
+  const racing = { ...realLedgerKeyManifestFs, readdirSync: () => ["orphan.ndjson.gz.json"],
+    unlinkSync: () => { throw Object.assign(new Error("gone"), { code: "ENOENT" }); } };
+  assert.equal(pruneLedgerKeyManifests(dir, new Set(), racing), 0, "a manifest another process removed counts as nothing pruned");
 });
 
 test("W1-T11423: a lookup retains only its own rows, where the full union read exhausts the same heap", { timeout: 300_000 }, (t) => {
