@@ -20,6 +20,14 @@
     - src/lib/worker-provider.ts
     - test/containment/a-codex-worker-reaching-a-non-allowlisted-host-is-proven-open.test.ts
     - test/containment/a-codex-worker-egress-goes-through-the-allowlist-proxy.test.ts
+    - src/lib/settings.ts
+    - settings/worker.json
+    - test/codex-disposable-review-sandbox.test.ts
+    - test/codex-writable-resume-sandbox.test.ts
+    - test/a-codex-writer-typecheck-reaches-the-host-test-slot.test.ts
+    - test/no-worker-writes-a-git-config-the-host-push-honours.test.ts
+    - test/worker/spawn/codex-native-cache.test.ts
+    - test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -46,3 +54,7 @@
     reservation hand-off: plan-file-1793912341000 -> plan-file-1793912341000
     Reserved with rmd next-task-id from the operator session's ops worktree. No duplicate: W1-T1265 (merged) added the egress arm; W1-T2271 (merged) stopped a bare response from claiming a breach and added the remote-address discriminator this task makes reachable; W1-T1289 (merged) gave the declared boundary an owner for Claude; W1-T3103 is the operator's allowlist-proxy ruling this task enforces for Codex.
     Related, out of scope (each a probe-design mismatch, not new): the token-read control file lives under config.root/state, which deploy/codex-requirements.toml denies to every Codex worker, so that arm is UNPROVEN by construction for Codex; under the private-registry profile the outside-cwd write exits 0 with no file and no OS denial, so the filesystem arm reads UNPROVEN and blocks those builds (fail-closed, correct). Both want their own task once egress is enforced.
+    Scope amendment 2026-11-05 (operator, ~21:25Z: "Let's fix codex to go through the allowlist proxy, but make sure almost all common sites are on the allowlist so this isn't unnecessarily restrictive. We need to get back to clearing the pr queue, so make it quick."):
+    - src/lib/settings.ts and settings/worker.json: the one allowlist (ALLOWED_NETWORK_DOMAINS, pinned to worker.json's allowedDomains by W1-T2243) is widened to common code hosts, package and container registries, package CDNs and docs. It stays EXACT HOSTS ONLY, because the Claude egress owner (startWorkerEgressProxy, src/lib/worker.ts) refuses any entry outside /^[a-z0-9.-]+$/; widening that owner to wildcards is a security change left out of this task. Kept out pending the operator's explicit call: model APIs (the inference-bypass reason in settings.ts) and user-hosted content domains (*.amazonaws.com, *.vercel.app, *.windows.net, *.cloudfront.net, *.azure.net, *.googleapis.com).
+    - Measured in-container 2026-11-05 on Codex 0.163: with --enable network_proxy the legacy sandbox_mode=workspace-write denies all egress and takes no allowlist key, so the legacy writer moves to a ":workspace" permission profile (keeps cwd and /tmp writable and .git/config and hooks protected, same as workspace-write) with network.domains from the allowlist. Six sibling suites pin the old `--sandbox workspace-write` / network_access argv for writers; each changed line asserts the profile instead and cites W1-T11437. No input and no other expectation changes.
+    - Design item 1 is met by narrowing the refusal pattern to curl's and the proxy's own refusal text (connection failures and `CONNECT tunnel failed`), which the probe's EGRESS-RESULT echo and the tripwire's hook line never contain, instead of a new probe file. test/egress-evidence-discriminates.test.ts pins the verdict order, and this leaves it intact.
