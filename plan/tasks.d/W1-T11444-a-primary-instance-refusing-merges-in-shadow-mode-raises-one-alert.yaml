@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "2026-11-05 incident: core, the primary instance, ran as shadow from 16:58Z to about 21:07Z and refused every arm and merge with only a quiet ledger row"
   plan_refs: [W1-T11431, W1-T11434, W1-T3596]
-  files: [src/lib/sweep.ts, src/lib/escalate.ts, test/deploy/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts, test/deploy/a-primary-shadow-alert-closes-on-live-mode.test.ts]
+  files: [src/lib/sweep.ts, src/lib/escalate.ts, src/lib/status.ts, src/lib/now-decisions.ts, test/deploy/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts, test/console-api/a-primary-shadow-alert-closes-on-live-mode.test.ts]
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=503e76eaca988e51
@@ -26,6 +26,18 @@
     shadow core still merge its one selected plan PR. Neither tells an operator that the PRIMARY
     instance is refusing merges, and shadow mode may be intended, so the signal must be one durable
     notice, not noise.
+    Reviewer-required operator-path scope: review #5807754178 on source 573c8ada4d1
+    (2026-11-06 22:15Z) found that projectPlan retains the original escalation.issue_opened
+    task identity after the displayed digest changes, and the actual MANUAL action emits
+    panel.manual_approved, which the channel does not consume. Include src/lib/status.ts for
+    the published-digest projection and src/lib/now-decisions.ts to retain the issue's MANUAL
+    action class when that projected task identity changes. The existing operator action writer
+    remains unchanged; test its real route and consume its actual successful action event.
+    A physical sketch with the existing closure imports plus the real projection, board,
+    decision, service and panel-action imports computes test/console-api/ at medium confidence
+    (console-read-model, runner-up deploy-host). Move only that closure test's folder, retaining
+    its basename, criterion markers, claims and existing assertions. Keep the budget and
+    acceptance semantics unchanged. No production or test implementation changes in this amendment.
     Cadence clarification: review #5807178636 on source 920a3120cfc (2026-11-06 21:22Z)
     rejected DEFAULT_POLL_INTERVAL_MS as an unrelated idle-poll delay. The existing escalation
     module has no pre-existing body-edit timer to reuse. Define the intended mutation bound using
@@ -55,7 +67,7 @@
     - claim: "A primary instance's first shadow-mode arm or merge refusal opens exactly one escalation naming the instance, selection source and refused PRs; later refusals update that one escalation, and a non-primary shadow instance opens none"
       proof: "unit test: test/deploy/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts"
     - claim: "The escalation closes when the primary instance is live again, and a mark-handled acknowledgement silences it only for the current selection digest"
-      proof: "unit test: test/deploy/a-primary-shadow-alert-closes-on-live-mode.test.ts"
+      proof: "unit test: test/console-api/a-primary-shadow-alert-closes-on-live-mode.test.ts"
   note: |
     The builder names each criterion test with the marker "W1-T11444 criterion N" so the reviewer can map tests to criteria.
   falsifier: |
