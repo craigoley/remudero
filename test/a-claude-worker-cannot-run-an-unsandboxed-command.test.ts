@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  ALLOWED_NETWORK_DOMAINS,
   validateWorkerSettings,
   validateWorkerSettingsFile,
   WorkerSettingsError,
@@ -105,7 +106,7 @@ test("every other sandbox key the committed policy declares is unchanged", () =>
       ],
     },
     network: {
-      allowedDomains: ["github.com", "api.github.com", "codeload.github.com", "registry.npmjs.org"],
+      allowedDomains: [...ALLOWED_NETWORK_DOMAINS],
     },
   });
 });
