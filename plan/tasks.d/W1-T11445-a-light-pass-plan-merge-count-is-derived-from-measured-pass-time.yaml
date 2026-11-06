@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "2026-11-05 core loop-hold incident: #16943, #16944 and #16945 green plan PRs waited 40+ min; the W1-T5901 one-per-pass claim deferred two of them each pass"
   plan_refs: [W1-T5901, W1-T9212, W1-T5748, W1-T5615, W1-T4405, W1-T11434]
-  files: [src/lib/sweep.ts, src/lib/ledger.ts, src/lib/status.ts, test/sweep/light-pass-merge-budget-uses-measured-interval.test.ts]
+  files: [src/lib/sweep.ts, src/lib/ledger.ts, src/lib/status.ts, test/ledger/light-pass-merge-budget-uses-measured-interval.test.ts]
   priority: 3
   status: queued
   # backlog gardener: band=3 evidence=b9d53b979d20e381
