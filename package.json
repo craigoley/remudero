@@ -137,7 +137,7 @@
     "@swc/core": "^1.16.21",
     "@types/node": "^24.19.1",
     "commit-and-tag-version": "^13.3.0",
-    "dependency-cruiser": "18.7.0",
+    "dependency-cruiser": "18.7.2",
     "fast-check": "^4.10.2",
     "jscpd": "^5.4.2"
   },

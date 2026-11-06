@@ -1,0 +1,30 @@
+id: incident-ea5bdcf87246a05c
+ts: 2026-11-05T22:55:14.137Z
+raw: >-
+  Incident ea5bdcf87246: flow pr-stage-stall:plan-proof-unrunnable:plan-only PR
+  is red on acceptance-author-gate — the code-fix lane cannot stage outside a
+  plan filing, so no fix is dispatched; the plan violation needs a plan repair
+
+  First seen: 2026-11-05T22:50:48.184Z
+
+  Last seen: 2026-11-05T22:50:48.184Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16936 plan-proof-unrunnable: repeat: "plan-only PR is red on acceptance-author-gate — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair" x3
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#ea5bdcf87246a05c96f7e18e57796710cce22cbe16415b2c0c2d0bd211c39911
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
