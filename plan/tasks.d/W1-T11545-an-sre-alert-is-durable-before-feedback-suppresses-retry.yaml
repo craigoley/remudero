@@ -11,7 +11,10 @@
   origin: "W1-T11458 full gateway-constructor audit, 2026-11-06: custom SRE delivery and downstream incident consumption"
   plan_refs: [W1-T11458, W1-T11474]
   files: [src/lib/host-escalation-spool.ts, src/lib/sre-runbooks.ts, src/lib/sre-lane.ts, src/run-task.ts, src/cli/commands/daemon.ts, test/sre/an-sre-alert-is-queued-before-feedback-can-suppress-its-retry.test.ts, test/the-sre-lane-runs-on-the-primary-instance.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=4867125eda0a55c4
+  # backlog gardener: placed=2026-11-06T22:24:39.776Z
   attempts: 0
   rationale: |
     At 557690834, sreOperatorEscalation in src/lib/sre-runbooks.ts supplies a custom synchronous
