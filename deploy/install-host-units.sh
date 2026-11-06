@@ -766,6 +766,26 @@ read_progress_verdict() {
   echo "rmd-relaunch: progress-watchdog -- ${PROGRESS_STATE:-UNKNOWN} action=${PROGRESS_ACTION:-none}"
 }
 
+# W1-T11327: a stall whose loop is alive is asked to restart in place through the daemon's freshness exit
+# (75, restarted in the container by deploy/entrypoint.sh) instead of a recycle. Returns 0 only when the
+# verb wrote the request; a failed write falls back to this tick's recycle.
+restart_in_place_on_verdict() {
+  local code rmd out tmo=()
+  [ "$PROGRESS_ACTION" = "restart-in-place" ] || return 1
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
+  rmd="$code/bin/rmd"
+  command -v timeout >/dev/null 2>&1 && tmo=(timeout 60)
+  if [ -x "$rmd" ] && out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --request-restart --state-root "$STATE_DIR/state" 2>/dev/null)"; then
+    printf '%s watchdog-restart-in-place state=%s %s\n' "$(watchdog_stamp)" "$PROGRESS_STATE" \
+      "$(printf '%s\n' "$out" | tail -n 1)" >> "$REVIVAL_LOG" 2>/dev/null || true
+    echo "rmd-relaunch: progress-watchdog -- ${PROGRESS_STATE} with a live loop; restart in place requested, no recycle this tick."
+    return 0
+  fi
+  echo "rmd-relaunch: progress-watchdog -- the restart-in-place request could not be written; recycling instead." >&2
+  PROGRESS_ACTION=recycle
+  return 1
+}
+
 note_progress_verdict() {
   [ "$PROGRESS_ACTION" = "capture-diagnostics" ] || return 0
   local dir; dir="$(verdict_field dir)"
@@ -1492,6 +1512,7 @@ $(render_serve_memory_tuning)
     [ "\$WATCHDOG_VERDICT_READ" = 1 ] || read_progress_verdict
     [ "\$PROGRESS_STATE" = CRASH_LOOP ] || rm -f "\$WATCHDOG_HOLD" 2>/dev/null || true
     note_progress_verdict
+    if restart_in_place_on_verdict; then exit 0; fi
     if recycle_on_verdict '${CONTAINER_NAME}'; then exit 0; fi
     # W1-T4917: load current deploy code only after a verified idle fast-forward. Running from
     # daemon-install conflates the invoking checkout with the tree deploy-run acts on.

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,8 @@ import { fixedClock } from "../src/lib/clock.js";
 import { loadConfig } from "../src/lib/config.js";
 import type { LedgerCompactCommandDeps } from "../src/lib/ledger-compact.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
+import { requestRestartInPlace, restartInPlaceFilePath } from "#src/lib/fleet-control.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Compactor = (rest: string[], deps: LedgerCompactCommandDeps) => number;
 
@@ -237,5 +240,36 @@ test("daemonCommand supplies the bounded review timing memo independently of idl
     assert.equal(captured!.readReviewMedianMs!(), 480_000);
   } finally {
     if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+  }
+});
+
+test("W1-T11327: daemonCommand wires a one-shot restart request stamped with its loaded code sha", async () => {
+  const { home, planPath, stateDir } = fixtureHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0);
+    assert.ok(captured, "the command passed DaemonDeps to runDaemon");
+    assert.equal(typeof captured.consumeRestartRequest, "function");
+
+    const root = join(stateDir, "..");
+    const marker = requestRestartInPlace(root, "progress-watchdog");
+    assert.deepEqual(captured.consumeRestartRequest?.(), {
+      ...marker,
+      codeSha: execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    });
+    assert.equal(captured.consumeRestartRequest?.(), null, "the real command wiring consumes the marker once");
+    assert.equal(existsSync(restartInPlaceFilePath(root)), false, "the marker is deleted after consumption");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
   }
 });
