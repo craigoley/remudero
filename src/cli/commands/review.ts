@@ -456,7 +456,7 @@ export async function readReviewStatusHistory(
       const status = row as Record<string, unknown>;
       return status.context === REVIEW_CONTEXT && String(status.state).toLowerCase() !== "pending";
     }) as Record<string, unknown> | undefined;
-    const revision = String(terminal?.state).toLowerCase() === "success"
+    const revision = terminal !== undefined && String(terminal.state).toLowerCase() === "success"
       ? createHash("sha256").update(JSON.stringify({ id: terminal.id ?? null,
         createdAt: terminal.created_at ?? null, description: terminal.description ?? null, targetUrl: terminal.target_url ?? null })).digest("hex")
       : String(terminal?.state ?? "none").toLowerCase();
