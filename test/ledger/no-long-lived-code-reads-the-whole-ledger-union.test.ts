@@ -18,6 +18,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const READERS = ["readLedgerUnionRecordsSync", "readLedgerUnionRecords", "readLedgerUnionRawLinesSync", "readLedgerUnionRawLinesAsync",
   "readLedgerUnionRawLines", "openLedgerUnion", "readLedgerCorpus"];
+const PLANTED_UNION_MODULE = [".", "ledger-union.js"].join("/");
 /** Options the union honours that bound what a read opens or keeps. */
 const BOUNDS = ["step", "pattern", "keep", "since", "sinceTs", "maxRotations", "rotationWindowMs", "afterRotation", "throughRotation",
   "rotationRecords", "where", "selectRotation"];
@@ -170,8 +171,8 @@ test("W1-T11423 criterion 3: a planted unbounded union read reddens the census, 
 
 test("W1-T11423 criterion 3: callback properties cannot bound a call, including imported and local reader aliases", () => {
   const calls = censusUnionCalls([{ file: "src/lib/planted.ts", text: `
-    import { readLedgerUnionRecords as scan } from "./ledger-union.js";
-    import * as union from "./ledger-union.js";
+    import { readLedgerUnionRecords as scan } from "${PLANTED_UNION_MODULE}";
+    import * as union from "${PLANTED_UNION_MODULE}";
     const again = scan;
     const chained = again;
     const { openLedgerUnion: opened } = union;
@@ -201,7 +202,7 @@ test("W1-T11423 criterion 3: callback properties cannot bound a call, including 
 
 test("W1-T11423 criterion 3: option and reader aliases keep their lexical scope", () => {
   const calls = censusUnionCalls([{ file: "src/lib/planted.ts", text: `
-    import { readLedgerUnionRecords as scan } from "./ledger-union.js";
+    import { readLedgerUnionRecords as scan } from "${PLANTED_UNION_MODULE}";
     export function bounded(dir: string) {
       const options = { "step": "café" } as const;
       return scan(dir, options);
