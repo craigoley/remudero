@@ -741,11 +741,10 @@ function completeCensusCapture(dir, owner, result) {
 }
 
 function runCensusChild(file, args, options) {
-  if (!Number.isFinite(options.timeout) || options.timeout <= 0) throw new RangeError("census test timeout must be finite and positive");
   const test = args.indexOf("--test");
-  if (test < 0) throw new Error("census child must name --test");
+  if (test >= 0 && (!Number.isFinite(options.timeout) || options.timeout <= 0)) throw new RangeError("census test timeout must be finite and positive");
   const insertion = args[test + 1]?.startsWith("--test-reporter=") ? test + 2 : test + 1;
-  const timedArgs = [...args.slice(0, insertion), `--test-timeout=${options.timeout}`, ...args.slice(insertion)];
+  const timedArgs = test < 0 ? args : [...args.slice(0, insertion), `--test-timeout=${options.timeout}`, ...args.slice(insertion)];
   const dir = mkdtempSync(join(tmpdir(), "rmd-census-capture-"));
   const owner = lstatSync(dir);
   let result;
