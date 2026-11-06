@@ -60,6 +60,7 @@ import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import type { OpenPrView } from "../src/lib/sweep.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { describeProcessCwdProbe, readBoundedProcessCwdCensus as readCwdCensus, type UnreadableCwdDetail } from "#src/lib/process-cwd-census.js";
 
 function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -448,6 +449,7 @@ async function driveDispatchFix(
       resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       owner: "acme",
       repo: "scratch-fbcs-repo",
+      localRepoName: "fixture-install",
       config: { root } as never,
       ledgerPath: join(root, "ledger.ndjson"),
       runId: "SWEEP-FBCS",
@@ -546,6 +548,52 @@ const SAFE_OWNER_SNAPSHOT: RegisteredFixOwnerSnapshot = {
   localSha: "a".repeat(40),
   remoteSha: "b".repeat(40),
 };
+
+test("W1-T10389: census and decline rows retain foreign counts and ancestor attribution", async () => {
+  for (const laterUnreadable of [false, true]) {
+    const root = tmp("rmd-fbcs-census-diagnostics-");
+    let removed = false;
+    try {
+      mkdirSync(join(root, "repos"), { recursive: true });
+      const pending = ["10", "11", ...(laterUnreadable ? ["30"] : [])];
+      let detail: UnreadableCwdDetail | undefined;
+      const census = readCwdCensus(SAFE_OWNER_SNAPSHOT.path, {
+        readNextPid: () => pending.shift() ?? null,
+        readCwd: (pid) => {
+          if (pid === "20") return "/another/worktree";
+          throw Object.assign(new Error("cwd denied"), { code: "EACCES" });
+        },
+        readStatus: (pid) => pid === "10" ? "Uid:\t0" : pid === "11" ? "Uid:\t1000\nPPid:\t20" : "",
+        ownUid: 1000,
+        clock: { now: () => 0 },
+        onUnreadable: (value) => { detail = value; },
+      });
+      const reason = describeProcessCwdProbe(census, detail);
+      const expected = laterUnreadable
+        ? "cwd_unreadable pid=30 errno=EACCES uid=unreadable skipped_foreign=1 attributed=1 attributed_via=20"
+        : "clear skipped_foreign=1 attributed=1 attributed_via=20";
+      assert.equal(reason, expected);
+      const { logs, threw } = await driveDispatchFix(root, "run-W1-T500-1785600000003", SAFE_OWNER_SNAPSHOT.path, {
+        capture: () => ({ ...SAFE_OWNER_SNAPSHOT, processState: census.state, processProbeReason: reason }),
+        remove: () => {
+          removed = true;
+          throw new Error("fixture removal refused");
+        },
+      });
+      assert.equal(threw, undefined);
+      assert.equal(removed, !laterUnreadable, "only a clear census reaches removal");
+      const row = logs.find((entry) => entry.step === "sweep.fix.checkout_owner_process_census");
+      assert.equal(row?.extra?.process_state, census.state);
+      assert.equal(row?.extra?.process_probe_reason, expected);
+      const decline = logs.find((entry) => entry.step === "sweep.fix.checkout_claim_declined");
+      assert.equal(decline?.extra?.owner_recovery_reason, laterUnreadable ? "process_cwd_probe_unreadable" : "owner_remove_failed");
+      if (laterUnreadable) assert.equal(decline?.extra?.process_probe_reason, expected);
+      assert.ok(!logs.some((entry) => entry.step === "fix.dispatch"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
 
 test("W1-T2952: only a clean, exact, unowned managed fix worktree is reclaimable", () => {
   assert.deepEqual(decideRegisteredFixOwnerRecovery(SAFE_OWNER_SNAPSHOT), { kind: "reclaim-contained" });
