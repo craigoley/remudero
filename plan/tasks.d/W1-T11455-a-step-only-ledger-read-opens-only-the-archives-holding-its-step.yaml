@@ -11,7 +11,10 @@
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
   plan_refs: [W1-T11423, W1-T11424, W1-T10077, W1-T10767]
   files: [src/run-task.ts, src/lib/escalate.ts, test/ledger/a-step-only-ledger-read-opens-only-the-archives-holding-its-step.test.ts]
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=6de3d2906d3821b4
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
     A live CPU profile of core on 2026-11-06 recorded one 206 s event-loop hold. About 122 s of

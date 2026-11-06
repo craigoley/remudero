@@ -10,7 +10,10 @@
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
   plan_refs: [W1-T1067, W1-T396, W1-T11369]
   files: [src/lib/fs-race-safe.ts, test/a-lock-holder-start-time-on-linux-reads-proc-without-spawning.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=60b3823c9f4c196b
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
     The 2026-11-06 core CPU profile attributes 7.2 s (window 2) and 13.6 s (window 3) of event-loop
