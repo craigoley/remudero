@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
   plan_refs: [W1-T1067, W1-T396, W1-T11369]
-  files: [src/lib/fs-race-safe.ts, test/a-lock-holder-start-time-on-linux-reads-proc-without-spawning.test.ts]
+  files: [src/lib/fs-race-safe.ts, test/dispatch/a-lock-holder-start-time-on-linux-reads-proc-without-spawning.test.ts]
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=60b3823c9f4c196b
@@ -33,9 +33,9 @@
     The comm field in /proc/<pid>/stat can contain spaces and parentheses, so parse after the LAST ")".
   acceptance:
     - claim: "On Linux a holder's start time comes from /proc/<pid>/stat and /proc/stat with no child process spawned, and a missing pid returns null"
-      proof: "grep: W1-T11457 criterion 1 in test/a-lock-holder-start-time-on-linux-reads-proc-without-spawning.test.ts"
+      proof: "grep: W1-T11457 criterion 1 in test/dispatch/a-lock-holder-start-time-on-linux-reads-proc-without-spawning.test.ts"
     - claim: "A /proc read failure or a non-Linux platform falls back to the ps path with today's result"
-      proof: "grep: W1-T11457 criterion 2 in test/a-lock-holder-start-time-on-linux-reads-proc-without-spawning.test.ts"
+      proof: "grep: W1-T11457 criterion 2 in test/dispatch/a-lock-holder-start-time-on-linux-reads-proc-without-spawning.test.ts"
   note: |
     The Mac cannot exercise real /proc, so drive the reader through the existing
     ProcessStartTimeSyscalls seam, extended with readFileSync and platform, using pinned fixture
