@@ -108,5 +108,14 @@ test("W1-T11444 criterion 2: only fresh merged observations retire the recorded 
       assert.match(all[1]!.body!, /1 refused PR/);
       assert.equal(all[1]!.body!.includes("https://github.com/owner/repo/pull/11"), false);
     }, { envPath: selected, instanceName: "core" });
+    writeFileSync(selected, `instances:\n  core:\n    github_repo: owner/repo\n    state_dir: ${root}\n    primary: true\n    mode: live\n`);
+    await withInstanceRegistryRuntime(async () => {
+      const liveEffects = buildSweepEffects({ owner: "owner", repo: "repo", repoMode: "live", config: { root } as Config,
+        ledgerPath, runId: "primary-live-observation", plan: { tasks: [], byId: new Map() } as unknown as Plan,
+        issuesImpl: issues, ghLiveStateImpl: async () => ({ ok: true, state: "MERGED" }), log: () => {} });
+      await liveEffects.readLiveState!(pr(13));
+      assert.equal(closed.size, 2, "a fresh observation also reconciles a positively live selection");
+      assert.match(notes[1]!, /live again/);
+    }, { envPath: selected, instanceName: "core" });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
