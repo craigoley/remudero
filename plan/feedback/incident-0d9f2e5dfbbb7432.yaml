@@ -1,0 +1,29 @@
+id: incident-0d9f2e5dfbbb7432
+ts: 2026-11-06T18:21:09.127Z
+raw: >-
+  Incident 0d9f2e5dfbbb: intervention
+  plan-proof-unrunnable:plan-repair:harness-judgment-lacks-corroborating-off
+
+  First seen: 2026-11-06T18:20:58.288Z
+
+  Last seen: 2026-11-06T18:20:58.288Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=merge target=pr#17022@merge actor=cao825 cause=plan-proof-unrunnable:plan-repair:harness-judgment-lacks-corroborating-off — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#0d9f2e5dfbbb7432ea8955e8ef898c57ff6e7d974b28f4a67b493deeabaec916
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
