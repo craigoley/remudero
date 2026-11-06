@@ -1,0 +1,47 @@
+- id: W1-T11473
+  title: The auto-triage refusal wiring test pins its feedback corpus so unrelated feedback changes cannot change the result
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-06 CI failures on #17022 and #16973: test/triage.test.ts reads candidates from the checkout, then autoTriageCheck refreshes origin/main and sees a different feedback corpus"
+  plan_refs: [W1-T4203, W1-T11374]
+  files: [test/triage.test.ts]
+  priority: 4
+  status: queued
+  attempts: 0
+  rationale: |
+    The W1-T4203 wiring test currently obtains its candidate list with
+    newFeedbackIdsOldestFirst(REPO_ROOT), then calls autoTriageCheck without feedbackRoot. The
+    production check refreshes origin/main through triageCandidateReaders before reading candidates.
+    A PR that changes a feedback entry from status:new to rejected, or a main update that adds a
+    new entry, makes the synthetic refusal rows cover a different set from the refreshed candidates.
+    CI then fails at "every candidate refused: nothing fires" even though the refusal logic is intact.
+    This reproduced on #17022 and #16973. W1-T11374 already added the feedbackRoot seam; this task
+    uses that seam to make the existing test hermetic without changing production behavior.
+  design: |
+    Keep the change in test/triage.test.ts. Create a private temporary feedback tree with a small,
+    explicit set of valid status:new YAML entries. Build the expected candidate list from that tree
+    and pass feedbackRoot pointing to it to every autoTriageCheck call in this wiring test,
+    including the default-ledger-read case. Keep config.root separate for the temporary state and
+    ledger. Assert the fixture's exact candidate set before exercising refused, pass-over, cleared,
+    and default-ledger outcomes. Cleanup only the test's private temporary roots in its existing
+    finally block. Do not read or copy the repository's plan/feedback corpus into the fixture.
+  acceptance:
+    - claim: "The W1-T4203 wiring test's new criterion marker is on the fixture-backed assertion path"
+      proof: "grep: W1-T11473 criterion 1 in test/triage.test.ts"
+    - claim: "The W1-T4203 wiring test builds an explicit private feedback fixture and uses it for the initial candidates and every autoTriageCheck call, so unrelated checkout or origin/main feedback changes cannot alter its refusal, pass-over, clearing, or default-ledger results"
+      proof: "unit test: test/triage.test.ts"
+      kind: guard
+  falsifier: |
+    Add an unrelated status:new feedback entry to the checkout or change one fixture candidate's
+    status outside the private fixture; the focused W1-T4203 wiring test must keep its exact expected
+    candidates and outcomes. Removing feedbackRoot from any autoTriageCheck call must make the
+    test fail when the checkout's main feedback corpus differs from the fixture.
+  note: |
+    The current #17022 and #16973 heads have the same CI failure, but this task does not authorize
+    editing or re-running either PR's branch. Preserve their native owners and let their ordinary
+    lanes re-evaluate after this test-only fix lands.
