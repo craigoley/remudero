@@ -5,12 +5,132 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { buildSweepEffects } from "#src/lib/sweep.js";
 import { runSweep } from "#src/lib/sweep.js";
+import { runEscalationReconcile } from "#src/lib/sweep.js";
+import { buildEscalationReconcileCandidates } from "#src/lib/tick-read-worker.js";
 import { withInstanceRegistryRuntime } from "#src/lib/instance-registry-selection.js";
 import * as escalation from "#src/lib/escalate.js";
 import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
 import type { Config } from "#src/lib/config.js";
 import type { Plan } from "#src/lib/plan.js";
 import type { OpenPrView } from "#src/lib/sweep.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "#src/lib/poll-interval.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+
+test("W1-T11444 criterion 2: the general lifecycle cannot retire the primary episode through one terminal PR", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-general-close-"));
+  try {
+    const ledgerPath = join(root, "ledger.ndjson"), open: OpenIssue[] = [], closes: string[] = [];
+    const issues: IssueGateway = {
+      create: (title, body) => { const url = "https://github.com/owner/repo/issues/1";
+        open.push({ number: 1, url, title, body }); return url; },
+      listOpen: () => open,
+      editBody: (url, body) => { open.find(i => i.url === url)!.body = body; },
+    };
+    const channel = escalation.primaryShadowOperatorChannel({ owner: "owner", repo: "repo", ledgerPath, runId: "general-close",
+      selection: () => ({ instance: "core", sourcePath: join(root, "selection.yaml"), digest: "a".repeat(64), mode: "shadow" }), issues });
+    for (const prNumber of [11, 12]) await channel.refuse({ prNumber, prUrl: `https://github.com/owner/repo/pull/${prNumber}` });
+    const plan = { tasks: [], byId: new Map() } as unknown as Plan;
+    for (const state of ["CLOSED", "MERGED"]) {
+      const candidates = buildEscalationReconcileCandidates("owner", "repo", plan, ledgerPath, () => {}, {
+        issues, evidenceRootFor: () => undefined,
+        github: { prByRef: (number: number) => ({ number, url: `https://github.com/owner/repo/pull/${number}`, state }) } as never,
+      });
+      assert.equal(candidates.length, 1, "the actual intake resolves the primary notice's first PR referent");
+      assert.equal(candidates[0]!.derived.prNumber, 11);
+      const summary = await runEscalationReconcile([...candidates, { ...candidates[0]!, taskId: "PR-99", issueUrl: "https://github.com/owner/repo/issues/99" }],
+        { ledgerPath, runId: "general-close", closeIssue: url => { closes.push(url); }, appendLine: () => {} });
+      assert.equal(summary.results[0]!.outcome, "left-live", "the instance channel owns recovery of the complete refused set");
+      assert.equal(summary.results[1]!.outcome, "closed", "ordinary terminal PR escalations still close");
+    }
+    assert.deepEqual(closes, ["https://github.com/owner/repo/issues/99", "https://github.com/owner/repo/issues/99"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T11444 criterion 2: acknowledgement after an in-place selection update silences only its displayed digest", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-updated-ack-"));
+  try {
+    const ledgerPath = join(root, "ledger.ndjson"), all: OpenIssue[] = [], closed = new Set<string>();
+    let now = 1_800_000_000_000;
+    const selection = { instance: "core", sourcePath: join(root, "selection.yaml"), digest: "a".repeat(64), mode: "shadow" as const };
+    const issues: IssueGateway = {
+      create: (title, body) => { const number = all.length + 1, url = `https://github.com/owner/repo/issues/${number}`;
+        all.push({ number, url, title, body }); return url; },
+      listOpen: () => all.filter(i => !closed.has(i.url)),
+      editBody: (url, body) => { all.find(i => i.url === url)!.body = body; },
+    };
+    const channel = () => escalation.primaryShadowOperatorChannel({ owner: "owner", repo: "repo", ledgerPath,
+      runId: "updated-ack", selection: () => ({ ...selection }), issues, clock: clockFromMillisFn(() => now) });
+    const pr = (prNumber: number) => ({ prNumber, prUrl: `https://github.com/owner/repo/pull/${prNumber}` });
+    await channel().refuse(pr(11));
+    selection.digest = "b".repeat(64); now += DEFAULT_POLL_INTERVAL_MS;
+    await channel().refuse(pr(12));
+    assert.equal(all.length, 1, "a changed selection updates the unacknowledged issue in place");
+    const taskId = /\*\*Task:\*\*\s*(\S+)/.exec(all[0]!.body!)![1];
+    assert.equal(taskId, `PRIMARY-SHADOW-${selection.digest}`, "mark-handled must acknowledge the displayed selection");
+    closed.add(all[0]!.url);
+    appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "PANEL", task_id: taskId,
+      step: "panel.escalation_marked_handled", issue_url: all[0]!.url, class: "MANUAL", disposition: "acted" }) + "\n");
+    now += DEFAULT_POLL_INTERVAL_MS;
+    await channel().refuse(pr(13)); await channel().reconcile();
+    assert.equal(all.length, 1, "reconstructing the channel cannot unsilence the acknowledged selection");
+    selection.digest = "c".repeat(64);
+    await channel().refuse(pr(14));
+    assert.equal(all.length, 2, "a new selection reopens the alert on its first refusal");
+    assert.ok(all[1]!.body!.includes(selection.digest));
+    assert.ok(all[1]!.body!.includes("/pull/14"));
+    assert.equal(all[1]!.body!.includes("/pull/13"), false, "silenced observations must not leak into the reopened alert");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T11444 criterion 2: a fresh pass retires merged refusals absent from the open PR list", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-pass-recovery-"));
+  try {
+    const selected = join(root, "selection.yaml"), ledgerPath = join(root, "ledger.ndjson");
+    writeFileSync(selected, `instances:\n  core:\n    github_repo: owner/repo\n    state_dir: ${root}\n    primary: true\n    mode: shadow\n`);
+    const all: OpenIssue[] = [], closed = new Set<string>(), notes: string[] = [], reads: string[] = [];
+    const issues: IssueGateway = {
+      create: (title, body) => { const number = all.length + 1, url = `https://github.com/owner/repo/issues/${number}`;
+        all.push({ number, url, title, body }); return url; },
+      listOpen: () => all.filter(i => !closed.has(i.url)),
+      editBody: (url, body) => { all.find(i => i.url === url)!.body = body; },
+      closeWithComment: (url, note) => { closed.add(url); notes.push(note); },
+    };
+    const observations = new Map<number, { ok: boolean; state?: string }>();
+    const makeEffects = () => buildSweepEffects({ owner: "owner", repo: "repo", repoMode: "shadow", config: { root } as Config,
+      ledgerPath, runId: "pass-recovery", plan: { tasks: [], byId: new Map() } as unknown as Plan, issuesImpl: issues,
+      ghLiveStateImpl: async (url: string) => { reads.push(url); return observations.get(Number(url.split("/").at(-1))) ?? { ok: false }; }, log: () => {} });
+    const pass = async () => {
+      const effects = makeEffects();
+      await runSweep([], { arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {},
+        ledgerPath, runId: "pass-recovery", readLedger: () => [], appendLine: () => {},
+        readReportedAnomalies: async () => ({ complete: true, costAnomaly: new Set(), runningLong: new Set() }),
+        reconcilePrimaryShadowAlert: effects.reconcilePrimaryShadowAlert });
+    };
+    await withInstanceRegistryRuntime(async () => {
+      const effects = makeEffects();
+      for (const prNumber of [11, 12]) await effects.arm({ prNumber,
+        prUrl: `https://github.com/owner/repo/pull/${prNumber}`, headSha: "a".repeat(40) } as OpenPrView);
+      await pass();
+      assert.deepEqual(new Set(reads), new Set([11, 12].map(n => `https://github.com/owner/repo/pull/${n}`)),
+        "reconciliation must read recorded refusals even when production supplies no open PRs");
+      assert.equal(closed.size, 0, "unreadable observations cannot establish recovery");
+      observations.set(11, { ok: true, state: "MERGED" });
+      observations.set(12, { ok: true, state: "CLOSED" });
+      await pass();
+      assert.equal(closed.size, 0, "a closed but unmerged candidate keeps the alert open");
+      observations.set(12, { ok: true, state: "MERGED" });
+      await pass();
+      assert.equal(closed.size, 1, "the first all-merged pass closes the same alert");
+      assert.match(notes[0]!, /MERGED/);
+      assert.ok(notes[0]!.includes("/pull/12"));
+      assert.equal(all.length, 1);
+      const count = reads.length;
+      await pass();
+      assert.equal(reads.length, count, "recovered episodes no longer query their old candidates");
+      assert.equal(notes.length, 1);
+    }, { envPath: selected, instanceName: "core" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("W1-T11444 criterion 2: live recovery closes the alert and handling is selection-scoped", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-recovery-"));
@@ -82,11 +202,12 @@ test("W1-T11444 criterion 2: only fresh merged observations retire the recorded 
       closeWithComment: (url, comment) => { closed.add(url); notes.push(comment); },
     };
     let observation = { ok: false, state: "MERGED" };
+    let now = 1_800_000_000_000;
     const pr = (prNumber: number) => ({ prNumber, prUrl: `https://github.com/owner/repo/pull/${prNumber}`, headSha: "a".repeat(40) } as OpenPrView);
     await withInstanceRegistryRuntime(async () => {
       const effects = buildSweepEffects({ owner: "owner", repo: "repo", repoMode: "shadow", config: { root } as Config,
         ledgerPath, runId: "primary-merged", plan: { tasks: [], byId: new Map() } as unknown as Plan,
-        issuesImpl: issues, ghLiveStateImpl: async () => observation, log: () => {} });
+        issuesImpl: issues, ghLiveStateImpl: async () => observation, nowMsImpl: () => now, log: () => {} });
       await effects.arm(pr(11)); await effects.arm(pr(12)); await effects.arm(pr(13));
       assert.equal(all.length, 1);
       await effects.readLiveState!(pr(11));
@@ -95,6 +216,7 @@ test("W1-T11444 criterion 2: only fresh merged observations retire the recorded 
       await effects.readLiveState!(pr(11));
       assert.equal(closed.size, 0, "closed without a merged observation is not lane recovery");
       observation = { ok: true, state: "MERGED" };
+      now += DEFAULT_POLL_INTERVAL_MS;
       await effects.readLiveState!({ ...pr(11), prUrl: "https://github.com/other/repo/pull/11" });
       assert.equal(closed.size, 0, "a different repository's merge cannot resolve this refusal");
       await effects.readLiveState!(pr(11));
@@ -152,7 +274,7 @@ test("W1-T11444 criterion 2: failed recovery delivery survives reconstruction an
     await channel().reconcile();
     assert.equal(closeAttempts, 2, "a delivered recovery is not repeated");
 
-    // Resolving the current digest must not close an older selection whose refused PR is unmerged.
+    // A selection change preserves the outstanding PRs in the same episode.
     await channel().refuse(pr(12));
     const older = all[1]!.url;
     failClose = true;
@@ -164,8 +286,8 @@ test("W1-T11444 criterion 2: failed recovery delivery survives reconstruction an
     selected.digest = "b".repeat(64);
     await channel().refuse(pr(13));
     await channel().resolved(pr(13));
-    assert.equal(closed.has(older), false, "shadow recovery is confined to the digest with complete merged evidence");
-    assert.equal(closed.has(all[2]!.url), true);
+    assert.equal(all.length, 2, "the changed digest reuses the still-open episode");
+    assert.equal(closed.has(older), false, "one merged candidate cannot close an episode with an unmerged refusal");
     selected.mode = "live";
     failClose = true;
     await assert.rejects(channel().reconcile(), /private close transport failure/);

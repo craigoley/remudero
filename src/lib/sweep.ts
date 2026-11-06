@@ -2612,6 +2612,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const primaryShadowAlerts = primaryShadowOperatorChannel({ owner, repo, ledgerPath, runId, issues: issuesImpl,
+    clock: clockFromMillisFn(nowMsImpl), readPrState: ghLiveState,
     selection: () => {
       try {
         const selected = instanceRegistryRuntimePresent();
@@ -2620,7 +2621,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const name = selected ? runtimeInstanceRegistryInstanceName() : undefined;
         const sourcePath = selected ? runtimeInstanceRegistryPrivateFile() : daemonInstanceRegistryPath(repoRoot);
         const digest = selected ? runtimeInstanceRegistryDigest() : createHash("sha256").update(text).digest("hex");
-        if (selected && (name === undefined || sourcePath === undefined || digest === undefined)) return undefined;
+        if (selected && (sourcePath === undefined || digest === undefined)) return undefined;
         const primary = parseInstanceRegistry(text).instances.find(row => row.live && row.primary === true
           && row.repo.toLowerCase() === `${owner}/${repo}`.toLowerCase() && (name === undefined || row.name === name));
         if (!primary || sourcePath === undefined || digest === undefined) return undefined;
@@ -2633,7 +2634,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const primaryShadowAlertFailed = (error: unknown): void => {
     log("primary_shadow.alert_failed", { error_class: error instanceof Error ? error.name : "unknown" });
   };
-  let primaryShadowReconciled: Promise<void> | undefined;
   const terminalHeads = terminalUncreditableHeads(ledgerPath);
   const escalateTerminalHead = (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): void => {
     if (terminal.escalated) return;
@@ -2931,7 +2931,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
-    reconcilePrimaryShadowAlert: () => primaryShadowReconciled ??= primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
+    reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
     readOpenEscalations: () => issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
     readHostedProofResults: (headSha, proofs) => readHostedFixProofResults({ owner, repo, headSha, proofs },
@@ -26982,6 +26982,11 @@ export async function runEscalationReconcile(
     // NOR a confident "still live" — it simply waits for a readable pass.
     if (c.derived.indeterminate) {
       results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "left-indeterminate" });
+      continue;
+    }
+    // An instance episode owns a set of refusals; a single terminal PR cannot establish its recovery.
+    if (/^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(c.taskId)) {
+      results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "left-live" });
       continue;
     }
     // STILL LIVE: the referent is neither merged nor closed-without-merging — leave the
