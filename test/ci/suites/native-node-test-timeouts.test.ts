@@ -13,6 +13,7 @@ import { runCensusSuitesViaChild } from '#scripts/census-precheck.mjs';
 // @ts-ignore executable mjs modules have no declaration files.
 import { runRuleSuites } from '#scripts/list-rule-suites.mjs';
 import { REPO_ROOT } from '#test/helpers/repo-root.js';
+import { prepareJudgedTestRun } from '#src/lib/ci-parity.js';
 
 const bounded = (args: string[], root: string, manifest: object) => {
   const api = tiers as { boundedNodeTestArgs?: (args: string[], root: string, manifest: object) => string[] };
@@ -87,6 +88,30 @@ test('the native launcher preserves explicit limits, failure statuses and spawn 
   const error = new Error('fixture spawn failure');
   assert.throws(() => runNativeTests(args, { run: () => ({ error }) }), value => value === error);
   assert.throws(() => runNativeTests(['ordinary.mjs']), /requires --test/);
+});
+
+test('the native deadline launcher supplies a derived bound before invoking its child', () => {
+  const args = ['--test', '--test-reporter=tap', 'test/cycle-ratchet.test.ts'];
+  const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'scripts/test-tier-manifest.json'), 'utf8'));
+  let called = false;
+  assert.equal(runNativeTests(args, { root: REPO_ROOT, run: (_file: string, actual: string[]) => {
+    called = true;
+    assert.deepEqual(actual, bounded(args, REPO_ROOT, manifest));
+    return { status: 0 };
+  } }), 0);
+  assert.equal(called, true);
+});
+
+test('native judged parity leaves retain judgment and derive per-test deadlines', () => {
+  const args = ['--test', '--test-reporter=tap', 'test/cycle-ratchet.test.ts'];
+  const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'scripts/test-tier-manifest.json'), 'utf8'));
+  const prepared = prepareJudgedTestRun(args, REPO_ROOT, 'native timeout test');
+  try {
+    assert.ok(prepared.args.includes(bounded(args, REPO_ROOT, manifest)[0]!));
+    assert.ok(prepared.args.includes('--test-reporter=tap'));
+    assert.ok(prepared.args.includes('test/cycle-ratchet.test.ts'));
+    assert.ok(prepared.args.length > args.length + 1, 'the existing judge remains attached');
+  } finally { prepared.cleanup(); }
 });
 
 test('the native timeout argv runs a real child and preserves complete passing and failing summaries', () => {
