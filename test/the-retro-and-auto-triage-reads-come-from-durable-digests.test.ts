@@ -7,7 +7,7 @@ import type { Config } from "#src/lib/config.js";
 import { loadPolicy, policyPath, type Policy } from "#src/lib/policy.js";
 import type { GitLogCommit, ShippedGithub } from "#src/lib/retro.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { newFeedbackIdsOldestFirst } from "#src/lib/auto-triage.js";
+import { triageCandidateReaders } from "#src/lib/auto-triage.js";
 import { TRIAGE_COMMIT_REFUSED_STEP } from "#src/lib/triage.js";
 // Namespace imports: this file must LOAD on a base without the W1-T10046 symbols, so each proof fails
 // there on its own assertion rather than on a missing export.
@@ -147,8 +147,9 @@ test("W1-T10046: a restarted retro check reads its run slice from digests, not r
 });
 
 test("W1-T10046: a fresh auto-triage check reads its refusal slice from digests off the loop", async () => {
-  const candidates = newFeedbackIdsOldestFirst(REPO_ROOT);
-  assert.ok(candidates.length >= 1, "this checkout holds at least one status: new entry to exercise");
+  const readers = await triageCandidateReaders(REPO_ROOT);
+  const candidates = readers.newFeedbackIdsOldestFirst(REPO_ROOT);
+  assert.ok(candidates.length >= 1, "origin/main holds at least one status: new entry to exercise");
   const { root, stateDir, config } = stateRoot("triage-refusal-digest");
   try {
     const refusals = candidates.map((id, i) => ({
