@@ -13,7 +13,6 @@ import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
 import type { Config } from "#src/lib/config.js";
 import type { Plan } from "#src/lib/plan.js";
 import type { OpenPrView } from "#src/lib/sweep.js";
-import { DEFAULT_POLL_INTERVAL_MS } from "#src/lib/poll-interval.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 
 test("W1-T11444 criterion 2: the general lifecycle cannot retire the primary episode through one terminal PR", async () => {
@@ -62,7 +61,7 @@ test("W1-T11444 criterion 2: acknowledgement after an in-place selection update 
       runId: "updated-ack", selection: () => ({ ...selection }), issues, clock: clockFromMillisFn(() => now) });
     const pr = (prNumber: number) => ({ prNumber, prUrl: `https://github.com/owner/repo/pull/${prNumber}` });
     await channel().refuse(pr(11));
-    selection.digest = "b".repeat(64); now += DEFAULT_POLL_INTERVAL_MS;
+    selection.digest = "b".repeat(64); now += 1;
     await channel().refuse(pr(12));
     assert.equal(all.length, 1, "a changed selection updates the unacknowledged issue in place");
     const taskId = /\*\*Task:\*\*\s*(\S+)/.exec(all[0]!.body!)![1];
@@ -70,7 +69,7 @@ test("W1-T11444 criterion 2: acknowledgement after an in-place selection update 
     closed.add(all[0]!.url);
     appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "PANEL", task_id: taskId,
       step: "panel.escalation_marked_handled", issue_url: all[0]!.url, class: "MANUAL", disposition: "acted" }) + "\n");
-    now += DEFAULT_POLL_INTERVAL_MS;
+    now += 1;
     await channel().refuse(pr(13)); await channel().reconcile();
     assert.equal(all.length, 1, "reconstructing the channel cannot unsilence the acknowledged selection");
     selection.digest = "c".repeat(64);
@@ -216,7 +215,7 @@ test("W1-T11444 criterion 2: only fresh merged observations retire the recorded 
       await effects.readLiveState!(pr(11));
       assert.equal(closed.size, 0, "closed without a merged observation is not lane recovery");
       observation = { ok: true, state: "MERGED" };
-      now += DEFAULT_POLL_INTERVAL_MS;
+      now += 1;
       await effects.readLiveState!({ ...pr(11), prUrl: "https://github.com/other/repo/pull/11" });
       assert.equal(closed.size, 0, "a different repository's merge cannot resolve this refusal");
       await effects.readLiveState!(pr(11));

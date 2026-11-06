@@ -7,7 +7,7 @@ import { createOrReadExclusive, createOrReadPublished, HEX_SECRET_RE, InvalidSec
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
-import { DEFAULT_POLL_INTERVAL_MS, NEEDS_HUMAN_LABEL } from "./poll-interval.js";
+import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import {
   checkOperatorMessage,
@@ -400,7 +400,7 @@ export function primaryShadowOperatorChannel(opts: {
   const issues = opts.issues ?? ghIssueGatewayAsync(opts.owner, opts.repo);
   const clock = opts.clock ?? systemClock;
   type State = { revision: number; first: string; prs: number[]; handledDigests: string[];
-    digest: string; sourcePath: string; publishedAt?: number;
+    digest: string; sourcePath: string;
     pendingRecovery?: string };
   const states = new Map<string, State>();
   const historyMemo = createLedgerRotationMemo(rows => rows.filter(row =>
@@ -437,8 +437,7 @@ export function primaryShadowOperatorChannel(opts: {
       if (!Number.isSafeInteger(row.revision) || Number(row.revision) <= 0 || typeof row.first_refusal_at !== "string"
         || !Array.isArray(row.refused_prs) || row.refused_prs.some(n => !Number.isSafeInteger(n) || n <= 0)
         || (row.pending_recovery !== undefined && (typeof row.pending_recovery !== "string" || !row.pending_recovery))
-        || (row.selection_digest !== undefined && (typeof row.selection_digest !== "string" || !/^[a-f0-9]{64}$/.test(row.selection_digest)))
-        || (row.published_at !== undefined && (typeof row.published_at !== "number" || !Number.isFinite(row.published_at)))) {
+        || (row.selection_digest !== undefined && (typeof row.selection_digest !== "string" || !/^[a-f0-9]{64}$/.test(row.selection_digest)))) {
         throw new Error("primary shadow alert observation is malformed");
       }
       if (Number(row.revision) >= current.revision) {
@@ -446,7 +445,6 @@ export function primaryShadowOperatorChannel(opts: {
         current.pendingRecovery = row.pending_recovery as string | undefined;
         current.digest = typeof row.selection_digest === "string" ? row.selection_digest : s.digest;
         current.sourcePath = typeof row.selection_path === "string" ? row.selection_path : s.sourcePath;
-        current.publishedAt = row.published_at as number | undefined;
       }
     }
     states.set(instanceKey, current);
@@ -457,7 +455,6 @@ export function primaryShadowOperatorChannel(opts: {
     appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: key(s), step: "primary_shadow.observation",
       revision: next.revision, first_refusal_at: next.first, refused_prs: [...next.prs],
       instance_key: identity(s), selection_digest: next.digest, selection_path: next.sourcePath,
-      ...(next.publishedAt === undefined ? {} : { published_at: next.publishedAt }),
       ...(next.pendingRecovery === undefined ? {} : { pending_recovery: next.pendingRecovery }) });
     states.set(identity(s), next);
     return next;
@@ -477,8 +474,7 @@ export function primaryShadowOperatorChannel(opts: {
         step: "primary_shadow.issue_closed", issue_url: issue.url, reason });
     }
     const recovered = await state(s);
-    if (recovered.pendingRecovery) save(s, { ...recovered, pendingRecovery: undefined,
-      publishedAt: undefined });
+    if (recovered.pendingRecovery) save(s, { ...recovered, pendingRecovery: undefined });
   };
   const publish = async (selected: PrimaryShadowSelection, current: State): Promise<void> => {
     const open = await list();
@@ -495,11 +491,9 @@ export function primaryShadowOperatorChannel(opts: {
       const updated = (body.slice(0, start) + observation + body.slice(stop + end.length))
         .replace(/^(\*\*Task:\*\*[ \t]*)\S+/m, `$1${key(selected)}`);
       if (updated !== body) {
-        // Use the existing loop pace, not a producer-specific threshold; pending observations remain durable.
-        if (clock.now() - (current.publishedAt ?? Date.parse(current.first)) < DEFAULT_POLL_INTERVAL_MS) return;
+        // The shared escalation gateway owns delivery timing; serialize and await its edit as other producers do.
         if (!issues.editBody) throw new Error("primary shadow alert cannot update its issue");
         await issues.editBody(existing.url, updated);
-        save(selected, { ...current, publishedAt: clock.now() });
       }
     } else {
       const escalation: Escalation = { class: "MANUAL", taskId: key(selected),
@@ -509,8 +503,7 @@ export function primaryShadowOperatorChannel(opts: {
           { label: "Restore intended live mode", detail: "Review the named selection and use the normal qualified deployment path.", kind: { type: "operator-only" } },
           { label: "Acknowledge this selection", detail: "Use the notice's existing mark-handled action to silence only this selection digest.", kind: { type: "operator-only" } },
         ], recommendation: "Restore intended live mode" };
-      const url = await escalateAsync(escalation, { issues: { ...issues, listOpen: async () => open }, ledgerPath: opts.ledgerPath, runId: opts.runId });
-      if (url) save(selected, { ...current, publishedAt: clock.now() });
+      await escalateAsync(escalation, { issues: { ...issues, listOpen: async () => open }, ledgerPath: opts.ledgerPath, runId: opts.runId });
     }
   };
   const operationKey = JSON.stringify([resolve(opts.ledgerPath), opts.owner, opts.repo]);
