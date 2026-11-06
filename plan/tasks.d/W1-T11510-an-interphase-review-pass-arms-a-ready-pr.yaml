@@ -1,0 +1,129 @@
+- id: W1-T11510
+  title: An interphase-review light pass arms a ready code PR through the existing guarded arm path, with its repair lanes still closed
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # one concern (arming on one review-only scope), but it sits in front of auto-merge and the arm path holds a worker-spawning branch
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T5922, W1-T9569, W1-T4732, W1-T7214, W1-T11293, W1-T5633, W1-T5901, W1-T11171, W1-T11502]
+  files:
+    - src/lib/daemon.ts
+    - src/lib/sweep.ts
+    - src/cli/commands/sweep.ts
+    - src/run-task.ts
+    - test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts
+    - test/a-ready-pr-is-armed-and-its-review-admitted-on-the-next-light-pass.test.ts
+  priority: 1
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-11-06: an interphase-review pass may arm a ready PR through the existing
+    guarded arm path. This lifts the earlier instruction to keep interphase held, for arming only,
+    which W1-T4732's design recorded as "concurrent follow-ups must not dispatch fixes, merges, closes
+    or escalations". Pause, drain and boot stay held, and repair lanes stay closed on interphase passes.
+
+    OPERATOR EVIDENCE (ledger rows not re-read by this filing): #16962 head 9725de953 had ci-gate
+    success at 13:47:47Z and merged at 14:25:36Z. The ledger holds 13 mergeable sweep.disposed
+    stand-downs in light_pass_scope interphase-review from 13:35:39Z to 13:56:20Z, reason "review-only
+    interphase-review pass: repair lanes closed until the overlapping pass or review settles".
+    plan/feedback/incident-e3d914ec7cac8ea6.yaml independently records the head awaiting arm at
+    14:14:58Z. Those rows end 29 minutes before the merge, so they do not attribute 13:56:20Z to
+    14:25:36Z, and this task must not claim the whole gap as its win.
+
+    MECHANISM. src/lib/daemon.ts:2344 makes a pass reviewOnly whenever any pass is active or any review
+    is in flight, and src/cli/commands/sweep.ts:1189 passes !reviewOnly as armAllowed. Any overlap
+    therefore refuses every arm, however cheap.
+
+    THREE WAYS THE ONE-LINE CHANGE IS WRONG. Each is why this task is not "pass true for armAllowed":
+    1. DISTANCE HOLD BYPASS. src/cli/commands/sweep.ts:1174 empties readyPrs on a review-only pass, so a
+       ready head lands in laterOrdinaryPrs and runBatches defaults distanceKnown to true. Opening
+       armAllowed alone arms it with no compare read: the W1-T11293 hold never runs.
+    2. REFRESH PRECEDENCE. An ordinary pass removes a head it refreshed from the arm batch (:1267).
+       W1-T7214 exists because #10353 armed on a base lacking #10349 and main stayed red 55 minutes.
+       An interphase pass may not refresh, so it must not arm that head either.
+    3. A WORKER IN THE ARM PATH. "An arm spawns no worker" is true of deps.arm but not of the mergeable
+       lane: src/lib/sweep.ts:21929 is W1-T5633's CodeQL branch, which reaches dispatchFix and escalate
+       inside case "mergeable", behind no actionable check for a fix. Admitting mergeable would open a
+       repair lane on the very pass that must keep them closed.
+
+    Settled by lookup: is this already filed or already decided? -> no. No task or plan text covers arming on a review-only scope; W1-T5922's design stops at the ordinary pass (plan/tasks.d, MASTER-PLAN.md, DECISIONS.md, LEARNINGS.md).
+    Settled by lookup: does W1-T11502 cover it? -> no. Its acceptance covers plan-repair, fix and conflict turns and it has no arm criterion; it shares three source files, so overlappingPaths serialises the two (plan/tasks.d/W1-T11502-a-due-repair-gets-a-turn-between-overlapping-reviews.yaml).
+    Settled by lookup: does W1-T10620 apply? -> no. #16962 has no armed-idle rows, and a light surface never records idle (operator evidence; src/lib/sweep.ts:21516).
+    Settled by lookup: must this flip reviewOnly false? -> no. That would reopen requeue, refresh, ratchet and head-contract work, all keyed on reviewOnly; W1-T11502's design refuses the same flip (src/cli/commands/sweep.ts:1180,1261,1263,1266).
+    Settled by lookup: is armsInFlight shared across overlapping passes? -> yes. It is module-level, and readArmFacts re-reads autoMergeArmed before the arm (src/lib/sweep.ts:18394, :22029).
+    Settled by lookup: is the exact-head re-read already on this path? -> yes. guardHead reads the live head for mergeable on a light surface whatever the scope (src/lib/sweep.ts:21859).
+    Settled by lookup: do non-selected plan PRs stay bounded once interphase admits mergeable? -> yes. The W1-T5901 one-per-pass branch fires exactly when actionable("mergeable") is true (src/lib/sweep.ts:25135).
+    Settled by lookup: does the arm path's risk judge stay bounded under overlap? -> yes. The judgment pool is keyed by ledger path, not by pass (src/lib/sweep.ts:15253).
+  design: |
+    1. ONE PREDICATE. Add lightPassArmAdmitted(scope) beside lightPassFixAdmitted in src/lib/daemon.ts.
+       It is true for an ordinary pass and for reviewOnly scope "interphase-review", false for every
+       other scope. It is an allowlist of one, so "idle" and any later scope stay held, not only the
+       pause, drain and boot the ruling names. Do not change reviewOnly or LightPassScope.reviewOnly.
+
+    2. THE HOOK (src/cli/commands/sweep.ts). Pass the predicate as armAllowed. Use it, not !reviewOnly, to
+       form readyPrs, so a ready head on an interphase pass takes the same compare read and the same
+       distanceKnown batches as the ordinary pass. Every other reviewOnly check stays exactly as it is:
+       requeueOnlyPrs, runLightPassRefreshAdmission, runArmedRatchetRejudge, lightPassHeadContractRefresh.
+       runLightPassReadyRefresh must gain a reviewOnly guard, because readyPrs is no longer empty there.
+       fixAdmitted stays false, so lightPassActionable's repair argument is untouched.
+
+    3. A HEAD THE ORDINARY PASS WOULD REFRESH IS HELD, NOT ARMED. On an interphase pass, with the compare
+       facts in hand, read the ready-overlap selection without acting on it (the select half of
+       runLightPassReadyRefresh, openPrsBehindMain filtered to ready-overlap, honouring spentHeads). Hold
+       every selected head, and every head in admissionWaiters, in a batch where mergeable is not
+       actionable and a named stand-down says it waits for the ordinary pass's refresh. This is the
+       distanceKnown batch's shape. It is deliberately stricter than the ordinary pass, which refreshes
+       one winner and arms the rest: a pass that cannot refresh fails closed. It calls no update-branch.
+
+    4. CLOSE THE CODEQL FIX ROUTE. In case "mergeable", when deps.lightPassScope is set and
+       codeScanning.kind is "fix", stand down with the pass's review-only reason before the unfixable
+       escalation, holdRepeatedFixClaimDecline and dispatchFix. The CODE_SCANNING_FIX_STEP ruling row
+       stays, so the next ordinary pass takes the fix from priorFix. The hold kind and proceed are unchanged.
+
+    5. KEEP THE STAND-DOWN TEXT HONEST. reviewOnlyStandDownReason and LIGHT_PASS_SCOPE_ENDS stay; "repair
+       lanes closed" is still true. The !distanceKnown override at :1191 returns undefined for other
+       dispositions, which falls back to "deferred to full sweep (light pass)": chain it to the review-only
+       reason, so a ready head that derives conflicted keeps W1-T9569's text. Correct the comments this
+       change falsifies: daemon.ts:2126, run-task.ts:33086, and the review-only title and comments in the
+       W1-T5922 test. arm_surface and light_pass_scope already make the arm measurable; add no new row.
+
+    The arm path's own refusals come with it unchanged: the re-arm bound and its escalation, the risk
+    judge, W1-T5911's override read, and the queue read gated on mergeActionable. W1-T11171's no-worker
+    conflict route is unchanged too, so the conflict fixture must need a worker. Add no timeout, timer,
+    bound, new capacity or new lane. Plan PR direct-merge turns are out of scope: see the note.
+
+    TESTS drive the real buildSweepLightHook through its io ports (openPrViews, effects, readCompare).
+    Do not mirror its wiring with a hand-written lightPassActionable call: that mirror is how a test
+    stays green while the hook is wrong, and several existing test files use it.
+  acceptance:
+    - claim: "An interphase-review pass arms a ready code PR at its exact head exactly once through deps.arm, and its sweep.disposed row carries arm_surface light and light_pass_scope interphase-review; the pass's fix admission stays false"
+      proof: "unit test: test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts"
+    - claim: "Pause, drain, boot and idle passes do not arm a ready code PR and each writes its own review-only stand-down, while an ordinary light pass still arms it"
+      proof: "unit test: test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts"
+    - claim: "On an interphase pass a moved live head, an operator hold, a standing risk refusal, a decideSweepArm refusal and an arm already in flight for the head from an overlapping pass each refuse without calling deps.arm, and each row names its own reason"
+      proof: "unit test: test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts"
+    - claim: "On an interphase pass a ready head with an unreadable compare is held with the ready PR distance reason, a head the ready-overlap selection picks or the refresh admission lists as waiting is held with a named reason, and no update-branch call is made"
+      proof: "unit test: test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts"
+    - claim: "On an interphase pass blocked-fixable and worker-needing conflicted heads stand down with the review-only text and no requeue or fix starts, and a mergeable head whose CodeQL gate rules a fix reaches neither dispatchFix nor escalate while its ruling row survives for the next ordinary pass"
+      proof: "unit test: test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts"
+  falsifier: |
+    Pass the predicate as armAllowed but leave readyPrs empty on review-only passes: the unreadable-compare
+    fixture arms and criterion 4 fails. Widen the predicate to every review-only scope: criterion 2 fails
+    naming the scope. Remove the CodeQL stand-down: dispatchFix is called and criterion 5 fails. Flip
+    reviewOnly false instead of adding the predicate: the fix and requeue fixtures start work and
+    criterion 5 fails. Drop the guard on runLightPassReadyRefresh: the update-branch count in criterion 4
+    is non-zero. At origin/main the test file does not exist, and criterion 1 fails once it does.
+  note: |
+    Operator ruling and evidence supplied with PLAN-create-1793980641461. Do not touch W1-T11463, which
+    has a live owner. W1-T11502, W1-T11503 and W1-T11445 share src/lib/sweep.ts and serialise on overlap;
+    none is a prerequisite. test/daemon is a sketch from the daemon and sweep imports (W1-T11502's computed
+    folder): recompute with rmd test-place on final contents and report any mismatch.
+    OPEN FOR THE OPERATOR, NOT DECIDED HERE: selectLightPassPlanMerges takes no scope, and the planMergeTurn
+    branch at src/lib/sweep.ts:25129 admits mergeable for one plan PR on any light pass. As read, a plan PR
+    can therefore direct-merge on a pause, drain or boot pass today, independently of this task. That was
+    read from code, not observed in the ledger. Criterion 2 proves code PRs only and this task leaves that
+    path alone. If a builder confirms it, report it in the PR body rather than widening this task.
