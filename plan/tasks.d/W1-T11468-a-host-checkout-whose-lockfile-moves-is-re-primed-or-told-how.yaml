@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "2026-11-06 Azure host: preflight-author refused /tmp/rmd-amend-W1-T11431-1793931609000 because its node_modules (a whole-directory symlink to ~/rmd-op/node_modules) held claude-agent-sdk 0.3.310 against a 0.3.316 lockfile"
   plan_refs: [W1-T10507, W1-T10508, W1-T10739]
-  files: [hooks/post-merge, scripts/lib/author-dependency-provenance.mjs, deploy/DEPENDENCY-SEEDS.md, test/deploy/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts]
+  files: [hooks/post-merge, scripts/lib/author-dependency-provenance.mjs, deploy/DEPENDENCY-SEEDS.md, test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts]
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=99d0a6235b9487c3
@@ -60,9 +60,9 @@
     No fixed thresholds; no new install path. The seed tool remains the only materializer.
   acceptance:
     - claim: "A merge that changes package-lock.json in a seed-linked host checkout runs remudero-dependencies prime for that checkout, and a merge that leaves the lockfile unchanged runs nothing"
-      proof: "grep: W1-T11468 criterion 1 in test/deploy/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts"
+      proof: "grep: W1-T11468 criterion 1 in test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts"
     - claim: "When node_modules is a whole-directory symlink or a real install, the hook changes nothing on disk and prints the exact remedy, and the author precheck's version-differs refusal names that same remedy"
-      proof: "grep: W1-T11468 criterion 2 in test/deploy/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts"
+      proof: "grep: W1-T11468 criterion 2 in test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts"
   note: |
     Copy the fixture technique from test/deploy/a-host-worktree-links-its-dependencies-whoever-creates-it.test.ts:
     a real git repo, a fake remudero-dependencies on PATH that records its argv, and a forced
