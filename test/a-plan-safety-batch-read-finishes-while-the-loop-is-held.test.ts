@@ -15,8 +15,8 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { planSafetyGitAsync, type PlanSafetyGitResult } from "../src/lib/plan-pr-merge-safety.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { planSafetyGitAsync, type PlanSafetyGitResult } from "#src/lib/plan-pr-merge-safety.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /** One blob, asked for COPIES times: ~48 MB of stdout, under the reader's 64 MiB cap. */
 const BLOB_BYTES = 40_000;
