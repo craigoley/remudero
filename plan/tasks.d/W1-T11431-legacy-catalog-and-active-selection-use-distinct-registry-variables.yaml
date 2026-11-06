@@ -39,17 +39,17 @@
   attempts: 0
   acceptance:
     - claim: "Private registry selection reaches the real host and daemon readers through their existing bounded selection seams."
-      proof: "unit test: private registry selection reaches real host and daemon readers"
+      proof: "grep: RMD_SELECTED_INSTANCE_REGISTRY in test/shadow-instance-safety.test.ts"
     - claim: "Absent selection preserves legacy behavior, while invalid, unreadable, malformed, unsupported, stale or revised selected inputs remain explicit failures or unknown and never fall back as though no selection existed."
-      proof: "unit test: private registry selection preserves legacy and refuses unknown selected inputs"
+      proof: "grep: explicit selected registry leaves a distinct legacy catalog in test/recycle-container.test.ts"
     - claim: "Owner STOP/PAUSE and override behavior, shadow policy, worker environment allowlists and private-safe boundaries remain independent and unchanged; the three registry transport names are declared only for guarded carry-through."
-      proof: "unit test: private registry selection preserves owner holds and private-safe boundaries"
+      proof: "grep: selected-registry-env in test/shadow-instance-safety.test.ts"
     - claim: "The daemon runtime name list declares RMD_INSTANCE_REGISTRY, RMD_INSTANCE_REGISTRY_DIGEST and RMD_INSTANCE_REGISTRY_FILE_BINDING for guarded carry-through; unknown names still refuse and no values are logged or persisted."
-      proof: "unit test: W1-T1069: both scripts read the same declared name list"
+      proof: "grep: RMD_INSTANCE_REGISTRY_FILE_BINDING in deploy/runtime-env-vars.sh"
     - claim: "A bare recycle of a container that mounts a selected registry refuses before anything is touched, names the selection remedy, and never launches a replacement without that mount; the printed daemon launch passes the three names only when they are set"
       proof: "grep: a bare recycle of a selected container in test/recycle-container.test.ts"
     - claim: "Defaults and deletion/restoration falsifiers demonstrate that this task cannot install or select a private registry, release a baked image, recycle workers or cut over live behavior."
-      proof: "unit test: private registry selection defaults and falsifiers forbid live effects"
+      proof: "grep: an unselected launch never passes an empty registry name in test/recycle-container.test.ts"
   rationale: |
     W1-T10573 (#15532) is already merged and introduced explicit private-registry selection through the existing host, serve, recycle and daemon paths. The merged code still overloads RMD_INSTANCE_REGISTRY: the recon in W1-T11276 found that heartbeat, host-update, installer enumeration and resource-policy readers consume that same variable as a legacy catalog path. This task fixes that distinct compatibility defect: retain RMD_INSTANCE_REGISTRY for legacy catalog consumers and use RMD_SELECTED_INSTANCE_REGISTRY for active selection. During transition, selected readers accept the old variable only when the new variable is absent; when the new variable is present but invalid, they fail closed instead of falling back. If both are set, each reader uses the variable matching its meaning. W1-T10573 built the selection behavior; this task separates the two meanings and preserves mixed-version compatibility.
 
