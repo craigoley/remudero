@@ -6,9 +6,7 @@
 // must raise none.
 
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { appendFileSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { DEFAULT_CRASHLOOP_WINDOW, daemonBoot, detectDaemonCrashLoop, learnedCleanLifetime } from "#src/lib/daemon.js";
 import {
@@ -19,7 +17,7 @@ import {
 } from "#src/lib/escalation-catalogue.js";
 import type { IssueGateway } from "#src/lib/escalate.js";
 import { rotateLedger } from "#src/lib/ledger.js";
-import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const MIN = 60_000;
 const HEAP_LIMIT = 7_540_310_016;
@@ -47,24 +45,6 @@ function recordingGateway(): IssueGateway & {
       closed.push({ url, comment });
     },
   };
-}
-
-function withLedger<T>(fn: (ledgerPath: string) => T): T {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}slow-crash-loop-`));
-  try {
-    return fn(join(dir, "ledger.ndjson"));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-async function withLedgerAsync(fn: (ledgerPath: string) => Promise<void>): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}slow-crash-loop-`));
-  try {
-    await fn(join(dir, "ledger.ndjson"));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 }
 
 function lines(ledgerPath: string): Array<Record<string, unknown>> {
@@ -120,8 +100,9 @@ function healthyHistory(ledgerPath: string, startMs: number, issues: IssueGatewa
 
 const START = Date.parse("2026-11-05T00:00:00.000Z");
 
-test("W1-T11421: 29 abnormal exits 15-28 min apart raise exactly one incident, though no ten-minute window holds six boots", () => {
-  withLedger((ledgerPath) => {
+test("W1-T11421: 29 abnormal exits 15-28 min apart raise exactly one incident, though no ten-minute window holds six boots", (t) => {
+  {
+    const ledgerPath = writeLedger([], { scope: t }).path;
     const issues = recordingGateway();
     let at = healthyHistory(ledgerPath, START, issues);
     const boots: string[] = [];
@@ -147,11 +128,12 @@ test("W1-T11421: 29 abnormal exits 15-28 min apart raise exactly one incident, t
     assert.equal(abnormal.length, 29, "every abnormal exit ledgers its row, rotation notwithstanding");
     assert.equal(verdict.summary?.runLength, 29);
     assert.equal(verdict.incident?.issueUrl, "https://github.com/o/r/issues/1");
-  });
+  }
 });
 
-test("W1-T11421 criterion 2: each further abnormal exit updates the one incident with its evidence and opens no second issue", () => {
-  withLedger((ledgerPath) => {
+test("W1-T11421 criterion 2: each further abnormal exit updates the one incident with its evidence and opens no second issue", (t) => {
+  {
+    const ledgerPath = writeLedger([], { scope: t }).path;
     const issues = recordingGateway();
     let at = healthyHistory(ledgerPath, START, issues);
     for (let i = 0; i < 6; i++) {
@@ -169,11 +151,12 @@ test("W1-T11421 criterion 2: each further abnormal exit updates the one incident
     }
     const updated = lines(ledgerPath).filter((l) => l.step === "daemon.crashloop.updated");
     assert.deepEqual(updated.map((l) => l.prior_run_id), ["DAEMON-c2", "DAEMON-c3", "DAEMON-c4", "DAEMON-c5"]);
-  });
+  }
 });
 
-test("W1-T11421 criterion 2: a single abnormal exit after a long lifetime only ledgers a row", () => {
-  withLedger((ledgerPath) => {
+test("W1-T11421 criterion 2: a single abnormal exit after a long lifetime only ledgers a row", (t) => {
+  {
+    const ledgerPath = writeLedger([], { scope: t }).path;
     const issues = recordingGateway();
     let at = healthyHistory(ledgerPath, START, issues);
     boot(ledgerPath, "DAEMON-long", at, issues);
@@ -187,11 +170,12 @@ test("W1-T11421 criterion 2: a single abnormal exit after a long lifetime only l
     assert.equal(abnormal[0].prior_run_id, "DAEMON-long");
     assert.equal(abnormal[0].lifetime_ms, 300 * MIN);
     assert.equal((abnormal[0].last_memory as { heap_limit_bytes: number }).heap_limit_bytes, HEAP_LIMIT);
-  });
+  }
 });
 
-test("W1-T11421: a healthy, long-lived boot history raises nothing", () => {
-  withLedger((ledgerPath) => {
+test("W1-T11421: a healthy, long-lived boot history raises nothing", (t) => {
+  {
+    const ledgerPath = writeLedger([], { scope: t }).path;
     const issues = recordingGateway();
     let at = healthyHistory(ledgerPath, START, issues);
     for (let i = 0; i < 20; i++) {
@@ -204,11 +188,12 @@ test("W1-T11421: a healthy, long-lived boot history raises nothing", () => {
     assert.equal(issues.created.length + issues.comments.length + issues.closed.length, 0);
     assert.equal(lines(ledgerPath).filter((l) => l.step === "daemon.clean_exit.observed").length, 26);
     assert.equal(lines(ledgerPath).filter((l) => l.step === "daemon.crash.abnormal_exit").length, 0, "a rotation never turns a clean end into a crash");
-  });
+  }
 });
 
-test("W1-T11421 criterion 3: the incident closes itself once the running process outlives the learned clean lifetime", () => {
-  withLedger((ledgerPath) => {
+test("W1-T11421 criterion 3: the incident closes itself once the running process outlives the learned clean lifetime", (t) => {
+  {
+    const ledgerPath = writeLedger([], { scope: t }).path;
     const issues = recordingGateway();
     let at = healthyHistory(ledgerPath, START, issues);
     for (let i = 0; i < 3; i++) {
@@ -236,11 +221,12 @@ test("W1-T11421 criterion 3: the incident closes itself once the running process
     assert.equal(cleared.length, 1);
     assert.equal(cleared[0].run_first, "DAEMON-c0");
     assert.equal(cancelled, 0);
-  });
+  }
 });
 
-test("W1-T11421 criterion 3: a boot after a process that outlived the p90 closes the open incident", () => {
-  withLedger((ledgerPath) => {
+test("W1-T11421 criterion 3: a boot after a process that outlived the p90 closes the open incident", (t) => {
+  {
+    const ledgerPath = writeLedger([], { scope: t }).path;
     const issues = recordingGateway();
     let at = healthyHistory(ledgerPath, START, issues);
     for (let i = 0; i < 2; i++) {
@@ -257,11 +243,12 @@ test("W1-T11421 criterion 3: a boot after a process that outlived the p90 closes
     assert.equal(issues.closed.length, 1);
     assert.match(issues.closed[0].comment, /DAEMON-survivor lived 200 min, past the learned p90/);
     assert.equal(verdict.incident, undefined);
-  });
+  }
 });
 
-test("W1-T11421 criterion 3: with no learned history the check keeps today's ten-minute window", async () => {
-  await withLedgerAsync(async (ledgerPath) => {
+test("W1-T11421 criterion 3: with no learned history the check keeps today's ten-minute window", async (t) => {
+  {
+    const ledgerPath = writeLedger([], { scope: t }).path;
     const issues = recordingGateway();
     const base = Date.parse("2026-11-05T10:00:00.000Z");
     // Six boots a minute apart and no clean lifetime yet: the sentinel learns nothing and the window decides.
@@ -280,11 +267,12 @@ test("W1-T11421 criterion 3: with no learned history the check keeps today's ten
     const check = logged.find((l) => l.step === "daemon.crashloop_check");
     assert.equal(check?.extra?.window_ms, DEFAULT_CRASHLOOP_WINDOW.windowMs);
     assert.equal(issues.created.length, 0, "the sentinel itself raised nothing");
-  });
+  }
 });
 
-test("W1-T11421: once a clean lifetime is learned the sentinel decides and the window does not also fire", async () => {
-  await withLedgerAsync(async (ledgerPath) => {
+test("W1-T11421: once a clean lifetime is learned the sentinel decides and the window does not also fire", async (t) => {
+  {
+    const ledgerPath = writeLedger([], { scope: t }).path;
     const issues = recordingGateway();
     let at = healthyHistory(ledgerPath, START, issues);
     for (let i = 0; i < 6; i++) {
@@ -305,16 +293,17 @@ test("W1-T11421: once a clean lifetime is learned the sentinel decides and the w
     assert.equal(check?.extra?.basis, "learned");
     assert.equal(check?.extra?.incident, "opened");
     assert.equal(check?.extra?.run_length, 6);
-  });
+  }
 });
 
-test("W1-T11421: a sentinel that throws is ledgered and leaves the decision to the window", () => {
-  withLedger((ledgerPath) => {
+test("W1-T11421: a sentinel that throws is ledgered and leaves the decision to the window", (t) => {
+  {
+    const ledgerPath = writeLedger([], { scope: t }).path;
     const unreadable = new Proxy({}, { get: () => { throw new Error("torn row"); } }) as Record<string, unknown>;
     const sentinel = daemonCrashSentinel([unreadable], { owner: "o", repo: "r", ledgerPath, runId: "DAEMON-now", issues: recordingGateway() });
     assert.equal(sentinel("2026-11-05T00:30:00.000Z"), undefined);
     const failed = lines(ledgerPath).filter((l) => l.step === "daemon.crashloop_sentinel_failed");
     assert.equal(failed.length, 1);
     assert.match(String(failed[0].error), /torn row/);
-  });
+  }
 });
