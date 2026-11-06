@@ -61,11 +61,22 @@ function controlledRelease() {
   value.releaseId = "controlled-" + digest;
   return value;
 }
-function writeSnapshot(directory: string) {
+function writeSnapshot(directory: string, state: "observed" | "observed-partial" = "observed") {
   writeFileSync(join(directory, "field-trials-flow-v1.json"), JSON.stringify({ version: "field-trials-flow-v1",
-    asOf: "2026-10-10T00:00:00.000Z", state: "observed", observational: true, causalClaims: "none",
+    asOf: "2026-10-10T00:00:00.000Z", state, observational: true, causalClaims: "none",
     servedTrialCohorts: [] }), { mode: 0o600 });
 }
+test("native field reader withholds partial snapshots from complete comparison", () => {
+  const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-field-partial-snapshot-`));
+  try {
+    chmodSync(directory, 0o700);
+    writeSnapshot(directory, "observed-partial");
+    const result = createNativeFieldEvidenceReader(directory)();
+    assert.deepEqual(result, { state: "unavailable", reason: "native-field-snapshot-partial" });
+    assert.equal("evidence" in result, false);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 function writeCandidate(directory: string) {
   const release = controlledRelease(), id = release.releaseId as string;
   writeFileSync(join(directory, id + ".candidate.json"), JSON.stringify(release), { mode: 0o600 });

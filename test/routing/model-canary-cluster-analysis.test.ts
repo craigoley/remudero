@@ -68,7 +68,18 @@ test("cluster paired analysis rejects family provenance that crosses sealed and 
     comparisons: [{ id: "model-a-vs-b", endpoints: ["correct"], estimands: ["all-repeats"] }],
     splits: ["sealed-holdout", "development"],
   }, seed: "predeclared-seed-v1" }).comparisons;
-  assert.ok(result.every(item => item.state === "withheld" && item.reason === "source-family-cross-split"));
+  assert.ok(result.every(item => item.state === "withheld" && item.reason === "case-or-source-family-cross-split"));
+});
+
+test("cluster paired analysis rejects case ids that cross sealed and development splits", () => {
+  const leaked = [pair(0), pair(1, { split: "development", caseId: "case-0",
+    sourceFamilyId: "family-other", incidentRootId: "root-other" })];
+  const result = analyzeClusterPairedCanaries({ pairs: leaked, design: {
+    comparisons: [{ id: "model-a-vs-b", endpoints: ["correct"], estimands: ["all-repeats"] }],
+    splits: ["sealed-holdout", "development"],
+  }, seed: "predeclared-seed-v1" }).comparisons;
+  assert.equal(result.length, 2);
+  assert.ok(result.every(item => item.state === "withheld" && item.reason === "case-or-source-family-cross-split"));
 });
 
 test("cluster paired analysis keeps first-attempt all-repeat and best-of-k estimands separate", () => {

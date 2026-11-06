@@ -193,7 +193,7 @@ function estimateClusterAnalysis(group: PairGroup, seed: string, resamples: numb
     uf.union(family, root); uf.union(task, family);
   }
   if (leakedAcrossSplits)
-    return { result: withholdClusterAnalysis(group, "source-family-cross-split", pairCount, caseCount, 0), work: 0 };
+    return { result: withholdClusterAnalysis(group, "case-or-source-family-cross-split", pairCount, caseCount, 0), work: 0 };
   if (native.some(row => !row.complete || row.leftValue === null || row.rightValue === null))
     return { result: withholdClusterAnalysis(group, "incomplete-or-missing-paired-outcome", pairCount, caseCount,
       new Set(native.map(row => uf.find(JSON.stringify(["family", row.sourceFamilyId])))).size), work: 0 };
@@ -258,7 +258,8 @@ export function analyzeClusterPairedCanaries(input: ClusteredCanaryAnalysisInput
   const splitByIdentity = new Map<string, Set<CanaryAnalysisSplitV1>>();
   for (const { row } of unique.values()) {
     if (row.executionSource !== "native-provider-execution") continue;
-    for (const identity of [JSON.stringify(["family", row.sourceFamilyId]), JSON.stringify(["incident", row.incidentRootId])]) {
+    for (const identity of [JSON.stringify(["case", row.caseId]), JSON.stringify(["family", row.sourceFamilyId]),
+      JSON.stringify(["incident", row.incidentRootId])]) {
       const values = splitByIdentity.get(identity) ?? new Set<CanaryAnalysisSplitV1>();
       values.add(row.split); splitByIdentity.set(identity, values);
     }
@@ -280,7 +281,8 @@ export function analyzeClusterPairedCanaries(input: ClusteredCanaryAnalysisInput
   let remainingWork = MAX_TOTAL_BOOTSTRAP_WORK;
   for (const [key, group] of [...groups].sort(([a], [b]) => clusterAnalysisCompare(a, b))) {
     const groupHasLeak = group.rows.some(row =>
-      leaked.has(JSON.stringify(["family", row.sourceFamilyId])) || leaked.has(JSON.stringify(["incident", row.incidentRootId])));
+      leaked.has(JSON.stringify(["case", row.caseId])) || leaked.has(JSON.stringify(["family", row.sourceFamilyId]))
+      || leaked.has(JSON.stringify(["incident", row.incidentRootId])));
     const result = estimateClusterAnalysis(group, input.seed, resamples, minIndependentClusters, groupHasLeak, remainingWork);
     remainingWork -= result.work;
     comparisons.push(result.result);

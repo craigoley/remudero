@@ -111,6 +111,8 @@ export function createNativeFieldEvidenceReader(outDir: string): () => NativeFie
       if (!nativeFieldRecord(snapshot) || (snapshot.state !== "observed" && snapshot.state !== "observed-partial")
         || snapshot.observational !== true || snapshot.causalClaims !== "none" || typeof snapshot.asOf !== "string")
         return { state: "unavailable", reason: "native-field-snapshot-contract-unavailable" };
+      if (snapshot.state === "observed-partial")
+        return { state: "unavailable", reason: "native-field-snapshot-partial" };
       const fieldTrials = nativeFieldObservationalRows(snapshot);
       const controlledDir = join(outDir, "controlled");
       let unmatchedControlledCandidates = 0;
