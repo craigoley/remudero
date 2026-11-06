@@ -1,0 +1,97 @@
+- id: W1-T11515
+  title: "An idle sleep ledgers why its light pass ran or did not, and a test states what an idle tick does for a mergeable PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T7734, W1-T9569, W1-T5922, W1-T11445]
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, test/daemon/an-idle-sleep-ledgers-why-its-light-pass-ran-or-did-not.test.ts]
+  priority: 3
+  status: queued
+  attempts: 0
+  rationale: |
+    Operator ruling 2026-11-06: file this narrowed, as cover for missed events.
+
+    THIS DID NOT CAUSE THE PR #16962 DELAY. That delay came from 13 interphase-review stand-downs
+    (W1-T11510) and selected-registry timeouts (W1-T11463). Nothing here claims to shorten it. This
+    task is step 1 of 2. It measures a pass that has never been seen running, and W1-T11516 is step 2.
+
+    EVIDENCE, supplied by the operator and not re-run for this filing, because the architect lane has
+    no ledger access. `daemon.idle_light_pass` and `"light_pass_scope":"idle"` have 0 rows across 391
+    archives plus the live ledger. The control `"light_pass_scope":"drain"` has 2,671 rows over the
+    same corpus. So the idle pass has never been observed running. W1-T11445 recorded an earlier zero
+    for this query as inconclusive for lack of a positive control; the drain count is that control.
+
+    MECHANISM IN SOURCE. `sleepIdleWithReviewDemand` (src/lib/daemon.ts:6296) runs a pass only when
+    `demand.eligible > 0` and `demand.cadenceMs < pollIntervalMs` (60 s). `readIdleLightCadence` and
+    `deriveIdleLightCadenceMs` (src/lib/sweep.ts:18359-18391) count only eligible review demand and cap
+    cadence by median review time and half the mean push gap. That cadence gate is the suspected
+    reason for the zero. It is INFERRED, NOT MEASURED. Below 60 s it needs a median review under 60 s,
+    or more than 30 pushes per PR-hour. Three other causes are equally unmeasured, and no current row
+    can tell them apart:
+    - The idle sleep may rarely be reached. It runs only when the tick selected nothing
+      (src/lib/daemon.ts:7108-7156).
+    - `readIdleLightCadence` returns undefined at zero eligible, so the most likely branch has no
+      cadence to report.
+    - A sleep that decided to run returns with no pass if a wake lands in its first chunk
+      (src/lib/daemon.ts:6315).
+
+    WHAT AN IDLE TICK DOES TODAY, read from source and not yet pinned. The code comment says the next
+    tick's full pass follows the sleep. `runGatedSweep` starts once per loop iteration
+    (src/lib/daemon.ts:6181), and it declines with `daemon.sweep.skipped_concurrent` while an earlier
+    pass still runs. An ordinary or full pass reaches the guarded `mergeable` arm in
+    src/lib/sweep.ts:21908. A review-only idle pass does not, because `lightPassActionable` receives
+    `armAllowed` false from src/cli/commands/sweep.ts:1189. This task pins that behaviour in a test.
+
+    Settled by lookup: is this already filed or decided? -> Not as measurement. W1-T7734 built the idle pass and has no row for a sleep that runs none; W1-T9569 named the scope only (plan/tasks.d/W1-T7734-the-sweep-sees-a-new-head-in-the-same-pass.yaml, plan/tasks.d/W1-T9569-a-review-only-light-pass-names-its-scope.yaml).
+    Settled by lookup: does W1-T11502 cover this? -> No. It shares daemon.ts and sweep.ts but covers repair turns only (plan/tasks.d/W1-T11502-a-due-repair-gets-a-turn-between-overlapping-reviews.yaml).
+    Settled by lookup: must the new row be registered for retention? -> No. Rotation keeps every non-retained line verbatim in the dated archive, and nothing live reads this row (src/lib/ledger.ts:1596-1607).
+    Settled by lookup: is W1-T10620 related? -> No. It is the machine-filed armed-idle blocker, a full-pass path (plan/tasks.d/W1-T10620-flow-armed-idle-review-success-required-checks-green.yaml).
+  design: |
+    1. `sleepIdleWithReviewDemand` writes one `daemon.idle_sleep.decision` row per idle sleep, when that
+       sleep ends. Fields: `reason`, `eligible`, `cadence_ms`, `median_review_ms`, `pushes_per_pr_hour`,
+       `poll_interval_ms`, `passes`, and `ended` (timeout, wake or stop). A field with no observed value
+       is omitted, not written as zero.
+    2. `reason` is one of: `light_pass_unwired`, `demand_unreadable`, `no_review_demand`,
+       `cadence_unobserved`, `cadence_not_below_poll`, `run`. A `run` sleep with `passes: 0` is the wake
+       case, so a reader never has to infer it.
+    3. `readIdleLightCadence` reports the derived cadence at zero eligible once a review or push has
+       been observed, so `no_review_demand` rows carry a cadence. With nothing observed it still returns
+       undefined. The sleep's own gate reads `eligible > 0` as today.
+    4. This task changes what is written, never what runs. Sleep lengths, the pass count and the gate
+       stay as they are. Keep `daemon.idle_light_pass` and `daemon.idle_light_pass.demand_unreadable`
+       unchanged, and keep the W1-T7734 idle tests passing as they stand.
+    5. Add a characterization test with a mergeable PR and no review demand. It pins what a truly idle
+       tick does: no idle light pass, a `no_review_demand` row, and the next tick's full pass as the only
+       route to the arm, including the `daemon.sweep.skipped_concurrent` case. The PR body states the
+       result in words, because W1-T11516 depends on it.
+    No new timer, constant or cadence. The row rate is at most one per idle sleep.
+  acceptance:
+    - claim: "Every idle sleep writes exactly one daemon.idle_sleep.decision row naming its eligible count, cadence and reason, on each of the six reason branches"
+      proof: "unit test: test/daemon/an-idle-sleep-ledgers-why-its-light-pass-ran-or-did-not.test.ts"
+    - claim: "A sleep that decided to run and was woken before its first pass reads reason run with passes 0 and ended wake, not a silent absence"
+      proof: "unit test: test/daemon/an-idle-sleep-ledgers-why-its-light-pass-ran-or-did-not.test.ts"
+    - claim: "With zero eligible demand the row still carries the derived cadence once a review or push was observed, and the sleep still runs no pass and sleeps the whole poll interval"
+      proof: "unit test: test/daemon/an-idle-sleep-ledgers-why-its-light-pass-ran-or-did-not.test.ts"
+    - claim: "A characterization test pins a truly idle tick with a mergeable PR: no idle light pass, a no_review_demand row, and the next tick's full pass as the only route to the arm"
+      proof: "unit test: test/daemon/an-idle-sleep-ledgers-why-its-light-pass-ran-or-did-not.test.ts"
+    - claim: "The decision row is written by the idle sleep itself"
+      proof: "grep: daemon.idle_sleep.decision in src/lib/daemon.ts"
+  note: |
+    verify:auto, because every row and the characterization are assertable with an in-process daemon
+    fixture. risk:high because it edits the daemon loop and sweep.ts. The change is one concern, so its
+    budget stays low. The builder names each criterion test with the marker "W1-T11515 criterion N".
+    After merge, read the rows with `rmd ledger-grep daemon.idle_sleep.decision`. Compare their count
+    with `daemon.sweep.started` over the same window: few decision rows means the idle branch itself is
+    rarely reached, which would clear the cadence gate as the cause. W1-T11516 stays held until that
+    reading exists.
+  falsifier: |
+    Drop the row on any one branch: the criterion 1 case for that reason fails. Write the row at sleep
+    start: the run-with-wake case cannot report passes 0 and ended wake, and criterion 2 fails. Let the
+    reader report eligible above zero when none exist: the criterion 3 no-pass assertion fails. Open
+    the arm on the idle pass here: the characterization fails, because that belongs to W1-T11516.

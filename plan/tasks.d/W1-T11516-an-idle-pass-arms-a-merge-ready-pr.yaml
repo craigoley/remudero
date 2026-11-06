@@ -1,0 +1,108 @@
+- id: W1-T11516
+  title: "Idle reconciliation sees a merge-ready PR and sends it through the existing guarded arm path, as cover for missed events"
+  repo: remudero
+  depends_on: [W1-T11515]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  dispatch_hold: true
+  origin: architect
+  plan_refs: [W1-T11510, W1-T11515, W1-T7734, W1-T5922, W1-T9569]
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, src/cli/commands/sweep.ts, src/run-task.ts, test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts, test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts]
+  priority: 3
+  status: queued
+  attempts: 0
+  note: |
+    DISPATCH HOLD: release only after W1-T11510 has merged (PR #17065, open at filing) and W1-T11515's
+    idle-sleep rows have been read. On release, add W1-T11510 to depends_on and remove dispatch_hold in
+    one plan edit. The edge is absent only because loadPlan refuses a depends_on naming a task this base
+    does not yet hold.
+
+    This shard was filed before that edge could exist, so the hold carries the ordering the operator
+    ruled. Without it, this task could dispatch as soon as step 1 merges. It would then build on a tree
+    with no arm predicate to widen, and with the idle assertion it replaces not yet written.
+    verify:auto, because every criterion runs against an in-process fixture with no live PR. risk:high
+    because it changes which pass may arm. The builder names each criterion test with the marker
+    "W1-T11516 criterion N".
+  rationale: |
+    Operator ruling 2026-11-06: file this narrowed, as cover for missed events. This is step 2 of 2,
+    after W1-T11515.
+
+    THIS DID NOT CAUSE THE PR #16962 DELAY. That delay came from 13 interphase-review stand-downs
+    (W1-T11510) and selected-registry timeouts (W1-T11463). This task exists so a merge-ready PR whose
+    event was missed still converges. It is not the remedy for #16962.
+
+    EVIDENCE, supplied by the operator and not re-run for this filing. `daemon.idle_light_pass` and
+    `"light_pass_scope":"idle"` have 0 rows across 391 archives plus the live ledger, against 2,671
+    `"light_pass_scope":"drain"` rows over the same corpus. The idle pass has never been observed
+    running. The cadence gate is the suspected reason. That is inferred, not measured, until
+    W1-T11515's rows are read.
+
+    WHY BOTH HALVES ARE NEEDED. Idle demand counts review work only (`noteIdleReviewDemand`,
+    src/lib/sweep.ts:18311), so a PR that is green and reviewed adds nothing to it and no idle pass
+    starts for it. And an idle pass could not act on it anyway: `lightPassActionable` receives
+    `armAllowed` false on every review-only pass (src/cli/commands/sweep.ts:1189).
+
+    Settled by lookup: is this already filed or decided? -> Not for the idle scope. W1-T11510 arms on interphase-review passes only and pins idle as unable to arm; W1-T5922 arms on the ordinary light pass; W1-T7734 built the idle pass for review demand (PR #17065, plan/tasks.d/W1-T5922-a-ready-pr-is-armed-and-its-review-admitted-on-the-next-light-pass.yaml, plan/tasks.d/W1-T7734-the-sweep-sees-a-new-head-in-the-same-pass.yaml).
+    Settled by lookup: does W1-T11510 exist, and what does it pin? -> Yes, in open PR #17065 (plan/tasks.d/W1-T11510-an-interphase-review-pass-arms-a-ready-pr.yaml on branch run-PLAN-create-1793980641461), not yet on main. Its second criterion says pause, drain, boot and idle passes do not arm. This task deliberately replaces the idle part of that one assertion. https://github.com/craigoley/remudero/pull/17065
+    Settled by lookup: can this shard declare depends_on W1-T11510 today? -> No. loadPlan throws "depends_on unknown task" and the relint step reports that as a blocking plan-load violation, so the filing would open no PR (src/lib/plan.ts:1041, src/lib/relint.ts:138). dispatch_hold holds it instead, and the hold-readiness observer names it for release (src/lib/plan.ts:1340, src/lib/hold-readiness.ts).
+    Settled by lookup: may this shard cite W1-T11510 while it is unmerged? -> Yes. A pushed filing keeps its reservation ref, and the id gate accepts a reservation or a declared id (src/run-task.ts:16437, scripts/task-id-existence-check.mjs).
+    Settled by lookup: does W1-T11502 overlap? -> On src/lib/daemon.ts and src/lib/sweep.ts only. It covers repair turns, and the file-overlap partition serializes the two (plan/tasks.d/W1-T11502-a-due-repair-gets-a-turn-between-overlapping-reviews.yaml).
+    Settled by lookup: are W1-T5922 and W1-T9569 merged, and is W1-T10620 relevant? -> Both are status merged. W1-T10620 is not relevant here (their shards under plan/tasks.d/).
+  design: |
+    Read W1-T11510's merged source first. This filing could read its record only on PR #17065, and it
+    is the base for what follows. That task adds `lightPassArmAdmitted(scope)`.
+
+    1. PERMIT ONLY THE IDLE SCOPE. Widen that predicate to `idle` by exact scope name. `reviewOnly`
+       stays true on the idle pass, and every repair lane stays closed. Pause, drain and boot stay held.
+       Interphase-review arming stays exactly as W1-T11510 left it.
+    2. REUSE ITS GUARDS. W1-T11510's distance read, its hold on a head an ordinary pass would refresh,
+       and its stand-down before any CodeQL fix or escalation all apply to `idle` too. Write no second
+       path. An idle pass makes no update-branch call and starts no fix or requeue.
+    3. COUNT MERGE-READY DEMAND. The passes that already publish idle demand also publish a separate
+       `mergeReady` count, and `readIdleLightCadence` stays memory-only. Count an open, non-draft,
+       unarmed head that is green with review success and still needs the guarded arm or merge decision.
+       Leave out a head whose standing refusal holds at its unchanged head (operator hold, risk refusal,
+       arm-decision refusal). Otherwise a refused head keeps idle passes running with nothing to do.
+    4. ARMED HEADS ARE NOT LIGHT-PASS DEMAND. Armed-idle completion runs only on a full pass
+       (src/lib/sweep.ts:21515), so an armed head stays with the full pass.
+    5. CHECKS TURNING GREEN AFTER REVIEW. A reviewed head with pending checks is not counted. It joins
+       the count when a later pass sees it green at the same head.
+    6. CADENCE, WITH NO NEW LITERAL. Run merge-ready demand at the existing derived cadence when that
+       is below the poll interval, otherwise once per idle sleep with `pollIntervalMs` as the bound.
+       Relaxing the gate alone does nothing: a final chunk ends the sleep without a pass
+       (src/lib/daemon.ts:6315), so a cadence equal to the poll interval still runs none. Decline while a
+       full pass is in flight, because its own ticker already runs light passes. If W1-T11515's rows point
+       at a better observed input, use that and name it in the PR body. Never add a constant.
+    7. RECORD IT. `daemon.idle_light_pass` and `daemon.idle_sleep.decision` carry `merge_ready`.
+    8. KEEP EVERYTHING ELSE. Exact-head re-reads, required-check and review gates, risk decisions,
+       operator holds, arm dedup, repair and spend bounds, and the per-tick full pass stay authoritative.
+       A missed event still converges through that full pass.
+    9. REPLACE THE ONE ASSERTION. In test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts, drop
+       idle from the unable-to-arm scopes and leave pause, drain and boot in place. Change nothing else.
+       Correct any comment this makes false, including `LightPassScope`'s "closes every lane but review"
+       and the W1-T5922 note on `lightPassActionable`.
+  acceptance:
+    - claim: "Idle demand made up only of merge-ready PRs runs an idle pass that arms the PR once at its exact head through the existing arm dependency, with arm_surface light"
+      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+    - claim: "A reviewed head with pending checks adds no merge-ready demand, and joins it and arms once a later pass sees its checks green at the same head"
+      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+    - claim: "On an idle pass a moved head, operator hold, risk refusal, arm-decision refusal or in-flight arm each blocks the arm with its own reason, and a standing refusal at an unchanged head leaves merge-ready demand"
+      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+    - claim: "Pause, drain and boot passes still cannot arm and each writes its own stand-down, while an interphase-review pass keeps the arming W1-T11510 gave it"
+      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+    - claim: "An idle pass opens no repair lane: conflicted and blocked-fixable heads stand down with the review-only text, an unreadable compare or refresh-selected head is held, and no update-branch, fix or requeue starts"
+      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+    - claim: "Merge-ready-only demand runs with no new timing literal, at most once per idle sleep past the derived cadence, declines beside an in-flight full pass, and leaves the per-tick full pass unchanged"
+      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+    - claim: "The idle rows name the merge-ready demand"
+      proof: "grep: merge_ready in src/lib/daemon.ts"
+  falsifier: |
+    Leave `mergeReady` out of the idle gate: the merge-ready-only case sees no pass and criterion 1 fails.
+    Relax the gate without handling the final chunk: criterion 1 still sees no pass. Widen the predicate
+    to every review-only scope: the pause, drain and boot cases of criterion 4 arm and fail. Count a head
+    with a standing hold: the criterion 3 demand assertion fails. Add a literal cadence: criterion 6 fails.
+    Skip the distance read for idle: the unreadable-compare case of criterion 5 arms and fails.
