@@ -14,14 +14,16 @@
     - W1-T4038
   files:
     - src/run-task.ts
-    - test/plan/a-relint-refuses-what-the-push-lint-refuses.test.ts
+    - test/relint-loop.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: A filed shard that lintTask passes but the pre-push changed-task lint refuses (a shared proof, a new src module with no call-site criterion, a new rule-suite basename) is handed back to the worker by the triage lane's relint loop with those violations, and the plan lane's loop does the same
-      proof: "unit test: test/plan/a-relint-refuses-what-the-push-lint-refuses.test.ts"
-    - claim: Both relint wirings in src/run-task.ts read the changed-task lint the review already runs
-      proof: "grep: lintPlanForReview(worktreePath in src/run-task.ts"
+    - claim: The plan lane redrafts a locally clean filing when the review's changed-task lint reports push-gate violations
+      proof: "unit test: PLAN LANE: a dirty filing is relinted, and the clean redraft proceeds"
+    - claim: The triage lane redrafts a locally clean filing when the review's changed-task lint reports push-gate violations
+      proof: "unit test: TRIAGE LANE: a dirty filing is relinted with the real violations, and the clean redraft proceeds"
+    - claim: Both lane relint callbacks read the review's changed-task lint for their reserved task ids
+      proof: "grep: lintPlanForReview)(worktreePath in src/run-task.ts"
   rationale: |
     OBSERVED 2026-11-03, in five operator-directed triages run in remudero-daemon:
     - Two lanes pushed a shard the pre-push hook refused, and each ended in triage.error with no PR.
@@ -38,7 +40,7 @@
   design: |
     In the triage lane's runRelintLoop wiring and the plan lane's (both in src/run-task.ts), the lint callback returns:
     - lintFiledTasks's violations, as today;
-    - plus every violation lintPlanForReview(worktreePath) reports on a filed id, mapped to RelintViolation with its check name.
+    - plus every changed-task lint finding for an id reserved by this run, mapped to a blocking RelintViolation with its check name.
     lintPlanForReview is the review's own child-process run of lint-plan:fast's selection, offline, against the merge base. When it returns ran: false, the loop keeps lintFiledTasks's verdict and ledgers the reason, so an unreadable lint never refuses a filing it could not judge.
     NOT IN SCOPE: the loop's attempt bound, its stop reasons, the worker prompt, and the pre-push hook.
   note: |
