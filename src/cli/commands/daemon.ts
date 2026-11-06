@@ -25,7 +25,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { daemonCrashSentinel, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
+import { daemonCrashSentinel, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared, withDaemonCrashLoopClear } from "../../lib/escalation-catalogue.js";
 import { resolveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
@@ -843,11 +843,14 @@ export async function daemonCommand(
   const target = resolved.target;
 
   const runId = `DAEMON-${Date.now()}`;
+  // Read before startup writes can rotate away the prior process's supervisor evidence.
+  const bootLedgerLines = readLedgerLines(ledgerPath);
   let lastReadPlaneStep: string | undefined;
   let onMainEntryStep: ((step: string) => void) | undefined;
   const log = (step: string, extra: Record<string, unknown> = {}) => {
     lastReadPlaneStep = step;
-    appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra,
+      ...(step === "daemon.boot" ? { pid: process.pid } : {}) });
     onMainEntryStep?.(step);
   };
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
@@ -1324,7 +1327,6 @@ export async function daemonCommand(
   // W1-T9087: under `auto` the mode is decided from the ledger's own evidence since the previous boot, fed every run-child
   // row this daemon writes since (`childLog`); it keeps counts. W1-T9816: that window and the settlements are one UNION read,
   // because rotation prunes them from the live file. Read here, before adoption, so the boot's adoption pass is folded once.
-  const bootLedgerLines = readLedgerLines(ledgerPath);
   const childPolicy = deps.readRunChildMode ?? (() => loadRunChildMode());
   const bootChildPolicy = readRunChildPolicy(childPolicy);
   // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
@@ -1986,7 +1988,8 @@ export async function daemonCommand(
         // The same read drains the host-escalation spool: host-side alerts the host itself could not post.
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
           ? daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness
-          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
+          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, liveEditLadderWiring(config)),
+            withDaemonCrashLoopClear(escalationSpoolDrainWiring(config), { owner: target.owner, repo: target.repo, ledgerPath, runId })),
         // W1-T10919: read main's tree directly; a config-only fetch need not reset the consumer checkout.
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state"), () => runnerConfigDigest(targetCheckoutRoot, "origin/main")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,

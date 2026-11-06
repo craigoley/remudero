@@ -6,21 +6,79 @@
 // must raise none.
 
 import assert from "node:assert/strict";
-import { appendFileSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { DEFAULT_CRASHLOOP_WINDOW, daemonBoot, detectDaemonCrashLoop, learnedCleanLifetime } from "#src/lib/daemon.js";
 import {
   daemonCrashSentinel,
+  clearDaemonCrashLoopIncident,
+  withDaemonCrashLoopClear,
   LEARNED_CRASHLOOP_SUMMARY,
   runDaemonCrashSentinel,
   type CrashSentinelCtx,
 } from "#src/lib/escalation-catalogue.js";
 import type { IssueGateway } from "#src/lib/escalate.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { drainEscalationSpool, escalationSpoolDir, spoolEscalation } from "#src/lib/host-escalation-spool.js";
 import { rotateLedger } from "#src/lib/ledger.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const MIN = 60_000;
 const HEAP_LIMIT = 7_540_310_016;
+const HEAP_FATAL = "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory";
+
+function containerProcess(t: Parameters<typeof ownedFixtureDir>[0], ledgerPath: string, runId: string,
+  bootMs: number, lifetimeMs: number, exitCode: number, heapLine = HEAP_FATAL): void {
+  const { dir: home } = ownedFixtureDir(t, "crash-exit-producer");
+  const root = join(home, "Remudero");
+  const tree = join(root, "remudero");
+  const stubs = join(home, "stubs");
+  for (const rel of [".git", "node_modules/.bin", "bin"]) mkdirSync(join(tree, rel), { recursive: true });
+  mkdirSync(stubs);
+  symlinkSync(dirname(ledgerPath), join(root, "state"), "dir");
+  writeFileSync(join(tree, "node_modules/.bin/tsx"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+  writeFileSync(join(stubs, "npm"), "#!/bin/bash\necho 'unexpected npm call' >&2\nexit 1\n", { mode: 0o755 });
+  writeFileSync(join(stubs, "git"), `#!/bin/bash
+case "$*" in
+  *'config --get user.name'*) echo fixture ;;
+  *'config --get user.email'*) echo fixture@example.invalid ;;
+  *'rev-parse --is-bare-repository'*) echo false ;;
+  *'rev-parse'*) echo 0123456789012345678901234567890123456789 ;;
+esac
+`, { mode: 0o755 });
+  writeFileSync(join(stubs, "date"), `#!/bin/bash\necho ${iso(bootMs + lifetimeMs)}\n`, { mode: 0o755 });
+  writeFileSync(join(stubs, "sleep"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+  const bootRow = { ts: iso(bootMs), run_id: runId, task_id: "DAEMON", step: "daemon.boot" };
+  const memoryRow = { ts: iso(bootMs + lifetimeMs), run_id: runId, task_id: "DAEMON", step: "daemon.memory",
+    heap: { used_bytes: HEAP_LIMIT * 0.97, limit_bytes: HEAP_LIMIT }, rss_bytes: 8_000_000_000 };
+  writeFileSync(join(tree, "bin/rmd"), `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(ledgerPath)}, JSON.stringify({...${JSON.stringify(bootRow)}, pid: process.pid}) + '\\n');
+fs.appendFileSync(${JSON.stringify(ledgerPath)}, JSON.stringify(${JSON.stringify(memoryRow)}) + '\\n');
+process.stderr.write(${JSON.stringify(heapLine + "\n")});
+process.exit(${exitCode});
+`, { mode: 0o755 });
+  const ambient = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("RMD_")));
+  const result = spawnSync("bash", [join(REPO_ROOT, "deploy/entrypoint.sh"), "./bin/rmd", "daemon"], {
+    encoding: "utf8", timeout: 30_000,
+    env: { ...ambient, HOME: home, PATH: `${stubs}:${process.env.PATH}`, RMD_RESTART_THROTTLE_S: "1",
+      GIT_CONFIG_GLOBAL: join(home, ".gitconfig"), GIT_CONFIG_SYSTEM: "/dev/null" },
+  });
+  assert.equal(result.status, exitCode, result.stderr);
+  assert.ok(result.stderr.includes(heapLine), "stderr still reaches docker logs");
+}
+
+async function drain(ledgerPath: string, issues: ReturnType<typeof recordingGateway>) {
+  return withDaemonCrashLoopClear(() => drainEscalationSpool(dirname(ledgerPath), {
+    clock: fixedClock(START), escalate: async () => { throw new Error("unexpected escalation"); },
+    close: async (url, body) => { issues.closeWithComment!(url, body); },
+    comment: async () => { throw new Error("unexpected comment"); },
+  }), { owner: "o", repo: "r", ledgerPath, runId: "DAEMON-healthy", issues })();
+}
 
 function recordingGateway(): IssueGateway & {
   created: Array<{ title: string; body: string }>;
@@ -123,7 +181,7 @@ test("W1-T11421: 29 abnormal exits 15-28 min apart raise exactly one incident, t
     assert.equal(issues.created[0].title, `[BLOCKED] DAEMON: ${LEARNED_CRASHLOOP_SUMMARY}`);
     assert.match(issues.created[0].body, /DAEMON-c0: booted .* lived \d+ min/);
     assert.match(issues.created[0].body, /heap \d+ of 7191 MiB in force \(\d+%\)/);
-    assert.match(issues.created[0].body, /exit code unknown \(not visible in-container/);
+    assert.match(issues.created[0].body, /exit code unknown \(no entrypoint wait status recorded/);
     const abnormal = lines(ledgerPath).filter((l) => l.step === "daemon.crash.abnormal_exit");
     assert.equal(abnormal.length, 29, "every abnormal exit ledgers its row, rotation notwithstanding");
     assert.equal(verdict.summary?.runLength, 29);
@@ -138,19 +196,32 @@ test("W1-T11421 criterion 2: each further abnormal exit updates the one incident
     let at = healthyHistory(ledgerPath, START, issues);
     for (let i = 0; i < 6; i++) {
       boot(ledgerPath, `DAEMON-c${i}`, at, issues);
-      writeProcess(ledgerPath, `DAEMON-c${i}`, at, 20 * MIN, false);
+      containerProcess(t, ledgerPath, `DAEMON-c${i}`, at, 20 * MIN, i % 2 === 0 ? 134 : 137, `${HEAP_FATAL} (exit ${i})`);
       at += 22 * MIN;
     }
     boot(ledgerPath, "DAEMON-next", at, issues);
     assert.equal(issues.created.length, 1);
     // The run opens at its second exit; the four after it are appended to that one issue.
     assert.equal(issues.comments.length, 4);
-    for (const c of issues.comments) {
+    assert.ok(issues.created[0].body.includes(`exit code 134`));
+    assert.ok(issues.created[0].body.includes(`exit code 137`));
+    assert.ok(issues.created[0].body.includes(`${HEAP_FATAL} (exit 0)`));
+    assert.ok(issues.created[0].body.includes(`${HEAP_FATAL} (exit 1)`));
+    for (const [index, c] of issues.comments.entries()) {
       assert.equal(c.url, "https://github.com/o/r/issues/1");
-      assert.match(c.body, /lived 20 min .*last daemon\.memory sample .*heap-limit line: none in the ledger/);
+      assert.match(c.body, /lived 20 min .*last daemon\.memory sample .*heap 6975 of 7191 MiB in force/);
+      assert.ok(c.body.includes(`exit code ${index % 2 === 0 ? 134 : 137}`));
+      assert.ok(c.body.includes(`${HEAP_FATAL} (exit ${index + 2})`));
     }
     const updated = lines(ledgerPath).filter((l) => l.step === "daemon.crashloop.updated");
     assert.deepEqual(updated.map((l) => l.prior_run_id), ["DAEMON-c2", "DAEMON-c3", "DAEMON-c4", "DAEMON-c5"]);
+    assert.deepEqual(updated.map((l) => l.run_length), [3, 4, 5, 6]);
+    assert.deepEqual(updated.map((l) => l.exit_code), [134, 137, 134, 137]);
+    assert.deepEqual(updated.map((l) => l.heap_limit_line), [2, 3, 4, 5].map((i) => `${HEAP_FATAL} (exit ${i})`));
+    assert.ok(updated.every((l) => l.lifetime_ms === 20 * MIN && (l.last_memory as { heap_limit_bytes: number }).heap_limit_bytes === HEAP_LIMIT));
+    boot(ledgerPath, "DAEMON-again", at + MIN, issues);
+    assert.equal(issues.created.length, 1);
+    assert.equal(issues.comments.length, 4, "observed exits are never appended twice");
   }
 });
 
@@ -173,6 +244,20 @@ test("W1-T11421 criterion 2: a single abnormal exit after a long lifetime only l
   }
 });
 
+test("W1-T11421 criterion 2: a killed container supplies its real status without inventing a heap failure", (t) => {
+  const ledgerPath = writeLedger([], { scope: t }).path;
+  const issues = recordingGateway();
+  const at = healthyHistory(ledgerPath, START, issues);
+  containerProcess(t, ledgerPath, "DAEMON-killed", at, 200 * MIN, 137, "Killed");
+  boot(ledgerPath, "DAEMON-next", at + 202 * MIN, issues);
+  const abnormal = lines(ledgerPath).filter((l) => l.step === "daemon.crash.abnormal_exit");
+  assert.equal(abnormal.length, 1);
+  assert.equal(abnormal[0].exit_code, 137);
+  assert.equal(abnormal[0].heap_limit_line, null);
+  assert.equal(abnormal[0].lifetime_ms, 200 * MIN);
+  assert.equal(issues.created.length, 0);
+});
+
 test("W1-T11421: a healthy, long-lived boot history raises nothing", (t) => {
   {
     const ledgerPath = writeLedger([], { scope: t }).path;
@@ -191,7 +276,7 @@ test("W1-T11421: a healthy, long-lived boot history raises nothing", (t) => {
   }
 });
 
-test("W1-T11421 criterion 3: the incident closes itself once the running process outlives the learned clean lifetime", (t) => {
+test("W1-T11421 criterion 3: the incident closes itself once the running process outlives the learned clean lifetime", async (t) => {
   {
     const ledgerPath = writeLedger([], { scope: t }).path;
     const issues = recordingGateway();
@@ -213,8 +298,16 @@ test("W1-T11421 criterion 3: the incident closes itself once the running process
     assert.equal(summary?.incident, "updated");
     const learned = learnedCleanLifetime([50, 60, 70, 80, 90, 100].map((m) => m * MIN));
     assert.equal(timers.length, 1);
-    assert.equal(timers[0].ms, learned?.p90Ms, "the clear is armed for when this process outlives the p90");
+    assert.equal(timers[0].ms, learned!.p90Ms + 1, "the clear is armed for when this process outlives the p90");
     timers[0].fn();
+    assert.equal(issues.closed.length, 0, "the close is queued through the launcher's spool");
+    assert.equal(lines(ledgerPath).filter((l) => l.step === "daemon.crashloop.cleared").length, 0);
+    assert.deepEqual(await drain(ledgerPath, issues), { delivered: 1, failed: 0 });
+    assert.ok(lines(ledgerPath).some((l) => l.step === "host_escalation.delivered" && l.kind === "close"));
+    rotate(ledgerPath, at + learned!.p90Ms + MIN);
+    assert.equal(lines(ledgerPath).some((l) => l.step === "host_escalation.delivered" && l.kind === "close"), false,
+      "the durable cleared marker survives loss of the transport receipt");
+    timers[1].fn();
     assert.equal(issues.closed.length, 1);
     assert.match(issues.closed[0].comment, /DAEMON-healthy outlived the learned p90/);
     const cleared = lines(ledgerPath).filter((l) => l.step === "daemon.crashloop.cleared");
@@ -224,7 +317,7 @@ test("W1-T11421 criterion 3: the incident closes itself once the running process
   }
 });
 
-test("W1-T11421 criterion 3: a boot after a process that outlived the p90 closes the open incident", (t) => {
+test("W1-T11421 criterion 3: another abnormal exit after a long life cannot clear the open incident", (t) => {
   {
     const ledgerPath = writeLedger([], { scope: t }).path;
     const issues = recordingGateway();
@@ -239,11 +332,88 @@ test("W1-T11421 criterion 3: a boot after a process that outlived the p90 closes
     writeProcess(ledgerPath, "DAEMON-survivor", at, 200 * MIN, false);
     at += 202 * MIN;
     const verdict = boot(ledgerPath, "DAEMON-next", at, issues);
-    assert.equal(verdict.summary?.incident, "cleared");
-    assert.equal(issues.closed.length, 1);
-    assert.match(issues.closed[0].comment, /DAEMON-survivor lived 200 min, past the learned p90/);
-    assert.equal(verdict.incident, undefined);
+    assert.equal(verdict.summary?.incident, "updated");
+    assert.equal(issues.closed.length, 0);
+    assert.equal(verdict.incident?.issueUrl, "https://github.com/o/r/issues/1");
+    assert.equal(lines(ledgerPath).filter((l) => l.step === "daemon.crashloop.cleared").length, 0);
   }
+});
+
+test("W1-T11421 criterion 3: a transient close failure remains pending across drains and boots until delivery succeeds", async (t) => {
+  const ledgerPath = writeLedger([], { scope: t }).path;
+  const issues = recordingGateway();
+  let at = healthyHistory(ledgerPath, START, issues);
+  for (let i = 0; i < 2; i++) {
+    boot(ledgerPath, `DAEMON-c${i}`, at, issues);
+    writeProcess(ledgerPath, `DAEMON-c${i}`, at, 18 * MIN, false);
+    at += 20 * MIN;
+  }
+  const timers: Array<{ fn: () => void; ms: number }> = [];
+  const ctx = { owner: "o", repo: "r", ledgerPath, runId: "DAEMON-healthy", issues };
+  daemonCrashSentinel(lines(ledgerPath), ctx, { setTimer: (fn, ms) => (timers.push({ fn, ms }), {}) })(iso(at));
+  timers[0].fn();
+  assert.equal(timers.length, 2, "a queued close remains eligible for retry");
+  const close = issues.closeWithComment!;
+  issues.closeWithComment = () => { throw new Error("github unavailable"); };
+  assert.deepEqual(await drain(ledgerPath, issues), { delivered: 0, failed: 1 });
+  assert.equal(readdirSync(escalationSpoolDir(dirname(ledgerPath))).filter((name) => name.startsWith("close-")).length, 1);
+  timers[1].fn();
+  assert.equal(timers.length, 3, "a failed close keeps the retry armed");
+  assert.equal(lines(ledgerPath).filter((l) => l.step === "daemon.crashloop.cleared").length, 0);
+  assert.ok(lines(ledgerPath).some((l) => l.step === "host_escalation.drain_failed" && l.error === "github unavailable"));
+  assert.equal(timers[2].ms, timers[0].ms, "retry cadence comes from the learned p90");
+  const restarted = boot(ledgerPath, "DAEMON-restarted", at + MIN, issues);
+  assert.equal(restarted.incident?.issueUrl, "https://github.com/o/r/issues/1", "failed close does not spend the incident");
+  issues.closeWithComment = close;
+  assert.deepEqual(await drain(ledgerPath, issues), { delivered: 1, failed: 0 });
+  timers[2].fn();
+  assert.equal(issues.closed.length, 1);
+  assert.equal(issues.closed[0].url, "https://github.com/o/r/issues/1");
+  assert.equal(lines(ledgerPath).filter((l) => l.step === "daemon.crashloop.cleared" && l.delivered === true).length, 1);
+  assert.equal(boot(ledgerPath, "DAEMON-next", at + 2 * MIN, issues).incident, undefined);
+  assert.equal(issues.created.length, 1);
+});
+
+test("W1-T11421 criterion 3: recovery withdraws a notice that has not reached an issue", (t) => {
+  const ledgerPath = writeLedger([], { scope: t }).path;
+  const stateDir = dirname(ledgerPath);
+  spoolEscalation(stateDir, {
+    class: "BLOCKED", taskId: "DAEMON", summary: LEARNED_CRASHLOOP_SUMMARY,
+    detail: "an undelivered crash-loop notice", options: [], recommendation: "fix",
+  }, { source: "daemon-crashloop", host: "fixture", clock: fixedClock(START) });
+  assert.equal(clearDaemonCrashLoopIncident({ runFirst: "DAEMON-c0", issueUrl: null }, "outlived p90", {
+    owner: "o", repo: "r", ledgerPath, runId: "DAEMON-healthy", issues: recordingGateway(),
+  }), true);
+  assert.equal(readdirSync(escalationSpoolDir(stateDir)).filter((name) => name.endsWith(".json")).length, 0);
+  assert.ok(lines(ledgerPath).some((l) => l.step === "host_escalation.withdrawn"));
+  assert.ok(lines(ledgerPath).some((l) => l.step === "daemon.crashloop.cleared" && l.delivered === false));
+});
+
+test("W1-T11421 criterion 3: an unwritable close spool records the failure and rearms instead of losing recovery", async (t) => {
+  const ledgerPath = writeLedger([], { scope: t }).path;
+  const issues = recordingGateway();
+  let at = healthyHistory(ledgerPath, START, issues);
+  for (let i = 0; i < 2; i++) {
+    boot(ledgerPath, `DAEMON-c${i}`, at, issues);
+    writeProcess(ledgerPath, `DAEMON-c${i}`, at, 18 * MIN, false);
+    at += 20 * MIN;
+  }
+  const timers: Array<() => void> = [];
+  daemonCrashSentinel(lines(ledgerPath), { owner: "o", repo: "r", ledgerPath, runId: "DAEMON-healthy", issues }, {
+    setTimer: (fn) => (timers.push(fn), {}),
+  })(iso(at));
+  const spoolPath = escalationSpoolDir(dirname(ledgerPath));
+  writeFileSync(spoolPath, "fixture blocking the close spool");
+  timers[0]();
+  assert.equal(timers.length, 2, "spool write failure keeps the timer armed");
+  assert.ok(lines(ledgerPath).some((l) => l.step === "daemon.crashloop_sentinel_failed" && String(l.error).includes("EEXIST")));
+  assert.equal(lines(ledgerPath).filter((l) => l.step === "daemon.crashloop.cleared").length, 0);
+  rmSync(spoolPath);
+  timers[1]();
+  assert.equal(timers.length, 3, "queued recovery remains pending until delivery");
+  assert.deepEqual(await drain(ledgerPath, issues), { delivered: 1, failed: 0 });
+  timers[2]();
+  assert.equal(lines(ledgerPath).filter((l) => l.step === "daemon.crashloop.cleared").length, 1);
 });
 
 test("W1-T11421 criterion 3: with no learned history the check keeps today's ten-minute window", async (t) => {

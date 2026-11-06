@@ -1,3 +1,7 @@
+import { dirname } from "node:path";
+import { hostname } from "node:os";
+import { systemClock } from "./clock.js";
+import { HOST_ESCALATION_STEPS, spoolIssueAction, withdrawSpooledEscalation } from "./host-escalation-spool.js";
 import { DISK_FAIL_BYTES, DISK_WARN_BYTES, humanBytes } from "./doctor.js";
 import {
   classifyEndedDaemonProcesses, crashLoopRunOf, DAEMON_ABNORMAL_EXIT_STEP, DAEMON_CLEAN_EXIT_OBSERVED_STEP, learnedCleanLifetime,
@@ -182,7 +186,7 @@ export const DAEMON_CRASHLOOP_UPDATED_STEP = "daemon.crashloop.updated";
 export const DAEMON_CRASHLOOP_CLEARED_STEP = "daemon.crashloop.cleared";
 /** The incident's title. It names no count, so every later exit in the run reads as the same incident. */
 export const LEARNED_CRASHLOOP_SUMMARY = "daemon crash-loop: abnormal exits shorter than its learned clean lifetime";
-const EXIT_CODE_SOURCE = "not visible in-container: the entrypoint exits the container with it";
+const EXIT_CODE_SOURCE = "no entrypoint wait status recorded";
 
 /** An open learned crash-loop incident, keyed by the first process of its run. */
 export interface CrashLoopIncident {
@@ -211,8 +215,8 @@ function lifetimeRowOf(end: DaemonProcessEnd, runId: string): Record<string, unk
   return {
     ...base,
     step: DAEMON_ABNORMAL_EXIT_STEP,
-    exit_code: null,
-    exit_code_source: EXIT_CODE_SOURCE,
+    exit_code: end.exitCode ?? null,
+    exit_code_source: end.exitCode === undefined ? EXIT_CODE_SOURCE : "entrypoint wait status; abnormal exits propagate to docker die",
     last_memory: memory === undefined ? null : {
       ts: memory.ts,
       heap_used_bytes: memory.heapUsedBytes ?? null,
@@ -267,24 +271,43 @@ function incidentState(lines: ReadonlyArray<Record<string, unknown>>): { open?: 
   return { open: open && !cleared.has(open.runFirst) ? open : undefined, escalatedRuns };
 }
 
-/** Close the incident: the issue with a citation, and a `daemon.crashloop.cleared` row either way. */
-export function clearDaemonCrashLoopIncident(incident: CrashLoopIncident, reason: string, ctx: CrashSentinelCtx): void {
-  let delivered = false;
-  if (incident.issueUrl) {
-    try {
-      const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
-      if (issues.closeWithComment) {
-        issues.closeWithComment(incident.issueUrl, `W1-T11421: ${reason}, so the crash loop has ended — closing.`);
-        delivered = true;
-      }
-    } catch (error) {
-      void error; // An undelivered close costs one operator read; the cleared row below still ends the incident.
+/** Withdraw an unseen notice or queue the close through the launcher's durable, retrying spool. */
+export function clearDaemonCrashLoopIncident(incident: CrashLoopIncident, reason: string, ctx: CrashSentinelCtx): boolean {
+  const stateDir = dirname(ctx.ledgerPath);
+  const source = "daemon-crashloop";
+  const rows = readLedgerLines(ctx.ledgerPath);
+  if (rows.some((row) => row.step === DAEMON_CRASHLOOP_CLEARED_STEP && row.run_first === incident.runFirst)) return true;
+  const delivered = incident.issueUrl !== null && rows.some((row) =>
+    row.step === HOST_ESCALATION_STEPS.delivered && row.kind === "close"
+    && row.source === source && row.issue_url === incident.issueUrl);
+  if (!delivered) {
+    const closing = `W1-T11421: ${reason}, so the crash loop has ended — closing.`;
+    const meta = { source, host: hostname(), clock: systemClock };
+    withdrawSpooledEscalation(stateDir, { taskId: "DAEMON", summary: LEARNED_CRASHLOOP_SUMMARY }, closing, meta);
+    if (incident.issueUrl) {
+      spoolIssueAction(stateDir, { kind: "close", url: incident.issueUrl, body: closing }, meta);
+      return false;
     }
   }
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_CLEARED_STEP,
     run_first: incident.runFirst, issue_url: incident.issueUrl, reason, delivered,
   });
+  return true;
+}
+
+/** Persist successful spool delivery before rotation can discard its transport receipt. */
+export function withDaemonCrashLoopClear<T>(drain: () => Promise<T>, ctx: CrashSentinelCtx): () => Promise<T> {
+  return async () => {
+    const result = await drain();
+    const rows = readLedgerLines(ctx.ledgerPath);
+    const open = incidentState(rows).open;
+    if (open?.issueUrl && rows.some((row) => row.step === HOST_ESCALATION_STEPS.delivered && row.kind === "close"
+      && row.source === "daemon-crashloop" && row.issue_url === open.issueUrl)) {
+      clearDaemonCrashLoopIncident(open, "the learned-p90 recovery close was delivered", ctx);
+    }
+    return result;
+  };
 }
 
 /**
@@ -294,8 +317,8 @@ export function clearDaemonCrashLoopIncident(incident: CrashLoopIncident, reason
  * TIERS. Every ended prior process gets one lifetime row: `daemon.crash.abnormal_exit`, with its evidence, or
  * `daemon.clean_exit.observed`. The clean lifetimes teach the instance's median and p90. A trailing run of abnormal
  * exits, each shorter than the median, raises ONE incident with a summary that names no count. Each further abnormal
- * exit is appended to that incident, never a second issue. The incident closes when a process outlives the p90: at
- * the next boot if it already has, else by the timer the caller arms. A lone abnormal exit after a long life only
+ * exit is appended to that incident, never a second issue. The incident closes when the running process outlives
+ * the p90, through the spool's retrying close path. A lone abnormal exit after a long life only
  * ledgers its row. With fewer than two clean lifetimes it returns no summary, and the ten-minute window decides.
  */
 export function runDaemonCrashSentinel(
@@ -314,12 +337,6 @@ export function runDaemonCrashSentinel(
   const state = incidentState(lines);
   let open = state.open;
   let incident: LearnedCrashLoopSummary["incident"] = open ? "open" : "none";
-  const outlived = ended.find((end) => end.lifetimeMs >= learned.p90Ms);
-  if (open && outlived) {
-    clearDaemonCrashLoopIncident(open, `${outlived.runId} lived ${minutes(outlived.lifetimeMs)} min, past the learned p90 (${learnedLine(learned)})`, ctx);
-    open = undefined;
-    incident = "cleared";
-  }
   const run = crashLoopRunOf(history, learned);
   if (open) {
     for (const row of abnormalRows) {
@@ -334,7 +351,7 @@ export function runDaemonCrashSentinel(
         void error; // The updated row below carries the evidence; an undelivered comment costs one operator read.
       }
       appendLedger(ctx.ledgerPath, {
-        run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_UPDATED_STEP,
+        ...row, step: DAEMON_CRASHLOOP_UPDATED_STEP,
         run_first: open.runFirst, prior_run_id: row.prior_run_id, run_length: run.length, issue_url: open.issueUrl, delivered,
       });
       incident = "updated";
@@ -395,14 +412,26 @@ export function daemonCrashSentinel(
     try {
       const { summary, incident } = runDaemonCrashSentinel(lines, nowIso, ctx);
       if (summary && incident) {
-        let remaining = summary.learned.p90Ms;
+        let remaining = summary.learned.p90Ms + 1;
         let handle: unknown;
         const arm = (): void => {
           const wait = Math.min(remaining, MAX_TIMER_DELAY_MS);
           remaining -= wait;
           const timer = setTimer(() => {
             if (remaining > 0) return arm();
-            clearDaemonCrashLoopIncident(incident, `${ctx.runId} outlived the learned p90 (${learnedLine(summary.learned)})`, ctx);
+            let cleared = false;
+            try {
+              cleared = clearDaemonCrashLoopIncident(incident, `${ctx.runId} outlived the learned p90 (${learnedLine(summary.learned)})`, ctx);
+            } catch (error) {
+              appendLedger(ctx.ledgerPath, {
+                run_id: ctx.runId, task_id: "DAEMON", step: "daemon.crashloop_sentinel_failed",
+                error: String((error as Error)?.message ?? error).slice(0, 240),
+              });
+            }
+            if (!cleared) {
+              remaining = summary.learned.p90Ms + 1;
+              arm();
+            }
           }, wait);
           timer.unref?.();
           handle = timer;

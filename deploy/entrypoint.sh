@@ -733,6 +733,25 @@ idle_starved_wait() {
 # crashing daemon read as a success. Backgrounded, not foreground, so the trap above can react
 # while it runs; `child_rc` starts empty every pass and only the trap sets it, so an unsignaled
 # exit leaves `rc` exactly what the plain `wait` below produces.
+# W1-T11421: preserve the supervisor's wait status and fatal stderr for the next boot's bounded ledger read.
+capture_daemon_stderr() {
+  local evidence_key="$1" line recorded=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '%s\n' "$line" >&2
+    case "$line" in
+      *"heap limit"*)
+        if [ -z "$recorded" ]; then
+          printf '{"ts":"%s","run_id":"ENTRYPOINT-%s","task_id":"DAEMON","step":"entrypoint.daemon_heap_limit","evidence_key":"%s","heap_limit_line":"%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$$" "$evidence_key" "$(json_escape "${line:0:240}")" \
+            >> "$LEDGER_FILE" || log "cannot ledger daemon heap-limit evidence"
+          recorded=1
+        fi
+        ;;
+    esac
+  done
+}
+
+daemon_attempt=0
 freshness_restarts=0
 blocked_restarts=0
 environmental_restarts=0
@@ -754,11 +773,22 @@ while :; do
       daemon_engine_observer="$CONFIG_ROOT/daemon-install"
     fi
   fi
-  "$@" &
+  daemon_attempt=$((daemon_attempt + 1))
+  evidence_key="$$-$daemon_attempt-$(date -u +%s%N)"
+  if [ "${RMD_IDLE_STARVED_SUPERVISED:-}" = "1" ]; then
+    "$@" 2> >(capture_daemon_stderr "$evidence_key") &
+  else
+    "$@" &
+  fi
   child_pid=$!
   wait "$child_pid" || rc=$?
   if [ -n "$child_rc" ]; then
     rc=$child_rc
+  fi
+  if [ "${RMD_IDLE_STARVED_SUPERVISED:-}" = "1" ]; then
+    printf '{"ts":"%s","run_id":"ENTRYPOINT-%s","task_id":"DAEMON","step":"entrypoint.daemon_exit","evidence_key":"%s","child_pid":%s,"exit_code":%s}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$$" "$evidence_key" "$child_pid" "$rc" \
+      >> "$LEDGER_FILE" || log "cannot ledger daemon exit evidence"
   fi
   child_pid=""
 
