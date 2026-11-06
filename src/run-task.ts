@@ -11414,13 +11414,18 @@ export function materializeReviewWorktreeAsync(
   return runStepsAsync(materializeReviewWorktreeSteps(config, repoDir, prNumber, headSha, deps, worktreeRemoveAsync, true));
 }
 
+// Epoch names remain compatible with the reclaimer, including overlapping same-tick calls.
+let lastReviewMaterializationEpochMs = 0;
+
 function* materializeReviewWorktreeSteps(
   config: Config, repoDir: string, prNumber: number, headSha: string,
   deps: ReviewWorktreeAsyncDeps,
   defaultRemove: (repoDir: string, worktreePath: string) => void | Promise<void>,
   protectWhileCreating: boolean,
 ): Steps<MaterializeReviewWorktreeResult> {
-  const worktreePath = join(worktreesDir(config), `review-PR${prNumber}-${Date.now()}`);
+  const epochMs = Math.max(Date.now(), lastReviewMaterializationEpochMs + 1);
+  lastReviewMaterializationEpochMs = epochMs;
+  const worktreePath = join(worktreesDir(config), `review-PR${prNumber}-${epochMs}`);
   const removeWorktree = deps.removeWorktree ?? defaultRemove;
   // An awaited add/HEAD read makes the new path visible before it can be handed to review.
   let handedOff = false;
