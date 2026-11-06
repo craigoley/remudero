@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { createNativeFieldEvidenceReader } from "#src/lib/model-canary-native-field-evidence.js";
+import { compareCanaryToFieldTrials } from "#src/lib/model-canary-field-comparison.js";
 
 test("native field reader preserves observational labels and withholds missing serving identity", () => {
   const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-field-`));
@@ -33,6 +34,19 @@ test("native field reader preserves observational labels and withholds missing s
       assert.equal(result.evidence.fieldTrials[0]!.assignedTasks, 3);
       assert.equal(result.evidence.fieldTrials[0]!.successfulTasks, 2);
       assert.equal(result.evidence.fieldTrials[0]!.identity.route, null);
+      const comparison = compareCanaryToFieldTrials({ benchmarkCases: [{
+        runId: "benchmark-run", caseId: "case-1", sourceFamilyId: "family-1", incidentRootId: "root-1",
+        split: "sealed-holdout", executionSource: "native-provider-execution",
+        identity: { provider: "claude", deployment: "deployment-a", requestedModel: "model-a", model: "model-b",
+          route: "subscription", effort: "medium", billing: "subscription",
+          treatment: { scaffold: "scaffold-a", tools: "none", context: "standard", cache: "cold" },
+          corpusDigest: "a".repeat(64), scorerDigest: "b".repeat(64), role: "worker",
+          observationWindow: { start: "2026-10-01T00:00:00.000Z", end: "2026-10-08T00:00:00.000Z" } },
+        outcomes: { "first-attempt": true, "all-repeats": true, "best-of-k": true },
+      }], fieldTrials: result.evidence.fieldTrials });
+      assert.equal(comparison.comparisons.length, 0);
+      assert.equal(comparison.unmatched.length, 1);
+      assert.equal(comparison.unmatched[0]!.reason, "serving-identity-incomplete");
     }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

@@ -53,11 +53,16 @@ function readNativeFieldPrivateJson(path: string, limit: number): unknown {
 function nativeFieldIncompleteIdentity(cohort: Record<string, unknown>): CanaryFieldComparisonIdentityV1 {
   const revisions = nativeFieldRecord(cohort.revisions) ? cohort.revisions : {};
   const text = (value: unknown): string | null => typeof value === "string" && value.length > 0 ? value : null;
+  const treatmentParts = { scaffold: text(revisions.prompt), tools: text(revisions.tool),
+    context: text(revisions.environment), cache: text(revisions.cache) };
+  const treatment: CanaryFieldComparisonIdentityV1["treatment"] = treatmentParts.scaffold !== null
+    && treatmentParts.tools !== null && treatmentParts.context !== null && treatmentParts.cache !== null
+    ? { scaffold: treatmentParts.scaffold, tools: treatmentParts.tools, context: treatmentParts.context, cache: treatmentParts.cache }
+    : null;
   return {
     provider: text(cohort.provider), deployment: null, requestedModel: text(cohort.selectedModel),
     model: text(cohort.servedModel), route: null, effort: text(cohort.selectedEffort), billing: null,
-    treatment: { scaffold: text(revisions.prompt), tools: text(revisions.tool), context: text(revisions.environment), cache: null },
-    corpusDigest: null, scorerDigest: null, role: null, observationWindow: null,
+    treatment, corpusDigest: null, scorerDigest: null, role: null, observationWindow: null,
   };
 }
 function nativeFieldObservationalRows(snapshot: Record<string, unknown>): FieldTrialComparisonCohortV1[] {
