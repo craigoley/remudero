@@ -73,15 +73,15 @@
     No new timer, constant or cadence. The row rate is at most one per idle sleep.
   acceptance:
     - claim: "Every idle sleep writes exactly one daemon.idle_sleep.decision row naming its eligible count, cadence and reason, on each of the six reason branches"
-      proof: "unit test: test/daemon/an-idle-sleep-ledgers-why-its-light-pass-ran-or-did-not.test.ts"
+      proof: "unit test: W1-T11515 criterion 1"
     - claim: "A sleep that decided to run and was woken before its first pass reads reason run with passes 0 and ended wake, not a silent absence"
-      proof: "unit test: test/daemon/an-idle-sleep-ledgers-why-its-light-pass-ran-or-did-not.test.ts"
+      proof: "unit test: W1-T11515 criterion 2"
     - claim: "With zero eligible demand the row still carries the derived cadence once a review or push was observed, and the sleep still runs no pass and sleeps the whole poll interval"
-      proof: "unit test: test/daemon/an-idle-sleep-ledgers-why-its-light-pass-ran-or-did-not.test.ts"
+      proof: "unit test: W1-T11515 criterion 3"
     - claim: "A characterization test pins a truly idle tick with a mergeable PR: no idle light pass, a no_review_demand row, and the next tick's full pass as the only route to the arm"
-      proof: "unit test: test/daemon/an-idle-sleep-ledgers-why-its-light-pass-ran-or-did-not.test.ts"
+      proof: "unit test: W1-T11515 criterion 4"
     - claim: "The decision row is written by the idle sleep itself"
-      proof: "grep: daemon.idle_sleep.decision in src/lib/daemon.ts"
+      proof: 'grep: daemon\.idle_sleep\.decision in src/lib/daemon.ts'
   note: |
     verify:auto, because every row and the characterization are assertable with an in-process daemon
     fixture. risk:high because it edits the daemon loop and sweep.ts. The change is one concern, so its

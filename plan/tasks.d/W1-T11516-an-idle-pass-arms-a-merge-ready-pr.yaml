@@ -87,17 +87,17 @@
        and the W1-T5922 note on `lightPassActionable`.
   acceptance:
     - claim: "Idle demand made up only of merge-ready PRs runs an idle pass that arms the PR once at its exact head through the existing arm dependency, with arm_surface light"
-      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+      proof: "unit test: W1-T11516 criterion 1"
     - claim: "A reviewed head with pending checks adds no merge-ready demand, and joins it and arms once a later pass sees its checks green at the same head"
-      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+      proof: "unit test: W1-T11516 criterion 2"
     - claim: "On an idle pass a moved head, operator hold, risk refusal, arm-decision refusal or in-flight arm each blocks the arm with its own reason, and a standing refusal at an unchanged head leaves merge-ready demand"
-      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+      proof: "unit test: W1-T11516 criterion 3"
     - claim: "Pause, drain and boot passes still cannot arm and each writes its own stand-down, while an interphase-review pass keeps the arming W1-T11510 gave it"
-      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+      proof: "unit test: W1-T11516 criterion 4"
     - claim: "An idle pass opens no repair lane: conflicted and blocked-fixable heads stand down with the review-only text, an unreadable compare or refresh-selected head is held, and no update-branch, fix or requeue starts"
-      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+      proof: "unit test: W1-T11516 criterion 5"
     - claim: "Merge-ready-only demand runs with no new timing literal, at most once per idle sleep past the derived cadence, declines beside an in-flight full pass, and leaves the per-tick full pass unchanged"
-      proof: "unit test: test/daemon/an-idle-pass-arms-a-merge-ready-pr.test.ts"
+      proof: "unit test: W1-T11516 criterion 6"
     - claim: "The idle rows name the merge-ready demand"
       proof: "grep: merge_ready in src/lib/daemon.ts"
   falsifier: |
