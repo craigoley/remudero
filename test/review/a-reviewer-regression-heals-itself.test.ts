@@ -334,9 +334,11 @@ test("W1-T10269: the healed reviewer follows origin/main and escalates a conflic
   assert.deepEqual(conflict.paths, ["src/lib/required-semantic-review.ts"]);
   // Through the route: it escalates the conflict once and reviews on today's path — never an old head.
   const logs: string[] = [];
+  const logRows: Array<{ step: string; extra: Record<string, unknown> }> = [];
   let normal = 0;
   const before = h.calls.issues.length;
-  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath, (step) => logs.push(step),
+  const route = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath,
+    (step, extra = {}) => { logs.push(step); logRows.push({ step, extra }); },
     freshTree(f, async () => { throw new Error("no healed tree exists to spawn"); }), h.issues, h.lane);
   assert.equal(await route("207", [], {}, async () => { normal++; return 0; }), 0);
   assert.equal(await route("208", [], {}, async () => { normal++; return 0; }), 0);
@@ -346,6 +348,9 @@ test("W1-T10269: the healed reviewer follows origin/main and escalates a conflic
   assert.match(filed[0]!.body, /does not apply/);
   assert.match(filed[0]!.body, /src\/lib\/required-semantic-review\.ts/);
   assert.ok(logs.includes("reviewer.healed_tree_unavailable"));
+  const rememberedConflict = logRows.filter((row) => row.step === "reviewer.healed_tree_unavailable").at(-1)!;
+  assert.equal(rememberedConflict.extra.remembered, true, "the route exposes the same-main conflict memo");
+  assert.deepEqual(rememberedConflict.extra.conflict_paths, ["src/lib/required-semantic-review.ts"]);
   // When main itself reverts the offending merge, the healed patch is empty: the healed tree IS origin/main.
   f.work.git("revert", "--no-edit", m4);
   f.work.git("revert", "--no-edit", f.m2);
