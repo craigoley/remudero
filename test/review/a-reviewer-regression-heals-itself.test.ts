@@ -393,7 +393,10 @@ test("W1-T10269: the incident opens one revert PR of the offending merge", async
 
 test("W1-T10269: the incident closes when the current reviewer returns to baseline", async (t) => {
   const { f, h } = await openTenTwenty(t);
-  const fixed = fake("fixed-main");
+  const fixed = pushMain(f, {
+    "src/lib/required-semantic-review.ts": "export const refusal = () => undefined;\n",
+  }, "fix(review): restore healthy semantic behavior (#103)");
+  f.daemon.git("fetch", "origin");
   // A few clean reviews at today's code are not yet evidence enough: the shadow keeps measuring.
   h.queue.push(posted(fixed, 300), posted(fixed, 301), posted(fixed, 302));
   const early = await h.evaluate(fixed);
@@ -414,13 +417,19 @@ test("W1-T10269: the incident closes when the current reviewer returns to baseli
   const state = health.loadReviewerHealthState(h.statePath);
   assert.equal(state.incident, null);
   assert.equal(state.closed.length, 1);
-  // The same failure mode recurring reopens THAT incident, with its blame, instead of blaming a later merge.
-  const later = fake("later-main");
+  // The failure signature recurs after a healthy fix, so attribution must stay inside that new range.
+  const later = pushMain(f, {
+    "src/lib/required-semantic-review.ts": 'export const refusal = () => "required-semantic-incomplete-verdicts";\n',
+  }, "fix(review): regress required semantic behavior (#104)");
+  f.daemon.git("fetch", "origin");
   h.queue.push(refused(later, 400), refused(later, 401));
   await h.evaluate(later);
   const reopened = health.loadReviewerHealthState(h.statePath).incident!;
   assert.equal(reopened.reopenedFrom, "reviewer-regression-" + f.m2.slice(0, 12));
-  assert.equal(reopened.offending?.sha, f.m2);
+  assert.equal(reopened.lastHealthySha, fixed);
+  assert.equal(reopened.offending?.sha, later);
+  assert.equal(reopened.offending?.pr, 104);
+  assert.notEqual(reopened.offending?.sha, f.m2);
   assert.equal(h.steps("reviewer.regression_opened").at(-1)!.extra.reopened_from, reopened.reopenedFrom);
 });
 
