@@ -696,10 +696,9 @@ test("W1-T1265: the egress command carries its own timeout and writes a marker p
   assert.ok(cmd.includes(EGRESS_BLOCKED_MARKER) && cmd.includes(EGRESS_ALLOWED_MARKER));
 });
 
-test("W1-T1265: a reported egress attempt derives the denial from the transcript rather than from silence", async () => {
+test("W1-T1265: a reported egress attempt derives denial from the blocked curl outcome rather than silence", async () => {
   // Drives probeContainment's OWN egress wiring (not just the pure verdict): an executor
-  // that REPORTS an egress attempt must have `egressDenialSeen` computed from the
-  // transcript. The `undefined` arm is covered by the unobserved case above.
+  // must supply the blocked request's own failed curl outcome (W1-T11437).
   const res = await probeContainment({
     settingsFile: settingsFile(ENABLED),
     token: "tok1265",
@@ -709,6 +708,7 @@ test("W1-T1265: a reported egress attempt derives the denial from the transcript
       insideWriteCreated: true,
       egressBlockedReached: false,
       egressAllowedReached: true,
+      egressBlockedCurlOutcome: { exitCode: 7, stderr: "curl: (7) Connection refused" },
     }),
   });
   // The filesystem verdict is unchanged by the egress arm — it still governs the throw.

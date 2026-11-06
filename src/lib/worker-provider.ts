@@ -44,7 +44,7 @@ import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
 import type { SdkUsageCase, UsageSnapshot, WeeklyWindow } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
-import { validateWorkerSettingsFile } from "./settings.js";
+import { ALLOWED_NETWORK_DOMAINS, validateWorkerSettingsFile } from "./settings.js";
 import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertInstanceRegistryRuntimeCurrent, assertInstanceRegistryWorkerEnvironment, runtimeInstanceRegistryPrivateFile, InstanceRegistryRuntimeError } from "./instance-registry-selection.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
@@ -3052,6 +3052,36 @@ interface PrivateRegistryCodexProfile {
   overrides: readonly string[];
 }
 
+/**
+ * W1-T11437: the TOML inline table a Codex permission profile's `network.domains` takes, built from the
+ * SAME list the Claude sandbox's `allowedDomains` is pinned to (settings.ts `ALLOWED_NETWORK_DOMAINS`), so
+ * both providers egress through one allowlist. Codex's `network_proxy` refuses every unlisted host with a
+ * 403 CONNECT. Legacy `sandbox_workspace_write.network_access` cannot carry an allowlist at all: it is
+ * either open egress or, with the proxy on, no egress.
+ */
+export function codexNetworkDomains(domains: readonly string[] = ALLOWED_NETWORK_DOMAINS): string {
+  return `{${domains.map((domain) => `${JSON.stringify(domain)}="allow"`).join(",")}}`;
+}
+
+/**
+ * W1-T11437: a legacy Codex writer's sandbox. `:workspace` keeps the worktree and tmp writable and the
+ * worktree's git config protected, exactly as `--sandbox workspace-write` did (measured in-container),
+ * while its egress goes through Codex's allowlist proxy instead of `network_access=true`. The host test
+ * slot and the native cache keep their `--add-dir` and are also granted here, so a profile never narrows them.
+ */
+function codexWriterProfileArgs(nativeCacheRoot: string | undefined, env: NodeJS.ProcessEnv = process.env): string[] {
+  const slot = env[TEST_SLOT_DIR_ENV] && !env.NODE_TEST_CONTEXT ? env[TEST_SLOT_DIR_ENV] : undefined;
+  const writable = [slot, nativeCacheRoot].filter((dir): dir is string => typeof dir === "string" && dir !== "");
+  return [
+    "--enable", "network_proxy",
+    "-c", 'default_permissions="rmd_writer"',
+    "-c", 'permissions.rmd_writer.extends=":workspace"',
+    ...(writable.length === 0 ? [] : ["-c", `permissions.rmd_writer.filesystem={${writable.map((dir) => `${JSON.stringify(dir)}="write"`).join(",")}}`]),
+    "-c", "permissions.rmd_writer.network.enabled=true",
+    "-c", `permissions.rmd_writer.network.domains=${codexNetworkDomains()}`,
+  ];
+}
+
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">, privateProfile?: PrivateRegistryCodexProfile, nativeCacheRoot?: string): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
@@ -3084,7 +3114,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     ...codexPreToolUseProfile(args.settingsFile),
     ...disposableReviewProfile,
     ...(privateProfile === undefined ? [] : ["--profile", privateProfile.name, "--strict-config", ...privateProfile.overrides,
-      ...(disposableReview ? ["--enable", "network_proxy"] : [])]),
+      ...(disposableReview || !readOnly ? ["--enable", "network_proxy"] : [])]),
     // W1-T2754: Codex refuses to start when its `-C` cwd is neither a git repository nor a
     // configured trusted directory — "Not inside a trusted directory and --skip-git-repo-check
     // was not specified." — and it does so by EXITING 0 WITH NO OUTPUT, so the caller sees an
@@ -3128,8 +3158,8 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   return [
     "exec",
     ...shared,
-    ...(disposableReview || privateProfile !== undefined ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
-    ...(readOnly || disposableReview || privateProfile !== undefined ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
+    ...(disposableReview || privateProfile !== undefined || !readOnly ? [] : ["--sandbox", "read-only"]),
+    ...(readOnly || disposableReview || privateProfile !== undefined ? [] : codexWriterProfileArgs(nativeCacheRoot)),
     // Writers only: a reader or review runs no typecheck that needs the host slot.
     ...(readOnly || disposableReview ? [] : codexTestSlotArgs()),
     ...(nativeCacheRoot === undefined ? [] : ["--add-dir", nativeCacheRoot]),
@@ -3224,12 +3254,15 @@ async function withPrivateRegistryCodexProfile<T>(
       ...[...roots].filter(root => root !== cwd && root !== slotRoot).map(root => [root, "read"] as [string, string]),
       ...executableReads.filter(root => !roots.has(root)).map(root => [root, "read"] as [string, string])]);
     text = `default_permissions=${JSON.stringify(name)}\n[permissions.${name}]\nextends="${readOnly ? ":read-only" : ":workspace"}"\n`
-      + `[permissions.${name}.network]\nenabled=${review || !readOnly}\n[permissions.${name}.filesystem]\n`
+      + `[permissions.${name}.network]\nenabled=${review || !readOnly}\n`
+      + (review || !readOnly ? `domains=${codexNetworkDomains()}\n` : "")
+      + `[permissions.${name}.filesystem]\n`
       + [...filesystem].map(([target, access]) => `${JSON.stringify(target)}=${JSON.stringify(access)}`).join("\n") + "\n";
     const inline = [...filesystem].map(([target, access]) => `${JSON.stringify(target)}=${JSON.stringify(access)}`).join(",");
     profile = { name, overrides: ["-c", `default_permissions=${JSON.stringify(name)}`,
       "-c", `permissions.${name}.extends=${JSON.stringify(readOnly ? ":read-only" : ":workspace")}`,
-      "-c", `permissions.${name}.filesystem={${inline}}`, "-c", `permissions.${name}.network.enabled=${review || !readOnly}`] };
+      "-c", `permissions.${name}.filesystem={${inline}}`, "-c", `permissions.${name}.network.enabled=${review || !readOnly}`,
+      ...(review || !readOnly ? ["-c", `permissions.${name}.network.domains=${codexNetworkDomains()}`] : [])] };
     fd = openSync(path, "wx+", 0o600);
     writeFileSync(fd, text);
     identity = fstatSync(fd);
