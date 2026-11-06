@@ -54,7 +54,7 @@
     3. Neither caller adds a cache or a constant. The manifest is the whole bound.
     W1-T10767 (queued) edits ledgerClassTier's neighbourhood for snoozes. Keep this change to the read.
   acceptance:
-    - claim: "rowsWithArchivedVerifyHumanVerdicts and ledgerClassTier open only the archives whose manifest holds their step, and return the same rows as an unbounded read"
+    - claim: "rowsWithArchivedVerifyHumanVerdicts and ledgerClassTier open only archives whose manifest holds their step, plus torn archives when the caller requests onTorn evidence, and return the same rows as an unbounded read"
       proof: "grep: W1-T11455 criterion 1 in test/ledger/a-step-only-ledger-read-opens-only-the-archives-holding-its-step.test.ts"
     - claim: "ledgerClassTier still refuses when a torn row names its step, including one in an otherwise-unmatched archive discovered through the key manifest's torn evidence; an unreadable archive that may hold its step also refuses, and an archive with no manifest is still read"
       proof: "grep: W1-T11455 criterion 2 in test/ledger/a-step-only-ledger-read-opens-only-the-archives-holding-its-step.test.ts"
