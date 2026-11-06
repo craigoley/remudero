@@ -67,19 +67,19 @@
     schedule, routing promotion or duplicate full Linux qualification.
   acceptance:
     - claim: Paired uncertainty uses independent source families rather than treating repeats as new cases
-      proof: 'unit test: cluster paired analysis keeps repeated attempts within independent task families'
+      proof: 'unit test: test/routing/model-canary-cluster-analysis.test.ts'
     - claim: Incomplete or insufficient evidence withholds confirmatory uncertainty
-      proof: 'unit test: cluster paired analysis withholds uncertainty for incomplete or undersized evidence'
+      proof: 'grep: W1-T11119 criterion 2: cluster paired analysis withholds uncertainty for incomplete or undersized evidence in test/routing/model-canary-cluster-analysis.test.ts'
     - claim: Synthetic outcomes never increase observed field-trial completion counts
-      proof: 'unit test: private field comparison separates benchmark and field trial denominators'
+      proof: 'unit test: test/routing/model-canary-field-comparison.test.ts'
     - claim: Serving or scaffold mismatches prevent model-attribution claims
-      proof: 'unit test: field comparison withholds attribution for mismatched serving identity or scaffold'
+      proof: 'grep: W1-T11119 criterion 4: field comparison withholds attribution for mismatched serving identity or scaffold in test/routing/model-canary-field-comparison.test.ts'
     - claim: Improvement drafts remain unmeasured and have no promotion or policy side effects
-      proof: 'unit test: experiment proposal export stays unmeasured and writes no promotion event'
+      proof: 'unit test: test/routing/model-canary-proposal-export.test.ts'
     - claim: Field-trial experiment designs and assignment provenance are not conflated
-      proof: 'unit test: field comparison preserves observational and randomized design provenance'
+      proof: 'grep: W1-T11119 criterion 6: field comparison preserves observational and randomized design provenance in test/routing/model-canary-field-comparison.test.ts'
     - claim: Improvement export invokes no ledger task schedule routing or activation writers
-      proof: 'unit test: improvement proposal export is pure and invokes no writer or activation effects'
+      proof: 'grep: W1-T11119 criterion 7: improvement proposal export is pure and invokes no writer or activation effects in test/routing/model-canary-proposal-export.test.ts'
     - claim: Native offline analysis actually consumes clustered paired evidence
       proof: 'grep: analyzeClusterPairedCanaries( in src/lib/model-canary-command.ts'
     - claim: Native offline comparison actually consumes separate field-trial evidence

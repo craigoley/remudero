@@ -23,7 +23,7 @@ function field(overrides: Partial<FieldTrialComparisonCohortV1> = {}): FieldTria
     assignmentAudit: null, randomizationUnit: null, analysis: null, assignmentProbabilities: null, ...overrides };
 }
 
-test("private field comparison separates benchmark and field trial denominators", () => {
+test("W1-T11119 criterion 3: private field comparison separates benchmark and field trial denominators", () => {
   const result = compareCanaryToFieldTrials({ benchmarkCases: [
     benchmark("run-1", "case-1"), benchmark("run-2", "case-1", { outcomes: {
       "first-attempt": false, "all-repeats": true, "best-of-k": true,
@@ -47,7 +47,7 @@ test("private field comparison separates benchmark and field trial denominators"
   assert.equal(comparison.fieldTrial.inference, "descriptive-only");
 });
 
-test("field comparison withholds attribution for mismatched serving identity or scaffold", () => {
+test("W1-T11119 criterion 4: field comparison withholds attribution for mismatched serving identity or scaffold", () => {
   const result = compareCanaryToFieldTrials({ benchmarkCases: [benchmark("run-1", "case-1")],
     fieldTrials: [field({ identity: { ...identity, treatment: { scaffold: "other-scaffold", tools: "none", context: "standard", cache: "cold" } } })] });
   assert.equal(result.comparisons.length, 0);
@@ -63,7 +63,7 @@ test("field comparison identifies incomplete serving identity when its window is
   assert.equal(result.unmatched[0]!.reason, "serving-identity-incomplete");
 });
 
-test("field comparison preserves observational and randomized design provenance", () => {
+test("W1-T11119 criterion 6: field comparison preserves observational and randomized design provenance", () => {
   const randomized = field({ id: "registered-epoch-1", design: "registered-randomized", assignmentAudit: "pass",
     randomizationUnit: "task", analysis: "intention-to-treat",
     assignmentProbabilities: { "model-a": 0.5, "model-b": 0.5 } });

@@ -9,7 +9,7 @@ function evidence(i: number, overrides: Partial<ImprovementEvidenceRowV1> = {}):
     executionSource: "native-provider-execution", split: "development", ...overrides };
 }
 
-test("experiment proposal export stays unmeasured and writes no promotion event", () => {
+test("W1-T11119 criterion 5: experiment proposal export stays unmeasured and writes no promotion event", () => {
   const result = buildExperimentProposal({ evidence: [evidence(1), evidence(2), evidence(3)] });
   assert.equal(result.state, "available");
   assert.equal(result.proposals.length, 1);
@@ -53,7 +53,7 @@ test("experiment proposal export keeps failure classes separate", () => {
 });
 
 
-test("improvement proposal export is pure and invokes no writer or activation effects", () => {
+test("W1-T11119 criterion 7: improvement proposal export is pure and invokes no writer or activation effects", () => {
   const result = buildExperimentProposal({ evidence: [evidence(1), evidence(2), evidence(3)] });
   assert.equal(result.proposals[0]!.outcome, "unmeasured");
   assert.equal(result.proposals[0]!.activation, "not-authorized");

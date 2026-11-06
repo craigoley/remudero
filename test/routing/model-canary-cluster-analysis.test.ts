@@ -19,7 +19,7 @@ function pair(index: number, overrides: Partial<ClusteredCanaryPairV1> = {}): Cl
 const run = (pairs: readonly ClusteredCanaryPairV1[], minIndependentClusters = 10) =>
   analyzeClusterPairedCanaries({ pairs, design, seed: "predeclared-seed-v1", resamples: 1000, minIndependentClusters });
 
-test("cluster paired analysis keeps repeated attempts within independent task families", () => {
+test("W1-T11119 criterion 1: cluster paired analysis keeps repeated attempts within independent task families", () => {
   const pairs = Array.from({ length: 10 }, (_, index) => pair(index));
   pairs.push(pair(0, { pairId: "pair-0-repeat", rightValue: 100 }));
   const result = run(pairs).comparisons[0]!;
@@ -40,7 +40,7 @@ test("cluster paired analysis joins families that share incident roots before re
   assert.equal(result.state, "estimated");
 });
 
-test("cluster paired analysis withholds uncertainty for incomplete or undersized evidence", () => {
+test("W1-T11119 criterion 2: cluster paired analysis withholds uncertainty for incomplete or undersized evidence", () => {
   const undersized = run(Array.from({ length: 9 }, (_, index) => pair(index))).comparisons[0]!;
   assert.equal(undersized.state, "withheld");
   assert.equal(undersized.reason, "insufficient-independent-clusters");
