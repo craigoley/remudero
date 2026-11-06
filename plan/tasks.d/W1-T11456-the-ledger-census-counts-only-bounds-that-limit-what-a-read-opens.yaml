@@ -1,0 +1,43 @@
+- id: W1-T11456
+  title: The whole-ledger census counts only options that limit which archives a read OPENS; a step, pattern or keep filter alone is flagged
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium
+  band_meaning: span
+  depends_on: [W1-T11424, W1-T11455]
+  origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
+  plan_refs: [W1-T11423, W1-T11424, W1-T11455]
+  files: [test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T11423's census (test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts)
+    treats any of its BOUNDS options as a bound: step, pattern, keep, since, sinceTs, maxRotations,
+    rotationWindowMs, afterRotation, throughRotation, and so on. step, pattern and keep only filter
+    rows AFTER every archive has been inflated and scanned, so a read carrying one of them alone
+    still decompresses the whole ledger. On 2026-11-06 exactly such a read, a step-only
+    readLedgerUnionRecordsSync in rowsWithArchivedVerifyHumanVerdicts, held core's event loop for
+    about 122 s of a 206 s hold. The census passed it, which is the failure it exists to catch.
+  design: |
+    Split the census's option list in two. OPEN bounds limit which archives are read: since,
+    sinceTs, maxRotations, rotationWindowMs, afterRotation, throughRotation, and a key-manifest
+    query through ledgerRowsFor. KEEP filters only drop rows after the read: step, pattern, keep.
+    A call counts as bounded only when it carries an open bound. A call with only keep filters is
+    unbounded, so it must move to ledgerRowsFor or carry a reasoned allowlist entry. Each reader
+    newly flagged by the split is either migrated in this PR, when it is a one-line ledgerRowsFor
+    swap like W1-T11455's, or gets an allowlist reason naming a filed follow-up task. The PR body
+    lists every newly flagged reader.
+  acceptance:
+    - claim: "A union read carrying only a step, pattern or keep filter is counted as unbounded by the census, and one carrying an open bound is counted as bounded"
+      proof: "grep: W1-T11456 criterion 1 in test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts"
+  note: |
+    Add the criterion test beside the census's existing self-tests, in the same file: a synthetic
+    source with readLedgerUnionRecords(dir, { step: ["x"] }) must be reported as an offender, and
+    one with { since: "...", step: ["x"] } must not. The builder names the test with the marker
+    "W1-T11456 criterion 1".
+  falsifier: |
+    Keep step in the bound list. Criterion 1's step-only synthetic call must then be counted as bounded,
+    and the test must fail.
