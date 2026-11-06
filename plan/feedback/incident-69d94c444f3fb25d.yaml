@@ -19,10 +19,10 @@ raw: >-
     (none found)
 attachments: []
 origin: incident#69d94c444f3fb25d89c220f135489fa44e8fc265a13b84a460b68aa67b864fc2
-status: rejected
+status: new
 reply_to: null
 proposal_pr: null
-summary: null
+summary: Pending recon of the recorded main-plan-guard gap; closure is unverified.
 expansion:
   claim: The recorded main-plan-guard.yml gap may still need a repair.
   evidence: "The incident records one reconcile.ci event at
