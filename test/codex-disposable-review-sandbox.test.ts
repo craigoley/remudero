@@ -92,8 +92,9 @@ test("W1-T2946: disposable reviews get private test writes without widening othe
     assert.equal(specialist.options.args.some((arg) => arg.includes(realpathSync(dependencyRoot))), false);
 
     const implementation = await captureCodexSpawn(root, ["Read", "Write", "Edit", "Bash"], undefined, [dependencyRoot]);
-    assert.equal(implementation.options.args[implementation.options.args.indexOf("--sandbox") + 1], "workspace-write");
-    assert.equal(implementation.options.args.includes("sandbox_workspace_write.network_access=true"), true);
+    // W1-T11437 (operator 2026-11-05): writers run the allowlist-proxied :workspace profile, not --sandbox workspace-write.
+    assert.ok(implementation.options.args.includes('permissions.rmd_writer.extends=":workspace"'));
+    assert.equal(implementation.options.args.includes("sandbox_workspace_write.network_access=true"), false);
     const nativeCache = join(realpathSync(homedir()), ".cache", "remudero", "swc-native");
     assert.deepEqual(
       implementation.options.args.flatMap((arg, index, all) => (arg === "--add-dir" ? [all[index + 1]] : [])),

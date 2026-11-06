@@ -129,7 +129,7 @@ test("the two triggered censuses have executable scripts, parity entries and CI 
     assert.ok(member, `${testFile} has a trigger row`);
     assert.equal(member.script, script);
     assert.deepEqual(precheck.PRECHECK_PARITY[testFile], { run: script });
-    assert.equal(scripts[script], `node --test --import tsx --import ./test/setup/tmp-hygiene.ts ${testFile}`);
+    assert.equal(scripts[script], `node scripts/native-test-run.mjs --test --test-reporter=tap --import tsx --import ./test/setup/tmp-hygiene.ts ${testFile}`);
     assert.ok(precheck.ciCensusPopulation(listRuleSuites(fileURLToPath(new URL("..", import.meta.url)))).includes(testFile));
     assert.ok(!ciOnly.includes(testFile));
   }

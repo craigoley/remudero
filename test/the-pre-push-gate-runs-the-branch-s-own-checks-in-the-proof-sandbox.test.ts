@@ -20,17 +20,18 @@ function put(path: string, text: string): void {
   writeFileSync(path, text);
 }
 
-function fixture(mode = "available", failure = "") {
+function fixture(mode = "available", failure = "", requireDeadlines = false) {
   const root = makeTempDir("t6138");
   const harness = join(root, "harness");
   const log = join(root, "runner.jsonl");
+  const budgetLog = join(root, "budgets.jsonl");
   const runner = join(root, "runner.mjs");
   put(runner, `#!${process.execPath}\nimport { appendFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 const argv = process.argv.slice(2);
 appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv, env: process.env }) + '\\n');
 const at = argv.indexOf('--');
-const r = spawnSync(argv[at + 1], argv.slice(at + 2), { cwd: process.cwd(), env: process.env, encoding: 'utf8' });
+${requireDeadlines ? "if (argv.slice(at + 2).includes('--test') && !argv.slice(at + 2).some(arg => /^--test-timeout=[1-9][0-9]*$/.test(arg))) { console.error('missing sandbox census per-test deadline'); process.exit(3); }\n" : ""}const r = spawnSync(argv[at + 1], argv.slice(at + 2), { cwd: process.cwd(), env: process.env, encoding: 'utf8' });
 process.stdout.write(r.stdout || ''); process.stderr.write(r.stderr || ''); process.exit(r.status ?? 2);
 `);
   chmodSync(runner, 0o755);
@@ -48,7 +49,13 @@ process.stdout.write(r.stdout || ''); process.stderr.write(r.stderr || ''); proc
 export const createPrePushSandboxRunner = (cwd) => p.createPrePushSandboxRunner(cwd, {
   probe: () => (${mode === "unavailable" ? "{ mode: 'unsandboxed', reason: 'fixture: user namespaces unavailable' }" : `{ mode: 'bwrap', binary: ${JSON.stringify(runner)} }`})
 });\n`);
-  put(join(harness, "scripts/census-precheck.mjs"), `export { main, runCensusSuitesViaChild } from ${url("scripts/census-precheck.mjs")};
+  put(join(harness, "scripts/census-precheck.mjs"), `${requireDeadlines ? `import { main, runCensusSuitesViaChild as measure } from ${url("scripts/census-precheck.mjs")};
+import { appendFileSync } from 'node:fs';
+export { main };
+export const runCensusSuitesViaChild = (options) => measure({ ...options, run: (file, args, config) => {
+  appendFileSync(${JSON.stringify(budgetLog)}, JSON.stringify(config.timeout) + '\\n');
+  return options.run(file, args, config);
+}});` : `export { main, runCensusSuitesViaChild } from ${url("scripts/census-precheck.mjs")};`}
 export const listAdmittedCensusMembers = () => [{ testFile: 'test/fixture-census.test.ts', script: 'census:fixture', walks: ['src/'] }];\n`);
   for (const name of ["ci-control-plane-precheck", "lint-plan-precheck"]) {
     put(join(harness, `scripts/${name}.mjs`), `export * from ${url(`scripts/${name}.mjs`)};\n`);
@@ -91,7 +98,8 @@ test('fixture census', () => assert.equal(readFileSync('census-input.txt', 'utf8
   git("add", "-A");
   git("commit", "-q", "-m", "feat: fixture inputs");
   const runs = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { argv: string[]; env: Record<string, string> }) : [];
-  return { root, harness, wt, remote, branch, runner, runs, head: git("rev-parse", "HEAD") };
+  const budgets = () => existsSync(budgetLog) ? readFileSync(budgetLog, "utf8").trim().split("\n").map(Number) : [];
+  return { root, harness, wt, remote, branch, runner, runs, budgets, head: git("rev-parse", "HEAD") };
 }
 
 async function runPush(f: ReturnType<typeof fixture>, asyncPush = false) {
@@ -118,6 +126,20 @@ async function runPush(f: ReturnType<typeof fixture>, asyncPush = false) {
 describe("test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts", () => {
   // W1-T11285 retired the managed-worktree refusal of reader-calibrated suites; test/github/a-managed-worktree-push-
   // measures-its-reader-suites.test.ts pins that they are now measured in the sandbox.
+  test("sandboxed census children inherit their admitted per-test deadline before execution", async () => {
+    const f = fixture("available", "", true);
+    const result = await runPush(f);
+    assert.equal(result.error, undefined, result.stderr);
+    const children = f.runs().filter(r => r.argv.includes("--test"));
+    const budgets = f.budgets();
+    assert.ok(children.length > 0, "positive control: real census children crossed the sandbox runner");
+    assert.equal(children.length, budgets.length);
+    for (const [i, child] of children.entries()) {
+      assert.ok(Number.isFinite(budgets[i]) && budgets[i] > 0);
+      assert.ok(child.argv.includes(`--test-timeout=${budgets[i]}`), child.argv.join(" "));
+    }
+  });
+
   test("the host gate runs all three branch checks through the runner with readonly binds and a credential-free throwaway HOME", async () => {
     const f = fixture();
     const result = await runPush(f);

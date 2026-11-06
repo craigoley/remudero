@@ -11,7 +11,10 @@
   origin: "2026-11-05/06 deploy.restart_refused incident and open alert #16958: an unselected deploy supervisor cannot replace selected core"
   plan_refs: [W1-T1069, W1-T11431, W1-T3596, W1-T10573]
   files: [deploy/recycle-container.sh, src/lib/deployer.ts, test/recycle-container.test.ts, test/deployer.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=40c37f860c011c75
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
   attempts: 0
   rationale: |
     At c5119b5428, recycle-container.sh declares the selection runtime variables only when its
