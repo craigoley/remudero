@@ -178,6 +178,59 @@ test("W1-T11421 criterion 2: each further abnormal exit updates the one incident
   }
 });
 
+test("W1-T11421 retries issue creation after a transient refusal", (t) => {
+  const ledgerPath = writeLedger([], { scope: t }).path;
+  const issues = recordingGateway();
+  const create = issues.create;
+  let refusals = 1;
+  issues.create = (title, body, labels) => {
+    if (refusals-- > 0) throw new Error("temporary issue transport refusal");
+    return create(title, body, labels);
+  };
+  let at = healthyHistory(ledgerPath, START, issues);
+  for (let i = 0; i < 2; i++) {
+    boot(ledgerPath, `DAEMON-retry-create${i}`, at, issues);
+    writeProcess(ledgerPath, `DAEMON-retry-create${i}`, at, 20 * MIN, false);
+    at += 22 * MIN;
+  }
+  const refused = boot(ledgerPath, "DAEMON-create-refused", at, issues);
+  assert.equal(refused.incident?.issueUrl, null);
+  assert.equal(issues.created.length, 0);
+  at += MIN;
+  const recovered = boot(ledgerPath, "DAEMON-create-retry", at, issues);
+  assert.equal(issues.created.length, 1);
+  assert.match(recovered.incident?.issueUrl ?? "", /issues\/1$/);
+  assert.equal(lines(ledgerPath).filter((r) => r.step === "daemon.crashloop.escalated" && r.issue_url).length, 1);
+});
+
+test("W1-T11421 retries an undelivered incident comment on a later boot", (t) => {
+  const ledgerPath = writeLedger([], { scope: t }).path;
+  const issues = recordingGateway();
+  let at = healthyHistory(ledgerPath, START, issues);
+  for (let i = 0; i < 2; i++) {
+    boot(ledgerPath, `DAEMON-retry-comment${i}`, at, issues);
+    writeProcess(ledgerPath, `DAEMON-retry-comment${i}`, at, 20 * MIN, false);
+    at += 22 * MIN;
+  }
+  boot(ledgerPath, "DAEMON-comment-open", at, issues);
+  const comment = issues.comment!;
+  let refusals = 1;
+  issues.comment = (url, body) => {
+    if (refusals-- > 0) throw new Error("temporary comment transport refusal");
+    comment(url, body);
+  };
+  writeProcess(ledgerPath, "DAEMON-comment-failed-run", at, 20 * MIN, false);
+  at += 22 * MIN;
+  boot(ledgerPath, "DAEMON-comment-refused", at, issues);
+  assert.equal(issues.comments.length, 0);
+  assert.equal(lines(ledgerPath).filter((r) => r.step === "daemon.crashloop.updated" && r.delivered === false).length, 1);
+  at += MIN;
+  boot(ledgerPath, "DAEMON-comment-retry", at, issues);
+  assert.equal(issues.comments.length, 1);
+  assert.match(issues.comments[0].body, /DAEMON-comment-failed-run/);
+  assert.equal(lines(ledgerPath).filter((r) => r.step === "daemon.crashloop.updated" && r.prior_run_id === "DAEMON-comment-failed-run" && r.delivered === true).length, 1);
+});
+
 test("W1-T11421 criterion 2: a single abnormal exit after a long lifetime only ledgers a row", (t) => {
   {
     const ledgerPath = writeLedger([], { scope: t }).path;

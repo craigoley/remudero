@@ -258,6 +258,27 @@ function learnedLine(learned: LearnedCleanLifetime): string {
   return `median ${minutes(learned.medianMs)} min, p90 ${minutes(learned.p90Ms)} min, from ${learned.samples} cleanly-ended processes`;
 }
 
+function learnedCrashLoopEscalation(run: DaemonLifetimeRecord[], allRows: Record<string, unknown>[], learned: LearnedCleanLifetime, runId: string) {
+  const runIds = new Set(run.map((r) => r.runId));
+  const evidence = allRows.filter((row) => row.step === DAEMON_ABNORMAL_EXIT_STEP && runIds.has(String(row.prior_run_id))).map(exitEvidence);
+  return {
+    class: "BLOCKED" as const,
+    taskId: "DAEMON",
+    runId,
+    summary: LEARNED_CRASHLOOP_SUMMARY,
+    detail:
+      `W1-T11421: ${run.length} consecutive daemon processes ended with no clean-exit row before the next boot, ` +
+      `each living less than this instance's learned clean lifetime (${learnedLine(learned)}). In the container an ` +
+      `abnormal exit is a heap abort (exit 134), a kill or a crash: the entrypoint records its wait status and ` +
+      `heap-limit stderr line, then exits the container with that status and ` +
+      `docker's restart policy starts the daemon again, so the loop runs until its cause is fixed. No ten-minute ` +
+      `window needs to hold six boots for this to fire. This issue is updated with each further exit and closes ` +
+      `itself once a process outlives the p90. Exits, oldest first:\n${evidence.join("\n")}`,
+    options: CRASHLOOP_OPTIONS,
+    recommendation: "read the last boot's failure and fix the cause",
+  };
+}
+
 /** The newest learned incident with no cleared row after it, and every run already escalated. */
 function incidentState(lines: ReadonlyArray<Record<string, unknown>>): { open?: CrashLoopIncident; escalatedRuns: Set<string> } {
   const escalatedRuns = new Set<string>();
@@ -331,7 +352,28 @@ export function runDaemonCrashSentinel(
   }
   const run = crashLoopRunOf(history, learned);
   if (open) {
-    for (const row of abnormalRows) {
+    if (!open.issueUrl && run.length >= 2) {
+      const issueUrl = tryEscalate(learnedCrashLoopEscalation(run, allRows, learned, ctx.runId),
+        { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId });
+      appendLedger(ctx.ledgerPath, {
+        run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_ESCALATED_STEP, basis: "learned",
+        run_first: open.runFirst, run_newest: run[run.length - 1].runId, run_length: run.length,
+        clean_lifetime_median_ms: learned.medianMs, clean_lifetime_p90_ms: open.p90Ms ?? learned.p90Ms,
+        issue_url: issueUrl, delivered: issueUrl !== null,
+      });
+      if (issueUrl) open = { ...open, issueUrl };
+    }
+    const updates = lines.filter((line) => line.step === DAEMON_CRASHLOOP_UPDATED_STEP && line.run_first === open?.runFirst);
+    const latestByRun = new Map<string, Record<string, unknown>>();
+    for (const update of updates) if (typeof update.prior_run_id === "string") latestByRun.set(update.prior_run_id, update);
+    const pendingIds = new Set([...latestByRun].filter(([, update]) => update.delivered === false).map(([id]) => id));
+    const rowsToUpdate = new Map<string, Record<string, unknown>>();
+    for (const row of abnormalRows) rowsToUpdate.set(String(row.prior_run_id), row);
+    for (const id of pendingIds) {
+      const row = allRows.find((candidate) => candidate.step === DAEMON_ABNORMAL_EXIT_STEP && candidate.prior_run_id === id);
+      if (row) rowsToUpdate.set(id, row);
+    }
+    for (const row of rowsToUpdate.values()) {
       let delivered = false;
       try {
         const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
@@ -349,25 +391,8 @@ export function runDaemonCrashSentinel(
       incident = "updated";
     }
   } else if (run.length >= 2 && !state.escalatedRuns.has(run[0].runId)) {
-    const runIds = new Set(run.map((r) => r.runId));
-    const evidence = allRows.filter((row) => row.step === DAEMON_ABNORMAL_EXIT_STEP && runIds.has(String(row.prior_run_id))).map(exitEvidence);
     const issueUrl = tryEscalate(
-      {
-        class: "BLOCKED",
-        taskId: "DAEMON",
-        runId: ctx.runId,
-        summary: LEARNED_CRASHLOOP_SUMMARY,
-        detail:
-          `W1-T11421: ${run.length} consecutive daemon processes ended with no clean-exit row before the next boot, ` +
-          `each living less than this instance's learned clean lifetime (${learnedLine(learned)}). In the container an ` +
-          `abnormal exit is a heap abort (exit 134), a kill or a crash: the entrypoint records its wait status and ` +
-          `heap-limit stderr line, then exits the container with that status and ` +
-          `docker's restart policy starts the daemon again, so the loop runs until its cause is fixed. No ten-minute ` +
-          `window needs to hold six boots for this to fire. This issue is updated with each further exit and closes ` +
-          `itself once a process outlives the p90. Exits, oldest first:\n${evidence.join("\n")}`,
-        options: CRASHLOOP_OPTIONS,
-        recommendation: "read the last boot's failure and fix the cause",
-      },
+      learnedCrashLoopEscalation(run, allRows, learned, ctx.runId),
       { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
     );
     appendLedger(ctx.ledgerPath, {
