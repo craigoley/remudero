@@ -31,6 +31,8 @@ export interface UnreadableCwdDetail {
   errno: string;
   uid: CwdOwnerUid;
   walk?: "ppid_unreadable" | "cycle" | "reached_init" | "ancestor_exited" | "ancestor_error";
+  ancestorPid?: number;
+  ancestorErrno?: string;
 }
 
 export type ProcessCwdCensus = (
@@ -166,8 +168,11 @@ export function readBoundedProcessCwdCensus(
           try {
             parentStatus = readStatus(String(parent));
           } catch (parentStatusError) {
-            // Not erased: an ancestor whose PPid cannot be read fails closed and names that errno.
-            return unreadable({ pid: Number(entry), errno: errnoOf(parentStatusError), uid: "same", walk: "ppid_unreadable" });
+            // Preserve the child's cwd errno; name the ancestor's status failure separately.
+            return unreadable({
+              pid: Number(entry), errno, uid: "same", walk: "ppid_unreadable",
+              ancestorPid: parent, ancestorErrno: errnoOf(parentStatusError),
+            });
           }
           parent = statusField(parentStatus, "PPid");
         }
@@ -202,7 +207,9 @@ export function describeProcessCwdProbe(census: ProcessCwdCensus, detail?: Unrea
   if (census.state === "unknown") {
     if (census.reason !== "cwd_unreadable" || !detail) return [census.reason, ...counts].join(" ");
     const walk = detail.walk ? ` walk=${detail.walk}` : "";
-    return [`cwd_unreadable pid=${detail.pid} errno=${detail.errno} uid=${detail.uid}${walk}`, ...counts].join(" ");
+    const ancestor = detail.ancestorPid !== undefined
+      ? ` ancestor_pid=${detail.ancestorPid} ancestor_errno=${detail.ancestorErrno}` : "";
+    return [`cwd_unreadable pid=${detail.pid} errno=${detail.errno} uid=${detail.uid}${walk}${ancestor}`, ...counts].join(" ");
   }
   if (census.state === "occupied" && census.via !== undefined) {
     return [`attributed pid=${census.pid} via=${census.via}`, ...counts].join(" ");

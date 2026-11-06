@@ -228,6 +228,32 @@ test("W1-T10389 criterion 3: an unreadable cwd on a same-uid sandboxed pid is de
   );
 });
 
+test("W1-T10389 criterion 3: an ancestor status failure preserves the child's cwd errno in the decline reason", () => {
+  for (const errno of ["EACCES", "EPERM"]) {
+    for (const ancestorErrno of ["EIO", "EACCES", "ENOENT"]) {
+      let detail: UnreadableCwdDetail | undefined;
+      const census = readBoundedProcessCwdCensus(OWNER, table({
+        "70": { errno, uid: DAEMON_UID, ppid: 80 },
+        "80": { errno: "EPERM", uid: DAEMON_UID, ppid: 90 },
+        "90": { cwd: "/another/worktree" },
+      }, {
+        readStatus: (pid) => {
+          if (pid === "80") throw denied(ancestorErrno);
+          assert.equal(pid, "70", "the walk must stop at the unreadable ancestor status");
+          return `Uid:\t${DAEMON_UID}\nPPid:\t80`;
+        },
+        onUnreadable: (value) => { detail = value; },
+      }));
+      assert.deepEqual(census, { state: "unknown", scanned: 1, reason: "cwd_unreadable" });
+      assert.deepEqual(detail, {
+        pid: 70, errno, uid: "same", walk: "ppid_unreadable", ancestorPid: 80, ancestorErrno,
+      });
+      assert.equal(describeProcessCwdProbe(census, detail),
+        `cwd_unreadable pid=70 errno=${errno} uid=same walk=ppid_unreadable ancestor_pid=80 ancestor_errno=${ancestorErrno}`);
+    }
+  }
+});
+
 test("W1-T10389: a real /proc census finds a live child working in the owner's worktree", { timeout: CENSUS_WALL_MS * 300 }, async (t) => {
   if (!existsSync("/proc/self/status")) {
     t.skip("no /proc on this host (macOS); CI's Linux runner is the first real pass");
