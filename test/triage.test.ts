@@ -1530,9 +1530,12 @@ test("W1-T4203: a refused triage commit is not re-triaged", async () => {
   // (3) THE WIRING: autoTriageCheck never fires on a refused entry and does again once it is cleared.
   const { autoTriageCheck } = await import("../src/run-task.js");
   const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
-  const { newFeedbackIdsOldestFirst } = await import("../src/lib/auto-triage.js");
-  const candidates = newFeedbackIdsOldestFirst(REPO_ROOT);
-  assert.ok(candidates.length >= 1, "this checkout holds at least one status: new entry to exercise");
+  const { triageCandidateReaders } = await import("../src/lib/auto-triage.js");
+  // Production reads the origin/main feedback view. This PR changes a status in the checkout,
+  // so using checkout candidates here omits the still-new base entry from the refusal list.
+  const readers = await triageCandidateReaders(REPO_ROOT);
+  const candidates = readers.newFeedbackIdsOldestFirst(REPO_ROOT);
+  assert.ok(candidates.length >= 1, "origin/main holds at least one status: new entry to exercise");
   const shipped = loadPolicy(policyPath(REPO_ROOT));
   const policy = { ...shipped, values: { ...shipped.values, autoTriage: { enabled: true, minIntervalMinutes: 1, maxPerDay: 50 } } };
   const root = mkdtempSync(join(tmpdir(), "rmd-triage-refused-"));

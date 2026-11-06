@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "2026-11-05 incident: #16523 merged head 90be1a69ea, carrying a boot-adoption ReferenceError a review had already reproduced"
   plan_refs: [W1-T178, W1-T5839, W1-T3704]
-  files: [src/lib/review.ts, src/cli/commands/review.ts, test/review/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts, test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts]
+  files: [src/lib/review.ts, src/cli/commands/review.ts, test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts, test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts, test/review-finding-receipts.test.ts, test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts, test/a-signal-ended-reviewer-is-re-run-once.test.ts, test/every-lane-records-how-its-worker-ended.test.ts, test/review-reservation-replay.test.ts, test/review/a-review-path-change-replays-recorded-reviews.test.ts, test/review/a-reviewers-explanation-reaches-the-binding-verdict.test.ts, test/review-skips-spawn-on-plan-only.test.ts, test/rubric-authorship-wiring.test.ts, test/ships-unwired-floor.test.ts, test/wiring-ordering-behaviour.test.ts, test/event-driven-semantic-review.test.ts]
   priority: 3
   status: queued
   # backlog gardener: band=3 evidence=c7d0eff7a219e1f9
@@ -30,6 +30,19 @@
     review.posted rows, so a local review cannot see a FAIL core posted, and the reverse holds too.
     GitHub's commit-status history for the remudero-review context is the only record every
     reviewer shares.
+    Operator-approved fixture compatibility amendment (2026-11-06): add
+    test/review-finding-receipts.test.ts only to replace its generic malformed GitHub API
+    response for the new history read with valid empty history. Keep every existing assertion,
+    expected value and test timeout unchanged; malformed history still fails closed in production.
+    Operator-approved extension (2026-11-06): eleven further legacy fixtures omit the new
+    statuses-list API or return the combined-status object/generic malformed response for it.
+    The diagnostic run at ffba18ce2fd65213516cdba371a88fd89f8098eb completed 6436 tests with
+    34 failures, including review-path fixtures whose fake history is unreadable. Paired controls
+    determine which failures are introduced; a diagnostic alone is not regression attribution.
+    Apply each additional adapter only after its unchanged-main control confirms the regression.
+    Add only valid empty responses for the new paginated history request in those named files.
+    Preserve every assertion, expected value, timeout, skip and all unrelated fake API responses.
+    Keep the production malformed-history refusal and the original acceptance criteria/budget.
   design: |
     Before posting a terminal SUCCESS for a head, read that head's remudero-review status history
     from GitHub (the statuses list, not only the combined current state) and join each FAILURE to
@@ -45,7 +58,7 @@
     to both directions and to every poster without adding a store. No fixed thresholds.
   acceptance:
     - claim: "A PASS computed on the same head as a prior FAILURE whose finding carried a reproduction posts FAILURE citing the prior finding unless its reviewer explicitly addressed that reproduction; the prior FAILURE is read from GitHub status history, so a FAILURE another machine posted is honoured"
-      proof: "unit test: test/review/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts"
+      proof: "unit test: test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts"
     - claim: "A prior FAILURE without a reproduction keeps today's behaviour, and an unreadable status history withholds SUCCESS as pending with a named reason"
       proof: "unit test: test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts"
   note: |
