@@ -19,21 +19,26 @@ raw: >-
     (none found)
 attachments: []
 origin: incident#69d94c444f3fb25d89c220f135489fa44e8fc265a13b84a460b68aa67b864fc2
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion:
   claim: The recorded main-plan-guard.yml gap may still need a repair.
-  evidence: >-
-    The incident records one reconcile.ci event at 2026-10-22T16:55:20.293Z:
-    main-plan-guard.yml covering 50815738d11a1bcb7f3234dd12dddec7f03a315a
-    reported a gap persisting after its repair attempt. No suspect commit was found.
+  evidence: "The incident records one reconcile.ci event at
+    2026-10-22T16:55:20.293Z: main-plan-guard.yml covering
+    50815738d11a1bcb7f3234dd12dddec7f03a315a reported a gap persisting after its
+    repair attempt. No suspect commit was found."
   recon:
-    - Establish which job and gate failed in the recorded main-plan-guard.yml run.
-    - Establish whether a later successful run or merged repair already resolves this exact gap.
-    - Keep this entry new until the run evidence supports closure, a bounded task, or a concrete grill question.
-  falsifying_check: A later successful main-plan-guard.yml run covering the same gap, or a merged repair with passing evidence for that gate, retires this incident.
+    - Establish which job and gate failed in the recorded main-plan-guard.yml
+      run.
+    - Establish whether a later successful run or merged repair already resolves
+      this exact gap.
+    - Keep this entry new until the run evidence supports closure, a bounded
+      task, or a concrete grill question.
+  falsifying_check: A later successful main-plan-guard.yml run covering the same
+    gap, or a merged repair with passing evidence for that gate, retires this
+    incident.
 submission_key: null
 thread_id: null
 answered_by: null
