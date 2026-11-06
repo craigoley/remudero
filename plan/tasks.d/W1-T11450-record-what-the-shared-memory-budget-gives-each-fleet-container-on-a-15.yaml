@@ -5,7 +5,10 @@
   type: recon
   verify: human
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=d30d3aedbf46e98f
+  # backlog gardener: placed=2026-11-06T14:34:56.047Z
   attempts: 0
   files:
     - deploy/resource-policy.sh
