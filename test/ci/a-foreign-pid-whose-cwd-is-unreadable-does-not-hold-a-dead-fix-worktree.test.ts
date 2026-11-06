@@ -6,6 +6,7 @@
 // here (the Mac has no /proc); the one real pass runs only where /proc exists.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -171,13 +172,22 @@ test("W1-T10389: a real /proc census finds a live child working in the owner's w
   }
   const owner = mkdtempSync(join(tmpdir(), "rmd-w1t10389-owner-"));
   const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { cwd: owner, stdio: "ignore" });
-  t.after(() => {
-    child.kill("SIGKILL");
+  t.after(async () => {
+    if (child.pid && child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, "exit");
+      child.kill("SIGKILL");
+      await exited;
+    }
     rmSync(owner, { recursive: true, force: true });
   });
-  await new Promise((resolve) => child.once("spawn", resolve));
-  // The runner's root-owned processes are foreign to this uid; with W1-T2952's census they answered `unknown`.
-  const census = readBoundedProcessCwdCensus(owner, { wallMs: CENSUS_WALL_MS * 100 });
-  assert.equal(census.state, "occupied", JSON.stringify(census));
-  assert.equal(census.state === "occupied" ? census.pid : undefined, child.pid);
+  await once(child, "spawn");
+  assert.ok(child.pid);
+  // Only enumerate the child we own: unrelated host pids may legitimately make a census unknown.
+  // The default cwd reader still reads the live child's actual /proc/<pid>/cwd in both passes.
+  const censusFor = (path: string) => {
+    const pids = [String(child.pid)];
+    return readBoundedProcessCwdCensus(path, { readNextPid: () => pids.shift() ?? null });
+  };
+  assert.deepEqual(censusFor(owner), { state: "occupied", scanned: 1, pid: child.pid });
+  assert.deepEqual(censusFor(join(owner, "unowned")), { state: "clear", scanned: 1 });
 });
