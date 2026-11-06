@@ -129,6 +129,34 @@ test("W1-T11327 criterion 2: a request followed by a newer boot reads as answere
   assert.equal(fresh.action, RESTART_IN_PLACE_ACTION, fresh.reason);
 });
 
+// W1-T11327: a loop resume cannot renew an unanswered restart request's bounded grace.
+test("W1-T11327 criterion 2: an expired restart request recycles despite a recent loop resume", () => {
+  const askedAt = BOOT + 40 * MIN;
+  for (const ageMs of [RESTART_REQUEST_GRACE_MS, RESTART_REQUEST_GRACE_MS + 1, RESTART_REQUEST_GRACE_MS + MIN]) {
+    const now = askedAt + ageMs;
+    const resumed = stalledRows(now - MIN, [loopLag(now - MIN)]);
+    const control = decide(resumed, now);
+    assert.deepEqual([control.state, control.action], ["RECOVERING", "none"], control.reason);
+
+    // Only ledger rows survive the daemon consuming the marker; a resume is no answering boot.
+    const verdict = decide([...resumed, requested(askedAt)], now);
+    if (ageMs === RESTART_REQUEST_GRACE_MS) {
+      assert.deepEqual([verdict.state, verdict.action], ["RECOVERING", "none"], verdict.reason);
+    } else {
+      assert.deepEqual([verdict.state, verdict.action], ["STALLED", "recycle"], verdict.reason);
+      assert.deepEqual(verdict.restartRequest, { requestedMs: askedAt, answeredByBootMs: null });
+      assert.match(verdict.reason, /no newer boot past its 15-min grace/);
+    }
+  }
+
+  const reboot = askedAt + 2 * MIN;
+  const now = reboot + 40 * MIN;
+  const answered = [...stalledRows(askedAt, [requested(askedAt)]), ...boot(reboot, NEXT_PID),
+    progress(reboot + MIN, NEXT_PID), loopLag(now - MIN, NEXT_PID)];
+  const recovered = decide(answered, now);
+  assert.deepEqual([recovered.state, recovered.action], ["RECOVERING", "none"], recovered.reason);
+});
+
 const scratch: string[] = [];
 after(() => { for (const dir of scratch) rmSync(dir, { recursive: true, force: true }); });
 

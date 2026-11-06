@@ -373,6 +373,12 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
   }
   if (progressAgeMs === null) return verdict("UNKNOWN", "none", "no sweep.pass, review.posted or verdict.merged row was read");
   const minutes = Math.floor(progressAgeMs / 60_000);
+  const stalled = progressAgeMs > STALL_RECYCLE_AFTER_MS
+    ? restartBeforeRecycle(verdict("STALLED", "recycle",
+      `newest progress row is ${minutes} min old with ${openPrCount} open PR(s)${counted}; daemon.* rows are not progress`), rows, nowMs, newestProgressMs)
+    : undefined;
+  // W1-T11327: a resume cannot extend an unanswered restart's grace; its recycle fallback outranks recovery.
+  if (stalled?.restartRequest?.answeredByBootMs === null && stalled.action === "recycle") return stalled;
   const resumeAgeMs = resume ? Math.max(0, nowMs - resume.resumedMs) : undefined;
   if (resume && resumeAgeMs !== undefined && progressAgeMs > STALL_DIAGNOSE_AFTER_MS && resumeAgeMs <= STALL_RECYCLE_AFTER_MS) {
     const said = `newest progress row is ${minutes} min old, but this generation's loop resumed at ` +
@@ -380,15 +386,14 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
     if (resumeAgeMs > STALL_DIAGNOSE_AFTER_MS) return verdict("STALLED", "capture-diagnostics", `${said} and has written no progress row since`);
     return verdict("RECOVERING", "none", `${said}; its progress is owed ${STALL_RECYCLE_AFTER_MS / 60_000} min after the resume`);
   }
-  if (progressAgeMs > STALL_RECYCLE_AFTER_MS) {
+  if (stalled) {
     const pass = inFlightPass(rows, nowMs);
     if (pass) {
       return verdict("IN_PASS", "capture-diagnostics", `newest progress row is ${minutes} min old, but the full pass started ` +
         `${Math.floor((nowMs - pass.startedMs) / 60_000)} min ago is in flight inside its own learned bound ` +
         `(${Math.floor(pass.boundMs / 60_000)} min) and its daemon is pulsing; not recycled`);
     }
-    return restartBeforeRecycle(verdict("STALLED", "recycle",
-      `newest progress row is ${minutes} min old with ${openPrCount} open PR(s)${counted}; daemon.* rows are not progress`), rows, nowMs, newestProgressMs);
+    return stalled;
   }
   if (progressAgeMs > STALL_DIAGNOSE_AFTER_MS) {
     return verdict("STALLED", "capture-diagnostics", `newest progress row is ${minutes} min old with ${openPrCount} open PR(s)${counted}; daemon.* rows are not progress`);
