@@ -36,7 +36,7 @@ case " $* " in *" --test-timeout=216000 "*) ;; *) echo 'missing derived test dea
 exec ${shellQuote(process.execPath)} "$@"
 `, { mode: 0o755 });
   repo.git('add', '.'); repo.git('commit', '-m', 'test: seed bounded native retry fixture');
-  const env = { ...process.env, TEST_RETRY: '1', NODE_V8_COVERAGE: '' };
+  const env: NodeJS.ProcessEnv = { ...process.env, TEST_RETRY: '1', NODE_V8_COVERAGE: '' };
   delete env.NODE_TEST_CONTEXT;
   const args = withTapReporter(node, ['--test', suite, green]);
   assert.ok(args.includes('--test-reporter=tap'));
