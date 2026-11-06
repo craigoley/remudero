@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
   plan_refs: [W1-T11341, W1-T10068, W1-T3378, W1-T11369, W1-T147]
-  files: [src/lib/composition-root.ts, src/run-task.ts, src/lib/review-worktree-reclaim.ts, src/lib/sweep.ts, src/cli/commands/daemon.ts, src/lib/daemon.ts, src/cli/commands/review.ts, test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts]
+  files: [src/lib/composition-root.ts, src/run-task.ts, src/lib/review-worktree-reclaim.ts, src/lib/sweep.ts, src/cli/commands/daemon.ts, src/lib/daemon.ts, src/cli/commands/review.ts, src/cli/commands/sweep.ts, test/daemon/a-fleet-store-on-an-exhausted-account-is-named-and-escalated.test.ts, test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts]
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=05e7c90230f710e6
@@ -29,6 +29,16 @@
     The remaining approved adapter is src/lib/sweep.ts: plan-round materialization is consumed
     synchronously, and owner-recovery results are stringified without awaiting them. Async Git
     must not turn an unresolved Promise into a worktree path or a ledgered recovery reference.
+    The review-reuse consumer in src/cli/commands/sweep.ts:347 also reads materialization
+    immediately and tears down its checkout synchronously at :438-441. The shared async binding
+    requires that final adapter to await readiness and teardown, with the hold retained until
+    removal settles. Its existing best-effort failure handling still applies.
+    The tracked direct-Root importer count at 94777e56d is 1010 against a 1010 ceiling; the new
+    regression alone would make it 1011. The existing fleet-store test imports only the RunResult
+    type through Root, which re-exports that exact type from src/lib/run-result.ts. Point that
+    type-only import at its owning module; preserve every existing test and assertion. With the
+    new regression still importing Root, the prospective direct count remains 1010. This is not
+    a full reach verdict: the complete unchanged ratchet must still pass on the built tree.
     W1-T147 shares src/lib/daemon.ts and src/run-task.ts for a separate operator-run overnight
     chaos drill. This task changes only review-worktree Git and its awaited ordering; it creates
     no fault-injection harness and does not run or activate that human-only drill.
@@ -50,6 +60,14 @@
     Operator-approved remaining adapter extension, 2026-11-06: src/lib/sweep.ts awaits plan-round
     materialization before using its path and awaits each recovery callback before interpreting
     or ledgering its result. Preserve the same owner checks, failure handling and cleanup order.
+    Operator-approved final command extension, 2026-11-06: src/cli/commands/sweep.ts awaits the
+    review-reuse checkout before consuming it and awaits cleanup before releasing its hold or
+    resuming its caller. Retain the synchronous one-shot exports and existing disposal semantics.
+    Operator-approved regression-scope extension, 2026-11-06: change only the RunResult type
+    import in test/daemon/a-fleet-store-on-an-exhausted-account-is-named-and-escalated.test.ts to
+    #src/lib/run-result.js. Keep the Root type-export contract checked by the new daemon fixture.
+    Change no existing test inputs, assertions, timeouts or skips and no census threshold or
+    exclusion. Both original acceptance claims and criterion markers remain unchanged.
   acceptance:
     - claim: "On the daemon path, materializeReviewWorktree, temporaryIndexTree and sweepStrandedReviewWorktrees call no synchronous git, and a timer scheduled before each one fires while its git is still running"
       proof: "grep: W1-T11459 criterion 1 in test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts"
@@ -63,4 +81,6 @@
     Restore any one path to its sync exec. Criterion 1 must then fail for that path, because the timer
     cannot fire while the sync git holds the loop.
     Remove the sweep adapter's materialization or recovery await: criterion 2 must then fail on
-    early worktree use or an unresolved recovery reference, then restore green.
+    early worktree use or an unresolved recovery reference, then restore green. Remove the command
+    adapter's readiness or teardown await: review reuse must observe an unfinished checkout or
+    return before removal, and criterion 2 must fail before the restored implementation passes.

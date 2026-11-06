@@ -1,0 +1,29 @@
+id: incident-e3d914ec7cac8ea6
+ts: 2026-11-06T14:18:25.965Z
+raw: >-
+  Incident e3d914ec7cac: flow pr-stage-stall:awaiting-arm:review success,
+  required checks green — arming auto-merge
+
+  First seen: 2026-11-06T14:14:58.221Z
+
+  Last seen: 2026-11-06T14:14:58.221Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16962 awaiting-arm: repeat: "review success, required checks green — arming auto-merge" x12
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#e3d914ec7cac8ea6bf22b3b9865757d0c8a853f446fcc1308ba8019c6b8f4566
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
