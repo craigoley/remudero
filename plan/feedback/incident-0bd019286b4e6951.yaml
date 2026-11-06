@@ -1,0 +1,29 @@
+id: incident-0bd019286b4e6951
+ts: 2026-11-06T03:16:40.439Z
+raw: >-
+  Incident 0bd019286b4e: intervention
+  escalated:none:fix-needs-design-at-this-exact-head-guar
+
+  First seen: 2026-11-06T03:12:52.553Z
+
+  Last seen: 2026-11-06T03:16:22.538Z
+
+  Count: 3, burn: 3.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#15404@5ad3608a9 actor=cao825 cause=escalated:none:fix-needs-design-at-this-exact-head-guar — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#0bd019286b4e69513c043e29f0aba9580e2ac50baf8f1422d80dfb9887c11c91
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

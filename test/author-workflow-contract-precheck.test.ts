@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { gitRepo } from './helpers/git-repo.js';
 const { main, OVER_CAPACITY_EXIT } = await import(new URL('../scripts/preflight-author.mjs', import.meta.url).href) as {
-  main: (args: string[], options: { root: string;
+  main: (args: string[], options: { root: string; spawn?: typeof spawnSync;
     select: () => { fullRun: boolean; suites: string[]; reasons: string[] };
     host: () => { cores: number; load1: number; headroomBytes: number } }) => number;
   OVER_CAPACITY_EXIT: number;
@@ -56,7 +57,7 @@ function fixture(t: { after: (fn: () => void) => void }) {
   const commit = () => { repo.git('add', '.'); repo.git('commit', '-m', 'test: workflow contract mutation'); };
   const select = () => ({ fullRun: false, suites: suites.filter(path => existsSync(join(repo.dir, path))),
     reasons: ['verified over-capacity fixture'] });
-  const run = () => main([], { root: repo.dir, select, host: () => ({ cores: 1, load1: 0, headroomBytes: 1024 ** 3 }) });
+  const run = (spawn?: typeof spawnSync) => main([], { root: repo.dir, select, ...(spawn ? { spawn } : {}), host: () => ({ cores: 1, load1: 0, headroomBytes: 1024 ** 3 }) });
   const receipt = () => JSON.parse(readFileSync(join(repo.dir, 'coverage/preflight-author.json'), 'utf8'));
   return { ...repo, put, commit, run, receipt };
 }
@@ -106,6 +107,23 @@ test('author static workflow contracts catch a new directory member before capac
   assert.equal(over.capacity.fits, false);
   assert.equal(existsSync(join(f.dir, 'coverage/static-started')), true);
   assert.equal(over.steps.some((step: { name: string }) => step.name.startsWith('affected-tests')), false);
+});
+
+test('native author workflow children carry duration-derived per-test deadlines', (t) => {
+  const f = fixture(t); f.put(PROBE, validWorkflow); f.commit();
+  const seen: string[][] = [];
+  const spawn = ((file: string, args: string[], opts: Parameters<typeof spawnSync>[2]) => {
+    if (args.includes('--test')) {
+      seen.push(args);
+      assert.ok(args.includes('--test-timeout=240000000'), args.join(' '));
+      assert.ok(args.includes('--test-reporter=tap'));
+      for (const suite of AUTHOR_WORKFLOW_CONTRACT_SUITES) assert.ok(args.includes(suite));
+    }
+    return spawnSync(file, args, opts);
+  }) as typeof spawnSync;
+  assert.equal(f.run(spawn), OVER_CAPACITY_EXIT);
+  assert.equal(seen.length, 1, 'positive control: workflow child ran before capacity refused affected suites');
+  assert.equal(f.receipt().steps[1].testSummary.fail, 0);
 });
 
 test('author workflow precheck refuses a missing physical contract before heavy admission', (t) => {
