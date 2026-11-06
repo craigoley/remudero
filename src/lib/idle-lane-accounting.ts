@@ -193,7 +193,7 @@ export function accountIdleLaneMinutes(account: IdleLaneAccount, sample: IdleLan
   };
 }
 
-/** What the previous process last recorded as its lane state (its newest `lane.idle_changed` row). */
+/** The previous process's last lane state, anchored after any interval its summaries already charged. */
 export interface IdleLaneLastRecord {
   atMs: number;
   idleSlots: number;
@@ -208,27 +208,35 @@ function parseLedgerLine(line: string): { row: Record<string, unknown> } | { err
 }
 
 /**
- * W1-T8235: the newest `lane.idle_changed` row in the ledger lines, or undefined. The row's own `at_ms` places it;
- * a row without one falls back to its `ts`. A row that cannot be placed in time is skipped, never guessed at.
+ * The newest `lane.idle_changed` state, anchored at the later of its timestamp and the last summary's end.
+ * A change's `at_ms` falls back to its `ts`; a summary needs a finite `window_end_ms`. Unplaced rows are skipped.
  */
 export function lastIdleLaneRecord(lines: readonly string[]): IdleLaneLastRecord | undefined {
+  let last: IdleLaneLastRecord | undefined;
+  let summaryEndMs = -Infinity;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
-    if (!line.includes("lane.idle_changed")) continue;
+    if (!line.includes("lane.idle_changed") && !line.includes("lane.idle_summary")) continue;
     const parsed = parseLedgerLine(line);
     if ("error" in parsed) continue; // a torn line is not a record
     const row = parsed.row;
-    if (row.step !== "lane.idle_changed") continue;
+    if (row.step === "lane.idle_summary") {
+      if (typeof row.window_end_ms === "number" && Number.isFinite(row.window_end_ms)) {
+        summaryEndMs = Math.max(summaryEndMs, row.window_end_ms);
+      }
+      continue;
+    }
+    if (row.step !== "lane.idle_changed" || last !== undefined) continue;
     const atMs = typeof row.at_ms === "number" ? row.at_ms : typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
     if (!Number.isFinite(atMs) || typeof row.idle_slots !== "number") continue;
-    return {
+    last = {
       atMs,
       idleSlots: row.idle_slots,
       capacity: typeof row.capacity === "number" ? row.capacity : null,
       dispatchable: typeof row.dispatchable === "number" ? row.dispatchable : 0,
     };
   }
-  return undefined;
+  return last === undefined ? undefined : { ...last, atMs: Math.max(last.atMs, summaryEndMs) };
 }
 
 /**
