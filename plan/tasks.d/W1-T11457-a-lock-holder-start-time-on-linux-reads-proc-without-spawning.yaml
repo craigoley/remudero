@@ -1,0 +1,46 @@
+- id: W1-T11457
+  title: A lock holder's start time on Linux is read from /proc without spawning ps, so the object reaper's liveness checks stop forking from the 4.6 GB daemon
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium
+  band_meaning: span
+  origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
+  plan_refs: [W1-T1067, W1-T396, W1-T11369]
+  files: [src/lib/fs-race-safe.ts, test/a-lock-holder-start-time-on-linux-reads-proc-without-spawning.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=60b3823c9f4c196b
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
+  attempts: 0
+  rationale: |
+    The 2026-11-06 core CPU profile attributes 7.2 s (window 2) and 13.6 s (window 3) of event-loop
+    hold time to one chain: activeWorkerProbes (src/lib/object-reaper.ts ~:623), then isHolderStale
+    (src/lib/fs-race-safe.ts ~:364), then defaultGetProcessStartTime (~:430), then
+    execFileSync("ps", ["-o", "etime=", "-p", pid]). One synchronous ps spawn runs per inflight lock
+    and per worktree lock the reaper checks. Each spawn forks the ~4.6 GB daemon process, about
+    110 ms per fork on this host (the loop-lag rows' measured spawn cost). On Linux the same fact is
+    in /proc/<pid>/stat (field 22, start time in clock ticks since boot) plus /proc/stat's btime,
+    with no child process at all.
+  design: |
+    defaultGetProcessStartTime reads /proc on Linux. start = (btime from /proc/stat) * 1000 +
+    starttime_ticks * 1000 / CLK_TCK. CLK_TCK is read once per process (one getconf CLK_TCK, or
+    os.constants if Node exposes it) and cached, so no constant is invented. A pid with no
+    /proc/<pid>/stat returns null, the same "no evidence" answer ps gives today. Any other read
+    or parse failure, and every non-Linux platform, falls back to today's ps path unchanged.
+    The comm field in /proc/<pid>/stat can contain spaces and parentheses, so parse after the LAST ")".
+  acceptance:
+    - claim: "On Linux a holder's start time comes from /proc/<pid>/stat and /proc/stat with no child process spawned, and a missing pid returns null"
+      proof: "grep: W1-T11457 criterion 1 in test/a-lock-holder-start-time-on-linux-reads-proc-without-spawning.test.ts"
+    - claim: "A /proc read failure or a non-Linux platform falls back to the ps path with today's result"
+      proof: "grep: W1-T11457 criterion 2 in test/a-lock-holder-start-time-on-linux-reads-proc-without-spawning.test.ts"
+  note: |
+    The Mac cannot exercise real /proc, so drive the reader through the existing
+    ProcessStartTimeSyscalls seam, extended with readFileSync and platform, using pinned fixture
+    text (including a comm with ") (" in it). Assert the exec spy is never called on the Linux path.
+    CI on Linux is the first real run. The builder names each criterion test with the marker
+    "W1-T11457 criterion N".
+  falsifier: |
+    Remove the /proc branch. Criterion 1 must then fail, because execFileSync("ps", ...) is called.

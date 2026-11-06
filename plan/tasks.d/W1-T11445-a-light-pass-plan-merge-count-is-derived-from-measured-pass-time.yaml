@@ -1,0 +1,72 @@
+- id: W1-T11445
+  title: A light pass direct-merges as many ready plan PRs as its measured pass interval affords, not one
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-05 core loop-hold incident: #16943, #16944 and #16945 green plan PRs waited 40+ min; the W1-T5901 one-per-pass claim deferred two of them each pass"
+  plan_refs: [W1-T5901, W1-T9212, W1-T5748, W1-T5615, W1-T4405, W1-T11434]
+  files: [src/lib/sweep.ts, test/ledger/a-ready-plan-pr-merges-on-the-next-pass.test.ts]
+  priority: 3
+  status: queued
+  # backlog gardener: band=3 evidence=b9d53b979d20e381
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
+  attempts: 0
+  rationale: |
+    Read-only core-ledger research found that the measurements this task assumes do not exist.
+    Across 394 archived ledger files, `sweep.pass` rows have no stable pass identifier or light-pass
+    scope, `sweep.summary` rows have no elapsed duration, and the plan `sweep.disposed` rows have no
+    direct-merge elapsed time. The `daemon.idle_light_pass` query returned zero; its positive control
+    found no matching metric population. The #16965 direct-merge receipt and its disposition were
+    10 ms apart, which is bookkeeping latency, not merge duration. The zero-result
+    `daemon.idle_light_pass` query lacked a positive control and is inconclusive. Per-PR rows and
+    neighboring judge timings cannot establish a pass boundary or merge cost.
+
+    First add correlated, durable measurements to the existing retained sweep rows: a unique pass id
+    and scope on the light-pass start row, the same id and monotonic elapsed time on its completion
+    summary, and monotonic elapsed time plus outcome for each plan-merge attempt on that PR's
+    disposition row. Then derive cadence from the newest three valid start-to-start intervals of
+    completed light passes with the same scope. Until those intervals and a valid current-pass merge
+    measurement exist, retain W1-T5901's one-plan-PR bound. W1-T11434 shares the sweep code but only
+    changes shadow admission; this task owns measurement and the time-derived bound.
+  design: |
+    Preserve W1-T5901's claim, W1-T9212 held-plan ordering, W1-T5748 merged-tree safety read,
+    W1-T4405 merge-queue path, overlapping-pass exclusion, and code-PR deferral. Do not infer time
+    from `sweep.disposed.ts`, `daemon.idle_light_pass`, review-duration summaries, or a timestamp
+    adjacent to a merge receipt.
+
+    Add explicit measurements to the existing retained ledger rows. A light pass's `sweep.pass`
+    row carries a unique `pass_id`, `light_pass_scope`, and the ledger-written start timestamp; its
+    matching `sweep.summary` row carries the same id and a finite non-negative `elapsed_ms` measured
+    with a monotonic clock. Full sweeps and incomplete or unmatched pairs do not enter the cadence
+    sample. Each selected plan-PR merge attempt carries that `pass_id`, its concrete outcome, and
+    monotonic `plan_merge_elapsed_ms` on that PR's `sweep.disposed` row. Measure the actual sequential
+    merge attempt, including the existing safety and queue path; do not synthesize elapsed values
+    from GitHub merge timestamps.
+
+    For a pass, derive the interval budget from the median of the newest three positive intervals
+    between start timestamps of completed light-pass pairs with the same scope. Reject malformed,
+    duplicate, clock-regressed, incomplete, and cross-scope samples. Accumulate this pass's measured
+    plan-merge durations and stop before starting another plan merge once the spent time reaches the
+    budget. With fewer than three valid intervals, take at most today's one-never-held-plan-PR
+    action. With enough intervals, allow the first action; if its duration is missing or invalid,
+    stop at one. A merge attempt that itself reaches or exceeds the interval ends further plan merges
+    in that pass. Every stand-down names the measured
+    budget and spent time, or says the measurement was unavailable; never report a guessed interval.
+  acceptance:
+    - claim: "Each light pass writes a correlated start and completion measurement with one unique pass_id, its light_pass_scope, a ledger start timestamp and a monotonic elapsed_ms. Only completed matching pairs of the same scope contribute positive start-to-start intervals. The proving test title includes the exact marker W1-T11445 criterion 1: light passes emit paired measurements and reject incomplete intervals."
+      proof: "unit test: W1-T11445 criterion 1: light passes emit paired measurements and reject incomplete intervals"
+    - claim: "Each attempted plan-PR direct merge records its measured monotonic plan_merge_elapsed_ms, pass_id and concrete outcome on that PR's sweep.disposed row, including the unchanged W1-T5748 safety and W1-T4405 queue paths. The proving test title includes the exact marker W1-T11445 criterion 2: plan merge attempts record elapsed time and outcome."
+      proof: "unit test: W1-T11445 criterion 2: plan merge attempts record elapsed time and outcome"
+    - claim: "With three valid same-scope light-pass intervals, the claim owner merges ready never-held plan PRs sequentially and stops before another attempt when measured plan-merge time spent reaches the median interval budget; each deferral names the measured budget and spent time. The proving test title includes the exact marker W1-T11445 criterion 3: plan merge work stops at the measured interval budget."
+      proof: "unit test: W1-T11445 criterion 3: plan merge work stops at the measured interval budget"
+    - claim: "With fewer than three valid intervals, malformed or incomplete measurements, or no valid merge duration for this pass, the one-never-held-plan-PR bound remains; held plan PR ordering, overlapping-pass exclusion and code-PR deferral are unchanged. The proving test title includes the exact marker W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bound."
+      proof: "unit test: W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bound"
+  falsifier: |
+    Remove the pass correlation or the monotonic merge-duration measurement while leaving the
+    time-derived admission in place. The measurement criteria must fail, and the implementation must
+    fall back to the one-plan bound instead of admitting an unmeasured second plan PR.

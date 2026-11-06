@@ -1,0 +1,29 @@
+id: incident-f41404f3044ff97d
+ts: 2026-11-06T03:14:26.368Z
+raw: >-
+  Incident f41404f3044f: intervention
+  review-failed:fix-lane:unmet-criterion-strike
+
+  First seen: 2026-11-06T03:12:52.553Z
+
+  Last seen: 2026-11-06T03:13:59.183Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#15108@d37b87a03 actor=cao825 cause=review-failed:fix-lane:unmet-criterion-strike — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#f41404f3044ff97d23009b3b9b1b9c42062b5e405e1a9adadf266a33b59fc0d0
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

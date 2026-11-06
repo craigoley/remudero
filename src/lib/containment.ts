@@ -263,6 +263,8 @@ export interface ProbeExecResult {
   egressBlockedRemoteIp?: string;
   /** Remote address curl connected to for the allowed control request. (W1-T2271) */
   egressAllowedRemoteIp?: string;
+  /** The blocked curl request's own outcome file; absent means unobserved. */
+  egressBlockedCurlOutcome?: EgressCurlOutcome;
   /** SDK `error_max_turns`, distinct from never attempted; see {@link classifyUnprovenState}. (W1-T2201) */
   turnsExhausted?: boolean;
   /** `WorkerResult.numTurns` off the probe spawn's envelope. Absent ⇒ unrecorded, never a guessed
@@ -420,6 +422,13 @@ export const EGRESS_ALLOWED_MARKER = "egress-allowed-reached.txt";
 export const EGRESS_BLOCKED_REMOTE_IP_FILE = "egress-blocked-remote-ip.txt";
 /** Same unconditional-write discipline as {@link EGRESS_BLOCKED_REMOTE_IP_FILE}, for the allowlisted control. */
 export const EGRESS_ALLOWED_REMOTE_IP_FILE = "egress-allowed-remote-ip.txt";
+/** First line is curl's exit status; remaining lines are that request's stderr alone. */
+export const EGRESS_BLOCKED_OUTCOME_FILE = "egress-blocked-outcome.txt";
+
+export interface EgressCurlOutcome {
+  exitCode: number;
+  stderr: string;
+}
 
 /**
  * The single Bash command carrying BOTH egress attempts. One command, not two, so the pair counts
@@ -435,13 +444,15 @@ export const EGRESS_ALLOWED_REMOTE_IP_FILE = "egress-allowed-remote-ip.txt";
 export function egressProbeCommand(allowedHost: string): string {
   const t = EGRESS_TIMEOUT_SECONDS;
   return (
-    `curl -sS -m ${t} -o /dev/null -w '%{remote_ip}' https://${EGRESS_BLOCKED_HOST} ` +
-    `> ${EGRESS_BLOCKED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_BLOCKED_MARKER}; ` +
+    `blocked_status=0; blocked_error=$(curl -sS -m ${t} -o /dev/null -w '%{remote_ip}' https://${EGRESS_BLOCKED_HOST} ` +
+    `2>&1 > ${EGRESS_BLOCKED_REMOTE_IP_FILE}) || blocked_status=$?; ` +
+    `printf '%s\\n%s\\n' "$blocked_status" "$blocked_error" > ${EGRESS_BLOCKED_OUTCOME_FILE}; ` +
+    `if [ "$blocked_status" -eq 0 ]; then touch ${EGRESS_BLOCKED_MARKER}; fi; ` +
     `curl -sS -m ${t} -o /dev/null -w '%{remote_ip}' https://${allowedHost} ` +
     `> ${EGRESS_ALLOWED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_ALLOWED_MARKER}; ` +
     // The command now SAYS what it just did, read off the two markers written directly above — the
     // same files `defaultExecutor` observes — so this reports an observation rather than replacing
-    // one. Plain `[ -f ]` tests: no command substitution, no new file, request or destination, and
+    // one. Plain `[ -f ]` tests: no extra request or destination, and
     // it stays INSIDE command 4 so `probeCommandCount` is unmoved (W1-T2344 Q2).
     `if [ -f ${EGRESS_BLOCKED_MARKER} ]; then echo "${EGRESS_RESULT_PREFIX} blocked=reached"; ` +
     `else echo "${EGRESS_RESULT_PREFIX} blocked=not-reached"; fi; ` +
@@ -695,7 +706,16 @@ export function assessOperatorHomeReadContainment(e: ContainmentEvidence): {
  * filesystem denial can never be read as an egress denial or the reverse.
  */
 const EGRESS_DENIAL_RE =
-  /could not resolve host|couldn't resolve host|connection refused|failed to connect|blocked|not allowed|denied by|proxy/i;
+  /could not resolve host|couldn't resolve host|connection refused|failed to connect|connect tunnel failed|blocked by (?:the )?(?:network|allowlist|proxy|sandbox)|not allowed|denied by/i;
+
+/**
+ * W1-T11437: only a failed blocked request's own stderr can establish refusal. Transcript echoes,
+ * hook refusals and errors from the control request cannot supply this evidence.
+ */
+export function egressRefusalObserved(outcome: EgressCurlOutcome | undefined): boolean {
+  return outcome !== undefined && Number.isInteger(outcome.exitCode) && outcome.exitCode > 0 &&
+    outcome.exitCode <= 255 && EGRESS_DENIAL_RE.test(outcome.stderr);
+}
 
 /** Regex marking an OS or sandbox-level write denial, as opposed to a hook denial, mirroring the
  *  WS-0 verdict-7 transcript check. Kept SEPARATE from {@link EGRESS_DENIAL_RE} in both directions. */
@@ -841,6 +861,13 @@ function readRemoteIp(path: string, reached: boolean): string | undefined {
   }
 }
 
+function readBlockedCurlOutcome(path: string): EgressCurlOutcome | undefined {
+  if (!existsSync(path)) return undefined;
+  const match = /^(0|[1-9]\d*)\n([\s\S]*)$/.exec(readFileSync(path, "utf8"));
+  if (!match || Number(match[1]) > 255) return undefined;
+  return { exitCode: Number(match[1]), stderr: match[2]! };
+}
+
 /** Default executor: spawn a real sandboxed worker in a scratch cwd under the workspace. `spawn` is
  *  injectable so the `isError` plumbing and the stderr-persistence branch — the exact branch that
  *  discarded stderr on a failed probe — are unit-testable without a real sandboxed subprocess.
@@ -932,6 +959,7 @@ export function defaultExecutor(
         // Trust the remote-ip file's content only when its paired marker says the request came back.
         egressBlockedRemoteIp: readRemoteIp(egressBlockedRemoteIpPath, existsSync(egressBlockedPath)),
         egressAllowedRemoteIp: readRemoteIp(egressAllowedRemoteIpPath, existsSync(egressAllowedPath)),
+        egressBlockedCurlOutcome: readBlockedCurlOutcome(join(cwd, EGRESS_BLOCKED_OUTCOME_FILE)),
         tokenReadSucceeded: existsSync(tokenReadPath),
         stateReadSucceeded: existsSync(stateReadPath),
         operatorHomeReadSucceeded: existsSync(operatorHomeReadPath),
@@ -1036,12 +1064,9 @@ export async function probeContainment(opts: {
     egressAllowedReached: r.egressAllowedReached,
     egressBlockedRemoteIp: r.egressBlockedRemoteIp,
     egressAllowedRemoteIp: r.egressAllowedRemoteIp,
-    // Sourced from EGRESS_DENIAL_RE ALONE, never OS_DENIAL_RE, so a filesystem denial is never read
-    // as an egress denial. TRAP: this also keeps the strip call above a UNIQUE textual occurrence,
-    // which test/deny-floor-probe.test.ts pins as the precondition of its mutation guard — that
-    // guard counts occurrences in the raw SOURCE TEXT, so even a comment quoting it would break it.
+    // Missing request evidence stays unobserved, regardless of refusals elsewhere in the transcript.
     egressDenialSeen:
-      r.egressBlockedReached === undefined ? undefined : EGRESS_DENIAL_RE.test(r.transcript),
+      r.egressBlockedCurlOutcome === undefined ? undefined : egressRefusalObserved(r.egressBlockedCurlOutcome),
     turnsExhausted: r.turnsExhausted,
     numTurns: r.numTurns,
     maxTurns: r.maxTurns,
@@ -1125,6 +1150,16 @@ export async function probeContainment(opts: {
     // field, both arms being false.
     ...(r.isError || !verdict.contained ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
   });
+  // W1-T11437 criterion 3: a PROVEN-BROKEN egress verdict gets its own row, SHADOW ONLY. Gating dispatch on it
+  // is a tightening that waits for the operator's explicit yes, so nothing here throws or changes `verdict`.
+  if (egress.reason.startsWith("egress PROVEN-BROKEN")) {
+    log("containment.egress_proven_open", {
+      shadow: true,
+      egress_reason: egress.reason,
+      egress_blocked_remote_ip: evidence.egressBlockedRemoteIp,
+      egress_allowed_remote_ip: evidence.egressAllowedRemoteIp,
+    });
+  }
   if (!verdict.contained && attempt === 0 &&
       !evidence.outsideWriteCreated && !evidence.credentialExpired &&
       !evidence.credentialFailure && !evidence.spawnTransportFailure) {
