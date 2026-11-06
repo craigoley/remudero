@@ -1,0 +1,78 @@
+- id: W1-T11500
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-shard:wn-tn-location-relative-test-files-never-rise-above-the-merg cost 5.2 PR minute(s) across 4 round(s) on 4 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-shard:wn-tn-location-relative-test-files-never-rise-above-the-merg"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/check-ci-log-coverage-shard-wn-tn-location-relative-test-files-never-ris.test.ts
+  acceptance:
+    - claim: "a recorded check:ci-log:coverage-shard:wn-tn-location-relative-test-files-never-rise-above-the-merg round, replayed through the real code path in .github/workflows/ci.yml, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11500: CI friction a2e52af955af1232 is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-shard:wn-tn-location-relative-test-files-never-rise-above-the-merg's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:coverage-shard:wn-tn-location-relative-test-files-never-rise-above-the-merg cost 5.2 PR minute(s) (seven-day half-life) across 4 fix round(s) on 4 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job coverage-ratchet for coverage-shard
+    - the rounds name a failing test: test/b.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #16962 (https://github.com/craigoley/remudero/pull/16962) at 2026-11-06T09:19:26.413Z: ci-log round — coverage-shard (4/8): WN-TN: location-relative test files never rise above the merge base, WN-TN: a new test file carries no location-relative
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 389.830801
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:102:1'
+          |   failureType: 'testCodeFailure'
+          |   error: '1904 test files carry a location-relative specifier at HEAD, 1903 at merge base 02104c200 — import through #src/*, #scripts/* and #test/* (script
+    - PR #13509 (https://github.com/craigoley/remudero/pull/13509) at 2026-10-22T04:14:11.846Z: ci-log round — coverage-shard (3/8): WN-TN: location-relative test files never rise above the merge base, WN-TN: a new test file carries no location-relative
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 322.518194
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:99:1'
+          |   failureType: 'testCodeFailure'
+          |   error: '3540 test files carry a location-relative specifier at HEAD, 3539 at merge base 37bc32004 — import through #src/*, #scripts/* and #test/* (scripts
+    - PR #12968 (https://github.com/craigoley/remudero/pull/12968) at 2026-10-19T22:44:03.411Z: ci-log round — coverage-shard (4/8): WN-TN: location-relative test files never rise above the merge base, WN-TN: a new test file carries no location-relative; coverage-shard (3/8): pool defect: test/b
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier; default agent worker and warm boot refuse old generation readiness and compare current matched producers; a successful shadow save reconciles a previously failed real-diff reset
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 200.437657
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:99:1'
+          |   failureType: 'testCodeFailure'
+          |   error: '3552 test files carry a location-relative specifier at HEAD, 3550 at merge base 099fef0ae — import through #src/*, #scripts/* and #test/* (scripts
+    - PR #12962 (https://github.com/craigoley/remudero/pull/12962) at 2026-10-19T18:14:21.234Z: ci-log round — coverage-shard (7/8): WN-TN: location-relative test files never rise above the merge base, WN-TN: a new test file carries no location-relative
+        failing tests: W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes; W1-T9864: location-relative test files never rise above the merge base; W1-T9864: a new test file carries no location-relative specifier; W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T9864: location-relative test files never rise above the merge base, W1-T9864: a new test file carries no location-relative specifier, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes
+          | not ok 3 - W1-T9864: location-relative test files never rise above the merge base
+          |   ---
+          |   duration_ms: 289.342124
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-test-imports-through-the-subpath-alias.test.ts:99:1'
+          |   failureType: 'testCode
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
