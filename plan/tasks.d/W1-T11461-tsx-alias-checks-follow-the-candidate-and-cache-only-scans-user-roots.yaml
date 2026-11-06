@@ -10,7 +10,10 @@
   origin: "Revised S3 handoff, 2026-11-06 01:55Z: installed helper dry-run held the 2.8 GB tsx-502 cache for a /tmp alias even though it lives under DARWIN_USER_TEMP_DIR"
   plan_refs: []
   files: [deploy/mac/tmp-reclaim.sh, deploy/mac/JANITOR.md, test/deploy/a-tsx-alias-follows-the-candidate-and-cache-only-scans-user-roots.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=b78c55347296abb4
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
   attempts: 0
   rationale: |
     The operator's verified account dry run, with TMPDIR unset, printed KEEP RISKY (TSX cache
