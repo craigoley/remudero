@@ -797,18 +797,32 @@ export async function runReview(host: ReviewCommandHost, args: {
   phases.decision = systemClock.now();
   if (decisionClaim.kind === "replay") {
     const priorVerdict = decisionClaim.terminal.verdict;
-    const guarded = applyReviewStatusHistoryGuard(priorVerdict, headSha, initialStatusHistory);
-    if (guarded.kind === "pending") return {
-      ...guarded.verdict, headSha, verdictWithheld: `pending: ${guarded.reason}`,
-      reviewerOutcome: decisionClaim.terminal.reviewerOutcome,
-      evaluatorProvenance: decisionClaim.terminal.evaluatorProvenance,
-      reviewDecisionDigest: decisionDigest, decisionDisposition: "replayed",
-    };
+    const replayHistory = args.shadow || priorVerdict.state !== "success"
+      ? initialStatusHistory : await readStatusHistory(owner, repo, prUrl, headSha);
+    const guarded = applyReviewStatusHistoryGuard(priorVerdict, headSha, replayHistory);
+    if (guarded.kind === "pending") {
+      const reason = `pending: ${guarded.reason}`;
+      log("review.stood_down", { context: REVIEW_CONTEXT, state: "pending", head_sha: headSha, pr_url: prUrl, reason });
+      say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${reason}`);
+      reportPhase("posted");
+      return {
+        ...guarded.verdict, headSha, verdictWithheld: reason,
+        reviewerOutcome: decisionClaim.terminal.reviewerOutcome,
+        evaluatorProvenance: decisionClaim.terminal.evaluatorProvenance,
+        reviewDecisionDigest: decisionDigest, decisionDisposition: "replayed",
+      };
+    }
+    const replayDigest = guarded.verdict.state !== priorVerdict.state && replayHistory.kind === "readable"
+      ? createHash("sha256").update(JSON.stringify({
+        kind: "shared-review-history-guard-v1", priorDecisionDigest: decisionDigest, headSha,
+        failureIds: replayHistory.failures.filter(finding => finding.headSha === headSha).map(finding => finding.id).sort(),
+        historyRevision: replayHistory.revision ?? null,
+      })).digest("hex") : decisionDigest;
     return {
       ...guarded.verdict, headSha,
       reviewerOutcome: decisionClaim.terminal.reviewerOutcome,
       evaluatorProvenance: decisionClaim.terminal.evaluatorProvenance,
-      reviewDecisionDigest: decisionDigest, decisionDisposition: "replayed",
+      reviewDecisionDigest: replayDigest, decisionDisposition: "replayed",
     };
   }
   if (decisionClaim.kind === "in_flight") {
@@ -2393,6 +2407,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // restore the already-judged terminal status instead of reporting a success that GitHub cannot see.
   let replayStatusAction: "restored" | "confirmed" | undefined;
   if (verdict.decisionDisposition === "replayed" && verdict.reviewDecisionDigest) {
+    if (verdict.verdictWithheld) return 2;
     const restorePoster = failureRecordingPoster();
     const restored = await postStatusDep({
       post: restorePoster.post,
