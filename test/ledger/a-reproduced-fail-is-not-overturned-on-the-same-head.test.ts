@@ -369,7 +369,7 @@ test("W1-T11443 criterion 1: cached CLI restoration rechecks the current shared 
               reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120_000 },
               reviewerClockBoundMs: 120_000,
               reviewerSpawnWorker: async () => { modelRuns++; return successfulReviewWorker("REVIEW_VERDICT 1: PASS (the changed file proves the claim)"); },
-              disarm: () => "not-armed", arm: () => ({ armed: false, reason: "fixture" }),
+              disarm: () => "not-armed", arm: () => "hold-refused",
             });
             if (attempt === 1 && scenario === "withheld") {
               result.verdictWithheld = "a prior publication guard already withheld this cached result";
@@ -379,13 +379,17 @@ test("W1-T11443 criterion 1: cached CLI restoration rechecks the current shared 
             return result;
           },
           postStatus: async args => {
+            assert.ok(typeof args.description === "string", "restoration names its verdict reason");
             restoration.push(args);
             if (scenario === "late") {
               assert.equal(args.state, "failure", "a newly readable reproduction cannot restore cached PASS");
               assert.notEqual(args.reviewDecisionDigest, decisions[0].reviewDecisionDigest, "late shared evidence is a new decision input");
               return review.postReviewStatusGuarded({ ...args,
                 fetchLifecycle: () => ({ headSha: head, merged: false, closed: false, reviewInputDigest: args.reviewInputDigest }),
-                post: async post => { published.push({ state: post.state, description: post.description }); },
+                post: async post => {
+                  assert.ok(typeof post.description === "string", "publication names its verdict reason");
+                  published.push({ state: post.state, description: post.description });
+                },
               });
             }
             published.push({ state: args.state, description: args.description });
