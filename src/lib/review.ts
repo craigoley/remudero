@@ -986,7 +986,6 @@ export interface ReviewVerdict {
   mergeBaseSha?: string;
   /** W1-T3798 — the exact task contract resolved by this verdict. */
   reviewContractDigest?: string;
-  /** Reproduced same-head failures this reviewer explicitly re-ran and addressed. */
   reproducedFailureIdsAddressed?: string[];
 }
 
@@ -6751,10 +6750,14 @@ export function reproducedReviewFailuresFromHistory(
     for (const finding of blocks) {
       const executedFailure = /proof executed and FAILED\b/i.test(finding);
       const semanticReason = finding.split(/NOTE: reviewer judged the proof non-responsive/i)[1] ?? "";
+      const unobserved = /\b(?:no|not|never|unable|would|could|should|might|may)\b|(?:didn|doesn|isn|wasn|weren|can|couldn|wouldn|shouldn)['’]t/i;
       const observedCheck = [...semanticReason.matchAll(/\b(?:a|an|the|my|our)\s+([^\n.]*\b(?:check|probe)\b[^\n.]*)\b(?:produced|returned|yielded|threw|failed)\b/gi)]
-        .some((match) => !/\b(?:no|not|never|unable|would|could|should|might|may)\b/i.test(match[1]!));
-      const namedCounterexample = /\b(?:replay|reproduction|counterexample)\b/i.test(finding) &&
-        /\b(?:throws?|failed?|fails?|ReferenceError|TypeError)\b/i.test(finding);
+        .some((match) => !unobserved.test(match[1]!));
+      const witnessText = semanticReason || finding.split(/\r?\n/).slice(1).join("\n");
+      const namedCounterexample = witnessText.split(/\r?\n|[.!?]\s+/).some((clause) => {
+        const witness = /\b(?:replay|reproduction|counterexample)\b.*?(?:\b(?:throws?|threw|fails?|failed)\b|:\s*(?:[A-Za-z]+Error|Error)\b)/i.exec(clause);
+        return witness !== null && !unobserved.test(clause.slice(0, witness.index + witness[0].length));
+      });
       const semanticCounterexample = /proof executed\b/i.test(finding) && (namedCounterexample || observedCheck);
       if (!executedFailure && !semanticCounterexample) continue;
       const criterion = Number(/^\s*(\d+)\./.exec(finding)?.[1]);

@@ -266,6 +266,8 @@ test("W1-T11443 criterion 2: hypothetical or explicitly unperformed checks are n
     "A classifier check would have produced a 100-minute lifetime.",
     "No classifier check produced a result; the reviewer could not inspect.",
     "A classifier check was not run and would have returned the incorrect result.",
+    "The replay no longer throws ReferenceError at daemon.ts:4218.",
+    "A reproduction could throw TypeError at daemon.ts:4218.",
   ]) {
     const body = `remudero-review=failure\n1. claim\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: ${reason}`;
     const failures = review.reproducedReviewFailuresFromHistory(history, [{ commit_id: SHA, body }], SHA);
