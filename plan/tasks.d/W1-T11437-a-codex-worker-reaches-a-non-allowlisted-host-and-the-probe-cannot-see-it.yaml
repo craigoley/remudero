@@ -28,6 +28,7 @@
     - test/no-worker-writes-a-git-config-the-host-push-honours.test.ts
     - test/worker/spawn/codex-native-cache.test.ts
     - test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts
+    - test/a-claude-worker-cannot-run-an-unsandboxed-command.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -42,6 +43,9 @@
     This contradicts the operator decision recorded in DECISIONS.md for W1-T3103 (2026-09-22): "CHOSEN: (b), THE ALLOWLIST PROXY. Both phases keep a network; egress is confined to an allowlist."
     Why the probe never proved it: EGRESS_DENIAL_RE in src/lib/containment.ts (curl refusal vocabulary, near :697) matches the bare word "blocked" anywhere in the transcript. Every probe transcript carries it, from command 4's own `EGRESS_RESULT blocked=reached|not-reached` echo and from command 3's deny-floor refusal ("Command blocked by PreToolUse hook"). So egressDenialSeen is effectively always true, and assessEgressContainment returns UNPROVEN at its denial branch (near :556) before its remote-address comparison (near :564) can report the breach. An UNPROVEN egress verdict does not gate containment, so the builds ran.
     Why Codex egress is open: Claude workers' sandbox runs the allowlist proxy that settings/worker.json's sandbox.network.allowedDomains declares (the ::1 answers). Codex workers get the network with no proxy. The legacy path passes `sandbox_workspace_write.network_access=true`, and the private-registry profile (withPrivateRegistryCodexProfile, src/lib/worker-provider.ts) sets `permissions.<name>.network.enabled=true` and enables network_proxy only for disposable reviews (codexExecArgs, near :3087). deploy/codex-requirements.toml carries filesystem deny_read only, no network policy.
+    Scope amendment 2026-11-06 (operator ruling in chat: "Both get the wide list"): Claude workers and the Codex proxy share the one widened
+    allowedDomains in settings/worker.json. test/a-claude-worker-cannot-run-an-unsandboxed-command.test.ts pins every other sandbox key of
+    the committed policy; its network.allowedDomains expectation moves to the EXACT new list, and every other pinned key stays unchanged.
   design: |
     1. Evidence, not prose: the egress command writes the blocked request's own curl exit code and error text to a probe file beside its remote-address file, and the executor reads those. Egress denial is derived from that file alone; the transcript-wide regex no longer feeds the egress verdict. A blocked host answering at a non-local address that differs from the allowlisted control's is PROVEN OPEN, whatever else the transcript says.
     2. Enforcement: Codex workers route egress through an allowlist proxy fed by the same allowedDomains the Claude sandbox uses (one source, secret-boundary.ts and settings.ts already read it), on both the legacy and private-profile paths. The builder measures which mechanism Codex 0.163 supports for a permission profile (its managed network_proxy with an allowlist, or an HTTPS proxy the sandbox cannot bypass) and records the measurement. No fixed constants.
