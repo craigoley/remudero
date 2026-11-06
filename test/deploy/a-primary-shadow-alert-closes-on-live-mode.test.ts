@@ -86,7 +86,7 @@ test("W1-T11444 criterion 2: only fresh merged observations retire the recorded 
       const effects = buildSweepEffects({ owner: "owner", repo: "repo", repoMode: "shadow", config: { root } as Config,
         ledgerPath, runId: "primary-merged", plan: { tasks: [], byId: new Map() } as unknown as Plan,
         issuesImpl: issues, ghLiveStateImpl: async () => observation, log: () => {} });
-      await effects.arm(pr(11)); await effects.arm(pr(12));
+      await effects.arm(pr(11)); await effects.arm(pr(12)); await effects.arm(pr(13));
       assert.equal(all.length, 1);
       await effects.readLiveState!(pr(11));
       assert.equal(closed.size, 0, "an unsuccessful read cannot establish a merge");
@@ -98,12 +98,15 @@ test("W1-T11444 criterion 2: only fresh merged observations retire the recorded 
       assert.equal(closed.size, 0, "a different repository's merge cannot resolve this refusal");
       await effects.readLiveState!(pr(11));
       assert.equal(closed.size, 0, "another recorded refused PR is still outstanding");
-      assert.match(all[0]!.body!, /1 refused PR/);
+      assert.match(all[0]!.body!, /2 refused PR/);
       assert.equal(all[0]!.body!.includes("https://github.com/owner/repo/pull/11"), false);
-      await effects.readLiveState!(pr(12));
-      assert.equal(closed.size, 1);
+      const otherEffects = buildSweepEffects({ owner: "owner", repo: "repo", repoMode: "shadow", config: { root } as Config,
+        ledgerPath, runId: "primary-merged-other-effect", plan: { tasks: [], byId: new Map() } as unknown as Plan,
+        issuesImpl: issues, ghLiveStateImpl: async () => observation, log: () => {} });
+      await Promise.all([effects.readLiveState!(pr(12)), otherEffects.readLiveState!(pr(13))]);
+      assert.equal(closed.size, 1, "both concurrent merged observations must retire the whole refused set");
       assert.match(notes[0]!, /fresh MERGED observation/);
-      await effects.arm(pr(13));
+      await effects.arm(pr(14));
       assert.equal(all.length, 2, "a new refusal after verified recovery opens a new episode");
       assert.match(all[1]!.body!, /1 refused PR/);
       assert.equal(all[1]!.body!.includes("https://github.com/owner/repo/pull/11"), false);
@@ -113,7 +116,7 @@ test("W1-T11444 criterion 2: only fresh merged observations retire the recorded 
       const liveEffects = buildSweepEffects({ owner: "owner", repo: "repo", repoMode: "live", config: { root } as Config,
         ledgerPath, runId: "primary-live-observation", plan: { tasks: [], byId: new Map() } as unknown as Plan,
         issuesImpl: issues, ghLiveStateImpl: async () => ({ ok: true, state: "MERGED" }), log: () => {} });
-      await liveEffects.readLiveState!(pr(13));
+      await liveEffects.readLiveState!(pr(14));
       assert.equal(closed.size, 2, "a fresh observation also reconciles a positively live selection");
       assert.match(notes[1]!, /live again/);
     }, { envPath: selected, instanceName: "core" });
