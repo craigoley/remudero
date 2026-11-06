@@ -1521,15 +1521,15 @@ function recordThreadMessage(e: Escalation, deps: Pick<EscalateDeps, "threadStor
  *  observer context. Missing listOpen permits creation; throwing listOpen refuses it (W1-T2912).
  *  Why: docs/forensics/escalate.md. */
 export function escalate(e: Escalation, deps: EscalateDeps): string {
-  return driveSynchronousEscalation(deps.issues, () => runStepsSync(escalateSteps(e, deps)));
+  return driveSynchronousEscalation(() => runStepsSync(escalateSteps(e, deps)));
 }
 
 const asyncIssueTwins = new WeakMap<IssueGateway, AsyncIssueGateway>();
 
-function driveSynchronousEscalation<T>(issues: IssueGateway, drive: () => T): T {
-  // Quarantine, memory and stalled-worker callers latch before delivery. Refusing here would
-  // lose their only notification. Custom gateways retain their own transport contract.
-  return asyncIssueTwins.has(issues) ? withSynchronousGhDelivery(drive) : drive();
+function driveSynchronousEscalation<T>(drive: () => T): T {
+  // Latched producers and SRE feedback can consume an incident after this call. Preserve
+  // synchronous delivery for default and custom routes until their durable async handoff.
+  return withSynchronousGhDelivery(drive);
 }
 
 /** W1-T5283 — {@link escalate} with every gateway call awaited, for the main-health rung on the
@@ -1732,7 +1732,7 @@ export async function escalateWithJudge(
  *  (W1-T2912), so `!== null` delivery callers cannot report phantom success. */
 // Why: the 2026-07-21 daemon boot loop this wrapper ended (W1-T197's sibling) — docs/forensics/escalate.md.
 export function tryEscalate(e: Escalation, deps: EscalateDeps): string | null {
-  return driveSynchronousEscalation(deps.issues, () => runStepsSync(tryEscalateSteps(e, deps)));
+  return driveSynchronousEscalation(() => runStepsSync(tryEscalateSteps(e, deps)));
 }
 
 /** W1-T5283 — {@link tryEscalate} over {@link escalateAsync}: never rejects, and ledgers the same
