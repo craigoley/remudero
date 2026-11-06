@@ -6750,8 +6750,12 @@ export function reproducedReviewFailuresFromHistory(
     if (current) blocks.push(current.join("\n").trim());
     for (const finding of blocks) {
       const executedFailure = /proof executed and FAILED\b/i.test(finding);
-      const semanticCounterexample = /proof executed\b/i.test(finding) && /\b(?:replay|reproduction|counterexample)\b/i.test(finding) &&
+      const semanticReason = finding.split(/NOTE: reviewer judged the proof non-responsive/i)[1] ?? "";
+      const observedCheck = [...semanticReason.matchAll(/\b(?:a|an|the|my|our)\s+([^\n.]*\b(?:check|probe)\b[^\n.]*)\b(?:produced|returned|yielded|threw|failed)\b/gi)]
+        .some((match) => !/\b(?:no|not|never|unable|would|could|should|might|may)\b/i.test(match[1]!));
+      const namedCounterexample = /\b(?:replay|reproduction|counterexample)\b/i.test(finding) &&
         /\b(?:throws?|failed?|fails?|ReferenceError|TypeError)\b/i.test(finding);
+      const semanticCounterexample = /proof executed\b/i.test(finding) && (namedCounterexample || observedCheck);
       if (!executedFailure && !semanticCounterexample) continue;
       const criterion = Number(/^\s*(\d+)\./.exec(finding)?.[1]);
       if (!Number.isSafeInteger(criterion) || criterion < 1) continue;

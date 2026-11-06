@@ -210,3 +210,27 @@ test("W1-T11443 criterion 1: an executed failing proof is a reproduced counterex
     SHA, { kind: "readable", failures });
   assert.equal(result.verdict.state, "failure");
 });
+
+test("W1-T11443 criterion 1: the recorded classifier-check counterexample is sticky without a reproduction label", () => {
+  const body = "remudero-review=failure\n1. lifetime excludes restart downtime\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive (semantic downgrade): A read-only classifier check with a boot-only tail and 100-minute restart gap produced a 100-minute lifetime.";
+  const failures = review.reproducedReviewFailuresFromHistory(history, [{ commit_id: SHA, body }], SHA);
+  assert.equal(failures.length, 1, "PR16971's recorded executed counterexample must not depend on the word reproduction");
+  const result = review.applyReviewStatusHistoryGuard({ ...computed, criteria: [{ ...computed.criteria[0], claim: "lifetime excludes restart downtime" }] } as never,
+    SHA, { kind: "readable", failures });
+  assert.equal(result.verdict.state, "failure");
+  assert.match(failures[0].finding, /100-minute restart gap produced a 100-minute lifetime/);
+});
+
+test("W1-T11443 criterion 2: hypothetical or explicitly unperformed checks are not reproduced findings", () => {
+  for (const reason of [
+    "A classifier check would have produced a 100-minute lifetime.",
+    "No classifier check produced a result; the reviewer could not inspect.",
+    "A classifier check was not run and would have returned the incorrect result.",
+  ]) {
+    const body = `remudero-review=failure\n1. claim\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: ${reason}`;
+    const failures = review.reproducedReviewFailuresFromHistory(history, [{ commit_id: SHA, body }], SHA);
+    assert.equal(failures.length, 0, reason);
+    const result = review.applyReviewStatusHistoryGuard(computed as never, SHA, { kind: "readable", failures });
+    assert.equal(result.verdict.state, "success", reason);
+  }
+});
