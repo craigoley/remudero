@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildSweepEffects } from "#src/run-task.js";
+import { buildSweepEffects } from "#src/lib/sweep.js";
 import { runSweep } from "#src/lib/sweep.js";
 import { withInstanceRegistryRuntime } from "#src/lib/instance-registry-selection.js";
 import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
