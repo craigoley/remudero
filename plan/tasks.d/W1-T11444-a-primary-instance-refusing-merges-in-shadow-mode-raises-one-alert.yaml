@@ -26,18 +26,31 @@
     shadow core still merge its one selected plan PR. Neither tells an operator that the PRIMARY
     instance is refusing merges, and shadow mode may be intended, so the signal must be one durable
     notice, not noise.
+    Cadence clarification: review #5807178636 on source 920a3120cfc (2026-11-06 21:22Z)
+    rejected DEFAULT_POLL_INTERVAL_MS as an unrelated idle-poll delay. The existing escalation
+    module has no pre-existing body-edit timer to reuse. Define the intended mutation bound using
+    the existing sweep pass lifecycle instead: immediate first notice, durable pending PR sets,
+    one coalesced changed-body flush per pass, with failed work retried on the next ordinary pass.
+    The acceptance claims, four-file scope, budget and recovery/acknowledgement semantics stay intact.
   design: |
     When the primary instance (registry `primary: true`) refuses an arm or merge because of shadow
     mode, open ONE escalation through the existing escalate.ts / Remudero Issues channel. It names
     the instance, the selection source (registry path and digest when readable, never secret
     values), the time the refusals began, and the count and list of refused PRs. Later refusals
-    update that same escalation in place (bounded by the existing per-escalation edit cadence) and
-    never open another. It closes itself, with a closing note, on the first pass where the primary
+    update that same escalation in place and never open another while that episode remains open.
+    Coalesce body edits at the existing sweep pass boundary; unchanged content remains a no-op.
+    The first notice attempt is immediate. Persist subsequent refused-PR observations before
+    deferring their changed body to the pass boundary or the next ordinary pass. A failed or
+    interrupted flush leaves durable pending work for the next pass, never a false delivery.
+    Bound body-write attempts by this existing pass lifecycle, not by an idle-poll timer or a new
+    duration. Keep the existing awaited gateway and serialized episode ownership.
+    It closes itself, with a closing note, on the first pass where the primary
     instance is live or the refusals stop because W1-T11434's lane merged the candidate. An
     operator's existing mark-handled acknowledgement silences updates for the current selection
     digest only: a changed selection re-opens the alert. Non-primary shadow instances keep today's
     quiet row. No fixed thresholds: the escalation opens on the first refusal of a pass and its
-    update cadence reuses the escalation module's own.
+    update cadence follows the explicit pass-boundary coalescing above. No new duration threshold,
+    background timer or scheduler is introduced.
   acceptance:
     - claim: "A primary instance's first shadow-mode arm or merge refusal opens exactly one escalation naming the instance, selection source and refused PRs; later refusals update that one escalation, and a non-primary shadow instance opens none"
       proof: "unit test: test/deploy/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts"
@@ -48,3 +61,6 @@
   falsifier: |
     Keep only the quiet automerge.shadow_refused row. Criterion 1's test must then fail, because no
     escalation is opened for the primary instance.
+    Remove pass-boundary coalescing: several distinct refusals in one pass cause repeated body
+    writes and the cadence regression fails. Omit the later flush: the durable changed PR set never
+    reaches the same issue on the next ordinary pass and its update regression fails.
