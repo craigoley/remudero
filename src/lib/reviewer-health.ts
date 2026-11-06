@@ -457,6 +457,16 @@ export type HealedTree =
   | { state: "conflict"; originMainSha: string; reason: string; paths: string[]; remembered?: true }
   | { state: "unavailable"; originMainSha: string | null; reason: string };
 
+/** Project a failed healed-tree result into the route's stable ledger/log fields. */
+export function reviewerHealedTreeUnavailableFields(healed: Exclude<HealedTree, { state: "ready" | "empty" }>): Record<string, unknown> {
+  return {
+    state: healed.state,
+    reason: healed.reason,
+    ...(healed.state === "conflict" ? { conflict_paths: healed.paths, ...(healed.remembered ? { remembered: true } : {}) } : {}),
+    origin_main_sha: healed.originMainSha,
+  };
+}
+
 const HEAL_IDENTITY = ["-c", "user.name=remudero reviewer-heal", "-c", "user.email=reviewer-heal@remudero.invalid"];
 const healedMemo = new Map<string, { path: string; sha: string }>();
 const healedConflictMemo = new Map<string, { reason: string; paths: string[] }>();

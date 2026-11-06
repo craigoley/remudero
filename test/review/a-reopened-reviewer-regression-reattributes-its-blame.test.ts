@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import * as health from "#src/lib/reviewer-health.js";
-import { reviewerHealedTreeUnavailableFields } from "#src/run-task.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
@@ -127,7 +126,7 @@ test("W1-T11448 criterion 2: a same-main conflict is remembered, then retried af
   const repeated = await health.buildHealedReviewerTree(f.daemon.dir, f.offender, cut, remove);
   assert.equal(repeated.state, "conflict"); assert.equal(repeated.remembered, true);
   if (repeated.state !== "conflict") assert.fail("expected the memoized conflict");
-  assert.deepEqual(reviewerHealedTreeUnavailableFields(repeated), {
+  assert.deepEqual(health.reviewerHealedTreeUnavailableFields(repeated), {
     state: "conflict", reason: repeated.reason, conflict_paths: repeated.paths, remembered: true,
     origin_main_sha: repeated.originMainSha,
   });
