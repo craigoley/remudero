@@ -1,0 +1,53 @@
+- id: W1-T11504
+  title: Plan merge safety reads byte-bounded batches before the growing plan reaches its output cap
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator H4-I measured git history 2026-11-06; full batch output projects to existing 64 MiB cap in 108-185 days"
+  plan_refs: [W1-T5748, W1-T11445]
+  files: [src/lib/plan-pr-merge-safety.ts, test/plan/a-plan-merge-safety-read-does-not-aggregate-the-whole-plan.test.ts]
+  priority: 2
+  status: queued
+  attempts: 0
+  rationale: |
+    At main a9eb76ff103a plan-pr-merge-safety.ts:228-229 fixes STDOUT_CAP_BYTES at 1<<26.
+    readPlanMergeSafetySteps at :444-461 requests the monolith and every YAML shard in ONE
+    cat-file --batch output, then reads/parses that entire output under the cap. The new file
+    descriptor transport prevents held-loop pipe stalls but keeps this aggregate size limit.
+    Measured using git ls-tree -rl sizes (not expanded working copies): 2026-10-06 main7bc018043e58
+    has3014 shards/18,963,857 bytes; 2026-10-30 main6f907f51a9e0 has4649/27,929,826;
+    2026-11-06 main202ec738c748 has4933/29,298,448. Including monolith, exact SHA-1 batch
+    headers and trailing newlines gives20,191,285;29,243,614;30,627,014 bytes respectively.
+    Month-to-current growth336,644 bytes/day projects cap in108.4 days; last-week197,661/day
+    projects184.6 days. These are linear hypotheses, not promised arrival dates or live failures.
+    Both are within months; preserve measurements and recalculate before implementation.
+  design: |
+    Keep the current output cap and fail-closed plan validation. Request immutable blob IDs
+    in deterministic byte-bounded groups derived from their ls-tree sizes, the batch framing
+    overhead and existing STDOUT_CAP_BYTES. Do not guess a fixed shard-count chunk size or raise
+    the cap. A blob that cannot itself fit the existing bound yields an explicit unreadable
+    refusal. Parse each response against exactly its requested IDs, sizes and order; include
+    every monolith/shard once in mergedPlanState. An empty, omitted, truncated, corrupt or
+    reordered response must never produce a safe merge. Preserve conflict and unsafe-plan
+    outcomes, native git errors, descriptor cleanup, off-loop writes and existing cancellation.
+    Expose the existing byte bound through a test seam so scaled fixtures cross it without
+    allocating tens of MiB. Exercise the real native Git transport on a small private repo,
+    plus fake error and framing cases. No host/container probe or real merge in tests.
+  acceptance:
+    - claim: "A merged plan larger in aggregate than the existing per-call output bound validates through deterministic size-bounded native batches, reading every blob exactly once with unchanged safe/unsafe outcomes"
+      proof: "grep: W1-T11504 criterion 1 in test/plan/a-plan-merge-safety-read-does-not-aggregate-the-whole-plan.test.ts"
+    - claim: "An individually oversize blob, missing or reordered response, truncation, corrupt framing, git failure or conflict stays explicit unreadable/unsafe/conflict and cannot authorize a merge"
+      proof: "grep: W1-T11504 criterion 2 in test/plan/a-plan-merge-safety-read-does-not-aggregate-the-whole-plan.test.ts"
+    - claim: "Default native file transport and error cleanup are exercised, retain the existing output cap, and close/unlink temporary descriptors on every outcome"
+      proof: "grep: W1-T11504 criterion 3 in test/plan/a-plan-merge-safety-read-does-not-aggregate-the-whole-plan.test.ts"
+  note: |
+    H4-I. Exact growth receipts at Remudero-notes/luna/H4-evidence/I-growth.json. Computed
+    test/plan HIGH from real planned imports. No new output limit, magic shard count or gate
+    waiver. Native/source merge safety remains authoritative; this task changes batching only.
+  falsifier: |
+    Restore one aggregate batch: criterion 1's scaled-bound native fixture refuses and fails.
+    Remove a response/size validation or cleanup path: its criterion 2/3 control must fail.

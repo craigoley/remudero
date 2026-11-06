@@ -1,0 +1,65 @@
+- id: W1-T11501
+  title: A filed test can ship in its computed folder without a placement amendment
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator H4-A investigation 2026-11-06; repeated placement amendments including PRs 16978, 17017 and 17024"
+  plan_refs: [W1-T9860, W1-T9862, W1-T9874, W1-T10695]
+  files:
+    - src/lib/test-path-resolver.ts
+    - src/lib/prompt-render.ts
+    - src/lib/review.ts
+    - src/run-task.ts
+    - test/ci/suites/a-computed-test-placement-preserves-file-scope.test.ts
+  priority: 1
+  status: queued
+  attempts: 0
+  rationale: |
+    At main a9eb76ff103a, src/lib/prompt-render.ts:60-68 compares an exact declared Set.
+    src/run-task.ts:30959-30970 stages changed paths through pathIsUnderDeclaredSurface;
+    its extra new-test admission accepts name-filtered unit proofs, not the grep criterion markers
+    used by these shards. A correctly placed new test is therefore undeclared and can remain
+    unstaged, or make an implement/fix scope guard refuse, despite the correct computed folder.
+    src/lib/review.ts:5470-5480 likewise reports an exact-path scope advisory. Rule15 precheck
+    only blocks editing criteria alongside implementation, not the placement itself.
+    W1-T9860 already resolves committed tests by unique basename for proofs and credited-test-path;
+    W1-T9862 covers proof debt and overlap, not worker staging. Do not duplicate those mechanisms.
+    REPORTS.md records T11445 changing root to ledger to sweep through separate plan PRs, and
+    T11444 changing deploy to sweep. The test contents determine placement, so a sketch is not final.
+  design: |
+    Add one shared admission predicate for this narrow case and use it for worker staging,
+    implement/fix scope checks and review scope comparison. Resolve identity from a declared
+    eligible test path and one unique candidate in the observed checkout/tree. Require the same
+    basename, a regular repository test outside fixtures, no traversal or symlink, the exact folder
+    computed by the current placement engine using the candidate's contents, and every existing
+    task criterion marker required by its proofs unchanged. Preserve exact paths for non-tests.
+    A new test whose declared path never existed is eligible under the same checks; do not require
+    a Git rename. A declared test already present elsewhere, ambiguous candidates, changed markers,
+    wrong folders, different basenames and unreadable placement remain refusals.
+    Pass task criteria and observed placement evidence through the existing scope/staging callers;
+    do not turn sameTestFile's basename equality into unrestricted scope admission.
+    Keep plan criteria verbatim and use W1-T9860's resolver after the candidate is committed.
+    Merged proofs are intentionally not rewritten under that existing operator ruling. No Rule15
+    exemption, placement-census waiver, broad test glob or proof-content substitution is authorized.
+    Production integration tests exercise real staging in a private git fixture and caller wiring,
+    plus positive and negative scope cases. The new test sketch computed test/ci/suites HIGH;
+    recompute with final contents before building and report any mismatch.
+  acceptance:
+    - claim: "A task declaring a not-yet-created test at another folder stages and admits its unique same-basename candidate only at the contents-computed folder with all criterion markers preserved; committed original-path proofs resolve without changing the shard"
+      proof: "grep: W1-T11501 criterion 1 in test/ci/suites/a-computed-test-placement-preserves-file-scope.test.ts"
+    - claim: "Wrong folder, renamed basename, changed or missing marker, duplicate candidate, symlink, fixture, traversal and unreadable placement stay refused, as do undeclared production edits and empty scope"
+      proof: "grep: W1-T11501 criterion 2 in test/ci/suites/a-computed-test-placement-preserves-file-scope.test.ts"
+    - claim: "Implement and fix staging, push scope and review scope share the narrow predicate; ordinary placement, proof and Rule15 gates still run"
+      proof: "grep: W1-T11501 criterion 3 in test/ci/suites/a-computed-test-placement-preserves-file-scope.test.ts"
+  note: |
+    H4-A; reserved on the operator-backed plan-file branch. Eight open PR heads were fetched and
+    compared against main; no authored diff implements this subject. Existing T9860/T9862 are
+    dependencies in meaning, not permission to loosen unrelated gates. No build in the filing PR.
+  falsifier: |
+    Remove staging integration: the correctly placed test is unstaged and criterion 1 fails.
+    Remove computed-folder or marker checks: the corresponding negative case fails criterion 2.
+    Remove each caller integration separately and its criterion 3 fixture must fail.
