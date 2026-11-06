@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as review from "#src/lib/review.js";
 import * as reviewCommand from "#src/cli/commands/review.js";
-import { runReview } from "#src/run-task.js";
 import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -109,6 +108,21 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
       const prompts: string[] = [];
       const phases: string[] = [];
       const sharedStatuses = [{ id: 1, context: "remudero-review", state: "failure" }];
+      const unrelatedHostPort = (): never => { throw new Error("unexpected unrelated orchestration port"); };
+      const host: reviewCommand.ReviewCommandHost = {
+        GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+        acceptedReviewAttemptId: unrelatedHostPort, attributeWorkerStreamEvent: unrelatedHostPort,
+        ledgeredNonDispatchSpawn: unrelatedHostPort, lintPlanForReview: unrelatedHostPort,
+        liveWorkerRunIds: new Set(), materializeReviewWorktree: unrelatedHostPort,
+        readHeadShaRest: () => head, readMainPlanTreeSha: unrelatedHostPort, realDeps: unrelatedHostPort,
+        reviewPostedDescription: verdict => {
+          assert.equal(verdict.capped, false, "this fixture exercises the production uncapped description branch");
+          return verdict.summary;
+        },
+        reviewWorkerLockId: unrelatedHostPort,
+        reviewerClockBoundMs: override => { assert.ok(Number.isFinite(override)); return override!; },
+        reviewSubjectGit: unrelatedHostPort,
+      };
       shim = ghShim([
         { when: "pulls/1/reviews", stdout: "[]" },
         { when: "pulls/1", stdout: JSON.stringify({ number: 1, html_url: prUrl, state: "open", merged_at: null, head: { ref: "b", sha: head } }) },
@@ -118,7 +132,7 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
         { when: "api ", stdout: "{}" },
       ], { kind: "reproduced-failure-publication" });
       process.env.PATH = `${shim.dir}:${oldPath}`;
-      const drive = () => runReview({
+      const drive = () => reviewCommand.runReview(host, {
         owner: "acme", repo: "remudero", prUrl,
         task: { id: "W1-T11443", files: ["changed.ts"], acceptance: [{ claim: "changed exists", proof: "grep: changed in changed.ts" }] },
         report: "changed", settingsFile: join(root, "settings.json"), config: { root, claudeBin: "/unused" },
@@ -144,7 +158,7 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
             tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
           };
         },
-        reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120_000 },
+        reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120_000 }, reviewerClockBoundMs: 120_000,
         headCheckoutDir: root, ledgerPath: join(root, "ledger.ndjson"), runId: `history-${scenario}`,
         disarm: () => "not-armed", arm: () => ({ armed: false, reason: "fixture" }),
       } as never);
