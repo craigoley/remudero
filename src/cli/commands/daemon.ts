@@ -57,7 +57,7 @@ import { daemonInstanceRegistryPath } from "../../lib/deployer.js";
 import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
-import { instanceRegistryRuntimePresent, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
+import { instanceRegistryRuntimePresent, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
 import { createGhCallPacer } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
@@ -648,7 +648,7 @@ export async function daemonCommand(
   } = {},
   host: DaemonCommandHost,
 ): Promise<number> {
-  if (process.env.RMD_INSTANCE_REGISTRY !== undefined && !instanceRegistryRuntimePresent()) {
+  if (selectedInstanceRegistryEnvPath() !== undefined && !instanceRegistryRuntimePresent()) {
     return withInstanceRegistryRuntime(() => daemonCommand(rest, deps, host));
   }
   const {
@@ -2103,7 +2103,9 @@ export async function daemonCommand(
                   const sreLane = {
                     instance: resolveSreLaneInstance({
                       stateRoot: config.root,
-                      registryPath: process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(repoRoot),
+                      registryPath: process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
+                        ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
+                        : process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(repoRoot),
                     }),
                     env: { RMD_SRE_LANE: process.env.RMD_SRE_LANE },
                   };

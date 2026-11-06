@@ -51,7 +51,8 @@ import {
 } from "../src/run-task.js";
 
 test("selected runtime CLI entry refuses invalid input without changing unselected read-only dispatch", async (t) => withTempDir("selected-runtime-cli", async root => {
-  const fixture = { selected: join(root, "selected.yaml") }, prior = process.env.RMD_INSTANCE_REGISTRY, argv = process.argv;
+  const fixture = { selected: join(root, "selected.yaml") }, prior = process.env.RMD_INSTANCE_REGISTRY,
+    priorSelected = process.env.RMD_SELECTED_INSTANCE_REGISTRY, argv = process.argv;
   writeFileSync(fixture.selected, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
   const reachedExit = new Error("contained CLI exit");
   let code: number | string | undefined;
@@ -63,6 +64,7 @@ test("selected runtime CLI entry refuses invalid input without changing unselect
   });
   process.argv = [process.execPath, "rmd", "daemon"];
   try {
+    delete process.env.RMD_SELECTED_INSTANCE_REGISTRY;
     process.env.RMD_INSTANCE_REGISTRY = "";
     await assert.rejects(main(), /selected instance registry unavailable/);
     assert.equal(code, undefined, "invalid selection stops before the actual dispatch exit");
@@ -75,6 +77,7 @@ test("selected runtime CLI entry refuses invalid input without changing unselect
   } finally {
     process.argv = argv;
     if (prior === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = prior;
+    if (priorSelected === undefined) delete process.env.RMD_SELECTED_INSTANCE_REGISTRY; else process.env.RMD_SELECTED_INSTANCE_REGISTRY = priorSelected;
   }
 }));
 
@@ -88,7 +91,7 @@ const registry = (mode?: string) => [
   "",
 ].join("\n");
 
-type RuntimeRegistryRunner = <T>(operation: () => T | Promise<T>, input: { envPath?: string; instanceName?: string }) => Promise<T>;
+type RuntimeRegistryRunner = <T>(operation: () => T | Promise<T>, input?: { envPath?: string; instanceName?: string }) => Promise<T>;
 function runtimeRegistryRunner(): RuntimeRegistryRunner {
   const run = Reflect.get(runtimeRegistry, "withInstanceRegistryRuntime");
   assert.equal(typeof run, "function", "production invocation binding must exist, not a supplied current-subject fixture");
@@ -105,7 +108,8 @@ function runtimeRegistryFixture(mode = "shadow") {
 }
 
 test("private registry selection reaches real host and daemon readers: actual entry points", async () => {
-  const fixture = runtimeRegistryFixture(), prior = process.env.RMD_INSTANCE_REGISTRY;
+  const fixture = runtimeRegistryFixture(), prior = process.env.RMD_INSTANCE_REGISTRY,
+    priorSelected = process.env.RMD_SELECTED_INSTANCE_REGISTRY;
   const reachedHost = new Error("contained host boundary reached");
   let reads = 0, observed: string | undefined;
   const host = new Proxy({}, { get: () => {
@@ -119,19 +123,36 @@ test("private registry selection reaches real host and daemon readers: actual en
   ];
   try {
     for (const enter of entries) {
+      delete process.env.RMD_SELECTED_INSTANCE_REGISTRY;
       process.env.RMD_INSTANCE_REGISTRY = "";
       const before = reads;
       await assert.rejects(enter(), /selected instance registry unavailable/);
-      assert.equal(reads, before, "explicit invalid selection must not touch the command host");
+      assert.equal(reads, before, "explicit invalid legacy selection must not touch the command host");
       process.env.RMD_INSTANCE_REGISTRY = fixture.selected;
       await assert.rejects(enter(), error => error === reachedHost);
-      assert.equal(observed, "shadow", "actual entrypoint host reads must see selected default bytes");
+      assert.equal(observed, "shadow", "legacy selected-path alias keeps working during transition");
       delete process.env.RMD_INSTANCE_REGISTRY;
       await assert.rejects(enter(), error => error === reachedHost);
       assert.equal(observed, "live", "genuine absence retains the existing legacy reader");
+
+      process.env.RMD_INSTANCE_REGISTRY = join(fixture.root, ".remudero", "daemon-instances.yaml");
+      process.env.RMD_SELECTED_INSTANCE_REGISTRY = fixture.selected;
+      await assert.rejects(enter(), error => error === reachedHost);
+      assert.equal(observed, "shadow", "explicit selection wins while the old variable remains the legacy catalog");
+      process.env.RMD_SELECTED_INSTANCE_REGISTRY = join(fixture.root, "missing-selected.yaml");
+      const beforeInvalid = reads;
+      await assert.rejects(enter(), /selected instance registry unavailable/);
+      assert.equal(reads, beforeInvalid, "an invalid explicit selection never falls back to the valid legacy catalog");
+      process.env.RMD_SELECTED_INSTANCE_REGISTRY = "";
+      await assert.rejects(enter(), /selected instance registry unavailable/);
+      assert.equal(reads, beforeInvalid, "an explicitly empty selected path remains present and refuses without reading the legacy catalog");
+      delete process.env.RMD_SELECTED_INSTANCE_REGISTRY;
+      await assert.rejects(enter(), error => error === reachedHost);
+      assert.equal(observed, "live", "absence of the new variable retains the old catalog-path fallback");
     }
   } finally {
     if (prior === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = prior;
+    if (priorSelected === undefined) delete process.env.RMD_SELECTED_INSTANCE_REGISTRY; else process.env.RMD_SELECTED_INSTANCE_REGISTRY = priorSelected;
     fixture.cleanup();
   }
 });
@@ -385,7 +406,8 @@ else { process.stderr.write("forbidden fixture transport"); process.exitCode=97;
     await runtimeRegistryRunner()(async () => {
       const packet = runtimeRegistry.trustedInstanceRegistryLaunchPacket().split("\n");
       const inspect = { Name: `/${container}`, Config: { Env: ["RMD_INSTANCE_NAME=worker",
-        `RMD_INSTANCE_REGISTRY=${fixture.selected}`, `RMD_INSTANCE_REGISTRY_DIGEST=${packet[2]}`,
+        "RMD_INSTANCE_REGISTRY=/home/node/Remudero/.remudero/daemon-instances.yaml",
+        `RMD_SELECTED_INSTANCE_REGISTRY=${fixture.selected}`, `RMD_INSTANCE_REGISTRY_DIGEST=${packet[2]}`,
         `RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet[4]}`] }, Mounts: [
         { Type: "bind", Source: hostRoot, Destination: containerRoot, RW: true },
         { Type: "bind", Source: "/srv/synthetic/private.yaml", Destination: fixture.selected, RW: false },
@@ -1285,7 +1307,7 @@ test("selected Claude SDK boundary snapshots private denials across queued argum
 });
 
 test("selected Claude scopes and worker environment refuse unknown private access before query", async () => {
-  for (const mode of ["tmp-overlap", "tmp-relative", "home-override", "unsafe-allow", "unsafe-read", "private-policy", "private-env", "selection-env"] as const) {
+  for (const mode of ["tmp-overlap", "tmp-relative", "home-override", "unsafe-allow", "unsafe-read", "private-policy", "private-env", "selection-env", "selected-registry-env"] as const) {
     const fixture = runtimeRegistryFixture(), sink = { calls: 0 };
     try {
       const args = privateClaudeArgs(fixture, sink), policy = JSON.parse(readFileSync(args.settingsFile, "utf8"));
@@ -1297,6 +1319,7 @@ test("selected Claude scopes and worker environment refuse unknown private acces
       if (mode === "private-policy") policy.sandbox.filesystem = { denyRead: [fixture.selected] };
       if (mode === "private-env") args.env!.ARBITRARY_FIXTURE_VALUE = fixture.selected;
       if (mode === "selection-env") args.env!.RMD_INSTANCE_REGISTRY_DIGEST = "fixture-not-a-worker-grant";
+      if (mode === "selected-registry-env") args.env!.RMD_SELECTED_INSTANCE_REGISTRY = fixture.selected;
       writeFileSync(args.settingsFile, JSON.stringify(policy));
       await assert.rejects(runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected }), error => {
         assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);

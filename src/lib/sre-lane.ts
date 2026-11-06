@@ -450,7 +450,9 @@ export function daemonSreLaneInput(
 ): SreLaneInput {
   const instance = resolveSreLaneInstance({
     stateRoot: dirname(input.stateDir),
-    registryPath: process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(input.root),
+    registryPath: process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
+      ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
+      : process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(input.root),
   });
   const name = instance.resolved ? instance.name : "unknown";
   return {
