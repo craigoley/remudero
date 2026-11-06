@@ -84,6 +84,15 @@ export function fastTierHangBoundArgs(manifest) {
   return [`--test-timeout=${thresholdMs * FAST_TIER_TEST_TIMEOUT_FACTOR}`, "--test-force-exit"];
 }
 
+/** The same duration policy also prices already-resolved proof targets without discovering files again. */
+export function derivedNodeTestTimeoutMs(files, manifest = {}, root = ".") {
+  manifest ??= {};
+  const threshold = Number.isFinite(manifest.thresholdMs) && manifest.thresholdMs > 0 ? manifest.thresholdMs : DEFAULT_SLOW_THRESHOLD_MS;
+  const durations = files.map(file => manifestEntryFor(manifest,
+    (isAbsolute(file) ? relative(root, file) : file).split(sep).join("/").replaceAll("\\", "/").replace(/^\.\//, "")));
+  return Math.ceil(Math.max(threshold, ...durations.filter(ms => Number.isFinite(ms) && ms > 0)) * FAST_TIER_TEST_TIMEOUT_FACTOR);
+}
+
 /** Native local runners use the selected files' measured duration, with the existing fast-tier
  * floor and safety factor. This adds only a deadline: targets, reporters and admission stay intact.
  * Explicit finite positive caller bounds take precedence; zero must never silently disable it. */
@@ -98,15 +107,12 @@ export function boundedNodeTestArgs(args, root = ".", manifest) {
   }
   if (explicit) return [...args];
   manifest ??= loadManifest(join(root, DEFAULT_MANIFEST_RELATIVE_PATH));
-  const threshold = Number.isFinite(manifest.thresholdMs) && manifest.thresholdMs > 0 ? manifest.thresholdMs : DEFAULT_SLOW_THRESHOLD_MS;
-  const durations = testFilesInArgv(args, root).map(file => manifestEntryFor(manifest,
-    isAbsolute(file) ? relative(root, file).split(sep).join("/") : file));
-  const longest = Math.max(threshold, ...durations.filter(ms => Number.isFinite(ms) && ms > 0));
+  const timeout = derivedNodeTestTimeoutMs(testFilesInArgv(args, root), manifest, root);
   // Preserve the entry/reporter header without splitting an option from its value.
   let insertion = args.indexOf("--test") + 1;
   if (args[insertion] === "--test-reporter") insertion += 2;
   else if (args[insertion]?.startsWith("--test-reporter=")) insertion += 1;
-  return [...args.slice(0, insertion), `--test-timeout=${Math.ceil(longest * FAST_TIER_TEST_TIMEOUT_FACTOR)}`, ...args.slice(insertion)];
+  return [...args.slice(0, insertion), `--test-timeout=${timeout}`, ...args.slice(insertion)];
 }
 
 /**
