@@ -33,10 +33,11 @@ export interface UnreadableCwdDetail {
   walk?: "ppid_unreadable" | "cycle" | "reached_init" | "ancestor_exited" | "ancestor_error";
 }
 
-export type ProcessCwdCensus =
-  | { state: "clear"; scanned: number; skippedForeign?: number; attributed?: number }
-  | { state: "occupied"; scanned: number; pid: number; via?: number; skippedForeign?: number; attributed?: number }
-  | { state: "unknown"; scanned: number; reason: "proc_unavailable" | "cwd_unreadable" | "entry_bound" | "wall_bound" };
+export type ProcessCwdCensus = (
+  | { state: "clear"; scanned: number }
+  | { state: "occupied"; scanned: number; pid: number; via?: number }
+  | { state: "unknown"; scanned: number; reason: "proc_unavailable" | "cwd_unreadable" | "entry_bound" | "wall_bound" }
+) & { skippedForeign?: number; attributed?: number; attributedVia?: number[] };
 
 const FIX_OWNER_PROC_ENTRY_BOUND = 4_096;
 const FIX_OWNER_PROC_WALL_MS = 100;
@@ -55,15 +56,6 @@ function statusField(status: string, field: "Uid" | "PPid"): number | null {
 function errnoOf(e: unknown): string {
   const code = (e as NodeJS.ErrnoException | undefined)?.code;
   return typeof code === "string" && code ? code : "unknown";
-}
-
-/** Only the counts that happened: a census with nothing skipped or attributed keeps its W1-T2952 shape. */
-function withCounts<T extends object>(result: T, skippedForeign: number, attributed: number): T {
-  return {
-    ...result,
-    ...(skippedForeign > 0 ? { skippedForeign } : {}),
-    ...(attributed > 0 ? { attributed } : {}),
-  };
 }
 
 export function readBoundedProcessCwdCensus(
@@ -98,22 +90,27 @@ export function readBoundedProcessCwdCensus(
     // W1-T10389 design 6: ancestor reads count against the same entry bound as the pids they explain.
     let walked = 0;
     let skippedForeign = 0;
-    let attributed = 0;
+    const attributedVia: number[] = [];
+    const finish = (result: ProcessCwdCensus): ProcessCwdCensus => ({
+      ...result,
+      ...(skippedForeign > 0 ? { skippedForeign } : {}),
+      ...(attributedVia.length > 0 ? { attributed: attributedVia.length, attributedVia } : {}),
+    });
     const unreadable = (detail: UnreadableCwdDetail): ProcessCwdCensus => {
       deps.onUnreadable?.(detail);
-      return { state: "unknown", scanned, reason: "cwd_unreadable" };
+      return finish({ state: "unknown", scanned, reason: "cwd_unreadable" });
     };
     for (;;) {
-      if (now() - started > wallMs) return { state: "unknown", scanned, reason: "wall_bound" };
+      if (now() - started > wallMs) return finish({ state: "unknown", scanned, reason: "wall_bound" });
       let entry: string | null;
       try {
         entry = readNextPid();
       } catch {
-        return { state: "unknown", scanned, reason: "proc_unavailable" };
+        return finish({ state: "unknown", scanned, reason: "proc_unavailable" });
       }
-      if (entry === null) return withCounts({ state: "clear", scanned }, skippedForeign, attributed);
+      if (entry === null) return finish({ state: "clear", scanned });
       if (!/^\d+$/.test(entry)) continue;
-      if (scanned + walked >= maxEntries) return { state: "unknown", scanned, reason: "entry_bound" };
+      if (scanned + walked >= maxEntries) return finish({ state: "unknown", scanned, reason: "entry_bound" });
       scanned += 1;
       let cwd: string;
       try {
@@ -121,18 +118,20 @@ export function readBoundedProcessCwdCensus(
       } catch (e) {
         const errno = errnoOf(e);
         if (errno === "ENOENT") continue;
-        if (errno !== "EACCES" && errno !== "EPERM") return unreadable({ pid: Number(entry), errno, uid: "unreadable" });
         // W1-T10389 design 2: only a pid whose uid is readable can be told apart from a fleet worker.
         let status: string;
         try {
           status = readStatus(entry);
         } catch (statusError) {
-          // Not erased: an exited pid is skipped as ENOENT is above; any other failure names the pid and errno.
-          if (errnoOf(statusError) === "ENOENT") continue;
+          // The uid was not established, even if status vanished after the denied cwd read.
+          void statusError;
           return unreadable({ pid: Number(entry), errno, uid: "unreadable" });
         }
         const uid = statusField(status, "Uid");
         if (uid === null || ownUid === undefined) return unreadable({ pid: Number(entry), errno, uid: "unreadable" });
+        if (errno !== "EACCES" && errno !== "EPERM") {
+          return unreadable({ pid: Number(entry), errno, uid: uid === ownUid ? "same" : "foreign" });
+        }
         if (uid !== ownUid) {
           // A fleet worker runs as the daemon's own uid, so a foreign pid cannot be the owner.
           skippedForeign += 1;
@@ -147,8 +146,8 @@ export function readBoundedProcessCwdCensus(
           if (parent === null) return unreadable({ pid: Number(entry), errno, uid: "same", walk: "ppid_unreadable" });
           if (parent < 1) return unreadable({ pid: Number(entry), errno, uid: "same", walk: "reached_init" });
           if (seen.has(parent)) return unreadable({ pid: Number(entry), errno, uid: "same", walk: "cycle" });
-          if (now() - started > wallMs) return { state: "unknown", scanned, reason: "wall_bound" };
-          if (scanned + walked >= maxEntries) return { state: "unknown", scanned, reason: "entry_bound" };
+          if (now() - started > wallMs) return finish({ state: "unknown", scanned, reason: "wall_bound" });
+          if (scanned + walked >= maxEntries) return finish({ state: "unknown", scanned, reason: "entry_bound" });
           walked += 1;
           seen.add(parent);
           try {
@@ -172,14 +171,14 @@ export function readBoundedProcessCwdCensus(
           }
           parent = statusField(parentStatus, "PPid");
         }
+        attributedVia.push(decided.pid);
         if (pathIsAtOrBelow(decided.cwd, ownerPath)) {
-          return withCounts({ state: "occupied", scanned, pid: Number(entry), via: decided.pid }, skippedForeign, attributed + 1);
+          return finish({ state: "occupied", scanned, pid: Number(entry), via: decided.pid });
         }
-        attributed += 1;
         continue;
       }
       if (pathIsAtOrBelow(cwd, ownerPath)) {
-        return withCounts({ state: "occupied", scanned, pid: Number(entry) }, skippedForeign, attributed);
+        return finish({ state: "occupied", scanned, pid: Number(entry) });
       }
     }
   } finally {
@@ -195,15 +194,16 @@ export function readBoundedProcessCwdCensus(
 /** W1-T10389 design 1/3/6: the `process_probe_reason` a decline row carries. Undefined when the census
  *  has nothing to say beyond its state, so a plain clear or direct occupancy keeps today's row. */
 export function describeProcessCwdProbe(census: ProcessCwdCensus, detail?: UnreadableCwdDetail): string | undefined {
-  if (census.state === "unknown") {
-    if (census.reason !== "cwd_unreadable" || !detail) return census.reason;
-    const walk = detail.walk ? ` walk=${detail.walk}` : "";
-    return `cwd_unreadable pid=${detail.pid} errno=${detail.errno} uid=${detail.uid}${walk}`;
-  }
   const counts = [
     ...(census.skippedForeign ? [`skipped_foreign=${census.skippedForeign}`] : []),
     ...(census.attributed ? [`attributed=${census.attributed}`] : []),
+    ...(census.attributedVia?.length ? [`attributed_via=${census.attributedVia.join(",")}`] : []),
   ];
+  if (census.state === "unknown") {
+    if (census.reason !== "cwd_unreadable" || !detail) return [census.reason, ...counts].join(" ");
+    const walk = detail.walk ? ` walk=${detail.walk}` : "";
+    return [`cwd_unreadable pid=${detail.pid} errno=${detail.errno} uid=${detail.uid}${walk}`, ...counts].join(" ");
+  }
   if (census.state === "occupied" && census.via !== undefined) {
     return [`attributed pid=${census.pid} via=${census.via}`, ...counts].join(" ");
   }

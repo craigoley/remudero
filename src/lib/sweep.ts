@@ -4121,6 +4121,16 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             });
           }
           const recovery = decideRegisteredFixOwnerRecovery(snapshot);
+          if (snapshot.processProbeReason !== undefined) {
+            log("sweep.fix.checkout_owner_process_census", {
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: snapshot.path,
+              process_state: snapshot.processState,
+              process_probe_reason: snapshot.processProbeReason,
+            });
+          }
           if (recovery.kind === "keep") {
             if (snapshot.treeState === "untracked_dirty") {
               log("sweep.fix.dirty_recovery_untracked_refused", {

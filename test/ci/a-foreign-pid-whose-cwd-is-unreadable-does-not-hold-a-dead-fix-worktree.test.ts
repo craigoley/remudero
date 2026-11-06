@@ -99,11 +99,16 @@ test("W1-T10389 criterion 2: an unreadable cwd on the daemon's own uid, an unrea
   assert.deepEqual(seen.at(-1), { pid: 71, errno: "EACCES", uid: "unreadable" });
   keep({ "72": { errno: "EPERM" } });
   assert.deepEqual(seen.at(-1), { pid: 72, errno: "EPERM", uid: "unreadable" });
+  for (const errno of ["EACCES", "EPERM"]) {
+    const missing = keep({ "73": { errno, status: "missing" } });
+    assert.deepEqual(seen.at(-1), { pid: 73, errno, uid: "unreadable" });
+    assert.equal(describeProcessCwdProbe(missing, seen.at(-1)), `cwd_unreadable pid=73 errno=${errno} uid=unreadable`);
+  }
 
   // Any errno other than EACCES/EPERM/ENOENT fails closed as before, and the row names it.
   const io = keep({ "74": { errno: "EIO", uid: 0 } });
-  assert.deepEqual(seen.at(-1), { pid: 74, errno: "EIO", uid: "unreadable" });
-  assert.equal(describeProcessCwdProbe(io, seen.at(-1)), "cwd_unreadable pid=74 errno=EIO uid=unreadable");
+  assert.deepEqual(seen.at(-1), { pid: 74, errno: "EIO", uid: "foreign" });
+  assert.equal(describeProcessCwdProbe(io, seen.at(-1)), "cwd_unreadable pid=74 errno=EIO uid=foreign");
 
   // A synthetic process table with no status reader never reads the real /proc: the W1-T2952 contract stands.
   const pending = ["10"];
@@ -117,6 +122,64 @@ test("W1-T10389 criterion 2: an unreadable cwd on the daemon's own uid, an unrea
   );
 });
 
+test("W1-T10389 criterion 1: a later unreadable uid retains the foreign skip count in the decline reason", () => {
+  let detail: UnreadableCwdDetail | undefined;
+  const census = readBoundedProcessCwdCensus(OWNER, table({
+    "10": { errno: "EACCES", uid: 0 },
+    "30": { errno: "EPERM", status: "unreadable" },
+  }, { onUnreadable: (value) => { detail = value; } }));
+  assert.deepEqual(census, { state: "unknown", scanned: 2, reason: "cwd_unreadable", skippedForeign: 1 });
+  assert.equal(describeProcessCwdProbe(census, detail), "cwd_unreadable pid=30 errno=EPERM uid=unreadable skipped_foreign=1");
+});
+
+test("W1-T10389 criterion 3: a later decline retains attribution counts and the readable ancestor pid", () => {
+  const procs = {
+    "1": { errno: "EACCES", uid: 0 },
+    "10": { errno: "EACCES", uid: DAEMON_UID, ppid: 20 },
+    "20": { cwd: "/another/worktree" },
+    "30": { errno: "EACCES", status: "unreadable" as const },
+  };
+  let detail: UnreadableCwdDetail | undefined;
+  const census = readBoundedProcessCwdCensus(OWNER, table(procs, { onUnreadable: (value) => { detail = value; } }));
+  assert.deepEqual(census, {
+    state: "unknown", scanned: 4, reason: "cwd_unreadable", skippedForeign: 1, attributed: 1, attributedVia: [20],
+  });
+  assert.equal(describeProcessCwdProbe(census, detail),
+    "cwd_unreadable pid=30 errno=EACCES uid=unreadable skipped_foreign=1 attributed=1 attributed_via=20");
+
+  const bounded = readBoundedProcessCwdCensus(OWNER, table(procs, { maxEntries: 3 }));
+  assert.deepEqual(bounded, {
+    state: "unknown", scanned: 2, reason: "entry_bound", skippedForeign: 1, attributed: 1, attributedVia: [20],
+  });
+  assert.equal(describeProcessCwdProbe(bounded), "entry_bound skipped_foreign=1 attributed=1 attributed_via=20");
+
+  let time = 0;
+  const timed = table(procs, { clock: { now: () => time } });
+  const readCwd = timed.readCwd!;
+  timed.readCwd = (pid) => {
+    const cwd = readCwd(pid);
+    time = CENSUS_WALL_MS + 1;
+    return cwd;
+  };
+  const wall = readBoundedProcessCwdCensus(OWNER, timed);
+  assert.deepEqual(wall, {
+    state: "unknown", scanned: 2, reason: "wall_bound", skippedForeign: 1, attributed: 1, attributedVia: [20],
+  });
+  assert.equal(describeProcessCwdProbe(wall), "wall_bound skipped_foreign=1 attributed=1 attributed_via=20");
+
+  const pending = ["1", "10"];
+  const unavailable = readBoundedProcessCwdCensus(OWNER, table(procs, {
+    readNextPid: () => {
+      if (pending.length) return pending.shift()!;
+      throw denied("EIO");
+    },
+  }));
+  assert.deepEqual(unavailable, {
+    state: "unknown", scanned: 2, reason: "proc_unavailable", skippedForeign: 1, attributed: 1, attributedVia: [20],
+  });
+  assert.equal(describeProcessCwdProbe(unavailable), "proc_unavailable skipped_foreign=1 attributed=1 attributed_via=20");
+});
+
 test("W1-T10389 criterion 3: an unreadable cwd on a same-uid sandboxed pid is decided by its nearest readable ancestor's cwd", { timeout: TEST_TIMEOUT_MS }, () => {
   // bwrap (200, non-dumpable) -> sandboxed node (300, non-dumpable) under their launcher (900, readable), all the
   // daemon's uid. The census meets the sandboxed pids before the launcher, as /proc order may.
@@ -128,13 +191,13 @@ test("W1-T10389 criterion 3: an unreadable cwd on a same-uid sandboxed pid is de
 
   // A review sandbox working in another worktree is attributed to it and does not hold this owner.
   const elsewhere = readBoundedProcessCwdCensus(OWNER, table(sandbox("/fleet/worktrees/review-PR16523-1")));
-  assert.deepEqual(elsewhere, { state: "clear", scanned: 3, attributed: 2 });
-  assert.equal(describeProcessCwdProbe(elsewhere), "clear attributed=2");
+  assert.deepEqual(elsewhere, { state: "clear", scanned: 3, attributed: 2, attributedVia: [900, 900] });
+  assert.equal(describeProcessCwdProbe(elsewhere), "clear attributed=2 attributed_via=900,900");
 
   // A sandbox whose launcher works inside the owner's worktree is a live owner: occupied, naming the ancestor.
   const inside = readBoundedProcessCwdCensus(OWNER, table(sandbox(`${OWNER}/test`)));
-  assert.deepEqual(inside, { state: "occupied", scanned: 1, pid: 200, via: 900, attributed: 1 });
-  assert.equal(describeProcessCwdProbe(inside), "attributed pid=200 via=900 attributed=1");
+  assert.deepEqual(inside, { state: "occupied", scanned: 1, pid: 200, via: 900, attributed: 1, attributedVia: [900] });
+  assert.equal(describeProcessCwdProbe(inside), "attributed pid=200 via=900 attributed=1 attributed_via=900");
 
   // The walk fails closed: a cycle, reaching init with no readable cwd, or an ancestor that exited mid-walk.
   const seen: UnreadableCwdDetail[] = [];
@@ -161,7 +224,7 @@ test("W1-T10389 criterion 3: an unreadable cwd on a same-uid sandboxed pid is de
   // in three entries; the walk's ancestor reads spend them first.
   assert.deepEqual(
     readBoundedProcessCwdCensus(OWNER, table(sandbox("/elsewhere"), { maxEntries: 3 })),
-    { state: "unknown", scanned: 2, reason: "entry_bound" },
+    { state: "unknown", scanned: 2, reason: "entry_bound", attributed: 1, attributedVia: [900] },
   );
 });
 
