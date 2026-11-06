@@ -10,7 +10,10 @@
   origin: "2026-11-06 Azure host: preflight-author refused /tmp/rmd-amend-W1-T11431-1793931609000 because its node_modules (a whole-directory symlink to ~/rmd-op/node_modules) held claude-agent-sdk 0.3.310 against a 0.3.316 lockfile"
   plan_refs: [W1-T10507, W1-T10508, W1-T10739]
   files: [hooks/post-merge, scripts/lib/author-dependency-provenance.mjs, deploy/DEPENDENCY-SEEDS.md, test/deploy/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=99d0a6235b9487c3
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
   attempts: 0
   rationale: |
     On 2026-11-06, scripts/preflight-author.mjs (~:507) refused a host worktree before expensive
