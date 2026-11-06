@@ -131,6 +131,32 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
       assert.equal(typeof delivered, "string", "the documented legacy latch contract stays synchronous");
       assert.equal(delivered, "https://github.com/fixture/loop/issues/7");
       assert.ok(legacySleeps > 0, "retain the explicitly documented unsafe-retry delivery exception until its durable follow-up");
+      const beforeCustom = legacySleeps;
+      let assigned = false;
+      shim.addRoute({ when: "issue edit", delaySeconds: 0.03 });
+      process.env.RMD_GH_CACHE_HOME = join(root, "legacy-custom-cache");
+      transport.stampGhRead(transport.ghReadCadenceStampPath(process.env));
+      const routed = ghIssueGateway("fixture", "loop", { exec: args => {
+        const out = transport.ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        if (args[0] === "issue" && args[1] === "create") {
+          transport.ghExec(["issue", "edit", out.trim(), "--repo", "fixture/loop", "--add-assignee", "fixture"],
+            { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+          assigned = true;
+        }
+        return out;
+      } });
+      const customDelivered = await withLiveWritesAllowed(() => transport.withDaemonGhTransportFloor(() => {
+        const url = escalate({ ...ask, taskId: "LEGACY-CUSTOM-LATCH" }, { issues: routed,
+          ledgerPath: join(root, "legacy-custom.ndjson"), runId: "LEGACY-CUSTOM", triage: { mode: "shadow" } });
+        const stillLoop = cache();
+        try { assert.throws(() => transport.applyGhReadCadence(read, stillLoop.deps), transport.GhPaceWouldBlockError,
+          "a legacy delivery exception must not escape its synchronous call"); }
+        finally { rmSync(stillLoop.root, { recursive: true, force: true }); }
+        return url;
+      }));
+      assert.equal(customDelivered, "https://github.com/fixture/loop/issues/7", "an unsafe custom route keeps synchronous delivery before its caller consumes the incident");
+      assert.equal(assigned, true, "the supplied route retains its real post-create assignment");
+      assert.ok(legacySleeps > beforeCustom, "a custom legacy caller keeps its existing positive wait contract");
     } finally { Atomics.wait = previousWait; }
     configureEscalationTriage(() => ({ mode: "shadow" }));
     try {
