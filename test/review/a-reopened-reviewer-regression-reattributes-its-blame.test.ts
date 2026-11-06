@@ -33,8 +33,9 @@ const healthyShadow = (sha: string, firstPr: number): Row[] => Array.from({ leng
 
 function commitFile(repo: GitRepo, content: string, subject: string): string {
   mkdirSync(join(repo.dir, "src/lib"), { recursive: true });
+  writeFileSync(join(repo.dir, "src/run-task.ts"), "// reviewer history fixture: no dispatch review path\n");
   writeFileSync(join(repo.dir, "src/lib/review.ts"), content);
-  repo.git("add", "src/lib/review.ts");
+  repo.git("add", "src/lib/review.ts", "src/run-task.ts");
   repo.git("commit", "-q", "-m", subject);
   return repo.git("rev-parse", "HEAD");
 }
