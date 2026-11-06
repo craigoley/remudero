@@ -34,9 +34,11 @@
     network access, including async execution, fallback inputs and explicit-timeout precedence.
   acceptance:
     - claim: "Every selected author Node suite receives a per-test hang timeout derived from measured suite duration or the manifest threshold, with explicit timeouts preserved"
-      proof: "unit test: W1-T11449 criterion 1"
+      proof: "grep: W1-T11449 criterion 1 in test/ci/a-preflight-author-tests-have-a-duration-derived-timeout.test.ts"
     - claim: "Sync and async Node unit-test proofs use the shared bound and retain complete summaries, while non-Node commands remain unchanged"
-      proof: "unit test: W1-T11449 criterion 2"
+      proof: "grep: W1-T11449 criterion 2 in test/ci/a-preflight-author-tests-have-a-duration-derived-timeout.test.ts"
+    - claim: "The shared Node timeout helper is called by the production proof executor"
+      proof: "grep: proofTestRunnerArgs( in src/lib/review.ts"
   note: |
     Keep markers in test names, record red-before-green and per-file mutation receipts, and use
     the shared Mac lock with a test timeout. File and implementation are separate PRs.
