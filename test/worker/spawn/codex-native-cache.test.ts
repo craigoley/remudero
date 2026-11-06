@@ -137,7 +137,8 @@ function assertNoNativeCache(options: ContainedSpawnOptions, home: string) {
   assert.equal(options.args.includes("--add-dir"), false, "no write grant of any kind");
   assert.equal(options.args.some(arg => arg.includes("swc-native")), false, "the namespace is named nowhere in argv");
   assert.equal(existsSync(join(home, ".cache")), false, "no namespace is created under the operator home");
-  assert.equal(options.args[options.args.indexOf("--sandbox") + 1], "workspace-write", "the writer itself still runs contained");
+  // W1-T11437 (operator 2026-11-05): writers run the allowlist-proxied :workspace profile, not --sandbox workspace-write.
+  assert.ok(options.args.includes('permissions.rmd_writer.extends=":workspace"'), "the writer itself still runs contained");
 }
 
 test("Codex writers without a verified Git repository receive no native-cache grant or namespace", posix, async () => {

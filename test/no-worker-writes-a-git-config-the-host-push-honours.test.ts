@@ -410,7 +410,8 @@ describe("W1-T6148: the codex lane has no gitdir grant and the harness commits f
     const { wt } = cutLane();
     // config.root spans the seed and the tree, so the old grant (limited to config.root) would have fired.
     const { args } = await runCodex(wt, codexChild(() => {}, "nothing"), {}, realpathSync(tmpdir()));
-    assert.equal(args[args.indexOf("--sandbox") + 1], "workspace-write");
+    // W1-T11437 (operator 2026-11-05): writers run the allowlist-proxied :workspace profile, not --sandbox workspace-write.
+    assert.ok(args.includes('permissions.rmd_writer.extends=":workspace"'));
     // The one grant a writer keeps is its private addon namespace (never a git administrative root).
     const nativeCache = join(realpathSync(homedir()), ".cache", "remudero", "swc-native");
     assert.deepEqual(args.flatMap((a, i) => (a === "--add-dir" ? [args[i + 1]] : [])), [nativeCache], "no writable git administrative root");
