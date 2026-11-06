@@ -96,10 +96,11 @@ export function derivedNodeTestTimeoutMs(files, manifest = {}, root = ".") {
 /** Native local runners use the selected files' measured duration, with the existing fast-tier
  * floor and safety factor. This adds only a deadline: targets, reporters and admission stay intact.
  * Explicit finite positive caller bounds take precedence; zero must never silently disable it. */
-export function boundedNodeTestArgs(args, root = ".", manifest) {
+export function boundedNodeTestArgs(args, root = ".", manifest, resolvedFiles) {
   if (!args.includes("--test")) return [...args];
   let explicit = false;
   for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--test-name-pattern" || args[i] === "--test-skip-pattern") { i += 1; continue; }
     if (args[i] !== "--test-timeout" && !args[i].startsWith("--test-timeout=")) continue;
     const value = Number(args[i] === "--test-timeout" ? args[i + 1] : args[i].slice("--test-timeout=".length));
     if (!Number.isFinite(value) || value <= 0) throw new RangeError("test timeout must be finite and positive");
@@ -107,7 +108,7 @@ export function boundedNodeTestArgs(args, root = ".", manifest) {
   }
   if (explicit) return [...args];
   manifest ??= loadManifest(join(root, DEFAULT_MANIFEST_RELATIVE_PATH));
-  const timeout = derivedNodeTestTimeoutMs(testFilesInArgv(args, root), manifest, root);
+  const timeout = derivedNodeTestTimeoutMs(resolvedFiles ?? testFilesInArgv(args, root), manifest, root);
   // Preserve the entry/reporter header without splitting an option from its value.
   let insertion = args.indexOf("--test") + 1;
   if (args[insertion] === "--test-reporter") insertion += 2;

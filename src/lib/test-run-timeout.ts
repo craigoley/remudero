@@ -8,7 +8,7 @@ export interface TestTierManifest {
 interface NativeTimeoutPolicy {
   loadManifest(path: string): TestTierManifest;
   derivedNodeTestTimeoutMs(files: readonly string[], manifest?: TestTierManifest | null, root?: string): number;
-  boundedNodeTestArgs(args: readonly string[], root?: string, manifest?: TestTierManifest): string[];
+  boundedNodeTestArgs(args: readonly string[], root?: string, manifest?: TestTierManifest, files?: readonly string[]): string[];
 }
 
 // Like review.ts's proof judge, load only when a Node proof runs. A src-only sandbox can import us.
@@ -39,11 +39,7 @@ export function boundedNodeTestArgs(args: readonly string[], files: readonly str
   const testAt = args.indexOf("--test");
   if (testAt < 0) return [...args];
   const policy = nativeTimeoutPolicy();
-  const at = afterReporter(args, testAt);
-  const explicit = args.some(arg => arg === "--test-timeout" || arg.startsWith("--test-timeout="));
-  const candidate = explicit ? [...args] : [...args.slice(0, at),
-    `--test-timeout=${policy.derivedNodeTestTimeoutMs(files, manifest, root)}`, ...args.slice(at)];
-  const timed = policy.boundedNodeTestArgs(candidate, root, manifest ?? {});
+  const timed = policy.boundedNodeTestArgs(args, root, manifest ?? {}, files);
   const additions = [
     ...(!timed.includes("--test-force-exit") ? ["--test-force-exit"] : []),
     ...(!timed.includes(stdoutDrainImport) ? [stdoutDrainImport] : []),
