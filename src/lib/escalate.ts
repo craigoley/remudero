@@ -2,7 +2,7 @@ import { ghExec, ghTextAsync } from "./github-transport.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createOrReadExclusive, createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { appendLedger } from "./ledger.js";
@@ -35,7 +35,7 @@ import {
   type TriagePass,
 } from "./escalation-triage.js";
 import { escalationClassSignal } from "./escalation-precision.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
 
 /**
  * Human stops (W1-T8, MASTER-PLAN §4): exhausted post-diagnose strikes (BLOCKED), human-only acts
@@ -382,6 +382,8 @@ export interface PrimaryShadowSelection {
   mode: "shadow" | "live";
 }
 
+const primaryShadowOperations = new Map<string, Promise<void>>();
+
 /** One digest owns one durable notice. Duplicate PR sets need no edit; no new timer is introduced.
  * Unknown selection or an unreadable history never establishes recovery or permission to create. */
 export function primaryShadowOperatorChannel(opts: {
@@ -398,18 +400,23 @@ export function primaryShadowOperatorChannel(opts: {
   const clock = opts.clock ?? systemClock;
   type State = { revision: number; first: string; prs: number[]; handled: boolean };
   const states = new Map<string, State>();
+  const historyMemo = createLedgerRotationMemo(rows => rows.filter(row =>
+    row.step === "primary_shadow.observation" || row.step === "panel.escalation_marked_handled"), {
+    holder: "primary-shadow-notice", durableDigest: { reducerVersion: "primary-shadow-notice-v1" },
+    pattern: /primary_shadow\.observation|panel\.escalation_marked_handled|PRIMARY-SHADOW-/, requireObjects: true,
+  });
   const identity = (s: PrimaryShadowSelection) => `<!-- primary-shadow ${JSON.stringify([opts.owner, opts.repo, s.instance])} -->`;
   const key = (s: PrimaryShadowSelection) => `PRIMARY-SHADOW-${s.digest}`;
   const list = async () => {
     if (!issues.listOpen) throw new Error("primary shadow alert cannot read open issues");
     return await issues.listOpen(NEEDS_HUMAN_LABEL);
   };
-  const state = (s: PrimaryShadowSelection): State => {
+  const state = async (s: PrimaryShadowSelection): Promise<State> => {
     const id = key(s), known = states.get(id);
     if (known) return known;
     let damaged = false;
-    const history = readLedgerUnionRecordsSync(dirname(opts.ledgerPath), {
-      taskId: id, step: ["primary_shadow.observation", "panel.escalation_marked_handled"], refuseIncomplete: true,
+    const history = await readLedgerUnionRecordsMemoized(dirname(opts.ledgerPath), historyMemo, {
+      step: ["primary_shadow.observation", "panel.escalation_marked_handled"], refuseIncomplete: true,
       onTorn: raw => { if (raw.includes(id) || raw.includes("panel.escalation_marked_handled")) damaged = true; },
     });
     if (!history.ok || damaged) throw new Error("primary shadow alert history is unreadable");
@@ -442,7 +449,7 @@ export function primaryShadowOperatorChannel(opts: {
       TASK_LINE_RE.exec(normalizeCandidateBody(issue.body!))![1].slice("PRIMARY-SHADOW-".length))]);
     // Record the positively observed recovery before its transport effect; a failed close retries.
     for (const digest of digests) {
-      const episode = { ...s, digest }, current = state(episode);
+      const episode = { ...s, digest }, current = await state(episode);
       if (current.prs.length || current.first) save(episode, { ...current, prs: [], first: "" });
     }
     for (const issue of matching) {
@@ -479,12 +486,17 @@ export function primaryShadowOperatorChannel(opts: {
       await escalateAsync(escalation, { issues: { ...issues, listOpen: async () => open }, ledgerPath: opts.ledgerPath, runId: opts.runId });
     }
   };
-  let tail = Promise.resolve();
+  const operationKey = JSON.stringify([resolve(opts.ledgerPath), opts.owner, opts.repo]);
   const serial = (body: () => Promise<void>): Promise<void> => {
-    const next = tail.then(body);
-    tail = next.catch(() => {
-      // Queue readiness ignores failure; next still rejects to the caller that records it.
-    });
+    const previous = primaryShadowOperations.get(operationKey) ?? Promise.resolve();
+    const next = previous.then(async () => { states.clear(); await body(); });
+    let tail: Promise<void>;
+    const finish = () => {
+      // Release readiness only; next retains the operation's rejection for its caller.
+      if (primaryShadowOperations.get(operationKey) === tail) primaryShadowOperations.delete(operationKey);
+    };
+    tail = next.then(finish, finish);
+    primaryShadowOperations.set(operationKey, tail);
     return next;
   };
   return {
@@ -495,7 +507,7 @@ export function primaryShadowOperatorChannel(opts: {
         || pr.prUrl.toLowerCase() !== `https://github.com/${opts.owner}/${opts.repo}/pull/${pr.prNumber}`.toLowerCase()) {
         throw new Error("primary shadow alert target is not qualified");
       }
-      let current = state(selected);
+      let current = await state(selected);
       if (current.handled) return;
       if (!current.prs.includes(pr.prNumber)) current = save(selected, { ...current,
         first: current.first || clock.iso(), prs: [...current.prs, pr.prNumber].sort((a, b) => a - b) });
@@ -518,7 +530,7 @@ export function primaryShadowOperatorChannel(opts: {
         await close(selected, await list(), `Primary instance ${selected.instance} is live again; the selected source is readable.`);
         return;
       }
-      const current = state(selected);
+      const current = await state(selected);
       if (current.handled || !current.prs.includes(pr.prNumber)) return;
       const remaining = current.prs.filter(n => n !== pr.prNumber);
       if (remaining.length) await publish(selected, save(selected, { ...current, prs: remaining }));
