@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -74,17 +74,65 @@ test('native npm census entrypoints derive deadlines without changing their targ
   }
 });
 
-test('native census precheck bounds argv before either its real or injected runner', () => {
-  const stopped = new Error('captured bounded argv before execution');
-  assert.throws(() => runCensusSuitesViaChild({ root: REPO_ROOT, files: ['test/cycle-ratchet.test.ts'],
-    priority: { wrap: (_file: string, args: string[]) => {
-      const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'scripts/test-tier-manifest.json'), 'utf8'));
-      const expected = timeoutFlag(['--test', 'test/cycle-ratchet.test.ts'], REPO_ROOT, manifest);
-      assert.ok(args.includes(expected));
-      assert.ok(args.includes('--test-reporter=tap'));
-      assert.equal(args.at(-1), 'test/cycle-ratchet.test.ts');
-      throw stopped;
-    } } }), error => error === stopped);
+test('native census test children inherit the admitted runtime bound at the real spawn boundary', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-native-census-bound-'));
+  try {
+    mkdirSync(join(root, 'test'));
+    const suite = 'test/census.test.mjs';
+    const proxy = join(root, 'node');
+    const argvLog = join(root, 'argv.log');
+    const timeout = Number(tiers.fastTierHangBoundArgs({})[0].split('=')[1]);
+    const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
+    writeFileSync(join(root, suite), "import test from 'node:test'; test('real census child',()=>{});\n");
+    // On the proof base this executable refuses BEFORE any untimed real test child can start.
+    writeFileSync(proxy, `#!/bin/sh
+printf '%s\\n' "$@" > ${quote(argvLog)}
+case " $* " in *" --test-timeout=${timeout} "*) ;; *) echo 'missing admitted census test deadline' >&2; exit 3 ;; esac
+exec ${quote(process.execPath)} "$@"
+`, { mode: 0o755 });
+    let failing: unknown;
+    assert.doesNotThrow(() => { failing = runCensusSuitesViaChild({ root, files: [suite], timeoutMs: timeout,
+      priority: { wrap: (_file: string, args: string[]) => ({ file: proxy, args }) },
+      history: { path: join(root, 'history.json'), mode: 'shadow' } }); });
+    assert.deepEqual(failing, []);
+    const actual = readFileSync(argvLog, 'utf8').split('\n');
+    assert.ok(actual.includes(`--test-timeout=${timeout}`));
+    assert.ok(actual.includes('--test-reporter=tap'));
+    assert.ok(actual.includes(suite));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a census timeout at its admitted bound remains unmeasured while assertion failures remain failures', () => {
+  const file = 'test/cycle-ratchet.test.ts';
+  const tap = (type: string, limit: number) => `TAP version 13
+not ok 1 - census reader
+  ---
+  location: '${file}:1:1'
+  failureType: '${type}'
+  error: 'test timed out after ${limit}ms'
+  ...
+1..1
+# tests 1
+# pass 0
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1
+`;
+  for (const timeoutMs of [undefined, 1000]) {
+    assert.throws(() => runCensusSuitesViaChild({ root: REPO_ROOT, files: [file], timeoutMs,
+      run: (_file: string, _args: string[], options: { timeout: number }) =>
+        ({ status: 1, stdout: tap('testTimeoutFailure', options.timeout) }) }),
+      error => Boolean(error && typeof error === 'object' &&
+        (error as Record<string, unknown>)[timeoutMs === undefined ? 'censusTimeBound' : 'readerBudgetOverrun'] === true));
+  }
+  for (const kind of ['testCodeFailure', 'smaller-authored-timeout']) {
+    assert.deepEqual(runCensusSuitesViaChild({ root: REPO_ROOT, files: [file],
+      run: (_file: string, _args: string[], options: { timeout: number }) => ({ status: 1,
+        stdout: tap(kind === 'testCodeFailure' ? kind : 'testTimeoutFailure',
+          kind === 'testCodeFailure' ? options.timeout : options.timeout / 2) }) }), [file]);
+  }
 });
 
 test('the native launcher preserves explicit limits, failure statuses and spawn failures', () => {
