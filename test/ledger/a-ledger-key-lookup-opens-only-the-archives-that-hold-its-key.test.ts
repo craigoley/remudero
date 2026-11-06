@@ -6,7 +6,9 @@
  * asserted to be exactly the ones holding a requested key.
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { readFileSync, readdirSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test, type TestContext } from "node:test";
@@ -202,6 +204,58 @@ test("W1-T11423: an archive whose manifest cannot be built is read in full and r
   assert.deepEqual(archiveNames(got.unindexed), [name]);
   assert.ok(got.unread.some((p) => p.endsWith(name)), "the unreadable archive is reported unread");
   assert.equal((await ledgerRowsFor(dir, { taskIds: ["W1-T7"] }, { refuseIncomplete: true })).ok, false);
+});
+
+test("W1-T11423 criterion 1: gzip source-open errors after stat fall back to an unindexed read and preserve refusal", { timeout: 10_000 }, async (t) => {
+  const original = fs.createReadStream;
+  try {
+    for (const persistent of [false, true]) {
+      const archived = { ts: day(5), task_id: "W1-T7", step: "wanted", location: "archive" };
+      const later = { ...archived, ts: day(7), location: "later archive" };
+      const live = { ...archived, ts: day(9), location: "live" };
+      const { dir } = writeLedger([live], { scope: t, rotations: [
+        { at: day(6), gz: true, rows: [archived] },
+        { at: day(8), gz: true, rows: [later] },
+      ] });
+      const archive = join(dir, "ledger.2026-10-06T00-00-00-000Z.ndjson.gz");
+      const query = { taskIds: ["W1-T7"] };
+      const want = await fullFiltered(dir, query);
+      assert.deepEqual(want, [archived, later, live], "positive control: every source contributes a row");
+      let attempts = 0;
+      let failures = 0;
+      fs.createReadStream = ((path, options) => {
+        if (String(path) === archive) {
+          assert.ok(fs.statSync(archive).size > 0, "stat still succeeds before the asynchronous open fails");
+          attempts += 1;
+          if (persistent || attempts === 1) {
+            failures += 1;
+            return original(join(dir, "missing-gzip-source"), options);
+          }
+        }
+        return original(path, options);
+      }) as typeof fs.createReadStream;
+      syncBuiltinESMExports();
+      const got = await ledgerRowsFor(dir, query, { refuseIncomplete: true, signal: AbortSignal.timeout(5_000) });
+      assert.equal(attempts, 2, "the failed manifest is followed by a full-read attempt");
+      assert.equal(failures, persistent ? 2 : 1, "the source-open failure injection fired");
+      assert.deepEqual(got.unindexed, [archive]);
+      assert.deepEqual(got.unread, persistent ? [archive] : []);
+      assert.equal(got.ok, !persistent);
+      assert.deepEqual(got.rows, persistent ? [] : want);
+      if (persistent) {
+        const partial = await ledgerRowsFor(dir, query);
+        assert.equal(partial.ok, true);
+        assert.deepEqual(partial.unindexed, [archive]);
+        assert.deepEqual(partial.unread, [archive]);
+        assert.deepEqual(partial.rows, [later, live], "best effort continues through later archives and live");
+      } else assert.ok(got.archivesOpened.includes(archive), "the unindexed archive was read in full");
+      fs.createReadStream = original;
+      syncBuiltinESMExports();
+    }
+  } finally {
+    fs.createReadStream = original;
+    syncBuiltinESMExports();
+  }
 });
 
 test("W1-T11423: the sync lookup also reads an archive whose manifest cannot be built in full and reports it", TIMEOUT, (t) => {

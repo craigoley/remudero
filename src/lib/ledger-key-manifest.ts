@@ -187,7 +187,12 @@ function buildFromBuffer(buf: Buffer): LedgerKeyManifest {
 async function buildStreamed(entry: LedgerManifestEntry): Promise<LedgerKeyManifest> {
   const builder = new ManifestBuilder();
   const source = createReadStream(entry.path);
-  const input = entry.form === "gzip" ? source.pipe(createGunzip()) : source;
+  const gunzip = entry.form === "gzip" ? createGunzip() : undefined;
+  const input = gunzip ?? source;
+  if (gunzip) {
+    source.once("error", (error) => { gunzip.destroy(error); });
+    source.pipe(gunzip);
+  }
   const decoder = new StringDecoder("utf8");
   let carry = "";
   try {

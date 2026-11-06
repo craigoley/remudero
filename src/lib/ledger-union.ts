@@ -652,8 +652,9 @@ export async function* openLedgerUnion(
       // `error` is otherwise only observable through readline's async iterator. Keep this
       // explicit so an audited reader can refuse a partial archive corpus rather than treating
       // a silently skipped rotation as proof that old attempts never happened.
-      source.once("error", () => {
+      source.once("error", (error) => {
         archiveUnread = true;
+        gunzip?.destroy(error);
       });
       gunzip = entry.form === "gzip" ? createGunzip() : undefined;
       if (gunzip) gunzip.once("error", () => {

@@ -19,21 +19,31 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 const READERS = ["readLedgerUnionRecordsSync", "readLedgerUnionRecords", "readLedgerUnionRawLinesSync", "readLedgerUnionRawLinesAsync",
   "readLedgerUnionRawLines", "openLedgerUnion", "readLedgerCorpus"];
 const PLANTED_UNION_MODULE = [".", "ledger-union.js"].join("/");
-/** Options the union honours that bound what a read opens or keeps. */
-const BOUNDS = ["step", "pattern", "keep", "since", "sinceTs", "maxRotations", "rotationWindowMs", "afterRotation", "throughRotation",
-  "rotationRecords", "where", "selectRotation"];
+/** Only design-approved bounds honoured by the particular reader can discharge the census. */
+const COMMON_BOUNDS = ["step", "since", "sinceTs"];
+const RAW_BOUNDS = [...COMMON_BOUNDS, "pattern", "keep", "maxRotations", "rotationWindowMs"];
+const BOUNDS: Record<string, readonly string[]> = {
+  readLedgerUnionRecordsSync: [...RAW_BOUNDS, "rotationRecords"],
+  readLedgerUnionRawLinesSync: RAW_BOUNDS,
+  readLedgerUnionRawLinesAsync: RAW_BOUNDS,
+  readLedgerUnionRecords: [...COMMON_BOUNDS, "afterRotation"],
+  openLedgerUnion: [...COMMON_BOUNDS, "afterRotation"],
+};
 /** The union's own module defines these readers and `ledgerRowsFor`; it is not a caller. */
 const DEFINING = new Set(["src/lib/ledger-union.ts", "src/lib/ledger-key-manifest.ts"]);
 
 /** file#function → why the read is unbounded today. Every entry is W1-T11424's to remove. */
 const ALLOWLIST: Record<string, string> = {
   "src/lib/analytics-route.ts#deriveAnalyticsSnapshotFromLedger": "whole-history analytics snapshot, no key; W1-T11424 gives it a per-archive digest",
+  "src/lib/analytics-route.ts#scanAnalyticsLedger": "initial analytics scan has no afterRotation checkpoint and streams whole history; W1-T11424",
+  "src/lib/dep-review.ts#proposalTaskLedgerRows": "unknown proposal capture time omits afterRotation and scans whole history for task ids; W1-T11424 moves it to ledgerRowsFor",
   "src/lib/field-trials-flow.ts#readFieldTrialsLedger": "field-trials ledger stream, whole history; W1-T11424",
   "src/lib/field-trials-flow.ts#readControlledLedgerRows": "field-trials materialises every row with no filter; W1-T11424 moves it to ledgerRowsFor",
   "src/lib/human-gate.ts#measureFeedbackAge": "live-file-only read: its fsDeps list no archives, so it never opens a rotation; W1-T11424 states that bound",
   "src/lib/impossible-canary.ts#impossibleCanaryCommand": "impossible-canary CLI materialises every row with no filter; W1-T11424",
   "src/lib/pr-owner-ledger.ts#readPrOwnerLedgerProjection": "pr-owner projection streams whole history, no key; W1-T11424",
   "src/lib/pr-state.ts#<module>": "pr-state's injectable reader passes its caller's options through; W1-T11424",
+  "src/lib/retro.ts#readRetroLedgerNdjson": "retro without sinceTs streams whole history into its caller-owned byte and row window; W1-T11424",
   "src/lib/routing-experiments.ts#routingAbCommand": "routing-experiments CLI materialises every row with no filter; W1-T11424",
 };
 
@@ -91,7 +101,7 @@ export function censusUnionCalls(files: Array<{ file: string; text: string }>): 
     walk(tree, (node) => {
       if (node.type === "ImportSpecifier") {
         const name = propertyName(node.imported ?? node.local);
-        bind(node.local, name && READERS.includes(name) ? { type: "UnionReader" } : undefined);
+        bind(node.local, name && READERS.includes(name) ? { type: "UnionReader", name } : undefined);
       } else if (node.type === "VariableDeclarator") bind(node.id, ast(node.init));
       else if (node.type === "FunctionDeclaration" || node.type === "FunctionExpression") bind(node.identifier);
       if (["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(node.type ?? "")) {
@@ -102,37 +112,42 @@ export function censusUnionCalls(files: Array<{ file: string; text: string }>): 
       return ["ParenthesisExpression", "TsAsExpression", "TsConstAssertion", "TsSatisfiesExpression", "TsNonNullExpression", "TsTypeAssertion"].includes(node.type ?? "")
         ? unwrap(ast(node.expression)!) : node;
     }
-    function reader(value: unknown, seen = new Set<string>()): boolean {
+    function reader(value: unknown, seen = new Set<string>()): string | undefined {
       const raw = ast(value);
-      if (!raw) return false;
+      if (!raw) return undefined;
       const node = unwrap(raw);
-      if (node.type === "UnionReader") return true;
-      if (node.type === "MemberExpression") return READERS.includes(propertyName(node.property) ?? "");
-      if (node.type !== "Identifier") return false;
+      if (node.type === "UnionReader") return String(node.name);
+      if (node.type === "MemberExpression") {
+        const name = propertyName(node.property);
+        return name && READERS.includes(name) ? name : undefined;
+      }
+      if (node.type !== "Identifier") return undefined;
       const key = identifierKey(node);
-      if (!bindings.has(key)) return READERS.includes(String(node.value));
-      if (seen.has(key)) return false;
+      if (!bindings.has(key)) return READERS.includes(String(node.value)) ? String(node.value) : undefined;
+      if (seen.has(key)) return undefined;
       return reader(bindings.get(key), new Set([...seen, key]));
     }
-    function bounded(value: unknown, seen = new Set<string>()): boolean {
+    function bounded(value: unknown, bounds: readonly string[], seen = new Set<string>()): boolean {
       const raw = ast(value);
       if (!raw) return false;
       const node = unwrap(raw);
       if (node.type === "Identifier") {
         const key = identifierKey(node);
-        return !seen.has(key) && bounded(bindings.get(key), new Set([...seen, key]));
+        return !seen.has(key) && bounded(bindings.get(key), bounds, new Set([...seen, key]));
       }
-      if (node.type === "ConditionalExpression") return bounded(node.consequent, seen) || bounded(node.alternate, seen);
+      if (node.type === "ConditionalExpression") return bounded(node.consequent, bounds, seen) && bounded(node.alternate, bounds, seen);
       if (node.type !== "ObjectExpression") return false;
-      return (node.properties as Ast[]).some((prop) => prop.type === "SpreadElement" ? bounded(prop.arguments, seen)
-        : BOUNDS.includes(propertyName(prop.type === "Identifier" ? prop : prop.key) ?? ""));
+      return (node.properties as Ast[]).some((prop) => prop.type === "SpreadElement" ? bounded(prop.arguments, bounds, seen)
+        : bounds.includes(propertyName(prop.type === "Identifier" ? prop : prop.key) ?? ""));
     }
     const bytes = Buffer.from(text);
     walk(tree, (node, fn) => {
-      if (node.type !== "CallExpression" || !reader(node.callee)) return;
+      if (node.type !== "CallExpression") return;
+      const name = reader(node.callee);
+      if (!name) return;
       const args = node.arguments as Ast[];
       const line = bytes.subarray(0, Number(ast(node.span)!.start) - 1).toString().split("\n").length;
-      calls.push({ site: `${file}:${line}`, file, fn, bounded: bounded(args[1]?.expression) });
+      calls.push({ site: `${file}:${line}`, file, fn, bounded: bounded(args[1]?.expression, BOUNDS[name] ?? []) });
     });
   }
   return calls;
@@ -220,4 +235,49 @@ test("W1-T11423 criterion 3: option and reader aliases keep their lexical scope"
     ["src/lib/planted.ts:5", "bounded", true],
     ["src/lib/planted.ts:9", "unbounded", false],
   ]);
+});
+
+test("W1-T11423 criterion 3: every conditional options branch must carry an honoured bound", () => {
+  const calls = censusUnionCalls([{ file: "src/lib/planted.ts", text: `
+    export function leak(dir: string, flag: boolean, other: boolean) {
+      readLedgerUnionRecordsSync(dir, flag ? { step: "x" } : {});
+      readLedgerUnionRecordsSync(dir, flag ? {} : { step: "x" });
+      const maybe = flag ? { since: "2026-10-05" } : {};
+      readLedgerUnionRecordsSync(dir, maybe);
+      readLedgerUnionRecordsSync(dir, { ...maybe });
+      readLedgerUnionRecordsSync(dir, flag ? { step: "x" } : other ? { keep: row => true } : {});
+      readLedgerUnionRecordsSync(dir, flag ? { step: "x" } : { since: "2026-10-05" });
+      readLedgerUnionRecordsSync(dir, { ...maybe, step: "x" });
+    }
+  ` }]);
+  assert.equal(calls.length, 7, "all planted conditional calls must be counted");
+  assert.deepEqual(calls.map((c) => c.bounded), [false, false, false, false, false, true, true]);
+});
+
+test("W1-T11423 criterion 3: ignored options cannot bound raw or streaming readers, including aliases", () => {
+  const calls = censusUnionCalls([{ file: "src/lib/planted.ts", text: `
+    import { readLedgerUnionRawLinesSync as raw, readLedgerUnionRecords as records } from "${PLANTED_UNION_MODULE}";
+    import * as union from "${PLANTED_UNION_MODULE}";
+    const again = raw;
+    const { readLedgerUnionRawLinesAsync: rawAsync } = union;
+    export function leak(dir: string) {
+      raw(dir, { where: row => row.step === "x" });
+      again(dir, { selectRotation: entry => false });
+      rawAsync(dir, { where: row => false, selectRotation: entry => false });
+      union.readLedgerUnionRawLinesSync(dir, { rotationRecords: () => [] });
+      raw(dir, { afterRotation: "archive" });
+      records(dir, { pattern: /x/ });
+      records(dir, { keep: row => false });
+      union.openLedgerUnion(dir, { maxRotations: 1, rotationWindowMs: 1 });
+      readLedgerUnionRecordsSync(dir, { afterRotation: "archive" });
+      union.openLedgerUnion(dir, { throughRotation: "archive", where: row => false, selectRotation: entry => false });
+      raw(dir, { pattern: /x/ });
+      rawAsync(dir, { keep: row => false });
+      again(dir, { maxRotations: 1 });
+      records(dir, { afterRotation: "archive" });
+      readLedgerUnionRecordsSync(dir, { rotationRecords: () => [] });
+    }
+  ` }]);
+  assert.equal(calls.length, 15, "reader identity must survive namespace, imported and chained aliases");
+  assert.deepEqual(calls.map((c) => c.bounded), [...Array(10).fill(false), ...Array(5).fill(true)]);
 });
