@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { listRuleSuites } from "../src/lib/ci-parity.ts";
 import { isMainModule } from "./lib/argv.mjs";
+import { boundedNodeTestArgs } from "./test-tier-manifest.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
@@ -13,7 +14,7 @@ export function ruleSuites(repoRoot = root) {
 }
 
 // The spec reporter, named: W1-T7848's failed-suite reader parses its `✖ failing tests:` block.
-const suiteArgs = (suite) => ["--test", "--test-reporter=spec", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", suite];
+const suiteArgs = (suite, repoRoot) => boundedNodeTestArgs(["--test", "--test-reporter=spec", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", suite], repoRoot);
 
 /** Record one suite's outcome; `true` when it failed. */
 function reportSuite(suite, result) {
@@ -44,7 +45,7 @@ export function runRuleSuites(repoRoot = root, run = spawnSync) {
   const failed = new Set();
   for (const suite of suites) {
     console.log(`rule-checks: ${suite}`);
-    if (reportSuite(suite, run(process.execPath, suiteArgs(suite), { cwd: repoRoot, stdio: "inherit" }))) failed.add(suite);
+    if (reportSuite(suite, run(process.execPath, suiteArgs(suite, repoRoot), { cwd: repoRoot, stdio: "inherit" }))) failed.add(suite);
   }
   return finish(suites, failed);
 }
@@ -53,7 +54,7 @@ export function runRuleSuites(repoRoot = root, run = spawnSync) {
 export function spawnSuiteCaptured(suite, repoRoot) {
   return new Promise((resolve) => {
     const chunks = [];
-    const child = spawn(process.execPath, suiteArgs(suite), { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, suiteArgs(suite, repoRoot), { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
     const output = () => Buffer.concat(chunks).toString();
     child.stdout.on("data", (chunk) => chunks.push(chunk));
     child.stderr.on("data", (chunk) => chunks.push(chunk));
