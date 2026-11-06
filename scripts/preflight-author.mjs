@@ -9,7 +9,7 @@ import { callerReachableSuites } from '../src/lib/ci-parity.ts';
 import { admitStaticWork, enqueueTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
 import { TYPECHECK_COLD_PEAK_BYTES } from '../src/lib/typecheck-buildinfo.ts';
-import { listTestFiles, manifestEntryFor, medianMeasuredDurationMs, mergeDurations, reportManifestFallbacks, weightedDurationMs } from './test-tier-manifest.mjs';
+import { boundedNodeTestArgs, listTestFiles, manifestEntryFor, medianMeasuredDurationMs, mergeDurations, reportManifestFallbacks, weightedDurationMs } from './test-tier-manifest.mjs';
 import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-test-pool.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
@@ -550,8 +550,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           // This fixed, cheap contract runs before any heavy admission or capacity truncation.
           // R-50 walks all workflows, including new names with no literal reader hit.
           const judged = prepareJudgedRun();
-          const command = lowPriorityCommand(process.execPath, judgedNodeTestArgs(['--test', '--test-reporter=tap',
-            '--test-concurrency=1', '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...suites], judged.args));
+          const command = lowPriorityCommand(process.execPath, judgedNodeTestArgs(boundedNodeTestArgs(['--test', '--test-reporter=tap',
+            '--test-concurrency=1', '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...suites], root), judged.args));
           const result = runStep('workflow-contract-precheck', command.args, command.file, judged.env, AUTHOR_WORKFLOW_CONTRACT_MAX_MS);
           const judge = closeJudgedRun(judged, suites, { status: result.status ?? 1, root,
             role: 'workflow-contract-precheck', prefix: 'preflight-author' });
@@ -734,8 +734,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             // Judged (scripts/pure-test-pool.mjs): a suite whose own child exits 0 part-way is reported
             // `ok` with a whole summary, so the step passes only when every suite reached its own summary.
             const judged = prepareJudgedRun();
-            const child = lowPriorityCommand(process.execPath, testRunArgv(judgedNodeTestArgs(['--test', '--test-reporter=tap', ...durationArgs,
-              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], judged.args), executionWorkers));
+            const child = lowPriorityCommand(process.execPath, testRunArgv(judgedNodeTestArgs(boundedNodeTestArgs(['--test', '--test-reporter=tap', ...durationArgs,
+              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], root, manifest), judged.args), executionWorkers));
             const tests = runStep(testsName, child.args, child.file, judged.env, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
             if (receipt.tiered) receipt.tiered.ran = [...ranSuites];
             if (receipt.partial) {
