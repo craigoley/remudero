@@ -63,7 +63,7 @@ test("whole clustered evaluation keeps evidence streams, denominators and propos
   const proposal = buildExperimentProposal({ evidence: Array.from({ length: 3 }, (_, i) => ({
     signatureId: "tool-timeout", failureClass: "tool-use-failure" as const, caseId: `failed-${i}`,
     sourceFamilyId: `ff-${i}`, incidentRootId: `fr-${i}`, evidenceDigest: (i + 10).toString(16).padStart(64, "0"),
-    executionSource: "native-provider-execution" as const,
+    executionSource: "native-provider-execution" as const, split: "development" as const,
   })) });
   assert.equal(proposal.proposals[0]!.outcome, "unmeasured");
   assert.deepEqual(proposal.effects, { measured: false, createsTasks: false, createsSchedules: false,

@@ -12,6 +12,7 @@ export interface ImprovementEvidenceRowV1 {
   incidentRootId: string;
   evidenceDigest: string;
   executionSource: "native-provider-execution" | "synthetic-control-replay";
+  split: "development" | "sealed-holdout";
 }
 export interface BuildExperimentProposalInputV1 {
   evidence: readonly ImprovementEvidenceRowV1[];
@@ -81,12 +82,13 @@ const proposalExportHypothesis: Record<ImprovementFailureClassV1, { hypothesis: 
 function validateProposalEvidenceRow(value: unknown): ImprovementEvidenceRowV1 {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("experiment-proposal-evidence-invalid");
   const row = value as Record<string, unknown>;
-  const keys = ["signatureId", "failureClass", "caseId", "sourceFamilyId", "incidentRootId", "evidenceDigest", "executionSource"];
+  const keys = ["signatureId", "failureClass", "caseId", "sourceFamilyId", "incidentRootId", "evidenceDigest", "executionSource", "split"];
   if (Object.keys(row).sort().join("\0") !== [...keys].sort().join("\0")
     || !proposalExportText(row.signatureId, 128) || !FAILURE_CLASSES.includes(row.failureClass as ImprovementFailureClassV1)
     || !proposalExportText(row.caseId) || !proposalExportText(row.sourceFamilyId) || !proposalExportText(row.incidentRootId)
     || typeof row.evidenceDigest !== "string" || !DIGEST.test(row.evidenceDigest)
-    || (row.executionSource !== "native-provider-execution" && row.executionSource !== "synthetic-control-replay"))
+    || (row.executionSource !== "native-provider-execution" && row.executionSource !== "synthetic-control-replay")
+    || (row.split !== "development" && row.split !== "sealed-holdout"))
     throw new Error("experiment-proposal-evidence-invalid");
   return value as ImprovementEvidenceRowV1;
 }
@@ -100,6 +102,7 @@ export function buildExperimentProposal(input: BuildExperimentProposalInputV1): 
   let syntheticControlEvidence = 0;
   for (const raw of input.evidence) {
     const row = validateProposalEvidenceRow(raw);
+    if (row.split === "sealed-holdout") continue;
     if (row.executionSource === "synthetic-control-replay") { syntheticControlEvidence++; continue; }
     const key = JSON.stringify([row.signatureId, row.caseId, row.sourceFamilyId, row.incidentRootId]);
     const prior = unique.get(key);

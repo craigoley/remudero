@@ -219,10 +219,12 @@ export class CanarySlotOwner {
 
   claim(slot: CanarySlot): "claimed" | "already-owned-or-terminal" {
     const identity = binding(slot);
-    const added = this.db.prepare(`INSERT INTO canary_slots_v1(id,binding,owner,phase)
-      SELECT ?,?,?,'started' WHERE (SELECT COUNT(*) FROM canary_slots_v1) < ?
+    const startedAt = new Date().toISOString();
+    const startedReceipt = JSON.stringify({ version: "canary-owner-started-v1", startedAt });
+    const added = this.db.prepare(`INSERT INTO canary_slots_v1(id,binding,owner,phase,receipt)
+      SELECT ?,?,?,'started',? WHERE (SELECT COUNT(*) FROM canary_slots_v1) < ?
         AND NOT EXISTS(SELECT 1 FROM canary_slots_v1 WHERE phase='started')
-      ON CONFLICT DO NOTHING`).run(slot.id, identity, this.owner, MAX_SLOTS);
+      ON CONFLICT DO NOTHING`).run(slot.id, identity, this.owner, startedReceipt, MAX_SLOTS);
     if (added.changes === 1) return "claimed";
     const prior = this.db.prepare("SELECT binding FROM canary_slots_v1 WHERE id=?").get(slot.id);
     if (prior) {
@@ -244,11 +246,24 @@ export class CanarySlotOwner {
     const fullBinding: CodingControlBindingV1 = Object.freeze({ caseId: slot.caseId, suiteHash: slot.pin.suiteHash,
       runId: input.runId, slotId: slot.id, canaryAttemptId: input.canaryAttemptId,
       workerSpawnAttemptId: input.workerSpawnAttemptId, codingExecutionAttemptId: randomUUID(), sourceDigest: input.sourceDigest });
-    const receipt = JSON.stringify({ version: codingAttemptReceiptVersion, binding: fullBinding });
+    const current = this.db.prepare("SELECT receipt FROM canary_slots_v1 WHERE id=? AND binding=? AND owner=? AND phase='started'")
+      .get(slot.id, identity, this.owner) as { receipt?: unknown } | undefined;
+    if (typeof current?.receipt !== "string") return { state: "refused" };
+    let startedAt: string;
+    try {
+      const started = JSON.parse(current.receipt) as Record<string, unknown>;
+      if (started?.version === codingAttemptReceiptVersion) return { state: "already-consumed" };
+      if (!started || started.version !== "canary-owner-started-v1" || typeof started.startedAt !== "string"
+        || Object.keys(started).sort().join("\0") !== "startedAt\0version"
+        || !Number.isFinite(Date.parse(started.startedAt)) || new Date(Date.parse(started.startedAt)).toISOString() !== started.startedAt)
+        return { state: "refused" };
+      startedAt = started.startedAt;
+    } catch { return { state: "refused" }; }
+    const receipt = JSON.stringify({ version: codingAttemptReceiptVersion, startedAt, binding: fullBinding });
     if (Buffer.byteLength(receipt, "utf8") > 4096) return { state: "refused" };
     const changed = this.db.prepare(`UPDATE canary_slots_v1 SET receipt=?
-      WHERE id=? AND binding=? AND owner=? AND phase='started' AND receipt IS NULL`)
-      .run(receipt, slot.id, identity, this.owner);
+      WHERE id=? AND binding=? AND owner=? AND phase='started' AND receipt=?`)
+      .run(receipt, slot.id, identity, this.owner, current.receipt);
     if (changed.changes !== 1) {
       const prior = this.db.prepare("SELECT phase,receipt FROM canary_slots_v1 WHERE id=? AND binding=? AND owner=?")
         .get(slot.id, identity, this.owner) as { phase?: unknown; receipt?: unknown } | undefined;
@@ -275,21 +290,36 @@ export class CanarySlotOwner {
       .get(slot.id, identity, this.owner) as { receipt?: unknown } | undefined;
     if (!current) throw new Error("canary-owner-terminal-not-owned");
     let consumed: CodingControlBindingV1 | null = null;
+    let startedAt: string | null = null;
     if (typeof current.receipt === "string") {
       try {
         const raw = snapshotPrivateCanaryJson(JSON.parse(current.receipt), 4096) as Record<string, unknown>;
-        if (raw.version !== codingAttemptReceiptVersion || Object.keys(raw).sort().join("\0") !== "binding\0version"
-          || !raw.binding || typeof raw.binding !== "object" || Array.isArray(raw.binding))
-          throw new Error("canary-owner-coding-consumption-invalid");
-        const candidate = raw.binding as Record<string, unknown>;
-        const required = ["canaryAttemptId", "caseId", "codingExecutionAttemptId", "runId", "slotId", "sourceDigest", "suiteHash", "workerSpawnAttemptId"];
-        if (Object.keys(candidate).sort().join("\0") !== required.join("\0")
-          || candidate.caseId !== slot.caseId || candidate.slotId !== slot.id || candidate.suiteHash !== slot.pin.suiteHash
-          || !attemptUuid.test(String(candidate.runId)) || !attemptUuid.test(String(candidate.canaryAttemptId))
-          || !attemptUuid.test(String(candidate.workerSpawnAttemptId)) || !attemptUuid.test(String(candidate.codingExecutionAttemptId))
-          || !privateTraceDigestPattern.test(String(candidate.sourceDigest)))
-          throw new Error("canary-owner-coding-consumption-invalid");
-        consumed = candidate as unknown as CodingControlBindingV1;
+        if (raw.version === "canary-owner-started-v1") {
+          if (Object.keys(raw).sort().join("\0") !== "startedAt\0version" || typeof raw.startedAt !== "string"
+            || !Number.isFinite(Date.parse(raw.startedAt)) || new Date(Date.parse(raw.startedAt)).toISOString() !== raw.startedAt)
+            throw new Error("canary-owner-started-receipt-invalid");
+          startedAt = raw.startedAt;
+        } else if (raw.version === codingAttemptReceiptVersion) {
+          const rawKeys = Object.keys(raw).sort().join("\0");
+          const legacyCodingReceipt = rawKeys === "binding\0version";
+          if ((!legacyCodingReceipt && (rawKeys !== "binding\0startedAt\0version"
+              || typeof raw.startedAt !== "string" || !Number.isFinite(Date.parse(raw.startedAt))
+              || new Date(Date.parse(raw.startedAt)).toISOString() !== raw.startedAt))
+            || !raw.binding || typeof raw.binding !== "object" || Array.isArray(raw.binding))
+            throw new Error("canary-owner-coding-consumption-invalid");
+          startedAt = legacyCodingReceipt ? null : raw.startedAt as string;
+          const candidate = raw.binding as Record<string, unknown>;
+          const required = ["canaryAttemptId", "caseId", "codingExecutionAttemptId", "runId", "slotId", "sourceDigest", "suiteHash", "workerSpawnAttemptId"];
+          if (Object.keys(candidate).sort().join("\0") !== required.join("\0")
+            || candidate.caseId !== slot.caseId || candidate.slotId !== slot.id || candidate.suiteHash !== slot.pin.suiteHash
+            || !attemptUuid.test(String(candidate.runId)) || !attemptUuid.test(String(candidate.canaryAttemptId))
+            || !attemptUuid.test(String(candidate.workerSpawnAttemptId)) || !attemptUuid.test(String(candidate.codingExecutionAttemptId))
+            || !privateTraceDigestPattern.test(String(candidate.sourceDigest)))
+            throw new Error("canary-owner-coding-consumption-invalid");
+          consumed = candidate as unknown as CodingControlBindingV1;
+        } else {
+          throw new Error("canary-owner-started-receipt-invalid");
+        }
       } catch (error) {
         if (error instanceof Error && error.message === "canary-owner-coding-consumption-invalid") throw error;
         throw new Error("canary-owner-coding-consumption-invalid");
@@ -373,7 +403,9 @@ export class CanarySlotOwner {
         || (event as Record<string, unknown>).denied !== true))
         throw new Error("canary-owner-coding-trace-invalid");
     }
-    const receipt = JSON.stringify({ slot, run, grade: outcome.grade, state: outcome.state, reason: outcome.reason,
+    const completedAt = new Date().toISOString();
+    const persistedRun = startedAt === null ? run : { ...run, executionWindow: { startedAt, completedAt } };
+    const receipt = JSON.stringify({ slot, run: persistedRun, grade: outcome.grade, state: outcome.state, reason: outcome.reason,
       ...(privateTrace === undefined ? {} : { privateTrace }),
       ...(run.family === "coding" ? { codingTrace } : {}),
       ...(codingOutcome.codingResult === undefined ? {} : { codingResult: codingOutcome.codingResult,

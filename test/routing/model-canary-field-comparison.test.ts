@@ -91,3 +91,12 @@ test("field comparison keeps repeated benchmark runs within one distinct case de
   assert.equal(result.comparisons[0]!.benchmark.denominator.count, 1);
   assert.equal(result.comparisons[0]!.benchmark.outcomes["all-repeats"].caseMean, 0.5);
 });
+
+test("field comparison withholds a caller window when benchmark execution time is unverified", () => {
+  const result = compareCanaryToFieldTrials({ benchmarkCases: [
+    benchmark("run-legacy", "case-legacy", { identity: { ...identity, observationWindow: null } }),
+  ], fieldTrials: [field()] });
+  assert.equal(result.comparisons.length, 0);
+  assert.equal(result.unmatched.length, 1);
+  assert.equal(result.unmatched[0]!.reason, "observation-window-unverified");
+});

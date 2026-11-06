@@ -152,6 +152,18 @@ export function parseNativeCanaryAnalysisInput(value: unknown): NativeCanaryAnal
   return raw as unknown as NativeCanaryAnalysisInputV1;
 }
 
+export function nativeCanaryExecutionWithinObservationWindow(
+  executionWindow: { startedAt: string; completedAt: string } | null,
+  observationWindow: { start: string; end: string },
+): boolean {
+  if (executionWindow === null) return false;
+  const start = Date.parse(observationWindow.start), end = Date.parse(observationWindow.end);
+  const executionStart = Date.parse(executionWindow.startedAt), executionEnd = Date.parse(executionWindow.completedAt);
+  return Number.isFinite(start) && Number.isFinite(end) && start < end
+    && Number.isFinite(executionStart) && Number.isFinite(executionEnd)
+    && executionStart >= start && executionEnd < end;
+}
+
 export function projectNativeCanaryEstimands(run: Pick<CanaryRun, "attempts" | "verified">) {
   const first = run.attempts.length === 1 && run.verified !== null ? run.verified : null;
   return { outcomes: { "first-attempt": first, "all-repeats": null, "best-of-k": null },
@@ -234,7 +246,8 @@ function runPrivateCanaryAnalysis(argv: readonly string[]) {
       identity: { provider: c.provider, deployment: c.deployment, requestedModel: c.requestedModel, model: c.model,
         route: c.route, effort: c.effort, billing: c.billing, treatment: c.treatment,
         corpusDigest: corpus.metadata.digest, scorerDigest: meta.scorerDigest, role: meta.role,
-        observationWindow: input.observationWindow },
+        observationWindow: nativeCanaryExecutionWithinObservationWindow(receipt.executionWindow, input.observationWindow)
+          ? input.observationWindow : null },
       outcomes: projectNativeCanaryEstimands(receipt.run).outcomes,
     };
     benchmarkCases.push(benchmark); receiptByRun.set(receipt.run.id, receipt); mappingByRun.set(receipt.run.id, mapping);
@@ -279,6 +292,8 @@ function runPrivateCanaryAnalysis(argv: readonly string[]) {
   const fieldTrials: readonly FieldTrialComparisonCohortV1[] =
     nativeFieldEvidence.state === "available" ? nativeFieldEvidence.evidence.fieldTrials : [];
   const fieldComparison = compareCanaryToFieldTrials({ benchmarkCases, fieldTrials });
+  const timestampQualifiedBenchmarkCases = benchmarkCases.filter(row => row.identity.observationWindow !== null).length;
+  const unverifiedOrOutOfWindowBenchmarkCases = benchmarkCases.length - timestampQualifiedBenchmarkCases;
 
   // Current native owner receipts do not persist frozen pre-outcome decisions or qualified-static-baseline receipts.
   // Keep the helper in the CLI pipeline, but explicitly withhold value claims until those native contracts exist.
@@ -291,7 +306,8 @@ function runPrivateCanaryAnalysis(argv: readonly string[]) {
     return row.outcomes["first-attempt"] === false && typeof reason === "string" && allowedFailures.includes(reason)
       ? [{ signatureId: reason, failureClass: reason as ImprovementEvidenceRowV1["failureClass"], caseId: row.caseId,
         sourceFamilyId: row.sourceFamilyId, incidentRootId: row.incidentRootId,
-        evidenceDigest: canaryAnalysisDigest([row.runId, row.caseId, row.outcomes]), executionSource: row.executionSource }] : [];
+        evidenceDigest: canaryAnalysisDigest([row.runId, row.caseId, row.split, row.outcomes]), executionSource: row.executionSource,
+        split: row.split }] : [];
   });
   const proposals = buildExperimentProposal({ evidence: proposalEvidence });
   const result = { version: "model-canary-analysis-v1", state: ownerEvidence.state === "available" ? "analyzed" : "unavailable",
@@ -299,6 +315,11 @@ function runPrivateCanaryAnalysis(argv: readonly string[]) {
       reason: ownerEvidence.state === "unavailable" ? ownerEvidence.reason : null },
     fieldTrials: { state: nativeFieldEvidence.state, reason: nativeFieldEvidence.state === "unavailable"
       ? nativeFieldEvidence.reason : null,
+      timestampCoverage: { benchmarkCases: benchmarkCases.length,
+        qualifiedExecutionIntervals: timestampQualifiedBenchmarkCases,
+        unverifiedOrOutOfWindow: unverifiedOrOutOfWindowBenchmarkCases },
+      comparisonWithholdingReason: benchmarkCases.length > 0 && timestampQualifiedBenchmarkCases === 0
+        ? "native-execution-interval-missing-or-outside-requested-window" : null,
       controlledCandidateExclusions: nativeFieldEvidence.state === "available"
         ? nativeFieldEvidence.evidence.unmatchedControlledReasons : [] }, matrixDigest: matrix.digest, corpusDigest: corpus.metadata.digest,
     counts: { nativeReceipts: receipts.length, benchmarkCases: benchmarkCases.length, unclassifiedReceipts, mismatchedReceipts },

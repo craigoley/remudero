@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { canaryCommand } from "#src/lib/model-canary-command.js";
+import { canaryCommand, nativeCanaryExecutionWithinObservationWindow } from "#src/lib/model-canary-command.js";
 
 test("native analysis CLI refuses absent source data without provisioning owner config or output state", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-analysis-no-provision-`));
@@ -33,4 +33,18 @@ test("native analysis CLI refuses absent source data without provisioning owner 
     if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("native field joins require the entire verified execution interval inside the requested window", () => {
+  const window = { start: "2026-11-01T00:00:00.000Z", end: "2026-11-08T00:00:00.000Z" };
+  assert.equal(nativeCanaryExecutionWithinObservationWindow({
+    startedAt: "2026-11-01T00:00:00.000Z", completedAt: "2026-11-07T23:59:59.999Z",
+  }, window), true);
+  assert.equal(nativeCanaryExecutionWithinObservationWindow({
+    startedAt: "2026-10-31T23:59:59.999Z", completedAt: "2026-11-01T00:00:00.001Z",
+  }, window), false);
+  assert.equal(nativeCanaryExecutionWithinObservationWindow({
+    startedAt: "2026-11-07T23:59:59.999Z", completedAt: "2026-11-08T00:00:00.000Z",
+  }, window), false);
+  assert.equal(nativeCanaryExecutionWithinObservationWindow(null, window), false);
 });

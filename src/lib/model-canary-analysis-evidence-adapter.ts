@@ -9,6 +9,7 @@ export interface NativeAnalysisReceiptV1 {
   slot: CanarySlot;
   run: CanaryRun;
   grade: { passed: boolean; reason: string; schemaValid: boolean } | null;
+  executionWindow: { startedAt: string; completedAt: string } | null;
   state: "scored" | "unavailable";
 }
 export type NativeAnalysisEvidenceResultV1 =
@@ -37,6 +38,16 @@ function projectCanaryAnalysisReceipt(raw: unknown): NativeAnalysisReceiptV1 {
     && typeof gradeRaw.reason === "string" && typeof gradeRaw.schemaValid === "boolean"
     ? { passed: gradeRaw.passed, reason: gradeRaw.reason, schemaValid: gradeRaw.schemaValid } : null;
   if (gradeRaw !== null && grade === null) throw new Error("native-analysis-grade-invalid");
+  const timestamp = (value: unknown): value is string => typeof value === "string"
+    && Number.isFinite(Date.parse(value)) && new Date(Date.parse(value)).toISOString() === value;
+  let executionWindow: NativeAnalysisReceiptV1["executionWindow"] = null;
+  if (run.executionWindow !== undefined) {
+    if (!canaryAnalysisRecord(run.executionWindow) || Object.keys(run.executionWindow).sort().join("\0") !== "completedAt\0startedAt"
+      || !timestamp(run.executionWindow.startedAt) || !timestamp(run.executionWindow.completedAt)
+      || Date.parse(run.executionWindow.startedAt) > Date.parse(run.executionWindow.completedAt))
+      throw new Error("native-analysis-execution-window-invalid");
+    executionWindow = { startedAt: run.executionWindow.startedAt, completedAt: run.executionWindow.completedAt };
+  }
   const safeRun = {
     id: run.id, caseId: run.caseId, suiteHash: run.suiteHash, model: run.model, route: run.route,
     effort: run.effort, family: run.family, executionSource: run.executionSource,
@@ -49,7 +60,7 @@ function projectCanaryAnalysisReceipt(raw: unknown): NativeAnalysisReceiptV1 {
   } as CanaryRun;
   const state = raw.state === "scored" ? "scored" : raw.state === "unavailable" ? "unavailable" : null;
   if (state === null) throw new Error("native-analysis-state-invalid");
-  return { slot: raw.slot as unknown as CanarySlot, run: safeRun, grade, state };
+  return { slot: raw.slot as unknown as CanarySlot, run: safeRun, grade, executionWindow, state };
 }
 export function createAnalysisEvidenceReader(privateDirectory: string): () => NativeAnalysisEvidenceResultV1 {
   return () => {
@@ -74,7 +85,8 @@ export function createAnalysisEvidenceReader(privateDirectory: string): () => Na
       return { state: "available", evidence: { version: "native-canary-analysis-evidence-v1", private: true, receipts } };
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      return { state: "unavailable", reason: error instanceof Error && error.message.startsWith("canary-owner-")
+      return { state: "unavailable", reason: error instanceof Error
+        && (error.message.startsWith("canary-owner-") || error.message.startsWith("native-analysis-"))
         ? error.message : code === "ENOENT" ? "canary-owner-db-not-private" : "native-analysis-owner-unreadable" };
     } finally { db?.close(); }
   };

@@ -6,7 +6,7 @@ const digest = (n: number) => n.toString(16).padStart(64, "0");
 function evidence(i: number, overrides: Partial<ImprovementEvidenceRowV1> = {}): ImprovementEvidenceRowV1 {
   return { signatureId: "sig-tool-timeout", failureClass: "tool-use-failure", caseId: `case-${i}`,
     sourceFamilyId: `family-${i}`, incidentRootId: `root-${i}`, evidenceDigest: digest(i + 1),
-    executionSource: "native-provider-execution", ...overrides };
+    executionSource: "native-provider-execution", split: "development", ...overrides };
 }
 
 test("experiment proposal export stays unmeasured and writes no promotion event", () => {
@@ -25,6 +25,7 @@ test("experiment proposal export stays unmeasured and writes no promotion event"
   assert.equal(result.effects.writesLedger, false);
   assert.equal(result.effects.writesRoutingPolicy, false);
   assert.equal(result.effects.writesPromotionState, false);
+  assert.deepEqual(result.exclusions, { syntheticControlEvidence: 0 });
 });
 
 test("experiment proposal export withholds repeated evidence from one family cluster", () => {
@@ -69,4 +70,14 @@ test("synthetic-only failures never produce provider improvement proposals", () 
   assert.equal(result.state, "unavailable");
   assert.equal(result.proposals.length, 0);
   assert.equal(result.exclusions.syntheticControlEvidence, 3);
+});
+
+test("sealed holdout failures cannot create or steer development proposals", () => {
+  const result = buildExperimentProposal({ evidence: [
+    evidence(1, { split: "sealed-holdout" }), evidence(2, { split: "sealed-holdout" }),
+    evidence(3, { split: "sealed-holdout" }),
+  ] });
+  assert.equal(result.state, "unavailable");
+  assert.equal(result.proposals.length, 0);
+  assert.equal(result.exclusions.syntheticControlEvidence, 0);
 });

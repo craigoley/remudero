@@ -182,6 +182,7 @@ export function compareCanaryToFieldTrials(input: CompareCanaryFieldTrialsInputV
   const benchmarks = input.benchmarkCases.map(validateFieldBenchmark), field = input.fieldTrials.map(validateFieldTrial);
   const uniqueRuns = new Map<string, string>(), groups = new Map<string, Group>();
   let syntheticControlRuns = 0;
+  const unverifiedWindowIdentityKeys = new Set<string>();
   for (const row of benchmarks) {
     const ident = fieldComparisonIdentity(row.identity), fingerprint = JSON.stringify([row.caseId, row.sourceFamilyId, row.incidentRootId,
       row.split, row.executionSource, ident.key, row.outcomes]);
@@ -192,7 +193,11 @@ export function compareCanaryToFieldTrials(input: CompareCanaryFieldTrialsInputV
     }
     uniqueRuns.set(row.runId, fingerprint);
     if (row.executionSource === "synthetic-control-replay") { syntheticControlRuns++; continue; }
-    if (ident.missing) continue;
+    if (ident.missing) {
+      if (ident.value.observationWindow === null)
+        unverifiedWindowIdentityKeys.add(fieldComparisonIdentity({ ...ident.value, observationWindow: null }).key);
+      continue;
+    }
     const key = JSON.stringify([ident.key, row.split]);
     const group = groups.get(key) ?? { identity: ident.value, key: ident.key, split: row.split, cases: new Map() };
     const priorCase = group.cases.get(row.caseId);
@@ -218,7 +223,16 @@ export function compareCanaryToFieldTrials(input: CompareCanaryFieldTrialsInputV
     if (cohort.design === "observational" && cohort.assignedTasks !== null) observationalAssignedTasks += cohort.assignedTasks;
     if (cohort.design === "registered-randomized" && cohort.assignedTasks !== null) randomizedAssignedTasks += cohort.assignedTasks;
     if (cohort.state === "unavailable") { unmatchedRows.push(unmatchedFieldEvidence(cohort, "field-trial-evidence-unavailable")); continue; }
-    if (ident.missing) { unmatchedRows.push(unmatchedFieldEvidence(cohort, "serving-identity-incomplete")); continue; }
+    if (ident.missing) {
+      unmatchedRows.push(unmatchedFieldEvidence(cohort,
+        ident.value.observationWindow === null ? "observation-window-unverified" : "serving-identity-incomplete"));
+      continue;
+    }
+    const cohortWithoutWindow = fieldComparisonIdentity({ ...ident.value, observationWindow: null }).key;
+    if (unverifiedWindowIdentityKeys.has(cohortWithoutWindow)) {
+      unmatchedRows.push(unmatchedFieldEvidence(cohort, "observation-window-unverified"));
+      continue;
+    }
     if (cohort.design === "registered-randomized" && (cohort.assignmentAudit !== "pass" || cohort.randomizationUnit !== "task"
       || cohort.analysis !== "intention-to-treat" || cohort.assignmentProbabilities === null
       || Math.abs(Object.values(cohort.assignmentProbabilities ?? {}).reduce((a, b) => a + b, 0) - 1) > 1e-6)) {
