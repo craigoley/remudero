@@ -9,15 +9,17 @@ import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
 import { systemClock } from "./clock.js";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
-import { type EnginePinOptions, type EngineRef, listEngines, newestCurrentEngine, type NewestEngineOptions, pinEngineForRun } from "./engine-tree.js";
+import { type EnginePinOptions, type EngineRef, type EngineRefreshLag, listEngines, newestCurrentEngine, type NewestEngineOptions, pinEngineForRun, refreshEngineFromCodeTree } from "./engine-tree.js";
+import { childEntryStoreRoot } from "./child-entry-store.js";
 import { defaultInstance, type HostMemoryLedgerOptions } from "./host-memory-ledger.js";
 import {
-  createTreePeakSampler, openLearnedReservation, type LearnedReservation, type PeakStoreOptions, type TreePeakSampler,
+  createTreePeakSampler, daemonOwnedProcess, openLearnedReservation, type LearnedReservation, type PeakStoreOptions, type TreePeakSampler,
 } from "./host-memory-learning.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { readLedgerUnionRawLinesSync, realLedgerFs } from "./ledger-union.js";
@@ -256,6 +258,20 @@ export function pruneTerminalRunDirs(stateRoot: string, prefix: string, keep: nu
   return removed;
 }
 
+/** Asks for an engine cut from this process's own code when the newest engine lags main; never awaited by a spawn. */
+export type EngineRefresh = (input: { stateRoot: string; root: string }, lag: EngineRefreshLag, log: Log) => Promise<void> | undefined;
+/** This package's root, from src/lib or the dist/child-entries bundle alike (child-entry-argv.ts's OWN_TREE). */
+const OWN_TREE = fileURLToPath(new URL("../../", import.meta.url));
+/** Refreshes only in a daemon-owned process, as child-entry-argv's store fill does: a test or a shell never builds. */
+export function refreshEngineWhen(daemonOwned: () => boolean): EngineRefresh {
+  return (input, lag, log) => (daemonOwned() ? refreshEngineFromCodeTree(OWN_TREE, input.stateRoot, childEntryStoreRoot(input.root), lag, log) : undefined);
+}
+export const refreshEngineOnLag: EngineRefresh = refreshEngineWhen(daemonOwnedProcess);
+function askForCurrentEngine(refresh: EngineRefresh | undefined, input: { stateRoot: string; root: string }, engine: EngineRef | undefined, mainSha: string, log: Log): void {
+  if (engine?.sha === mainSha) return;
+  void (refresh ?? refreshEngineOnLag)(input, { engineSha: engine?.sha ?? null, mainSha }, log);
+}
+
 // ── the probe ────────────────────────────────────────────────────────────────────────────────
 
 export interface RunChildProbeInput {
@@ -275,6 +291,8 @@ export interface RunChildProbeInput {
 }
 
 export interface RunChildProbePorts {
+  /** Asked when the newest engine lags main; default {@link refreshEngineOnLag}. */
+  refreshEngine?: EngineRefresh;
   /** `sweep.runChild.mode`; the default reads this installation's policy.yaml. */
   readMode?: () => RunChildMode;
   /** main's tip, for `newestCurrentEngine`; default {@link mainTipSha}. */
@@ -408,6 +426,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
       return skip(reasonOf(error));
     }
     let engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...seams.engine });
+    askForCurrentEngine(seams.refreshEngine, input, engine, mainSha, log);
     if (!engine) return skip("no current engine tree for main");
     const entry = (seams.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(engine, [], log);
     if (input.work) await requireDetachedWorkEntry(entry, input.work.kind);
@@ -642,6 +661,8 @@ export interface RunChildPending {
 }
 
 export interface SpawnRunChildPorts {
+  /** Asked when the newest engine lags main; default {@link refreshEngineOnLag}. */
+  refreshEngine?: EngineRefresh;
   mainSha?: (repoDir: string) => Promise<string>;
   engine?: Pick<NewestEngineOptions, "git" | "isCurrent">;
   /** The pin lock's wait and clock seams (engine-tree.ts pinEngineForRun); default the real ones. */
@@ -813,6 +834,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     if (listEngines(input.stateRoot).length === 0) return unavailable("no engine tree has been built yet");
     const mainSha = (await (ports.mainSha ?? mainTipSha)(input.repoDir)).trim();
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...ports.engine });
+    askForCurrentEngine(ports.refreshEngine, input, engine, mainSha, log);
     if (!engine) return unavailable("no current engine tree for main");
     engineSha = engine.sha;
     const engineResolvedAt = clock();
