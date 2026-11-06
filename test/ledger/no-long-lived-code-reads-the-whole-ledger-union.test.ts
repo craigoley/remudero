@@ -7,10 +7,13 @@
  * aborted core twice before (09-10, 09-23). A keyed question asks `ledgerRowsFor`; every other union read must
  * carry a bound the union honours, or a written reason on the allowlist below. W1-T11424 empties it.
  */
+// @source-text-subject: the census parses reader calls in the complete src tree.
+// @census-reads: src/ — every non-test source file's union reader calls.
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { test } from "node:test";
+import { parseSync } from "@swc/core";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const READERS = ["readLedgerUnionRecordsSync", "readLedgerUnionRecords", "readLedgerUnionRawLinesSync", "readLedgerUnionRawLinesAsync",
@@ -24,14 +27,12 @@ const DEFINING = new Set(["src/lib/ledger-union.ts", "src/lib/ledger-key-manifes
 /** file#function → why the read is unbounded today. Every entry is W1-T11424's to remove. */
 const ALLOWLIST: Record<string, string> = {
   "src/lib/analytics-route.ts#deriveAnalyticsSnapshotFromLedger": "whole-history analytics snapshot, no key; W1-T11424 gives it a per-archive digest",
-  "src/lib/benchmark-cohort.ts#observeTimestamp": "benchmark-cohort streams one source at a time through caller-built options; W1-T11424",
   "src/lib/field-trials-flow.ts#readFieldTrialsLedger": "field-trials ledger stream, whole history; W1-T11424",
   "src/lib/field-trials-flow.ts#readControlledLedgerRows": "field-trials materialises every row with no filter; W1-T11424 moves it to ledgerRowsFor",
   "src/lib/human-gate.ts#measureFeedbackAge": "live-file-only read: its fsDeps list no archives, so it never opens a rotation; W1-T11424 states that bound",
-  "src/lib/impossible-canary.ts#model": "impossible-canary CLI materialises every row with no filter; W1-T11424",
+  "src/lib/impossible-canary.ts#impossibleCanaryCommand": "impossible-canary CLI materialises every row with no filter; W1-T11424",
   "src/lib/pr-owner-ledger.ts#readPrOwnerLedgerProjection": "pr-owner projection streams whole history, no key; W1-T11424",
   "src/lib/pr-state.ts#<module>": "pr-state's injectable reader passes its caller's options through; W1-T11424",
-  "src/lib/retro.ts#opts": "retro streams whole history (sinceTs only when given) and bounds its own retained window; W1-T11424",
   "src/lib/routing-experiments.ts#routingAbCommand": "routing-experiments CLI materialises every row with no filter; W1-T11424",
 };
 
@@ -44,55 +45,94 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-/** Comment lines and block comments blanked (line count kept), so a doc mention is never a call. */
-function stripComments(text: string): string {
-  return text.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, " "))
-    .split("\n").map((line) => (/^\s*\/\//.test(line) ? "" : line)).join("\n");
-}
+type Ast = { type?: string; [key: string]: unknown };
+const ast = (value: unknown): Ast | undefined => value !== null && typeof value === "object" ? value as Ast : undefined;
+const identifierKey = (node: Ast): string => `${node.ctxt}:${node.value}`;
+const propertyName = (value: unknown): string | undefined => {
+  const node = ast(value);
+  return node?.type === "Identifier" || node?.type === "StringLiteral" ? String(node.value)
+    : node?.type === "Computed" && ast(node.expression)?.type === "StringLiteral" ? String(ast(node.expression)!.value) : undefined;
+};
 
-/** The argument text of the call whose "(" is at `open`, skipping string literals. */
-function argumentsAt(text: string, open: number): string {
-  let depth = 0;
-  for (let i = open; i < text.length; i += 1) {
-    const c = text[i]!;
-    if (c === "\"" || c === "'" || c === "`") {
-      for (i += 1; i < text.length && text[i] !== c; i += 1) if (text[i] === "\\") i += 1;
-      continue;
-    }
-    if (c === "(") depth += 1;
-    else if (c === ")" && --depth === 0) return text.slice(open + 1, i);
-  }
-  return text.slice(open + 1);
-}
-
-const FUNCTION = /(?:function\s*\*?\s*([A-Za-z0-9_$]+)\s*[<(]|(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z0-9_$]+)\s*(?::[^=]*)?=>|^\s*(?:(?:public|private|static|async|readonly)\s+)*([A-Za-z0-9_$]+)\s*(?:\([^)]*\)|:)\s*(?::[^{;]*)?(?:=>|\{))/gm;
-
-function enclosingFunction(text: string, at: number): string {
-  let name = "<module>";
-  for (const match of text.slice(0, at).matchAll(FUNCTION)) {
-    const found = match[1] ?? match[2] ?? match[3];
-    if (found && !["if", "for", "while", "switch", "catch", "return"].includes(found)) name = found;
-  }
-  return name;
+function walk(value: unknown, visit: (node: Ast, fn: string) => void, fn = "<module>"): void {
+  if (Array.isArray(value)) { value.forEach((child) => walk(child, visit, fn)); return; }
+  const node = ast(value);
+  if (!node) return;
+  if (node.type === "FunctionDeclaration" || node.type === "FunctionExpression") {
+    fn = propertyName(node.identifier) ?? fn;
+  } else if (node.type === "VariableDeclarator" && ["ArrowFunctionExpression", "FunctionExpression"].includes(ast(node.init)?.type ?? "")) {
+    fn = propertyName(node.id) ?? fn;
+  } else if (node.type === "ClassMethod" || node.type === "MethodProperty") fn = propertyName(node.key) ?? fn;
+  visit(node, fn);
+  Object.values(node).forEach((child) => walk(child, visit, fn));
 }
 
 export interface UnionCall { site: string; file: string; fn: string; bounded: boolean }
 
 export function censusUnionCalls(files: Array<{ file: string; text: string }>): UnionCall[] {
   const calls: UnionCall[] = [];
-  const name = new RegExp(`\\b(${READERS.join("|")})\\s*\\(`, "g");
-  const bound = new RegExp(`(?:^|[{,\\s(])(?:${BOUNDS.join("|")})\\s*(?::|,|\\}|\\?)`);
-  for (const { file, text: raw } of files) {
-    if (DEFINING.has(file)) continue;
-    const text = stripComments(raw);
-    for (const match of text.matchAll(name)) {
-      const before = text.slice(Math.max(0, match.index! - 40), match.index!);
-      if (/(?:function\s*\*?\s*|import\s*\{[^}]*|type\s+\w+\s*=\s*)$/.test(before) || /\bfunction\s*$/.test(before)) continue;
-      const open = match.index! + match[0].length - 1;
-      const args = argumentsAt(text, open);
-      const line = text.slice(0, match.index!).split("\n").length;
-      calls.push({ site: `${file}:${line}`, file, fn: enclosingFunction(text, match.index!), bounded: bound.test(args) });
+  for (const { file, text } of files) {
+    if (DEFINING.has(file) || !READERS.some((name) => text.includes(name))) continue;
+    const tree = parseSync(text, { syntax: "typescript", target: "es2022" });
+    // SWC resolves each identifier's syntax context, so equal local names in different scopes do not alias.
+    const bindings = new Map<string, Ast | undefined>();
+    function bind(pattern: unknown, value?: Ast): void {
+      const node = ast(pattern);
+      if (node?.type === "Identifier") bindings.set(identifierKey(node), value);
+      else if (node?.type === "ObjectPattern") {
+        for (const prop of node.properties as Ast[]) {
+          const key = prop.key;
+          const target = prop.type === "AssignmentPatternProperty" ? prop.key : prop.value;
+          bind(target, { type: "MemberExpression", object: value, property: key });
+        }
+      } else if (node?.type === "AssignmentPattern") bind(node.left, value);
     }
+    walk(tree, (node) => {
+      if (node.type === "ImportSpecifier") {
+        const name = propertyName(node.imported ?? node.local);
+        bind(node.local, name && READERS.includes(name) ? { type: "UnionReader" } : undefined);
+      } else if (node.type === "VariableDeclarator") bind(node.id, ast(node.init));
+      else if (node.type === "FunctionDeclaration" || node.type === "FunctionExpression") bind(node.identifier);
+      if (["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(node.type ?? "")) {
+        for (const param of node.params as Ast[]) bind(param.pat ?? param);
+      }
+    });
+    function unwrap(node: Ast): Ast {
+      return ["ParenthesisExpression", "TsAsExpression", "TsConstAssertion", "TsSatisfiesExpression", "TsNonNullExpression", "TsTypeAssertion"].includes(node.type ?? "")
+        ? unwrap(ast(node.expression)!) : node;
+    }
+    function reader(value: unknown, seen = new Set<string>()): boolean {
+      const raw = ast(value);
+      if (!raw) return false;
+      const node = unwrap(raw);
+      if (node.type === "UnionReader") return true;
+      if (node.type === "MemberExpression") return READERS.includes(propertyName(node.property) ?? "");
+      if (node.type !== "Identifier") return false;
+      const key = identifierKey(node);
+      if (!bindings.has(key)) return READERS.includes(String(node.value));
+      if (seen.has(key)) return false;
+      return reader(bindings.get(key), new Set([...seen, key]));
+    }
+    function bounded(value: unknown, seen = new Set<string>()): boolean {
+      const raw = ast(value);
+      if (!raw) return false;
+      const node = unwrap(raw);
+      if (node.type === "Identifier") {
+        const key = identifierKey(node);
+        return !seen.has(key) && bounded(bindings.get(key), new Set([...seen, key]));
+      }
+      if (node.type === "ConditionalExpression") return bounded(node.consequent, seen) || bounded(node.alternate, seen);
+      if (node.type !== "ObjectExpression") return false;
+      return (node.properties as Ast[]).some((prop) => prop.type === "SpreadElement" ? bounded(prop.arguments, seen)
+        : BOUNDS.includes(propertyName(prop.type === "Identifier" ? prop : prop.key) ?? ""));
+    }
+    const bytes = Buffer.from(text);
+    walk(tree, (node, fn) => {
+      if (node.type !== "CallExpression" || !reader(node.callee)) return;
+      const args = node.arguments as Ast[];
+      const line = bytes.subarray(0, Number(ast(node.span)!.start) - 1).toString().split("\n").length;
+      calls.push({ site: `${file}:${line}`, file, fn, bounded: bounded(args[1]?.expression) });
+    });
   }
   return calls;
 }
@@ -126,4 +166,57 @@ test("W1-T11423 criterion 3: a planted unbounded union read reddens the census, 
   ].join("\n") }];
   const calls = censusUnionCalls(planted);
   assert.deepEqual(calls.map((c) => [c.fn, c.bounded]), [["leak", false], ["keyed", true]]);
+});
+
+test("W1-T11423 criterion 3: callback properties cannot bound a call, including imported and local reader aliases", () => {
+  const calls = censusUnionCalls([{ file: "src/lib/planted.ts", text: `
+    import { readLedgerUnionRecords as scan } from "./ledger-union.js";
+    import * as union from "./ledger-union.js";
+    const again = scan;
+    const chained = again;
+    const { openLedgerUnion: opened } = union;
+    export function leak(dir: string) {
+      readLedgerUnionRecords(dir, { onRecord: row => report({ step: row.step }) });
+      scan(dir, { onRecord: row => report({ since: row.ts }) });
+      again(dir, { onRecord: row => report({ keep: row }) });
+      chained(dir, { onRecord: row => report({ maxRotations: 3 }) });
+      opened(dir, { onRecord: row => report({ pattern: row.step }) });
+      union.openLedgerUnion(dir, {}, { step: "third argument is not options" });
+      readLedgerUnionRecords({ step: "first argument is not options" }, {});
+      const metadata = { step: "nested metadata is not a bound" };
+      scan(dir, { metadata });
+      scan(dir, { onRecord: row => report({ step: row.step }), "since": "2026-10-05" });
+      const options = { since: "2026-10-05", onRecord: row => report({ step: row.step }) };
+      scan(dir, options);
+      scan(dir, { ...options });
+      const description = "scan(dir, { step: 'text is not a call' })";
+      // scan(dir, {}) is not a call either.
+    }
+  ` }]);
+  assert.equal(calls.length, 11, "all direct, namespace, imported and chained aliases must be counted");
+  assert.deepEqual(calls.map((c) => c.bounded), [...Array(8).fill(false), true, true, true]);
+  const offenders = calls.filter((c) => !c.bounded && !ALLOWLIST[`${c.file}#${c.fn}`]);
+  assert.equal(offenders.length, 8, "every planted unbounded call must refuse the census");
+});
+
+test("W1-T11423 criterion 3: option and reader aliases keep their lexical scope", () => {
+  const calls = censusUnionCalls([{ file: "src/lib/planted.ts", text: `
+    import { readLedgerUnionRecords as scan } from "./ledger-union.js";
+    export function bounded(dir: string) {
+      const options = { "step": "café" } as const;
+      return scan(dir, options);
+    }
+    export function unbounded(dir: string) {
+      const options = { onRecord: row => report({ step: row.step }) };
+      return scan(dir, options);
+    }
+    export function unrelated(dir: string) {
+      const scan = report;
+      return scan(dir, {});
+    }
+  ` }]);
+  assert.deepEqual(calls.map((c) => [c.site, c.fn, c.bounded]), [
+    ["src/lib/planted.ts:5", "bounded", true],
+    ["src/lib/planted.ts:9", "unbounded", false],
+  ]);
 });

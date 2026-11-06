@@ -63,6 +63,59 @@ async function fullFiltered(dir: string, query: LedgerKeyQuery): Promise<Array<R
   return rows.filter((row) => ledgerRowMatchesKeys(row, query));
 }
 
+test("W1-T11423 criterion 1: keys split across UTF-8 stream chunks preserve exact union equivalence", TIMEOUT, async (t) => {
+  for (const gz of [true, false]) {
+    for (const field of ["task_id", "run_id", "step"] as const) {
+      const value = "café";
+      const row = { ts: day(6), pad: "", [field]: value };
+      const boundary = gz ? 16_384 : 65_536;
+      const charOffset = Buffer.from(JSON.stringify(row)).indexOf(Buffer.from("é"));
+      row.pad = "x".repeat(boundary - 1 - charOffset);
+      const encoded = Buffer.from(JSON.stringify(row));
+      assert.equal(encoded[boundary - 1], 0xc3, "the first UTF-8 byte ends one decoder chunk");
+      assert.equal(encoded[boundary], 0xa9, "the continuation begins the next chunk");
+      const { dir } = writeLedger([{ ...row, pad: "live" }], { scope: t, rotations: [
+        { at: day(7), gz, rows: [row] },
+        { at: day(8), gz, rows: [{ ts: day(7), step: "noise" }] },
+      ] });
+      const query = field === "task_id" ? { taskIds: [value] }
+        : field === "run_id" ? { runIds: [value] } : { steps: [value] };
+      const want = await fullFiltered(dir, query);
+      assert.equal(want.length, 2, "positive control: the full read preserves archive and live keys");
+      const got = await ledgerRowsFor(dir, query);
+      assert.deepEqual(got.rows, want, `${field}, gzip=${gz}`);
+      assert.equal(got.archivesOpened.length, 1);
+      assert.equal(got.archivesSkipped, 1);
+      const cached = await ledgerRowsFor(dir, query);
+      assert.deepEqual(cached.rows, want);
+      assert.equal(cached.manifestsBuilt, 0);
+      assert.deepEqual(ledgerRowsForSync(dir, query).rows, want);
+    }
+  }
+});
+
+test("W1-T11423 criterion 1: since pruning preserves invalid-string timestamps retained by the full union", TIMEOUT, async (t) => {
+  for (const syncFirst of [false, true]) {
+    const base = { task_id: "W1-T7", run_id: "run-seven", pr_number: 41, step: "wanted" };
+    const { dir } = writeLedger([{ ...base, ts: "live-invalid" }], { scope: t, rotations: [
+      { at: day(7), gz: true, rows: [{ ...base, ts: "invalid" }] },
+      { at: day(8), gz: true, rows: [{ ...base, ts: day(2) }, { ...base, ts: "" }] },
+      { at: day(9), gz: true, rows: [{ ...base, ts: day(2) }, { ...base }, { ...base, ts: null }] },
+    ] });
+    for (const keys of [{ taskIds: ["W1-T7"] }, { prNumbers: [41] }, { runIds: ["run-seven"] }, { steps: ["wanted"] }, {}]) {
+      const query = { ...keys, since: day(5) };
+      const want = await fullFiltered(dir, query);
+      assert.equal(want.length, 3, "invalid strings survive since; missing, null and older valid stamps do not");
+      const first = syncFirst ? ledgerRowsForSync(dir, query) : await ledgerRowsFor(dir, query);
+      assert.deepEqual(first.rows, want);
+      assert.equal(first.archivesOpened.length, 2, "only archives with surviving timestamp strings open");
+      assert.equal(first.archivesSkipped, 1);
+      assert.deepEqual((await ledgerRowsFor(dir, query)).rows, want);
+      assert.deepEqual(ledgerRowsForSync(dir, query).rows, want);
+    }
+  }
+});
+
 test("W1-T11423 criterion 1: a task lookup returns the full union's rows and opens only the archives that hold the task", TIMEOUT, async (t) => {
   const { dir } = corpus(t);
   const query = { taskIds: ["W1-T7"] };

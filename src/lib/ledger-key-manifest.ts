@@ -13,17 +13,19 @@
 import { createReadStream, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { createGunzip, gunzipSync } from "node:zlib";
 
 /** The reserved holder name in the rotation-digests store; no reader's digest may use it. */
 export const LEDGER_KEY_MANIFEST_HOLDER = "ledger-key-manifest";
 /** Bump whenever {@link ledgerRowKeys} or the manifest's shape changes: every manifest is then rebuilt. */
-export const LEDGER_KEY_MANIFEST_VERSION = "1";
+export const LEDGER_KEY_MANIFEST_VERSION = "2";
 
 export interface LedgerKeyManifest {
-  /** Earliest and latest `ts` strings in the archive; undefined when no row carried one. */
+  /** Earliest and latest parseable `ts` strings; undefined when none were parseable. */
   minTs?: string;
   maxTs?: string;
+  hasInvalidStringTs: boolean;
   taskIds: string[];
   prNumbers: number[];
   runIds: string[];
@@ -106,8 +108,9 @@ export function ledgerRowMatchesKeys(row: Record<string, unknown>, query: Ledger
 export function ledgerManifestMayHold(manifest: LedgerKeyManifest, query: LedgerKeyQuery): boolean {
   if (query.since !== undefined) {
     const since = Date.parse(query.since);
-    // A row with no `ts` never survives a since filter, so an archive whose newest stamp is older holds none.
-    if (!Number.isNaN(since) && (manifest.maxTs === undefined || Date.parse(manifest.maxTs) < since)) return false;
+    // The union retains invalid strings (NaN < since is false), but rejects missing/non-string stamps.
+    if (!Number.isNaN(since) && !manifest.hasInvalidStringTs &&
+        (manifest.maxTs === undefined || Date.parse(manifest.maxTs) < since)) return false;
   }
   if (query.steps?.length && !query.steps.some((step) => manifest.steps.includes(step))) return false;
   if (!ledgerQueryIsKeyed(query)) return true;
@@ -125,6 +128,7 @@ class ManifestBuilder {
   private maxTs: string | undefined;
   private minMs = Number.POSITIVE_INFINITY;
   private maxMs = Number.NEGATIVE_INFINITY;
+  private hasInvalidStringTs = false;
   private rows = 0;
 
   line(raw: string): void {
@@ -149,7 +153,7 @@ class ManifestBuilder {
       if (!Number.isNaN(ms)) {
         if (ms < this.minMs) { this.minMs = ms; this.minTs = keys.ts; }
         if (ms > this.maxMs) { this.maxMs = ms; this.maxTs = keys.ts; }
-      }
+      } else this.hasInvalidStringTs = true;
     }
   }
 
@@ -157,6 +161,7 @@ class ManifestBuilder {
     return {
       ...(this.minTs !== undefined ? { minTs: this.minTs } : {}),
       ...(this.maxTs !== undefined ? { maxTs: this.maxTs } : {}),
+      hasInvalidStringTs: this.hasInvalidStringTs,
       taskIds: [...this.taskIds].sort(),
       prNumbers: [...this.prNumbers].sort((a, b) => a - b),
       runIds: [...this.runIds].sort(),
@@ -183,10 +188,11 @@ async function buildStreamed(entry: LedgerManifestEntry): Promise<LedgerKeyManif
   const builder = new ManifestBuilder();
   const source = createReadStream(entry.path);
   const input = entry.form === "gzip" ? source.pipe(createGunzip()) : source;
+  const decoder = new StringDecoder("utf8");
   let carry = "";
   try {
     for await (const chunk of input as AsyncIterable<Buffer>) {
-      const text = carry + chunk.toString("utf8");
+      const text = carry + decoder.write(chunk);
       let start = 0;
       for (let end = text.indexOf("\n"); end >= 0; end = text.indexOf("\n", start)) {
         builder.line(text.slice(start, end));
@@ -194,6 +200,7 @@ async function buildStreamed(entry: LedgerManifestEntry): Promise<LedgerKeyManif
       }
       carry = text.slice(start);
     }
+    carry += decoder.end();
     if (carry) builder.line(carry);
   } finally {
     input.destroy();
@@ -237,6 +244,7 @@ function validManifest(value: unknown): value is LedgerKeyManifest {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const m = value as Record<string, unknown>;
   return isStringArray(m.taskIds) && isStringArray(m.runIds) && isStringArray(m.steps) &&
+    typeof m.hasInvalidStringTs === "boolean" &&
     Array.isArray(m.prNumbers) && m.prNumbers.every((n) => Number.isSafeInteger(n)) &&
     Number.isSafeInteger(m.rows) && (m.minTs === undefined || typeof m.minTs === "string") &&
     (m.maxTs === undefined || typeof m.maxTs === "string");
