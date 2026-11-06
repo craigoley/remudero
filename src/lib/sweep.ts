@@ -285,6 +285,7 @@ import {
   taskContractRevision,
   taskSemanticRevision,
   tryEscalate,
+  tryEscalateAsync,
   type AskType,
   type Escalation,
   type EscalationCause,
@@ -2607,7 +2608,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const terminalHeads = terminalUncreditableHeads(ledgerPath);
-  const escalateTerminalHead = (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): void => {
+  const escalateTerminalHead = async (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): Promise<void> => {
     if (terminal.escalated) return;
     // W1-T3168: the ownership fact alone is not an ask. A foreign head on a PR that is not stuck
     // needs no decision from anyone today, so it is LEDGERED and not escalated — never silently
@@ -2623,7 +2624,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       return;
     }
     const prUrl = `https://github.com/${owner}/${repo}/pull/${terminal.prNumber}`;
-    const issueUrl = tryEscalate(
+    const issueUrl = await tryEscalateAsync(
       {
         class: "BLOCKED",
         taskId: terminal.taskId,
@@ -3963,7 +3964,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const preflightStandDown = await dispatchFixPreflightStandDown(ghLiveState, pr, log);
         if (preflightStandDown) return;
         if (priorTerminal) {
-          escalateTerminalHead(priorTerminal, pr);
+          await escalateTerminalHead(priorTerminal, pr);
           return;
         }
 
@@ -4073,7 +4074,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               escalated: false,
             };
             terminalHeads.set(terminalKey, terminal);
-            escalateTerminalHead(terminal, pr);
+            await escalateTerminalHead(terminal, pr);
           }
           return;
         }

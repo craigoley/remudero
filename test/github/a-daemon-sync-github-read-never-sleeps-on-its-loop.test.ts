@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import * as transport from "#src/lib/github-transport.js";
-import { escalate, escalateAsync, ghIssueGateway } from "#src/lib/escalate.js";
+import { configureEscalationTriage, escalate, escalateAsync, ghIssueGateway } from "#src/lib/escalate.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 function cache() {
@@ -115,6 +118,51 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
       assert.equal(delivered, "https://github.com/fixture/loop/issues/7");
       assert.ok(legacySleeps > 0, "retain the explicitly documented unsafe-retry delivery exception until its durable follow-up");
     } finally { Atomics.wait = previousWait; }
+    configureEscalationTriage(() => ({ mode: "shadow" }));
+    try {
+      for (const cached of [true, false]) {
+        const mode = cached ? "cached terminal" : "new terminal";
+        const terminalRoot = join(root, cached ? "cached-terminal" : "new-terminal");
+        const state = join(terminalRoot, "state"); mkdirSync(state, { recursive: true });
+        const ledger = join(state, "ledger.ndjson"); writeFileSync(ledger, "");
+        const fixtureTask: Task = { id: "W1-T11458", title: "terminal fixture", repo: "loop", type: "implement", risk: "high", budget_usd: 0, verify: "auto", files: [], acceptance: [], status: "queued", depends_on: [], attempts: 0 };
+        const plan = { tasks: [fixtureTask], byId: new Map([[fixtureTask.id, fixtureTask]]) } as Plan;
+        const pr = { prNumber: cached ? 51 : 52, prUrl: `https://github.com/fixture/loop/pull/${cached ? 51 : 52}`, taskId: fixtureTask.id,
+          reviewState: "failure", checksState: "green", unmetCriteria: [], priorStrikes: 0,
+          lastActivityAt: new Date().toISOString(), headSha: cached ? "cached-head" : "new-head", autoMergeArmed: false } as OpenPrView;
+        if (cached) appendLedger(ledger, { run_id: "PRIOR", task_id: "SWEEP", step: "sweep.fix.uncreditable_head", pr_number: pr.prNumber,
+          head_sha: pr.headSha, head: "codex/foreign", reason: "not_a_run_branch", terminal: true, repair_task_id: fixtureTask.id, cause: "review" });
+        const effects = buildSweepEffects({ owner: "fixture", repo: "loop", config: { root: terminalRoot } as never,
+          ledgerPath: ledger, runId: "TERMINAL-FIXTURE", plan, policy: DEFAULT_SWEEP_POLICY,
+          log: (step, fields) => appendLedger(ledger, { ...fields, step, run_id: "TERMINAL-FIXTURE", task_id: "SWEEP" }),
+          contributorAdmissionImpl: async () => {}, dispatchFixPreflightStandDownImpl: async () => false,
+          ghLiveStateImpl: () => ({ ok: true, state: "OPEN" }), reloadPlanForFixImpl: () => plan,
+          ghJsonImpl: () => ({ headRefName: "codex/foreign", headRefOid: pr.headSha, body: "", files: [] }),
+          spawnImpl: async () => { throw new Error("fixture must not spawn a repair worker"); },
+          createFixRungWorktreeImpl: () => { throw new Error("fixture must not create a repair worktree"); },
+        });
+        const rows = (): Array<Record<string, unknown>> => readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+        during.clear(); writeFileSync(calls, "");
+        try {
+          await withLiveWritesAllowed(() => transport.withDaemonGhTransportFloor(() => effects.dispatchFix(pr, { unmetCriteria: [] })));
+          assert.ok(effects.terminalFixStandDown?.(pr), `${mode}: parent must await delivered acknowledgement`);
+          const delivered = rows().find((row) => row.step === "sweep.fix.uncreditable_head_escalated");
+          assert.equal(delivered?.issue_url, "https://github.com/fixture/loop/issues/7", `${mode}: only an actual URL may be acknowledged`);
+          const commands = readFileSync(calls, "utf8").trim().split("\n").filter((line) => line.startsWith("start ")).map((line) => line.slice(6));
+          assert.ok(commands.includes("issue create"), `${mode}: the real default gateway must create the fixture issue`);
+          for (const command of commands) assert.ok(during.has(command), `${mode}: timer must run during the default caller's child ${command}`);
+        } finally {
+          // A deliberately removed parent await leaves a real private child in flight. Retain its
+          // fixture until the existing transport deadline or a final delivery disposition, then clean.
+          const deadline = Date.now() + transport.DEFAULT_GH_CALL_TIMEOUT_MS;
+          const settled = new Set(["escalation.issue_opened", "escalation.failed", "escalation.dedup_unreadable"]);
+          while (!rows().some((row) => typeof row.step === "string" && settled.has(row.step)) && Date.now() < deadline) {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+          }
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      }
+    } finally { configureEscalationTriage(undefined); }
   } finally {
     clearInterval(timer);
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
