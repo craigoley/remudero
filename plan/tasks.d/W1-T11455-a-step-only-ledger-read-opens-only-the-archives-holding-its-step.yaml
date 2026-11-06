@@ -10,7 +10,7 @@
   depends_on: [W1-T11423]
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
   plan_refs: [W1-T11423, W1-T11424, W1-T10077, W1-T10767]
-  files: [src/run-task.ts, src/lib/escalate.ts, test/ledger/a-step-only-ledger-read-opens-only-the-archives-holding-its-step.test.ts]
+  files: [src/run-task.ts, src/lib/escalate.ts, src/lib/ledger-union.ts, test/ledger/a-step-only-ledger-read-opens-only-the-archives-holding-its-step.test.ts]
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=6de3d2906d3821b4
@@ -31,16 +31,19 @@
     W1-T11423 adds a per-archive key manifest whose ledgerManifestMayHold already skips an
     archive when query.steps names no step in manifest.steps, and ledgerRowsFor /
     ledgerRowsForSync to read through it. Neither reader uses them yet. W1-T11424's census also
-    counts a step option as a bound, so neither reader is flagged (see W1-T11456).
+    counts a step option as a bound, so neither reader is flagged (see W1-T11456). The current
+    ledgerRowsForSync API supports refuseIncomplete but exposes no torn-row callback or matching torn
+    evidence, so it cannot preserve ledgerClassTier's refusal for a torn raw line naming its step.
+    Add scoped support in src/lib/ledger-union.ts rather than weakening that refusal.
   design: |
     1. rowsWithArchivedVerifyHumanVerdicts reads through ledgerRowsForSync with
        steps [VERIFY_HUMAN_JUDGED_STEP]. It returns the same rows in the same order (archived first,
        live last), and keeps its documented partial-read behaviour.
     2. ledgerClassTier reads through ledgerRowsForSync with steps ["panel.escalation_marked_handled"].
-       It keeps its refusal semantics: an incomplete read of an archive the manifest says MAY hold
-       the step, or a torn row naming the step, still throws "escalation precision history is
-       unreadable". An archive whose manifest is missing or unreadable is opened as today.
-       ledgerRowsFor already falls back for those; confirm it, and say so in the PR.
+       The sync keyed-read API exposes a bounded onTorn callback for raw malformed rows; ledgerClassTier
+       throws "escalation precision history is unreadable" when an unreadable selected archive or a
+       torn row naming the step is observed. An archive whose manifest is missing or unreadable is
+       opened as today. Confirm those paths and say so in the PR.
     3. Neither caller adds a cache or a constant. The manifest is the whole bound.
     W1-T10767 (queued) edits ledgerClassTier's neighbourhood for snoozes. Keep this change to the read.
   acceptance:
