@@ -1,0 +1,53 @@
+- id: W1-T11506
+  title: The independent reader-agreement ledger scan yields the daemon event loop
+  repo: remudero
+  depends_on: [W1-T11423, W1-T11455]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-06 final handoff section 6 and source inspection of independentFigures at origin/main 202ec738c748"
+  plan_refs: [W1-T9981, W1-T6246, W1-T10817, W1-T11455]
+  files: [src/lib/reader-agreement.ts, test/review/the-independent-reader-ledger-scan-yields-the-daemon-loop.test.ts]
+  priority: 4
+  status: queued
+  attempts: 0
+  rationale: |
+    independentFigures is async, but reader-agreement.ts:212 selects readLedgerUnionRawLinesSync
+    and its readRows helper executes that windowed union synchronously for figure steps, halted
+    task rows, and queued-task projection rows. runSweep awaits checkReaderAgreement in its full
+    prelude, so that work still occupies the daemon loop. The final handoff reports about 13 s in
+    one CPU-profile window; that duration is historical evidence, not a new measurement here.
+    W1-T9981 filters rows before parsing and preserves independent reducers. W1-T6246 moves only
+    the independent GitHub/plan projection off-loop. Neither changes this remaining raw union
+    read. readLedgerUnionRawLinesAsync already uses libuv reads/decompression and yields between
+    slices under the existing LEDGER_ROTATION_LOAD_LINES_PER_TURN policy. This task waits for
+    W1-T11455 and its keyed-ledger prerequisite, respecting the current reader-work hold.
+  design: |
+    After prerequisites merge, recheck the three independent corpus reads and move any remaining
+    synchronous default to the existing async raw-union reader, awaiting each dependent reduction.
+    Accept existing synchronous injected corpus fixtures as well as promises; retain every window,
+    minRotations, keep filter, order, replay dedupe, incomplete/unreadable behavior and scan count.
+    Keep the board and independent corpora and reducers separate; never copy board results into
+    the independent figure. Do not change figures, disagreement decisions, cadence or bounds.
+    If a prerequisite already removed the sync default, do not build redundant work; establish
+    exact merged credit and report supersession through normal task hygiene instead.
+    Prove a timer can run while an independent corpus read remains pending, then prove the caller
+    awaits that read before publishing figures. Also exercise the real default on a temporary
+    live-plus-gzip state directory, compare complete figures with the old sync fixture corpus,
+    and cover unreadable archives, malformed rows, halted-task and queued-plan branches. No
+    network, worker/model spend, loop-time threshold, extra reader store or new fixed constant.
+  acceptance:
+    - claim: "The independent default ledger reads yield the event loop and are awaited before figure publication"
+      proof: "grep: W1-T11506 criterion 1 in test/review/the-independent-reader-ledger-scan-yields-the-daemon-loop.test.ts"
+    - claim: "The real live-plus-gzip default and synchronous injected control retain identical figures, scan counts and incomplete/unreadable refusal semantics"
+      proof: "grep: W1-T11506 criterion 2 in test/review/the-independent-reader-ledger-scan-yields-the-daemon-loop.test.ts"
+  note: |
+    Import-equivalent sketch computed test/review at medium confidence. Recompute with the finished
+    test. This task is filing only until W1-T11455 and W1-T11423 merge; preserve their owners.
+  falsifier: |
+    Restore the synchronous default while keeping awaited reductions: criterion 1 must fail the
+    pending-read timer control. Drop an await: publication-before-completion fails. Drop a keep
+    filter or incomplete refusal: criterion 2's sync-equivalence and unreadable controls fail.
