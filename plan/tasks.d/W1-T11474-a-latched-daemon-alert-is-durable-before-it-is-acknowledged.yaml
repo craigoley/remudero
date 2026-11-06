@@ -11,7 +11,10 @@
   origin: "W1-T11458 caller census, 2026-11-06: one-shot escalation delivery cannot safely refuse"
   plan_refs: [W1-T11458, W1-T7720, W1-T943, W1-T4409]
   files: [src/lib/host-escalation-spool.ts, src/lib/dispatch-governor.ts, src/lib/escalate.ts, src/lib/github-transport.ts, src/run-task.ts, src/cli/commands/daemon.ts, test/inbox/a-latched-daemon-alert-is-durable-before-it-is-acknowledged.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=e49e118dd6388bdd
+  # backlog gardener: placed=2026-11-06T12:46:06.258Z
   attempts: 0
   rationale: |
     The W1-T11458 census found three daemon callers that acknowledge before synchronous delivery:
