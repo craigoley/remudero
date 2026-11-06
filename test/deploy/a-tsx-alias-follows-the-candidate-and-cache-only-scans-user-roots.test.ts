@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -15,8 +15,10 @@ function command(file: string, args: string[], env?: NodeJS.ProcessEnv): string 
   return r.stdout;
 }
 function fixture() {
-  // Beside the checkout, outside Git and /private/tmp, even when the runner's TMPDIR is /private/tmp/rt.
-  const base = mkdtempSync(join(dirname(REPO_ROOT), "rmd-tsx-alias-fixture-"));
+  // Proof checkouts and their parents are read-only. Darwin's account temp directory stays
+  // outside /private/tmp even when a runner sets TMPDIR there; Linux uses its writable proof scratch.
+  const writable = process.platform === "darwin" ? command("getconf", ["DARWIN_USER_TEMP_DIR"]).trim() : tmpdir();
+  const base = realpathSync(mkdtempSync(join(writable, "rmd-tsx-alias-fixture-")));
   const root = join(base, "tmp"), user = join(base, "user"), sessions = join(base, "sessions"), bin = join(base, "bin");
   for (const p of [root, user, sessions, bin, join(base, "home")]) mkdirSync(p);
   const processes = join(base, "processes"), cwds = join(base, "cwds"), open = join(base, "open");
@@ -63,6 +65,7 @@ test("W1-T11461 criterion 1: aliases follow the cache candidate and preserve gen
     writeFileSync(harness, source.split(boundary)[0] + `
 source ${quote(join(REPO_ROOT, "deploy/dependency-seed-guard.sh"))}
 ROOT_REAL=/private/tmp
+if path_is_live_or_unknown ${quote(`/user-cache/${cacheName}`)}; then echo OUTSIDE_ALIAS_FALSE_HOLD; else echo OUTSIDE_ALIAS_CLEAR; fi
 prune_tsx_cache ${quote(fx.cache)} 1
 printf 'OUTSIDE_ELIGIBLE=%s\\n' "$TSX_PRUNED_N"
 printf '%s\\n' ${quote(`/tmp/rt/nested/${cacheName}`)} > ${quote(fx.processes)}
@@ -73,6 +76,8 @@ if path_is_live_or_unknown ${quote(`/private/tmp/rt/nested/${cacheName}/leaf`)};
 : > ${quote(fx.cwds)}
 `, { mode: 0o755 });
     const out = command("/bin/bash", [harness], fx.env);
+    assert.match(out, /^OUTSIDE_ALIAS_CLEAR$/m, out);
+    assert.equal(out.includes("OUTSIDE_ALIAS_FALSE_HOLD"), false, out);
     assert.match(out, /^OUTSIDE_ELIGIBLE=1$/m, out);
     assert.match(out, /^REAL_ALIAS_HELD$/m, out);
     assert.match(out, /^REAL_CWD_HELD$/m, out);
