@@ -377,7 +377,12 @@ test("canary owner preserves legacy receipt shape and refuses tampered private t
   try {
     const rows = db.prepare("SELECT id,receipt FROM canary_slots_v1 ORDER BY id").all() as { id: string; receipt: string }[];
     const legacy = JSON.parse(rows.find(row => row.id === legacySlot.id)!.receipt) as Record<string, unknown>;
-    assert.deepEqual(Object.keys(legacy), ["slot", "run", "grade", "state", "reason"]);
+    assert.deepEqual(Object.keys(legacy).sort(), ["executionWindow", "grade", "reason", "run", "slot", "state"]);
+    const executionWindow = legacy.executionWindow as { startedAt?: unknown; completedAt?: unknown };
+    assert.equal(typeof executionWindow.startedAt, "string");
+    assert.equal(typeof executionWindow.completedAt, "string");
+    assert.ok(Date.parse(String(executionWindow.startedAt)) <= Date.parse(String(executionWindow.completedAt)));
+    assert.equal("executionWindow" in (legacy.run as Record<string, unknown>), false);
     const row = rows.find(value => value.id === tracedSlot.id)!;
     const parsed = JSON.parse(row.receipt) as { privateTrace: { finalText: string } };
     parsed.privateTrace.finalText = "tampered";

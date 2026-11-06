@@ -42,12 +42,12 @@ function projectCanaryAnalysisReceipt(raw: unknown): NativeAnalysisReceiptV1 {
   const timestamp = (value: unknown): value is string => typeof value === "string"
     && Number.isFinite(Date.parse(value)) && fixedClock(Date.parse(value)).iso() === value;
   let executionWindow: NativeAnalysisReceiptV1["executionWindow"] = null;
-  if (run.executionWindow !== undefined) {
-    if (!canaryAnalysisRecord(run.executionWindow) || Object.keys(run.executionWindow).sort().join("\0") !== "completedAt\0startedAt"
-      || !timestamp(run.executionWindow.startedAt) || !timestamp(run.executionWindow.completedAt)
-      || Date.parse(run.executionWindow.startedAt) > Date.parse(run.executionWindow.completedAt))
+  if (raw.executionWindow !== undefined) {
+    if (!canaryAnalysisRecord(raw.executionWindow) || Object.keys(raw.executionWindow).sort().join("\0") !== "completedAt\0startedAt"
+      || !timestamp(raw.executionWindow.startedAt) || !timestamp(raw.executionWindow.completedAt)
+      || Date.parse(raw.executionWindow.startedAt) > Date.parse(raw.executionWindow.completedAt))
       throw new Error("native-analysis-execution-window-invalid");
-    executionWindow = { startedAt: run.executionWindow.startedAt, completedAt: run.executionWindow.completedAt };
+    executionWindow = { startedAt: raw.executionWindow.startedAt, completedAt: raw.executionWindow.completedAt };
   }
   const safeRun = {
     id: run.id, caseId: run.caseId, suiteHash: run.suiteHash, model: run.model, route: run.route,

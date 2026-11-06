@@ -29,8 +29,8 @@ function receipt() {
     slot: { id: "a".repeat(64), caseId: "case-1", pin: { model: "m", route: "r", effort: "e",
       suiteHash: "b".repeat(64), billing: "subscription" } },
     run: { id: "run-1", caseId: "case-1", suiteHash: "b".repeat(64), model: "m", route: "r", effort: "e",
-      family: "general", executionSource: "native-provider-execution", verified: true, totalDurationMs: 10, attempts: [],
-      executionWindow: { startedAt: "2026-11-01T00:00:00.000Z", completedAt: "2026-11-01T00:00:01.000Z" } },
+      family: "general", executionSource: "native-provider-execution", verified: true, totalDurationMs: 10, attempts: [] },
+    executionWindow: { startedAt: "2026-11-01T00:00:00.000Z", completedAt: "2026-11-01T00:00:01.000Z" },
     grade: { passed: true, reason: "ok", schemaValid: true }, state: "scored", reason: "ok",
     privateTrace: { finalText: "private prompt and answer must not escape" },
   });
@@ -76,8 +76,7 @@ test("analysis evidence reader leaves legacy receipts without an execution inter
   const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-canary-owner-legacy-window-`));
   try {
     const legacy = JSON.parse(receipt()) as Record<string, unknown>;
-    const run = legacy.run as Record<string, unknown>;
-    delete run.executionWindow;
+    delete legacy.executionWindow;
     ownerDb(directory, JSON.stringify(legacy));
     const result = createAnalysisEvidenceReader(directory)();
     assert.equal(result.state, "available");
@@ -89,8 +88,7 @@ test("analysis evidence reader refuses malformed or reversed native execution in
   const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-canary-owner-invalid-window-`));
   try {
     const malformed = JSON.parse(receipt()) as Record<string, unknown>;
-    const malformedRun = malformed.run as Record<string, unknown>;
-    malformedRun.executionWindow = { startedAt: "not-a-timestamp", completedAt: "2026-11-01T00:00:01.000Z" };
+    malformed.executionWindow = { startedAt: "not-a-timestamp", completedAt: "2026-11-01T00:00:01.000Z" };
     ownerDb(directory, JSON.stringify(malformed));
     const result = createAnalysisEvidenceReader(directory)();
     assert.equal(result.state, "unavailable");
@@ -132,8 +130,9 @@ test("native owner persists a trusted execution interval that the private reader
       try {
         const raw = db.prepare("SELECT receipt FROM canary_slots_v1 WHERE id=?").get(slot.id) as { receipt: string };
         const stored = JSON.parse(raw.receipt) as Record<string, unknown>;
-        assert.deepEqual(Object.keys(stored).sort(), ["grade", "reason", "run", "slot", "state"]);
-        assert.deepEqual((stored.run as Record<string, unknown>).executionWindow, interval);
+        assert.deepEqual(Object.keys(stored).sort(), ["executionWindow", "grade", "reason", "run", "slot", "state"]);
+        assert.deepEqual(stored.executionWindow, interval);
+        assert.equal("executionWindow" in (stored.run as Record<string, unknown>), false);
       } finally { db.close(); }
     }
   } finally { rmSync(directory, { recursive: true, force: true }); }

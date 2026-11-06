@@ -25,6 +25,7 @@
     - src/lib/model-canary-native-config.ts
     - src/lib/model-canary-native-field-evidence.ts
     - src/lib/model-canary-owner.ts
+    - test/model-canary-owner.test.ts
     - src/lib/model-canary-router-value.ts
     - test/model-canary-input.test.ts
     - test/routing/model-canary-analysis-command.test.ts
