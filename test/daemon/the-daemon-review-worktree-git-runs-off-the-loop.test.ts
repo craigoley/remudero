@@ -356,8 +356,10 @@ type RecoveryName = "preserveTrackedDirtyFixOwner" | "preserveOrDiscardFixOwnerR
   | "preserveStagedFixOwnerResidue" | "resetTrackedDirtyFixOwner" | "preserveAndClearUntrackedFixOwner"
   | "preserveStaleDirtyFixOwner" | "clearStaleDirtyFixOwner" | "removeAbandonedFixWorktreeOwner";
 // Retain base execution for the semantic timing falsifier; restored code selects the real async twins.
-function recoveryTwin<K extends RecoveryName>(name: K): typeof task[K] {
-  return (Reflect.get(task, `${name}Async`) ?? task[name]) as typeof task[K];
+type RecoveryTwin<K extends RecoveryName> = (...args: Parameters<typeof task[K]>) =>
+  ReturnType<typeof task[K]> | Promise<ReturnType<typeof task[K]>>;
+function recoveryTwin<K extends RecoveryName>(name: K): RecoveryTwin<K> {
+  return (Reflect.get(task, `${name}Async`) ?? task[name]) as unknown as RecoveryTwin<K>;
 }
 
 async function recoveryDefaults(fx: ReturnType<typeof fixture>): Promise<void> {
@@ -498,7 +500,9 @@ async function materializeControls(fx: ReturnType<typeof fixture>): Promise<void
     assert.equal(reclaim.reviewWorktreeIsHeld(path), false);
   }
 
-  const planRound = (Reflect.get(task, "materializePlanRoundWorktreeAsync") ?? task.materializePlanRoundWorktree) as typeof task.materializePlanRoundWorktree;
+  type PlanRound = (...args: Parameters<typeof task.materializePlanRoundWorktree>) =>
+    ReturnType<typeof task.materializePlanRoundWorktree> | Promise<ReturnType<typeof task.materializePlanRoundWorktree>>;
+  const planRound = (Reflect.get(task, "materializePlanRoundWorktreeAsync") ?? task.materializePlanRoundWorktree) as unknown as PlanRound;
   for (const throws of [false, true]) {
     const name = `review-PR4-${Date.now()}`, path = join(fx.config.root, "worktrees", name);
     fx.repo.git("worktree", "add", "--detach", path, fx.sha); reclaim.holdReviewWorktree(path);
@@ -536,7 +540,7 @@ async function daemonReclaimWiring(fx: ReturnType<typeof fixture>): Promise<void
     const code = await task.daemonCommand(["--repo", "fixture/review-loop", "--plan", planPath, "--max", "0"], {
       config: { ...fx.config, claudeBin: "/bin/true" } as Config,
       repoRoot: fx.repo.dir,
-      daemonBoot: async () => {},
+      daemonBoot: async () => ({ env_clean: true, billing_mode: "subscription", node_path: process.execPath, node_version: process.version }),
       githubFactory: () => ({} as never),
       startGithubAppRefresh: () => ({ armed: false, stop: () => {} }),
       startGitCredentialSocket: async () => undefined,
