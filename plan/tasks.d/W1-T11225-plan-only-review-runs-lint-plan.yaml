@@ -13,12 +13,12 @@
     - W1-T4423
   files:
     - src/run-task.ts
-    - test/plan/a-plan-lint-that-cannot-run-names-what-it-printed.test.ts
+    - test/plan-only-review-runs-lint-plan.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: When the lint child exits with no summary line, lintPlanForReview ledgers one row carrying the exit status and the child's redacted, bounded output tail, and the outcome's reason ends with the child's last non-blank output line; a secret-shaped token in that output never reaches the row or the reason, and a child that printed nothing keeps today's reason unchanged
-      proof: "unit test: test/plan/a-plan-lint-that-cannot-run-names-what-it-printed.test.ts"
+      proof: "unit test: a plan-only review whose lint cannot run withholds the pass"
     - claim: The review's plan-lint failure arm ledgers the child's output under its own step
       proof: "grep: review\\.plan_lint_unreadable in src/run-task.ts"
   rationale: |
