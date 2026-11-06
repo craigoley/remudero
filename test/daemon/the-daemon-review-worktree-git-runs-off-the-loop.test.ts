@@ -10,7 +10,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import * as task from "#src/run-task.js";
 import * as reclaim from "#src/lib/review-worktree-reclaim.js";
 import { withMaterializedWorktree } from "#src/cli/commands/review.js";
@@ -79,6 +79,7 @@ test("W1-T11459 criterion 1: materialization turns the loop during every real Gi
   }
   await materializeControls(fx);
   await reviewCommandWiring(fx);
+  await sameTickMaterializationOwnership(fx, t);
 });
 
 test("W1-T11459 criterion 1: staged recovery awaits temporary-index Git and preserves the exact tree", async (t) => {
@@ -666,5 +667,41 @@ exit $rc
     writeFileSync(wrapper, previousWrapper, { mode: 0o755 });
     fx.repo.git("remote", "set-url", "origin", previousOrigin);
     if (existsSync(managed)) fx.repo.git("worktree", "remove", "--force", managed);
+  }
+}
+
+async function sameTickMaterializationOwnership(fx: ReturnType<typeof fixture>, t: TestContext): Promise<void> {
+  const instant = Date.now(), frozen = t.mock.method(Date, "now", () => instant);
+  let ready!: () => void, refuse!: (error: Error) => void;
+  const successfulFetch = new Promise<void>(resolve => { ready = resolve; });
+  const refusedFetch = new Promise<void>((_resolve, reject) => { refuse = reject; });
+  let fetches = 0, owned: string | undefined;
+  const first = materialize(fx.config, fx.repo.dir, 41, fx.sha, {
+    fetch: async () => { fetches++; await successfulFetch; },
+    addWorktree: () => {}, revParseHead: () => fx.sha,
+  });
+  const second = materialize(fx.config, fx.repo.dir, 41, fx.sha, {
+    fetch: async () => { fetches++; await refusedFetch; },
+    addWorktree: () => { throw new Error("a failed fetch cannot add a checkout"); },
+    revParseHead: () => fx.sha,
+  });
+  try {
+    assert.equal(fetches, 2, "positive control: both same-tick materializations entered their fetch");
+    ready();
+    owned = (await first).worktreePath;
+    assert.ok(owned);
+    assert.match(owned, /review-PR41-[0-9]+$/, "the reclaimer's existing epoch name stays recognizable");
+    assert.equal(reclaim.reviewWorktreeIsHeld(owned), true);
+    refuse(new Error("private second fetch failure"));
+    const failed = await second;
+    assert.equal(failed.worktreePath, undefined);
+    if (!failed.worktreePath) assert.equal(failed.failure.errorClass, "fetch-failure");
+    assert.equal(reclaim.reviewWorktreeIsHeld(owned), true,
+      "a failed same-tick attempt cannot release another review's hold");
+  } finally {
+    ready(); refuse(new Error("private fixture released"));
+    await Promise.allSettled([first, second]);
+    if (owned) reclaim.releaseReviewWorktree(owned);
+    frozen.mock.restore();
   }
 }
