@@ -10,7 +10,10 @@
   origin: "2026-11-06 ledger: sweep.fix.dispatch_failed / sweep.fix.error / fix.commit_refused / sweep.plan_round.refused with 'selected instance registry unavailable (timeout)' while core's loop was held 60-200 s"
   plan_refs: [W1-T11368, W1-T11431, W1-T10573]
   files: [src/lib/instance-registry-selection.ts, test/a-selected-registry-read-deadline-counts-only-loop-available-time.test.ts]
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=33472fe3b97e4510
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
   attempts: 0
   rationale: |
     Core has run with a selected instance registry since the 2026-11-05 recycles. Every fix-lane
