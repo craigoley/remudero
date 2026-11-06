@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "2026-11-05 core loop-hold incident: #16943, #16944 and #16945 green plan PRs waited 40+ min; the W1-T5901 one-per-pass claim deferred two of them each pass"
   plan_refs: [W1-T5901, W1-T9212, W1-T5748, W1-T5615, W1-T4405, W1-T11434]
-  files: [src/lib/sweep.ts, src/lib/ledger.ts, test/sweep/a-ready-plan-pr-merges-on-the-next-pass.test.ts]
+  files: [src/lib/sweep.ts, src/lib/ledger.ts, src/lib/status.ts, test/sweep/light-pass-merge-budget-uses-measured-interval.test.ts]
   priority: 3
   status: queued
   # backlog gardener: band=3 evidence=b9d53b979d20e381
@@ -27,7 +27,11 @@
     neighboring judge timings cannot establish a pass boundary or merge cost.
 
     Because the cadence reader consumes `sweep.pass` and `sweep.summary` across ledger rotation, register
-    those steps in `src/lib/ledger.ts` so the interval sample survives retention.
+    those steps in `src/lib/ledger.ts` so the interval sample survives retention. Keep `src/lib/status.ts`
+    in the approved scope because the ledger-rotation reader census includes its status projection when
+    classifying step reads; verify the cadence measurements remain non-decision display data there. The
+    computed `test/sweep/` placement must use a basename distinct from the existing root-level W1-T5901 test
+    so the repository's unique-test-basename census resolves each test by identity.
 
     First add correlated, durable measurements to the existing retained sweep rows: a unique pass id
     and scope on the light-pass start row, the same id and monotonic elapsed time on its completion
@@ -62,13 +66,13 @@
     budget and spent time, or says the measurement was unavailable; never report a guessed interval.
   acceptance:
     - claim: "Each light pass writes a correlated start and completion measurement with one unique pass_id, its light_pass_scope, a ledger start timestamp and a monotonic elapsed_ms. Only completed matching pairs of the same scope contribute positive start-to-start intervals. The proving test title includes the exact marker W1-T11445 criterion 1: light passes emit paired measurements and reject incomplete intervals."
-      proof: "unit test: W1-T11445 criterion 1: light passes emit paired measurements and reject incomplete intervals"
+      proof: "unit test: test/sweep/light-pass-merge-budget-uses-measured-interval.test.ts"
     - claim: "Each attempted plan-PR direct merge records its measured monotonic plan_merge_elapsed_ms, pass_id and concrete outcome on that PR's sweep.disposed row, including the unchanged W1-T5748 safety and W1-T4405 queue paths. The proving test title includes the exact marker W1-T11445 criterion 2: plan merge attempts record elapsed time and outcome."
-      proof: "unit test: W1-T11445 criterion 2: plan merge attempts record elapsed time and outcome"
+      proof: "unit test: test/sweep/light-pass-merge-budget-uses-measured-interval.test.ts"
     - claim: "With three valid same-scope light-pass intervals, the claim owner merges ready never-held plan PRs sequentially and stops before another attempt when measured plan-merge time spent reaches the median interval budget; each deferral names the measured budget and spent time. The proving test title includes the exact marker W1-T11445 criterion 3: plan merge work stops at the measured interval budget."
-      proof: "unit test: W1-T11445 criterion 3: plan merge work stops at the measured interval budget"
+      proof: "unit test: test/sweep/light-pass-merge-budget-uses-measured-interval.test.ts"
     - claim: "With fewer than three valid intervals, malformed or incomplete measurements, or no valid merge duration for this pass, the one-never-held-plan-PR bound remains; held plan PR ordering, overlapping-pass exclusion and code-PR deferral are unchanged. The proving test title includes the exact marker W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bound."
-      proof: "unit test: W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bound"
+      proof: "unit test: test/sweep/light-pass-merge-budget-uses-measured-interval.test.ts"
   falsifier: |
     Remove the pass correlation or the monotonic merge-duration measurement while leaving the
     time-derived admission in place. The measurement criteria must fail, and the implementation must
