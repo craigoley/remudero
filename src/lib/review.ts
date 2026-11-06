@@ -4362,7 +4362,6 @@ export function judgeCriterion(
   const base = { claim: criterion.claim, proof: criterion.proof };
   const reviewerUnavailable = reviewerUnable !== undefined && semantic !== false
     ? (reviewerUnable || "the reviewer gave no reason") : undefined;
-  // W1-T11428: an UNABLE line rides every early return too, so judgeReview always sees cannot-evaluate.
   const unable = (v: CriterionVerdict): CriterionVerdict => reviewerUnavailable === undefined ? v
     : { ...v, reason: `${v.reason} — NOTE: reviewer could not inspect this proof (UNABLE): ${reviewerUnavailable}`, reviewerUnavailable };
 
