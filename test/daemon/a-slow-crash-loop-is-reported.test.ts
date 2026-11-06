@@ -444,6 +444,11 @@ test("W1-T11421: fatal summaries and explicit failed exits are not clean lifetim
   const failed = { ...summary, step: "daemon.process.exit", exit_code: 1, clean_exit: false };
   assert.equal(classifyEndedDaemonProcesses([boot, { ...summary, stopReason: "stale" }, failed], next)[0].cleanStep, undefined,
     "the supervisor's failed exit outranks an otherwise clean summary");
+  assert.equal(classifyEndedDaemonProcesses([boot, { ...summary, stopReason: "blocked" }], next)[0].cleanStep, undefined,
+    "only known clean summary stop reasons can teach clean history");
+  const incomplete = { ...summary, step: "daemon.process.exit", exit_code: 75 };
+  assert.equal(classifyEndedDaemonProcesses([boot, { ...summary, stopReason: "stale" }, incomplete], next)[0].cleanStep, undefined,
+    "an incomplete supervisor receipt cannot fall back to summary evidence");
 });
 
 test("W1-T11421: rotation preserves the last row and heap sample before a long restart gap", (t) => {

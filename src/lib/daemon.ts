@@ -3170,7 +3170,7 @@ export function detectDaemonCrashLoop(
  *  supervisor's explicit failed exit overrides a summary. A process with no clean end before the next boot ended
  *  abnormally: a heap abort (exit 134), a kill, or a crash. */
 export const DAEMON_CLEAN_EXIT_STEPS: ReadonlySet<string> = new Set([
-  "daemon.summary", "daemon.stop", "daemon.stop_drain.completed", "daemon.freshness_exit",
+  "daemon.stop", "daemon.stop_drain.completed", "daemon.freshness_exit",
   "daemon.freshness_drain.completed", "daemon.memory_exit", "daemon.memory_drain.completed", "daemon.signal_exit",
 ]);
 /** One row per ended process, written by the boot after it. Both are retained across rotation: the live tail keeps only
@@ -3260,16 +3260,20 @@ export function classifyEndedDaemonProcesses(
     const own = (perRun.get(boot.runId) ?? []).filter((r) => r.ms >= boot.ms && r.ms <= nextMs).sort((a, b) => a.ms - b.ms);
     const last = own[own.length - 1];
     const exit = own.find(({ row }) => row.step === "daemon.process.exit")?.row;
-    const failedExit = exit?.clean_exit === false;
-    const clean = failedExit ? undefined : own.find(({ row }) =>
-      (DAEMON_CLEAN_EXIT_STEPS.has(String(row.step)) &&
-        (row.step !== "daemon.summary" || row.stopReason !== "error")) ||
-      (row.step === "daemon.process.exit" && row.clean_exit === true));
+    const summary = own.find(({ row }) => row.step === "daemon.summary")?.row;
+    // When present, the supervisor receipt is authoritative regardless of summary or launcher rows.
+    // Without it, only stop reasons whose exit mapping is clean may teach clean lifetime history.
+    const cleanSummary = summary && ["stopped", "max_reached", "stale", "heap_pressure"].includes(String(summary.stopReason))
+      ? { row: summary } : undefined;
+    const clean = exit
+      ? (exit.clean_exit === true ? { row: exit } : undefined)
+      : (own.find(({ row }) => DAEMON_CLEAN_EXIT_STEPS.has(String(row.step))) ?? cleanSummary);
     const memory = own.filter(({ row }) => row.step === "daemon.memory").at(-1)?.row;
     const policy = (perRun.get(boot.runId) ?? []).filter(({ ms, row }) => ms <= nextMs && row.step === "daemon.memory_policy").at(-1)?.row;
     const heapLine = own.filter(({ row }) => row.step !== DAEMON_ABNORMAL_EXIT_STEP)
       .map(({ row }) => heapLimitLineOf(row)).filter(Boolean).at(-1);
-    const freshness = rows.find((r) => r.step === "daemon.boot" && r.run_id === nextBoot?.runId)?.priorExitReason === "freshness";
+    const freshnessMarker = rows.find((r) => r.step === "daemon.boot" && r.run_id === nextBoot?.runId)?.priorExitReason === "freshness";
+    const freshness = freshnessMarker && (!exit || exit.clean_exit === true);
     ended.push({
       runId: boot.runId,
       bootTs: boot.ts,
