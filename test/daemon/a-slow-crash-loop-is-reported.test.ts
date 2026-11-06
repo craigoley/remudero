@@ -79,6 +79,14 @@ function writeProcess(ledgerPath: string, runId: string, bootMs: number, lifetim
   if (clean) row(ledgerPath, { ts: iso(bootMs + lifetimeMs), run_id: runId, task_id: "DAEMON", step: "daemon.summary", stopReason: "stale" });
 }
 
+/** A daemon can report its fatal outcome before the entrypoint records the failed container exit. */
+function writeFatalProcess(ledgerPath: string, runId: string, bootMs: number, lifetimeMs: number): void {
+  writeProcess(ledgerPath, runId, bootMs, lifetimeMs, false);
+  const end = { ts: iso(bootMs + lifetimeMs), run_id: runId, task_id: "DAEMON" };
+  row(ledgerPath, { ...end, step: "daemon.summary", stopReason: "error", stopDetail: "fatal worker defect" });
+  row(ledgerPath, { ...end, step: "daemon.process.exit", exit_code: 1, clean_exit: false });
+}
+
 /** A boot: the sentinel judges the tail exactly as the daemon's pre-boot snapshot would. */
 function boot(ledgerPath: string, runId: string, bootMs: number, issues: IssueGateway) {
   const ctx: CrashSentinelCtx = { owner: "o", repo: "r", ledgerPath, runId, issues };
@@ -153,6 +161,34 @@ test("W1-T11421: 29 abnormal exits 15-28 min apart raise exactly one incident, t
     assert.equal(verdict.summary?.runLength, 29);
     assert.equal(verdict.incident?.issueUrl, "https://github.com/o/r/issues/1");
   }
+});
+
+test("W1-T11421: fatal summaries and failed supervisor exits still open and update the slow-loop incident", (t) => {
+  const ledgerPath = writeLedger([], { scope: t }).path;
+  const issues = recordingGateway();
+  let at = healthyHistory(ledgerPath, START, issues);
+  const boots: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    const runId = `DAEMON-fatal${i}`;
+    boot(ledgerPath, runId, at, issues);
+    boots.push(iso(at));
+    writeFatalProcess(ledgerPath, runId, at, 20 * MIN);
+    at += 22 * MIN;
+  }
+  const verdict = boot(ledgerPath, "DAEMON-after-fatal", at, issues);
+  assert.equal(detectDaemonCrashLoop(boots).breached, false);
+  assert.equal(verdict.summary?.runLength, 3);
+  assert.equal(verdict.summary?.learned.samples, 6, "fatal summaries cannot teach the clean lifetime");
+  assert.equal(issues.created.length, 1);
+  assert.equal(issues.comments.length, 1);
+  assert.match(issues.created[0].body, /DAEMON-fatal0:.*exit code 1/);
+  assert.match(issues.created[0].body, /DAEMON-fatal1:.*exit code 1/);
+  assert.match(issues.comments[0].body, /DAEMON-fatal2:.*exit code 1/);
+  const observed = lines(ledgerPath);
+  assert.deepEqual(observed.filter((r) => r.step === "daemon.crash.abnormal_exit" && String(r.prior_run_id).startsWith("DAEMON-fatal"))
+    .map((r) => r.prior_run_id), ["DAEMON-fatal0", "DAEMON-fatal1", "DAEMON-fatal2"]);
+  assert.equal(observed.filter((r) => r.step === "daemon.clean_exit.observed" && String(r.prior_run_id).startsWith("DAEMON-fatal")).length, 0);
+  assert.deepEqual(observed.filter((r) => r.step === "daemon.crashloop.updated").map((r) => r.prior_run_id), ["DAEMON-fatal2"]);
 });
 
 test("W1-T11421 criterion 2: each further abnormal exit updates the one incident with its evidence and opens no second issue", (t) => {
@@ -331,10 +367,12 @@ test("W1-T11421 criterion 3: with no learned history the check keeps today's ten
     const ledgerPath = writeLedger([], { scope: t }).path;
     const issues = recordingGateway();
     const base = Date.parse("2026-11-05T10:00:00.000Z");
-    // Six boots a minute apart and no clean lifetime yet: the sentinel learns nothing and the window decides.
-    for (let i = 0; i < 6; i++) row(ledgerPath, { ts: iso(base + i * MIN), run_id: `DAEMON-s${i}`, task_id: "DAEMON", step: "daemon.boot" });
+    // Six fatal summaries a minute apart must not become learned clean samples.
+    for (let i = 0; i < 6; i++) writeFatalProcess(ledgerPath, `DAEMON-s${i}`, base + i * MIN, 15_000);
     const nowIso = iso(base + 6 * MIN);
     assert.deepEqual(runDaemonCrashSentinel(lines(ledgerPath), nowIso, { owner: "o", repo: "r", ledgerPath, runId: "DAEMON-probe", issues }), {});
+    assert.equal(lines(ledgerPath).filter((r) => r.step === "daemon.crash.abnormal_exit").length, 6);
+    assert.equal(lines(ledgerPath).filter((r) => r.step === "daemon.clean_exit.observed").length, 0);
     const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
     const breaches: unknown[] = [];
     await daemonBoot((step, extra) => logged.push({ step, extra }), {}, undefined, undefined, undefined, {
@@ -395,6 +433,17 @@ test("W1-T11421: a boot-only tail never counts restart downtime as lifetime", ()
   assert.equal(end.endedTs, bootRow.ts);
   assert.equal(end.endedBasis, "last_row");
   assert.equal(classifyEndedDaemonProcesses([{ ...bootRow, run_id: "WORKER-1" }], iso(START + MIN)).length, 0);
+});
+
+test("W1-T11421: fatal summaries and explicit failed exits are not clean lifetime samples", () => {
+  const boot = { ts: iso(START), run_id: "DAEMON-fatal", task_id: "DAEMON", step: "daemon.boot" };
+  const summary = { ...boot, ts: iso(START + MIN), step: "daemon.summary", stopReason: "error" };
+  const next = iso(START + 2 * MIN);
+  assert.equal(classifyEndedDaemonProcesses([boot, summary], next)[0].cleanStep, undefined,
+    "an error summary alone is an abnormal end");
+  const failed = { ...summary, step: "daemon.process.exit", exit_code: 1, clean_exit: false };
+  assert.equal(classifyEndedDaemonProcesses([boot, { ...summary, stopReason: "stale" }, failed], next)[0].cleanStep, undefined,
+    "the supervisor's failed exit outranks an otherwise clean summary");
 });
 
 test("W1-T11421: rotation preserves the last row and heap sample before a long restart gap", (t) => {
