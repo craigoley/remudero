@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "2026-11-05 ledger: reviewer.healed_tree_unavailable x8 in ~4 h for incident reviewer-regression-8b37a0a1b86b, blaming a 2026-10-20 merge"
   plan_refs: [W1-T10269, W1-T228]
-  files: [src/lib/reviewer-health.ts, src/run-task.ts, test/review/a-reopened-reviewer-regression-reattributes-its-blame.test.ts]
+  files: [src/lib/reviewer-health.ts, src/run-task.ts, test/review/a-reopened-reviewer-regression-reattributes-its-blame.test.ts, test/review/a-reviewer-regression-heals-itself.test.ts]
   priority: 3
   status: queued
   # backlog gardener: band=3 evidence=01e5282e872c7818
@@ -22,6 +22,10 @@
     openIncident in src/lib/reviewer-health.ts then re-opened it and kept its blame: "the same failure
     mode again after a close: the same cause, so the same blame and the same heal". Overlapping
     signatures do not mean the same cause.
+    The existing W1-T10269 regression test at test/review/a-reviewer-regression-heals-itself.test.ts
+    assumed every later matching signature retains the old offender. The new healthy-to-regressed
+    range rule intentionally requires fresh attribution when that offender is outside the range, so
+    this assertion must be updated to pin the re-opened incident's recomputed attribution.
     From then on, every review ran buildHealedReviewerTree for 8b37a0a1b8. Each time: a fetch of
     origin/main, a fresh worktree, a git revert that conflicts (src/lib/config-gardener.ts,
     src/run-task.ts, ...), an abort, a removal, the reviewer.healed_tree_unavailable row, and a
