@@ -530,7 +530,7 @@ case "$RESTART_THROTTLE_S" in
     ;;
 esac
 
-if [ "$RESTART_THROTTLE_S" -eq 0 ]; then
+if [ "$RESTART_THROTTLE_S" -eq 0 ] && ! { [ "${1##*/}" = "rmd" ] && [ "${2:-}" = "daemon" ]; }; then
   exec "$@"
 fi
 
@@ -736,6 +736,22 @@ idle_starved_wait() {
 freshness_restarts=0
 blocked_restarts=0
 environmental_restarts=0
+record_daemon_exit() {
+  node --input-type=module - "$RMD_DAEMON_EXIT_RECEIPT" "$rc" <<'DAEMON_EXIT_RECEIPT'
+import { appendFileSync, readFileSync } from 'node:fs';
+import { hostname } from 'node:os';
+const [path, code] = process.argv.slice(2);
+const marker = readFileSync(path, 'utf8');
+if (marker.trim()) {
+  const { runId, ledgerPath } = JSON.parse(marker);
+  const heapLine = readFileSync(path + '.heap', 'utf8').trim();
+  appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), host: hostname(),
+    run_id: `ENTRYPOINT-${process.pid}`, task_id: 'DAEMON', step: 'daemon.process_exit',
+    prior_run_id: runId, exit_code: Number(code), exit_code_source: 'entrypoint wait status (docker die status on abnormal exit)',
+    heap_limit_line: heapLine || null }) + '\n', { flush: true });
+}
+DAEMON_EXIT_RECEIPT
+}
 while :; do
   rc=0
   child_rc=""
@@ -754,13 +770,36 @@ while :; do
       daemon_engine_observer="$CONFIG_ROOT/daemon-install"
     fi
   fi
-  "$@" &
-  child_pid=$!
+  evidence_pid=""
+  if [ "${1##*/}" = "rmd" ] && [ "${2:-}" = "daemon" ]; then
+    mkdir -p "$STATE_DIR"
+    RMD_DAEMON_EXIT_RECEIPT="$(mktemp "$STATE_DIR/daemon-exit.XXXXXX")"
+    export RMD_DAEMON_EXIT_RECEIPT
+    : > "$RMD_DAEMON_EXIT_RECEIPT.heap"
+    # Forward stderr unchanged; retain only the latest bounded heap-limit line, never a second log.
+    exec {evidence_fd}> >(awk -v out="$RMD_DAEMON_EXIT_RECEIPT.heap" '{
+      if (tolower($0) ~ /heap limit|heap out of memory/) { print substr($0, 1, 240) > out; close(out) }
+      print; fflush()
+    }' >&2)
+    evidence_pid=$!
+    "$@" 2>&$evidence_fd &
+    child_pid=$!
+    exec {evidence_fd}>&-
+  else
+    "$@" &
+    child_pid=$!
+  fi
   wait "$child_pid" || rc=$?
   if [ -n "$child_rc" ]; then
     rc=$child_rc
   fi
   child_pid=""
+  if [ -n "$evidence_pid" ]; then
+    wait "$evidence_pid" || log "daemon stderr observer failed"
+    record_daemon_exit || log "could not persist daemon exit receipt"
+    rm -f -- "$RMD_DAEMON_EXIT_RECEIPT" "$RMD_DAEMON_EXIT_RECEIPT.heap"
+    unset RMD_DAEMON_EXIT_RECEIPT
+  fi
 
   # W1-T2586: A SIGNAL THIS SHELL ITSELF FORWARDED OUTRANKS EVERY OTHER CLASSIFICATION BELOW.
   # `signal_forwarded` is set ONLY inside `forward_signal`, ONLY after TERM/INT was actually sent

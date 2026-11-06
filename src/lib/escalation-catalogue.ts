@@ -10,6 +10,10 @@ import { appendLedger, matchesRepoScopedTask } from "./ledger.js";
 import type { ReplayStranded } from "./inbox-replay.js";
 import type { Task } from "./plan.js";
 import { DEFAULT_MAX_TASK_LIFETIME_DISPATCHES, readLedgerLines } from "./status.js";
+import { dirname } from "node:path";
+import { hostname } from "node:os";
+import { systemClock } from "./clock.js";
+import { spoolIssueAction, withdrawSpooledEscalation } from "./host-escalation-spool.js";
 import type { PostReviewStallVerdict } from "./sweep.js";
 
 /**
@@ -182,7 +186,7 @@ export const DAEMON_CRASHLOOP_UPDATED_STEP = "daemon.crashloop.updated";
 export const DAEMON_CRASHLOOP_CLEARED_STEP = "daemon.crashloop.cleared";
 /** The incident's title. It names no count, so every later exit in the run reads as the same incident. */
 export const LEARNED_CRASHLOOP_SUMMARY = "daemon crash-loop: abnormal exits shorter than its learned clean lifetime";
-const EXIT_CODE_SOURCE = "not visible in-container: the entrypoint exits the container with it";
+const EXIT_CODE_SOURCE = "no supervisor exit receipt available";
 
 /** An open learned crash-loop incident, keyed by the first process of its run. */
 export interface CrashLoopIncident {
@@ -211,8 +215,8 @@ function lifetimeRowOf(end: DaemonProcessEnd, runId: string): Record<string, unk
   return {
     ...base,
     step: DAEMON_ABNORMAL_EXIT_STEP,
-    exit_code: null,
-    exit_code_source: EXIT_CODE_SOURCE,
+    exit_code: end.exitCode ?? null,
+    exit_code_source: end.exitCodeSource ?? EXIT_CODE_SOURCE,
     last_memory: memory === undefined ? null : {
       ts: memory.ts,
       heap_used_bytes: memory.heapUsedBytes ?? null,
@@ -267,23 +271,18 @@ function incidentState(lines: ReadonlyArray<Record<string, unknown>>): { open?: 
   return { open: open && !cleared.has(open.runFirst) ? open : undefined, escalatedRuns };
 }
 
-/** Close the incident: the issue with a citation, and a `daemon.crashloop.cleared` row either way. */
+/** Withdraw an unsent alert or durably queue its close through the launcher's retrying delivery path. */
 export function clearDaemonCrashLoopIncident(incident: CrashLoopIncident, reason: string, ctx: CrashSentinelCtx): void {
-  let delivered = false;
-  if (incident.issueUrl) {
-    try {
-      const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
-      if (issues.closeWithComment) {
-        issues.closeWithComment(incident.issueUrl, `W1-T11421: ${reason}, so the crash loop has ended — closing.`);
-        delivered = true;
-      }
-    } catch (error) {
-      void error; // An undelivered close costs one operator read; the cleared row below still ends the incident.
-    }
-  }
+  const stateDir = dirname(ctx.ledgerPath);
+  const meta = { source: "daemon-crashloop", host: hostname(), clock: systemClock };
+  const comment = `W1-T11421: ${reason}, so the crash loop has ended — closing.`;
+  withdrawSpooledEscalation(stateDir, { taskId: "DAEMON", summary: LEARNED_CRASHLOOP_SUMMARY }, comment, meta);
+  // Incidents opened directly predate a spool delivery receipt, so carry their known URL too.
+  if (incident.issueUrl) spoolIssueAction(stateDir, { kind: "close", url: incident.issueUrl, body: comment }, meta);
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_CLEARED_STEP,
-    run_first: incident.runFirst, issue_url: incident.issueUrl, reason, delivered,
+    run_first: incident.runFirst, issue_url: incident.issueUrl, reason, delivered: false,
+    closure_pending: incident.issueUrl !== null,
   });
 }
 
@@ -314,9 +313,12 @@ export function runDaemonCrashSentinel(
   const state = incidentState(lines);
   let open = state.open;
   let incident: LearnedCrashLoopSummary["incident"] = open ? "open" : "none";
-  const outlived = ended.find((end) => end.lifetimeMs >= learned.p90Ms);
+  const priorLearned = learnedCleanLifetime(lines.map(lifetimeRecordOf)
+    .filter((r): r is DaemonLifetimeRecord => r !== undefined && r.clean).map((r) => r.lifetimeMs)) ?? learned;
+  const newest = history.toSorted((a, b) => Date.parse(a.endedTs) - Date.parse(b.endedTs)).at(-1);
+  const outlived = ended.find((end) => end.runId === newest?.runId && end.cleanStep && end.lifetimeMs > priorLearned.p90Ms);
   if (open && outlived) {
-    clearDaemonCrashLoopIncident(open, `${outlived.runId} lived ${minutes(outlived.lifetimeMs)} min, past the learned p90 (${learnedLine(learned)})`, ctx);
+    clearDaemonCrashLoopIncident(open, `${outlived.runId} lived ${minutes(outlived.lifetimeMs)} min, past the learned p90 (${learnedLine(priorLearned)})`, ctx);
     open = undefined;
     incident = "cleared";
   }
@@ -395,14 +397,23 @@ export function daemonCrashSentinel(
     try {
       const { summary, incident } = runDaemonCrashSentinel(lines, nowIso, ctx);
       if (summary && incident) {
-        let remaining = summary.learned.p90Ms;
+        let remaining = summary.learned.p90Ms + 1;
         let handle: unknown;
         const arm = (): void => {
           const wait = Math.min(remaining, MAX_TIMER_DELAY_MS);
           remaining -= wait;
           const timer = setTimer(() => {
             if (remaining > 0) return arm();
-            clearDaemonCrashLoopIncident(incident, `${ctx.runId} outlived the learned p90 (${learnedLine(summary.learned)})`, ctx);
+            try {
+              clearDaemonCrashLoopIncident(incident, `${ctx.runId} outlived the learned p90 (${learnedLine(summary.learned)})`, ctx);
+            } catch (error) {
+              appendLedger(ctx.ledgerPath, {
+                run_id: ctx.runId, task_id: "DAEMON", step: "daemon.crashloop_sentinel_failed",
+                error: `queuing incident close: ${String(error)}`.slice(0, 240),
+              });
+              remaining = summary.learned.p90Ms + 1;
+              arm();
+            }
           }, wait);
           timer.unref?.();
           handle = timer;

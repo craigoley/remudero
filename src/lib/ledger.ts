@@ -634,6 +634,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "daemon.crash.abnormal_exit",
   "daemon.clean_exit.observed",
   "daemon.crashloop.cleared",
+  "daemon.process.observed",
+  "daemon.process_exit",
   // …and DAEMON_CLEAN_EXIT_STEPS (daemon.ts), one row per process: a rotation between a clean exit and the next boot
   // would otherwise archive the row, and the next boot would judge a clean end a crash.
   "daemon.summary",
@@ -1199,6 +1201,37 @@ function parseLedgerLine(raw: string): ParsedLedgerLine {
   } catch {
     return { raw };
   }
+}
+
+/** Carry an unclassified process's boot-to-last-row evidence before rotation removes its raw rows. */
+function daemonProcessObservations(rows: readonly ParsedLedgerLine[]): ParsedLedgerLine[] {
+  const judged = new Set(rows.filter((p) => p.step === "daemon.crash.abnormal_exit" || p.step === "daemon.clean_exit.observed")
+    .map((p) => p.json?.prior_run_id));
+  const processes = new Map<string, Record<string, unknown>>();
+  for (const p of rows) {
+    const r = p.json;
+    const id = r?.run_id;
+    if (!r || typeof id !== "string" || !id.startsWith("DAEMON-") || judged.has(id) || p.tsMs === undefined) continue;
+    if (p.step === "daemon.process.observed") {
+      const prior = processes.get(id);
+      if (!prior || Date.parse(String(r.last_row_ts)) >= Date.parse(String(prior.last_row_ts))) processes.set(id, { ...r });
+      continue;
+    }
+    if (p.step === "daemon.boot" && !processes.has(id)) {
+      processes.set(id, { run_id: id, task_id: "DAEMON", step: "daemon.process.observed", boot_ts: r.ts, last_row_ts: r.ts,
+        ...(r.priorExitReason ? { prior_exit_reason: r.priorExitReason } : {}) });
+    }
+    const seen = processes.get(id);
+    if (!seen) continue;
+    if (p.tsMs >= Date.parse(String(seen.last_row_ts))) seen.last_row_ts = r.ts;
+    if (p.step === "daemon.memory" && (!seen.last_memory || p.tsMs >= Date.parse(String((seen.last_memory as Record<string, unknown>).ts)))) {
+      seen.last_memory = { run_id: id, step: p.step, ts: r.ts, heap: r.heap, rss_bytes: r.rss_bytes };
+    }
+    if (p.step && ["daemon.summary", "daemon.stop", "daemon.stop_drain.completed", "daemon.freshness_exit",
+      "daemon.freshness_drain.completed", "daemon.memory_exit", "daemon.memory_drain.completed", "daemon.signal_exit"].includes(p.step)) seen.clean_step = p.step;
+  }
+  return [...processes.values()].sort((a, b) => Date.parse(String(a.boot_ts)) - Date.parse(String(b.boot_ts)))
+    .slice(-200).map((r) => parseLedgerLine(JSON.stringify({ ...r, ts: r.last_row_ts })));
 }
 
 function readSyncRange(path: string, start: number, end: number): Buffer {
@@ -1920,13 +1953,15 @@ function rotateLedgerLocked(
 
   // Parsed exactly once, in file order — every retention pass below tracks lines by object
   // identity (never re-parses/re-matches raw text) so original order is always recoverable.
-  const originalOrder: ParsedLedgerLine[] = [
+  let originalOrder: ParsedLedgerLine[] = [
     ...recarry.rows,
     ...snapshot
       .split("\n")
       .filter((raw) => raw.trim() !== "")
       .map(parseLedgerLine),
   ];
+  const daemonObservations = daemonProcessObservations(originalOrder);
+  originalOrder = [...originalOrder.filter((p) => p.step !== "daemon.process.observed"), ...daemonObservations];
 
   // ── PASS 1: classify — decision, model-attribution, health and render-relevant candidates
   // against pure noise. Render membership (W1-T275) keeps daemon.headroom and the kick rows out of

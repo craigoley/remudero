@@ -28,7 +28,7 @@ import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { daemonCrashSentinel, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
 import { resolveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
-import { readFileIfExists } from "../../lib/fs-race-safe.js";
+import { readFileIfExists, writeAtomic } from "../../lib/fs-race-safe.js";
 import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
 import { startDaemonSreLane } from "../../lib/daemon.js";
 import { REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
@@ -843,6 +843,10 @@ export async function daemonCommand(
   const target = resolved.target;
 
   const runId = `DAEMON-${Date.now()}`;
+  // The shell survives a V8 abort and records its wait status against this exact process.
+  if (process.env.RMD_DAEMON_EXIT_RECEIPT) {
+    writeAtomic(process.env.RMD_DAEMON_EXIT_RECEIPT, JSON.stringify({ runId, ledgerPath }));
+  }
   let lastReadPlaneStep: string | undefined;
   let onMainEntryStep: ((step: string) => void) | undefined;
   const log = (step: string, extra: Record<string, unknown> = {}) => {
