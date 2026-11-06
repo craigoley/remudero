@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "W1-T11458 caller census, 2026-11-06: one-shot escalation delivery cannot safely refuse"
   plan_refs: [W1-T11458, W1-T7720, W1-T943, W1-T4409]
-  files: [src/lib/host-escalation-spool.ts, src/lib/dispatch-governor.ts, src/lib/escalate.ts, src/lib/github-transport.ts, src/run-task.ts, src/cli/commands/daemon.ts, test/inbox/a-latched-daemon-alert-is-durable-before-it-is-acknowledged.test.ts]
+  files: [src/lib/host-escalation-spool.ts, src/lib/dispatch-governor.ts, src/lib/escalate.ts, src/lib/github-transport.ts, src/lib/sweep.ts, src/run-task.ts, src/cli/commands/daemon.ts, test/inbox/a-latched-daemon-alert-is-durable-before-it-is-acknowledged.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -23,27 +23,33 @@
     host-escalation-spool.ts already durably queues and asynchronously retries notifications, but
     its entries and delivered keys carry no target repository; run-task's drain supplies the fleet
     gateway. Sending arbitrary target-repository alerts through it unchanged would misroute them.
+    The same audit found a fourth producer: publishLightPassReviewDemand consumes takeCapacityDecisions
+    before its callback (src/lib/sweep.ts ~25500); memoryCapacityEscalation uses synchronous delivery.
+    A failed callback loses that queued observation because the shortfall tracker already raised it.
   design: |
     Reuse the existing host escalation spool and normal drain cadence, with no new timer or bound.
     Add an explicit qualified repository to target-specific entries and include it in pending and
     delivered identities. Resolve that route to its same-repository async issue gateway on drain.
     An invalid or unavailable explicit route stays pending with a visible failure; never fall back
     to the fleet repository. Preserve the established fleet lane for legacy unqualified entries.
-    Quarantine, sustained-memory and stalled-worker producers synchronously enqueue their complete
-    notification before acknowledging the episode. A failed durable write leaves the episode
+    Quarantine, sustained-memory, stalled-worker and capacity-decision producers synchronously enqueue
+    their complete notification before acknowledging the episode. Reuse queueCapacityDecision to
+    retain a consumed capacity observation when its durable write fails; no new queue or threshold.
+    A failed durable write leaves the episode
     eligible for the next pass, while successful enqueue may acknowledge without inventing an issue
     URL. Observe actual GitHub delivery separately; retain failed delivery across process restart.
     Wire each producer from its already qualified daemon target. Keep standalone CLI behavior.
-    Remove W1-T11458's legacy synchronous escalation exemption only after these three production
-    paths use the durable handoff; custom injected gateways retain their declared contract.
+    These four migrated production paths use the durable handoff and no longer need synchronous
+    escalation delivery. Retain the legacy exemption for other unverified synchronous clients;
+    custom injected gateways retain their declared contract.
     Test the real spool on disk and the real producer adapters, with private fake async transport.
     Use two repositories with identical task and summary to expose cross-route key collisions.
   acceptance:
-    - claim: "Quarantine, sustained-memory and stalled-worker episodes acknowledge only after durable enqueue, and a failed write remains retryable"
+    - claim: "Quarantine, sustained-memory, stalled-worker and capacity-decision episodes acknowledge only after durable enqueue, and a failed write remains retryable"
       proof: "grep: W1-T11474 criterion 1 in test/inbox/a-latched-daemon-alert-is-durable-before-it-is-acknowledged.test.ts"
     - claim: "Pending and delivered spool identities preserve qualified repository routing across restart without fleet fallback"
       proof: "grep: W1-T11474 criterion 2 in test/inbox/a-latched-daemon-alert-is-durable-before-it-is-acknowledged.test.ts"
-    - claim: "The three real daemon producer paths never synchronously sleep for GitHub delivery and failed async delivery remains pending"
+    - claim: "The four real daemon producer paths never synchronously sleep for GitHub delivery and failed async delivery remains pending"
       proof: "grep: W1-T11474 criterion 3 in test/inbox/a-latched-daemon-alert-is-durable-before-it-is-acknowledged.test.ts"
   note: |
     Filed follow-up required by W1-T11458's unsafe-retry exception. The sketch computes test/inbox/
