@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
   plan_refs: [W1-T4970, W1-T5770, W1-T10271, W1-T11128]
-  files: [src/lib/github-transport.ts, src/lib/escalate.ts, test/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts]
+  files: [src/lib/github-transport.ts, src/lib/escalate.ts, test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts]
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=3eeb7837e7ceb04e
@@ -40,9 +40,9 @@
        boot), never inferred from timing. No new constants.
   acceptance:
     - claim: "In a process marked as a loop host, a sync GitHub read whose cadence gap is not yet open refuses without calling the blocking sleep, and the same read in a CLI process still waits"
-      proof: "grep: W1-T11458 criterion 1 in test/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts"
+      proof: "grep: W1-T11458 criterion 1 in test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts"
     - claim: "The escalation gateway's GitHub calls on the daemon path go through the async transport or treat the refusal as a retry, never a blocking sleep"
-      proof: "grep: W1-T11458 criterion 2 in test/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts"
+      proof: "grep: W1-T11458 criterion 2 in test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts"
   note: |
     Sol-level: it needs a call-site census and judgment about each caller's retry semantics. Inject
     sleepSync and spy that it is never called in the loop-host case. The builder names each
