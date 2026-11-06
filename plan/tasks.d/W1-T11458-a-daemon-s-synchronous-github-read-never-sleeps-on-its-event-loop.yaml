@@ -10,7 +10,10 @@
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
   plan_refs: [W1-T4970, W1-T5770, W1-T10271, W1-T11128]
   files: [src/lib/github-transport.ts, src/lib/escalate.ts, test/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=3eeb7837e7ceb04e
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
     The 2026-11-06 core CPU profile shows defaultBlockingSleepSync (src/lib/github-transport.ts

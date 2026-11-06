@@ -10,7 +10,10 @@
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
   plan_refs: [W1-T11341, W1-T10068, W1-T3378, W1-T11369]
   files: [src/lib/composition-root.ts, src/run-task.ts, src/lib/review-worktree-reclaim.ts, test/review/the-daemon-review-worktree-git-runs-off-the-loop.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=05e7c90230f710e6
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
     W1-T11341 (#16852) moved the review base-proof git and the boot tracker off the loop. The

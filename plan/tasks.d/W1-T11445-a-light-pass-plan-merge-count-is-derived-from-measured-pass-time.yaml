@@ -1,0 +1,50 @@
+- id: W1-T11445
+  title: A light pass direct-merges as many ready plan PRs as its measured pass interval affords, not one
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-05 core loop-hold incident: #16943, #16944 and #16945 green plan PRs waited 40+ min; the W1-T5901 one-per-pass claim deferred two of them each pass"
+  plan_refs: [W1-T5901, W1-T9212, W1-T5748, W1-T5615, W1-T4405, W1-T11434]
+  files: [src/lib/sweep.ts, test/a-ready-plan-pr-merges-on-the-next-pass.test.ts]
+  priority: 3
+  status: queued
+  # backlog gardener: band=3 evidence=b9d53b979d20e381
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
+  attempts: 0
+  rationale: |
+    MEASURED 2026-11-05/06 (core ledger, read-only, newest 3 archives plus the live ledger;
+    per-step retention prunes rows, so these counts are lower bounds): 16 sweep.disposed rows
+    stood down with "one plan PR direct-merges per light pass (W1-T5901) — deferred to full sweep
+    (light pass)" across 10 plan PRs, including #16943, #16945 and #16947 at 23:39Z and again at
+    00:10Z. Three green, reviewed, CLEAN plan PRs were disposed "merging directly" in the same
+    23:39:40Z pass; one took the claim and the other two waited for a later pass. W1-T9212 already
+    lets the claim owner merge every HELD plan PR it observes ready, one at a time under the same
+    claim; a ready plan PR that was never held still keeps the fixed one-per-pass bound. The bound
+    is a fixed number, chosen on 2026-10-05 so a light pass could not run long. That concern is
+    about time, and the time is measurable: each plan direct merge's elapsed time and the
+    interval between light passes are both ledgered. W1-T11434 shares these files but keeps the
+    one-per-pass bound and only lets a shadow core take it; this task changes the bound itself and
+    leaves the shadow rule to W1-T11434.
+  design: |
+    Replace the fixed one-plan-PR bound for never-held plan PRs with a budget derived from the
+    ledger. The pass that owns the W1-T5901 claim keeps merging ready plan PRs one at a time,
+    each through the unchanged W1-T5748 merged-tree safety read against the main the previous
+    merge produced, and the W1-T4405 merge-queue branch. It stops when the plan-merge time this
+    pass has spent reaches the median interval between recent light passes, as read from their
+    own summary rows. With too few rows to read that median, or with no plan-merge timing, the
+    pass keeps today's one-PR bound. The claim, its release when the candidate's sweep settles,
+    the overlapping-pass exclusion, and code-PR deferral are unchanged. Each stand-down names the
+    measured budget and what was spent, so a deferral says why.
+  acceptance:
+    - claim: "A light pass that owns the plan-merge claim and observes three ready never-held plan PRs merges each in turn through the W1-T5748 safety read, while its spent plan-merge time stays under the measured median light-pass interval, and stands down the rest naming the budget. The proving test title includes the exact marker W1-T11445 criterion 1: plan merges continue within the measured pass interval."
+      proof: "unit test: W1-T11445 criterion 1: plan merges continue within the measured pass interval"
+    - claim: "With too few light-pass summary rows to measure the interval, the pass merges one never-held plan PR as W1-T5901 does today, an overlapping pass still takes none, and code PRs stay deferred. The proving test title includes the exact marker W1-T11445 criterion 2: unmeasured interval keeps the one-plan bound."
+      proof: "unit test: W1-T11445 criterion 2: unmeasured interval keeps the one-plan bound"
+  falsifier: |
+    Keep the fixed one-per-pass bound for never-held plan PRs. Criterion 1's second and third
+    ready plan PRs stay deferred and the test fails.

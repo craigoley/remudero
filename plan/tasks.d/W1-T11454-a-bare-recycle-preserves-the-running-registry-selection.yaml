@@ -1,0 +1,77 @@
+- id: W1-T11454
+  title: A bare recycle preserves the running container's qualified registry selection
+  repo: remudero
+  depends_on: [W1-T11431]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-05/06 deploy.restart_refused incident and open alert #16958: an unselected deploy supervisor cannot replace selected core"
+  plan_refs: [W1-T1069, W1-T11431, W1-T3596, W1-T10573]
+  files: [deploy/recycle-container.sh, src/lib/deployer.ts, test/recycle-container.test.ts, test/deployer.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=40c37f860c011c75
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
+  attempts: 0
+  rationale: |
+    At c5119b5428, recycle-container.sh declares the selection runtime variables only when its
+    caller explicitly selected a registry. deployer.ts:2920 invokes the script without a
+    selection when selectedPacket is undefined. The host supervisor has no selected packet,
+    while the running core container carries selection variables and a private read-only mount.
+    W1-T1069 correctly refuses their silent loss. Issue #16958 remains open on 2026-11-06 and
+    records three consecutive backoff windows from 23:49:32Z to 23:59:13Z with this refusal;
+    the handoff reports nine refusals in roughly four hours. The alert's current remedy is only
+    "been touched.", which does not tell the operator how to recover.
+    W1-T11431 separates catalog and selection variables and is not implemented at this filing.
+    It changes variable meanings, not inheritance from a running container or explicit departure
+    from selected mode; this task adds those distinct behaviors on its four shared paths.
+    This follow-up must wait for it and use its final names and compatibility rules. A sweep of
+    all fourteen open PR heads found no task or code implementing selection preservation or the
+    explicit leave flag. Docker's bind-mount contract identifies the host source in Mounts;
+    inspection can request only that subsection without exposing Config.Env values.
+  design: |
+    With no explicit caller selection and without the leave flag, read ONLY the target container's
+    Mounts subsection through the existing bounded Docker read seam. Recognize the exact private
+    registry destination, require one read-only bind mount with an absolute qualified host Source,
+    and pass that source through the existing selected-registry reader and launch-packet checks.
+    Do not derive a host path from a container environment path or read/print Config.Env values.
+    An unchanged qualified source produces the same digest and read-only selection mount. Keep
+    the captured identity/digest rechecks through image qualification and final replacement;
+    unreadable, ambiguous, malformed, revised or unqualified selection refuses with a named reason.
+    An explicitly present but invalid caller selection must never fall back to the container.
+    No selection mount and no selection variables preserve legacy unselected behavior. Selection
+    variables without a qualifying mount remain a refusal; never silently discard unknown state.
+    Add --leave-selected-registry as an explicit operator option. It removes exactly the active
+    selection variables and its private mount, using W1-T11431's final variable/alias contract;
+    it must not drop a catalog variable or bypass unrelated runtime-drift, PAUSE, STOP, drain,
+    image, identity or environment guards. Refuse contradictory explicit-selection inputs.
+    Ledger recycle.selection_left only after a successful replacement actually leaves selection;
+    dry-run, smoke failure and refused replacement never claim the effect occurred. No private
+    file bytes or environment values may enter diagnostics or that row. The deployer never
+    supplies this flag or automatically retries in unselected mode.
+    For a selection-only refusal, refusalRemedyLine names the exact scoped recycler command and
+    explains the optional explicit leave command. Preserve the existing remedy for mixed or
+    unrelated drift; do not suggest adding selection names to the global runtime allowlist.
+    Extend the existing contained Docker harness and injected deployer tests. Assert no new
+    real Docker, Azure, image build, worker recycle or live configuration operation. No new bound.
+    Build only after both this filing and W1-T11431 merge and current ownership permits it. If
+    W1-T11431's merged selection/legacy fallback contract cannot support the design, stop and
+    report the conflict rather than changing that worker's registry design or file scope.
+  acceptance:
+    - claim: "A selected container recycled without caller selection keeps its qualified mount and digest; unknown or unreadable mount sources and invalid explicit selections still refuse before mutation"
+      proof: "grep: W1-T11454 criterion 1 in test/recycle-container.test.ts"
+    - claim: "The explicit leave flag removes only active selection state, preserves unrelated guards and catalog state, and ledgers selection_left only after successful replacement"
+      proof: "grep: W1-T11454 criterion 2 in test/recycle-container.test.ts"
+    - claim: "The deployer never opts out automatically and selection-only refusals name the exact scoped remedy command"
+      proof: "grep: W1-T11454 criterion 3 in test/deployer.test.ts"
+  note: |
+    Use the existing test files and real recycler script only behind the fixture Docker transport.
+    Record variable-name decisions after W1-T11431 under Decisions in the implementation PR.
+    Source-only work grants no release, production recycle, private selection or cutover authority.
+  falsifier: |
+    Remove mount-source inheritance: criterion 1 returns the current undeclared-variable refusal.
+    Remove leave handling or its successful-effect row: criterion 2 fails. Let the deployer pass
+    the leave flag or restore the meaningless remedy tail: criterion 3 fails.

@@ -265,7 +265,7 @@ if has census-precheck.mjs; then
             try {
               const run = p.createPrePushSandboxRunner(root);
               return m.runCensusSuitesViaChild({ root, files, readerRuntimePolicy, run: (_file, _args, options) => run(process.execPath,
-                ["--test", "--test-reporter=tap", "--test-concurrency=1", "--import", "tsx", "--import", pathToFileURL(root + "/test/setup/tmp-hygiene.ts").href, ...files], options) });
+                ["--test", "--test-reporter=tap", "--test-timeout=" + options.timeout, "--test-concurrency=1", "--import", "tsx", "--import", pathToFileURL(root + "/test/setup/tmp-hygiene.ts").href, ...files], options) });
             } catch (e) {
               console.error("pre-push: census-precheck — " + e.message + ": skipped, NOT passed (CI runs it)");
               throw e;

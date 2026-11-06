@@ -10,7 +10,10 @@
   origin: "2026-11-05 incident: core, the primary instance, ran as shadow from 16:58Z to about 21:07Z and refused every arm and merge with only a quiet ledger row"
   plan_refs: [W1-T11431, W1-T11434, W1-T3596]
   files: [src/lib/sweep.ts, src/lib/escalate.ts, test/deploy/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts, test/deploy/a-primary-shadow-alert-closes-on-live-mode.test.ts]
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=503e76eaca988e51
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
     On 2026-11-05 the host registry, which is both the recycle catalog and (once a recycle passes

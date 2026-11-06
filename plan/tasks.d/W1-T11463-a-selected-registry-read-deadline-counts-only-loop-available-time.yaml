@@ -1,0 +1,56 @@
+- id: W1-T11463
+  title: A selected-registry read's deadline counts only loop-available time, so a held event loop no longer turns every fix dispatch and fix commit into "selected instance registry unavailable (timeout)"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-06 ledger: sweep.fix.dispatch_failed / sweep.fix.error / fix.commit_refused / sweep.plan_round.refused with 'selected instance registry unavailable (timeout)' while core's loop was held 60-200 s"
+  plan_refs: [W1-T11368, W1-T11431, W1-T10573]
+  files: [src/lib/instance-registry-selection.ts, test/a-selected-registry-read-deadline-counts-only-loop-available-time.test.ts]
+  priority: 2
+  status: queued
+  # backlog gardener: band=2 evidence=33472fe3b97e4510
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
+  attempts: 0
+  rationale: |
+    Core has run with a selected instance registry since the 2026-11-05 recycles. Every fix-lane
+    dispatch, fix commit and plan round re-reads that registry through readSelectedInstanceRegistry
+    (src/lib/instance-registry-selection.ts ~:216). The read races a plain
+    setTimeout(timeoutMs) against an async read of a small YAML file (readWithDeadline, ~:169), with
+    a default timeoutMs of 1500. On 2026-11-05/06 core's event loop was held 60-200 s at a time
+    (daemon.loop_lag; a live CPU profile on 11-06 named the holders, see W1-T11455..W1-T11459).
+    When a held loop resumes, Node runs due timers before I/O callbacks, so the timer wins every
+    time and the read reports "timeout". The registry is healthy; the deadline measured wall time
+    the loop never had.
+    The ledger shows the effect:
+    - sweep.fix.error / sweep.fix.dispatch_failed "selected instance registry unavailable (timeout)"
+      for #16948 and #16961 at 01:06Z;
+    - fix.commit_refused and sweep.plan_round.refused with the same reason (5 each in about 4 h);
+    - fix rounds for #16925, #16946 and #16948 that reached head-lookup and never produced a
+      worker for over an hour.
+    W1-T11368 already fixed this class for other deadlines with loopAvailableDeadline (src/lib/clock.ts).
+  design: |
+    readWithDeadline arms its expiry with loopAvailableDeadline(systemClock, timeoutMs, expire)
+    instead of a bare setTimeout. A firing that is late because the loop was held re-arms for the held
+    time, inside W1-T11368's bounded window. Only a read that is still pending on a free loop expires.
+    Cancellation through the external AbortSignal, the "cancelled" result, the byte cap and every
+    other refusal stay exactly as they are. The disarm function replaces clearTimeout in the
+    finally block. No new constant, and the default and allowed timeoutMs range are unchanged.
+    W1-T11431 (queued, the catalog/selection split) also lists this file. Change only
+    readWithDeadline. If W1-T11431 has merged or is in flight, build on its version of the function.
+  acceptance:
+    - claim: "A registry read whose result is ready when a held loop resumes past timeoutMs returns the bytes, not timeout, and a read still pending on a free loop past its window still returns timeout"
+      proof: "grep: W1-T11463 criterion 1 in test/a-selected-registry-read-deadline-counts-only-loop-available-time.test.ts"
+    - claim: "An external abort still returns cancelled, and the deadline is disarmed when the read settles"
+      proof: "grep: W1-T11463 criterion 2 in test/a-selected-registry-read-deadline-counts-only-loop-available-time.test.ts"
+  note: |
+    The test holds the loop with a synchronous busy-wait longer than timeoutMs while an injected
+    RegistryFileIO read has already completed (copy the technique from W1-T11368's clock test). At
+    base the read returns { kind: "unknown", reason: "timeout" }. Inject the io through the existing
+    RegistryFileIO parameter; never read a real registry file. The builder names each criterion test
+    with the marker "W1-T11463 criterion N".
+  falsifier: |
+    Restore the bare setTimeout. Criterion 1's held-loop case must then fail, because it returns timeout.

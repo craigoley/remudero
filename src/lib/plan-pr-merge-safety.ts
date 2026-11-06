@@ -11,13 +11,15 @@
  * Anything else, or an unreadable input: refresh, up to
  * {@link PLAN_PR_REFRESH_BOUND} times, then escalate to the operator.
  */
-import { spawnSync } from "node:child_process";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { spawn, spawnSync } from "node:child_process";
+import { closeSync, fstatSync, openSync, readSync, rmSync, writeFileSync } from "node:fs";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { join, relative } from "node:path";
 import { step, type Steps } from "./git-push.js";
 import { singlePrRestArgs } from "./open-prs-rest.js";
 import { mergePlanBlobsQuarantiningDuplicates, parseBlobBatch } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { makeTempDir } from "./tmp.js";
 
 /** BACKSTOP: plan_pr_behind refreshes one PR may take before it is escalated instead. The safe
  *  merge above is the primary control; this fires only when the merged plan stays unprovable. */
@@ -223,24 +225,112 @@ export function planSafetyGitSync(cwd: string): PlanSafetyGit {
   };
 }
 
+/** The most stdout one call keeps, as execFile's `maxBuffer` held it on the pipe. */
+const STDOUT_CAP_BYTES = 1 << 26;
+
+/** One call's stdin and stdout as files, unlinked once open: git reads and writes them without the loop. */
+interface GitCallFiles {
+  stdin: number | "ignore";
+  stdout: number;
+  /** A second descriptor on the stdout file, with its own offset, for reading what git wrote. */
+  readBack: number;
+}
+
+function openGitCallFiles(stdin: string | undefined): GitCallFiles {
+  const dir = makeTempDir("plan-safety-git");
+  const opened: number[] = [];
+  try {
+    if (stdin !== undefined) writeFileSync(join(dir, "in"), stdin);
+    const input = stdin === undefined ? "ignore" : openSync(join(dir, "in"), "r");
+    if (input !== "ignore") opened.push(input);
+    const stdout = openSync(join(dir, "out"), "w");
+    opened.push(stdout);
+    const readBack = openSync(join(dir, "out"), "r");
+    return { stdin: input, stdout, readBack };
+  } catch (e) {
+    for (const fd of opened) closeSync(fd);
+    throw e;
+  } finally {
+    // the open descriptors keep both files; only this exact dir goes.
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function readBackAll(fd: number): Buffer {
+  const size = fstatSync(fd).size;
+  const out = Buffer.alloc(Math.min(size, STDOUT_CAP_BYTES));
+  let at = 0;
+  while (at < out.length) {
+    const n = readSync(fd, out, at, out.length - at, at);
+    if (n === 0) break;
+    at += n;
+  }
+  return out.subarray(0, at);
+}
+
+/**
+ * GIT'S STDIN AND STDOUT ARE FILES, NOT PIPES THE DAEMON LOOP MUST SERVICE. On 2026-11-05 the merged
+ * plan's batch read (4,915 shards, ~29 MB of stdout) takes 0.3 s on the host, yet #16943 and #16945 refused as
+ * "git cat-file --batch exited null, killed by SIGTERM (its bound)" while core's loop was held for 60-90 s at a
+ * time. Through a pipe, git blocks once ~64 KB sits unread, so a held loop stalled git itself, and since W1-T11368
+ * a held loop no longer re-arms the bound forever. With files, git finishes on its own time: the bound now measures
+ * git's work, not the loop's.
+ */
 export function planSafetyGitAsync(cwd: string): PlanSafetyGit {
   return (args, stdin) =>
     new Promise((resolve) => {
-      const command = execFileLoopBounded("git", [...args], { cwd, encoding: "utf8", timeout: GIT_CALL_MS, maxBuffer: 1 << 26 });
-      command.then(
-        ({ stdout, stderr }) => resolve({ status: 0, stdout: stdout ?? "", signal: null, stderr: stderrTail(stderr) }),
-        (error: { code?: unknown; stdout?: unknown; stderr?: unknown; signal?: string | null }) => {
-          const { code } = error;
-          const stderr = typeof error.stderr === "string" ? error.stderr : "";
-          // a non-numeric code (ERR_CHILD_PROCESS_STDIO_MAXBUFFER) is Node's reason, kept beside git's own words.
-          const said = typeof code === "string" ? `${stderr}\n${code}` : stderr;
-          resolve({ status: typeof code === "number" ? code : null, stdout: typeof error.stdout === "string" ? error.stdout : "", signal: error.signal ?? null, stderr: stderrTail(said) });
-        },
-      );
-      const child = command.child;
-      // a verb that exits before reading stdin must not surface as an EPIPE on the daemon.
-      child.stdin?.on("error", () => {});
-      child.stdin?.end(stdin);
+      let files: GitCallFiles;
+      try {
+        files = openGitCallFiles(stdin);
+      } catch (e) {
+        resolve({ status: null, stdout: "", signal: null, stderr: stderrTail(String((e as Error)?.message ?? e)) });
+        return;
+      }
+      const { readBack } = files;
+      let stderr = "";
+      let settled = false;
+      const settle = (res: PlanSafetyGitResult): void => {
+        if (settled) return;
+        settled = true;
+        closeSync(readBack);
+        resolve(res);
+      };
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn("git", [...args], { cwd, stdio: [files.stdin, files.stdout, "pipe"] });
+      } catch (e) {
+        settle({ status: null, stdout: "", signal: null, stderr: stderrTail(String((e as Error)?.message ?? e)) });
+        return;
+      } finally {
+        // the child holds its own copies.
+        if (files.stdin !== "ignore") closeSync(files.stdin);
+        closeSync(files.stdout);
+      }
+      const bound = boundChildByLoopTime(child, GIT_CALL_MS);
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => void (stderr += chunk));
+      child.on("error", (e) => {
+        bound.cancel();
+        settle({ status: null, stdout: "", signal: null, stderr: stderrTail(`${stderr}\n${String(e?.message ?? e)}`) });
+      });
+      child.on("close", (code, signal) => {
+        bound.cancel();
+        let stdout: string;
+        try {
+          if (fstatSync(readBack).size > STDOUT_CAP_BYTES) {
+            // Node's reason, kept beside git's own words, as execFile's maxBuffer reported it.
+            settle({ status: null, stdout: "", signal: null, stderr: stderrTail(`${stderr}\nERR_CHILD_PROCESS_STDIO_MAXBUFFER`) });
+            return;
+          }
+          stdout = readBackAll(readBack).toString("utf8");
+        } catch (e) {
+          settle({ status: null, stdout: "", signal: null, stderr: stderrTail(`${stderr}\n${String((e as Error)?.message ?? e)}`) });
+          return;
+        }
+        // a child killed at its bound is a kill, even when it trapped the signal and exited 0.
+        if (bound.timedOut) settle({ status: null, stdout, signal: signal ?? "SIGTERM", stderr: stderrTail(stderr) });
+        else settle({ status: code, stdout, signal: signal ?? null, stderr: stderrTail(stderr) });
+      });
     });
 }
 
