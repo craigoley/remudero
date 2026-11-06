@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "2026-11-05 operator engine cut: engine.prune_deferred on run-W1-T9328-1792218295640-5526, an empty run directory from 2026-10-17"
   plan_refs: [W1-T9910, W1-T10000, W1-T9738]
-  files: [src/lib/engine-tree.ts, src/lib/run-child.ts, test/an-empty-run-directory-never-defers-engine-pruning-forever.test.ts]
+  files: [src/lib/engine-tree.ts, src/lib/run-child.ts, test/deploy/an-empty-run-directory-never-defers-engine-pruning-forever.test.ts]
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=f6932c3cb875d215
@@ -32,6 +32,8 @@
     (tryAcquirePin) that pinEngineForRun holds while it writes the spec. So an empty directory inside that
     window is the only thing stopping a prune from removing the engine a run is pinning at that moment.
     Simply skipping empty directories would reopen that race.
+    rmd test-place computes this test's folder as test/deploy/ from its imports, so
+    the test file and both proof paths must use that computed placement.
   design: |
     1. Prune under the pin. For each engine pruneEngineTrees would remove, it takes that engine's pin lock
        with the same non-blocking tryAcquirePin that pinEngineForRun uses. If the lock is held, the
@@ -49,9 +51,9 @@
     No new constant, no age or count bound. The pin lock and the directory's emptiness are the whole rule.
   acceptance:
     - claim: "An empty run directory no longer defers pruning: with one present, pruneEngineTrees removes an unnamed, unpinned engine, and an engine whose pin lock is held at prune time is kept that pass"
-      proof: "grep: W1-T11447 criterion 1 in test/an-empty-run-directory-never-defers-engine-pruning-forever.test.ts"
+      proof: "grep: W1-T11447 criterion 1 in test/deploy/an-empty-run-directory-never-defers-engine-pruning-forever.test.ts"
     - claim: "A run directory with content but no spec and no status still defers the prune, and a probe or run whose engine pin comes back unavailable leaves no run directory behind"
-      proof: "grep: W1-T11447 criterion 2 in test/an-empty-run-directory-never-defers-engine-pruning-forever.test.ts"
+      proof: "grep: W1-T11447 criterion 2 in test/deploy/an-empty-run-directory-never-defers-engine-pruning-forever.test.ts"
   note: |
     Tests use a real state root: a published newest engine, an older unnamed engine, and an empty
     runs/<id> directory, then run the real pruneEngineTrees. At base the older engine is kept

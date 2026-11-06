@@ -17,6 +17,7 @@
     - src/lib/escalation-catalogue.ts
     - test/daemon/a-slow-crash-loop-is-reported.test.ts
     - "deploy/entrypoint.sh"
+    - "src/lib/config-schema.ts"
   status: queued
   attempts: 0
   acceptance:
