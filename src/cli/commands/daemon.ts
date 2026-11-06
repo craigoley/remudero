@@ -102,7 +102,7 @@ import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from
 import { acquireDrainLock, DrainLockError } from "../../lib/drain-lock.js";
 import { testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
 import { withLiveEditLadders } from "../../lib/live-edit-ladder.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, consumeRestartInPlace, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
 import { wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "../../lib/github-app.js";
 import { LEDGER_REQUEST_STEP, realScopedMint, startDaemonGitCredentialSocket, type ScopedTokenMint } from "../../lib/secret-boundary.js";
@@ -2045,6 +2045,11 @@ export async function daemonCommand(
           }),
         } : {}),
         consumeDrainNow: () => consumeDrainNow(config.root),
+        // W1-T11327: the progress watchdog's restart-in-place request, exited on with this process's own boot sha.
+        consumeRestartRequest: () => {
+          const request = consumeRestartInPlace(config.root);
+          return request && { ...request, ...(daemonLoadedCodeSha ? { codeSha: daemonLoadedCodeSha } : {}) };
+        },
         // Selected-repository PR controls (W1-T3989). The HTTP surface only writes a bounded
         // marker; this is the sole point that reaches the established selected-repository CLI
         // commands. Their own disposition, strike, worktree and review-lock gates remain the
