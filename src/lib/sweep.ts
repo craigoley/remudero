@@ -24948,7 +24948,7 @@ export async function runSweepLightPass(
   const passId = randomUUID();
   const passScope = deps.lightPassScope ?? "idle";
   const startedAtMs = performance.now();
-  const startedAt = new Date().toISOString();
+  const startedAt = clockFromMillisFn(deps.now ?? Date.now).iso();
   const log = deps.log ?? ((step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step, ...extra }));
   log("sweep.pass", { ts: startedAt, pass_id: passId, light_pass_scope: passScope });
