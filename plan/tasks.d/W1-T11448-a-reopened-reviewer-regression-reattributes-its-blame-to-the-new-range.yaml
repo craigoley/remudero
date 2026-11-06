@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "2026-11-05 ledger: reviewer.healed_tree_unavailable x8 in ~4 h for incident reviewer-regression-8b37a0a1b86b, blaming a 2026-10-20 merge"
   plan_refs: [W1-T10269, W1-T228]
-  files: [src/lib/reviewer-health.ts, src/run-task.ts, test/a-reopened-reviewer-regression-reattributes-its-blame.test.ts]
+  files: [src/lib/reviewer-health.ts, src/run-task.ts, test/review/a-reopened-reviewer-regression-reattributes-its-blame.test.ts]
   priority: 3
   status: queued
   # backlog gardener: band=3 evidence=01e5282e872c7818
@@ -44,9 +44,9 @@
     No fixed thresholds. The memo is keyed on origin/main, which the code already reads.
   acceptance:
     - claim: "A re-opened incident whose prior offending merge is outside the new healthy..regressed range is attributed fresh, and one whose prior offender is inside the range keeps that blame"
-      proof: "grep: W1-T11448 criterion 1 in test/a-reopened-reviewer-regression-reattributes-its-blame.test.ts"
+      proof: "grep: W1-T11448 criterion 1 in test/review/a-reopened-reviewer-regression-reattributes-its-blame.test.ts"
     - claim: "After a healed tree conflicts at an origin/main, a second review at the same origin/main attempts no revert, and a moved origin/main attempts it again"
-      proof: "grep: W1-T11448 criterion 2 in test/a-reopened-reviewer-regression-reattributes-its-blame.test.ts"
+      proof: "grep: W1-T11448 criterion 2 in test/review/a-reopened-reviewer-regression-reattributes-its-blame.test.ts"
   note: |
     Copy the fixtures in test/a-reviewer-regression-heals-itself.test.ts: a git repo with a healthy sha,
     an old offending merge X, later commits, and a new regressed range that excludes X. At base the
