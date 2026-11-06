@@ -4,8 +4,8 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `daemon`, field `outcome`.
 
-  Coverage: 453/559 assignments (a joined terminal outcome is the numerator)
-  (81.0%) in the trailing 7-day window; trailing baseline 98.9% — below it by
+  Coverage: 384/492 assignments (a joined terminal outcome is the numerator)
+  (78.0%) in the trailing 7-day window; trailing baseline 98.9% — below it by
   more than 10.0%.
 
   First seen: 2026-11-05T17:58:57.884Z.
@@ -24,3 +24,61 @@ summary: null
 expansion: null
 submission_key: null
 thread_id: null
+evidence_coverage_revision:
+  version: 1
+  mainSha: 02104c2005bf5154c14daaad5b77e386ffa0149e
+  expectedRecord: >
+    id: evidence-coverage-daemon-outcome
+
+    ts: 2026-11-05T18:13:44.602Z
+
+    raw: >-
+      Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+      `daemon`, field `outcome`.
+
+      Coverage: 453/559 assignments (a joined terminal outcome is the numerator)
+      (81.0%) in the trailing 7-day window; trailing baseline 98.9% — below it by
+      more than 10.0%.
+
+      First seen: 2026-11-05T17:58:57.884Z.
+
+
+      This follow-up never gates a PR or blocks work. Restore the field at the
+      lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+      reads), or record why this lane legitimately lacks it. The evidence-coverage
+      gardener updates this entry in place while the gap persists.
+    attachments: []
+
+    origin: cli
+
+    status: new
+
+    reply_to: null
+
+    proposal_pr: null
+
+    summary: null
+
+    expansion: null
+
+    submission_key: null
+
+    thread_id: null
+  expectedPlan:
+    plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+    plan/tasks.d: 2239627b1dd86605f1e1d4e08f3e5283bb2ccec5
+  measurement:
+    lane: daemon
+    field: outcome
+    observed: 384
+    denominator: 492
+    floor: 0.8
+    baseline: 0.9890909090909091
+    at: 2026-11-06T08:46:53.885Z
+    since: 2026-10-30T08:46:53.885Z
+    line: "Coverage: 384/492 assignments (a joined terminal outcome is the
+      numerator) (78.0%) in the trailing 7-day window; trailing baseline 98.9% —
+      below it by more than 10.0%."
+  closure:
+    eligible: false
+    reason: record is open

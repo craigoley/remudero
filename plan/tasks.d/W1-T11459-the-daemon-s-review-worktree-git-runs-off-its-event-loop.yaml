@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
   plan_refs: [W1-T11341, W1-T10068, W1-T3378, W1-T11369, W1-T147]
-  files: [src/lib/composition-root.ts, src/run-task.ts, src/lib/review-worktree-reclaim.ts, src/cli/commands/daemon.ts, src/lib/daemon.ts, src/cli/commands/review.ts, test/review/the-daemon-review-worktree-git-runs-off-the-loop.test.ts]
+  files: [src/lib/composition-root.ts, src/run-task.ts, src/lib/review-worktree-reclaim.ts, src/cli/commands/daemon.ts, src/lib/daemon.ts, src/cli/commands/review.ts, test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts]
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=05e7c90230f710e6
@@ -46,9 +46,9 @@
     through these adapters and retain the existing catch, ownership and completion ordering.
   acceptance:
     - claim: "On the daemon path, materializeReviewWorktree, temporaryIndexTree and sweepStrandedReviewWorktrees call no synchronous git, and a timer scheduled before each one fires while its git is still running"
-      proof: "grep: W1-T11459 criterion 1 in test/review/the-daemon-review-worktree-git-runs-off-the-loop.test.ts"
+      proof: "grep: W1-T11459 criterion 1 in test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts"
     - claim: "A review still reads a fully materialized worktree, and a stranded-worktree removal completes before the path is reused"
-      proof: "grep: W1-T11459 criterion 2 in test/review/the-daemon-review-worktree-git-runs-off-the-loop.test.ts"
+      proof: "grep: W1-T11459 criterion 2 in test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts"
   note: |
     Sol-level: three call chains, each with ordering assumptions. Copy W1-T11341's test technique
     (a slow fake git, plus a timer that must fire during it). The builder names each criterion test
