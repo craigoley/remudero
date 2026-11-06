@@ -686,13 +686,22 @@ export interface EngineRefreshOptions {
 const refreshInFlight = new Map<string, Promise<void>>();
 const refreshedSha = new Map<string, string>();
 
+/** Whether the store result's engine is published at `sha`: a built, present or advanced engine's record says so. */
+function publishedAt(stateRoot: string, stored: StoreBuildResult, sha: string): boolean {
+  if (stored.kind !== "built" && stored.kind !== "present") return false;
+  if (!SHA256_HEX.test(stored.hash)) return false;
+  const record = readRecord(enginePath(stateRoot, stored.hash));
+  return record?.sourceHash === stored.hash && record.sha === sha;
+}
+
 /**
  * 2026-11-05: engines were cut only after a build run cut its worktree, but every build run first passes a containment
  * probe that runs FROM the newest engine. When that engine's own code failed the probe (a stale codex profile), no build
  * reached its worktree, no engine was cut, and the probe kept running the stale code: a self-sustaining stall, 4+ h,
  * silent but for engine.lag. A spawn that finds the engine behind main asks this to fill the store and cut an engine
  * from the running process's own code tree, which is at least as new as the code that found the lag. Joined while in
- * flight, done once per code revision, never rejects; each pass is ledgered.
+ * flight, done once per code revision it PUBLISHED (a pass that cut nothing is retried by the next ask), never rejects;
+ * each pass is ledgered.
  */
 export function refreshEngineFromCodeTree(
   codeTree: string, stateRoot: string, storeRoot: string, lag: EngineRefreshLag, log: StoreLog, opts: EngineRefreshOptions = {},
@@ -707,6 +716,11 @@ export function refreshEngineFromCodeTree(
     log("engine.refresh_requested", { code_sha: sha, engine_sha: lag.engineSha, main_sha: lag.mainSha });
     const stored = await (opts.buildIntoStore ?? buildIntoStore)(codeTree, { storeRoot, log });
     await (opts.afterStore ?? buildEngineAfterStore)(codeTree, stateRoot, storeRoot, stored, log, opts.git ? { git: opts.git } : {});
+    // The engine pass never rejects, so only a published record at this revision proves a cut; anything less is retried.
+    if (!publishedAt(stateRoot, stored, sha)) {
+      log("engine.refresh_unpublished", { code_sha: sha, store_kind: stored.kind });
+      return;
+    }
     refreshedSha.set(key, sha);
     log("engine.refresh_done", { code_sha: sha, store_kind: stored.kind });
   })()

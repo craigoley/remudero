@@ -37,6 +37,12 @@ const headIs = (sha: string): EngineGit => async (_dir, args) => {
   if (args[0] === "rev-parse" && args[1] === "HEAD") return `${sha}\n`;
   throw new Error(`unexpected git ${args.join(" ")}`);
 };
+/** What a successful engine pass leaves: the store hash's record at the code tree's revision. */
+const publish = (state: string, sha = CODE): void => {
+  const root = join(state, "engines", HASH);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "engine.json"), `${JSON.stringify({ sha, sourceHash: HASH, builtAt: 1 })}\n`);
+};
 
 test("a lagging engine is refreshed from the code tree: the store is filled and an engine pass runs, both ledgered", TIMEOUT, async () => {
   const state = tmp("lag");
@@ -46,7 +52,7 @@ test("a lagging engine is refreshed from the code tree: the store is filled and 
   await refreshEngineFromCodeTree("/code", state, "/store", { engineSha: ENGINE, mainSha: MAIN }, log, {
     git: headIs(CODE),
     buildIntoStore: async (tree, opts) => { calls.push(`store ${tree} ${opts.storeRoot}`); return stored; },
-    afterStore: async (tree, stateRoot, storeRoot, got) => { calls.push(`engine ${tree} ${stateRoot === state} ${storeRoot} ${got === stored}`); },
+    afterStore: async (tree, stateRoot, storeRoot, got) => { calls.push(`engine ${tree} ${stateRoot === state} ${storeRoot} ${got === stored}`); publish(stateRoot); },
   });
   assert.deepEqual(calls, ["store /code /store", "engine /code true /store true"]);
   assert.deepEqual(rows.map((r) => r.step), ["engine.refresh_requested", "engine.refresh_done"]);
@@ -60,7 +66,7 @@ test("no refresh when the engine already holds the code tree's revision, and one
   const opts = {
     git: headIs(CODE),
     buildIntoStore: async (): Promise<StoreBuildResult> => { builds++; return { kind: "present", hash: HASH }; },
-    afterStore: async () => {},
+    afterStore: async (_tree: string, stateRoot: string) => { publish(stateRoot); },
   };
   await refreshEngineFromCodeTree("/code", state, "/store", { engineSha: CODE, mainSha: MAIN }, log, opts);
   assert.equal(builds, 0, "the engine is the code tree's revision: nothing to cut");
@@ -71,6 +77,32 @@ test("no refresh when the engine already holds the code tree's revision, and one
   await refreshEngineFromCodeTree("/code", state, "/store", { engineSha: ENGINE, mainSha: MAIN }, log, opts);
   assert.equal(builds, 1, "a revision already refreshed is not refreshed again");
   assert.equal(rows.filter((r) => r.step === "engine.refresh_requested").length, 1);
+});
+
+test("an engine pass that cuts nothing is not remembered: the next lagging ask builds again, and a published one is not rebuilt", TIMEOUT, async () => {
+  const state = tmp("unpublished");
+  const { rows, log } = recorder();
+  let builds = 0;
+  const buildIntoStore = async (): Promise<StoreBuildResult> => { builds++; return { kind: "built", hash: HASH, ms: 1, bytes: 1 }; };
+  // The REAL buildEngineAfterStore, whose cut fails here: git answers the revision and the common dir, refuses the rest.
+  const failingGit: EngineGit = async (_dir, args) => {
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return `${CODE}\n`;
+    if (args[0] === "rev-parse" && args.includes("--git-common-dir")) return "/code/.git\n";
+    throw new Error(`worktree refused: git ${args.join(" ")}`);
+  };
+  const lag = { engineSha: ENGINE, mainSha: MAIN };
+  await refreshEngineFromCodeTree("/code", state, "/store", lag, log, { git: failingGit, buildIntoStore });
+  assert.ok(rows.some((r) => r.step === "engine.build_failed"), "control: the real engine pass ran and failed");
+  assert.ok(rows.some((r) => r.step === "engine.refresh_unpublished"), "a pass that cut nothing says so");
+  assert.ok(!rows.some((r) => r.step === "engine.refresh_done"), "a pass that cut nothing is not done");
+  await refreshEngineFromCodeTree("/code", state, "/store", lag, log, { git: failingGit, buildIntoStore });
+  assert.equal(builds, 2, "the next lagging ask retries instead of trusting a pass that cut nothing");
+  await refreshEngineFromCodeTree("/code", state, "/store", lag, log, {
+    git: headIs(CODE), buildIntoStore, afterStore: async (_tree, stateRoot) => { publish(stateRoot); },
+  });
+  assert.equal(builds, 3);
+  await refreshEngineFromCodeTree("/code", state, "/store", lag, log, { git: failingGit, buildIntoStore });
+  assert.equal(builds, 3, "once an engine is published at this revision, it is not rebuilt");
 });
 
 test("a refresh that throws is ledgered and never rejects", TIMEOUT, async () => {
