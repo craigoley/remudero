@@ -34,6 +34,7 @@ import { parse, parseExpressionAt } from "acorn";
 import { isTrustRootPath, scanTrustRootText, trustRootFor } from "../src/lib/trust-root-text.ts";
 import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, loadavg, tmpdir } from "node:os";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
@@ -50,7 +51,6 @@ import { scanSource as scanChildCoverage } from "./coverage-session-blanking-che
 import { captureStepSync } from "./lib/author-step-capture.mjs";
 import { describeJudgedRun, judgedNodeTestArgs, judgeRun, prepareJudgedRun } from "./pure-test-pool.mjs";
 import { retainFixture } from "./lib/retained-fixtures.mjs";
-import { boundedNodeTestArgs } from "./test-tier-manifest.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
   DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE,
@@ -110,6 +110,7 @@ export function censusSnapshotPaths(snapshot) {
   return [...paths].sort();
 }
 
+const require = createRequire(import.meta.url);
 const CLOCK_FIELDS = ["legacy", "dateNow", "newDate"];
 const CLOCK_SCOPE_RE = /^src\/.+\.ts$/;
 /** A test file at any depth under test/, except test/fixtures/** (data, never a suite). */
@@ -810,6 +811,7 @@ function censusReaderContext(root, child, options) {
 export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
   readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0],
   history = { path: censusReaderHistoryPath(), mode: process.env[CENSUS_READER_HISTORY_ENV] === "act" ? "act" : "shadow" } }) {
+  const { boundedNodeTestArgs } = require("./test-tier-manifest.mjs");
   const args = boundedNodeTestArgs(["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files], root);
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
