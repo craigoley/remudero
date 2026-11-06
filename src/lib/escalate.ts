@@ -482,8 +482,9 @@ export function primaryShadowOperatorChannel(opts: {
   let tail = Promise.resolve();
   const serial = (body: () => Promise<void>): Promise<void> => {
     const next = tail.then(body);
-    // Only the queue tail absorbs a rejection; the actual caller receives it and records failure.
-    tail = next.catch(() => {});
+    tail = next.catch(() => {
+      // Queue readiness ignores failure; next still rejects to the caller that records it.
+    });
     return next;
   };
   return {
