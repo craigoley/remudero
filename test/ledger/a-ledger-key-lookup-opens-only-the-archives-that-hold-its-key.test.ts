@@ -284,6 +284,41 @@ test("W1-T11423: a manifest whose archive is gone is pruned, and one already rem
   assert.equal(pruneLedgerKeyManifests(dir, new Set(), racing), 0, "a manifest another process removed counts as nothing pruned");
 });
 
+test("W1-T11423: keyed async lookup reuses its directory snapshot and refuses an unread directory", TIMEOUT, async (t) => {
+  const { dir } = corpus(t);
+  const original = fs.readdirSync;
+  let stateReads = 0;
+  fs.readdirSync = ((path: fs.PathLike, ...args: unknown[]) => {
+    if (String(path) === dir && ++stateReads === 2) throw Object.assign(new Error("second listing failed"), { code: "EIO" });
+    return Reflect.apply(original, fs, [path, ...args]);
+  }) as typeof fs.readdirSync;
+  syncBuiltinESMExports();
+  try {
+    const result = await ledgerRowsFor(dir, { taskIds: ["W1-T7"] }, { refuseIncomplete: true });
+    assert.equal(stateReads, 1, "manifest selection and stream reading must share one rotation snapshot");
+    assert.equal(result.ok, true);
+    assert.ok(result.rows.length > 0);
+  } finally {
+    fs.readdirSync = original;
+    syncBuiltinESMExports();
+  }
+
+  fs.readdirSync = ((path: fs.PathLike, ...args: unknown[]) => {
+    if (String(path) === dir) throw Object.assign(new Error("listing failed"), { code: "EIO" });
+    return Reflect.apply(original, fs, [path, ...args]);
+  }) as typeof fs.readdirSync;
+  syncBuiltinESMExports();
+  try {
+    const result = await ledgerRowsFor(dir, { taskIds: ["W1-T7"] }, { refuseIncomplete: true });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.rows, []);
+    assert.ok(result.unread.includes(dir));
+  } finally {
+    fs.readdirSync = original;
+    syncBuiltinESMExports();
+  }
+});
+
 test("W1-T11423: a lookup retains only its own rows, where the full union read exhausts the same heap", { timeout: 300_000 }, (t) => {
   // Heap-capped child: the full read must abort (positive control) and the keyed read must pass.
   const { dir } = writeLedger([], {

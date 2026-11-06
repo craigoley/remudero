@@ -102,6 +102,8 @@ export function censusUnionCalls(files: Array<{ file: string; text: string }>): 
       if (node.type === "ImportSpecifier") {
         const name = propertyName(node.imported ?? node.local);
         bind(node.local, name && READERS.includes(name) ? { type: "UnionReader", name } : undefined);
+      } else if (node.type === "ImportNamespaceSpecifier") {
+        bind(node.local, { type: "UnionNamespace" });
       } else if (node.type === "VariableDeclarator") bind(node.id, ast(node.init));
       else if (node.type === "FunctionDeclaration" || node.type === "FunctionExpression") bind(node.identifier);
       if (["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(node.type ?? "")) {
@@ -119,7 +121,14 @@ export function censusUnionCalls(files: Array<{ file: string; text: string }>): 
       if (node.type === "UnionReader") return String(node.name);
       if (node.type === "MemberExpression") {
         const name = propertyName(node.property);
-        return name && READERS.includes(name) ? name : undefined;
+        if (!name) return undefined;
+        if (READERS.includes(name) && namespace(node.object)) return name;
+        const object = resolve(node.object, seen);
+        if (object?.type === "ObjectExpression") {
+          const prop = (object.properties as Ast[]).find((item) => item.type !== "SpreadElement" && propertyName(item.key) === name);
+          if (prop?.type === "KeyValueProperty") return reader(prop.value, seen);
+        }
+        return undefined;
       }
       if (node.type !== "Identifier") return undefined;
       const key = identifierKey(node);
@@ -127,18 +136,91 @@ export function censusUnionCalls(files: Array<{ file: string; text: string }>): 
       if (seen.has(key)) return undefined;
       return reader(bindings.get(key), new Set([...seen, key]));
     }
+    function resolve(value: unknown, seen = new Set<string>()): Ast | undefined {
+      const raw = ast(value);
+      if (!raw) return undefined;
+      const node = unwrap(raw);
+      if (node.type !== "Identifier") return node;
+      const key = identifierKey(node);
+      if (seen.has(key) || !bindings.has(key)) return undefined;
+      const binding = bindings.get(key);
+      if (!binding) return undefined;
+      return resolve(binding, new Set([...seen, key]));
+    }
+    function namespace(value: unknown, seen = new Set<string>()): boolean {
+      const raw = ast(value);
+      if (!raw) return false;
+      const node = unwrap(raw);
+      if (node.type === "UnionNamespace") return true;
+      if (node.type !== "Identifier") return false;
+      const key = identifierKey(node);
+      if (seen.has(key) || !bindings.has(key)) return false;
+      const binding = ast(bindings.get(key));
+      return binding?.type === "UnionNamespace" || namespace(binding, new Set([...seen, key]));
+    }
     function bounded(value: unknown, bounds: readonly string[], seen = new Set<string>()): boolean {
       const raw = ast(value);
       if (!raw) return false;
       const node = unwrap(raw);
-      if (node.type === "Identifier") {
-        const key = identifierKey(node);
-        return !seen.has(key) && bounded(bindings.get(key), bounds, new Set([...seen, key]));
-      }
+      if (node.type === "Identifier") return !seen.has(identifierKey(node)) && bounded(bindings.get(identifierKey(node)), bounds, new Set([...seen, identifierKey(node)]));
       if (node.type === "ConditionalExpression") return bounded(node.consequent, bounds, seen) && bounded(node.alternate, bounds, seen);
       if (node.type !== "ObjectExpression") return false;
-      return (node.properties as Ast[]).some((prop) => prop.type === "SpreadElement" ? bounded(prop.arguments, bounds, seen)
-        : bounds.includes(propertyName(prop.type === "Identifier" ? prop : prop.key) ?? ""));
+      const effective = new Map<string, boolean>();
+      const applySpread = (input: unknown, state: Map<string, boolean>, chain: Set<string>): boolean => {
+        const spread = resolve(input, chain);
+        if (spread?.type === "ConditionalExpression") {
+          const consequent = new Map(state), alternate = new Map(state);
+          if (!applySpread(spread.consequent, consequent, chain) || !applySpread(spread.alternate, alternate, chain)) return false;
+          for (const key of new Set([...consequent.keys(), ...alternate.keys()])) {
+            state.set(key, consequent.get(key) === true && alternate.get(key) === true);
+          }
+          return true;
+        }
+        if (spread?.type !== "ObjectExpression") {
+          state.clear();
+          return true;
+        }
+        return apply(spread, state, chain);
+      };
+      const apply = (object: Ast, state: Map<string, boolean>, chain: Set<string>): boolean => {
+        for (const prop of object.properties as Ast[]) {
+          if (prop.type === "SpreadElement") {
+            if (!applySpread(prop.arguments, state, chain)) return false;
+            continue;
+          }
+          const name = propertyName(prop.type === "Identifier" ? prop : prop.key);
+          if (!name || !bounds.includes(name)) continue;
+          const valueNode = prop.type === "KeyValueProperty" || prop.type === "AssignmentProperty" ? prop.value
+            : prop.type === "Identifier" ? prop : undefined;
+          state.set(name, valueNode !== undefined && validBoundValue(valueNode, name, chain));
+        }
+        return true;
+      };
+      const validBoundValue = (input: unknown, name: string, chain: Set<string>): boolean => {
+        const rawValue = ast(input);
+        if (!rawValue) return false;
+        const valueNode = unwrap(rawValue);
+        if (valueNode.type === "Identifier") {
+          const key = identifierKey(valueNode);
+          if (String(valueNode.value) === "undefined") return false;
+          if (chain.has(key)) return false;
+          if (!bindings.has(key) || bindings.get(key) === undefined) return true;
+          return validBoundValue(bindings.get(key), name, new Set([...chain, key]));
+        }
+        if (valueNode.type === "StringLiteral") return String(valueNode.value).length > 0;
+        if (valueNode.type === "ArrayExpression") return (valueNode.elements as unknown[]).some((item) => item !== null);
+        if (valueNode.type === "RegexLiteral") return String(valueNode.exp).length > 0;
+        if (valueNode.type === "RegExpLiteral") return String(valueNode.pattern).length > 0;
+        if (valueNode.type === "NumericLiteral") return Number(valueNode.value) >= 0;
+        if (valueNode.type === "NullLiteral" || valueNode.type === "BooleanLiteral") return false;
+        if (valueNode.type === "UnaryExpression" && valueNode.operator === "void") return false;
+        if (valueNode.type === "ConditionalExpression") return validBoundValue(valueNode.consequent, name, chain) && validBoundValue(valueNode.alternate, name, chain);
+        if (["ArrowFunctionExpression", "FunctionExpression"].includes(String(valueNode.type ?? ""))) return ["keep", "rotationRecords"].includes(name);
+        if (valueNode.type === "NewExpression") return name === "pattern";
+        return ["MemberExpression", "CallExpression", "BinaryExpression", "LogicalExpression", "TemplateLiteral"].includes(String(valueNode.type ?? ""));
+      };
+      if (!apply(node, effective, seen)) return false;
+      return [...effective.values()].some(Boolean);
     }
     const bytes = Buffer.from(text);
     walk(tree, (node, fn) => {
@@ -252,6 +334,24 @@ test("W1-T11423 criterion 3: every conditional options branch must carry an hono
   ` }]);
   assert.equal(calls.length, 7, "all planted conditional calls must be counted");
   assert.deepEqual(calls.map((c) => c.bounded), [false, false, false, false, false, true, true]);
+});
+
+test("W1-T11423 criterion 3: undefined bounds and object aliases stay unbounded", () => {
+  const calls = censusUnionCalls([{ file: "src/lib/planted.ts", text: `
+    import * as union from "${PLANTED_UNION_MODULE}";
+    const aliased = union;
+    const readers = { scan: union.readLedgerUnionRecords };
+    export function leaks(dir: string) {
+      union.readLedgerUnionRecords(dir, { step: undefined });
+      union.readLedgerUnionRecords(dir, { step: "x", ...{ step: undefined } });
+      union.readLedgerUnionRecords(dir, { ...{ step: "x" }, step: undefined });
+      aliased.readLedgerUnionRecords(dir, {});
+      readers.scan(dir, {});
+      union.readLedgerUnionRecords(dir, { step: "x" });
+    }
+  ` }]);
+  assert.equal(calls.length, 6, "namespace and object aliases must remain visible to the census");
+  assert.deepEqual(calls.map((c) => c.bounded), [false, false, false, false, false, true]);
 });
 
 test("W1-T11423 criterion 3: ignored options cannot bound raw or streaming readers, including aliases", () => {

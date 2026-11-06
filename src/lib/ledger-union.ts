@@ -327,6 +327,8 @@ export function listedLedgerFiles(
   return { rotations, unclassified, auxiliary };
 }
 
+type LedgerCorpusSnapshot = ReturnType<typeof listedLedgerFiles>;
+
 function sinceMs(opts: LedgerUnionOptions): number | undefined {
   const raw = opts.sinceTs ?? opts.since;
   if (raw === undefined) return undefined;
@@ -435,6 +437,8 @@ function scanLedgerBuffer(
 }
 
 export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
+  /** Reuse one directory listing when a keyed reader selects archives from that same snapshot. */
+  corpusSnapshot?: LedgerCorpusSnapshot;
   /** W1-T11423: false skips a ROTATION unopened (the live file is never skipped). {@link ledgerRowsFor} passes
    *  the archives its key manifests say hold a requested key. */
   selectRotation?: (entry: LedgerCorpusEntry) => boolean;
@@ -573,7 +577,7 @@ export async function* openLedgerUnion(
   if (opts.exactDedupe && opts.dedupeWindowPerStep !== undefined) {
     throw new TypeError("openLedgerUnion: exactDedupe requires whole-corpus dedupe");
   }
-  const { rotations } = listedLedgerFiles(stateDir, io, opts.onUnreadDirectory);
+  const rotations = opts.corpusSnapshot?.rotations ?? listedLedgerFiles(stateDir, io, opts.onUnreadDirectory).rotations;
   const livePath = ledgerLivePath(stateDir);
   const resumedRotations = opts.afterRotation === undefined
     ? rotations
@@ -1094,6 +1098,8 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
 }
 
 export interface LedgerUnionRecordReadOptions extends LedgerUnionRawReadOptions {
+  /** Reuse one directory listing when a keyed reader selects archives from that same snapshot. */
+  corpusSnapshot?: LedgerCorpusSnapshot;
   /** W1-T11423: see {@link OpenLedgerUnionOptions.selectRotation}. */
   selectRotation?: (entry: LedgerCorpusEntry) => boolean;
   /** W1-T11423: see {@link OpenLedgerUnionOptions.where}. */
@@ -1706,9 +1712,8 @@ export function readLedgerUnionRecordsSync(
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): LedgerUnionRecordRead {
   const unread: string[] = [];
-  const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps, (path) => {
-    if (opts.refuseIncomplete) unread.push(path);
-  });
+  const corpus = opts.corpusSnapshot ?? listedLedgerFiles(stateDir, fsDeps, (path) => { if (opts.refuseIncomplete) unread.push(path); });
+  const { rotations, unclassified, auxiliary } = corpus;
   const archiveFiles = rotations.map((e) => e.path);
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = opts.readLiveRecords !== undefined ? true : fsDeps.existsSync(livePath);
@@ -2277,8 +2282,9 @@ export async function ledgerRowsFor(
   opts: LedgerRowsForOptions = {},
 ): Promise<LedgerRowsForResult> {
   const unread: string[] = [];
-  const { rotations } = listedLedgerFiles(stateDir, realLedgerUnionStreamIO, (path) => { unread.push(path); });
-  pruneLedgerKeyManifests(stateDir, new Set(rotations.map((entry) => basename(entry.path))));
+  const corpus = listedLedgerFiles(stateDir, realLedgerUnionStreamIO, (path) => { unread.push(path); });
+  const { rotations } = corpus;
+  if (unread.length === 0) pruneLedgerKeyManifests(stateDir, new Set(rotations.map((entry) => basename(entry.path))));
   const open = new Set<string>();
   const unindexed: string[] = [];
   let skipped = 0;
@@ -2297,6 +2303,7 @@ export async function ledgerRowsFor(
   const rows: Array<Record<string, unknown>> = [];
   for await (const row of openLedgerUnion(stateDir, {
     ...keyedUnionOptions(query),
+    corpusSnapshot: corpus,
     selectRotation: (entry) => open.has(entry.path),
     onSourceRead: (source) => { if (source.form !== "live") archivesOpened.push(source.path); },
     onUnreadArchive: (path) => { unread.push(path); },
@@ -2314,8 +2321,10 @@ export function ledgerRowsForSync(
   opts: Omit<LedgerRowsForOptions, "signal"> = {},
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): LedgerRowsForResult {
-  const { rotations } = listedLedgerFiles(stateDir, fsDeps, () => undefined);
-  pruneLedgerKeyManifests(stateDir, new Set(rotations.map((entry) => basename(entry.path))));
+  const unreadDirectory: string[] = [];
+  const corpus = listedLedgerFiles(stateDir, fsDeps, (path) => { unreadDirectory.push(path); });
+  const { rotations } = corpus;
+  if (unreadDirectory.length === 0) pruneLedgerKeyManifests(stateDir, new Set(rotations.map((entry) => basename(entry.path))));
   const open = new Set<string>();
   const unindexed: string[] = [];
   let skipped = 0;
@@ -2332,6 +2341,7 @@ export function ledgerRowsForSync(
   const archivesOpened: string[] = [];
   const read = readLedgerUnionRecordsSync(stateDir, {
     ...keyedUnionOptions(query),
+    corpusSnapshot: corpus,
     refuseIncomplete: opts.refuseIncomplete ?? false,
     selectRotation: (entry) => {
       if (!open.has(entry.path)) return false;
@@ -2339,5 +2349,7 @@ export function ledgerRowsForSync(
       return true;
     },
   }, fsDeps);
-  return { rows: read.rows, archivesOpened, archivesSkipped: skipped, unindexed, manifestsBuilt: built, unread: read.unread, ok: read.ok };
+  const unread = [...new Set([...unreadDirectory, ...read.unread])];
+  const ok = read.ok && !(opts.refuseIncomplete && unreadDirectory.length > 0);
+  return { rows: ok ? read.rows : [], archivesOpened, archivesSkipped: skipped, unindexed, manifestsBuilt: built, unread, ok };
 }
