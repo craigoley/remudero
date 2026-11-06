@@ -6755,7 +6755,7 @@ export function reproducedReviewFailuresFromHistory(
         .some((match) => !unobserved.test(match[1]!));
       const witnessText = semanticReason || finding.split(/\r?\n/).slice(1).join("\n");
       const namedCounterexample = witnessText.split(/\r?\n|[.!?]\s+/).some((clause) => {
-        const witness = /\b(?:replay|reproduction|counterexample)\b.*?(?:\b(?:throws?|threw|fails?|failed)\b|:\s*(?:[A-Za-z]+Error|Error)\b)/i.exec(clause);
+        const witness = /\b(?:replay|reproduction|counterexample)\b.*?(?:\b(?:throws?|threw|fails?|failed|shows?|showed|produced|returned|yielded|demonstrates?|demonstrated)\b|:\s*(?:[A-Za-z]+Error|Error)\b)/i.exec(clause);
         return witness !== null && !unobserved.test(clause.slice(0, witness.index + witness[0].length));
       });
       const semanticCounterexample = /proof executed\b/i.test(finding) && (namedCounterexample || observedCheck);

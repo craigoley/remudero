@@ -261,6 +261,20 @@ test("W1-T11443 criterion 1: the recorded classifier-check counterexample is sti
   assert.match(failures[0].finding, /100-minute restart gap produced a 100-minute lifetime/);
 });
 
+test("W1-T11443 criterion 1: the recorded in-process delivery counterexamples remain sticky", () => {
+  for (const reason of [
+    "Named suite passes 16/16, but an additional in-process counterexample shows that one temporary issue-creation refusal permanently suppresses the incident.",
+    "Grep resolves and the named tests pass, but an additional in-process counterexample shows that a refused comment is permanently lost.",
+  ]) {
+    const body = `remudero-review=failure\n1. claim\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive (semantic downgrade): ${reason}`;
+    const failures = review.reproducedReviewFailuresFromHistory(history, [{ commit_id: SHA, body }], SHA);
+    assert.equal(failures.length, 1, "PR16971 review at 2026-11-06T16:24:44Z records an executed counterexample");
+    const result = review.applyReviewStatusHistoryGuard({ ...computed, criteria: [{ ...computed.criteria[0], claim: "claim" }] } as never,
+      SHA, { kind: "readable", failures });
+    assert.equal(result.verdict.state, "failure", reason);
+  }
+});
+
 test("W1-T11443 criterion 2: hypothetical or explicitly unperformed checks are not reproduced findings", () => {
   for (const reason of [
     "A classifier check would have produced a 100-minute lifetime.",
@@ -268,6 +282,9 @@ test("W1-T11443 criterion 2: hypothetical or explicitly unperformed checks are n
     "A classifier check was not run and would have returned the incorrect result.",
     "The replay no longer throws ReferenceError at daemon.ts:4218.",
     "A reproduction could throw TypeError at daemon.ts:4218.",
+    "A counterexample would show a permanently suppressed incident.",
+    "An in-process counterexample was not run and could show a permanently lost comment.",
+    "The counterexample did not show an incident suppressed by a temporary refusal.",
   ]) {
     const body = `remudero-review=failure\n1. claim\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: ${reason}`;
     const failures = review.reproducedReviewFailuresFromHistory(history, [{ commit_id: SHA, body }], SHA);
