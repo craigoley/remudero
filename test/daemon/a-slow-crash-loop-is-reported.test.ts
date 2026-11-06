@@ -99,6 +99,18 @@ function boot(ledgerPath: string, runId: string, bootMs: number, issues: IssueGa
   return result;
 }
 
+function drainComments(ledgerPath: string, issues: IssueGateway) {
+  return drainEscalationSpool(dirname(ledgerPath), {
+    clock: systemClock,
+    escalate: async () => { throw new Error("no escalation expected"); },
+    close: async () => { throw new Error("no close expected"); },
+    comment: async (url, body) => {
+      assert.ok(issues.comment);
+      issues.comment(url, body);
+    },
+  });
+}
+
 function drainCloses(ledgerPath: string, issues: IssueGateway) {
   return drainEscalationSpool(dirname(ledgerPath), {
     clock: systemClock,
@@ -239,7 +251,7 @@ test("W1-T11421 retries issue creation after a transient refusal", (t) => {
   assert.equal(lines(ledgerPath).filter((r) => r.step === "daemon.crashloop.escalated" && r.issue_url).length, 1);
 });
 
-test("W1-T11421 retries an undelivered incident comment on a later boot", (t) => {
+test("W1-T11421 keeps a refused incident comment retryable across ledger rotation", async (t) => {
   const ledgerPath = writeLedger([], { scope: t }).path;
   const issues = recordingGateway();
   let at = healthyHistory(ledgerPath, START, issues);
@@ -259,12 +271,20 @@ test("W1-T11421 retries an undelivered incident comment on a later boot", (t) =>
   at += 22 * MIN;
   boot(ledgerPath, "DAEMON-comment-refused", at, issues);
   assert.equal(issues.comments.length, 0);
-  assert.equal(lines(ledgerPath).filter((r) => r.step === "daemon.crashloop.updated" && r.delivered === false).length, 1);
+  assert.equal(lines(ledgerPath).filter((r) => r.step === "daemon.crashloop.updated" && r.delivered === false && r.queued === true).length, 1);
+  assert.equal(readdirSync(escalationSpoolDir(dirname(ledgerPath))).filter((name) => name.endsWith(".json")).length, 1);
+
+  for (let n = 0; n < 400; n++) row(ledgerPath, { ts: iso(at), run_id: "noise", step: "fixture.noise", payload: "x".repeat(150) });
+  const rotated = rotateLedger(ledgerPath, { ceilingBytes: 32 * 1024, smoothingWindowMs: 0, now: () => new Date(at + 30 * MIN) });
+  assert.equal(rotated.rotated, true);
+  assert.equal(lines(ledgerPath).some((r) => r.step === "daemon.crashloop.updated" && r.prior_run_id === "DAEMON-comment-failed-run"), false,
+    "positive control: rotation discarded the pending ledger marker");
+
   at += MIN;
-  boot(ledgerPath, "DAEMON-comment-retry", at, issues);
+  boot(ledgerPath, "DAEMON-comment-after-rotation", at, issues);
+  assert.deepEqual(await drainComments(ledgerPath, issues), { delivered: 1, failed: 0 });
   assert.equal(issues.comments.length, 1);
   assert.match(issues.comments[0].body, /DAEMON-comment-failed-run/);
-  assert.equal(lines(ledgerPath).filter((r) => r.step === "daemon.crashloop.updated" && r.prior_run_id === "DAEMON-comment-failed-run" && r.delivered === true).length, 1);
 });
 
 test("W1-T11421 criterion 2: a single abnormal exit after a long lifetime only ledgers a row", (t) => {

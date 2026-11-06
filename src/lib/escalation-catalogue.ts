@@ -366,7 +366,8 @@ export function runDaemonCrashSentinel(
     const updates = lines.filter((line) => line.step === DAEMON_CRASHLOOP_UPDATED_STEP && line.run_first === open?.runFirst);
     const latestByRun = new Map<string, Record<string, unknown>>();
     for (const update of updates) if (typeof update.prior_run_id === "string") latestByRun.set(update.prior_run_id, update);
-    const pendingIds = new Set([...latestByRun].filter(([, update]) => update.delivered === false).map(([id]) => id));
+    const pendingIds = new Set([...latestByRun]
+      .filter(([, update]) => update.delivered === false && update.queued !== true).map(([id]) => id));
     const rowsToUpdate = new Map<string, Record<string, unknown>>();
     for (const row of abnormalRows) rowsToUpdate.set(String(row.prior_run_id), row);
     for (const id of pendingIds) {
@@ -375,18 +376,31 @@ export function runDaemonCrashSentinel(
     }
     for (const row of rowsToUpdate.values()) {
       let delivered = false;
+      let queued = false;
       try {
         const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
         if (open.issueUrl && issues.comment) {
           issues.comment(open.issueUrl, `Another abnormal exit (${run.length} short exits in the trailing run; ${learnedLine(learned)}):\n${exitEvidence(row)}`);
           delivered = true;
         }
-      } catch (error) {
-        void error; // The updated row below carries the evidence; an undelivered comment costs one operator read.
+      } catch {
+        // Keep a refused update outside the rotating lifetime ledger; the daemon's host-spool drain retries it.
+      }
+      if (!delivered && open.issueUrl) {
+        try {
+          const meta = { source: "daemon-crashloop", host: hostname(), clock: systemClock };
+          spoolIssueAction(dirname(ctx.ledgerPath), {
+            kind: "comment", url: open.issueUrl,
+            body: `Another abnormal exit (${run.length} short exits in the trailing run; ${learnedLine(learned)}):\n${exitEvidence(row)}`,
+          }, meta);
+          queued = true;
+        } catch {
+          // The unqueued ledger row remains retryable while it is retained.
+        }
       }
       appendLedger(ctx.ledgerPath, {
         run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_UPDATED_STEP,
-        run_first: open.runFirst, prior_run_id: row.prior_run_id, run_length: run.length, issue_url: open.issueUrl, delivered,
+        run_first: open.runFirst, prior_run_id: row.prior_run_id, run_length: run.length, issue_url: open.issueUrl, delivered, queued,
       });
       incident = "updated";
     }
