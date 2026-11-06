@@ -1,0 +1,31 @@
+id: incident-87b7e1ffb217fc7c
+ts: 2026-11-05T22:19:24.426Z
+raw: >-
+  Incident 87b7e1ffb217: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: review failing with no actionable unmet criteria (contradictory) —
+  escalating
+
+  First seen: 2026-11-05T21:14:07.945Z
+
+  Last seen: 2026-11-05T21:14:07.945Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=16926 escalated: already escalated (reason unreadable: no escalation of this PR at head 5bcaa23 is in the ledger); this pass: review failing with no actionable unmet criteria (contradictory) — escalating
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#87b7e1ffb217fc7cccad72419e57aa1673ef6b4fb38257f0ee5789287ff56552
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
