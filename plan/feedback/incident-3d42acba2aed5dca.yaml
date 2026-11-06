@@ -1,0 +1,28 @@
+id: incident-3d42acba2aed5dca
+ts: 2026-11-05T23:01:46.677Z
+raw: >-
+  Incident 3d42acba2aed: intervention cli-merge:no-recorded-cause
+
+  First seen: 2026-11-05T23:01:44.299Z
+
+  Last seen: 2026-11-05T23:01:44.299Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=control action=cli.merge target=cli:merge actor=unknown cause=cli-merge:no-recorded-cause — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#3d42acba2aed5dca4ef4aaee55685f4365692014f97a94a955e80a8a00eda2c4
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
