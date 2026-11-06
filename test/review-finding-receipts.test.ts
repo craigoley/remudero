@@ -87,6 +87,7 @@ test("the production reviewer posts status and ledgers a finding only once acros
     { when: "pulls/", stdout: JSON.stringify({ number: 1, html_url: prUrl, updated_at: "t", body: "changed", state: "open", head: { ref: "b", sha: headSha } }) },
     { when: "pr diff", stdout: diff },
     { when: "pr view", stdout: '{"state":"OPEN"}' },
+    { when: "/statuses?", stdout: "[[]]" },
     { when: "api ", stdout: "{}" },
   ], { kind: "review-finding-receipts" });
   const oldPath = process.env.PATH;
