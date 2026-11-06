@@ -113,6 +113,26 @@ function rowMs(row: Record<string, unknown>): number | undefined {
   return Number.isNaN(ms) ? undefined : ms;
 }
 
+function restartRequestFromRows(rows: ReadonlyArray<Record<string, unknown>>):
+  { requestedMs: number; answeredByBootMs: number | null } | undefined {
+  let requestedMs: number | undefined;
+  let generationMs = -Infinity;
+  for (const row of rows) {
+    const ms = rowMs(row);
+    if (ms === undefined) continue;
+    if (row.step === RESTART_REQUESTED_STEP && (requestedMs === undefined || ms > requestedMs)) requestedMs = ms;
+    if (row.step === "daemon.boot" && ms > generationMs) generationMs = ms;
+  }
+  return requestedMs === undefined ? undefined : { requestedMs, answeredByBootMs: generationMs > requestedMs ? generationMs : null };
+}
+
+function restartRequestNeedsRecycle(request: { requestedMs: number; answeredByBootMs: number | null }, nowMs: number,
+  newestProgressMs: number | undefined): boolean {
+  return request.answeredByBootMs === null
+    ? nowMs - request.requestedMs > RESTART_REQUEST_GRACE_MS
+    : newestProgressMs === undefined || newestProgressMs < request.answeredByBootMs;
+}
+
 /**
  * W1-T9702: the newest FULL pass's `enumerated`, raised by any newer pass that saw more. With no full row
  * read (rows written before the surface field), the largest `enumerated` among the rows read.
@@ -383,6 +403,12 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
   if (resume && resumeAgeMs !== undefined && progressAgeMs > STALL_DIAGNOSE_AFTER_MS && resumeAgeMs <= STALL_RECYCLE_AFTER_MS) {
     const said = `newest progress row is ${minutes} min old, but this generation's loop resumed at ` +
       `${fixedClock(resume.resumedMs).iso()} (${Math.floor(resumeAgeMs / 60_000)} min ago) after a block of lag_ms ${resume.lagMs}`;
+    // A fresh resume cannot make an expired restart request healthy again, even before ordinary recycle age.
+    const restartRequest = restartRequestFromRows(rows);
+    if (restartRequest && restartRequestNeedsRecycle(restartRequest, nowMs, newestProgressMs)) {
+      return restartBeforeRecycle(verdict("STALLED", "recycle", `${said}; the requested restart still requires recycle`),
+        rows, nowMs, newestProgressMs);
+    }
     if (resumeAgeMs > STALL_DIAGNOSE_AFTER_MS) return verdict("STALLED", "capture-diagnostics", `${said} and has written no progress row since`);
     return verdict("RECOVERING", "none", `${said}; its progress is owed ${STALL_RECYCLE_AFTER_MS / 60_000} min after the resume`);
   }
@@ -412,12 +438,12 @@ function restartBeforeRecycle(recycle: ProgressWatchdogVerdict, rows: ReadonlyAr
   newestProgressMs: number | undefined): ProgressWatchdogVerdict {
   let generation: Record<string, unknown> | undefined;
   let generationMs = -Infinity;
-  let requestedMs: number | undefined;
+  const restartRequestState = restartRequestFromRows(rows);
+  const requestedMs = restartRequestState?.requestedMs;
   for (const row of rows) {
     const ms = rowMs(row);
     if (ms === undefined) continue;
     if (row.step === "daemon.boot" && ms >= generationMs) [generation, generationMs] = [row, ms];
-    if (row.step === RESTART_REQUESTED_STEP && (requestedMs === undefined || ms > requestedMs)) requestedMs = ms;
   }
   let live: { ms: number; step: unknown } | undefined;
   for (const row of rows) {
@@ -426,8 +452,8 @@ function restartBeforeRecycle(recycle: ProgressWatchdogVerdict, rows: ReadonlyAr
     if (row.actor_pid !== generation.actor_pid || (typeof generation.host === "string" && row.host !== generation.host)) continue;
     if (live === undefined || ms > live.ms) live = { ms, step: row.step };
   }
-  const answeredByBootMs = requestedMs !== undefined && generationMs > requestedMs ? generationMs : null;
-  const restartRequest = requestedMs === undefined ? undefined : { requestedMs, answeredByBootMs };
+  const answeredByBootMs = restartRequestState?.answeredByBootMs ?? null;
+  const restartRequest = restartRequestState;
   const as = (action: ProgressWatchdogVerdictAction, why: string): ProgressWatchdogVerdict =>
     ({ ...recycle, action, reason: `${recycle.reason}; ${why}`, ...(restartRequest ? { restartRequest } : {}) });
   const graceMin = RESTART_REQUEST_GRACE_MS / 60_000;
