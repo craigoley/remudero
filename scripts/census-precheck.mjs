@@ -741,11 +741,15 @@ function completeCensusCapture(dir, owner, result) {
 }
 
 function runCensusChild(file, args, options) {
+  const test = args.indexOf("--test");
+  if (test >= 0 && (!Number.isFinite(options.timeout) || options.timeout <= 0)) throw new RangeError("census test timeout must be finite and positive");
+  const insertion = args[test + 1]?.startsWith("--test-reporter=") ? test + 2 : test + 1;
+  const timedArgs = test < 0 ? args : [...args.slice(0, insertion), `--test-timeout=${options.timeout}`, ...args.slice(insertion)];
   const dir = mkdtempSync(join(tmpdir(), "rmd-census-capture-"));
   const owner = lstatSync(dir);
   let result;
   try {
-    result = captureStepSync(file, args, { cwd: options.cwd, env: options.env, runtimeMs: options.timeout,
+    result = captureStepSync(file, timedArgs, { cwd: options.cwd, env: options.env, runtimeMs: options.timeout,
       maxBytes: options.maxBuffer, trackParent: true,
       stdoutPath: join(dir, "stdout"), stderrPath: join(dir, "stderr"), resultPath: join(dir, "native.json") });
   } catch (error) {
@@ -841,16 +845,21 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       const res = run(judgedChild.file, judgedChild.args, judged ? { ...options, env: { ...options.env, ...judged.env } } : options);
       pending.add(res);
       const finishedMs = now();
-      if (TIME_BOUND_CODES.has(res.error?.code) && options.timeout === CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
+      const nodeDeadline = String(res.stdout ?? "").split(/^\s*\.\.\.\s*$/m).some((block) =>
+        /^\s*failureType: ['"]testTimeoutFailure['"]\s*$/m.test(block) &&
+        Number(block.match(/^\s*error: ['"]test timed out after ([0-9]+)ms['"]\s*$/m)?.[1]) === options.timeout);
+      const timeBound = TIME_BOUND_CODES.has(res.error?.code) || nodeDeadline;
+      const timeoutMessage = res.error?.message ?? "Node test reached its admitted per-test deadline";
+      if (timeBound && options.timeout === CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
         // W1-T9919: the backstop fired; name what sizes it, so a loaded host reads differently from a hung child.
         const loads = [startLoad, load1()].map((n) => (Number.isFinite(n) ? n.toFixed(2) : "unknown"));
-        throw Object.assign(new Error(`the census suite child could not run to completion: ${res.error.message} - time bound: ` +
+        throw Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage} - time bound: ` +
           `${Math.round(finishedMs - startedMs)} ms elapsed of the ${CENSUS_SUITE_CHILD_TIME_BOUND_MS} ms bound, ${files.length} suite(s), ` +
           `1-minute load ${loads[0]} at start and ${loads[1]} at end`), { censusTimeBound: true });
       }
-      if (TIME_BOUND_CODES.has(res.error?.code)) {
+      if (timeBound) {
         // Below the backstop the bound is a reader's measured budget: an overrun its qualification re-measures once.
-        throw Object.assign(new Error(`the census suite child could not run to completion: ${res.error.message}`), { readerBudgetOverrun: true });
+        throw Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage}`), { readerBudgetOverrun: true });
       }
       assertChildFinished(res, "census suite");
       const stdout = String(res.stdout ?? "");

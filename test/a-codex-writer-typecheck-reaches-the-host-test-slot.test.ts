@@ -90,7 +90,8 @@ test("a Codex writer alone is granted and told the host test slot dir so its npm
   const repo = gitRepo({ kind: "codex-slot" });
   const fleet = { RMD_TEST_SLOT_DIR: SLOT_DIR, RMD_TEST_SLOTS: "2" };
   const args = await withEnv(fleet, () => codexArgv(repo.dir, WRITER));
-  assert.equal(args[args.indexOf("--sandbox") + 1], "workspace-write");
+  // W1-T11437 (operator 2026-11-05): writers run the allowlist-proxied :workspace profile, not --sandbox workspace-write.
+  assert.ok(args.includes('permissions.rmd_writer.extends=":workspace"'));
   assert.deepEqual(slotArgs(args), [
     "--add-dir", SLOT_DIR,
     `shell_environment_policy.set.RMD_TEST_SLOT_DIR="${SLOT_DIR}"`,
