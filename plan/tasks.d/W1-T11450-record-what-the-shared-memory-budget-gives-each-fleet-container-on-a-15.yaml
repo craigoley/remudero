@@ -1,0 +1,26 @@
+- id: W1-T11450
+  title: "Record what the shared memory budget gives each fleet container on a 15.6 GiB host, and put the small-host outcome to the operator"
+  repo: remudero
+  depends_on: [W1-T11130]
+  type: recon
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - deploy/resource-policy.sh
+    - plan/tasks.d/W1-T11130-each-container-memory-max-comes-from-one-shared-host-budget.yaml
+  acceptance:
+    - claim: "The finding states, for a 15.6 GiB MemTotal and today's learned peaks, the memory.max each of core, console, site and serve receives under the W1-T11130 formula (the larger of the shared-budget value and the container's own peak), and whether the floors alone exceed the budget"
+      proof: "demonstration: run the resource-policy.sh memory.max arithmetic with a 15.6 GiB host total and the recorded peaks, and show each container's resulting limit and the overcommit deficit"
+    - claim: "The finding names the small-host outcome in plain terms (which containers get no ceiling beyond their own peak, and what the host.memory_max.overcommitted row and its alert issue will report), and puts one decision to the operator: accept that outcome, or set a smaller floor or an RMD_SERVE_MEMORY_LIMIT_MIB override for small hosts"
+      proof: "demonstration: the operator reads the finding and records accept or a named override in the W1-T11130 shard note"
+  origin: "followup:DAEMON-1793737148911:2026-11-03T22:52:27.064Z:1"
+  rationale: >-
+    From the 2026-11-03 follow-up on https://github.com/craigoley/remudero/pull/16468, ratified
+    via rmd approve:
+  
+    follow-up harvest [research]: on a 15.6 GiB host the floors exceed the budget, so build
+    daemons now get small or no ceilings under R1. The operator's ruling covers the 32 GiB host,
+    but they may want to confirm the small-host outcome. — from W1-T11130 (run
+    DAEMON-1793737148911, https://github.com/craigoley/remudero/pull/16468)
