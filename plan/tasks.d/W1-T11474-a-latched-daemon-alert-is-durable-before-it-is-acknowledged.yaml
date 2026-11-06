@@ -53,12 +53,17 @@
       proof: "grep: W1-T11474 criterion 3 in test/inbox/a-latched-daemon-alert-is-durable-before-it-is-acknowledged.test.ts"
   note: |
     Filed follow-up required by W1-T11458's unsafe-retry exception. The sketch computes test/inbox/
-    at medium confidence (dispatch runner-up); recompute placement on the completed tests.
+    at low confidence (memory-budget runner-up); recompute placement on the completed tests.
     The overlap sweep covers seven open heads with 21 positive main subject paths. PR16971 changes
     crash lifetime handling and PR16961 changes cwd attribution, not this delivery contract.
+    The capacity amendment swept nine open heads against ten positive main subject paths and found
+    no authored overlap. W1-T100's shared sweep/run-task files concern CI fix-mode strike routing;
+    this task concerns qualified durable alert acknowledgement. Retain that surface advisory.
   falsifier: |
     Move any producer acknowledgement before enqueue: criterion 1 must fail after an injected
     durable-write failure. Drop repository from routing or either spool identity: criterion 2
     must fail for equal task/summary across two repos. Restore a sync real gateway on a producer
     path: criterion 3's blocking-sleep guard or real-child heartbeat must fail. Each removal must
     produce its intended assertion, then restore green; missing exports are structural only.
+    Drop capacity requeue after a failed durable write: criterion 1 must find the consumed decision
+    missing on the next pass, then restore its pending observation with the fix.
