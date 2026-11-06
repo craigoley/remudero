@@ -114,4 +114,10 @@ test("W1-T11443 criterion 1: guarded failure publication settles the history ide
   statuses.push({ id: 0, context: "remudero-review", state: "error" });
   const older = await read();assert.equal(older.kind, "readable");
   assert.equal(older.revision, contradicted.revision, "older terminal history is not a fresh competing PASS");
+  statuses.unshift({ id: 4, context: "remudero-review", state: "failure" });
+  const nextRefusal = await read();assert.equal(nextRefusal.kind, "readable");
+  assert.equal(nextRefusal.revision, settled.revision, "another own FAILURE stays on the refusal identity");
+  statuses.unshift({ id: 5, context: "remudero-review", state: "success" });
+  const nextContradiction = await read();assert.equal(nextContradiction.kind, "readable");
+  assert.notEqual(nextContradiction.revision, contradicted.revision, "a PASS after another refusal cannot reuse the earlier contradicted decision");
 });

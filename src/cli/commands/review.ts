@@ -451,14 +451,21 @@ export async function readReviewStatusHistory(
       throw new Error("GitHub returned an incomplete pull request review history");
     }
     const failures = reproducedReviewFailuresFromHistory(statuses, reviews, headSha);
-    // GitHub returns newest first. A competing PASS reopens the decision; our own FAILURE settles it.
+    // Pending and repeated PASS rows are bookkeeping; a PASS after new failures reopens the decision.
     const terminal = statuses.find((row) => {
       const status = row as Record<string, unknown>;
       return status.context === REVIEW_CONTEXT && String(status.state).toLowerCase() !== "pending";
     }) as Record<string, unknown> | undefined;
+    const failureHistory = statuses.filter((row) => {
+      const status = row as Record<string, unknown>;
+      return status.context === REVIEW_CONTEXT && String(status.state).toLowerCase() === "failure";
+    }).map((row) => {
+      const status = row as Record<string, unknown>;
+      return { id: status.id ?? null, createdAt: status.created_at ?? null,
+        description: status.description ?? null, targetUrl: status.target_url ?? null };
+    });
     const revision = terminal !== undefined && String(terminal.state).toLowerCase() === "success"
-      ? createHash("sha256").update(JSON.stringify({ id: terminal.id ?? null,
-        createdAt: terminal.created_at ?? null, description: terminal.description ?? null, targetUrl: terminal.target_url ?? null })).digest("hex")
+      ? createHash("sha256").update(JSON.stringify(failureHistory)).digest("hex")
       : String(terminal?.state ?? "none").toLowerCase();
     return { kind: "readable", failures, ...(failures.length ? { revision } : {}) };
   } catch (error) {

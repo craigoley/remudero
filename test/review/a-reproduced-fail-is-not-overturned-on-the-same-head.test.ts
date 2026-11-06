@@ -108,6 +108,7 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
       let historyRevision = "external-failure-v1";
       const prompts: string[] = [];
       const phases: string[] = [];
+      const sharedStatuses = [{ id: 1, context: "remudero-review", state: "failure" }];
       shim = ghShim([
         { when: "pulls/1/reviews", stdout: "[]" },
         { when: "pulls/1", stdout: JSON.stringify({ number: 1, html_url: prUrl, state: "open", merged_at: null, head: { ref: "b", sha: head } }) },
@@ -125,6 +126,9 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
         spawnReviewer: true, readReviewReuseFacts: () => undefined, onPhase: (phase: string) => phases.push(phase),
         readReviewStatusHistory: async () => {
           reads++;
+          if (scenario === "addressed") return reviewCommand.readReviewStatusHistory("acme", "remudero", prUrl, head,
+            async args => args.at(-1)?.includes("/statuses?") ? [sharedStatuses]
+              : [[{ commit_id: head, body: failureBody.replace("laneTarget's CPU bound is measured", "changed exists") }]]);
           if (scenario === "unreadable" || (scenario === "history-lost" && reads > 1)) return { kind: "unreadable", reason: "history unavailable in fixture" };
           return { kind: "readable", failures: scenario === "unreproduced" || scenario === "history-lost" || (scenario === "late" && reads === 1) || (scenario === "replay" && !replayPhase) ? [] : failures, ...(scenario === "replay" && replayPhase ? { revision: historyRevision } : {}) };
         },
@@ -172,6 +176,17 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
         assert.equal(reads, 2);
       }
       if (scenario === "history-lost") assert.ok(prompts.length > 0, "the final read protects an already-started review too");
+      if (scenario === "addressed") {
+        sharedStatuses.unshift({ id: 2, context: "remudero-review", state: "success" });
+        const settled = await drive();
+        assert.equal(settled.state, "success");
+        sharedStatuses.unshift({ id: 3, context: "remudero-review", state: "success" });
+        const priorPrompts = prompts.length;
+        const reused = await drive();
+        assert.equal(reused.decisionDisposition, "replayed", "an explicitly resolved PASS must not invalidate its own cache forever");
+        assert.equal(reused.state, "success");
+        assert.equal(prompts.length, priorPrompts, "another own PASS status is not new reproduction evidence");
+      }
       if (scenario === "replay") {
         replayPhase = true;
         const changed = await drive();
