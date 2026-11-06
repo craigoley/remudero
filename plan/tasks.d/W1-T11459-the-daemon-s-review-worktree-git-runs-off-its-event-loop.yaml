@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
-  plan_refs: [W1-T11341, W1-T10068, W1-T3378, W1-T11369]
+  plan_refs: [W1-T11341, W1-T10068, W1-T3378, W1-T11369, W1-T147]
   files: [src/lib/composition-root.ts, src/run-task.ts, src/lib/review-worktree-reclaim.ts, src/cli/commands/daemon.ts, src/lib/daemon.ts, src/cli/commands/review.ts, test/review/the-daemon-review-worktree-git-runs-off-the-loop.test.ts]
   priority: 4
   status: queued
@@ -26,6 +26,9 @@
     - sweepStrandedReviewWorktrees (src/lib/review-worktree-reclaim.ts ~:115) through
       worktreeRemove / hostWorktreeGit: 7.2 s in window 1.
     hostWorktreeGitAsync already exists (W1-T11341 used it).
+    W1-T147 shares src/lib/daemon.ts and src/run-task.ts for a separate operator-run overnight
+    chaos drill. This task changes only review-worktree Git and its awaited ordering; it creates
+    no fault-injection harness and does not run or activate that human-only drill.
   design: |
     Decide with evidence; record it in the PR body under "## Decisions".
     - Each of the three paths awaits hostWorktreeGitAsync (or the async exec realReviewWorktree can
