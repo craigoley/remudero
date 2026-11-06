@@ -1330,7 +1330,10 @@ export interface RegisteredFixOwnerRecoveryDeps {
 
 /** Preserve sync injected callers; async rejection has the existing kept-owner disposition. */
 function mapRecoveryPreservation<T>(value: T | Promise<T>, consume: (value: T) => boolean): boolean | Promise<boolean> {
-  return value instanceof Promise ? value.then(consume).catch(() => false) : consume(value);
+  return value instanceof Promise ? value.then(consume).catch((error) => {
+    console.error("owner recovery failed; retaining its checkout hold:", String((error as Error)?.message ?? error));
+    return false;
+  }) : consume(value);
 }
 
 export interface FixOwnerResidue {

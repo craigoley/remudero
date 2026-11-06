@@ -408,8 +408,8 @@ import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock 
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { createGateSandboxMetrics } from "./lib/gate-sandbox-metrics.js";
-import { composeRealDeps, realReviewWorktreeAsync, type ComposedRealGraph, type ReviewWorktreeDeps, type ReviewWorktreeAsyncDeps } from "./lib/composition-root.js";
-export type { ReviewWorktreeDeps, ReviewWorktreeAsyncDeps } from "./lib/composition-root.js";
+import { composeRealDeps, realReviewWorktreeAsync, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
+export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 
 type ReviewRecoveryGit = typeof hostWorktreeGit | typeof hostWorktreeGitAsync;
 import {
@@ -11409,7 +11409,7 @@ export function materializeReviewWorktree(
 
 export function materializeReviewWorktreeAsync(
   config: Config, repoDir: string, prNumber: number, headSha: string,
-  deps: ReviewWorktreeAsyncDeps = realReviewWorktreeAsync(),
+  deps: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>> = realReviewWorktreeAsync(),
 ): Promise<MaterializeReviewWorktreeResult> {
   return runStepsAsync(materializeReviewWorktreeSteps(config, repoDir, prNumber, headSha, deps, worktreeRemoveAsync, true));
 }
@@ -11419,7 +11419,7 @@ let lastReviewMaterializationEpochMs = 0;
 
 function* materializeReviewWorktreeSteps(
   config: Config, repoDir: string, prNumber: number, headSha: string,
-  deps: ReviewWorktreeAsyncDeps,
+  deps: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>,
   defaultRemove: (repoDir: string, worktreePath: string) => void | Promise<void>,
   protectWhileCreating: boolean,
 ): Steps<MaterializeReviewWorktreeResult> {
@@ -11434,6 +11434,7 @@ function* materializeReviewWorktreeSteps(
   try {
     yield* step(() => deps.fetch(repoDir, prNumber, headSha));
   } catch (e) {
+    // Nothing was created yet — no cleanup needed, only a named reason.
     return { worktreePath: undefined, failure: { errorClass: "fetch-failure", message: String((e as Error)?.message ?? e) } };
   }
   let created = false;
@@ -11475,7 +11476,7 @@ function* cleanupMaterializedWorktreeSteps(
 
 export async function materializePlanRoundWorktreeAsync(
   config: Config, repoDir: string, prNumber: number, headSha: string,
-  deps: { materialize?: typeof materializeReviewWorktreeAsync | typeof materializeReviewWorktree;
+  deps: Pick<ReviewCommandDeps, "materialize"> & {
     prepare?: (repoDir: string, worktreePath: string) => boolean | Promise<boolean> } = {},
 ): Promise<MaterializeReviewWorktreeResult> {
   const result = await (deps.materialize ?? materializeReviewWorktreeAsync)(config, repoDir, prNumber, headSha);
@@ -11506,7 +11507,7 @@ async function prepareWorktreeToolchainAsync(repoDir: string, worktreePath: stri
 }
 
 export function materializePlanRoundWorktree(config: Config, repoDir: string, prNumber: number, headSha: string,
-  deps: { materialize?: typeof materializeReviewWorktree; prepare?: FreshTreeReviewSeams["prepareWorktree"] } = {},
+  deps: Partial<Record<"materialize", typeof materializeReviewWorktree>> & { prepare?: FreshTreeReviewSeams["prepareWorktree"] } = {},
 ): MaterializeReviewWorktreeResult {
   const result = (deps.materialize ?? materializeReviewWorktree)(config, repoDir, prNumber, headSha);
   if (result.worktreePath && !(deps.prepare ?? prepareWorktreeToolchain)(repoDir, result.worktreePath)) {

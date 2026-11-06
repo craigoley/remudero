@@ -28,22 +28,15 @@ import {
   type SynthesizeGitGateway,
 } from "./onboard/synthesize.js";
 
-export interface ReviewWorktreeDeps {
-  fetch: (repoDir: string, prNumber: number, headSha?: string) => void;
-  addWorktree: (repoDir: string, worktreePath: string, revision: string) => void;
-  revParseHead: (worktreePath: string) => string;
-  removeWorktree?: (repoDir: string, worktreePath: string) => void;
-}
-
-export interface ReviewWorktreeAsyncDeps {
-  fetch: (repoDir: string, prNumber: number, headSha?: string) => void | Promise<void>;
-  addWorktree: (repoDir: string, worktreePath: string, revision: string) => void | Promise<void>;
-  revParseHead: (worktreePath: string) => string | Promise<string>;
-  removeWorktree?: (repoDir: string, worktreePath: string) => void | Promise<void>;
+export interface ReviewWorktreeDeps<Head = string, Effect = void> {
+  fetch: (repoDir: string, prNumber: number, headSha?: string) => Effect;
+  addWorktree: (repoDir: string, worktreePath: string, revision: string) => Effect;
+  revParseHead: (worktreePath: string) => Head;
+  removeWorktree?: (repoDir: string, worktreePath: string) => Effect;
 }
 
 /** Same creation and exact-head policy, with awaited Git on the daemon's path. */
-export function realReviewWorktreeAsync(): ReviewWorktreeAsyncDeps {
+export function realReviewWorktreeAsync(): ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>> {
   return realReviewWorktree(
     async (_cmd, args) => hostWorktreeGitAsync(args[1], args.slice(2)),
     async (path) => (await hostWorktreeGitAsync(path, ["rev-parse", "HEAD"])).trim(),
@@ -55,12 +48,12 @@ type ReviewGitExec = (cmd: string, args: string[], options: { stdio: "pipe" }) =
 type ReviewGitAsyncExec = (cmd: string, args: string[], options: { stdio: "pipe" }) => Promise<string | Buffer>;
 
 function realReviewWorktree(exec?: ReviewGitExec): ReviewWorktreeDeps;
-function realReviewWorktree(exec: ReviewGitAsyncExec, readHead: (path: string) => Promise<string>): ReviewWorktreeAsyncDeps;
+function realReviewWorktree(exec: ReviewGitAsyncExec, readHead: (path: string) => Promise<string>): ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>;
 function realReviewWorktree(
   exec: ReviewGitExec | ReviewGitAsyncExec = execFileSync,
   readHead: (path: string) => string | Promise<string> =
     (worktreePath) => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim(),
-): ReviewWorktreeAsyncDeps {
+): ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>> {
   return {
     fetch: (repoDir, prNumber, headSha) => {
       const fetchRef = (ref: string) =>
@@ -77,7 +70,10 @@ function realReviewWorktree(
       try {
         const fetched = fetchRef(`refs/pull/${prNumber}/head`);
         if (fetched instanceof Promise) return fetched.then(() => {}).catch(recover);
-      } catch (error) { return recover(error); }
+      } catch (error) {
+        // Recovery fetches the exact SHA or rethrows the original missing-pull-ref failure.
+        return recover(error);
+      }
     },
     addWorktree: (repoDir, worktreePath, revision) => {
       const added = exec("git", ["-C", repoDir, "worktree", "add", "--detach", worktreePath, revision], { stdio: "pipe" });

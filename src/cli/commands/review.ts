@@ -10,7 +10,7 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
-import { type ComposedRealGraph, type ReviewWorktreeDeps, type ReviewWorktreeAsyncDeps } from "../../lib/composition-root.js";
+import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
 import { SPECIALIST_TOOLS } from "../../lib/specialist-panel.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, reviewerHealthRowFields, reviewerShadowStep } from "../../lib/reviewer-health.js";
 import { withTempDir } from "../../lib/tmp.js";
@@ -66,8 +66,8 @@ export interface ReviewCommandHost {
     options?: { signal?: AbortSignal; log?: (step: string, extra?: Record<string, unknown>) => void },
   ): Promise<PlanLintOutcome>;
   readonly liveWorkerRunIds: Set<string>;
-  materializeReviewWorktree(config: Config, repoDir: string, prNumber: number, headSha: string, deps?: ReviewWorktreeDeps | ReviewWorktreeAsyncDeps): MaterializeReviewWorktreeResult | Promise<MaterializeReviewWorktreeResult>;
-  readonly reviewWorktreeAsync?: ReviewWorktreeAsyncDeps;
+  materializeReviewWorktree(config: Config, repoDir: string, prNumber: number, headSha: string, deps?: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>): MaterializeReviewWorktreeResult | Promise<MaterializeReviewWorktreeResult>;
+  readonly reviewWorktreeAsync?: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>;
   readHeadShaRest(prUrl: string, fetch?: GhApiFetcher): string;
   readMainPlanTreeSha(repoDir: string): string;
   realDeps(): ComposedRealGraph;

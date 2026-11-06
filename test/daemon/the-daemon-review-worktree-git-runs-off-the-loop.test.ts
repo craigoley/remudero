@@ -282,7 +282,7 @@ test("W1-T11459 criterion 2: command review reuse awaits readiness and teardown 
   }
 });
 
-test("W1-T11459 criterion 2: sweep awaits a recovery reference, reset and removal before re-reading ownership", async () => {
+test("W1-T11459 criterion 2: sweep awaits a recovery reference, reset and removal before re-reading ownership", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rmd-review-recovery-adapter-")), owner = join(root, "owner");
   mkdirSync(owner);
   const id = "W1-T11459", head = "a".repeat(40), branch = `run-${id}-${Date.now()}`;
@@ -293,7 +293,9 @@ test("W1-T11459 criterion 2: sweep awaits a recovery reference, reset and remova
   const preserving = new Promise<void>(r => { preserveStarted = r; }), saved = new Promise<void>(r => { save = r; });
   const resetting = new Promise<void>(r => { resetStarted = r; }), resetDone = new Promise<void>(r => { reset = r; });
   const removing = new Promise<void>(r => { removeStarted = r; }), removedDone = new Promise<void>(r => { remove = r; });
-  let removed = false, returned = false;
+  let removed = false, returned = false, failPreservation = false;
+  const failures: unknown[][] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => { failures.push(args); });
   const fixtureTask = { id, title: "private recovery adapter", repo: "loop", type: "implement",
     risk: "high", budget_usd: 0, files: ["src/fixture.ts"], acceptance: [], status: "queued" };
   const plan = { tasks: [fixtureTask], byId: new Map([[id, fixtureTask]]) };
@@ -311,7 +313,10 @@ test("W1-T11459 criterion 2: sweep awaits a recovery reference, reset and remova
       capture: () => ({ path: owner, pathState: "managed", attachmentState: "exact", treeState: "tracked_dirty",
         remoteState: "exact", historyState: "contained", claimState: "clear", processState: "clear",
         ageMs: 0, localSha: head, remoteSha: head }),
-      preserveTrackedDirty: async () => { events.push("preserve"); preserveStarted(); await saved; events.push("preserved"); return ref; },
+      preserveTrackedDirty: async () => {
+        if (failPreservation) throw new Error("private preservation rejection");
+        events.push("preserve"); preserveStarted(); await saved; events.push("preserved"); return ref;
+      },
       resetTrackedDirty: async () => { events.push("reset"); resetStarted(); await resetDone; events.push("reset-done"); },
       remove: async () => { events.push("remove"); removeStarted(); await removedDone; removed = true; events.push("removed"); },
     },
@@ -344,6 +349,18 @@ test("W1-T11459 criterion 2: sweep awaits a recovery reference, reset and remova
     const readHold = (sweepLib as unknown as { fixDispatchHoldAtHeadAsync?: typeof sweepLib.fixDispatchHoldAtHead }).fixDispatchHoldAtHeadAsync
       ?? sweepLib.fixDispatchHoldAtHead;
     assert.equal(await readHold(pr, lines, () => true, effects.fixOwnerReclaimableAtHold), undefined);
+    failPreservation = true;
+    const priorEvents = [...events], priorRows = rows.length;
+    await assert.doesNotReject(async () => {
+      assert.equal(await effects.fixOwnerReclaimableAtHold!(pr, decline), false,
+        "a rejected preservation cannot release the owner hold");
+    });
+    assert.deepEqual(events, priorEvents, "failed revalidation neither resets nor removes the owner");
+    assert.equal(rows.length, priorRows, "a failed preservation cannot publish a success receipt");
+    assert.ok(failures.some(args => args.join(" ").includes("private preservation rejection")),
+      "the retryable refusal retains the preservation failure reason");
+    assert.ok(await readHold(pr, lines, () => true, effects.fixOwnerReclaimableAtHold),
+      "the existing decline backstop still holds after an asynchronous preservation failure");
   } finally {
     save(); reset(); remove(); await work;
     rmSync(root, { recursive: true, force: true });
@@ -520,6 +537,18 @@ async function materializeControls(fx: ReturnType<typeof fixture>): Promise<void
     } finally { await work.catch(() => {}); if (existsSync(path)) remove(path); }
   }
   const unavailable = { worktreePath: undefined, failure: { errorClass: "fetch-failure" as const, message: "private unavailable checkout" } };
+  const synchronousReady = { worktreePath: join(fx.config.root, "synchronous-plan-with-private-ports") };
+  let preparedSynchronously = false;
+  const synchronousResult = task.materializePlanRoundWorktree(fx.config, fx.repo.dir, 4, fx.sha, {
+    materialize: () => synchronousReady,
+    prepare: () => { preparedSynchronously = true; return true; },
+  });
+  assert.equal(synchronousResult, synchronousReady, "the public synchronous entry returns its prepared result immediately");
+  assert.equal(preparedSynchronously, true, "synchronous preparation finished before return");
+  assert.equal(task.materializePlanRoundWorktree(fx.config, fx.repo.dir, 4, fx.sha, {
+    materialize: () => unavailable,
+    prepare: () => { throw new Error("an unavailable synchronous checkout must not be prepared"); },
+  }), unavailable);
   assert.equal(await planRound(fx.config, fx.repo.dir, 4, fx.sha, {
     materialize: () => unavailable,
     prepare: () => { throw new Error("an unavailable checkout must not be prepared"); },
