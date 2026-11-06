@@ -4,8 +4,10 @@ import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 // @ts-expect-error executable JavaScript module has no declaration file.
 import { main as preflightAuthor } from "#scripts/preflight-author.mjs";
 // @ts-expect-error executable JavaScript module has no declaration file.
-import { FAST_TIER_TEST_TIMEOUT_FACTOR } from "#scripts/test-tier-manifest.mjs";
-import { join } from "node:path";
+import { FAST_TIER_TEST_TIMEOUT_FACTOR, boundedNodeTestArgs as nativeBoundedNodeTestArgs } from "#scripts/test-tier-manifest.mjs";
+// @ts-expect-error executable JavaScript module has no declaration file.
+import { AUTHOR_WORKFLOW_CONTRACT_SUITES } from "#scripts/lib/author-workflow-contract.mjs";
+import { dirname, join } from "node:path";
 import {
   execWhitelistedProof,
   execWhitelistedProofAsync,
@@ -28,7 +30,7 @@ function assertTimedTestChild(args: readonly string[]): void {
   assert.ok(Number.isFinite(value) && value > 0, "guard refused an untimed real test child before spawning it");
 }
 
-function authorFixture() {
+function authorFixture(workflow = false) {
   const repo = gitRepo({ kind: "author-timeout", seedCommit: false });
   const root = repo.dir;
   for (const path of ["test/setup", "src", "scripts"]) mkdirSync(join(root, path), { recursive: true });
@@ -36,6 +38,15 @@ function authorFixture() {
   writeFileSync(join(root, ".gitignore"), "node_modules\ncoverage\n");
   symlinkSync(join(REPO_ROOT, "node_modules"), join(root, "node_modules"));
   writeFileSync(join(root, "package-lock.json"), readFileSync(join(REPO_ROOT, "package-lock.json")));
+  writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module", imports: { "#src/*": "./src/*" } }));
+  if (workflow) {
+    mkdirSync(join(root, ".github/workflows"), { recursive: true });
+    writeFileSync(join(root, ".github/workflows/fixture.yml"), "name: before\n");
+    for (const suite of AUTHOR_WORKFLOW_CONTRACT_SUITES) {
+      mkdirSync(dirname(join(root, suite)), { recursive: true });
+      writeFileSync(join(root, suite), "import { test } from 'node:test'; test('fixture workflow contract', () => {});\n");
+    }
+  }
   writeFileSync(join(root, "scripts/test-tier-manifest.json"), JSON.stringify({
     thresholdMs: FIXTURE_SLOW_THRESHOLD_MS,
     files: { "test/leaf.test.ts": 12_500 },
@@ -48,7 +59,7 @@ function authorFixture() {
   writeFileSync(join(root, "test/leaf.test.ts"), [
     "import { test } from 'node:test';",
     "import assert from 'node:assert/strict';",
-    "import { value } from '../src/leaf.js';",
+    "import { value } from '#src/leaf.js';",
     "test('fixture leaf', () => assert.equal(value, 2));",
   ].join("\n") + "\n");
   const git = (...args: string[]) => repo.git(...args);
@@ -57,6 +68,7 @@ function authorFixture() {
   git("remote", "add", "origin", root);
   git("checkout", "-b", "run-unfiled-author-timeout-fixture");
   writeFileSync(join(root, "src/leaf.ts"), "export const value = 2;\n");
+  if (workflow) writeFileSync(join(root, ".github/workflows/fixture.yml"), "name: after\n");
   git("add", ".");
   git("commit", "-m", "fix: author timeout fixture change");
   return { root, cleanup: repo.cleanup };
@@ -119,6 +131,22 @@ test("W1-T11449 criterion 2: corrupt target metadata is visible and non-test hel
   assert.equal(timeoutHelpers.derivedNodeTestTimeoutMs([], null), 5_000 * FAST_TIER_TEST_TIMEOUT_FACTOR);
 });
 
+test("W1-T11449 criterion 1: workflow prechecks use the same bounded completion adapter", (t) => {
+  const fixture = authorFixture(true);
+  t.after(fixture.cleanup);
+  const argsSeen: string[][] = [];
+  const run = (file: string, args: string[], options: Parameters<typeof spawnSync>[2]) => {
+    if (args.includes("--test")) { argsSeen.push([...args]); assertTimedTestChild(args); }
+    return spawnSync(file, args, options);
+  };
+  assert.equal(preflightAuthor([], { root: fixture.root, spawn: run }), 0);
+  const workflowArgs = argsSeen.find(args => args.includes(AUTHOR_WORKFLOW_CONTRACT_SUITES[0]));
+  assert.ok(workflowArgs, "the actual workflow precheck ran");
+  assert.ok(workflowArgs.includes(`--test-timeout=${FIXTURE_SLOW_THRESHOLD_MS * FAST_TIER_TEST_TIMEOUT_FACTOR}`));
+  assert.ok(workflowArgs.includes("--test-force-exit"));
+  assert.ok(workflowArgs.some(arg => arg.includes("setBlocking")));
+});
+
 const PROOF_FILE = "test/a-proof-timeout-is-not-a-failed-proof.test.ts";
 const REPO_MANIFEST = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/test-tier-manifest.json"), "utf8"));
 const PROOF_BOUND_MS = expectedBoundForFile(PROOF_FILE);
@@ -166,6 +194,8 @@ test("W1-T11449 criterion 2: measured and unmeasured suite durations derive fini
 
 test("W1-T11449 criterion 2: the synchronous Node proof gets a derived timeout and retains its complete summary", () => {
   assert.ok(REPO_MANIFEST.files?.[PROOF_FILE] > 0, `positive measured-duration control for ${PROOF_FILE}`);
+  assert.ok(nativeBoundedNodeTestArgs(["--test", PROOF_FILE], REPO_ROOT, REPO_MANIFEST)
+    .includes(`--test-timeout=${PROOF_BOUND_MS}`), "the default native helper also uses the factored duration policy");
   const proof = parseWhitelistedProof(`unit test: ${PROOF_FILE}`)!;
   assert.equal(execWhitelistedProof(proof, REPO_ROOT, PROOF_BOUND_MS, realSync), "pass");
   assert.ok(observedSync.args?.includes(`--test-timeout=${PROOF_BOUND_MS}`), observedSync.args?.join(" "));
