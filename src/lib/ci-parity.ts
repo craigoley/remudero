@@ -594,7 +594,7 @@ export function prepareJudgedTestRun(args: readonly string[], cwd: string, role:
   const files = judge.testFilesInArgv(args, cwd);
   const judged = judge.prepareJudgedRun();
   return {
-    args: judge.judgedNodeTestArgs(args, judged.args),
+    args: judge.judgedNodeTestArgs(boundNativeTestArgs(args, cwd), judged.args),
     env: judged.env,
     judge: (status) => {
       const { verdict, line } = judge.closeJudgedRun(judged, files, { status, root: cwd, role, prefix: "test-judge", log: () => {} });
@@ -930,8 +930,8 @@ function coverageShardSelectionArgs(repoRoot: string, shard: number, base: strin
   ];
 }
 
-function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number, judge: TestJudge, judgedArgs: readonly string[]): string[] {
-  return testRunArgv(judge.judgedNodeTestArgs([
+function coverageShardArgs(repoRoot: string, shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number, judge: TestJudge, judgedArgs: readonly string[]): string[] {
+  return testRunArgv(judge.judgedNodeTestArgs(boundNativeTestArgs([
     "--enable-source-maps",
     "--experimental-test-coverage",
     "--test-coverage-exclude=test/**",
@@ -947,7 +947,7 @@ function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly
     "--import",
     TMP_HYGIENE_IMPORT,
     ...testFiles,
-  ], judgedArgs), concurrency);
+  ], repoRoot), judgedArgs), concurrency);
 }
 
 /** The `containment-probe:test` leaf: test/containment.test.ts, judged (W1-T8379) — exit 0 alone never passes it. */
@@ -972,6 +972,11 @@ interface TestJudge {
 
 // Loaded when a coverage leaf runs, never at import: a sandbox that copies only src/ (the mutation
 // detectors in test/ledger-rotation.test.ts) still imports this module. A plain .mjs, so no types.
+function boundNativeTestArgs(args: readonly string[], root: string): string[] {
+  const tiers = require("../../scripts/test-tier-manifest.mjs") as { boundedNodeTestArgs(args: readonly string[], root: string): string[] };
+  return tiers.boundedNodeTestArgs(args, root);
+}
+
 function loadTestJudge(): TestJudge {
   return require("../../scripts/pure-test-pool.mjs") as TestJudge;
 }
@@ -1047,7 +1052,7 @@ function testWithCoverageShards(
     // Its files live in this run's own scratch, not os.tmpdir(): the shard's TMPDIR is scratchDir too.
     const judge = loadTestJudge();
     const judged = judge.prepareJudgedRun({ makeDir: () => mkdtempSync(join(scratchDir, "rmd-pool-run-")) });
-    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency, judge, judged.args), testSlot.binaryExists);
+    const child = lowPriorityCommand(process.execPath, coverageShardArgs(repoRoot, shardRoot, shard, testFiles, slot.concurrency, judge, judged.args), testSlot.binaryExists);
     const res = spawn(child.file, child.args, {
       cwd: repoRoot,
       env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir, ...judged.env },
