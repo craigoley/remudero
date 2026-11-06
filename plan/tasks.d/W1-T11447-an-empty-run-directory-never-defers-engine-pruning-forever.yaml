@@ -10,7 +10,10 @@
   origin: "2026-11-05 operator engine cut: engine.prune_deferred on run-W1-T9328-1792218295640-5526, an empty run directory from 2026-10-17"
   plan_refs: [W1-T9910, W1-T10000, W1-T9738]
   files: [src/lib/engine-tree.ts, src/lib/run-child.ts, test/an-empty-run-directory-never-defers-engine-pruning-forever.test.ts]
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=f6932c3cb875d215
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
     On 2026-11-05 an operator-run engine cut in core logged engine.prune_deferred: "run
