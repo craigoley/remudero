@@ -14,6 +14,9 @@
     - src/lib/prompt-render.ts
     - src/lib/review.ts
     - src/run-task.ts
+    - src/cli/commands/fix.ts
+    - src/cli/commands/review.ts
+    - src/cli/commands/run-task-verb.ts
     - test/ci/suites/a-computed-test-placement-preserves-file-scope.test.ts
   priority: 1
   status: queued
@@ -40,6 +43,9 @@
     A new test whose declared path never existed is eligible under the same checks; do not require
     a Git rename. A declared test already present elsewhere, ambiguous candidates, changed markers,
     wrong folders, different basenames and unreadable placement remain refusals.
+    The CLI adapters fix.ts:564-565, review.ts:691 and run-task-verb.ts:7464 are in scope only
+    to carry task criteria/observed checkout evidence to that same predicate. They are real
+    callers found by the source census; leaving them out would require another scope amendment.
     Pass task criteria and observed placement evidence through the existing scope/staging callers;
     do not turn sameTestFile's basename equality into unrestricted scope admission.
     Keep plan criteria verbatim and use W1-T9860's resolver after the candidate is committed.
