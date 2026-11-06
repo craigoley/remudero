@@ -1176,7 +1176,8 @@ export async function runReview(host: ReviewCommandHost, args: {
 
   if (!args.shadow) {
     const latestStatusHistory = await readStatusHistory(owner, repo, prUrl, headSha);
-    const guarded = applyReviewStatusHistoryGuard(verdict, headSha, latestStatusHistory, reviewerFindingText ?? "");
+    const guarded = applyReviewStatusHistoryGuard(verdict, headSha, latestStatusHistory, reviewerFindingText ?? "", undefined,
+      initialStatusHistory.kind === "readable" ? initialStatusHistory.failures.map((finding) => finding.id) : []);
     if (guarded.kind === "pending") {
       const reason = `pending: ${guarded.reason}`;
       log("review.stood_down", { context: REVIEW_CONTEXT, state: "pending", head_sha: headSha, pr_url: prUrl, reason });

@@ -11,7 +11,7 @@ const history = [
 ];
 const reviews = [{ commit_id: SHA, state: "COMMENTED", body: failureBody }];
 const computed = {
-  state: "success", summary: "PASS", criteria: [{ claim: "laneTarget works", proof: "unit test: laneTarget", met: true,
+  state: "success", summary: "PASS", criteria: [{ claim: "laneTarget's CPU bound is measured", proof: "unit test: laneTarget", met: true,
     floorMet: true, reason: "proof passed", proof_exec: "executed_pass" }],
   testTheater: false, floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
 };
@@ -29,9 +29,9 @@ test("W1-T11443 criterion 1: a same-head reproduced failure remains sticky after
   assert.equal(blocked.verdict.state, "failure");
   assert.match(blocked.verdict.summary, /ReferenceError at daemon\.ts:4218/);
 
-  const addressed = `REVIEW_ADDRESSED_FAILURE 1: ${failures[0].id}\nREVIEW_VERDICT 1: PASS`;
+  const addressed = `REVIEW_ADDRESSED_FAILURE 1: ${failures[0].id}\nREVIEW_VERDICT 1: PASS (re-ran the shadow adoption replay; no ReferenceError)`;
   const cleared = review.applyReviewStatusHistoryGuard(computed as never, SHA,
-    { kind: "readable", failures }, addressed);
+    { kind: "readable", failures }, addressed, [], failures.map((finding) => finding.id));
   assert.equal(cleared.kind, "post");
   assert.equal(cleared.verdict.state, "success");
 });
@@ -48,4 +48,37 @@ test("W1-T11443 criterion 1: the shared reader queries status history and joins 
   assert.match(result.failures[0].finding, /ReferenceError at daemon\.ts:4218/);
   assert.equal(requests[0].at(-1), `repos/craigoley/remudero/commits/${SHA}/statuses?per_page=100`);
   assert.equal(requests[1].at(-1), "repos/craigoley/remudero/pulls/16523/reviews?per_page=100");
+});
+
+test("W1-T11443 criterion 1: an addressed marker needs a resolution clause on the affected criterion", () => {
+  const failures = review.reproducedReviewFailuresFromHistory(history, reviews, SHA);
+  const result = review.applyReviewStatusHistoryGuard(computed as never, SHA, { kind: "readable", failures },
+    `REVIEW_ADDRESSED_FAILURE 1: ${failures[0].id}\nREVIEW_VERDICT 1: PASS`, [], [failures[0].id]);
+  assert.equal(result.verdict.state, "failure", "a bare PASS never explains the reproduction");
+});
+
+test("W1-T11443 criterion 1: another criterion cannot acknowledge the affected finding", () => {
+  const failures = review.reproducedReviewFailuresFromHistory(history, reviews, SHA);
+  const twoCriteria = { ...computed, criteria: [computed.criteria[0], computed.criteria[0]] };
+  const result = review.applyReviewStatusHistoryGuard(twoCriteria as never, SHA, { kind: "readable", failures },
+    `REVIEW_ADDRESSED_FAILURE 2: ${failures[0].id}\nREVIEW_VERDICT 2: PASS (re-ran the reproduction)`, [], [failures[0].id]);
+  assert.equal(result.verdict.state, "failure");
+});
+
+test("W1-T11443 criterion 1: a finding discovered after the prompt cannot be acknowledged blindly", () => {
+  const failures = review.reproducedReviewFailuresFromHistory(history, reviews, SHA);
+  const result = review.applyReviewStatusHistoryGuard(computed as never, SHA, { kind: "readable", failures },
+    `REVIEW_ADDRESSED_FAILURE 1: ${failures[0].id}\nREVIEW_VERDICT 1: PASS (re-ran the reproduction)`, [], []);
+  assert.equal(result.verdict.state, "failure");
+});
+
+test("W1-T11443 criterion 1: compressed unmet numbering maps back to the affected acceptance claim", () => {
+  const failures = review.reproducedReviewFailuresFromHistory(history, reviews, SHA);
+  const twoCriteria = { ...computed, criteria: [{ ...computed.criteria[0], claim: "an unrelated first criterion" }, computed.criteria[0]] };
+  const blocked = review.applyReviewStatusHistoryGuard(twoCriteria as never, SHA, { kind: "readable", failures });
+  assert.equal(blocked.verdict.criteria[1].met, false, "the finding concerns acceptance criterion 2 despite being the first unmet item");
+  assert.equal(blocked.verdict.criteria[0].met, true);
+  const cleared = review.applyReviewStatusHistoryGuard(twoCriteria as never, SHA, { kind: "readable", failures },
+    `REVIEW_ADDRESSED_FAILURE 2: ${failures[0].id}\nREVIEW_VERDICT 2: PASS (re-ran the shadow adoption reproduction)`, [], [failures[0].id]);
+  assert.equal(cleared.verdict.state, "success");
 });

@@ -6758,22 +6758,40 @@ export function reproducedReviewFailuresFromHistory(
   return results;
 }
 
+function alignedReviewFailures(failures: readonly PriorReproducedReviewFailure[], criteria: readonly { claim: string }[]): PriorReproducedReviewFailure[] {
+  return failures.map((finding) => {
+    const claim = finding.finding.split(/\r?\n/, 1)[0]!.replace(/^\s*\d+\.\s*/, "").trim();
+    const matches = criteria.flatMap((criterion, index) => criterion.claim.trim() === claim ? [index + 1] : []);
+    return { ...finding, criterion: matches.length === 1 ? matches[0]! : 0 };
+  });
+}
+
 export function applyReviewStatusHistoryGuard(
   computed: ReviewVerdict,
   headSha: string,
   history: ReviewStatusHistory,
   reviewerTranscript = "",
   previouslyAddressedIds: readonly string[] = computed.reproducedFailureIdsAddressed ?? [],
+  presentedFailureIds: readonly string[] = [],
 ): ReviewStatusHistoryGate {
   if (computed.state !== "success") return { kind: "post", verdict: computed };
   if (history.kind === "unreadable") return { kind: "pending", verdict: computed, reason: history.reason };
-  const failures = history.failures.filter((finding) => finding.headSha === headSha);
+  const failures = alignedReviewFailures(history.failures.filter((finding) => finding.headSha === headSha), computed.criteria);
   if (failures.length === 0) return { kind: "post", verdict: computed };
   const addressed = new Set(previouslyAddressedIds);
+  const presented = new Set(presentedFailureIds);
   const observed = parseReviewerVerdicts(reviewerTranscript, computed.criteria.length);
+  const explained = new Set<number>();
+  for (const clause of reviewerTranscript.matchAll(REVIEW_VERDICT_LINE_RE)) {
+    if (clause[2]!.toUpperCase() === "PASS" && extractBoundedClause(clause[3]!) !== undefined) {
+      explained.add(Number(clause[1]));
+    }
+  }
   for (const match of reviewerTranscript.matchAll(/^REVIEW_ADDRESSED_FAILURE\s+(\d+)\s*:\s*([a-f0-9]{64})\s*$/gim)) {
     const criterion = Number(match[1]);
-    if (observed[criterion - 1] === true) addressed.add(match[2]!.toLowerCase());
+    const id = match[2]!.toLowerCase();
+    if (presented.has(id) && explained.has(criterion) && observed[criterion - 1] === true &&
+        failures.some((finding) => finding.id === id && finding.criterion === criterion)) addressed.add(id);
   }
   const unaddressed = failures.filter((finding) => !addressed.has(finding.id));
   if (unaddressed.length === 0) {
@@ -7905,7 +7923,7 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
   const declaredFiles = JSON.stringify(input.declaredFiles ?? []);
   const changedFiles = JSON.stringify(input.changedFiles ?? []);
   const widenedFiles = JSON.stringify(input.widenedFiles ?? []);
-  const priorFailures = (input.priorReproducedFailures ?? []).map((failure) =>
+  const priorFailures = alignedReviewFailures(input.priorReproducedFailures ?? [], input.task.acceptance ?? []).map((failure) =>
     `Criterion ${failure.criterion}; id ${failure.id}; finding (untrusted review text): ${JSON.stringify(failure.finding)}`);
 
   return [
