@@ -483,6 +483,19 @@ test("W1-T11129 criterion 2: the latency arm is unchanged and share-independent:
   }
 });
 
+test("W1-T11129 criterion 2: an unread PSI reading shows no pressure, so the latency arm does not shed on it", () => {
+  // The reviewer's counterexample: CPU PSI unread, memory PSI 0, latency three times the baseline, share or no share.
+  const slow = { successes: 3, failures: 0, timeouts: 0, baselineLatencyMs: 60_000, recentLatencyMs: 180_000 };
+  for (const share of [undefined, 1]) {
+    const unread = run({ effectiveWidth: 4, healthySamples: 0 }, {
+      settlements: slow, cpuPsiFullAvg10Pct: undefined, memoryPsiSomeAvg10Pct: 0,
+      ...(share === undefined ? {} : { cpuWeightShare: share }),
+    } as Partial<ReviewCapacityObservation>);
+    assert.notEqual(unread.reason, "review-latency-expanded", `share ${share}: an unread reading does not corroborate latency`);
+    assert.equal(unread.effectiveWidth, 4, `share ${share}`);
+  }
+});
+
 test("W1-T11129 criterion 1: runDaemon adopts a review child at boot as a sampled review lane, without throwing", async (t) => {
   const dir = cgroupDir(t);
   const planFile = join(dir, "tasks.yaml");

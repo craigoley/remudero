@@ -385,15 +385,19 @@ export function selectAdaptiveReviewWidth(
   const latencyRatio = reviewLatencyRatio(observation.settlements);
   const latencyExpanded = latencyRatio !== undefined && latencyRatio >= policy.latencyExpansionRatio;
   // 2026-10-06 — PSI AT OR BELOW BOTH LOW WATERMARKS, and only when both readings exist: an unread
-  // PSI never counts as calm. `psiQuiet` is that reading as it is; it corroborates the latency arm below, which sheds
-  // only while PSI still shows pressure, share or no share (2026-10-06, unchanged by W1-T11129). `psiCalm` is the
-  // recovery condition, and it also needs the CPU verdict's calm, which an unread share never gives (W1-T11129).
+  // PSI never counts as calm. `psiCalm` is the recovery condition, and it also needs the CPU verdict's calm, which an
+  // unread share never gives (W1-T11129).
   const psiQuiet =
     finite(observation.cpuPsiFullAvg10Pct) &&
     finite(observation.memoryPsiSomeAvg10Pct) &&
     observation.cpuPsiFullAvg10Pct <= policy.cpuPsiLowPct &&
     observation.memoryPsiSomeAvg10Pct <= policy.memoryPsiLowPct;
   const psiCalm = psiQuiet && cpuCalm;
+  // The latency arm's corroboration: a reading that EXISTS and is above its low watermark, share or no share. An
+  // unread reading shows no pressure, so it neither sheds here nor counts as calm above.
+  const psiShowsPressure =
+    (finite(observation.cpuPsiFullAvg10Pct) && observation.cpuPsiFullAvg10Pct > policy.cpuPsiLowPct) ||
+    (finite(observation.memoryPsiSomeAvg10Pct) && observation.memoryPsiSomeAvg10Pct > policy.memoryPsiLowPct);
   // Back to base in one sample, never past what the host worker budget leaves room for, and never
   // above base: lanes above it stay earned by the healthy window below.
   const restoreBase = (): void => {
@@ -485,7 +489,7 @@ export function selectAdaptiveReviewWidth(
     observation.settlements.timeouts >= policy.unhealthySettlementThreshold
   ) {
     directPressure("review-unhealthy");
-  } else if (latencyExpanded && !psiQuiet) {
+  } else if (latencyExpanded && psiShowsPressure) {
     // MEASURED 2026-10-06 (Azure, base 4): this arm stepped 4 -> 3 -> 2 -> 1 on three samples
     // whose cpu `full` PSI read 2.18, 0.31 and 0; the third fired on reviews that had run long
     // during a load spike already gone, and recovery then took 30+ min. Latency is a lagging
