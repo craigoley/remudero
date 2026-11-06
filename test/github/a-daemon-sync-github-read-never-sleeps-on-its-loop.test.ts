@@ -9,6 +9,7 @@ import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/l
 import { appendLedger } from "#src/lib/ledger.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 function cache() {
   const root = mkdtempSync(join(tmpdir(), "rmd-loop-gh-"));
@@ -73,30 +74,43 @@ test("W1-T11458 criterion 1: lock contention refusal propagates instead of faili
 
 test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to its same-repository async transport", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-loop-issue-"));
-  const bin = join(root, "bin"); mkdirSync(bin);
-  const calls = join(root, "calls");
-  writeFileSync(join(bin, "gh"), `#!/bin/sh\nprintf '%s %s %s\\n' start "$1" "$2" >> "$LOOP_GH_CALLS"\nsleep 0.03\ncase "$1" in\n api) case "$2" in repos/fixture/loop/issues*) ;; *) exit 91;; esac;;\n label|issue) good=0; prev=; for arg in "$@"; do if [ "$prev" = --repo ] && [ "$arg" = fixture/loop ]; then good=1; fi; prev=$arg; done; [ "$good" = 1 ] || exit 92;;\nesac\ncase "$1 $2" in\n  'api '* ) printf '[]\\n';;\n  'issue create') printf 'https://github.com/fixture/loop/issues/7\\n';;\nesac\nprintf '%s %s %s\\n' end "$1" "$2" >> "$LOOP_GH_CALLS"\n`, { mode: 0o755 });
-  const changes = { PATH: `${bin}:${process.env.PATH}`, LOOP_GH_CALLS: calls, RMD_GH_CACHE_HOME: join(root, "cache"), RMD_GH_SHARED_READ_GAP_MS: "0", RMD_GH_TRANSPORT_FLOOR: "advisory" };
+  const shim = ghShim([
+    { when: "api repos/fixture/loop/issues", stdout: "[]", delaySeconds: 0.03 },
+    { when: "issue create", stdout: "https://github.com/fixture/loop/issues/7", delaySeconds: 0.03 },
+    { when: "label", delaySeconds: 0.03 },
+    { when: "", exit: 93, delaySeconds: 0.03 },
+  ]);
+  const changes = { PATH: `${shim.dir}:${process.env.PATH}`, RMD_GH_CACHE_HOME: join(root, "cache"), RMD_GH_SHARED_READ_GAP_MS: "0", RMD_GH_TRANSPORT_FLOOR: "advisory" };
   const previous = Object.fromEntries(Object.keys(changes).map((key) => [key, process.env[key]]));
   Object.assign(process.env, changes);
-  const during = new Set<string>();
+  const during = new Set<number>();
   const timer = setInterval(() => {
-    if (!existsSync(calls)) return;
-    const lines = readFileSync(calls, "utf8").trim().split("\n");
-    const last = lines[lines.length - 1];
-    if (last.startsWith("start ")) during.add(last.slice(6));
+    const active = new Set<number>();
+    for (const event of shim.events()) {
+      if (event.phase === "start") active.add(event.id); else active.delete(event.id);
+    }
+    for (const id of active) during.add(id);
   }, 1);
+  const assertRoute = (args: string[]): void => {
+    if (args[0] === "api") assert.ok(args[1].startsWith("repos/fixture/loop/issues"), "every real API child keeps the gateway repository");
+    else {
+      assert.ok(["issue", "label"].includes(args[0]), "only the private gateway commands may run");
+      assert.equal(args[args.indexOf("--repo") + 1], "fixture/loop", "every real mutation child keeps the gateway repository");
+    }
+  };
   try {
     const url = await withLiveWritesAllowed(() => transport.withDaemonGhTransportFloor(() => escalateAsync({
       class: "MANUAL", taskId: "LOOP-FIXTURE", summary: "fixture delivery", detail: "Private fake child only.",
       options: [{ label: "inspect", detail: "Inspect the fixture." }], recommendation: "inspect",
     }, { issues: ghIssueGateway("fixture", "loop"), ledgerPath: join(root, "ledger.ndjson"), runId: "LOOP-FIXTURE", triage: { mode: "shadow" } })));
     assert.equal(url, "https://github.com/fixture/loop/issues/7");
-    const lines = readFileSync(calls, "utf8").trim().split("\n");
-    const starts = lines.filter((line) => line.startsWith("start ")).map((line) => line.slice(6));
-    assert.ok(starts.some((line) => line.startsWith("api ")), "the real issue-list default must execute");
-    assert.ok(starts.includes("issue create"), "the real issue-create default must execute");
-    for (const command of starts) assert.ok(during.has(command), `loop timer must run during each real default child: ${command}`);
+    const starts = shim.events().filter((event) => event.phase === "start");
+    assert.ok(starts.some((event) => event.args[0] === "api"), "the real issue-list default must execute");
+    assert.ok(starts.some((event) => event.args.slice(0, 2).join(" ") === "issue create"), "the real issue-create default must execute");
+    for (const event of starts) {
+      assertRoute(event.args);
+      assert.ok(during.has(event.id), `loop timer must run during each real default child: ${event.args.join(" ")}`);
+    }
     const injected: string[][] = [];
     const custom = ghIssueGateway("custom", "route", { exec: (args) => {
       injected.push(args);
@@ -142,15 +156,18 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
           createFixRungWorktreeImpl: () => { throw new Error("fixture must not create a repair worktree"); },
         });
         const rows = (): Array<Record<string, unknown>> => readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
-        during.clear(); writeFileSync(calls, "");
+        const beforeEvents = shim.events().length;
         try {
           await withLiveWritesAllowed(() => transport.withDaemonGhTransportFloor(() => effects.dispatchFix(pr, { unmetCriteria: [] })));
           assert.ok(effects.terminalFixStandDown?.(pr), `${mode}: parent must await delivered acknowledgement`);
           const delivered = rows().find((row) => row.step === "sweep.fix.uncreditable_head_escalated");
           assert.equal(delivered?.issue_url, "https://github.com/fixture/loop/issues/7", `${mode}: only an actual URL may be acknowledged`);
-          const commands = readFileSync(calls, "utf8").trim().split("\n").filter((line) => line.startsWith("start ")).map((line) => line.slice(6));
-          assert.ok(commands.includes("issue create"), `${mode}: the real default gateway must create the fixture issue`);
-          for (const command of commands) assert.ok(during.has(command), `${mode}: timer must run during the default caller's child ${command}`);
+          const commands = shim.events().slice(beforeEvents).filter((event) => event.phase === "start");
+          assert.ok(commands.some((event) => event.args.slice(0, 2).join(" ") === "issue create"), `${mode}: the real default gateway must create the fixture issue`);
+          for (const event of commands) {
+            assertRoute(event.args);
+            assert.ok(during.has(event.id), `${mode}: timer must run during the default caller's child ${event.args.join(" ")}`);
+          }
         } finally {
           // A deliberately removed parent await leaves a real private child in flight. Retain its
           // fixture until the existing transport deadline or a final delivery disposition, then clean.
@@ -166,6 +183,7 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
   } finally {
     clearInterval(timer);
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    rmSync(shim.dir, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
 });
