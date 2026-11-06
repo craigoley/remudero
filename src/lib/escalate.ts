@@ -8,7 +8,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
-import { clockFromMillisFn } from "./clock.js";
+import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import {
   checkOperatorMessage,
   operatorMessageFooter,
@@ -372,6 +372,157 @@ export function maintenanceOperatorChannel(issues: AsyncIssueGateway): {
       const url = issueUrl ?? (await findOpen(repo))?.url;
       if (url !== undefined) await issues.closeWithComment?.(url, comment);
     },
+  };
+}
+
+export interface PrimaryShadowSelection {
+  instance: string;
+  sourcePath: string;
+  digest: string;
+  mode: "shadow" | "live";
+}
+
+/** One digest owns one durable notice. Duplicate PR sets need no edit; no new timer is introduced.
+ * Unknown selection or an unreadable history never establishes recovery or permission to create. */
+export function primaryShadowOperatorChannel(opts: {
+  owner: string; repo: string; ledgerPath: string; runId: string;
+  selection(): PrimaryShadowSelection | undefined;
+  issues?: AsyncIssueGateway;
+  clock?: Clock;
+}): {
+  refuse(pr: { prNumber: number; prUrl: string }): Promise<void>;
+  reconcile(): Promise<void>;
+  resolved(pr: { prNumber: number; prUrl: string }): Promise<void>;
+} {
+  const issues = opts.issues ?? ghIssueGatewayAsync(opts.owner, opts.repo);
+  const clock = opts.clock ?? systemClock;
+  type State = { revision: number; first: string; prs: number[]; handled: boolean };
+  const states = new Map<string, State>();
+  const identity = (s: PrimaryShadowSelection) => `<!-- primary-shadow ${JSON.stringify([opts.owner, opts.repo, s.instance])} -->`;
+  const key = (s: PrimaryShadowSelection) => `PRIMARY-SHADOW-${s.digest}`;
+  const list = async () => {
+    if (!issues.listOpen) throw new Error("primary shadow alert cannot read open issues");
+    return await issues.listOpen(NEEDS_HUMAN_LABEL);
+  };
+  const state = (s: PrimaryShadowSelection): State => {
+    const id = key(s), known = states.get(id);
+    if (known) return known;
+    let damaged = false;
+    const history = readLedgerUnionRecordsSync(dirname(opts.ledgerPath), {
+      step: ["primary_shadow.observation", "panel.escalation_marked_handled"], refuseIncomplete: true,
+      onTorn: raw => { if (raw.includes(id) || raw.includes("panel.escalation_marked_handled")) damaged = true; },
+    });
+    if (!history.ok || damaged) throw new Error("primary shadow alert history is unreadable");
+    const current: State = { revision: 0, first: "", prs: [], handled: false };
+    for (const row of history.rows.filter(r => r.task_id === id)) {
+      if (row.step === "panel.escalation_marked_handled") { current.handled = true; continue; }
+      if (!Number.isSafeInteger(row.revision) || Number(row.revision) <= 0 || typeof row.first_refusal_at !== "string"
+        || !Array.isArray(row.refused_prs) || row.refused_prs.some(n => !Number.isSafeInteger(n) || n <= 0)) {
+        throw new Error("primary shadow alert observation is malformed");
+      }
+      if (Number(row.revision) >= current.revision) {
+        current.revision = Number(row.revision); current.first = row.first_refusal_at; current.prs = [...row.refused_prs];
+      }
+    }
+    states.set(id, current);
+    return current;
+  };
+  const save = (s: PrimaryShadowSelection, proposed: State): State => {
+    const next = { ...proposed, revision: proposed.revision + 1 };
+    appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: key(s), step: "primary_shadow.observation",
+      revision: next.revision, first_refusal_at: next.first, refused_prs: [...next.prs] });
+    states.set(key(s), next);
+    return next;
+  };
+  const close = async (s: PrimaryShadowSelection, open: OpenIssue[], reason: string) => {
+    const matching = open.filter(i => i.body?.includes(identity(s))
+      && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(TASK_LINE_RE.exec(normalizeCandidateBody(i.body))?.[1] ?? ""));
+    if (matching.length && !issues.closeWithComment) throw new Error("primary shadow alert cannot close with a recovery citation");
+    const digests = new Set([s.digest, ...matching.map(issue =>
+      TASK_LINE_RE.exec(normalizeCandidateBody(issue.body!))![1].slice("PRIMARY-SHADOW-".length))]);
+    // Record the positively observed recovery before its transport effect; a failed close retries.
+    for (const digest of digests) {
+      const episode = { ...s, digest }, current = state(episode);
+      if (current.prs.length || current.first) save(episode, { ...current, prs: [], first: "" });
+    }
+    for (const issue of matching) {
+      await issues.closeWithComment!(issue.url, reason);
+      appendLedger(opts.ledgerPath, { run_id: opts.runId,
+        task_id: TASK_LINE_RE.exec(normalizeCandidateBody(issue.body!))![1],
+        step: "primary_shadow.issue_closed", issue_url: issue.url, reason });
+    }
+  };
+  const publish = async (selected: PrimaryShadowSelection, current: State): Promise<void> => {
+    const open = await list();
+    const existing = open.find(i => TASK_LINE_RE.exec(normalizeCandidateBody(i.body ?? ""))?.[1] === key(selected));
+    const begin = "<!-- primary-shadow-observation:start -->", end = "<!-- primary-shadow-observation:end -->";
+    const observation = [begin, identity(selected), `Instance: ${selected.instance}`,
+      `Selection path: ${JSON.stringify(selected.sourcePath)}`, `Selection digest: ${selected.digest}`,
+      `Refusals began: ${current.first}`, `${current.prs.length} refused PRs:`,
+      ...current.prs.map(n => `- https://github.com/${opts.owner}/${opts.repo}/pull/${n}`), end].join("\n");
+    if (existing) {
+      const body = existing.body ?? "", start = body.indexOf(begin), stop = body.indexOf(end, start);
+      if (start < 0 || stop < start) throw new Error("primary shadow alert observation section is unavailable");
+      const updated = body.slice(0, start) + observation + body.slice(stop + end.length);
+      if (updated !== body) {
+        if (!issues.editBody) throw new Error("primary shadow alert cannot update its issue");
+        await issues.editBody(existing.url, updated);
+      }
+    } else {
+      const escalation: Escalation = { class: "MANUAL", taskId: key(selected),
+        summary: `Primary instance ${selected.instance} refuses merges in shadow mode`, detail: observation,
+        consequence: "Reviewed PRs remain unmerged while the primary instance refuses them.",
+        options: [
+          { label: "Restore intended live mode", detail: "Review the named selection and use the normal qualified deployment path.", kind: { type: "operator-only" } },
+          { label: "Acknowledge this selection", detail: "Use the notice's existing mark-handled action to silence only this selection digest.", kind: { type: "operator-only" } },
+        ], recommendation: "Restore intended live mode" };
+      await escalateAsync(escalation, { issues: { ...issues, listOpen: async () => open }, ledgerPath: opts.ledgerPath, runId: opts.runId });
+    }
+  };
+  let tail = Promise.resolve();
+  const serial = (body: () => Promise<void>): Promise<void> => {
+    const next = tail.then(body);
+    // Only the queue tail absorbs a rejection; the actual caller receives it and records failure.
+    tail = next.catch(() => {});
+    return next;
+  };
+  return {
+    refuse: pr => serial(async () => {
+      const selected = opts.selection();
+      if (!selected || selected.mode !== "shadow") return;
+      if (!/^[a-f0-9]{64}$/.test(selected.digest) || !Number.isSafeInteger(pr.prNumber) || pr.prNumber <= 0
+        || pr.prUrl.toLowerCase() !== `https://github.com/${opts.owner}/${opts.repo}/pull/${pr.prNumber}`.toLowerCase()) {
+        throw new Error("primary shadow alert target is not qualified");
+      }
+      let current = state(selected);
+      if (current.handled) return;
+      if (!current.prs.includes(pr.prNumber)) current = save(selected, { ...current,
+        first: current.first || clock.iso(), prs: [...current.prs, pr.prNumber].sort((a, b) => a - b) });
+      await publish(selected, current);
+    }),
+    reconcile: () => serial(async () => {
+      const selected = opts.selection();
+      if (selected?.mode !== "live") return;
+      const open = await list();
+      if (open.some(i => i.body?.includes(identity(selected)))) await close(selected, open, `Primary instance ${selected.instance} is live again; the selected source is readable.`);
+    }),
+    resolved: pr => serial(async () => {
+      const selected = opts.selection();
+      if (!selected) return;
+      if (!Number.isSafeInteger(pr.prNumber) || pr.prNumber <= 0
+        || pr.prUrl.toLowerCase() !== `https://github.com/${opts.owner}/${opts.repo}/pull/${pr.prNumber}`.toLowerCase()) {
+        throw new Error("primary shadow alert recovery target is not qualified");
+      }
+      if (selected.mode === "live") {
+        await close(selected, await list(), `Primary instance ${selected.instance} is live again; the selected source is readable.`);
+        return;
+      }
+      const current = state(selected);
+      if (current.handled || !current.prs.includes(pr.prNumber)) return;
+      const remaining = current.prs.filter(n => n !== pr.prNumber);
+      if (remaining.length) await publish(selected, save(selected, { ...current, prs: remaining }));
+      else await close(selected, await list(), `Every recorded refused PR has a fresh MERGED observation, including ${pr.prUrl}.`);
+    }),
   };
 }
 
