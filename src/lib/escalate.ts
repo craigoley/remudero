@@ -409,7 +409,7 @@ export function primaryShadowOperatorChannel(opts: {
     if (known) return known;
     let damaged = false;
     const history = readLedgerUnionRecordsSync(dirname(opts.ledgerPath), {
-      step: ["primary_shadow.observation", "panel.escalation_marked_handled"], refuseIncomplete: true,
+      taskId: id, step: ["primary_shadow.observation", "panel.escalation_marked_handled"], refuseIncomplete: true,
       onTorn: raw => { if (raw.includes(id) || raw.includes("panel.escalation_marked_handled")) damaged = true; },
     });
     if (!history.ok || damaged) throw new Error("primary shadow alert history is unreadable");
