@@ -49,7 +49,8 @@ function authorFixture(workflow = false) {
   }
   writeFileSync(join(root, "scripts/test-tier-manifest.json"), JSON.stringify({
     thresholdMs: FIXTURE_SLOW_THRESHOLD_MS,
-    files: { "test/leaf.test.ts": 12_500 },
+    files: { "test/leaf.test.ts": 12_500,
+      ...(workflow ? Object.fromEntries(AUTHOR_WORKFLOW_CONTRACT_SUITES.map((suite: string) => [suite, FIXTURE_SLOW_THRESHOLD_MS])) : {}) },
   }));
   writeFileSync(join(root, "scripts/diff-class.mjs"), "// fixture has no census path readers\n");
   writeFileSync(join(root, "scripts/census-precheck.mjs"), "console.log('fixture census precheck passed');\n");
@@ -114,6 +115,13 @@ test("W1-T11449 criterion 2: the shared policy preserves option pairs and reject
     .includes("--test-timeout=480000"), "unique moved basename retains its measurement");
   assert.ok(boundedNodeTestArgs(["--test", "test/moved/slow.test.ts"], [join(REPO_ROOT, "test/moved/slow.test.ts")], manifest, REPO_ROOT)
     .includes("--test-timeout=480000"), "absolute targets are relative to the target checkout");
+  const literalPattern = ["--test", "--test-name-pattern", "--test-timeout=0", "test/slow.test.ts"];
+  assert.doesNotThrow(() => boundedNodeTestArgs(literalPattern, ["test/slow.test.ts"], manifest),
+    "a literal proof title is an option value, not permission to disable the timeout");
+  const literal = boundedNodeTestArgs(literalPattern, ["test/slow.test.ts"], manifest);
+  assert.equal(literal[literal.indexOf("--test-name-pattern") + 1], "--test-timeout=0");
+  assert.ok(literal.includes("--test-timeout=480000"));
+  assert.deepEqual(boundedNodeTestArgs(literal, ["test/slow.test.ts"], manifest), literal);
   for (const value of ["0", "-1", "Infinity", "NaN", ""]) {
     assert.throws(() => boundedNodeTestArgs(["--test", `--test-timeout=${value}`], [], manifest), RangeError);
   }
