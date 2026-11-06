@@ -10,7 +10,10 @@
   origin: "2026-11-05 incident: #16523 merged head 90be1a69ea, carrying a boot-adoption ReferenceError a review had already reproduced"
   plan_refs: [W1-T178, W1-T5839, W1-T3704]
   files: [src/lib/review.ts, src/cli/commands/review.ts, test/review/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts, test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts]
+  priority: 3
   status: queued
+  # backlog gardener: band=3 evidence=c7d0eff7a219e1f9
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
     On 2026-11-05 PR #16523 (W1-T11129) head 90be1a69eaea5510184cf6eec69f7c72afd13c39 received

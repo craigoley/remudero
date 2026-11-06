@@ -1,0 +1,59 @@
+- id: W1-T11448
+  title: A re-opened reviewer regression keeps its old blame only when that merge is in the new regression range, and a healed tree that conflicts is not rebuilt for every review
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-05 ledger: reviewer.healed_tree_unavailable x8 in ~4 h for incident reviewer-regression-8b37a0a1b86b, blaming a 2026-10-20 merge"
+  plan_refs: [W1-T10269, W1-T228]
+  files: [src/lib/reviewer-health.ts, src/run-task.ts, test/a-reopened-reviewer-regression-reattributes-its-blame.test.ts]
+  priority: 3
+  status: queued
+  # backlog gardener: band=3 evidence=01e5282e872c7818
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
+  attempts: 0
+  rationale: |
+    Incident reviewer-regression-8b37a0a1b86b blames 8b37a0a1b8 (#12954, merged 2026-10-20). On
+    2026-11-05 the codex sandbox broke (a container recreate added a private-registry profile), and
+    daemon reviews failed in a wave. That wave's failure signature overlapped the closed 10-20 incident.
+    openIncident in src/lib/reviewer-health.ts then re-opened it and kept its blame: "the same failure
+    mode again after a close: the same cause, so the same blame and the same heal". Overlapping
+    signatures do not mean the same cause.
+    From then on, every review ran buildHealedReviewerTree for 8b37a0a1b8. Each time: a fetch of
+    origin/main, a fresh worktree, a git revert that conflicts (src/lib/config-gardener.ts,
+    src/run-task.ts, ...), an abort, a removal, the reviewer.healed_tree_unavailable row, and a
+    fallback to the normal reviewer. That happened 8 times in about 4 hours, twice within one second
+    at the same origin/main. healedMemo caches only READY trees, never a conflict.
+    Alert issues #13966 and #13968 ("the healed reviewer cannot be built") have been open since
+    2026-10-24.
+  design: |
+    1. openIncident: when a closed incident's signature matches, reuse its blame (offending merge, last
+       healthy sha) only when its offending merge lies inside the NEW regression's range. The range runs
+       from the newest healthy ancestor (newestHealthyAncestor) to the regressed sha, tested with the same
+       isAncestor reads the fresh-open path uses. Otherwise attribute the regression fresh, exactly as a
+       new incident does, through findOffendingMerge or offendingUnavailable. The re-opened incident
+       still records reopenedFrom.
+    2. buildHealedReviewerTree remembers a conflict per (patch, offender or PR, origin/main sha), the
+       same key the ready memo uses. A later review at that same origin/main gets the remembered
+       conflict back, with no fetch-and-cut and no revert. A moved origin/main is a new key and tries
+       again. The run-task.ts caller keeps logging reviewer.healed_tree_unavailable, marked as
+       remembered, so the evidence trail stays complete.
+    No fixed thresholds. The memo is keyed on origin/main, which the code already reads.
+  acceptance:
+    - claim: "A re-opened incident whose prior offending merge is outside the new healthy..regressed range is attributed fresh, and one whose prior offender is inside the range keeps that blame"
+      proof: "grep: W1-T11448 criterion 1 in test/a-reopened-reviewer-regression-reattributes-its-blame.test.ts"
+    - claim: "After a healed tree conflicts at an origin/main, a second review at the same origin/main attempts no revert, and a moved origin/main attempts it again"
+      proof: "grep: W1-T11448 criterion 2 in test/a-reopened-reviewer-regression-reattributes-its-blame.test.ts"
+  note: |
+    Copy the fixtures in test/a-reviewer-regression-heals-itself.test.ts: a git repo with a healthy sha,
+    an old offending merge X, later commits, and a new regressed range that excludes X. At base the
+    re-open blames X. For criterion 2, count revert invocations through the git seam.
+    Do not close #13966 or #13968 by hand: the detector closes its own incident when outcomes return to
+    baseline. Name them in the PR body. The builder names each criterion test with the marker
+    "W1-T11448 criterion N" so the reviewer can map tests to criteria.
+  falsifier: |
+    Keep the unconditional blame reuse. Criterion 1's out-of-range case must then fail, because it still
+    blames X. Drop the conflict memo. Criterion 2 must then fail, because a second revert is attempted.

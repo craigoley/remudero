@@ -31,7 +31,7 @@ import { visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk 
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -741,6 +741,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   // in a throwaway cwd so it cannot touch the worktree/diff under review.
   let semantic: (boolean | undefined)[] | undefined;
   let semanticClauses: (string | undefined)[] | undefined;
+  let reviewerUnable: (string | undefined)[] | undefined;
   // W1-T2472: a PLAN-ONLY changeset has no code for this advisory lane to judge, so the spawn is
   // skipped rather than dispatched to discover there is nothing to execute. This does not weaken
   // the gate: `judgeReview` decides a plan-only diff's state on `floorUnmet` (review.ts), and
@@ -910,6 +911,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         semantic = candidateSemantic;
         reviewerFindingText = workerTranscript(reviewer);
         semanticClauses = parseReviewerVerdictClauses(reviewerFindingText, criteria.length);
+        reviewerUnable = parseReviewerUnable(reviewerFindingText, criteria.length);
         reviewerSubtype = reviewer.subtype;
         reviewerExit = reviewer.exit;
         const reviewerFields = workerLedgerFields(reviewer);
@@ -926,6 +928,8 @@ export async function runReview(host: ReviewCommandHost, args: {
           session_id: reviewer.sessionId,
           subtype: reviewer.subtype,
           downgrades: semantic.filter((s) => s === false).length,
+          // W1-T11428: criteria this reviewer could not inspect; W1-T11432 reads the provider beside it.
+          unable: reviewerUnable.filter((u) => u !== undefined).length,
           // W1-T6: the advisory reviewer is a BRAIN-PLANE call — same telemetry
           // shape as a worker call, so ledger lines are queryable uniformly.
           ...reviewerFields,
@@ -1026,7 +1030,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     undefined, undefined, { signal, log }) : undefined;
   phases.lint = systemClock.now();
   const computed = await preparedDecision.judge({
-    ...proofEvidence, planLint, semantic, semanticClauses,
+    ...proofEvidence, planLint, semantic, semanticClauses, reviewerUnable,
     diff, report,
     target: { owner, repo },
     headCheckoutDir: args.headCheckoutDir,

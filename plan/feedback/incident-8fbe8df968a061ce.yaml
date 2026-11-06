@@ -1,0 +1,29 @@
+id: incident-8fbe8df968a061ce
+ts: 2026-11-06T03:17:16.485Z
+raw: >-
+  Incident 8fbe8df968a0: intervention
+  own-red:fix-lane:fix-progress-judgment-due-after-repeated
+
+  First seen: 2026-11-06T03:12:52.553Z
+
+  Last seen: 2026-11-06T03:17:14.511Z
+
+  Count: 4, burn: 4.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#15434@ab3c17ded actor=cao825 cause=own-red:fix-lane:fix-progress-judgment-due-after-repeated — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#8fbe8df968a061cee9f4454c98be3c77da953d4f1d42e78720b8287d7c921074
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
