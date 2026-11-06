@@ -61,7 +61,7 @@ function sweepDeps(ledger: string, armed: number[], arm?: SweepDeps["arm"]): Swe
     log: (step, extra = {}) => appendFileSync(ledger, `${JSON.stringify({
       run_id: "SWEEP-W1-T11445", task_id: "SWEEP", step, ts: new Date(BASE).toISOString(), ...extra,
     })}\n`),
-    arm: arm ?? (async (pr) => { armed.push(pr.prNumber); return "direct-merged"; }),
+    arm: arm ?? (async (pr) => { armed.push(pr.prNumber); return "direct-merged" as const; }),
     close: () => {},
     dispatchFix: () => {},
     escalate: () => {},
@@ -111,7 +111,7 @@ test("W1-T11445 criterion 3: plan merge work stops at the measured interval budg
   const slowArm: SweepDeps["arm"] = async (pr) => {
     armed.push(pr.prNumber);
     await new Promise<void>((resolve) => setTimeout(resolve, 150));
-    return "direct-merged";
+    return "direct-merged" as const;
   };
   await runSweepLightPass([planPr(1144511), planPr(1144512), planPr(1144513)],
     sweepDeps(ledger, armed, slowArm), DEFAULT_SWEEP_POLICY);
