@@ -9510,6 +9510,7 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   "^plan/credit-overrides\\.yaml$",
   "^scripts/lib/ci-dependency-evidence\\.mjs$",
   "^scripts/preflight-author\\.mjs$",
+  "^scripts/native-test-run\\.mjs$",
   "^scripts/calibrate-author-runtime\\.mjs$",
   "^scripts/lib/author-step-capture\\.mjs$",
   "^src/lib/review\\.ts$",

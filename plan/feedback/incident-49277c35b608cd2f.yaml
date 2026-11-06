@@ -1,0 +1,30 @@
+id: incident-49277c35b608cd2f
+ts: 2026-11-06T06:01:05.366Z
+raw: >-
+  Incident 49277c35b608: flow pr-stage-stall:awaiting-review:checks green,
+  remudero-review pending <duration> (< <duration> ceiling) — a review is
+  already in flight, waiting
+
+  First seen: 2026-11-06T05:21:38.958Z
+
+  Last seen: 2026-11-06T05:21:38.958Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=17002 awaiting-review: repeat: "checks green, remudero-review pending <duration> (< <duration> ceiling) — a review is already in flight, waiting" x11
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#49277c35b608cd2f4aaf1981aeeab7d1152b14be036af43fd9e71ef995101629
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
