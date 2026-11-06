@@ -10,13 +10,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
 import { systemClock } from "./clock.js";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
 import { type EnginePinOptions, type EngineRef, type EngineRefreshLag, listEngines, newestCurrentEngine, type NewestEngineOptions, pinEngineForRun, refreshEngineFromCodeTree } from "./engine-tree.js";
 import { childEntryStoreRoot } from "./child-entry-store.js";
-import { repoRoot } from "./repo-location.js";
 import { defaultInstance, type HostMemoryLedgerOptions } from "./host-memory-ledger.js";
 import {
   createTreePeakSampler, openLearnedReservation, type LearnedReservation, type PeakStoreOptions, type TreePeakSampler,
@@ -261,7 +261,7 @@ export function pruneTerminalRunDirs(stateRoot: string, prefix: string, keep: nu
 /** Asks for an engine cut from this process's own code when the newest engine lags main; never awaited by a spawn. */
 export type EngineRefresh = (input: { stateRoot: string; root: string }, lag: EngineRefreshLag, log: Log) => void;
 export const refreshEngineOnLag: EngineRefresh = (input, lag, log) => {
-  void refreshEngineFromCodeTree(repoRoot, input.stateRoot, childEntryStoreRoot(input.root), lag, log);
+  void refreshEngineFromCodeTree(fileURLToPath(new URL("../../", import.meta.url)), input.stateRoot, childEntryStoreRoot(input.root), lag, log);
 };
 function askForCurrentEngine(refresh: EngineRefresh | undefined, input: { stateRoot: string; root: string }, engine: EngineRef | undefined, mainSha: string, log: Log): void {
   if (engine?.sha === mainSha) return;
