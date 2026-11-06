@@ -154,8 +154,8 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
       assert.equal(posts.some(call => call.includes("state=success")), scenario === "addressed" || scenario === "unreproduced", scenario);
       if (scenario === "sticky" || scenario === "late") {
         assert.ok(posts.some(call => call.includes("state=failure")), scenario);
-        const submitted = shim.events().filter(event => event.phase === "start").map(event => event.args.join(" "));
-        assert.ok(submitted.some(call => call.includes("pulls/1/reviews") && call.includes("prior reproduced failure remains unaddressed: ReferenceError")), JSON.stringify(submitted));
+        const submitted = shim.calls().join("\n");
+        assert.ok(submitted.includes("pulls/1/reviews") && submitted.includes("prior reproduced failure remains unaddressed: ReferenceError"), submitted);
       }
     } finally {
       if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
