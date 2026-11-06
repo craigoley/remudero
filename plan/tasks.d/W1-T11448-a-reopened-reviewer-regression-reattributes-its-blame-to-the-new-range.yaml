@@ -10,7 +10,10 @@
   origin: "2026-11-05 ledger: reviewer.healed_tree_unavailable x8 in ~4 h for incident reviewer-regression-8b37a0a1b86b, blaming a 2026-10-20 merge"
   plan_refs: [W1-T10269, W1-T228]
   files: [src/lib/reviewer-health.ts, src/run-task.ts, test/a-reopened-reviewer-regression-reattributes-its-blame.test.ts]
+  priority: 3
   status: queued
+  # backlog gardener: band=3 evidence=01e5282e872c7818
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
     Incident reviewer-regression-8b37a0a1b86b blames 8b37a0a1b8 (#12954, merged 2026-10-20). On
