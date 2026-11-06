@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "2026-11-05 incident: core, the primary instance, ran as shadow from 16:58Z to about 21:07Z and refused every arm and merge with only a quiet ledger row"
   plan_refs: [W1-T11431, W1-T11434, W1-T3596]
-  files: [src/lib/sweep.ts, src/lib/escalate.ts, test/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts, test/a-primary-shadow-alert-closes-on-live-mode.test.ts]
+  files: [src/lib/sweep.ts, src/lib/escalate.ts, test/deploy/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts, test/deploy/a-primary-shadow-alert-closes-on-live-mode.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -37,9 +37,9 @@
     update cadence reuses the escalation module's own.
   acceptance:
     - claim: "A primary instance's first shadow-mode arm or merge refusal opens exactly one escalation naming the instance, selection source and refused PRs; later refusals update that one escalation, and a non-primary shadow instance opens none"
-      proof: "unit test: test/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts"
+      proof: "unit test: test/deploy/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts"
     - claim: "The escalation closes when the primary instance is live again, and a mark-handled acknowledgement silences it only for the current selection digest"
-      proof: "unit test: test/a-primary-shadow-alert-closes-on-live-mode.test.ts"
+      proof: "unit test: test/deploy/a-primary-shadow-alert-closes-on-live-mode.test.ts"
   note: |
     The builder names each criterion test with the marker "W1-T11444 criterion N" so the reviewer can map tests to criteria.
   falsifier: |
