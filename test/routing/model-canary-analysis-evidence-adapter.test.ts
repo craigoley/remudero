@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { createAnalysisEvidenceReader, nativeAnalysisEvidenceWithinBounds } from "#src/lib/model-canary-analysis-evidence-adapter.js";
 import { CanarySlotOwner } from "#src/lib/model-canary-owner.js";
 import { buildCanarySchedule, type CanarySchedulePorts } from "#src/lib/model-canary-schedule.js";
@@ -103,7 +104,8 @@ test("native owner persists a trusted execution interval that the private reader
   const [slot] = buildCanarySchedule("2026-11-06", "native-time-control", cases,
     [{ model: "test-model", route: "test-route", effort: "medium",
       suiteHash: canarySuiteDigest(cases), billing: "subscription" }]).slots;
-  const owner = new CanarySlotOwner(directory);
+  const fixedInstant = "2026-11-06T12:00:00.000Z";
+  const owner = new CanarySlotOwner(directory, fixedClock(Date.parse(fixedInstant)));
   type Outcome = Parameters<CanarySchedulePorts["terminal"]>[1];
   const outcome = { state: "unavailable" as const, reason: "transport-error", trace: [], grade: null,
     error: new Error("not persisted"), run: { id: "native-time-run", caseId: slot.caseId,
@@ -111,6 +113,13 @@ test("native owner persists a trusted execution interval that the private reader
       family: "structured", verified: null, totalDurationMs: 1, attempts: [], outcomeReason: "transport-error" } } as Outcome;
   try {
     assert.equal(owner.claim(slot), "claimed");
+    const startedDb = new DatabaseSync(join(directory, "model-canary-slots.sqlite"), { readOnly: true });
+    try {
+      const startedRow = startedDb.prepare("SELECT phase,receipt FROM canary_slots_v1 WHERE id=?").get(slot.id) as
+        { phase: string; receipt: string | null };
+      assert.equal(startedRow.phase, "started");
+      assert.equal(startedRow.receipt, null);
+    } finally { startedDb.close(); }
     owner.terminal(slot, outcome);
   } finally { owner.close(); }
   try {
@@ -118,8 +127,7 @@ test("native owner persists a trusted execution interval that the private reader
     assert.equal(result.state, "available");
     if (result.state === "available") {
       const interval = result.evidence.receipts[0]!.executionWindow;
-      assert.ok(interval);
-      assert.ok(Date.parse(interval.startedAt) <= Date.parse(interval.completedAt));
+      assert.deepEqual(interval, { startedAt: fixedInstant, completedAt: fixedInstant });
       const db = new DatabaseSync(join(directory, "model-canary-slots.sqlite"), { readOnly: true });
       try {
         const raw = db.prepare("SELECT receipt FROM canary_slots_v1 WHERE id=?").get(slot.id) as { receipt: string };
@@ -131,13 +139,13 @@ test("native owner persists a trusted execution interval that the private reader
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("one-shot coding consumption preserves the owner-generated execution start timestamp", () => {
+test("one-shot coding consumption preserves the legacy receipt shape", () => {
   const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-canary-owner-coding-window-`));
   const cases = commonCanarySuite().filter(item => item.family === "coding").slice(0, 1);
   const [slot] = buildCanarySchedule("2026-11-06", "native-coding-time-control", cases,
     [{ model: "test-model", route: "test-route", effort: "medium",
       suiteHash: canarySuiteDigest(cases), billing: "subscription" }]).slots;
-  const owner = new CanarySlotOwner(directory);
+  const owner = new CanarySlotOwner(directory, fixedClock(Date.parse("2026-11-06T12:00:00.000Z")));
   const input = { runId: "c0044072-86e2-4b85-b871-3735362cb490",
     canaryAttemptId: "d1044072-86e2-4b85-b871-3735362cb491",
     workerSpawnAttemptId: "e2044072-86e2-4b85-b871-3735362cb492", sourceDigest: "a".repeat(64) };
@@ -145,17 +153,15 @@ test("one-shot coding consumption preserves the owner-generated execution start 
     assert.equal(owner.claim(slot), "claimed");
     assert.equal(owner.consumeCodingAttempt(slot, input).state, "consumed");
     assert.equal(owner.consumeCodingAttempt(slot, input).state, "already-consumed");
-  } finally { owner.close(); }
-  try {
     const db = new DatabaseSync(join(directory, "model-canary-slots.sqlite"), { readOnly: true });
     try {
       const row = db.prepare("SELECT receipt FROM canary_slots_v1 WHERE id=?").get(slot.id) as { receipt: string };
       const stored = JSON.parse(row.receipt) as Record<string, unknown>;
+      assert.deepEqual(Object.keys(stored).sort(), ["binding", "version"]);
       assert.equal(stored.version, "canary-coding-consumed-v1");
-      assert.equal(typeof stored.startedAt, "string");
-      assert.ok(Number.isFinite(Date.parse(stored.startedAt as string)));
+      assert.equal("startedAt" in stored, false);
     } finally { db.close(); }
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally { owner.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("coding consumption refuses a malformed owner start receipt", () => {
@@ -174,5 +180,62 @@ test("coding consumption refuses a malformed owner start receipt", () => {
     try { db.prepare("UPDATE canary_slots_v1 SET receipt='not-json' WHERE id=?").run(slot.id); }
     finally { db.close(); }
     assert.equal(owner.consumeCodingAttempt(slot, input).state, "refused");
+  } finally { owner.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("invalid owner start time creates no active slot row", () => {
+  const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-canary-owner-invalid-start-time-`));
+  const cases = commonCanarySuite().slice(0, 1);
+  const [slot] = buildCanarySchedule("2026-11-06", "native-invalid-start-time-control", cases,
+    [{ model: "test-model", route: "test-route", effort: "medium",
+      suiteHash: canarySuiteDigest(cases), billing: "subscription" }]).slots;
+  const clock = { ...fixedClock(Date.parse("2026-11-06T12:00:00.000Z")), iso: () => "not-an-iso" };
+  const owner = new CanarySlotOwner(directory, clock);
+  try {
+    assert.throws(() => owner.claim(slot), /canary-owner-execution-start-invalid/);
+    const db = new DatabaseSync(join(directory, "model-canary-slots.sqlite"), { readOnly: true });
+    try {
+      const row = db.prepare("SELECT phase,receipt FROM canary_slots_v1 WHERE id=?").get(slot.id);
+      assert.equal(row, undefined);
+    } finally { db.close(); }
+  } finally { owner.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("invalid or reversed terminal time leaves the owner claim active for a valid retry", () => {
+  const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-canary-owner-reversed-window-`));
+  const cases = commonCanarySuite().slice(0, 1);
+  const [slot] = buildCanarySchedule("2026-11-06", "native-reversed-time-control", cases,
+    [{ model: "test-model", route: "test-route", effort: "medium",
+      suiteHash: canarySuiteDigest(cases), billing: "subscription" }]).slots;
+  const instants = ["2026-11-06T12:00:02.000Z", "not-an-iso", "2026-11-06T12:00:01.000Z",
+    "2026-11-06T12:00:03.000Z"];
+  let instantIndex = 0;
+  const clock = { ...fixedClock(Date.parse(instants[0]!)), iso: () => instants[instantIndex++]! };
+  const owner = new CanarySlotOwner(directory, clock);
+  type Outcome = Parameters<CanarySchedulePorts["terminal"]>[1];
+  const outcome = { state: "unavailable" as const, reason: "transport-error", trace: [], grade: null,
+    error: new Error("not persisted"), run: { id: "native-reversed-time-run", caseId: slot.caseId,
+      suiteHash: slot.pin.suiteHash, model: slot.pin.model, route: slot.pin.route, effort: slot.pin.effort,
+      family: "structured", verified: null, totalDurationMs: 1, attempts: [], outcomeReason: "transport-error" } } as Outcome;
+  try {
+    assert.equal(owner.claim(slot), "claimed");
+    assert.throws(() => owner.terminal(slot, outcome), /canary-owner-execution-window-invalid/);
+    const db = new DatabaseSync(join(directory, "model-canary-slots.sqlite"), { readOnly: true });
+    try {
+      const started = db.prepare("SELECT phase,receipt FROM canary_slots_v1 WHERE id=?").get(slot.id) as
+        { phase: string; receipt: string | null };
+      assert.equal(started.phase, "started");
+      assert.equal(started.receipt, null);
+      assert.throws(() => owner.terminal(slot, outcome), /canary-owner-execution-window-invalid/);
+      const stillStarted = db.prepare("SELECT phase,receipt FROM canary_slots_v1 WHERE id=?").get(slot.id) as
+        { phase: string; receipt: string | null };
+      assert.equal(stillStarted.phase, "started");
+      assert.equal(stillStarted.receipt, null);
+    } finally { db.close(); }
+    owner.terminal(slot, outcome);
+    const result = createAnalysisEvidenceReader(directory)();
+    assert.equal(result.state, "available");
+    if (result.state === "available") assert.deepEqual(result.evidence.receipts[0]!.executionWindow,
+      { startedAt: instants[0], completedAt: instants[3] });
   } finally { owner.close(); rmSync(directory, { recursive: true, force: true }); }
 });

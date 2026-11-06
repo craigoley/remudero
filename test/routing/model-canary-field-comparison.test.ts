@@ -55,6 +55,14 @@ test("field comparison withholds attribution for mismatched serving identity or 
   assert.equal(result.unmatched[0]!.reason, "serving-identity-mismatch");
 });
 
+test("field comparison identifies incomplete serving identity when its window is verified", () => {
+  const result = compareCanaryToFieldTrials({ benchmarkCases: [benchmark("run-1", "case-1")],
+    fieldTrials: [field({ identity: { ...identity, route: null } })] });
+  assert.equal(result.comparisons.length, 0);
+  assert.equal(result.unmatched.length, 1);
+  assert.equal(result.unmatched[0]!.reason, "serving-identity-incomplete");
+});
+
 test("field comparison preserves observational and randomized design provenance", () => {
   const randomized = field({ id: "registered-epoch-1", design: "registered-randomized", assignmentAudit: "pass",
     randomizationUnit: "task", analysis: "intention-to-treat",

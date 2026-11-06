@@ -8,7 +8,7 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { createNativeFieldEvidenceReader } from "#src/lib/model-canary-native-field-evidence.js";
 import { compareCanaryToFieldTrials } from "#src/lib/model-canary-field-comparison.js";
 
-test("native field reader preserves observational labels and withholds missing serving identity", () => {
+test("native field reader withholds missing serving identity and an unverified observation window", () => {
   const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-field-`));
   try {
     chmodSync(directory, 0o700);
@@ -46,7 +46,7 @@ test("native field reader preserves observational labels and withholds missing s
       }], fieldTrials: result.evidence.fieldTrials });
       assert.equal(comparison.comparisons.length, 0);
       assert.equal(comparison.unmatched.length, 1);
-      assert.equal(comparison.unmatched[0]!.reason, "serving-identity-incomplete");
+      assert.equal(comparison.unmatched[0]!.reason, "observation-window-unverified");
     }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

@@ -2,6 +2,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { assertExistingCanaryOwnerV1 } from "./model-canary-owner.js";
+import { fixedClock } from "./clock.js";
 import type { CanaryRun } from "./model-canary-metrics.js";
 import type { CanarySlot } from "./model-canary-schedule.js";
 
@@ -39,7 +40,7 @@ function projectCanaryAnalysisReceipt(raw: unknown): NativeAnalysisReceiptV1 {
     ? { passed: gradeRaw.passed, reason: gradeRaw.reason, schemaValid: gradeRaw.schemaValid } : null;
   if (gradeRaw !== null && grade === null) throw new Error("native-analysis-grade-invalid");
   const timestamp = (value: unknown): value is string => typeof value === "string"
-    && Number.isFinite(Date.parse(value)) && new Date(Date.parse(value)).toISOString() === value;
+    && Number.isFinite(Date.parse(value)) && fixedClock(Date.parse(value)).iso() === value;
   let executionWindow: NativeAnalysisReceiptV1["executionWindow"] = null;
   if (run.executionWindow !== undefined) {
     if (!canaryAnalysisRecord(run.executionWindow) || Object.keys(run.executionWindow).sort().join("\0") !== "completedAt\0startedAt"
