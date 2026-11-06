@@ -1,0 +1,46 @@
+- id: W1-T11459
+  title: The daemon's review-worktree git (materialize, temporary index tree, stranded-worktree sweep) runs through the async git path, off the event loop
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high
+  band_meaning: span
+  origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
+  plan_refs: [W1-T11341, W1-T10068, W1-T3378, W1-T11369]
+  files: [src/lib/composition-root.ts, src/run-task.ts, src/lib/review-worktree-reclaim.ts, test/review/the-daemon-review-worktree-git-runs-off-the-loop.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T11341 (#16852) moved the review base-proof git and the boot tracker off the loop. The
+    2026-11-06 core CPU profile still shows three review-worktree paths running git through
+    execFileSync on the daemon's main thread, inside loop holds:
+    - materializeReviewWorktree (src/run-task.ts ~:11399, wired through realReviewWorktree in
+      src/lib/composition-root.ts ~:40, whose exec defaults to execFileSync), called by
+      reviewCommand: 8.9 s in window 3;
+    - temporaryIndexTree (src/run-task.ts ~:30537) through hostWorktreeGit: 7.7 s in window 1;
+    - sweepStrandedReviewWorktrees (src/lib/review-worktree-reclaim.ts ~:115) through
+      worktreeRemove / hostWorktreeGit: 7.2 s in window 1.
+    hostWorktreeGitAsync already exists (W1-T11341 used it).
+  design: |
+    Decide with evidence; record it in the PR body under "## Decisions".
+    - Each of the three paths awaits hostWorktreeGitAsync (or the async exec realReviewWorktree can
+      be given) instead of the sync form, when reached from the daemon's review lane or sweep.
+    - CLI one-shot callers may keep the sync form, if splitting the path is cleaner than making
+      the CLI async.
+    - Preserve every existing ordering guarantee. A worktree is fully materialized before review
+      reads it, and a removal finishes before its path is reused. Prove each guarantee with a test.
+    - No new timeouts or constants; reuse the async path's existing bounds.
+  acceptance:
+    - claim: "On the daemon path, materializeReviewWorktree, temporaryIndexTree and sweepStrandedReviewWorktrees call no synchronous git, and a timer scheduled before each one fires while its git is still running"
+      proof: "grep: W1-T11459 criterion 1 in test/review/the-daemon-review-worktree-git-runs-off-the-loop.test.ts"
+    - claim: "A review still reads a fully materialized worktree, and a stranded-worktree removal completes before the path is reused"
+      proof: "grep: W1-T11459 criterion 2 in test/review/the-daemon-review-worktree-git-runs-off-the-loop.test.ts"
+  note: |
+    Sol-level: three call chains, each with ordering assumptions. Copy W1-T11341's test technique
+    (a slow fake git, plus a timer that must fire during it). The builder names each criterion test
+    with the marker "W1-T11459 criterion N".
+  falsifier: |
+    Restore any one path to its sync exec. Criterion 1 must then fail for that path, because the timer
+    cannot fire while the sync git holds the loop.
