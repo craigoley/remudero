@@ -66,13 +66,13 @@
     budget and spent time, or says the measurement was unavailable; never report a guessed interval.
   acceptance:
     - claim: "Each light pass writes a correlated start and completion measurement with one unique pass_id, its light_pass_scope, a ledger start timestamp and a monotonic elapsed_ms. Only completed matching pairs of the same scope contribute positive start-to-start intervals. The proving test title includes the exact marker W1-T11445 criterion 1: light passes emit paired measurements and reject incomplete intervals."
-      proof: "unit test: test/sweep/light-pass-merge-budget-uses-measured-interval.test.ts"
+      proof: "unit test: W1-T11445 criterion 1: light passes emit paired measurements and reject incomplete intervals"
     - claim: "Each attempted plan-PR direct merge records its measured monotonic plan_merge_elapsed_ms, pass_id and concrete outcome on that PR's sweep.disposed row, including the unchanged W1-T5748 safety and W1-T4405 queue paths. The proving test title includes the exact marker W1-T11445 criterion 2: plan merge attempts record elapsed time and outcome."
-      proof: "unit test: test/sweep/light-pass-merge-budget-uses-measured-interval.test.ts"
+      proof: "unit test: W1-T11445 criterion 2: plan merge attempts record elapsed time and outcome"
     - claim: "With three valid same-scope light-pass intervals, the claim owner merges ready never-held plan PRs sequentially and stops before another attempt when measured plan-merge time spent reaches the median interval budget; each deferral names the measured budget and spent time. The proving test title includes the exact marker W1-T11445 criterion 3: plan merge work stops at the measured interval budget."
-      proof: "unit test: test/sweep/light-pass-merge-budget-uses-measured-interval.test.ts"
+      proof: "unit test: W1-T11445 criterion 3: plan merge work stops at the measured interval budget"
     - claim: "With fewer than three valid intervals, malformed or incomplete measurements, or no valid merge duration for this pass, the one-never-held-plan-PR bound remains; held plan PR ordering, overlapping-pass exclusion and code-PR deferral are unchanged. The proving test title includes the exact marker W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bound."
-      proof: "unit test: test/sweep/light-pass-merge-budget-uses-measured-interval.test.ts"
+      proof: "unit test: W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bound"
   falsifier: |
     Remove the pass correlation or the monotonic merge-duration measurement while leaving the
     time-derived admission in place. The measurement criteria must fail, and the implementation must
