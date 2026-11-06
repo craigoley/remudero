@@ -27,3 +27,11 @@
     daemons now get small or no ceilings under R1. The operator's ruling covers the 32 GiB host,
     but they may want to confirm the small-host outcome. — from W1-T11130 (run
     DAEMON-1793737148911, https://github.com/craigoley/remudero/pull/16468)
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares deploy/resource-policy.sh, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-06T14:30:15.104Z"
+    pin: "fcf662344b76b1b402da999797e937349b0e119dbbffef3ab05b555cce1b59d5"
