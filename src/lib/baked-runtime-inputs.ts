@@ -18,6 +18,7 @@ export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
   "src/lib/instance-registry-selection.ts",
   "src/lib/instance-registry.ts",
   "src/lib/ledger-carry.ts",
+  "src/lib/ledger-key-manifest.ts",
   "src/lib/ledger-path.ts",
   "src/lib/ledger-union.ts",
   "src/lib/ledger.ts",

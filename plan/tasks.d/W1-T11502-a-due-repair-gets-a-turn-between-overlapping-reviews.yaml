@@ -1,0 +1,58 @@
+- id: W1-T11502
+  title: A due repair gets a serialized turn between overlapping review passes
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator H4-B investigation 2026-11-06; PR16962 repair starvation after 05:33Z"
+  plan_refs: [W1-T4732, W1-T9569, W1-T9808, W1-T11027]
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, src/cli/commands/sweep.ts, test/daemon/a-due-repair-gets-a-turn-between-overlapping-reviews.test.ts]
+  priority: 1
+  status: queued
+  attempts: 0
+  rationale: |
+    Main a9eb76ff103a src/lib/daemon.ts:2344 makes every pass reviewOnly when ANY active pass
+    or in-flight review exists. W1-T4732 correctly allows a second review pass while the first
+    waits. Consecutive reviews can keep that global condition true indefinitely; no pending repair
+    ownership or fairness debt reserves the next ordinary pass. lightPassFixAdmitted at :2141
+    refuses every reviewOnly pass, and sweep.ts:14245 names the interphase stand-down.
+    Named archive06:45 confirms PR16962 interphase deferrals at06:02:13 through06:13:04,
+    with streaks8-16; progress judgment said continue at06:08:39 and06:12:31. The lane DID
+    reopen at06:16:24 and a detached fix was active by06:21. Earlier05:37-05:57 holds were
+    metadata/human-escalation holds, not continuous interphase starvation. This task addresses
+    the observed repeated scheduling delay and its no-fair-handoff mechanism, not those holds.
+    W1-T11027 covers the focus gardener's FOCUS signal only and expressly defers without focus;
+    W1-T4732 protects review responsiveness but authorizes no fair repair handoff. Neither covers this.
+  design: |
+    Preserve review overlap and its existing width. Retain a due-repair request from a light
+    disposition as scheduling debt, bound to the observed PR/head and ordinary repair owner.
+    Arrange a serialized repair-capable pass after currently admitted overlapping passes settle,
+    before admitting another generation of overlapping reviews indefinitely. A fair handoff or
+    shared admission-owner queue is preferable to dispatching concurrent repair sweeps. Re-read
+    facts and use the exact ordinary plan-repair/fix/conflict admission path when the turn arrives.
+    Derive readiness from completion and pending work, not fixed timers, streaks or magic counts.
+    Preserve new-green review wake debt and release repair debt when the head settles or changes.
+    Pause, boot, drain, freshness latch, capacity, per-head mutex, strikes, progress judgment and
+    escalation holds remain authoritative. Do not open repair during pause/drain/boot or simply
+    set reviewOnly false on an overlapping pass. Record request, handoff and refusal reasons.
+    Use an in-process controllable completion fixture: an unrelated review remains in flight,
+    review arrivals continue, a due plan repair is observed, incumbents settle, and the repair
+    gets the next permitted turn without waiting for all future review arrivals to stop.
+  acceptance:
+    - claim: "Under continuing unrelated review arrivals a due plan repair gets a serialized ordinary repair turn after incumbent passes settle; every ordinary repair gate and exact-head ownership is applied"
+      proof: "grep: W1-T11502 criterion 1 in test/daemon/a-due-repair-gets-a-turn-between-overlapping-reviews.test.ts"
+    - claim: "Review overlap remains bounded, new-green wake debt survives, no duplicate repair starts, and changed-head or settled requests are discarded with an explicit reason"
+      proof: "grep: W1-T11502 criterion 2 in test/daemon/a-due-repair-gets-a-turn-between-overlapping-reviews.test.ts"
+    - claim: "Pause, boot, drain, freshness, capacity and progress refusals still hold repairs and emit their actual reason rather than claiming a dispatch"
+      proof: "grep: W1-T11502 criterion 3 in test/daemon/a-due-repair-gets-a-turn-between-overlapping-reviews.test.ts"
+  note: |
+    H4-B. Computed test/daemon MEDIUM from daemon/sweep imports. No concurrent live PR repair,
+    provider invocation, new timer or capacity change in qualification. Retain the H4 bounded
+    ledger evidence and open-head census; the active PR16962 owner keeps its repair authority.
+  falsifier: |
+    Remove the retained request or fair handoff: continuing reviews again starve the fixture's
+    repair and criterion 1 fails without a wall-clock sleep. Remove a stale-head/pause gate or
+    ownership check and the corresponding negative control fails criteria 2 or 3.
