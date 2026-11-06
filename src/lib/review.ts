@@ -7,9 +7,10 @@ import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
-import { basenameResolutionNote, resolveTestPath, type TestPathResolution } from "./test-path-resolver.js";
+import { basenameResolutionNote, resolveTestPath, type TestPathResolution, type TestPathResolverGit } from "./test-path-resolver.js";
 // Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
 export { resolveTestPath };
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -28,7 +29,7 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
+import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, rotationStampIso, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { formatTail } from "./proofExecutor.js";
@@ -38,6 +39,7 @@ import { createProofCache, ProofCacheUnavailableError, type ProofCache, type Pro
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { configuredDependencySeedRoot } from "./dependency-seeds.js";
+import { proofTestRunnerArgs } from "./test-run-timeout.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
@@ -238,6 +240,12 @@ export interface ReviewDecisionTerminal {
   evaluatorProvenance: ReviewEvaluatorProvenance;
 }
 
+function isReviewDecisionTerminalRow(line: Record<string, unknown>, taskId: string, prUrl: string, digest: string): boolean {
+  if (line.step !== "review.posted" || !reviewRowNamesPr(line, taskId, prUrl) || line.review_decision_digest !== digest) return false;
+  const verdict = line.decision_verdict as ReviewVerdict | undefined;
+  return !!verdict && (verdict.state === "success" || verdict.state === "failure") && Array.isArray(verdict.criteria);
+}
+
 export function lastReviewDecisionTerminal(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -246,9 +254,8 @@ export function lastReviewDecisionTerminal(
 ): ReviewDecisionTerminal | undefined {
   let terminal: ReviewDecisionTerminal | undefined;
   for (const line of lines) {
-    if (line.step !== "review.posted" || !reviewRowNamesPr(line, taskId, prUrl) || line.review_decision_digest !== digest) continue;
-    const verdict = line.decision_verdict as ReviewVerdict | undefined;
-    if (!verdict || (verdict.state !== "success" && verdict.state !== "failure") || !Array.isArray(verdict.criteria)) continue;
+    if (!isReviewDecisionTerminalRow(line, taskId, prUrl, digest)) continue;
+    const verdict = line.decision_verdict as ReviewVerdict;
     terminal = {
       state: verdict.state,
       verdict,
@@ -282,6 +289,167 @@ function isReopenableDegradedTerminal(
   return hasHeadCheckout && terminal.verdict.capped && terminal.verdict.keywordOnly;
 }
 
+/** W1-T11390: an `admitted` row is the only bound; a run that dies stays consumed. */
+const PLAN_LINT_RETRY_STEP = "review.plan_lint_retry";
+const PLAN_LINT_RETRY_REASON_MAX = 300;
+const PLAN_LINT_NO_SUMMARY_REASON = /^lint-plan exited \d+ with no summary(?:; it printed: [\s\S]*)?$/;
+
+/** `checks` excludes `remudero-review`, the failure being re-evaluated. */
+interface PlanLintRetryObservation {
+  headSha: string;
+  mergeBaseSha: string;
+  baseRef: string;
+  checks: { headSha: string; fresh: boolean; complete: boolean; passing: boolean };
+}
+type PlanLintRetryObserver = () => PlanLintRetryObservation | Promise<PlanLintRetryObservation>;
+type ReviewPublisherReaders = Pick<PostReviewStatusGuardedOpts, "owner" | "repo" | "fetchPublisher" | "readRequiredContexts">;
+
+interface PlanLintRetryRequest extends ReviewPublisherReaders {
+  attemptId: string;
+  runId: string;
+  headSha: string;
+  mergeBaseSha: string;
+  observe: PlanLintRetryObserver;
+  clock?: Clock;
+  assessPendingOwner?: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment;
+}
+
+interface PlanLintRetryIdentity {
+  runId: string;
+  taskId: string;
+  attemptId: string;
+  prUrl?: string;
+  headSha: string;
+  mergeBaseSha?: unknown;
+  digest?: string;
+  priorRunId?: unknown;
+}
+
+function appendPlanLintRetryRow(
+  ledgerPath: string,
+  id: PlanLintRetryIdentity,
+  outcome: "admitted" | "refused" | "incomplete" | "published" | "post_failed",
+  reason?: string,
+): void {
+  appendLedger(ledgerPath, {
+    run_id: id.runId, task_id: id.taskId, step: PLAN_LINT_RETRY_STEP, attempt_id: id.attemptId, pr_url: id.prUrl,
+    head_sha: id.headSha, merge_base_sha: id.mergeBaseSha, review_decision_digest: id.digest,
+    prior_run_id: id.priorRunId, outcome,
+    ...(reason !== undefined ? { reason: reason.slice(0, PLAN_LINT_RETRY_REASON_MAX) } : {}),
+  });
+}
+
+/** Whole corpus: this step rotates away while a replay keeps its terminal row live. */
+async function readPlanLintRetryRows(ledgerPath: string): Promise<Array<Record<string, unknown>>> {
+  const read = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { step: PLAN_LINT_RETRY_STEP, refuseIncomplete: true });
+  if (!read.ok) throw new Error(`ledger unreadable: ${read.unread.join(", ")}`);
+  return read.rawLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** judgeReview renders exactly planLintRefusalText only when nothing else failed. */
+function isPlanLintRetryEligible(terminal: ReviewDecisionTerminal): boolean {
+  const { state, verdict } = terminal;
+  const lint: unknown = verdict.planLint;
+  if (state !== "failure" || verdict.planOnly !== true || verdict.capped !== false || verdict.keywordOnly !== false) return false;
+  if (typeof lint !== "object" || lint === null) return false;
+  const { ran, reason } = lint as { ran?: unknown; reason?: unknown };
+  return ran === false && typeof reason === "string" && PLAN_LINT_NO_SUMMARY_REASON.test(reason) &&
+    verdict.summary === planLintRefusalText({ ran, reason });
+}
+
+function foreignPendingClaim(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  prUrl: string,
+  retry: PlanLintRetryRequest,
+): string | undefined {
+  const now = (retry.clock ?? systemClock).now();
+  const assess = retry.assessPendingOwner ??
+    ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
+  for (const row of rows) {
+    if (row.step !== "review.pending_posted" || !reviewRowNamesPr(row, taskId, prUrl) || row.run_id === retry.runId) continue;
+    const record = pendingReviewStatusRecord(row);
+    const ageMs = now - Date.parse(record?.postedAt ?? "");
+    if (!record || Number.isNaN(ageMs) || (ageMs < REVIEW_LOCK_TTL_MS && assess(record) !== "dead")) return String(row.run_id);
+  }
+  return undefined;
+}
+
+async function planLintRetryPublisherRefusal(publisher: ReviewPublisherReaders, baseRef: string): Promise<string | undefined> {
+  if (typeof baseRef !== "string" || baseRef.length === 0) return "the PR's base branch is unreadable";
+  const { canPublish, evidence } = await replayPublisher(publisher, { baseRef }, undefined);
+  if (evidence.requiredAppId === null) return `remudero-review has no pinned App id on ${baseRef}`;
+  return canPublish ? undefined : `the current credential cannot publish as App ${evidence.requiredAppId}`;
+}
+
+async function planLintRetryRefusal(
+  opts: { ledgerPath: string; taskId: string; prUrl: string; digest: string; headCheckoutDir?: string },
+  retry: PlanLintRetryRequest,
+  terminal: ReviewDecisionTerminal,
+  terminalRow: Record<string, unknown>,
+  afterTerminal: ReadonlyArray<Record<string, unknown>>,
+): Promise<string | undefined> {
+  try {
+    if (!isPlanLintRetryEligible(terminal)) return "the terminal is not a lone lint-plan failure with no summary";
+    if (terminalRow.head_sha !== retry.headSha) return `the terminal judged head ${String(terminalRow.head_sha)}, not the requested head`;
+    const recordedBases = [terminalRow.merge_base_sha, terminal.verdict.mergeBaseSha].filter((base) => base !== undefined);
+    if (recordedBases.length === 0) return "the terminal recorded no merge base";
+    if (recordedBases.some((base) => base !== retry.mergeBaseSha)) return "the terminal judged a different merge base";
+    if (opts.headCheckoutDir === undefined) return "no PR-head checkout is materialized";
+    const foreignRun = foreignPendingClaim(afterTerminal, opts.taskId, opts.prUrl, retry);
+    if (foreignRun !== undefined) return `run ${foreignRun} holds a live pending claim on this PR`;
+    const observed = await retry.observe();
+    if (observed.headSha !== retry.headSha) return `the PR head moved to ${observed.headSha}`;
+    if (observed.mergeBaseSha !== retry.mergeBaseSha) return `the merge base moved to ${observed.mergeBaseSha}`;
+    const { checks } = observed;
+    if (checks.headSha !== retry.headSha || checks.fresh !== true || checks.complete !== true || checks.passing !== true) {
+      return "the head's check set is not fresh, complete and passing";
+    }
+    const checkoutHead = (await hostWorktreeGitAsync(opts.headCheckoutDir, ["rev-parse", "HEAD"], { timeout: 15_000 })).trim();
+    if (checkoutHead !== retry.headSha) return `the checkout is at ${checkoutHead}, not the requested head`;
+    const publisherRefusal = await planLintRetryPublisherRefusal(retry, observed.baseRef);
+    if (publisherRefusal !== undefined) return publisherRefusal;
+    const consumed = (await readPlanLintRetryRows(opts.ledgerPath)).some((row) => row.outcome === "admitted" &&
+      row.pr_url === opts.prUrl && row.head_sha === retry.headSha && row.merge_base_sha === retry.mergeBaseSha &&
+      row.review_decision_digest === opts.digest);
+    return consumed ? "this PR, head, base and digest already spent their retry" : undefined;
+  } catch (error) {
+    return `a retry read failed: ${String(error)}`;
+  }
+}
+
+async function admitPlanLintRetry(
+  opts: Parameters<typeof planLintRetryRefusal>[0],
+  retry: PlanLintRetryRequest,
+  handle: ReviewStatusLockHandle,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  terminal: ReviewDecisionTerminal,
+): Promise<ReviewDecisionClaim> {
+  const terminalIndex = lines.findLastIndex((line) => isReviewDecisionTerminalRow(line, opts.taskId, opts.prUrl, opts.digest));
+  const terminalRow = lines[terminalIndex]!;
+  let admitted = false;
+  try {
+    const refusal = await planLintRetryRefusal(opts, retry, terminal, terminalRow, lines.slice(terminalIndex + 1));
+    appendPlanLintRetryRow(opts.ledgerPath, {
+      ...retryRowIdentity(opts, retry), priorRunId: terminalRow.run_id,
+    }, refusal === undefined ? "admitted" : "refused", refusal);
+    admitted = refusal === undefined;
+  } finally {
+    if (!admitted) handle.release();
+  }
+  return admitted ? { kind: "owned", release: () => handle.release(), reopenedDegradedTerminal: true } : { kind: "replay", terminal };
+}
+
+function retryRowIdentity(
+  opts: { taskId: string; prUrl: string; digest: string },
+  retry: PlanLintRetryRequest,
+): PlanLintRetryIdentity {
+  return {
+    runId: retry.runId, taskId: opts.taskId, attemptId: retry.attemptId, prUrl: opts.prUrl,
+    headSha: retry.headSha, mergeBaseSha: retry.mergeBaseSha, digest: opts.digest,
+  };
+}
+
 /** Acquire-before-read closes the terminal-check/create race; a live owner makes the loser stand down. */
 export async function claimReviewDecision(opts: {
   ledgerPath: string;
@@ -291,23 +459,32 @@ export async function claimReviewDecision(opts: {
   /** A successfully materialized checkout at the exact PR head; absent means replay remains final. */
   headCheckoutDir?: string;
   lockOpts?: AcquireReviewStatusLockOpts;
+  /** W1-T11390: an explicit request; absent, nothing below changes. */
+  planLintRetry?: PlanLintRetryRequest;
 }): Promise<ReviewDecisionClaim> {
+  const retry = opts.planLintRetry;
   const lockPath = join(dirname(opts.ledgerPath), "review-decision-claims", `${opts.digest.replace(":", "-")}.lock`);
   let handle: ReviewStatusLockHandle;
   try {
     handle = await acquireReviewStatusLock(lockPath, { timeoutMs: 0, ...opts.lockOpts });
   } catch (error) {
-    if (error instanceof ReviewStatusLockTimeoutError) return { kind: "in_flight" };
+    if (error instanceof ReviewStatusLockTimeoutError) {
+      if (retry) appendPlanLintRetryRow(opts.ledgerPath, retryRowIdentity(opts, retry), "refused", "another run holds the decision lock");
+      return { kind: "in_flight" };
+    }
     throw error;
   }
-  const terminal = lastReviewDecisionTerminal(readLiveLedgerRecords(opts.ledgerPath), opts.taskId, opts.prUrl, opts.digest);
+  const lines = readLiveLedgerRecords(opts.ledgerPath);
+  const terminal = lastReviewDecisionTerminal(lines, opts.taskId, opts.prUrl, opts.digest);
   if (terminal) {
+    if (retry) return await admitPlanLintRetry(opts, retry, handle, lines, terminal);
     if (isReopenableDegradedTerminal(terminal, opts.headCheckoutDir !== undefined)) {
       return { kind: "owned", release: () => handle.release(), reopenedDegradedTerminal: true };
     }
     handle.release();
     return { kind: "replay", terminal };
   }
+  if (retry) appendPlanLintRetryRow(opts.ledgerPath, retryRowIdentity(opts, retry), "refused", "no terminal exists for this decision");
   return { kind: "owned", release: () => handle.release() };
 }
 
@@ -504,6 +681,7 @@ export interface CriterionVerdict {
   proof_exec: ProofExecOutcome;
   /** The bounded runner diagnostic when `proof_exec` is `cannot_evaluate`. */
   loadError?: string;
+  reviewerUnavailable?: string;
   /** Host load at the start and end of a proof that did not pass (W1-T11132): the sweep's re-review reads it. */
   load?: ProofLoadRecord;
   cause?: "promise-harvest-incomplete";
@@ -595,6 +773,7 @@ export interface ReviewEvidence {
    *  parseReviewerVerdictClauses}. Index-aligned, read ONLY where `semantic[i] === false`, and never a second reviewer
    *  call: captured off the SAME transcript {@link parseReviewerVerdicts} already parses. */
   semanticClauses?: (string | undefined)[];
+  reviewerUnable?: (string | undefined)[];
   /** The checkout whitelisted proofs execute in — MUST be the PR HEAD sha, NEVER the operator's working checkout (HEAD
    *  DISCIPLINE, W1-T65). Absent ⇒ execution is skipped and the keyword floor is byte-identical to pre-W1-T65. */
   headCheckoutDir?: string;
@@ -1794,12 +1973,13 @@ export interface ResolvedProofText {
 export function resolveProofTestPath(
   proof: string,
   root: string,
-  opts: { tree?: string; target?: SuiteRegistryTarget } = {},
+  opts: { tree?: string; target?: SuiteRegistryTarget; git?: TestPathResolverGit } = {},
 ): ResolvedProofText {
   const w = parseWhitelistedProof(proof, opts.target);
   const cited = w ? citedTestPath(w) : undefined;
   if (cited === undefined) return { proof };
-  const resolution = resolveTestPath(cited, { root, ...(opts.tree === undefined ? {} : { tree: opts.tree }) });
+  // W1-T11341: an awaited caller hands the resolver its git answers, so the base tree is never read synchronously on the loop.
+  const resolution = resolveTestPath(cited, { root, ...(opts.tree === undefined ? {} : { tree: opts.tree }), ...(opts.git ? { git: opts.git } : {}) });
   if (!("path" in resolution) || resolution.how !== "basename") return { proof, cited, resolution };
   const at = proof.lastIndexOf(cited);
   const rewritten = proof.slice(0, at) + resolution.path + proof.slice(at + cited.length);
@@ -3354,10 +3534,15 @@ function loadProofJudge(): ProofJudge {
 }
 
 /** `args` with the judge's inline tally reporter, for a node `--test` proof; any other argv unchanged. Idempotent. */
-function withProofJudge(whitelisted: WhitelistedProof, args: readonly string[]): readonly string[] {
+function withProofJudge(whitelisted: WhitelistedProof, args: readonly string[], cwd: string,
+  resolvedFiles?: readonly string[]): readonly string[] {
   if (whitelisted.kind !== "test" || whitelisted.runner === "vitest" || !args.includes("--test")) return args;
   const judge = loadProofJudge();
-  return judge.hasInlineJudge(args) ? args : judge.judgedNodeTestArgs(args, judge.inlineJudgedArgs());
+  const judged = judge.hasInlineJudge(args) ? [...args] : judge.judgedNodeTestArgs(args, judge.inlineJudgedArgs());
+  const patternAt = judged.indexOf("--test-name-pattern");
+  const fileArgs = patternAt < 0 ? judged : [...judged.slice(0, patternAt), ...judged.slice(patternAt + 2)];
+  const files = resolvedFiles?.length ? resolvedFiles : judge.testFilesInArgv(fileArgs, cwd);
+  return proofTestRunnerArgs(judged, cwd, files);
 }
 
 /** `args` without {@link withProofJudge}'s two flags (the async executor hands the sync one an already-judged argv). */
@@ -3447,7 +3632,7 @@ export function execWhitelistedProof(
   }
   // The excerpt names the proof's own argv: the judge's inline reporter is ~2 KB of base64 that reproduces nothing.
   const shownArgs = withoutProofJudge(args);
-  args = withProofJudge(whitelisted, args);
+  args = withProofJudge(whitelisted, args, cwd, preflightFiles);
   delete whitelisted.failureOutput;
   delete whitelisted.failureTail;
   // A replayed (async) run was already spawned with its own owned cache, released and recorded by that caller.
@@ -3625,7 +3810,7 @@ export async function execWhitelistedProofAsync(
     assertGrepTargetsInsideCheckout(args, cwd);
     assertGrepTargetIsFile(args, cwd);
   }
-  args = withProofJudge(whitelisted, args);
+  args = withProofJudge(whitelisted, args, cwd, preflightFiles);
   const replayArgs = args;
   delete whitelisted.proofCacheRelease;
   const cache = ownedVitestCache(whitelisted, cwd, args);
@@ -4178,24 +4363,29 @@ export function judgeCriterion(
   /** A syntactically valid implementation-worker refusal. It is advisory evidence with one
    * deterministic consequence: the worker may make its own criterion fail, never pass. */
   refusal?: CriterionRefusal,
+  reviewerUnable?: string,
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
+  const reviewerUnavailable = reviewerUnable !== undefined && semantic !== false
+    ? (reviewerUnable || "the reviewer gave no reason") : undefined;
+  const unable = (v: CriterionVerdict): CriterionVerdict => reviewerUnavailable === undefined ? v
+    : { ...v, reason: `${v.reason} — NOTE: reviewer could not inspect this proof (UNABLE): ${reviewerUnavailable}`, reviewerUnavailable };
 
   // ARCHITECT-ONLY `satisfied_by`: a criterion already satisfied by an EARLIER PR is MET, cited to that PR. The
   // reviewer judges diff and report, never repo state, so without this an earlier-PR criterion is permanently
   // unsatisfiable by a later one. Setting it is a human act in a plan PR.
   if (criterion.satisfied_by) {
-    return {
+    return unable({
       ...base,
       met: true,
       reason: `satisfied by ${criterion.satisfied_by} (prior merge)`,
       proof_exec: "not_executable",
       holdout: !!criterion.holdout,
-    };
+    });
   }
 
   if (refusal) {
-    return {
+    return unable({
       ...base,
       met: false,
       floorMet: false,
@@ -4203,7 +4393,7 @@ export function judgeCriterion(
       proof_exec: "not_executable",
       holdout: !!criterion.holdout,
       refusal,
-    };
+    });
   }
 
   // R-15: `floorTokens` is ALWAYS `reportTokens`. No arm lets the floor read the criterion it is judging — that is
@@ -4575,6 +4765,9 @@ export function judgeCriterion(
   // and can never rescue an unpasted or executed-fail proof. W1-T2263: APPEND to the floor's accumulated `reason`,
   // never replace it — a bare overwrite threw away everything earlier branches built, in the one branch where an
   // author most needs to know what was weighed. A bounded `semanticClause` rides after the downgrade note.
+  if (reviewerUnavailable !== undefined) {
+    reason = `${reason} — NOTE: reviewer could not inspect this proof (UNABLE): ${reviewerUnavailable}`;
+  }
   if (semantic === false && met) {
     const downgradeNote = "reviewer judged the proof non-responsive (semantic downgrade)";
     // An UNEXPLAINED downgrade cannot outweigh a proof this run watched execute and pass. `reviewerVerdictContract`
@@ -4595,6 +4788,7 @@ export function judgeCriterion(
     ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}),
     ...(proofLoad !== undefined ? { load: proofLoad } : {}),
     ...(clauseChars !== undefined ? { clauseChars } : {}),
+    ...(reviewerUnavailable !== undefined ? { reviewerUnavailable } : {}),
     ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}),
     ...(proofExec === "executed_fail" || proofExec === "cannot_evaluate"
       ? { failureTail: failureTail || "(the proof printed nothing)" } : {}), floorMet, holdout: !!criterion.holdout,
@@ -5484,7 +5678,10 @@ export async function preparePromisedReviewDecision(args: {
     prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt,
   });
   const defaultProofExecutor = memoizeAsyncProofExecutor(execWhitelistedProofAsync);
-  const priorRow = existsSync(ledgerPath) ? await priorPostedReviewRow(ledgerPath, task.id, prUrl) : undefined;
+  // W1-T11340: the PR's own lifetime bounds a first review's archive scan (the admitting lane's view supplies it).
+  const priorRow = existsSync(ledgerPath) ? await priorPostedReviewRow(ledgerPath, task.id, prUrl, {
+    prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt,
+  }) : undefined;
   const priorVerdict = priorRow?.decision_verdict as ReviewVerdict | undefined;
   const priorInconclusiveLoads = new Map<string, number>();
   if (priorRow?.head_sha === input.headSha && priorRow?.state === "pending") {
@@ -5877,6 +6074,7 @@ export function judgeReview(
       evidence.reportSubstituteCause,
       floorKeywords,
       criterionRefusals[i],
+      evidence.reviewerUnable?.[i],
     ),
   );
   const promiseObservation = evidence.promisedFollowUpObservation ??
@@ -5963,7 +6161,8 @@ export function judgeReview(
   // happened not to execute" — the same shape `criteriaTampered` uses. A code diff is byte-identical: `unmetForState
   // === unmet`.
   const unmetForState = planOnly ? floorUnmet : unmet;
-  const cannotEvaluate = verdicts.some((v) => v.proof_exec === "cannot_evaluate");
+  const reviewerUnavailable = verdicts.find((v) => v.reviewerUnavailable !== undefined)?.reviewerUnavailable;
+  const cannotEvaluate = verdicts.some((v) => v.proof_exec === "cannot_evaluate") || reviewerUnavailable !== undefined;
   const planLintRefusal = planOnly ? planLintRefusalText(evidence.planLint) : undefined;
   const failsWithoutUnknown =
     planLintRefusal !== undefined ||
@@ -6046,6 +6245,8 @@ export function judgeReview(
     state === "pending"
       ? (verdicts.some(v => v.loadError !== undefined)
         ? `remudero-review: cannot-evaluate — ${visibleCriteria(verdicts).find(v => v.loadError)?.loadError ?? "proof test files could not load"}`
+        : reviewerUnavailable !== undefined
+        ? `remudero-review: cannot-evaluate — reviewer unable: ${reviewerUnavailable}`
         : inconclusiveLoad && !cannotEvaluate
         ? "remudero-review: inconclusive-load — a proof concluded nothing under host load; re-reviewed when load falls"
         : `remudero-review: promise-harvest-incomplete — ${promiseObservation?.state === "unknown" ? promiseObservation.reason : "harvest unfinished"}`).slice(0, 140)
@@ -6331,27 +6532,65 @@ export function reviewRowNamesPr(line: Record<string, unknown>, key: string | un
   return typeof line.pr_url === "string" ? line.pr_url === prUrl : key !== undefined && line.task_id === key;
 }
 
+/** W1-T11340: the admitting review lane's cancellation, carried through a review's awaits. sweep.ts runs each in-process
+ *  review inside it; review.ts reads it here, so a lookup this module owns stops when the lane aborts the review. */
+export const reviewLaneCancellation = new AsyncLocalStorage<AbortSignal>();
+
+/** W1-T11340: the PR an admitting lane is reviewing, as that lane's open-PR view read it. sweep.ts runs each in-process
+ *  review inside it, so the review's own lookups learn the PR's lifetime without another GitHub read. */
+export const reviewLanePr = new AsyncLocalStorage<{ prUrl: string; createdAt?: string }>();
+
+/** W1-T11340: where a prior-verdict lookup learns its PR's lifetime, and the cancellation it honors. */
+export interface PriorPostedReviewLookup {
+  /** The PR's GitHub `created_at`. No review.posted row for the PR can be older, so no archive cut before it can hold one.
+   *  Absent, the admitting lane's {@link reviewLanePr} supplies it when that lane is reviewing this same PR. */
+  prCreatedAt?: string;
+  /** Read `created_at` only when the live file missed AND archives exist to bound; a failure keeps the full read. */
+  fetchPrCreatedAt?: (prUrl: string) => Promise<string | undefined>;
+  signal?: AbortSignal;
+}
+
 /** W1-T9681: the newest `review.posted` row {@link reviewRowNamesPr} matches with a verdict — by URL, so a plan filing or
- *  hand PR with no task id finds its own. The live file answers first; on a miss the archive union does. */
+ *  hand PR with no task id finds its own. The live file answers first; on a miss the archive union does.
+ *  W1-T11340: a known `created_at` bounds that union to the archives cut at or after it, as
+ *  {@link recoverPromisedFollowUpReports} bounds its harvest; on 2026-11-04 a never-reviewed plan PR's lookup gunzipped
+ *  all ~391 archives on core's loop and its review hung for hours. An unknown `created_at` keeps the full read. */
 export async function priorPostedReviewRow(
   ledgerPath: string,
   taskId: string | undefined,
   prUrl: string,
+  lookup: PriorPostedReviewLookup = {},
 ): Promise<Record<string, unknown> | undefined> {
   const names = (line: Record<string, unknown>): boolean =>
     line.step === "review.posted" && reviewRowNamesPr(line, taskId, prUrl) && Boolean(line.decision_verdict);
   const live = readLiveLedgerRecords(ledgerPath).filter(names).at(-1);
   if (live) return live;
-  const patterns = [`"pr_url":${JSON.stringify(prUrl)}`, ...(taskId === undefined ? [] : [`"task_id":${JSON.stringify(taskId)}`])];
-  const pattern = new RegExp(patterns.map(value => value.replace(/[.*+?^${}()[\]\\]/g, "\\$&")).join("|"));
-  const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { pattern, step: "review.posted", requireArchives: true, refuseIncomplete: true });
-  return union.rawLines.flatMap((raw) => {
+  const stateDir = dirname(ledgerPath);
+  const signal = lookup.signal ?? reviewLaneCancellation.getStore();
+  signal?.throwIfAborted();
+  const fileNames = existsSync(stateDir) ? readdirSync(stateDir) : [];
+  const archived = fileNames.some((name) => rotationStampIso(name) !== undefined);
+  if (!archived) return undefined; // nothing rotated: the live miss is the whole answer
+  const lane = reviewLanePr.getStore();
+  let createdAt = lookup.prCreatedAt ?? (lane?.prUrl === prUrl ? lane.createdAt : undefined);
+  if (createdAt === undefined && lookup.fetchPrCreatedAt) {
     try {
-      return [JSON.parse(raw) as Record<string, unknown>];
+      createdAt = await lookup.fetchPrCreatedAt(prUrl);
     } catch {
-      return []; // a torn archived row names no verdict; the union reports it, this lookup skips it
+      // deliberate: an unread created_at is an unknown bound, and an unknown bound keeps today's full union read
+      createdAt = undefined;
     }
-  }).filter(names).at(-1);
+  }
+  const bounded = createdAt !== undefined && Number.isFinite(Date.parse(createdAt));
+  let newest: Record<string, unknown> | undefined;
+  for await (const row of openLedgerUnion(stateDir, {
+    step: "review.posted", dedupe: false, ...(signal ? { signal } : {}),
+    // The live file was read above; a bounded read opens only the PR's own lifetime of rotations.
+    ...(bounded ? { afterRotation: rotationBeforeTime(fileNames, createdAt!), includeLive: false } : {}),
+  })) {
+    if (names(row)) newest = row; // a torn archived row never reaches here; the union skips it
+  }
+  return newest;
 }
 
 /** W1-T9681: the one reuse fact a discriminate-only review could not read, so each fallback row names its cause. */
@@ -6909,16 +7148,17 @@ export async function refreshReviewPublisherToken(opts: RefreshOptions = {}): Re
 }
 
 async function replayPublisher(
-  opts: PostReviewStatusGuardedOpts,
-  lifecycle: PrLifecycleState,
+  opts: ReviewPublisherReaders,
+  lifecycle: Pick<PrLifecycleState, "baseRef">,
   entry: ReviewStatusEntry | undefined,
 ): Promise<{ trusted: boolean; canPublish: boolean; evidence: ReviewReplayPublisherEvidence }> {
   const fetch = opts.fetchPublisher ?? ghJsonAsync;
   let snapshot: RequiredStatusChecksSnapshot | undefined;
-  // status.ts's graph reaches review; load its existing reader only after both modules initialized.
-  const statusModule = "./status.js";
-  const { readRequiredStatusCheckContextsAsync } = await import(statusModule);
-  const binding = await readRequiredStatusCheckContextsAsync(opts.owner, opts.repo, encodeURIComponent(lifecycle.baseRef ?? "main"), async (args: string[]) => {
+  // status.ts's graph reaches review, so its reader is injected by the caller (which already imports status.ts)
+  // rather than loaded here: a computed import() was a runtime-relative specifier no child-entry bundle carries.
+  const readRequiredContexts = opts.readRequiredContexts;
+  if (!readRequiredContexts) throw new Error("no required-status-contexts reader is wired for this replay");
+  const binding = await readRequiredContexts(opts.owner, opts.repo, encodeURIComponent(lifecycle.baseRef ?? "main"), async (args: string[]) => {
     const raw = await fetch(args);
     snapshot = raw as RequiredStatusChecksSnapshot;
     return JSON.stringify(raw);
@@ -7663,6 +7903,7 @@ export function reviewerVerdictContract(count: number): string {
     `EXACTLY one line per criterion, in this form:`,
     `  REVIEW_VERDICT <n>: PASS`,
     `  REVIEW_VERDICT <n>: FAIL   <why THIS proof did not substantiate THIS claim>`,
+    `  REVIEW_VERDICT <n>: UNABLE <what you could not inspect, and why>`,
     `for n = 1..${count}. These are folded into the deterministic verdict and may`,
     `only DOWNGRADE a criterion to failure, never rescue an unpasted proof.`,
     ``,
@@ -7675,6 +7916,12 @@ export function reviewerVerdictContract(count: number): string {
     `leaves them nothing to act on. One line, at most ${REVIEWER_CLAUSE_MAX_CHARS} characters; anything after a`,
     `newline is dropped, and a longer line is cut at a sentence end and marked.`,
     `PASS lines are never annotated — the clause is read only on FAIL.`,
+    ``,
+    `USE UNABLE, NEVER FAIL, WHEN YOU COULD NOT LOOK: if your own tools, shell or`,
+    `sandbox failed, or you could not read the proof or the code it names, emit`,
+    `UNABLE with what failed. FAIL means you inspected and found the claim`,
+    `unsubstantiated; UNABLE means no judgement was possible. An UNABLE never`,
+    `downgrades a criterion: the review is held for a retry instead.`,
     ``,
     `OPTIONAL FINDING RECEIPTS (not used to decide the status): if you found a`,
     `specific, evidenced issue, emit at most eight one-line JSON records:`,
@@ -7692,7 +7939,7 @@ export function reviewerVerdictContract(count: number): string {
  *  reviewer wrote after the token, SAME LINE ONLY — the character class excludes `\r`/`\n`, so a clause can never span
  *  lines by construction. {@link parseReviewerVerdicts} reads groups 1 and 2 for observed verdicts;
  *  {@link parseReviewerVerdictClauses} reads group 3. One regex, two readers. */
-const REVIEW_VERDICT_LINE_RE = /REVIEW_VERDICT\s+(\d+)\s*:\s*(PASS|FAIL)\b([^\r\n]*)/gi;
+const REVIEW_VERDICT_LINE_RE = /REVIEW_VERDICT\s+(\d+)\s*:\s*(PASS|FAIL|UNABLE)\b([^\r\n]*)/gi;
 
 /** Parse the reviewer's `REVIEW_VERDICT <n>: PASS|FAIL` lines into a semantic array index-aligned to the criteria.
  *  `FAIL` is `false`, an observed `PASS` is `true`, and missing output remains `undefined`. The required
@@ -7704,8 +7951,9 @@ export function parseReviewerVerdicts(text: string, count: number): (boolean | u
     const n = Number(m[1]) - 1;
     if (n < 0 || n >= count) continue;
     // A witnessed FAIL wins even if a later line says PASS. Presence is not certification.
-    if (m[2].toUpperCase() === "FAIL") semantic[n] = false;
-    else if (semantic[n] !== false) semantic[n] = true;
+    const token = m[2].toUpperCase();
+    if (token === "FAIL") semantic[n] = false;
+    else if (token === "PASS" && semantic[n] !== false) semantic[n] = true;
   }
   return semantic;
 }
@@ -7748,6 +7996,17 @@ function extractBoundedClause(trailing: string): string | undefined {
 /** (W1-T2263) Companion to {@link parseReviewerVerdicts}, reading the SAME transcript through the SAME regex for the
  *  bounded clause a FAIL line may carry — no second question, no second spawn. Index-aligned to `count`. `undefined`
  *  at an index whose line was PASS, absent, or a FAIL with no clause: a PASS line is never annotated. */
+/** W1-T11428: criteria the reviewer could not inspect. */
+export function parseReviewerUnable(text: string, count: number): (string | undefined)[] {
+  const unable: (string | undefined)[] = new Array(count).fill(undefined);
+  for (const m of text.matchAll(REVIEW_VERDICT_LINE_RE)) {
+    const n = Number(m[1]) - 1;
+    if (n < 0 || n >= count || m[2].toUpperCase() !== "UNABLE") continue;
+    unable[n] = extractBoundedClause(m[3]) ?? unable[n] ?? "";
+  }
+  return unable;
+}
+
 export function parseReviewerVerdictClauses(text: string, count: number): (string | undefined)[] {
   const clauses: (string | undefined)[] = new Array(count).fill(undefined);
   for (const m of text.matchAll(REVIEW_VERDICT_LINE_RE)) {
@@ -9257,6 +9516,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   "^plan/credit-overrides\\.yaml$",
   "^scripts/lib/ci-dependency-evidence\\.mjs$",
   "^scripts/preflight-author\\.mjs$",
+  "^scripts/native-test-run\\.mjs$",
+  "^src/lib/test-run-timeout\\.ts$",
   "^scripts/calibrate-author-runtime\\.mjs$",
   "^scripts/lib/author-step-capture\\.mjs$",
   "^src/lib/review\\.ts$",
@@ -11406,13 +11667,36 @@ export async function acquireReviewStatusLock(
 
 /** The issue transport this posting path uses. Keep it structural so review's module graph
  * does not load the worker/escalation graph merely to judge or post a status. */
-interface ReviewIssueGateway {
+export interface ReviewIssueGateway {
   create(title: string, body: string, labels: string[]): string;
   listOpen?(label: string): Array<{ number: number; url: string; title?: string; body?: string }>;
   closeWithComment?(url: string, comment: string): void;
   comment?(url: string, body: string): void;
   ensureLabel?(label: string): boolean;
 }
+
+/** The one cannot-evaluate escalation this module asks for, as escalate.ts's Escalation reads it. Declared locally:
+ *  escalate.ts's graph reaches this module, and dependency-cruiser counts a type-only import as a cycle edge. */
+export interface CannotEvaluateEscalation {
+  class: "MANUAL";
+  taskId: string;
+  runId: string;
+  headSha: string;
+  cause: "review";
+  summary: string;
+  detail: string;
+  options: { label: string; detail: string }[];
+  recommendation: string;
+  consequence: string;
+}
+
+/** The shape of status.ts's readRequiredStatusCheckContextsAsync, typed here so review.ts never imports status.ts. */
+export type RequiredStatusContextsReader = (
+  owner: string,
+  repo: string,
+  branch: string,
+  readText: (args: string[]) => Promise<string>,
+) => Promise<{ kind: string; reason?: string }>;
 
 export interface PostReviewStatusGuardedOpts {
   owner: string;
@@ -11433,6 +11717,8 @@ export interface PostReviewStatusGuardedOpts {
   reviewDecisionDigest?: string;
   /** Permit replacement only of the matching CAPPED keyword-only terminal reopened after exact-head materialization. */
   reopenedDegradedTerminal?: boolean;
+  /** W1-T11390: this post is an admitted lint retry's fresh result. */
+  planLintRetry?: PlanLintRetryPublicationRequest;
   reviewEngineRevision?: string;
   evaluatorProvenance?: ReviewEvaluatorProvenance;
   /** A just-in-time reading of the module graph producing this terminal verdict. When supplied,
@@ -11447,6 +11733,10 @@ export interface PostReviewStatusGuardedOpts {
   fetchCurrentStatus?: () => PostableReviewState | ReviewStatusEntry | undefined;
   fetchCurrentStatusEntry?: () => ReviewStatusEntry | undefined | Promise<ReviewStatusEntry | undefined>;
   fetchPublisher?: GhApiFetcher;
+  /** status.ts's readRequiredStatusCheckContextsAsync, which a decision replay needs to name the required publisher.
+   *  Injected because status.ts's graph reaches this module; every terminal-posting caller passes it. Absent, a replay
+   *  is withheld with a named reason rather than guessing a publisher. */
+  readRequiredContexts?: RequiredStatusContextsReader;
   /** Injected raw poster for tests. Defaults to {@link postReviewStatus}, which already retries a TRANSIENT gh error
    *  internally (rule (iv) above). May return a Promise, as the default does, or `void`. */
   post?: (o: {
@@ -11458,6 +11748,10 @@ export interface PostReviewStatusGuardedOpts {
   }) => void | Promise<void>;
   /** Injectable issue transport for the one cannot-evaluate escalation per head. */
   issues?: ReviewIssueGateway;
+  /** Files the one cannot-evaluate escalation per head and returns its issue URL. Injected because escalate.ts's graph
+   *  reaches this module; every terminal-posting caller binds tryEscalate to its own ledger, run and gateway. `issues`
+   *  is this call's injected transport, when it has one. Unwired, no escalation is filed and the pending status stands. */
+  cannotEvaluateEscalation?: (escalation: CannotEvaluateEscalation, issues: ReviewIssueGateway | undefined) => string | null;
   lockOpts?: AcquireReviewStatusLockOpts;
 }
 
@@ -11496,6 +11790,50 @@ function reviewerCodePublicationRefusal(
     );
   }
   return `reviewer code freshness is unprovable; withholding a terminal verdict: ${freshness.reason}`;
+}
+
+interface PlanLintRetryPublicationRequest {
+  attemptId: string;
+  outcome?: PlanLintOutcome;
+  observe: PlanLintRetryObserver;
+}
+
+/** Only a clean lint may publish success, so a retry cannot launder a violation. */
+async function decidePlanLintRetryPublication(
+  opts: PostReviewStatusGuardedOpts,
+  retry: PlanLintRetryPublicationRequest,
+  priorDecision: ReviewDecisionTerminal | undefined,
+  prior: PostedReviewStatusRecord | undefined,
+  lifecycle: PrLifecycleState,
+): Promise<{ identity: PlanLintRetryIdentity; refusal?: { outcome: "refused" | "incomplete"; reason: string } }> {
+  const identity: PlanLintRetryIdentity = {
+    runId: opts.runId, taskId: opts.taskId, attemptId: retry.attemptId, prUrl: opts.prUrl,
+    headSha: opts.sha, digest: opts.reviewDecisionDigest,
+  };
+  const refuse = (reason: string, outcome: "refused" | "incomplete" = "refused") => ({ identity, refusal: { outcome, reason } });
+  try {
+    const rows = await readPlanLintRetryRows(opts.ledgerPath);
+    const admitted = rows.findLastIndex((row) => row.outcome === "admitted" && row.attempt_id === retry.attemptId &&
+      row.pr_url === opts.prUrl && row.head_sha === opts.sha && row.review_decision_digest === opts.reviewDecisionDigest);
+    if (admitted < 0) return refuse("no admitted lint retry exists for this attempt, head and digest");
+    identity.mergeBaseSha = rows[admitted]!.merge_base_sha;
+    identity.priorRunId = rows[admitted]!.prior_run_id;
+    if (rows.slice(admitted + 1).some((row) => row.attempt_id === retry.attemptId)) return refuse("this lint retry attempt is already settled");
+    if (!priorDecision || !isPlanLintRetryEligible(priorDecision)) return refuse("the terminal is no longer a lint-plan failure with no summary");
+    if (retry.outcome?.ran !== true) return refuse(`the retried lint-plan did not finish: ${retry.outcome?.reason ?? "no lint was run"}`, "incomplete");
+    const expected = retry.outcome.violations.length === 0 ? "success" : "failure";
+    if (opts.state !== expected) return refuse(`a retried lint-plan with ${retry.outcome.violations.length} violation(s) cannot publish ${opts.state}`);
+    const guarded = decideReviewStatusPost({ headSha: opts.sha, state: opts.state, evidence: opts.evidence,
+      ...(opts.reviewInputDigest !== undefined ? { reviewInputDigest: opts.reviewInputDigest } : {}) }, prior, lifecycle);
+    if (!guarded.post) return refuse(guarded.reason);
+    const observed = await retry.observe();
+    if (observed.headSha !== opts.sha) return refuse(`the PR head moved to ${observed.headSha}`);
+    if (observed.mergeBaseSha !== identity.mergeBaseSha) return refuse(`the merge base moved to ${observed.mergeBaseSha}`);
+    const publisherRefusal = await planLintRetryPublisherRefusal(opts, observed.baseRef);
+    return publisherRefusal === undefined ? { identity } : refuse(publisherRefusal);
+  } catch (error) {
+    return refuse(`a retry read failed: ${String(error)}`);
+  }
 }
 
 /** Single `remudero-review` posting path (W1-T228): lock, read fresh ledger and lifecycle, then
@@ -11565,8 +11903,17 @@ export async function postReviewStatusGuarded(
       });
       return { posted: false, reason };
     };
+    let planLintRetryIdentity: PlanLintRetryIdentity | undefined;
+    if (opts.planLintRetry !== undefined) {
+      const { identity, refusal } = await decidePlanLintRetryPublication(opts, opts.planLintRetry, priorDecision, prior, lifecycle);
+      if (refusal !== undefined) {
+        appendPlanLintRetryRow(opts.ledgerPath, identity, refusal.outcome, refusal.reason);
+        return withholdReplay(refusal.reason);
+      }
+      planLintRetryIdentity = identity;
+    }
     let restoreTerminal = false;
-    if (!lifecycle.merged && !lifecycle.closed && priorDecision && !replacingDegradedTerminal) {
+    if (!lifecycle.merged && !lifecycle.closed && priorDecision && !replacingDegradedTerminal && planLintRetryIdentity === undefined) {
       if (opts.state === "pending") {
         return { posted: false, replayed: true, effectiveState: priorDecision.state,
           reason: "cannot-evaluate hold cannot overwrite a terminal verdict for the same review decision" };
@@ -11666,6 +12013,7 @@ export async function postReviewStatusGuarded(
     } catch (e) {
       // W1-T135 exhaustion path: ledger-and-continue, never crash the run.
       const message = e instanceof Error ? e.message : String(e);
+      if (planLintRetryIdentity !== undefined) appendPlanLintRetryRow(opts.ledgerPath, planLintRetryIdentity, "post_failed", message);
       appendLedger(opts.ledgerPath, {
         run_id: opts.runId,
         task_id: opts.taskId,
@@ -11684,29 +12032,34 @@ export async function postReviewStatusGuarded(
         reason: `posting remudero-review failed and was not applied (see the review.post_failed ledger line): ${message}`,
       };
     }
+    if (planLintRetryIdentity !== undefined) appendPlanLintRetryRow(opts.ledgerPath, planLintRetryIdentity, "published");
     if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") &&
         !/^remudero-review: cannot-evaluate — promise harvest (?:unavailable:|corpus is unreadable)/.test(opts.description) && opts.prUrl &&
         !lines.some((line) => line.step === "review.cannot_evaluate_escalated" && line.task_id === opts.taskId && line.head_sha === opts.sha)) {
-      // Load escalation only for this exceptional pending path. Its worker graph reaches review
-      // through eval-card; a top-level import closes a cycle and fails the dependency gate.
-      const escalationModule = "./escalate.js";
-      const { ghIssueGateway, tryEscalate } = await import(escalationModule);
-      const issueUrl = tryEscalate({
+      // escalate.ts's worker graph reaches review through eval-card, so its two functions are injected by the caller
+      // (which already imports escalate.ts) rather than loaded here: a computed import() is a runtime-relative
+      // specifier no child-entry bundle carries. Unwired, the escalation is skipped and the pending status stands.
+      const escalate = opts.cannotEvaluateEscalation;
+      const issueUrl = escalate && escalate({
         class: "MANUAL",
         taskId: opts.taskId,
         runId: opts.runId,
         headSha: opts.sha,
         cause: "review",
-        summary: `PR ${opts.prUrl} proof runner cannot load test files`,
-        detail: `${opts.description}. The toolchain refresh and one retry did not resolve the load error.`,
-        options: [{ label: "Repair reviewer toolchain", detail: "Refresh the canonical install, then rerun this head's review." }],
+        ...(opts.description.startsWith("remudero-review: cannot-evaluate — reviewer unable:")
+          ? {
+            summary: `PR ${opts.prUrl} reviewer could not inspect the proofs`,
+            detail: `${opts.description}. The reviewer reported UNABLE (its tools or sandbox failed), so no verdict was judged.`,
+            options: [{ label: "Repair reviewer toolchain", detail: "Fix the reviewer's sandbox or tools, then rerun this head's review." }],
+          }
+          : {
+            summary: `PR ${opts.prUrl} proof runner cannot load test files`,
+            detail: `${opts.description}. The toolchain refresh and one retry did not resolve the load error.`,
+            options: [{ label: "Repair reviewer toolchain", detail: "Refresh the canonical install, then rerun this head's review." }],
+          }),
         recommendation: "Repair reviewer toolchain",
         consequence: "The required review remains pending and the PR cannot merge.",
-      }, {
-        issues: opts.issues ?? ghIssueGateway(opts.owner, opts.repo),
-        ledgerPath: opts.ledgerPath,
-        runId: opts.runId,
-      });
+      }, opts.issues);
       if (issueUrl) appendLedger(opts.ledgerPath, {
         run_id: opts.runId, task_id: opts.taskId, step: "review.cannot_evaluate_escalated",
         pr_url: opts.prUrl, head_sha: opts.sha, issue_url: issueUrl,

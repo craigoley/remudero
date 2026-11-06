@@ -1,0 +1,128 @@
+- id: W1-T11429
+  title: "rmd review accepts one explicit operator request to re-evaluate a lint-incomplete plan-only failure, capturing the exact head and merge base and handing W1-T11390's dormant guard its first caller; without the request nothing changes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high  # Rule 19: one concern in one file, but it is the first production path that can replace a failed required review on the merge gate
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T11390, W1-T3835, W1-T4423, W1-T11225, W1-T9727, W1-T10269, W1-T3704, W1-T11163]
+  files:
+    - src/cli/commands/review.ts
+    - test/an-explicit-plan-lint-retry-request-drives-one-bounded-review.test.ts
+  priority: 3
+  status: queued
+  # backlog gardener: band=3 evidence=4a39afd506921179
+  # backlog gardener: placed=2026-11-05T23:00:35.430Z
+  attempts: 0
+  rationale: |
+    THE GAP. W1-T11390 (merged, PR #16893) added an optional planLintRetry option to claimReviewDecision and
+    postReviewStatusGuarded in src/lib/review.ts, and filed it dormant by decision: "the new option is absent on
+    every production path until a caller supplies it, and that caller change is outside these two files ...
+    Shipping this task does not by itself recover any PR." Wreckterra PR #6 holds a plan-only failure whose
+    lint-plan exited with no summary. At an unchanged head, claimReviewDecision replays it on every review, so
+    PR #6 cannot be recovered until a caller exists. This task adds that caller to the existing `rmd review` path
+    and nothing else.
+
+    Settled by lookup: is this already filed or decided? -> No. grep for planLintRetry, plan-lint-retry and W1-T11390 across plan/, MASTER-PLAN.md, LEARNINGS.md and DECISIONS.md finds only W1-T11390's own shard, which excludes src/cli/commands/review.ts by name. plan/feedback/fb-1790086853999-c6a250.yaml matches "relint retry", which is the triage relint path and unrelated.
+    Settled by lookup: does the library guard already exist, so this task needs no lib change? -> Yes. src/lib/review.ts defines PlanLintRetryRequest (attemptId, runId, headSha, mergeBaseSha, observe, owner, repo, fetchPublisher, readRequiredContexts) and the planLintRetry option on both claimReviewDecision and postReviewStatusGuarded. Admission checks eligibility, the recorded and observed head and base, the checkout HEAD, fresh complete passing checks, the pinned App, a concurrent owner, and a prior admitted row, all inside the decision lock (W1-T11390 design 3a-3h).
+    Settled by lookup: where does the CLI call the two functions? -> src/cli/commands/review.ts runReview calls claimReviewDecision with { ledgerPath, taskId, prUrl, digest, headCheckoutDir } only (around line 704), and calls postReviewStatusGuarded around line 1187, forwarding decisionClaim.reopenedDegradedTerminal. Neither call passes planLintRetry today.
+    Settled by lookup: where do review flags enter? -> reviewOptionsFromFlags in src/cli/commands/review.ts, merged into deps at the top of reviewCommand. The sweep forwards options through reviewOptionFlags (src/run-task.ts), which emits only --plan-only-filing, --execution-mode and --review-attempt-id. A sweep therefore cannot synthesise the new flag. A fresh-tree child gets [...rest, ...reviewOptionFlags, --judge-at-own-start], so an operator flag in rest reaches the child that does the review.
+    Settled by lookup: does a shadow review claim the decision? -> Yes. runReview calls claimReviewDecision before its args.shadow early return (around line 1125), so a shadow that carried the request could spend the single admitted attempt and never publish. The shadow arm must never build a request.
+    Settled by lookup: is there a reader for the head's checks that excludes the review context itself? -> Yes. checksStateFromRollup and requiredCheckGate (src/lib/sweep.ts) drop REVIEW_CONTEXT. The failed remudero-review status therefore does not count against "passing". checksStateFromRollup judges only the required contexts present, though, so "complete" needs its own check that every required context is registered. readChecksGreenReviewedAtHead cannot be reused because it also requires review success.
+    Settled by lookup: where does the merge base come from? -> tryFetchReviewReuseFacts (src/lib/open-prs-rest.ts) returns { ownDiffDigest, mergeBaseSha } or undefined for unreadable. This is the same source W1-T3704 records on review.posted, so the captured base is comparable with the terminal row's merge_base_sha.
+    Settled by lookup: is extra spend, a new gate, or a timeout change needed? -> No. The retry reuses the existing lintPlanForReview call that runs after an owned claim. Budget follows W1-T11390's 30.00 cap.
+
+    EXCLUDED SCOPE, BY DECISION: this task makes no edit to Wreckterra PR #6 (head, body or statuses), and adds no
+    status publication outside postReviewStatusGuarded. It does not change gates, timeouts, branch protection,
+    global limits or service state, and it does not touch src/lib/review.ts or src/run-task.ts. Filing and building
+    this task recovers nothing by itself. The recovery is a later operator invocation of the new flag.
+  design: |
+    All production code goes in src/cli/commands/review.ts. Tests go in the one new test file.
+
+    1. THE REQUEST IS ONE FLAG CARRYING THE HEAD THE OPERATOR SAW. Export PLAN_LINT_RETRY_FLAG = "--plan-lint-retry".
+       Its value must be a full 40-hex SHA. reviewOptionsFromFlags parses it into a new ReviewCommandDeps field,
+       planLintRetryHead. A missing value, a malformed value or a bare flag yields no field. Nothing else infers
+       a request: not a sweep pass, not --review-attempt-id, and not a replay. Do not add the flag to
+       reviewOptionFlags or to any sweep or daemon caller.
+
+    2. CAPTURE, ONCE PER INVOCATION, BEFORE THE CLAIM. When planLintRetryHead is present and the review is not a
+       shadow (REVIEWER_SHADOW_FLAG), runReview builds exactly one PlanLintRetryRequest:
+       a. attemptId: a fresh `review-PR<n>-<randomUUID>` minted here. One invocation produces one attempt id.
+          The id is not read from a flag, so reusing an old id cannot buy a second attempt (W1-T11390's admitted
+          row bounds by PR, head, base and digest anyway).
+       b. headSha: the flag value. It must equal the review's own headSha, which comes from view.headRefOid.
+       c. mergeBaseSha: one tryFetchReviewReuseFacts read against the PR's base branch at headSha.
+       d. observe(): a fresh read on each call that returns the current head, merge base and base ref. Its checks
+          field is built from readRequiredStatusCheckContextsAsync for that base ref plus rollupForAsync at the
+          head. Set fresh only when the read happened now at this head. Set complete only when protection read as
+          contexts and every required context except REVIEW_CONTEXT is registered on the head. Set passing only
+          when checksStateFromRollup is "green". Any throw propagates, and the library treats it as a refusal.
+       e. runId: the review's runId. owner, repo, readRequiredContexts: the review's own values. fetchPublisher:
+          the default replayPublisher reader, unchanged.
+       If (b) mismatches or (c) is unreadable, build no request. Ledger a review.plan_lint_retry_not_requested row
+       naming the reason, then call claimReviewDecision WITHOUT the option, so the prior terminal replays.
+
+    3. ONE CLAIM, ONE POST. Pass the request as planLintRetry to the single existing claimReviewDecision call. When
+       the claim returns owned with reopenedDegradedTerminal and a request was passed, give the existing
+       postReviewStatusGuarded call planLintRetry: { attemptId, ...the request's readers, outcome: the planLint
+       this review just computed }. Pass it only on that path. No other status or comment poster receives the
+       request. Add no second lint runner. The fresh outcome is the existing lintPlanForReview result.
+
+    4. DEFAULT UNCHANGED. With the flag absent, both calls receive exactly the arguments they receive today, and
+       the ledger gains no new step.
+
+    5. TESTS in test/an-explicit-plan-lint-retry-request-drives-one-bounded-review.test.ts drive runReview, or
+       reviewCommand with injected seams, against a seeded ledger. The ledger holds a plan-only review.posted
+       failure with planLint { ran: false, reason: "lint-plan exited 1 with no summary" }, capped false,
+       keywordOnly false and a recorded merge_base_sha. Tests inject the lint, the observer reads, the publisher
+       readers and the post. No test touches the network or a real PR. The tests must show:
+       - with no flag, the call replays the old failure and posts nothing, and the ledger gains no
+         review.plan_lint_retry row (falsifier for the default path);
+       - one flag at matching facts produces exactly one review.plan_lint_retry admitted row with one attempt id.
+         lint runs once, the fresh clean result posts success through postReviewStatusGuarded, and the prior
+         review.posted row stays byte-identical;
+       - a second invocation with the same flag, head, base and digest is refused and replays. It posts nothing
+         and adds no second admitted row (falsifier for the one-attempt bound);
+       - a flag whose head differs from the PR head, and an unreadable merge base, each build no request, ledger
+         review.plan_lint_retry_not_requested and replay;
+       - failing, pending or incomplete checks, a missing checkout and an unpinned publisher each refuse through
+         the library and replay;
+       - a shadow review carrying the flag builds no request and leaves no admitted row;
+       - the guard test is named "W1-T11429 no flag preserves prior terminal".
+       - reviewOptionFlags never emits PLAN_LINT_RETRY_FLAG for any input.
+
+    NOT IN SCOPE, AND NEVER DONE BY THIS TASK OR ITS BUILD:
+    - running the flag against Wreckterra PR #6, or editing its head, body or statuses;
+    - src/lib/review.ts, src/run-task.ts, the sweep, the daemon or any new verb;
+    - changing gates, timeouts, branch protection, required checks, pinned identities, global limits or service state;
+    - fixing why the lint child dies, which is W1-T11225's work.
+  acceptance:
+    - claim: "the CLI review path parses one explicit operator flag carrying the expected head"
+      proof: "grep: PLAN_LINT_RETRY_FLAG in src/cli/commands/review.ts"
+    - claim: "the request reaches the single existing claimReviewDecision call as its planLintRetry option"
+      proof: "grep: planLintRetry: in src/cli/commands/review.ts"
+    - claim: "a caller that could not capture the head or base ledgers its own refusal row and replays"
+      proof: "grep: review\\.plan_lint_retry_not_requested in src/cli/commands/review.ts"
+    - claim: "absence of the flag replays the old failure with no retry row; one flag at matching facts makes exactly one admitted attempt that publishes through postReviewStatusGuarded; a repeat is refused; mismatched head, unreadable base, failing or incomplete checks, missing checkout, unpinned publisher and shadow reviews all replay"
+      proof: "unit test: test/an-explicit-plan-lint-retry-request-drives-one-bounded-review.test.ts"
+    - claim: "the no-flag guard remains explicit in the integration suite"
+      proof: "grep: W1-T11429 no flag preserves prior terminal in test/an-explicit-plan-lint-retry-request-drives-one-bounded-review.test.ts"
+      kind: guard
+  falsifier: |
+    At origin/main, seed the lint-incomplete plan-only failure and run the review twice, with and without
+    --plan-lint-retry <head>. Both replay, because no caller passes the option. At head, the run without the flag
+    still replays and writes no review.plan_lint_retry row. One run with the flag writes exactly one admitted row
+    and posts the fresh result. A second identical run writes a refused row and posts nothing. If the flag is
+    forwarded by reviewOptionFlags, or a shadow consumes the attempt, the named test reddens. The same happens
+    if the post is reached for a refused claim, or if the default call's arguments change.
+  note: |
+    verify:auto: every branch is decided over a seeded ledger and injected readers. No live GitHub state is needed.
+    risk:high with band_meaning blast-radius: one file of production code, but this is the first production path
+    that can turn a required failed review into a PASS.
+    budget_usd 30 follows W1-T11390's cap. The initiative asks for normal per-task budget policy and no extra spend.
+    Recovery of Wreckterra PR #6 is a separate operator action after this merges:
+    `rmd review 6 --repo <owner>/wreckterra --plan-lint-retry <current head sha>`.

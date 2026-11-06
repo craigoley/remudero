@@ -1,0 +1,64 @@
+- id: W1-T11437
+  title: "A Codex worker's egress reaches a non-allowlisted host directly, against the 2026-09-22 allowlist-proxy ruling, and the containment probe can never prove it, because its egress-denial regex matches the probe's own `blocked=` echo and the tripwire's hook refusal"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # security containment; a verdict change here decides whether builds run with open egress
+  origin: operator-session#codex-egress-open-2026-11-05
+  plan_refs:
+    - W1-T3103
+    - W1-T1265
+    - W1-T2271
+    - W1-T1289
+    - W1-T2211
+  files:
+    - src/lib/containment.ts
+    - src/lib/worker-provider.ts
+    - test/containment/a-codex-worker-reaching-a-non-allowlisted-host-is-proven-open.test.ts
+    - test/containment/a-codex-worker-egress-goes-through-the-allowlist-proxy.test.ts
+    - src/lib/settings.ts
+    - settings/worker.json
+    - test/codex-disposable-review-sandbox.test.ts
+    - test/codex-writable-resume-sandbox.test.ts
+    - test/a-codex-writer-typecheck-reaches-the-host-test-slot.test.ts
+    - test/no-worker-writes-a-git-config-the-host-push-honours.test.ts
+    - test/worker/spawn/codex-native-cache.test.ts
+    - test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts
+    - test/a-claude-worker-cannot-run-an-unsandboxed-command.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The egress verdict proves egress OPEN when the blocked host answered at a non-local address different from the allowlisted control, and a refusal counted against that verdict must come from the blocked request's own curl outcome, never from the probe's own echo lines or the deny-floor tripwire's hook text elsewhere in the transcript
+      proof: "unit test: test/containment/a-codex-worker-reaching-a-non-allowlisted-host-is-proven-open.test.ts"
+    - claim: A Codex worker, on both the legacy workspace-write path and the private-registry permission profile, sends its egress through an allowlist proxy carrying the fleet's own sandbox allowlist, so a request to a non-allowlisted host is refused
+      proof: "unit test: test/containment/a-codex-worker-egress-goes-through-the-allowlist-proxy.test.ts"
+    - claim: A proven-open egress verdict is ledgered as its own row in shadow first and gates containment only after the operator's ruling, so tightening the gate never silently halts the fleet
+      proof: "grep: W1-T11437 criterion 3 in test/containment/a-codex-worker-reaching-a-non-allowlisted-host-is-proven-open.test.ts"
+  rationale: |
+    OBSERVED 2026-11-05, ledger containment.probe rows (live plus the newest 40 archives): the blocked request to example.com came back at example.com's real addresses (104.20.23.154, 172.66.147.243) and the allowlisted control at api.github.com's real addresses (140.82.114.x). Days with such REMOTE blocked-host answers: 10-28 30, 10-29 56, 10-30 21, 11-04 20, 11-05 100. Only 3 probes on 11-05 answered at the local proxy (::1), which is what a contained worker shows. 23 probes on 11-05 alone passed overall (contained=true) with a REMOTE blocked-host answer, so their builds ran with open egress.
+    This contradicts the operator decision recorded in DECISIONS.md for W1-T3103 (2026-09-22): "CHOSEN: (b), THE ALLOWLIST PROXY. Both phases keep a network; egress is confined to an allowlist."
+    Why the probe never proved it: EGRESS_DENIAL_RE in src/lib/containment.ts (curl refusal vocabulary, near :697) matches the bare word "blocked" anywhere in the transcript. Every probe transcript carries it, from command 4's own `EGRESS_RESULT blocked=reached|not-reached` echo and from command 3's deny-floor refusal ("Command blocked by PreToolUse hook"). So egressDenialSeen is effectively always true, and assessEgressContainment returns UNPROVEN at its denial branch (near :556) before its remote-address comparison (near :564) can report the breach. An UNPROVEN egress verdict does not gate containment, so the builds ran.
+    Why Codex egress is open: Claude workers' sandbox runs the allowlist proxy that settings/worker.json's sandbox.network.allowedDomains declares (the ::1 answers). Codex workers get the network with no proxy. The legacy path passes `sandbox_workspace_write.network_access=true`, and the private-registry profile (withPrivateRegistryCodexProfile, src/lib/worker-provider.ts) sets `permissions.<name>.network.enabled=true` and enables network_proxy only for disposable reviews (codexExecArgs, near :3087). deploy/codex-requirements.toml carries filesystem deny_read only, no network policy.
+    Scope amendment 2026-11-06 (operator ruling in chat: "Both get the wide list"): Claude workers and the Codex proxy share the one widened
+    allowedDomains in settings/worker.json. test/a-claude-worker-cannot-run-an-unsandboxed-command.test.ts pins every other sandbox key of
+    the committed policy; its network.allowedDomains expectation moves to the EXACT new list, and every other pinned key stays unchanged.
+  design: |
+    1. Evidence, not prose: the egress command writes the blocked request's own curl exit code and error text to a probe file beside its remote-address file, and the executor reads those. Egress denial is derived from that file alone; the transcript-wide regex no longer feeds the egress verdict. A blocked host answering at a non-local address that differs from the allowlisted control's is PROVEN OPEN, whatever else the transcript says.
+    2. Enforcement: Codex workers route egress through an allowlist proxy fed by the same allowedDomains the Claude sandbox uses (one source, secret-boundary.ts and settings.ts already read it), on both the legacy and private-profile paths. The builder measures which mechanism Codex 0.163 supports for a permission profile (its managed network_proxy with an allowlist, or an HTTPS proxy the sandbox cannot bypass) and records the measurement. No fixed constants.
+    3. Gate: a PROVEN-OPEN verdict writes a containment.egress_proven_open row immediately (shadow). Making it block dispatch is a tightening that would stop every Codex build until (2) lands, so it ships behind the operator's explicit yes, recorded in DECISIONS.md, and never by default in this task's merge.
+    4. Never loosen: UNPROVEN stays UNPROVEN and never becomes contained. Nothing here relaxes the filesystem, token-read or operator-home arms.
+    Tests: (a) a probe transcript containing the echo and the tripwire refusal, with remote addresses REMOTE and different, is PROVEN OPEN (at base it is UNPROVEN). (b) a real local-proxy answer (::1 for both) stays as today. (c) a spawned Codex writer's argv and profile carry the proxy and allowlist on both paths (at base neither does).
+  falsifier: |
+    At origin/main, a probe whose blocked request reached example.com at 104.20.23.154 while the control reached 140.82.114.4 is reported egress UNPROVEN, and the run's containment verdict is contained=true (11-05, 23 such probes).
+  note: |
+    reservation hand-off: plan-file-1793912341000 -> plan-file-1793912341000
+    Reserved with rmd next-task-id from the operator session's ops worktree. No duplicate: W1-T1265 (merged) added the egress arm; W1-T2271 (merged) stopped a bare response from claiming a breach and added the remote-address discriminator this task makes reachable; W1-T1289 (merged) gave the declared boundary an owner for Claude; W1-T3103 is the operator's allowlist-proxy ruling this task enforces for Codex.
+    Related, out of scope (each a probe-design mismatch, not new): the token-read control file lives under config.root/state, which deploy/codex-requirements.toml denies to every Codex worker, so that arm is UNPROVEN by construction for Codex; under the private-registry profile the outside-cwd write exits 0 with no file and no OS denial, so the filesystem arm reads UNPROVEN and blocks those builds (fail-closed, correct). Both want their own task once egress is enforced.
+    Scope amendment 2026-11-05 (operator, ~21:25Z: "Let's fix codex to go through the allowlist proxy, but make sure almost all common sites are on the allowlist so this isn't unnecessarily restrictive. We need to get back to clearing the pr queue, so make it quick."):
+    - src/lib/settings.ts and settings/worker.json: the one allowlist (ALLOWED_NETWORK_DOMAINS, pinned to worker.json's allowedDomains by W1-T2243) is widened to common code hosts, package and container registries, package CDNs and docs. It stays EXACT HOSTS ONLY, because the Claude egress owner (startWorkerEgressProxy, src/lib/worker.ts) refuses any entry outside /^[a-z0-9.-]+$/; widening that owner to wildcards is a security change left out of this task. Kept out pending the operator's explicit call: model APIs (the inference-bypass reason in settings.ts) and user-hosted content domains (*.amazonaws.com, *.vercel.app, *.windows.net, *.cloudfront.net, *.azure.net, *.googleapis.com).
+    - Measured in-container 2026-11-05 on Codex 0.163: with --enable network_proxy the legacy sandbox_mode=workspace-write denies all egress and takes no allowlist key, so the legacy writer moves to a ":workspace" permission profile (keeps cwd and /tmp writable and .git/config and hooks protected, same as workspace-write) with network.domains from the allowlist. Six sibling suites pin the old `--sandbox workspace-write` / network_access argv for writers; each changed line asserts the profile instead and cites W1-T11437. No input and no other expectation changes.
+    - Design item 1 is met by narrowing the refusal pattern to curl's and the proxy's own refusal text (connection failures and `CONNECT tunnel failed`), which the probe's EGRESS-RESULT echo and the tripwire's hook line never contain, instead of a new probe file. test/egress-evidence-discriminates.test.ts pins the verdict order, and this leaves it intact.

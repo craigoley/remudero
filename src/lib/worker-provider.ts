@@ -44,7 +44,7 @@ import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
 import type { SdkUsageCase, UsageSnapshot, WeeklyWindow } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
-import { validateWorkerSettingsFile } from "./settings.js";
+import { ALLOWED_NETWORK_DOMAINS, validateWorkerSettingsFile } from "./settings.js";
 import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertInstanceRegistryRuntimeCurrent, assertInstanceRegistryWorkerEnvironment, runtimeInstanceRegistryPrivateFile, InstanceRegistryRuntimeError } from "./instance-registry-selection.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
@@ -3052,6 +3052,36 @@ interface PrivateRegistryCodexProfile {
   overrides: readonly string[];
 }
 
+/**
+ * W1-T11437: the TOML inline table a Codex permission profile's `network.domains` takes, built from the
+ * SAME list the Claude sandbox's `allowedDomains` is pinned to (settings.ts `ALLOWED_NETWORK_DOMAINS`), so
+ * both providers egress through one allowlist. Codex's `network_proxy` refuses every unlisted host with a
+ * 403 CONNECT. Legacy `sandbox_workspace_write.network_access` cannot carry an allowlist at all: it is
+ * either open egress or, with the proxy on, no egress.
+ */
+export function codexNetworkDomains(domains: readonly string[] = ALLOWED_NETWORK_DOMAINS): string {
+  return `{${domains.map((domain) => `${JSON.stringify(domain)}="allow"`).join(",")}}`;
+}
+
+/**
+ * W1-T11437: a legacy Codex writer's sandbox. `:workspace` keeps the worktree and tmp writable and the
+ * worktree's git config protected, exactly as `--sandbox workspace-write` did (measured in-container),
+ * while its egress goes through Codex's allowlist proxy instead of `network_access=true`. The host test
+ * slot and the native cache keep their `--add-dir` and are also granted here, so a profile never narrows them.
+ */
+function codexWriterProfileArgs(nativeCacheRoot: string | undefined, env: NodeJS.ProcessEnv = process.env): string[] {
+  const slot = env[TEST_SLOT_DIR_ENV] && !env.NODE_TEST_CONTEXT ? env[TEST_SLOT_DIR_ENV] : undefined;
+  const writable = [slot, nativeCacheRoot].filter((dir): dir is string => typeof dir === "string" && dir !== "");
+  return [
+    "--enable", "network_proxy",
+    "-c", 'default_permissions="rmd_writer"',
+    "-c", 'permissions.rmd_writer.extends=":workspace"',
+    ...(writable.length === 0 ? [] : ["-c", `permissions.rmd_writer.filesystem={${writable.map((dir) => `${JSON.stringify(dir)}="write"`).join(",")}}`]),
+    "-c", "permissions.rmd_writer.network.enabled=true",
+    "-c", `permissions.rmd_writer.network.domains=${codexNetworkDomains()}`,
+  ];
+}
+
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">, privateProfile?: PrivateRegistryCodexProfile, nativeCacheRoot?: string): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
@@ -3084,7 +3114,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     ...codexPreToolUseProfile(args.settingsFile),
     ...disposableReviewProfile,
     ...(privateProfile === undefined ? [] : ["--profile", privateProfile.name, "--strict-config", ...privateProfile.overrides,
-      ...(disposableReview ? ["--enable", "network_proxy"] : [])]),
+      ...(disposableReview || !readOnly ? ["--enable", "network_proxy"] : [])]),
     // W1-T2754: Codex refuses to start when its `-C` cwd is neither a git repository nor a
     // configured trusted directory — "Not inside a trusted directory and --skip-git-repo-check
     // was not specified." — and it does so by EXITING 0 WITH NO OUTPUT, so the caller sees an
@@ -3128,14 +3158,45 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   return [
     "exec",
     ...shared,
-    ...(disposableReview || privateProfile !== undefined ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
-    ...(readOnly || disposableReview || privateProfile !== undefined ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
+    ...(disposableReview || privateProfile !== undefined || !readOnly ? [] : ["--sandbox", "read-only"]),
+    ...(readOnly || disposableReview || privateProfile !== undefined ? [] : codexWriterProfileArgs(nativeCacheRoot)),
     // Writers only: a reader or review runs no typecheck that needs the host slot.
     ...(readOnly || disposableReview ? [] : codexTestSlotArgs()),
     ...(nativeCacheRoot === undefined ? [] : ["--add-dir", nativeCacheRoot]),
     "-C", args.cwd,
     "-",
   ];
+}
+
+/**
+ * The read grants a private-registry Codex profile needs so Codex's own Linux sandbox can start: the
+ * directory holding the native executable it re-execs (as `codex-linux-sandbox`, through PATH aliases)
+ * and `$CODEX_HOME/tmp`, where it writes those aliases. Without them `":root"="deny"` hides the helper
+ * and every sandboxed command fails `execvp codex-linux-sandbox` before running (2026-11-05).
+ * Derived from the resolved executable, never a fixed install path: a node launcher (`codex.js`)
+ * contributes its package's `vendor` dir and each sibling platform package's (`codex-linux-x64`…);
+ * a native executable contributes its own directory. Read only: nothing here grants write.
+ */
+export function codexPrivateProfileExecutableReads(codexBin: string, realCodexHome: string): string[] {
+  const reads = new Set<string>();
+  const real = realpathSync(codexBin);
+  if (/\.[cm]?js$/.test(real)) {
+    let pkgRoot = dirname(real);
+    while (!existsSync(join(pkgRoot, "package.json")) && dirname(pkgRoot) !== pkgRoot) pkgRoot = dirname(pkgRoot);
+    const vendorOf = (dir: string): void => {
+      const vendor = join(dir, "vendor");
+      if (existsSync(vendor) && lstatSync(realpathSync(vendor)).isDirectory()) reads.add(realpathSync(vendor));
+    };
+    vendorOf(pkgRoot);
+    const scope = dirname(pkgRoot), prefix = `${basename(pkgRoot)}-`;
+    for (const entry of readdirSync(scope)) if (entry.startsWith(prefix)) vendorOf(join(scope, entry));
+  } else {
+    reads.add(dirname(real));
+  }
+  const aliases = join(realCodexHome, "tmp");
+  // Codex creates tmp on first use; an existing entry is canonicalised so a planted symlink cannot widen the grant.
+  reads.add(existsSync(aliases) ? realpathSync(aliases) : aliases);
+  return [...reads];
 }
 
 async function withPrivateRegistryCodexProfile<T>(
@@ -3182,20 +3243,26 @@ async function withPrivateRegistryCodexProfile<T>(
     // policy is therefore also supplied through supported CLI overrides. Neither surface names private paths.
     // --add-dir also expands :workspace_roots. Its verified cache grant must remain disjoint
     // from both private inputs, even though the public-only profile never names those inputs.
-    const grantRoots = nativeCacheRoot === undefined ? [...roots] : [...roots, directory(nativeCacheRoot)];
+    const executableReads = codexPrivateProfileExecutableReads(resolveCodexBin(config), realpathSync(codexHome(config)));
+    const grantRoots = nativeCacheRoot === undefined ? [...roots, ...executableReads]
+      : [...roots, ...executableReads, directory(nativeCacheRoot)];
     if (grantRoots.some(root => isWithin(root, selected) || isWithin(root, path))) {
       throw new InstanceRegistryRuntimeError("worker_scope_contains_private_file");
     }
     const filesystem = new Map<string, string>([[":root", "deny"], [":minimal", "read"],
       [":workspace_roots", readOnly ? "read" : "write"], [":slash_tmp", "deny"], [":tmpdir", readOnly ? "read" : "write"],
-      ...[...roots].filter(root => root !== cwd && root !== slotRoot).map(root => [root, "read"] as [string, string])]);
+      ...[...roots].filter(root => root !== cwd && root !== slotRoot).map(root => [root, "read"] as [string, string]),
+      ...executableReads.filter(root => !roots.has(root)).map(root => [root, "read"] as [string, string])]);
     text = `default_permissions=${JSON.stringify(name)}\n[permissions.${name}]\nextends="${readOnly ? ":read-only" : ":workspace"}"\n`
-      + `[permissions.${name}.network]\nenabled=${review || !readOnly}\n[permissions.${name}.filesystem]\n`
+      + `[permissions.${name}.network]\nenabled=${review || !readOnly}\n`
+      + (review || !readOnly ? `domains=${codexNetworkDomains()}\n` : "")
+      + `[permissions.${name}.filesystem]\n`
       + [...filesystem].map(([target, access]) => `${JSON.stringify(target)}=${JSON.stringify(access)}`).join("\n") + "\n";
     const inline = [...filesystem].map(([target, access]) => `${JSON.stringify(target)}=${JSON.stringify(access)}`).join(",");
     profile = { name, overrides: ["-c", `default_permissions=${JSON.stringify(name)}`,
       "-c", `permissions.${name}.extends=${JSON.stringify(readOnly ? ":read-only" : ":workspace")}`,
-      "-c", `permissions.${name}.filesystem={${inline}}`, "-c", `permissions.${name}.network.enabled=${review || !readOnly}`] };
+      "-c", `permissions.${name}.filesystem={${inline}}`, "-c", `permissions.${name}.network.enabled=${review || !readOnly}`,
+      ...(review || !readOnly ? ["-c", `permissions.${name}.network.domains=${codexNetworkDomains()}`] : [])] };
     fd = openSync(path, "wx+", 0o600);
     writeFileSync(fd, text);
     identity = fstatSync(fd);
@@ -4477,6 +4544,8 @@ export interface OpenWeightWorkerResult {
   /** W1-T4079: the deployment this attempt found absent (HTTP 404). */
   openWeightDeploymentAbsent?: string;
   openWeightCapacityShortfall?: CapacityShortfall;
+  /** W1-T10877: see WorkerResult.openWeightErrorClass. */
+  openWeightErrorClass?: string;
   sessionId: string;
   costUsd: number;
   numTurns: number;
@@ -5399,6 +5468,9 @@ function openWeightResult(input: {
       reason: "capacity_shortfall" as const, deployment: input.model,
       estimatedTokens: input.error.estimatedTokens, limitTokens: input.error.limitTokens!,
     } } : {}),
+    // W1-T10877: a truncated reply or a timeout is returned, not thrown, so its class must ride the result typed.
+    ...(input.error instanceof OpenWeightTruncatedReplyError ? { openWeightErrorClass: OpenWeightTruncatedReplyError.name }
+      : input.error instanceof OpenWeightRequestTimeoutError ? { openWeightErrorClass: OpenWeightRequestTimeoutError.name } : {}),
     webSearchAttempted: input.webSearchAttempted ?? 0,
     webSearchAccepted: input.webSearchAccepted ?? 0,
     webSearchRefused: input.webSearchRefused ?? 0,

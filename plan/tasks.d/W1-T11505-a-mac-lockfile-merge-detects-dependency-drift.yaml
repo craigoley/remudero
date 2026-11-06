@@ -1,0 +1,52 @@
+- id: W1-T11505
+  title: A Mac lockfile merge detects stale dependencies and names the supported seed-store recovery
+  repo: remudero
+  depends_on: [W1-T11468]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-06 final handoff section 6; independently reproduced SDK and dependency-cruiser version drift on the Mac operator checkout"
+  plan_refs: [W1-T10507, W1-T10257, W1-T11468]
+  files: [hooks/post-merge, deploy/DEPENDENCY-SEEDS.md, test/review/a-mac-lockfile-merge-names-the-supported-prime-remedy.test.ts]
+  priority: 3
+  status: queued
+  attempts: 0
+  rationale: |
+    On 2026-11-06 the Mac operator checkout holds claude-agent-sdk 0.3.310 and dependency-cruiser
+    18.7.0; origin/main 202ec738c748 locks 0.3.316 and 18.7.2. A resumed S1 worktree borrowed that
+    install through a whole-directory node_modules symlink, and remudero-dependencies prime refused
+    it with dependency seed version mismatch. Removing only that owned link and priming produced
+    method apfs-clone with the matching account seed. The shared donor was preserved.
+    hooks/post-checkout explicitly skips Darwin. W1-T11468 adds a Linux-only post-merge hook, so
+    its filed design leaves a Mac merge without freshness detection or a supported recovery line.
+    This task extends that hook after W1-T11468 merges; it does not duplicate its Linux behavior.
+  design: |
+    On Darwin, a merge that changes package-lock.json checks the checkout through the existing
+    remudero-dependencies tool. An absent destination is primed using the account seed store and
+    must report apfs-clone, never a private npm install or cache. A present matching generation is
+    left alone. A stale or unverifiable occupied destination is reported with the exact supported
+    recovery for its layout; never delete or rename a real install or a symlink donor automatically.
+    For a whole-directory link, name unlinking that link only and priming the checkout, with an
+    explicit no-trailing-slash command. For an occupied real directory, explain that the tool never
+    replaces it and require owner qualification of borrowers before replacement, or use a fresh
+    APFS-primed checkout; never imply that prime alone will replace it. Missing tools and failed
+    checks remain named refusals. Do not report a stale install as fresh or fail the already-done
+    merge. An unchanged lockfile invokes no provisioning. Preserve W1-T11468's Linux contract.
+    Use a contained real-git hook fixture, forced Darwin uname and a recording seed-tool fixture;
+    check actual package-version mismatch as well as the matching-generation control. Preserve
+    shared paths byte-for-byte. No live operator install changes or new fixed bounds.
+  acceptance:
+    - claim: "A Darwin merge that changes the lockfile detects stale dependencies, while an unchanged lockfile and a matching generation leave provisioning idle"
+      proof: "grep: W1-T11505 criterion 1 in test/review/a-mac-lockfile-merge-names-the-supported-prime-remedy.test.ts"
+    - claim: "An absent destination uses the account APFS seed path; occupied real installs and symlink donors remain unchanged and receive a layout-correct recovery command"
+      proof: "grep: W1-T11505 criterion 2 in test/review/a-mac-lockfile-merge-names-the-supported-prime-remedy.test.ts"
+  note: |
+    Import-equivalent sketch computed test/review at high confidence via dep-review. Compute again
+    on the completed test. This is a Mac counterpart; W1-T11468 remains the Linux owner.
+  falsifier: |
+    Restore the Darwin early return: criterion 1 misses the reproduced version mismatch. Replace
+    the layout-specific remedy with an unconditional prime: criterion 2 fails for an occupied real
+    install. Add destructive replacement: the donor/private-install byte-preservation controls fail.

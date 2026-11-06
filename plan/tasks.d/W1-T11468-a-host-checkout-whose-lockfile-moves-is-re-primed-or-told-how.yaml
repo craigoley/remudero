@@ -1,0 +1,75 @@
+- id: W1-T11468
+  title: A host checkout whose lockfile moves under a fast-forward is re-primed from the seed store, and a stale-dependency refusal names the supported remedy
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-06 Azure host: preflight-author refused /tmp/rmd-amend-W1-T11431-1793931609000 because its node_modules (a whole-directory symlink to ~/rmd-op/node_modules) held claude-agent-sdk 0.3.310 against a 0.3.316 lockfile"
+  plan_refs: [W1-T10507, W1-T10508, W1-T10739]
+  files: [hooks/post-merge, scripts/lib/author-dependency-provenance.mjs, deploy/DEPENDENCY-SEEDS.md, test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=99d0a6235b9487c3
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
+  attempts: 0
+  rationale: |
+    On 2026-11-06, scripts/preflight-author.mjs (~:507) refused a host worktree before expensive
+    validation with "installed dependency precheck unavailable: installed package version differs:
+    node_modules/@anthropic-ai/claude-agent-sdk". The refusal comes from
+    scripts/lib/author-dependency-provenance.mjs (~:65).
+    How it got there:
+    - The worktree's node_modules was a whole-directory symlink to
+      /home/craigoleyagent/rmd-op/node_modules: a real install written 2026-11-04 02:42, holding
+      0.3.310.
+    - #16940 (cac35918ce, 2026-11-05 23:41Z) moved the lockfile to 0.3.316.
+    - rmd-op was then fast-forwarded four times (reflog "merge origin/main: Fast-forward", 02:10-02:45Z),
+      and nothing re-primed its dependencies. Its own lockfile and its own install now disagree, so
+      every checkout borrowing it inherits the mismatch at the next dependency bump.
+    The supported path already exists. hooks/post-checkout primes a NEW host worktree through
+    $HOME/.local/bin/remudero-dependencies, and the seed store already held three 0.3.316
+    generations. But there are three gaps:
+    - nothing re-primes on a fast-forward (post-checkout never runs for a merge);
+    - a manual `ln -s node_modules` defeats the post-checkout hook, which skips a present node_modules;
+    - the refusal names no remedy. The operator had to reconstruct it by hand, and the tool is not on a
+      non-login ssh PATH.
+  design: |
+    1. hooks/post-merge (new, executable, the same guards as hooks/post-checkout: not Darwin,
+       package-lock.json present, tool resolved on PATH or at $HOME/.local/bin). It acts only when the
+       merge changed package-lock.json (git diff --name-only ORIG_HEAD HEAD).
+       - node_modules is seed-linked ([ -L node_modules/typescript ]) or absent: re-prime through
+         `remudero-dependencies prime <toplevel>`, the supported path; report its method and key, or
+         its first refusal line. If the tool refuses an occupied seed-linked destination, the hook
+         uses whatever re-link path the tool supports. If there is none, it prints the remedy and
+         the builder documents that in the PR.
+       - node_modules is a whole-directory symlink or a real install: never delete, move or install
+         anything, because other checkouts may borrow it. Print one line naming the drift and the
+         exact remedy (see 2).
+       - The hook never fails the merge.
+    2. author-dependency-provenance.mjs: when the precheck fails because an installed version differs
+       from the lock, the reason carries the remedy for the layout it found:
+       - for a whole-directory symlink: `rm <checkout>/node_modules` (the link only), then
+         `<absolute tool path> prime <checkout>`;
+       - for seed links or a real install: the prime command alone, or the documented re-link.
+       The tool path is resolved the way the hook resolves it, and the reason never prints env values.
+    3. deploy/DEPENDENCY-SEEDS.md documents the fast-forward case and the remedy, including the trap
+       that `rm -rf node_modules/` with a trailing slash follows the link and deletes the donor's
+       install.
+    No fixed thresholds; no new install path. The seed tool remains the only materializer.
+  acceptance:
+    - claim: "A merge that changes package-lock.json in a seed-linked host checkout runs remudero-dependencies prime for that checkout, and a merge that leaves the lockfile unchanged runs nothing"
+      proof: "grep: W1-T11468 criterion 1 in test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts"
+    - claim: "When node_modules is a whole-directory symlink or a real install, the hook changes nothing on disk and prints the exact remedy, and the author precheck's version-differs refusal names that same remedy"
+      proof: "grep: W1-T11468 criterion 2 in test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts"
+  note: |
+    Copy the fixture technique from test/deploy/a-host-worktree-links-its-dependencies-whoever-creates-it.test.ts:
+    a real git repo, a fake remudero-dependencies on PATH that records its argv, and a forced
+    non-Darwin uname. For criterion 2, assert the symlink target and a real install's files are
+    byte-identical before and after. The hook is bash; the Mac has bash 3.2 and CI has bash 5, so
+    initialise arrays under set -u. The builder names each criterion test with the marker
+    "W1-T11468 criterion N".
+  falsifier: |
+    Delete hooks/post-merge. Criterion 1 must then fail, because no prime is recorded. Drop the
+    remedy text from the precheck reason. Criterion 2's refusal assertion must then fail.

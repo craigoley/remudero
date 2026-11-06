@@ -6512,6 +6512,15 @@ export interface components {
       canReply: boolean;
       /** True only for a current native source with positively observed absent history and unambiguous native identity. Starting is an explicit bound write; reads never create messages. */
       canStartConversation: boolean;
+      /** A current native intake question bound to this preserved conversation. Its canonical feedback record must still be grilling. May enable a reply after the original escalation closes; conveys no executor authority. */
+      activeQuestion?: {
+        issueUrl: string;
+        feedbackId: string;
+        revision: string;
+        seq: number;
+        observedAt: string;
+        updatedAt: string;
+      };
       /** Verified original source text copied only when the operator explicitly starts this conversation. Earlier GitHub comments are not included. */
       initialMessage?: string;
       /** Native acceptance or decline text for recording an operator answer through the bound reply route. These are input, never task approval or repair execution. */
@@ -6530,6 +6539,92 @@ export interface components {
       state: "unavailable";
       reason: "invalid_request" | "wrong_repository" | "source_unavailable" | "invalid_source";
       detail: string;
+    };
+    EscalationConversationIndexUnavailable: {
+      state: "unavailable";
+      reason: "invalid_request" | "refresh_required" | "source_unavailable";
+      detail: string;
+    };
+    EscalationConversationIndexItem: {
+      /** Stable `issue:<canonical issue URL>`. */
+      id: string;
+      issueUrl: string;
+      threadId: string | null;
+      identity: {
+        taskId: string;
+        class: "BLOCKED" | "MANUAL" | "HARD_STOP" | "GRILL";
+        cause?: string;
+        prRef?: string;
+      } | null;
+      identityState: "verified" | "unverified";
+      source: {
+        kind: "saved_thread" | "board_flag" | "saved_thread_and_board_flag";
+        taskId: string;
+        headline: string | null;
+      };
+      correspondence: {
+        state: "needs_input" | "waiting_for_agent" | "archived" | "unknown";
+        reason?: "identity_unverified" | "history_incomplete" | "source_unverified";
+      };
+      history: "verified" | "partial" | "absent";
+      lastActivityAt: string | null;
+      messageCount: number;
+      preview: {
+        from: "operator" | "daemon";
+        text: string;
+      } | null;
+    };
+    EscalationConversationIndex: {
+      state: "served";
+      version: 1;
+      repository: string;
+      snapshot: {
+        version: string;
+        observedAt: string;
+      };
+      coverage: {
+        state: "complete" | "partial" | "unavailable";
+        sources: {
+          threads: "complete" | "unavailable";
+          board: "complete" | "unavailable";
+        };
+        truncated: boolean;
+        /** Sources left out because they named conflicting or foreign conversations. */
+        conflicts: number;
+        incompleteHistory: number;
+        /** Saved escalation threads with no source-bound issue; not listed. */
+        unboundThreads: number;
+        reasons: (string)[];
+      };
+      counts: {
+        unit: "unique_conversations";
+        scope: "repository_snapshot";
+        complete: boolean;
+        /** Null unless every source was read completely. */
+        total: number | null;
+        folders: {
+          needs_input: number | null;
+          waiting_for_agent: number | null;
+          archived: number | null;
+          unknown: number | null;
+        };
+        /** Rows on this page only; never a folder total. */
+        loaded: {
+          total: number;
+          folders: {
+            needs_input: number;
+            waiting_for_agent: number;
+            archived: number;
+            unknown: number;
+          };
+        };
+      };
+      items: (EscalationConversationIndexItem)[];
+      page: {
+        limit: number;
+        folder: ("needs_input" | "waiting_for_agent" | "archived" | "unknown") | (null);
+        nextCursor: string | null;
+      };
     };
     /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */
     EscalationReplyRequest: {
@@ -8632,6 +8727,18 @@ export interface paths {
           "404": EscalationConversationUnavailable;
           "422": EscalationConversationUnavailable;
           "503": EscalationConversationUnavailable;
+        };
+    };
+  };
+  "/v1/escalation/threads": {
+    get: {
+      responses: {
+          "200": EscalationConversationIndex;
+          "400": EscalationConversationIndexUnavailable;
+          "401": Error;
+          "403": Error;
+          "409": EscalationConversationIndexUnavailable;
+          "503": EscalationConversationIndexUnavailable;
         };
     };
   };

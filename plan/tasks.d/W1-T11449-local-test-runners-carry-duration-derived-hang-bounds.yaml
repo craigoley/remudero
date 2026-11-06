@@ -1,0 +1,50 @@
+- id: W1-T11449
+  title: Local author and Node unit-proof test runners carry duration-derived per-test hang bounds
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-06 S0 inspection of the first run's unpushed timeout fix; author preflight has an outer four-hour bound but no per-test timeout"
+  plan_refs: [W1-T2742, W1-T11158]
+  files: [scripts/test-tier-manifest.mjs, scripts/preflight-author.mjs, src/lib/review.ts, src/lib/test-run-timeout.ts, test/ci/a-preflight-author-tests-have-a-duration-derived-timeout.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=6fa1235e64659cf1
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
+  attempts: 0
+  rationale: |
+    At c5119b5428, scripts/preflight-author.mjs:737-739 runs its selected Node suites without
+    --test-timeout. scripts/lib/author-step-capture.mjs:9 bounds the whole step at four hours;
+    src/lib/review.ts:3599-3635 also has a whole-proof bound. Neither names an individual hung
+    test or allows a finished test run with leaked handles to exit normally. The first run's
+    claim that the Mac lock could be held indefinitely was overstated, and its permission errors
+    were caused by the wrong user. The narrower code gap is real: fast and slow hosted tiers
+    already supply per-test hang bounds, while author preflight and Node unit proofs do not.
+    Open-head inspection found no new overlapping task or implementation in 13 open PRs;
+    W1-T11445 and #16969 concern plan merges and event-loop pipe holds, not Node test timeouts.
+  design: |
+    Share a Node argv helper between author preflight and the sync/async proof executors.
+    Derive the per-test timeout from the slowest selected suite's measured duration, with the
+    manifest's existing tier threshold for unmeasured suites and its calibrated hang factor.
+    Preserve an explicitly supplied timeout rather than silently replacing caller policy.
+    Include the existing force-exit and result-pipe-drain handling so completed summaries survive.
+    Preserve suite selection, ordering, outer process bounds and non-Node proof commands.
+    Load the target checkout's manifest lazily for proofs, preserving src-only sandbox imports.
+    No new duration threshold. Test the real executor argv through injected spawners without
+    network access, including async execution, fallback inputs and explicit-timeout precedence.
+  acceptance:
+    - claim: "Every selected author Node suite receives a per-test hang timeout derived from measured suite duration or the manifest threshold, with explicit timeouts preserved"
+      proof: "grep: W1-T11449 criterion 1 in test/ci/a-preflight-author-tests-have-a-duration-derived-timeout.test.ts"
+    - claim: "Sync and async Node unit-test proofs use the shared bound and retain complete summaries, while non-Node commands remain unchanged"
+      proof: "grep: W1-T11449 criterion 2 in test/ci/a-preflight-author-tests-have-a-duration-derived-timeout.test.ts"
+    - claim: "The shared Node timeout helper is called by the production proof executor"
+      proof: "grep: proofTestRunnerArgs( in src/lib/review.ts"
+  note: |
+    Keep markers in test names, record red-before-green and per-file mutation receipts, and use
+    the shared Mac lock with a test timeout. File and implementation are separate PRs.
+  falsifier: |
+    Remove the bound helper from author argv construction: criterion 1 must see the missing
+    timeout. Remove either proof executor's wiring: criterion 2 must see an unbounded Node argv.

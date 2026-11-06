@@ -1,0 +1,58 @@
+- id: W1-T11455
+  title: A step-only ledger read in the daemon opens only the archives whose key manifest holds that step, instead of decompressing all of them on the event loop
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  depends_on: [W1-T11423]
+  origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
+  plan_refs: [W1-T11423, W1-T11424, W1-T10077, W1-T10767]
+  files: [src/run-task.ts, src/lib/escalate.ts, test/ledger/a-step-only-ledger-read-opens-only-the-archives-holding-its-step.test.ts]
+  priority: 2
+  status: queued
+  # backlog gardener: band=2 evidence=6de3d2906d3821b4
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
+  attempts: 0
+  rationale: |
+    A live CPU profile of core on 2026-11-06 recorded one 206 s event-loop hold. About 122 s of
+    it, plus most of 68 s of garbage collection, was a single call chain:
+    routeAdaptiveLifetimePressure, then rowsWithArchivedVerifyHumanVerdicts (src/run-task.ts
+    ~:36724), then readLedgerUnionRecordsSync(dir, { step: [VERIFY_HUMAN_JUDGED_STEP] }), then
+    scanLedgerBuffer / parseObject, then zlib inflate. A step filter limits which rows are KEPT, but
+    the union still inflates and scans every one of the ~394 archives (~692 MB gz) synchronously,
+    to find a handful of verify_human.judged rows. Two callers reach it: the lifetime-pressure hook
+    (~:36604) and the verify-human sweep (~:21591, ~:37028).
+    ledgerClassTier (src/lib/escalate.ts ~:1535) does the same with step
+    panel.escalation_marked_handled, synchronously, on every escalation it judges: 14.6 s of
+    hold time in one 300 s profile window.
+    W1-T11423 adds a per-archive key manifest whose ledgerManifestMayHold already skips an
+    archive when query.steps names no step in manifest.steps, and ledgerRowsFor /
+    ledgerRowsForSync to read through it. Neither reader uses them yet. W1-T11424's census also
+    counts a step option as a bound, so neither reader is flagged (see W1-T11456).
+  design: |
+    1. rowsWithArchivedVerifyHumanVerdicts reads through ledgerRowsForSync with
+       steps [VERIFY_HUMAN_JUDGED_STEP]. It returns the same rows in the same order (archived first,
+       live last), and keeps its documented partial-read behaviour.
+    2. ledgerClassTier reads through ledgerRowsForSync with steps ["panel.escalation_marked_handled"].
+       It keeps its refusal semantics: an incomplete read of an archive the manifest says MAY hold
+       the step, or a torn row naming the step, still throws "escalation precision history is
+       unreadable". An archive whose manifest is missing or unreadable is opened as today.
+       ledgerRowsFor already falls back for those; confirm it, and say so in the PR.
+    3. Neither caller adds a cache or a constant. The manifest is the whole bound.
+    W1-T10767 (queued) edits ledgerClassTier's neighbourhood for snoozes. Keep this change to the read.
+  acceptance:
+    - claim: "rowsWithArchivedVerifyHumanVerdicts and ledgerClassTier open only the archives whose manifest holds their step, and return the same rows as an unbounded read"
+      proof: "grep: W1-T11455 criterion 1 in test/ledger/a-step-only-ledger-read-opens-only-the-archives-holding-its-step.test.ts"
+    - claim: "ledgerClassTier still refuses when an archive that may hold its step is torn or unreadable, and an archive with no manifest is still read"
+      proof: "grep: W1-T11455 criterion 2 in test/ledger/a-step-only-ledger-read-opens-only-the-archives-holding-its-step.test.ts"
+  note: |
+    Tests use a real state dir with N rotated archives (built with the ledger's own rotation, so
+    manifests are written), where the step lives in k of N. Count archive opens through the injection
+    point W1-T11423's own tests use. At base both readers open all N. The builder names each criterion
+    test with the marker "W1-T11455 criterion N".
+  falsifier: |
+    Revert either reader to readLedgerUnionRecordsSync. Criterion 1 must then fail, because all N
+    archives are opened.

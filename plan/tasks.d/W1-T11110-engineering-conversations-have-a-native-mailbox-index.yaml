@@ -2,7 +2,6 @@
   title: Engineering conversations have a native mailbox index with honest correspondence states
   repo: remudero
   depends_on: []
-  dispatch_hold: true
   priority: 1.2
   type: implement
   verify: auto
@@ -11,16 +10,8 @@
   band_meaning: span
   budget_usd: 20
   origin: human#2026-11-02-console-email-inbox
-  plan_refs: [W1-T11096, W1-T11103, CONSOLE-T164]
-  files:
-    - src/lib/escalation-conversation-index.ts
-    - src/lib/escalation-conversation.ts
-    - src/lib/serve.ts
-    - src/lib/instance-gateway.ts
-    - openapi/daemon.yaml
-    - packages/api-client/src/schema.d.ts
-    - test/inbox/escalation-conversation-index.test.ts
-    - test/inbox/escalation-conversation-index-serving.test.ts
+  plan_refs: [W1-T11096, W1-T11103, W1-T10572, CONSOLE-T164]
+  files: [src/lib/escalation-conversation-index.ts, src/lib/escalation-conversation.ts, src/lib/serve.ts, src/lib/instance-gateway.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/inbox/escalation-conversation-index.test.ts, test/inbox/escalation-conversation-index-coverage.test.ts, test/inbox/escalation-conversation-index-serving.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -28,9 +19,15 @@
     producers select proposal identities. A separate reading page does not make engineering asks
     discoverable in the mailbox or remove an answered ask from Action required. The operator says
     archive when the agent needs no more input, while work can continue, and reopen on a new question.
-    A sweep of all 29 current core open PR heads at e572bfa648014f1b96bddf34e06d2159338af00c
-    found no added engineering mailbox index signatures. Positive controls were 71 runtime and 99
-    plan lines; added matches were the held correspondence task and an unrelated bake-off comment.
+    A fresh sweep at main 542d312490d43b2825427a8134a833ff5cdf3a4e covered all 17 open Core PR heads.
+    API head SHAs matched git ls-remote for all 17. Each head had zero overlap with this task's
+    nine implementation and test paths, zero changed plan files matching the mailbox-index subject,
+    and zero added index-route signatures. The positive control returned four task/index matches
+    from main, confirming the search terms resolved in the repository corpus.
+    W1-T10572 shares the OpenAPI and generated-client files but only documents the already-existing
+    AnalyticsView gardener-spend source. This task adds repository-scoped escalation thread routes,
+    their schemas, and the conversation-index tests; the two declaration changes are in separate
+    sections. Normal branch reconciliation still applies if both tasks reach review at once.
   design: |
     Add one authenticated, repository-scoped, bounded GET /v1/escalation/threads index in the real
     serve assembly and generated contract. Mount the index and existing conversation read/reply
@@ -56,28 +53,37 @@
     or truncated history remains visible as incomplete/unknown coverage. Counts name the same unit
     (unique conversations) and their complete scope; a partial page or unreadable source cannot claim
     an empty folder, zero asks, complete history or a verified global total. Keep loaded counts distinct.
-    Exercise healthy and legacy source-only rows, exact native issue binding, saved answer while the
-    board flag remains open, archive while work runs, reopen, closed-origin preserved history, page
-    changes, duplicate/conflicting source rows and absent/corrupt/oversize sources in real-store tests.
-    Prove the repository-prefixed read through the assembled authenticated service, including foreign
-    scope refusal, bounded reads and no source fan-out or live fixture write.
+    Add dedicated real-store index tests and an assembled-service test. Cover healthy and legacy
+    source-only rows, exact native issue binding, a saved answer while the board flag remains open,
+    archive while work runs, reopen, closed-origin preserved history, page changes, duplicate or
+    conflicting source rows and absent, corrupt or oversized sources. Use new test files so this
+    plan-only filing names forward proofs that discriminate the later implementation. Prove the
+    repository-prefixed read through the assembled authenticated service, including foreign-scope
+    refusal, bounded reads and no source fan-out or live fixture write.
   acceptance:
-    - claim: the real service mounts the native engineering conversation index
+    - claim: the real Serve assembly calls the native index route
       proof: 'grep: buildEscalationConversationIndexRoute( in src/lib/serve.ts'
-    - claim: a saved answer clears the ask while its original flag remains open
-      proof: 'unit test: an answered escalation stays out of action required while its source flag remains open'
-    - claim: correspondence archives and reopens without claiming work is complete
-      proof: 'unit test: the engineering mailbox preserves archive and reopen on one native conversation'
-    - claim: incomplete sources and pagination cannot fabricate complete folder counts
-      proof: 'unit test: the engineering conversation index preserves incomplete coverage and count units'
-    - claim: the selected repository read is served through the real authenticated gateway
-      proof: 'unit test: assembled service serves the repository scoped engineering conversation index'
+    - claim: the repository-scoped index is served through authenticated service reads
+      proof: 'unit test: test/inbox/escalation-conversation-index-serving.test.ts'
+    - claim: saved answers and agent follow-ups keep one thread with honest archive and reopen states
+      proof: 'unit test: test/inbox/escalation-conversation-index.test.ts'
+    - claim: incomplete or conflicting sources and pagination cannot fabricate complete folder counts
+      proof: 'unit test: test/inbox/escalation-conversation-index-coverage.test.ts'
   falsifier: |
     Restore the open flag as Action required after a saved answer, archive on capture, substitute a
     foreign issue/thread, remove the actual mount, or count a partial page as the whole mailbox:
     named tests must fail. Keep control/mutant/restored receipts and verify served adoption separately.
   note: |
     Reserved W1-T11110 through the operator checkout for codex/console-mailbox-integration-plan-20261102.
-    Held until W1-T11096 and W1-T11103 are merged/served and current source custody is reconciled.
+    Released 2026-11-05 after W1-T11096 (#16221) and W1-T11103 (#16839) were verified as ancestors
+    of the live Serve process source, generation a at 42dd6c080b4f48bd7c4509a00ccd05850d86b2ad.
+    At 02:51Z the process ran from /home/node/rmd-serve-gens/a (PID 27060); the earlier generation
+    c031697e39dbf819470413196e581813c4ebc6d2 is also an ancestor. Unauthenticated /v1/version and
+    /v1/escalation/thread reads returned 401, so this records source adoption, not an authenticated
+    response contract. At 02:56Z origin/main was 4385229cc49bfad9e77ba880f61277e1e65863f9. A fresh
+    sweep found 11 open Core PR heads and 41 changed-file occurrences, with no overlap in these task
+    files; PR #16817's src/lib/read-plane.ts was the positive control. No W1-T11110 dispatch ref or
+    run branch was found. The task may now enter the normal selector and review gates. Console
+    CONSOLE-T165 remains held until this index is merged, served, and pinned.
     A separate console consumer must pin this actual served index before mailbox/folder adoption.
     Existing proposal inbox, W1-T8887 execution and CONSOLE-T128 scope remain with their native owners.

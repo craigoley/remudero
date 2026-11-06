@@ -1,0 +1,55 @@
+- id: W1-T11503
+  title: A freshness exit accounts for a direct merge still owned by an abandoned sweep
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator H4-F investigation 2026-11-06; PR16944 direct-merge preflight followed by freshness exit 2026-11-05T23:57:03Z"
+  plan_refs: [W1-T5748, W1-T5901, W1-T10057, W1-T9563]
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, src/lib/arm-auto-merge.ts, test/github/a-freshness-exit-drains-an-admitted-direct-merge.test.ts]
+  priority: 1
+  status: queued
+  attempts: 0
+  rationale: |
+    Main a9eb76ff103a daemon.ts:3026 races the real sweep with its learned bound, returns on
+    abandonment, and leaves the original promise alive. prepareFreshnessExit at :4860 awaits
+    backgroundSweep, which is that bounded wrapper, not necessarily the original sweep.
+    restartDrainInventory in sweep.ts:16969 includes reviews and detached worker/admission actions
+    only. The direct merge awaited by the original sweep has no independent drain registration.
+    arm-auto-merge.ts:1297 prints merging the behind plan PR as-is before returning proceed;
+    this is preflight intent, not a successful merge receipt. Handoff observed this for PR16944
+    at 23:57:01Z; archived ledger independently confirms freshness_exit at23:57:03.359Z with
+    pre_exit_pass awaited_in_flight, and PR16944 still observed open after reboot at00:07Z.
+    The ledger alone does not prove a GitHub write had been submitted; test both preflight and
+    submitted-write boundaries rather than converting that intent log into a merge success.
+  design: |
+    Register an admitted direct-merge operation with the daemon-lifetime drain owner before its
+    asynchronous preflight/write can outlive a sweep wrapper. Keep registration until actual
+    settlement, including refusal/error, and include PR/head, phase and settlement evidence in
+    the existing inventory. Freshness latch closes NEW merge admissions after revalidation;
+    it does not erase an already admitted operation or report the wrapper as its settlement.
+    Before submission a cancellation may safely refuse; after submission preserve settlement
+    or an explicit unknown-write outcome through the existing measured drain policy. Use the
+    existing learned bounds and structured drain receipts, no new timer or unbounded wait.
+    Do not claim a completed drain if the merge remains unresolved. Reconcile actual PR state
+    before retrying an uncertain write; never blindly submit a second merge. Keep all ordinary
+    review/check/head, plan-safety, holds and single-plan-merge ownership gates.
+    Exercise the real daemon/sweep wiring with manually controlled promises and learned clock:
+    abandon wrapper, keep direct merge pending, latch restart, then settle it. Also cover
+    preflight cancellation, write refusal, changed head and an unresolved write at the drain bound.
+  acceptance:
+    - claim: "A direct merge outliving its abandoned sweep remains visible to restart drain until its own settlement, and a freshness exit cannot mistake wrapper completion for merge completion"
+      proof: "grep: W1-T11503 criterion 1 in test/github/a-freshness-exit-drains-an-admitted-direct-merge.test.ts"
+    - claim: "Freshness closes new merge admission; refusal, error, changed head and bound exhaustion produce explicit outcomes and cleanup without a false success or duplicate write"
+      proof: "grep: W1-T11503 criterion 2 in test/github/a-freshness-exit-drains-an-admitted-direct-merge.test.ts"
+  note: |
+    H4-F. Computed test/github MEDIUM from daemon, sweep and arm-auto-merge sketch. Host investigation
+    was read-only and bounded to one named archive. No actual merge, restart or status write in
+    qualification. Open-head sweep must distinguish PR16971's crash reporting from this merge drain.
+  falsifier: |
+    Remove merge registration while keeping the bounded sweep: criterion 1 observes an empty
+    drain or premature freshness exit and fails. Remove latch/unknown-write handling and the
+    corresponding negative controls fail criterion 2.

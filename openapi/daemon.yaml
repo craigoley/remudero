@@ -15121,6 +15121,17 @@ components:
               sourceImported: {type: boolean, enum: [true]}
         canReply: {type: boolean}
         canStartConversation: {type: boolean, description: True only for a current native source with positively observed absent history and unambiguous native identity. Starting is an explicit bound write; reads never create messages.}
+        activeQuestion:
+          type: object
+          description: A current native intake question bound to this preserved conversation. Its canonical feedback record must still be grilling. May enable a reply after the original escalation closes; conveys no executor authority.
+          required: [issueUrl, feedbackId, revision, seq, observedAt, updatedAt]
+          properties:
+            issueUrl: {type: string}
+            feedbackId: {type: string}
+            revision: {type: string, pattern: '^[a-f0-9]{64}$'}
+            seq: {type: integer, minimum: 1}
+            observedAt: {type: string, format: date-time}
+            updatedAt: {type: string, format: date-time}
         initialMessage: {type: string, description: Verified original source text copied only when the operator explicitly starts this conversation. Earlier GitHub comments are not included.}
         recommendationReplies:
           type: object
@@ -15147,6 +15158,129 @@ components:
         state: {type: string, enum: [unavailable]}
         reason: {type: string, enum: [invalid_request, wrong_repository, source_unavailable, invalid_source]}
         detail: {type: string}
+
+    EscalationConversationIndexUnavailable:
+      type: object
+      required: [state, reason, detail]
+      properties:
+        state: {type: string, enum: [unavailable]}
+        reason: {type: string, enum: [invalid_request, refresh_required, source_unavailable]}
+        detail: {type: string}
+
+    EscalationConversationIndexItem:
+      type: object
+      required: [id, issueUrl, threadId, identity, identityState, source, correspondence, history, lastActivityAt, messageCount, preview]
+      properties:
+        id: {type: string, description: "Stable `issue:<canonical issue URL>`."}
+        issueUrl: {type: string}
+        threadId: {type: [string, "null"]}
+        identity:
+          type: [object, "null"]
+          required: [taskId, class]
+          properties:
+            taskId: {type: string}
+            class: {type: string, enum: [BLOCKED, MANUAL, HARD_STOP, GRILL]}
+            cause: {type: string}
+            prRef: {type: string}
+        identityState: {type: string, enum: [verified, unverified]}
+        source:
+          type: object
+          required: [kind, taskId, headline]
+          properties:
+            kind: {type: string, enum: [saved_thread, board_flag, saved_thread_and_board_flag]}
+            taskId: {type: string}
+            headline: {type: [string, "null"], maxLength: 200}
+        correspondence:
+          type: object
+          required: [state]
+          properties:
+            state: {type: string, enum: [needs_input, waiting_for_agent, archived, unknown]}
+            reason: {type: string, enum: [identity_unverified, history_incomplete, source_unverified]}
+        history: {type: string, enum: [verified, partial, absent]}
+        lastActivityAt: {type: [string, "null"], format: date-time}
+        messageCount: {type: integer, minimum: 0}
+        preview:
+          type: [object, "null"]
+          required: [from, text]
+          properties:
+            from: {type: string, enum: [operator, daemon]}
+            text: {type: string, maxLength: 200}
+
+    EscalationConversationIndex:
+      type: object
+      required: [state, version, repository, snapshot, coverage, counts, items, page]
+      properties:
+        state: {type: string, enum: [served]}
+        version: {type: integer, enum: [1]}
+        repository: {type: string}
+        snapshot:
+          type: object
+          required: [version, observedAt]
+          properties:
+            version: {type: string, pattern: '^[a-f0-9]{64}$'}
+            observedAt: {type: string, format: date-time}
+        coverage:
+          type: object
+          required: [state, sources, truncated, conflicts, incompleteHistory, unboundThreads, reasons]
+          properties:
+            state: {type: string, enum: [complete, partial, unavailable]}
+            sources:
+              type: object
+              required: [threads, board]
+              properties:
+                threads: {type: string, enum: [complete, unavailable]}
+                board: {type: string, enum: [complete, unavailable]}
+            truncated: {type: boolean}
+            conflicts: {type: integer, minimum: 0, description: Sources left out because they named conflicting or foreign conversations.}
+            incompleteHistory: {type: integer, minimum: 0}
+            unboundThreads: {type: integer, minimum: 0, description: Saved escalation threads with no source-bound issue; not listed.}
+            reasons: {type: array, items: {type: string}}
+        counts:
+          type: object
+          required: [unit, scope, complete, total, folders, loaded]
+          properties:
+            unit: {type: string, enum: [unique_conversations]}
+            scope: {type: string, enum: [repository_snapshot]}
+            complete: {type: boolean}
+            total: {type: [integer, "null"], minimum: 0, description: Null unless every source was read completely.}
+            folders:
+              type: object
+              required: [needs_input, waiting_for_agent, archived, unknown]
+              properties:
+                needs_input: {type: [integer, "null"], minimum: 0}
+                waiting_for_agent: {type: [integer, "null"], minimum: 0}
+                archived: {type: [integer, "null"], minimum: 0}
+                unknown: {type: [integer, "null"], minimum: 0}
+            loaded:
+              type: object
+              description: Rows on this page only; never a folder total.
+              required: [total, folders]
+              properties:
+                total: {type: integer, minimum: 0}
+                folders:
+                  type: object
+                  required: [needs_input, waiting_for_agent, archived, unknown]
+                  properties:
+                    needs_input: {type: integer, minimum: 0}
+                    waiting_for_agent: {type: integer, minimum: 0}
+                    archived: {type: integer, minimum: 0}
+                    unknown: {type: integer, minimum: 0}
+        items:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/EscalationConversationIndexItem"
+        page:
+          type: object
+          required: [limit, folder, nextCursor]
+          properties:
+            limit: {type: integer, minimum: 1, maximum: 50}
+            folder:
+              oneOf:
+                - type: string
+                  enum: [needs_input, waiting_for_agent, archived, unknown]
+                - type: "null"
+            nextCursor: {type: [string, "null"]}
 
     EscalationReplyRequest:
       type: object
@@ -22168,10 +22302,75 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /v1/escalation/threads:
+    get:
+      summary: List the repository's engineering conversations as a native mailbox index.
+      description: >
+        Read-only, authenticated, repository-scoped and bounded (W1-T11110). One row per unique
+        conversation (native issue or saved thread), deduplicated across the saved thread store and
+        the current board; conflicting mappings are left out and counted, never chosen between.
+        Correspondence uses the same projection as the detail read: a saved answer is waiting for the
+        agent even while the board flag is open, an explicit no-more-input message archives while work
+        continues, and a later agent question reopens the same thread. A flag with no saved history
+        keeps its native issue URL with identity and correspondence unknown. Counts name unique
+        conversations and their scope; they are null whenever a source is unreadable, a mapping
+        conflicts or the snapshot was truncated, so a partial view never claims an empty folder.
+        Cursors are bound to the repository, folder and snapshot version; a changed snapshot answers
+        409 and requires a refresh from the first page. A list read never writes.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 50, default: 25}
+        - name: cursor
+          in: query
+          required: false
+          schema: {type: string, maxLength: 512}
+        - name: folder
+          in: query
+          required: false
+          schema: {type: string, enum: [needs_input, waiting_for_agent, archived, unknown]}
+      responses:
+        "200":
+          description: One bounded page with coverage and counts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationIndex"
+        "400":
+          description: The limit, folder or cursor is not valid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationIndexUnavailable"
+        "409":
+          description: The snapshot changed or the cursor belongs to another view; refresh from the first page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationIndexUnavailable"
+        "503":
+          description: No serving repository is configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationIndexUnavailable"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/escalation/reply:
     post:
       summary: Answer an ESCALATION in prose -- recorded as an input on its thread, never a command.
       description: >
+        Source-bound replies use one immutable native feedback submission identity. A duplicate
+        intent may recover delivery of its exact saved input without appending another answer.
+        Replies to verified intake follow-ups preserve the original thread and carry reply_to
+        for the exact current grilling feedback record. A closed original issue alone never
+        enables a reply. Legacy replies without a native delivery identity remain unverified.
         W1-T2496, W1-T4471 (src/lib/panel-actions.ts's `buildEscalationReplyRoute`). Write tier:
         LOW (W1-T404). Derives the escalation's thread id from the body, refuses (400) when no
         thread store is configured, the thread cannot be read, or it holds no prior message --

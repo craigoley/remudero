@@ -10,9 +10,9 @@ import type { WorkerProviderId } from "#src/lib/config.js";
 import type { Mount, Mounts } from "#src/lib/mounts.js";
 import type { EffectiveProviderRoutingPolicy } from "#src/lib/provider-routing-policy.js";
 import { clearProviderRoutingPolicyOverride, resolveProviderRoutingPolicy, writeProviderRoutingPolicyOverride } from "#src/lib/provider-routing-policy.js";
-import { buildEffectiveConfigCensus, modelCanaryConfigId, type ModelCanaryConfigCandidate,
+import { buildEffectiveConfigCensus, modelCanaryCaseSetDigest, modelCanaryConfigId, type ModelCanaryConfigCandidate,
   type ModelCanaryConfigEvidence, type ModelCanaryConfigOverrideEvidence, type ModelCanaryConfiguration } from "#src/lib/model-canary-config-census.js";
-import type { CanaryCase } from "#src/lib/model-canary-suite.js";
+import { commonCanarySuite, type CanaryCase } from "#src/lib/model-canary-suite.js";
 
 const asOf = "2026-11-02T12:00:00.000Z";
 const sha = (digit: string) => digit.repeat(64);
@@ -21,6 +21,16 @@ const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(
   : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort()
     .map(key => [key, canonical((value as Record<string, unknown>)[key])])) : value;
 const createCanonicalDigestForTest = (value: unknown) => createHash("sha256").update(JSON.stringify(canonical(value))!).digest("hex");
+
+test("coding cases retain first class identity through matrix census validation", () => {
+  const cases = commonCanarySuite(), coding = cases.find(item => item.id === "coding-sum-four-v1");
+  assert.ok(coding);
+  assert.equal(coding.family, "coding");
+  assert.deepEqual(coding.codingControl, { version: "coding-control-v1", seed: "model-canary-coding-v1" });
+  assert.equal(modelCanaryCaseSetDigest(cases), modelCanaryCaseSetDigest(commonCanarySuite()));
+  assert.throws(() => modelCanaryCaseSetDigest(cases.map(item => item.id === coding.id
+    ? { ...item, family: "review" as const } : item)), /case-identity-invalid/);
+});
 
 function fixtureRoot(prefix: string): string {
   const hasGitMarkerAncestor = (candidate: string): boolean => {

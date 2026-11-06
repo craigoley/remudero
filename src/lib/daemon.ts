@@ -126,6 +126,8 @@ import {
   drainInFlightReviews,
   inFlightReviewCount,
   inFlightReviewRunsNow,
+  installReviewLaneTransition,
+  runningReviewLaneIds,
   restartDrainInventory,
   type RestartDrainInventoryEntry,
 } from "./sweep.js";
@@ -155,7 +157,7 @@ import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, sys
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
-import { defaultLaneGovernorPorts, LANE_TARGET_STEP, laneTarget, laneTargetPayload, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget } from "./lane-governor.js";
+import { defaultLaneGovernorPorts, DISPATCH_LANE_CPU_CLASS, initialLaneCpuLearner, LANE_TARGET_STEP, laneTarget, laneTargetPayload, publishLaneCpuBound, publishLaneCpuClasses, readLaneCpu, relabelLaneCpu, REVIEW_LANE_CPU_CLASS, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget, type RunningLane } from "./lane-governor.js";
 import type { LaneGovernorMode } from "./policy.js";
 import {
   createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimBeforeMemoryRestart, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
@@ -1137,7 +1139,9 @@ export type DaemonFreshness =
   | { stale: false; notStale?: DaemonFreshnessNotStale }
   | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[];
       /** The tree was behind before this reading could say so (a live edit held it, live-edit-ladder.ts). */
-      staleSinceMs?: number };
+      staleSinceMs?: number;
+      /** W1-T11327: a requested restart in place, whose sha pair is this process's own boot sha twice. */
+      restartRequest?: { origin: string; requestedAt: string } };
 
 /** W1-T5282 — the real wiring's reading is awaited, its `git fetch` off the loop; a sync reading stays sync. */
 /** W1-T5723: start, adopt, restart or discard the cadence child; only its settle is detached. */
@@ -1589,6 +1593,9 @@ export interface DaemonDeps {
   /** Read and delete the "drain now" marker, consumed once; a defined return means the operator
    *  asked for one immediate dispatch cycle. */
   consumeDrainNow?: () => { origin: string } | null;
+  /** W1-T11327: read and delete the `RESTART_REQUESTED` marker, consumed once. A defined return asks this process to
+   *  leave through its freshness exit (DAEMON_EXIT_STALE), leaving run children for the next boot to adopt. */
+  consumeRestartRequest?: () => { origin: string; requestedAt: string; codeSha?: string } | null;
   /** Pending bounded PR repair/review requests recorded by the authenticated console. The daemon
    * consumes at most one per poll and keeps final fix/review authority in its established command
    * path; the HTTP writer never starts a process. */
@@ -3844,6 +3851,15 @@ export async function runDaemon(
   // must not add a row of zeros to the ledger. The account is rolled, so a second call cannot double-count.
   const flushIdleLaneWindow = (report: typeof emitLog = emitLog): void => {
     const atMs = idleLaneClock.now();
+    const state = idleLaneAccount.state;
+    idleLaneAccount = accountIdleLaneMinutes(idleLaneAccount, {
+      atMs,
+      busyLanes: idleLaneCapacity - state.idleSlots,
+      capacity: idleLaneCapacity,
+      dispatchable: state.dispatchable,
+      cause: state.cause ?? undefined,
+      hold: state.hold ?? undefined,
+    });
     const row = summarizeIdleLaneAccount(idleLaneAccount, atMs);
     idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
     if (row.idle_minutes > 0) report("lane.idle_summary", { ...row, partial: true });
@@ -4204,6 +4220,37 @@ export async function runDaemon(
     log(LANE_TARGET_STEP, { mode: "shadow", mode_unread: error instanceof Error ? error.message : String(error) });
   }
   let laneTargetReading: { atMs: number; result: LaneTarget } | undefined;
+  // W1-T11129: the CPU arm learns from the container's cgroup cpu.stat, crediting each interval to the lanes that ran
+  // THROUGH it: each dispatch lane is an implement build (by task id), each review (in process or a run child) a review.
+  // EVERY lane start or end samples first, so the interval it closes is credited to the lanes from before it (never the
+  // set after a refill removed a finished build, nor a build interval a review ran inside), and the next interval opens
+  // with the new set. Builds transition below; reviews through the sweep registry's hook, installed for this run.
+  let laneCpuLearner = initialLaneCpuLearner();
+  const laneCpuBuilds = new Set<string>();
+  const runningCpuLanes = (starting?: string): RunningLane[] => {
+    const builds = new Set(laneCpuBuilds);
+    for (const child of children.values()) if (child.work === undefined) builds.add(child.taskId);
+    // The pool runs a worker before its start bookkeeping, so its child may already be registered: not yet a lane.
+    if (starting !== undefined) builds.delete(starting);
+    const reviews = runningReviewLaneIds().map((id) => ({ id, cls: REVIEW_LANE_CPU_CLASS }));
+    return [...[...builds].map((id) => ({ id: `build-${id}`, cls: DISPATCH_LANE_CPU_CLASS })), ...reviews];
+  };
+  const sampleLaneCpu = (nowMs: number, closes = false, starting?: string): ReturnType<typeof readLaneCpu> | undefined => {
+    if (!laneGovernorPorts) return undefined;
+    const reading = readLaneCpu(laneCpuLearner, laneGovernorPorts, nowMs, runningCpuLanes(starting), closes);
+    laneCpuLearner = reading.learner;
+    publishLaneCpuBound(reading.bound);
+    publishLaneCpuClasses(reading.learner);
+    return reading;
+  };
+  /** A lane (build or review) starts or ends: close the interval on the lanes before it, apply it, open the next after. */
+  const laneCpuTransition = (apply: () => void, starting?: string): void => {
+    sampleLaneCpu(daemonClock.now(), true, starting);
+    apply();
+    if (laneGovernorPorts) laneCpuLearner = relabelLaneCpu(laneCpuLearner, runningCpuLanes());
+  };
+  // Installed once `children` exists (below, beside the boot adoption): the lane reader above reads it.
+  let uninstallReviewLaneTransition: () => void = () => {};
   /** The lanes new admissions may fill: the governor's target under enforce, otherwise unbounded. */
   const enforcedLaneTarget = (inFlight: number, wipBound: number | undefined): number => {
     if (!laneGovernorPorts) return Infinity;
@@ -4215,7 +4262,10 @@ export async function runDaemon(
         const reason = error instanceof Error ? error.message : String(error);
         memory = { unread: reason };
       }
-      const result = laneTarget({ previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount() });
+      const cpuReading = sampleLaneCpu(nowMs)!;
+      const result = laneTarget({
+        previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount(), cpu: cpuReading.cpu,
+      });
       laneTargetReading = { atMs: nowMs, result };
       log(LANE_TARGET_STEP, laneTargetPayload(result, { mode: laneGovernorMode, fixed: laneCount, inFlight }));
     }
@@ -4270,7 +4320,7 @@ export async function runDaemon(
     catch (reason) { /* Retained in the cleanup AggregateError, after every other stop is attempted. */ failures.push(reason); }
     for (const stop of [
       () => prActionPumpRef.stop(), () => improvementActionPumpRef.stop(), () => plainBackfill?.stop(), () => recommendationBackfill?.stop(), () => fleetLane?.stop(),
-      () => inboxResponder?.stop(), () => gardenerRef.stop(), () => livenessPulse?.stop(),
+      () => inboxResponder?.stop(), () => gardenerRef.stop(), () => livenessPulse?.stop(), () => uninstallReviewLaneTransition(),
     ]) {
       try { stop(); }
       catch (reason) { /* Retained in the cleanup AggregateError, never converted into successful closure. */ failures.push(reason); }
@@ -4328,10 +4378,13 @@ export async function runDaemon(
   // pass returns or the BACKSTOP passes (10-05: first `sweep.pass` 6.7-15.8 min after `daemon.boot`). It holds
   // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.
   const adoptedAll = deps.adoptRunChildren ? deps.adoptRunChildren() : [];
-  // W1-T9114: a child hosting a review or a fix dispatch holds a review slot, never a lane: it is registered with the sweep.
-  for (const child of adoptedAll) if (child.work) void adoptChildWork({ ...child, work: child.work }, log);
   const adoptedChildren = adoptedAll.filter((child) => child.work === undefined);
   const children = new Map<string, AdoptedRunChild>(adoptedChildren.map((child) => [child.runId, child]));
+  // W1-T11129: the review-lane hook reads `children` and the build lanes, so it is installed only now that both exist,
+  // and BEFORE the boot adoption below, so an adopted review child is a lane transition the CPU learner samples.
+  if (laneGovernorPorts) uninstallReviewLaneTransition = installReviewLaneTransition((apply) => laneCpuTransition(apply));
+  // W1-T9114: a child hosting a review or a fix dispatch holds a review slot, never a lane: it is registered with the sweep.
+  for (const child of adoptedAll) if (child.work) void adoptChildWork({ ...child, work: child.work }, log);
   let childMode = deps.adoptRunChildren !== undefined;
   const childTaskIds = (): string[] => [...children.values()].map((child) => child.taskId);
   const hasChildTask = (id: string): boolean => childTaskIds().includes(id);
@@ -4831,15 +4884,35 @@ export async function runDaemon(
     freshness: Extract<DaemonFreshness, { stale: true }>, dispatchLatchAtMs?: number,
   ): Promise<DaemonSummary> => {
     const preExitPass = await (preparedFreshnessExit ?? prepareFreshnessExit(freshness, dispatchLatchAtMs));
-    const detail =
-      `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
-      `past this process's boot sha`;
+    const requested = freshness.restartRequest;
+    const detail = requested
+      ? `restart in place requested by ${requested.origin} at ${requested.requestedAt}`
+      : `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
+        `past this process's boot sha`;
     log("daemon.freshness_exit", { children_left_running: [...children.values()].map((child) => child.runId),
       phases_ms: { ...freshnessPhases, ...(freshnessDecidedAtMs === undefined ? {} : {
         total: Math.max(0, daemonClock.now() - freshnessDecidedAtMs),
-      }) } });
+      }) },
+      // W1-T11327: the request-to-exit time; the next `daemon.boot` row closes the request-to-boot span.
+      ...(requested ? { restart_request: { origin: requested.origin, requested_at: requested.requestedAt,
+        request_to_exit_ms: Math.max(0, daemonClock.now() - Date.parse(requested.requestedAt)) } } : {}) });
     log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass });
     return summary("stale", detail);
+  };
+  // W1-T11327: a RESTART_REQUESTED marker is a freshness decision with no advance, so it skips scoring, coalescing and
+  // the minimum-lifetime hold. One written before this loop started was answered by this boot and is only ledgered.
+  const takeRestartRequest = (at: "cycle_top" | "dispatch_tick"): Extract<DaemonFreshness, { stale: true }> | undefined => {
+    const request = deps.consumeRestartRequest?.();
+    if (!request) return undefined;
+    const nowMs = daemonClock.now();
+    const requestedAtMs = Date.parse(request.requestedAt);
+    const answeredByBoot = requestedAtMs < bootGateStartedAtMs;
+    log("daemon.restart_request_consumed", { origin: request.origin, requested_at: request.requestedAt, at,
+      request_age_ms: Math.max(0, nowMs - requestedAtMs), ...(answeredByBoot ? { answered_by_boot: true } : {}) });
+    if (answeredByBoot) return undefined;
+    freshnessDecidedAtMs ??= nowMs;
+    const sha = request.codeSha ?? "unknown";
+    return { stale: true, oldSha: sha, newSha: sha, restartRequest: { origin: request.origin, requestedAt: request.requestedAt } };
   };
 
   // One per-task block-reasoning processor, shared by the single-task tick and the multi-lane batch, so how a solo
@@ -6064,6 +6137,9 @@ export async function runDaemon(
       const drain = deps.consumeDrainNow();
       if (drain) log("console.drain_consumed", { origin: drain.origin });
     }
+    // W1-T11327: a requested restart in place, read once here where the holds above already outrank it.
+    const requestedRestart = takeRestartRequest("cycle_top");
+    if (requestedRestart) return stopForFreshness(requestedRestart);
 
     const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     for (const taskId of pendingMergedCredit) {
@@ -7340,10 +7416,13 @@ export async function runDaemon(
     // W1-T8235: a lane change is a sample. The hold that emptied the slot is whichever step this lane's decision wrote.
     const sampleLaneChange = (): void => sampleIdleLane(inFlightTasks.size, true, undefined, false);
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
-      inFlightTasks.delete(finished);
-      pendingChildren.delete(finished.id);
-      const child = batchChildren.get(finished);
-      if (child) children.delete(child.runId);
+      laneCpuTransition(() => {
+        inFlightTasks.delete(finished);
+        laneCpuBuilds.delete(finished.id);
+        pendingChildren.delete(finished.id);
+        const child = batchChildren.get(finished);
+        if (child) children.delete(child.runId);
+      });
       resetIdleLaneTick();
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
@@ -7532,6 +7611,9 @@ export async function runDaemon(
     const onDispatchTick = checkFreshness || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
       wakeParkedLanes();
       if (inFlightTasks.size === 0 || deps.checkPause?.()) return;
+      // W1-T11327: a requested restart releases child lanes and awaits in-process ones, as a decided restart does.
+      const requestedRestart = restartDecided || deps.checkStop?.() ? undefined : takeRestartRequest("dispatch_tick");
+      if (requestedRestart) decideRestart(requestedRestart);
       // The light sweep reads this live binding; admitted workers retain their captured planForBatch.
       const reload = (): void | Promise<void> => deps.reloadPlan ? reloadPlanBinding() : undefined;
       if (restartDecided || !checkFreshness) return reload();
@@ -7623,6 +7705,7 @@ export async function runDaemon(
       const startedAtMs = preparedStartTimes.get(task.id) ?? daemonClock.now();
       if (restartDecided) admittedAfterRestart.add(task.id);
       laneStartedAtMs.set(task.id, startedAtMs);
+      laneCpuTransition(() => laneCpuBuilds.add(task.id), task.id);
       if (poolControl.occupied?.has(task)) return;
       attempted.push(task.id);
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
@@ -7708,6 +7791,9 @@ export async function runDaemon(
       } finally {
         // Even a phase-level logging failure cannot abandon promises the pool already owns.
         poolOutcome = await admittedWork;
+        // W1-T11129: the pool's last lane, and any a fault or detach retired, never reaches refillLane: close its interval.
+        // Never throws: readLaneCpu reads an unreadable or throwing counter as unread, and the rest is pure.
+        laneCpuTransition(() => { for (const task of admitted) laneCpuBuilds.delete(task.id); });
         // W1-T9089: the lanes phase is the wait from a mid-phase decision until the pool settled or detached its children.
         if (restartDecided) freshnessPhases.lanes = Math.max(0, daemonClock.now() - restartWait.decidedAtMs);
         // W1-T10000: the pool released every run waiting for its child's admission; the restart abandons each wait.

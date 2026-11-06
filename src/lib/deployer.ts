@@ -41,7 +41,7 @@ import { fixedClock } from "./clock.js";
 import { InstanceRegistryRuntimeError, runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryText,
   runtimeInstanceRegistryInstanceName, assertInstanceRegistryRuntimeCurrent, trustedInstanceRegistryLaunchPacket } from "./instance-registry-selection.js";
 import { createSelectedRegistryObserver, observeSelectedRegistry, selectedRegistryObserverInContext,
-  type SelectedRegistryConsumerOptions } from "./selected-registry-consumers.js";
+  selectedRegistryLaunchArgs, type SelectedRegistryConsumerOptions } from "./selected-registry-consumers.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
@@ -534,6 +534,29 @@ export function readRunSettlement(ledgerText: string): { settled: Set<string>; j
     }
   }
   return { settled, judged };
+}
+
+/** The unsettled lane holders under a state directory, with ages at the caller's clock. */
+export function readDrainWaitLanes(stateDir: string, ledgerText: string, clock: () => number): DrainWaitLane[] {
+  const inflightDir = join(stateDir, "inflight");
+  const { settled, judged } = readRunSettlement(ledgerText);
+  const lanes: DrainWaitLane[] = [];
+  if (!existsSync(inflightDir)) return lanes;
+  for (const name of readdirSync(inflightDir)) {
+    if (!name.endsWith(".lock")) continue;
+    const taskId = name.slice(0, -".lock".length);
+    const holder = readLockHolder(inflightDir, taskId);
+    if (!holder || settled.has(holder.run_id)) continue;
+    const startedMs = Date.parse(holder.startedAt);
+    const verdict = judged.get(holder.run_id);
+    lanes.push({
+      runId: holder.run_id,
+      taskId,
+      ageS: Number.isFinite(startedMs) ? Math.max(0, Math.floor((clock() - startedMs) / 1000)) : 0,
+      ...(verdict ? { judged: verdict } : {}),
+    });
+  }
+  return lanes;
 }
 
 export interface Decision {
@@ -2846,22 +2869,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
   const deriveWaitFromState = (): DerivedDrainWait | undefined => {
     try {
       const text = readLedgerText();
-      const { settled, judged } = readRunSettlement(text);
-      const lanes: DrainWaitLane[] = [];
-      for (const name of readdirSync(inflightDir)) {
-        if (!name.endsWith(".lock")) continue;
-        const taskId = name.slice(0, -".lock".length);
-        const holder = readLockHolder(inflightDir, taskId);
-        if (!holder || settled.has(holder.run_id)) continue;
-        const startedMs = Date.parse(holder.startedAt);
-        const verdict = judged.get(holder.run_id);
-        lanes.push({
-          runId: holder.run_id,
-          taskId,
-          ageS: Number.isFinite(startedMs) ? Math.max(0, Math.floor((clock() - startedMs) / 1000)) : 0,
-          ...(verdict ? { judged: verdict } : {}),
-        });
-      }
+      const lanes = readDrainWaitLanes(join(o.stateRoot, "state"), text, clock);
       const derived = deriveDrainWait(readImplementDurationsMs(text), lanes);
       log("deploy.recycle_wait_derived", {
         wait_s: derived.waitS,
@@ -2912,8 +2920,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
         if (selectedPacket === undefined) return exec("bash", command, options);
         const packet = selectedPacket.split("\n");
         try {
-          return exec("bash", ["-c", 'export RMD_INSTANCE_REGISTRY="$1" RMD_INSTANCE_REGISTRY_DIGEST="$2" RMD_INSTANCE_REGISTRY_LAUNCH_BINDING="$3"; shift 3; exec bash "$@"',
-            "selected-registry-launch", packet[1]!, packet[2]!, packet[3]!, ...command], options);
+          return exec("bash", selectedRegistryLaunchArgs(packet[1]!, packet[2]!, packet[3]!, command), options);
         } catch {
           // Child/OS errors can quote private argv; unknown launch failure is never a public diagnostic of those bytes.
           throw new InstanceRegistryRuntimeError("launcher_failed");

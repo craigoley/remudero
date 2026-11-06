@@ -1,0 +1,58 @@
+- id: W1-T11458
+  title: A synchronous GitHub read in the daemon never sleeps on its event loop for read cadence or pacing; it takes the async path or refuses and retries next pass
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high
+  band_meaning: span
+  origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
+  plan_refs: [W1-T4970, W1-T5770, W1-T10271, W1-T11128]
+  files: [src/lib/github-transport.ts, src/lib/escalate.ts, src/lib/sweep.ts, test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=3eeb7837e7ceb04e
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
+  attempts: 0
+  rationale: |
+    The 2026-11-06 core CPU profile shows defaultBlockingSleepSync (src/lib/github-transport.ts
+    ~:622, an Atomics.wait) with 15.4 s of self time inside loop holds in window 1 and 14.1 s in
+    window 3. One stack runs ghExec, then applyGhReadCadence (~:1680), then withGhCadenceLock, then
+    ghReadCadenceTurn, then defaultBlockingSleepSync. ghIssueGateway's sync ghExec (escalate.ts) is
+    among its callers.
+    applyGhReadCadence skips its synchronous waits only when the same process already has an
+    async read pending (W1-T5770). Otherwise it sleeps the main thread for the shared cadence gap.
+    createGhCallPacer also defaults to the blocking sleep, while serve already uses
+    createNonBlockingGhCallPacer. In the daemon every such sleep freezes sweeps, reviews and timers.
+    The approved caller audit found src/lib/sweep.ts's terminal-head escalation acknowledges only
+    a nonempty issue URL, and both parent call sites already run in async dispatchFix. This adapter
+    can use awaited delivery without risking a one-shot notification.
+  design: |
+    Decide with evidence; record the decision in the PR body under "## Decisions". Direction:
+    1. In a long-lived event-loop host (the daemon; serve already is one), applyGhReadCadence's
+       sync path never calls a blocking sleep. When a wait is due, it throws the existing
+       GhReadCadenceRefusal / GhPaceWouldBlockError, as the async-holder branch and the
+       non-blocking pacer already do. The CLI's one-shot commands keep blocking, because they have
+       no loop to protect.
+    2. Every daemon caller that can now see that refusal handles it as a retry-next-pass. List them
+       from a census of sync gh entry points reachable from the daemon. Where an async twin exists
+       (ghJsonAsync / ghTextAsync, the AsyncIssueGateway), the caller moves to it instead. Start
+       with the escalation gateway's sync ghExec. In src/lib/sweep.ts use tryEscalateAsync for
+       terminal-head delivery and await both parent calls; retain acknowledgement only after
+       a real issue URL. Other one-shot producers remain covered by the bounded durable follow-up.
+    3. How "this process is a loop host" is detected must be explicit (a flag the daemon sets at
+       boot), never inferred from timing. No new constants.
+  acceptance:
+    - claim: "In a process marked as a loop host, a sync GitHub read whose cadence gap is not yet open refuses without calling the blocking sleep, and the same read in a CLI process still waits"
+      proof: "grep: W1-T11458 criterion 1 in test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts"
+    - claim: "The escalation gateway's GitHub calls on the daemon path go through the async transport or treat the refusal as a retry, never a blocking sleep"
+      proof: "grep: W1-T11458 criterion 2 in test/github/a-daemon-sync-github-read-never-sleeps-on-its-loop.test.ts"
+  note: |
+    Sol-level: it needs a call-site census and judgment about each caller's retry semantics. Inject
+    sleepSync and spy that it is never called in the loop-host case. The builder names each
+    criterion test with the marker "W1-T11458 criterion N".
+  falsifier: |
+    Drop the loop-host branch. Criterion 1 must then fail, because the blocking sleep is called.
+    Restore synchronous terminal-head delivery or remove either parent await: criterion 2 must
+    fail on the real fake-child heartbeat or acknowledgement-before-return observation.

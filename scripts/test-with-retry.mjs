@@ -59,6 +59,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { gitOrThrow } from "./lib/git.mjs";
 import { newTestCoverage, renderCoverageSummary } from "./coverage-merge-ratchet.mjs";
 import { closeJudgedRun, judgedNodeTestArgs, POOL_ISOLATION_FLAG, prepareJudgedRun, testFilesInArgv, unreportedFilesIn } from "./pure-test-pool.mjs";
+import { boundedNodeTestArgs } from "./test-tier-manifest.mjs";
 
 /**
  * W1-T2715 — A TEST THAT WRITES INTO THE TRACKED TREE IS OBSERVED BY EVERY OTHER WORKER, and the
@@ -349,7 +350,7 @@ async function runOnce(cmd, args, env = process.env) {
   if (!isNodeTestRun(cmd, args)) return runChild(cmd, args, env);
   const files = testFilesInArgv(args, process.cwd());
   const judged = prepareJudgedRun({ files, root: process.cwd() });
-  const first = await runChild(cmd, judgedNodeTestArgs(args, judged.args), { ...env, ...judged.env });
+  const first = await runChild(cmd, judgedNodeTestArgs(boundedNodeTestArgs(args, process.cwd()), judged.args), { ...env, ...judged.env });
   const lines = [];
   const { status, verdict } = closeJudgedRun(judged, files, {
     status: first.code,

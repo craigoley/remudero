@@ -13,6 +13,15 @@
   files:
     - src/lib/board-projection.ts
     - test/console-api/read-model/a-re-derived-task-extends-its-cached-history.test.ts
+  # refusal-amendment (W1-T9716, run DAEMON-1793897932969@22bb3e73116823fadb68c734be1ad4011292442f, 2026-11-05T20:01:31.326Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The missing sandbox launcher prevents verifying fresh-read equivalence.
+  # refusal-amendment (W1-T9716, run DAEMON-1793897932969@22bb3e73116823fadb68c734be1ad4011292442f, 2026-11-05T20:01:31.326Z): the worker refused criterion 2 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The missing sandbox launcher prevents verifying incremental reads.
+  # refusal-amendment (W1-T9716, run DAEMON-1793897932969@22bb3e73116823fadb68c734be1ad4011292442f, 2026-11-05T20:01:31.326Z): the worker refused criterion 3 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The missing sandbox launcher prevents verifying bounded LRU eviction.
+  # refusal-amendment (W1-T9716, run DAEMON-1793897932969@22bb3e73116823fadb68c734be1ad4011292442f, 2026-11-05T20:01:31.326Z): the worker refused criterion 4 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: The missing sandbox launcher prevents verifying byte-identical now-view bodies.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 0.5 # operator 2026-11-03: efficiency and throughput first; serve GC is its top stall frame
   attempts: 0

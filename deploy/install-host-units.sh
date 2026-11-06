@@ -58,6 +58,24 @@
 #   RMD_SYSTEMCTL_CMD                                  (W1-T10501: systemctl seam; runs on a temp tree)
 set -euo pipefail
 
+registry_shadow_observe() { :; }
+registry_shadow_session=""
+registry_shadow_pin=""
+registry_shadow_forward=()
+registry_shadow_argv=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --selected-registry-pin)
+      registry_shadow_pin="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    --selected-registry-shadow)
+      registry_shadow_session="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    *) registry_shadow_argv+=("$1"); shift ;;
+  esac
+done
+set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
+
 MODE="check"
 INSTANCE_NAME=""
 while [ $# -gt 0 ]; do
@@ -208,12 +226,14 @@ if [ -n "$INSTANCE_NAME" ]; then
     echo "install-host-units: FATAL -- instance '${INSTANCE_NAME}' is not declared in ${REGISTRY_FILE}." >&2
     exit 2
   fi
-  repo=""; state_dir=""; container_name=""; service_user=""; image=""; max_old_space_mb=""
+  repo=""; github_repo=""; state_dir=""; container_name=""; service_user=""; image=""; max_old_space_mb=""
   service_name=""; watchdog_service_name=""; watchdog_timer_name=""; launcher_path=""; revival_log=""
   gh_app_id=""; gh_app_installation_id=""; gh_app_private_key_path=""
   claude_dir=""; codex_dir=""; container_config_dir=""
   instance_mode_seen=0
   while IFS='=' read -r key value; do
+    # The shell shadow names its target by owner/name, the identity the selected binding matches.
+    [ "$key" = github_repo ] && github_repo="$value"
     case "$key" in
       mode)
         [ "$instance_mode_seen" = 0 ] || { echo "install-host-units: FATAL -- instance '${INSTANCE_NAME}' declares duplicate mode." >&2; exit 2; }
@@ -523,7 +543,7 @@ DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliati
   src/lib/actor-evidence.ts
   src/lib/baked-runtime-inputs.ts src/lib/clock.ts src/lib/config-schema.ts src/lib/config.ts
   src/lib/deploy-judge.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts
-  src/lib/fs-race-safe.ts src/lib/host-identity.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
+  src/lib/fs-race-safe.ts src/lib/host-identity.ts src/lib/ledger-carry.ts src/lib/ledger-key-manifest.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
   src/lib/instance-registry-selection.ts src/lib/instance-registry.ts src/lib/selected-registry-consumers.ts
   src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/loop-bounded-child.ts
   src/lib/plan-scope.ts src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/state-backup-engine-links.ts src/lib/worker-containment.ts)
@@ -717,9 +737,11 @@ PROGRESS_ACTION=""
 
 watchdog_stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-# A string field of the verdict's one-line JSON (JSON.stringify writes no spaces).
+# A string or non-negative integer field of the verdict's one-line JSON (JSON.stringify writes no spaces).
 verdict_field() {
-  printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' | head -n 1
+  printf '%s\n' "$PROGRESS_VERDICT" | sed -n \
+    -e 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' \
+    -e 's/.*"'"$1"'":\([0-9][0-9]*\)[,}].*/\1/p' | head -n 1
 }
 
 # RMD_SELF_SYNC_DONE=1 skips checkCliFreshness, which would fetch and fast-forward the tree the
@@ -744,6 +766,26 @@ read_progress_verdict() {
   echo "rmd-relaunch: progress-watchdog -- ${PROGRESS_STATE:-UNKNOWN} action=${PROGRESS_ACTION:-none}"
 }
 
+# W1-T11327: a stall whose loop is alive is asked to restart in place through the daemon's freshness exit
+# (75, restarted in the container by deploy/entrypoint.sh) instead of a recycle. Returns 0 only when the
+# verb wrote the request; a failed write falls back to this tick's recycle.
+restart_in_place_on_verdict() {
+  local code rmd out tmo=()
+  [ "$PROGRESS_ACTION" = "restart-in-place" ] || return 1
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
+  rmd="$code/bin/rmd"
+  command -v timeout >/dev/null 2>&1 && tmo=(timeout 60)
+  if [ -x "$rmd" ] && out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --request-restart --state-root "$STATE_DIR/state" 2>/dev/null)"; then
+    printf '%s watchdog-restart-in-place state=%s %s\n' "$(watchdog_stamp)" "$PROGRESS_STATE" \
+      "$(printf '%s\n' "$out" | tail -n 1)" >> "$REVIVAL_LOG" 2>/dev/null || true
+    echo "rmd-relaunch: progress-watchdog -- ${PROGRESS_STATE} with a live loop; restart in place requested, no recycle this tick."
+    return 0
+  fi
+  echo "rmd-relaunch: progress-watchdog -- the restart-in-place request could not be written; recycling instead." >&2
+  PROGRESS_ACTION=recycle
+  return 1
+}
+
 note_progress_verdict() {
   [ "$PROGRESS_ACTION" = "capture-diagnostics" ] || return 0
   local dir; dir="$(verdict_field dir)"
@@ -753,11 +795,14 @@ note_progress_verdict() {
 
 # Returns 0 only when it RAN recycle-container.sh, so the caller ends the tick on one action.
 recycle_on_verdict() {
-  local age
+  local age wait_s
   [ "$PROGRESS_ACTION" = "recycle" ] || return 1
   # W1-T6597: the verdict rides along, so the recycle may prove a FROZEN daemon owns what blocks it.
   age="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"progressAgeMs":\([0-9]*\).*/\1/p' | head -n 1)"
-  watchdog_recycle "$1" "progress-watchdog" "${PROGRESS_STATE}" "${PROGRESS_STATE} progressAgeMs=${age:-unknown}"
+  # W1-T11320: use the lanes' derived wait unless the environment already supplies one.
+  wait_s="$(verdict_field drainWaitS)"
+  RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$wait_s}" \
+    watchdog_recycle "$1" "progress-watchdog" "${PROGRESS_STATE}" "${PROGRESS_STATE} progressAgeMs=${age:-unknown}"
 }
 
 # One recycle-container.sh run, shared by every rung that hands the daemon to its pause-and-drain
@@ -778,6 +823,9 @@ watchdog_recycle() {
   mkdir -p "$STATE_DIR/state" 2>/dev/null || true
   printf '%s\n' "$now" > "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true
   [ -n "$INSTANCE_NAME" ] && args=(--instance "$INSTANCE_NAME")
+  if [ -n "${registry_shadow_session:-}" ] && command -v registry_shadow_supports >/dev/null 2>&1 && registry_shadow_supports "$script"; then
+    args+=(--selected-registry-shadow "$registry_shadow_session" --selected-registry-pin "$registry_shadow_pin")
+  fi
   [ -n "$INSTANCE_REGISTRY" ] && envs=(RMD_INSTANCE_REGISTRY="$INSTANCE_REGISTRY")
   [ -z "$verdict" ] || envs+=(RMD_RECYCLE_VERDICT="$verdict")
   echo "rmd-relaunch: ${who} -- ${why}; recycling $container via $script."
@@ -1041,7 +1089,7 @@ render_edge_heal() {
 edge_heal_on_exit() {
   local rc=$? out hrc=0 why
   if [ "$rc" -eq 0 ] && [ -x "$CHECKOUT/deploy/edge-heal.sh" ]; then
-    out="$(RMD_STATE_DIR="$STATE_DIR" "$CHECKOUT/deploy/edge-heal.sh")" || hrc=$?
+    out="$(RMD_STATE_DIR="$STATE_DIR" RMD_RESOURCE_POLICY_REGISTRY="$INSTANCE_REGISTRY" "$CHECKOUT/deploy/edge-heal.sh")" || hrc=$?
     [ -z "$out" ] || printf '%s\n' "$out"
     if [ "$hrc" -eq 3 ]; then
       why="$(printf '%s\n' "$out" | sed -n 's/^edge-heal: tunnel roll failed -- //p' | tail -n 1)"
@@ -1063,7 +1111,7 @@ EDGE_HEAL
 render_serve_memory_tuning() {
   case "${INSTANCE_NAME:-core}" in core) : ;; *) return 0 ;; esac
   cat <<'SERVE_MEMORY_TUNING'
-    ${MHT_TMO[@]+"${MHT_TMO[@]}"} bash "$CHECKOUT/deploy/memory-high-tuner.sh" \
+    ${MHT_TMO[@]+"${MHT_TMO[@]}"} env ${POLICY_ENV[@]+"${POLICY_ENV[@]}"} bash "$CHECKOUT/deploy/memory-high-tuner.sh" \
       --container 'remudero-serve' --state-dir "$STATE_DIR" || true
 SERVE_MEMORY_TUNING
 }
@@ -1123,13 +1171,32 @@ crash_loop_live() {
 HOST_ALERTS
 }
 
+render_registry_shadow() {
+  [ -n "$registry_shadow_session" ] || return 0
+  printf '\nregistry_shadow_observe() { :; }\n'
+  printf 'if [ -r %q ] && . %q 2>/dev/null; then :; else registry_shadow_observe() { :; }; fi\n' "$registry_shadow_lib" "$registry_shadow_lib"
+  printf 'registry_shadow_session=%q\n' "$registry_shadow_session"
+  printf 'registry_shadow_pin=%q\n' "$registry_shadow_pin"
+  printf 'registry_shadow_forward=(--selected-registry-shadow %q --selected-registry-pin %q)\n' "$registry_shadow_session" "$registry_shadow_pin"
+  # The launcher's own docker run mounts these; its observation re-checks the session against them.
+  printf '{ ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root %q %q %q %q %q %q; }\n' \
+    "$STATE_DIR" "$CLAUDE_DIR" "$CODEX_DIR" "$CONTAINER_CONFIG_DIR" "$CREDENTIAL_OWNER_DIR" "$GH_APP_KEY_HOST_V"
+}
+
+render_registry_shadow_boundary() {
+  [ -n "$registry_shadow_session" ] || return 0
+  printf 'registry_shadow_codex_mount_root "$CHECKOUT/deploy/codex-sessions-mount.sh" "$STATE_DIR" 2>/dev/null || { registry_shadow_session=""; printf "%%s\\n" instance_registry.shell_shadow_unrecorded >&2 || :; }\n'
+  printf '{ ! declare -F registry_shadow_mount_args >/dev/null 2>&1 || registry_shadow_mount_args "${SCRATCH_ARGS[@]+"${SCRATCH_ARGS[@]}"}" "${CODEX_SESSIONS_ARGS[@]+"${CODEX_SESSIONS_ARGS[@]}"}"; }\n'
+  printf 'registry_shadow_observe launcher "$INSTANCE_NAME" %q host "$STATE_DIR|%s"; ' "${github_repo:-}" "$CONTAINER_NAME"
+}
+
 render_launcher() {
   cat <<EOF
 #!/usr/bin/env bash
 # Canonical daemon launcher. GENERATED by deploy/install-host-units.sh — edit that, not this.
 # The invocation itself is derived from: deploy/host-update.sh --print-daemon-run
 # (run it with RMD_STATE_DIR set; its default points at a volume that may hold no ledger).
-set -euo pipefail
+set -euo pipefail$(render_registry_shadow)
 STATE_DIR=${STATE_DIR}
 IMAGE=${IMAGE}
 REVIVAL_LOG=${REVIVAL_LOG}
@@ -1146,6 +1213,12 @@ CHECKOUT=${STATE_DIR}/daemon-install
 UNITS_HEAP_MB=${MAX_OLD_SPACE_MB}
 INSTANCE_NAME=${INSTANCE_NAME:-}
 INSTANCE_REGISTRY=${REGISTRY_FILE:-}
+# W1-T11130: the memory policy reads each peer's learned peak from that peer's own root, found through
+# the registry this unit was installed from. It goes to every call that reaches the policy -- the tuner,
+# the revival, deploy-run's drift read and the edge heal -- as RMD_RESOURCE_POLICY_REGISTRY, one call at
+# a time and never exported: those callers read RMD_INSTANCE_REGISTRY as an active selection (W1-T10573).
+POLICY_ENV=()
+if [ -n "\$INSTANCE_REGISTRY" ]; then POLICY_ENV=(RMD_RESOURCE_POLICY_REGISTRY="\$INSTANCE_REGISTRY"); fi
 HOST_ALERT_INSTANCE=${CONTAINER_NAME}
 BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
@@ -1309,12 +1382,16 @@ converge_host_units() {
     return 0
   fi
   INSTALLER_ENV=(RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB")
+  INSTALLER_SHADOW_ARGS=()
+  if [ -n "\${registry_shadow_session:-}" ] && command -v registry_shadow_supports >/dev/null 2>&1 && registry_shadow_supports "\$CHECKOUT/deploy/install-host-units.sh"; then
+    INSTALLER_SHADOW_ARGS=(\${registry_shadow_forward[@]+"\${registry_shadow_forward[@]}"})
+  fi
   if [ -n "\$INSTANCE_NAME" ]; then
     INSTALLER_ENV=(RMD_INSTANCE_REGISTRY="\$INSTANCE_REGISTRY")
-    if units_check=\$(env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --instance "\$INSTANCE_NAME" 2>/dev/null); then
+    if units_check=\$(env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --instance "\$INSTANCE_NAME" \${INSTALLER_SHADOW_ARGS[@]+"\${INSTALLER_SHADOW_ARGS[@]}"} 2>/dev/null); then
       return 0
     fi
-  elif units_check=\$(env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" 2>/dev/null); then
+  elif units_check=\$(env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" \${INSTALLER_SHADOW_ARGS[@]+"\${INSTALLER_SHADOW_ARGS[@]}"} 2>/dev/null); then
     return 0
   fi
 
@@ -1339,10 +1416,10 @@ converge_host_units() {
   echo "rmd-relaunch: units DRIFTED at \$head_sha -- converging."
   install_ok=0
   if [ -n "\$INSTANCE_NAME" ]; then
-    if sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install --instance "\$INSTANCE_NAME"; then
+    if sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install --instance "\$INSTANCE_NAME" \${INSTALLER_SHADOW_ARGS[@]+"\${INSTALLER_SHADOW_ARGS[@]}"}; then
       install_ok=1
     fi
-  elif sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install; then
+  elif sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install \${INSTALLER_SHADOW_ARGS[@]+"\${INSTALLER_SHADOW_ARGS[@]}"}; then
     install_ok=1
   fi
   if [ "\$install_ok" -eq 1 ]; then
@@ -1362,7 +1439,7 @@ $(render_watchdog_tick_snapshot)
 $(render_watchdog_deploy_deadline)
 
 # THE STOP LEVER OUTRANKS THIS SCRIPT, INCLUDING AT BOOT AND FROM THE WATCHDOG.
-if [ -e "\$STATE_DIR/state/STOP" ]; then
+$(render_registry_shadow_boundary)if [ -e "\$STATE_DIR/state/STOP" ]; then
   echo "rmd-relaunch: state/STOP present -- refusing to start. rm it to resume."
   exit 0
 fi
@@ -1404,7 +1481,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # moves while the code does not. Bounded, and never fatal to the tick.
   if [ "\$BOOT" -eq 0 ] && [ -f "\$CHECKOUT/deploy/memory-high-tuner.sh" ]; then
     MHT_TMO=(); command -v timeout >/dev/null 2>&1 && MHT_TMO=(timeout 60)
-    \${MHT_TMO[@]+"\${MHT_TMO[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
+    \${MHT_TMO[@]+"\${MHT_TMO[@]}"} env \${POLICY_ENV[@]+"\${POLICY_ENV[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
       --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
 $(render_serve_memory_tuning)
   fi
@@ -1435,6 +1512,7 @@ $(render_serve_memory_tuning)
     [ "\$WATCHDOG_VERDICT_READ" = 1 ] || read_progress_verdict
     [ "\$PROGRESS_STATE" = CRASH_LOOP ] || rm -f "\$WATCHDOG_HOLD" 2>/dev/null || true
     note_progress_verdict
+    if restart_in_place_on_verdict; then exit 0; fi
     if recycle_on_verdict '${CONTAINER_NAME}'; then exit 0; fi
     # W1-T4917: load current deploy code only after a verified idle fast-forward. Running from
     # daemon-install conflates the invoking checkout with the tree deploy-run acts on.
@@ -1444,11 +1522,16 @@ $(render_serve_memory_tuning)
       refresh_deploy_code '${CONTAINER_NAME}' || deploy_code_busy_handoff '${CONTAINER_NAME}' || exit 0
     fi
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
+    DEPLOY_SHADOW_ARGS=()
+    if [ -n "\${registry_shadow_session:-}" ] && [ -r "\$DAEMON_CODE/src/run-task.ts" ] && \\
+        grep -F -- 'selectedRegistryLifecycleExec(' "\$DAEMON_CODE/src/run-task.ts" >/dev/null; then
+      DEPLOY_SHADOW_ARGS=(\${registry_shadow_forward[@]+"\${registry_shadow_forward[@]}"})
+    fi
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
     if watchdog_deploy_out="\$(cd "\$DAEMON_CODE" && \\
-      RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
-      watchdog_deploy_run "\$DAEMON_CODE/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR")"; then
+      RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build RMD_RESOURCE_POLICY_REGISTRY="\$INSTANCE_REGISTRY" \\
+      watchdog_deploy_run "\$DAEMON_CODE/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR" \${DEPLOY_SHADOW_ARGS[@]+"\${DEPLOY_SHADOW_ARGS[@]}"})"; then
       printf '%s\\n' "\$watchdog_deploy_out"
       host_alert_clear deploy-run-problem
       # Exit zero also means deferred: cache only the supervisor's confirmed up-to-date result.
@@ -1505,7 +1588,9 @@ if [ ! -r "\$RESOURCE_POLICY_LIB" ]; then
   exit 1
 fi
 . "\$RESOURCE_POLICY_LIB"
-resource_policy_build_args '${CONTAINER_NAME}'
+# W1-T11130: the installed registry names each peer's root for this one policy call only; a prefix
+# assignment on a function call lasts for that call, so nothing later inherits it.
+RMD_RESOURCE_POLICY_REGISTRY="\$INSTANCE_REGISTRY" resource_policy_build_args '${CONTAINER_NAME}'
 echo "rmd-relaunch: resource policy from \$RESOURCE_POLICY_LIB -- \$RESOURCE_POLICY_NOTE"
 
 # W1-T9627 -- THE DEAD CONTAINER'S LAST WORDS ARE KEPT BEFORE \`docker rm -f\` DELETES THEM. On
@@ -1594,7 +1679,7 @@ $(render_instance_name_env)
 # rmd-fleet.service; crash recovery past the budget is rmd-fleet-watchdog.timer.
 # NODE_OPTIONS: without it V8 caps at ~2GB and the retro rung aborts at ~2046 MB on a 7.9GB host.
 # Its memory flags and GLIBC_TUNABLES (in the build args) are operator ruling 2026-10-19.
-docker run -d --name ${CONTAINER_NAME} \\
+$(render_registry_shadow_boundary)docker run -d --name ${CONTAINER_NAME} \\
   --restart=on-failure:5 \\
   "\${RESOURCE_POLICY_BUILD_ARGS[@]}" \\
   --cap-drop ALL \\
@@ -1970,6 +2055,23 @@ unit_file_changes() { # $1 = installed path, $2 = rendered text
 }
 
 drift=0
+# Resolve registry/default mount sources before capture can write private bytes, not only before observation.
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="${SCRIPT_DIR}/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_mount_root "$STATE_DIR" "$CLAUDE_DIR" "$CODEX_DIR" "$CONTAINER_CONFIG_DIR" \
+      "$CREDENTIAL_OWNER_DIR" "$GH_APP_KEY_HOST_V"
+    if registry_shadow_codex_mount_root "${SCRIPT_DIR}/codex-sessions-mount.sh" "$STATE_DIR"; then
+      registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    fi
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+registry_shadow_observe install "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
 converge_host_node
 for row in $UNITS; do
   [ -n "$row" ] || continue
@@ -1989,6 +2091,7 @@ for row in $UNITS; do
     echo "install-host-units: ok      $path"
   else
     if unit_file_changes "$path" "$want"; then UNIT_CHANGED=1; fi
+    registry_shadow_observe install "$INSTANCE_NAME" "${github_repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
     mkdir -p "$(dirname "$path")"
     tmp="${path}.tmp.$$"
     printf '%s\n' "$want" > "$tmp"

@@ -369,10 +369,15 @@ export function modelCanaryCaseSetDigest(cases: readonly CanaryCase[]): string {
   const ordered = [...cases];
   if (ordered.some((item) => !record(item) || !nonempty(item.id) || item.id.length > 128
     || !nonempty(item.prompt) || item.prompt.length > 65_536
-    || !["schema", "evidence", "tools", "recovery", "review", "retention"].includes(item.family)
+    || !["schema", "evidence", "tools", "recovery", "review", "retention", "coding"].includes(item.family)
     || !["none", "inventory", "retry", "approval"].includes(item.tools)
     || !["daily", "weekly"].includes(item.cadence)
-    || !record(item.expected)))
+    || !record(item.expected)
+    || (item.family === "coding"
+      ? !record(item.codingControl) || item.codingControl.version !== "coding-control-v1"
+        || !nonempty(item.codingControl.seed) || item.codingControl.seed.length > 256
+        || item.tools !== "none" || Object.keys(item.expected).length !== 0
+      : item.codingControl !== undefined)))
     throw new Error("canary-config-census-case-identity-invalid");
   const expectedBudget: JsonByteBudget = { remaining: MAX_CASE_SET_BYTES, exceeded: false };
   for (const item of ordered) {
