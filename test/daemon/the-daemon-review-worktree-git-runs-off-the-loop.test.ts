@@ -6,7 +6,7 @@ import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -78,6 +78,7 @@ test("W1-T11459 criterion 1: materialization turns the loop during every real Gi
     if (path) { reclaim.releaseReviewWorktree(path); fx.repo.git("worktree", "remove", "--force", path); }
   }
   await materializeControls(fx);
+  await reviewCommandWiring(fx);
 });
 
 test("W1-T11459 criterion 1: staged recovery awaits temporary-index Git and preserves the exact tree", async (t) => {
@@ -517,6 +518,51 @@ async function materializeControls(fx: ReturnType<typeof fixture>): Promise<void
       assert.equal(reclaim.reviewWorktreeIsHeld(path), false);
     } finally { await work.catch(() => {}); if (existsSync(path)) remove(path); }
   }
+  const unavailable = { worktreePath: undefined, failure: { errorClass: "fetch-failure" as const, message: "private unavailable checkout" } };
+  assert.equal(await planRound(fx.config, fx.repo.dir, 4, fx.sha, {
+    materialize: () => unavailable,
+    prepare: () => { throw new Error("an unavailable checkout must not be prepared"); },
+  }), unavailable, "the adapter preserves a declined materialization without preparing it");
+
+  const dependencySource = join(fx.repo.dir, "node_modules");
+  assert.equal(existsSync(dependencySource), false, "the private repository has no installed dependencies");
+  const wrapper = join(fx.bin, "git"), originalWrapper = readFileSync(wrapper, "utf8");
+  const delegated = join(fx.scratch, "original-prepare-git");
+  writeFileSync(delegated, originalWrapper, { mode: 0o755 });
+  mkdirSync(dependencySource);
+  for (const state of ["ready", "common-unreadable"] as const) {
+    const path = join(fx.config.root, "worktrees", `review-PR4-${Date.now()}`);
+    fx.repo.git("worktree", "add", "--detach", path, fx.sha); reclaim.holdReviewWorktree(path);
+    const attempted = join(fx.scratch, "common-dir-read-attempted");
+    try {
+      if (state === "common-unreadable") writeFileSync(wrapper, `#!/bin/sh
+case "$*" in *--git-common-dir*)
+ echo "start $$" >> ${quote(fx.order)}
+ sleep 0.05
+ : > ${quote(attempted)}
+ echo "private common-dir read failure" >&2
+ echo "end $$" >> ${quote(fx.order)}
+ exit 7;;
+esac
+exec ${quote(delegated)} "$@"
+`, { mode: 0o755 });
+      const result = await measure(fx, async () => {
+        const work = Promise.resolve(planRound(fx.config, fx.repo.dir, 4, fx.sha, {
+          materialize: () => ({ worktreePath: path }),
+        }));
+        await assert.doesNotReject(work, "the existing toolchain exclusion remains best effort");
+        return await work;
+      });
+      assert.equal(result.worktreePath, path);
+      assert.equal(existsSync(join(path, "node_modules")), true, "the real default links the empty fixture dependency source");
+      assert.equal(reclaim.reviewWorktreeIsHeld(path), true, "a prepared checkout stays owned");
+      if (state === "common-unreadable") assert.equal(existsSync(attempted), true, "positive control: the real common-directory child failed");
+    } finally {
+      writeFileSync(wrapper, originalWrapper, { mode: 0o755 });
+      try { if (existsSync(path)) fx.repo.git("worktree", "remove", "--force", path); }
+      finally { reclaim.releaseReviewWorktree(path); }
+    }
+  }
 }
 
 async function daemonReclaimWiring(fx: ReturnType<typeof fixture>): Promise<void> {
@@ -563,5 +609,62 @@ async function daemonReclaimWiring(fx: ReturnType<typeof fixture>): Promise<void
   } finally {
     for (const [name, old] of previous) { if (old === undefined) delete process.env[name]; else process.env[name] = old; }
     if (path && existsSync(path)) fx.repo.git("worktree", "remove", "--force", path);
+  }
+}
+
+async function reviewCommandWiring(fx: ReturnType<typeof fixture>): Promise<void> {
+  const repos = join(fx.config.root, "repos"), managed = join(repos, "review-loop");
+  const remoteDir = join(fx.scratch, "fixture"), remote = join(remoteDir, "review-loop.git");
+  mkdirSync(repos, { recursive: true }); mkdirSync(remoteDir, { recursive: true });
+  symlinkSync(fx.repo.dir, remote, "dir");
+  fx.repo.addWorktree(managed, "private-review-command-target", fx.sha);
+  const previousOrigin = fx.repo.git("remote", "get-url", "origin");
+  const wrapper = join(fx.bin, "git"), previousWrapper = readFileSync(wrapper, "utf8");
+  let reviewed: string | undefined, publications = 0;
+  try {
+    fx.repo.git("remote", "set-url", "origin", remote);
+    // Target identity validation predates this task and remains synchronous. Delay and measure
+    // the profiled fetch/add/HEAD/remove chain, keeping those two validation reads real.
+    writeFileSync(wrapper, `#!/bin/sh
+case " $* " in *" rev-parse --is-inside-work-tree "*|*" config --get remote.origin.url "*) exec ${quote(realGit)} "$@";; esac
+echo "start $$" >> ${quote(fx.order)}
+sleep 0.05
+${quote(realGit)} "$@"
+rc=$?
+echo "end $$" >> ${quote(fx.order)}
+exit $rc
+`, { mode: 0o755 });
+    const code = await measure(fx, () => task.reviewCommand("1", ["--repo", "fixture/review-loop", "--reviewer-shadow"], {
+      enforceReviewSubjectCheckout: true,
+      resolveOwnerRepo: () => ({ owner: "fixture", repo: "controller" }),
+      loadConfig: () => ({ ...fx.config, installRoot: REPO_ROOT } as Config),
+      fetchView: () => ({ number: 1, state: "open", head: { sha: fx.sha, ref: "private-review-command" },
+        base: { ref: "main" }, html_url: "https://github.com/fixture/review-loop/pull/1",
+        body: "## Acceptance\n- claim: fixture content exists\n  proof: grep: base in tracked.txt" }),
+      refreshSubjectInstall: () => {},
+      buildBaseProof: () => ({ baseCheckoutDir: undefined, baseUnreadablePaths: new Set(), baseIsCheckout: false, addedTestFiles: new Set() }),
+      reviewerCodeFreshness: () => ({ status: "fresh", codeSha: fx.sha, originMainSha: fx.sha, advance: "none" }),
+      postReviewPending: async () => { publications++; return { posted: false } as never; },
+      postStatus: async () => { publications++; return { posted: false } as never; },
+      runReview: async input => {
+        assert.ok(input.headCheckoutDir, "the real default materializer supplies a prepared head");
+        reviewed = input.headCheckoutDir;
+        assert.equal(readFileSync(join(reviewed, "tracked.txt"), "utf8"), "base\n");
+        assert.equal(reclaim.reviewWorktreeIsHeld(reviewed), true, "review owns the completed checkout");
+        return { state: "success", headSha: fx.sha, reviewerOutcome: "private fixture",
+          keywordOnly: false, criteria: [], testTheater: false, summary: "private fixture",
+          floorDegraded: false, capped: false, planOnly: false };
+      },
+    }));
+    assert.equal(code, 0);
+    assert.ok(reviewed, "the real command reaches the private reviewer");
+    assert.equal(existsSync(reviewed), false, "default teardown finished before command return");
+    assert.equal(reclaim.reviewWorktreeIsHeld(reviewed), false);
+    assert.equal(publications, 0, "the public shadow path publishes no status or arm");
+    assert.equal(existsSync(managed), true, "the managed subject is retained");
+  } finally {
+    writeFileSync(wrapper, previousWrapper, { mode: 0o755 });
+    fx.repo.git("remote", "set-url", "origin", previousOrigin);
+    if (existsSync(managed)) fx.repo.git("worktree", "remove", "--force", managed);
   }
 }

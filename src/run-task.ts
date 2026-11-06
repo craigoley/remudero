@@ -11492,7 +11492,7 @@ async function prepareWorktreeToolchainAsync(repoDir: string, worktreePath: stri
   const linked = linkWorktreeNodeModules(repoDir, worktreePath);
   let commonDir: string | undefined;
   try { commonDir = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(); }
-  catch { /* The existing exclusion is best-effort; its named diagnostic still runs below. */ }
+  catch { /* Preserve the existing best-effort exclusion when Git cannot name its directory. */ }
   excludeNodeModulesFromGit(worktreePath, { commonDir: () => {
     if (commonDir === undefined) throw new Error("git common dir unreadable");
     return commonDir;
