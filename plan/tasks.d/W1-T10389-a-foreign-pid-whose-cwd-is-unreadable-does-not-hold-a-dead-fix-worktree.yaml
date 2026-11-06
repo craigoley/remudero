@@ -13,6 +13,7 @@
     - src/run-task.ts
     - src/lib/process-cwd-census.ts
     - test/ci/a-foreign-pid-whose-cwd-is-unreadable-does-not-hold-a-dead-fix-worktree.test.ts
+    - "src/lib/sweep.ts"
   status: queued
   priority: 2
   attempts: 0

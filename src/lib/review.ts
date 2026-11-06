@@ -39,6 +39,7 @@ import { createProofCache, ProofCacheUnavailableError, type ProofCache, type Pro
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { configuredDependencySeedRoot } from "./dependency-seeds.js";
+import { proofTestRunnerArgs } from "./test-run-timeout.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
@@ -3533,10 +3534,15 @@ function loadProofJudge(): ProofJudge {
 }
 
 /** `args` with the judge's inline tally reporter, for a node `--test` proof; any other argv unchanged. Idempotent. */
-function withProofJudge(whitelisted: WhitelistedProof, args: readonly string[]): readonly string[] {
+function withProofJudge(whitelisted: WhitelistedProof, args: readonly string[], cwd: string,
+  resolvedFiles?: readonly string[]): readonly string[] {
   if (whitelisted.kind !== "test" || whitelisted.runner === "vitest" || !args.includes("--test")) return args;
   const judge = loadProofJudge();
-  return judge.hasInlineJudge(args) ? args : judge.judgedNodeTestArgs(args, judge.inlineJudgedArgs());
+  const judged = judge.hasInlineJudge(args) ? [...args] : judge.judgedNodeTestArgs(args, judge.inlineJudgedArgs());
+  const patternAt = judged.indexOf("--test-name-pattern");
+  const fileArgs = patternAt < 0 ? judged : [...judged.slice(0, patternAt), ...judged.slice(patternAt + 2)];
+  const files = resolvedFiles?.length ? resolvedFiles : judge.testFilesInArgv(fileArgs, cwd);
+  return proofTestRunnerArgs(judged, cwd, files);
 }
 
 /** `args` without {@link withProofJudge}'s two flags (the async executor hands the sync one an already-judged argv). */
@@ -3626,7 +3632,7 @@ export function execWhitelistedProof(
   }
   // The excerpt names the proof's own argv: the judge's inline reporter is ~2 KB of base64 that reproduces nothing.
   const shownArgs = withoutProofJudge(args);
-  args = withProofJudge(whitelisted, args);
+  args = withProofJudge(whitelisted, args, cwd, preflightFiles);
   delete whitelisted.failureOutput;
   delete whitelisted.failureTail;
   // A replayed (async) run was already spawned with its own owned cache, released and recorded by that caller.
@@ -3804,7 +3810,7 @@ export async function execWhitelistedProofAsync(
     assertGrepTargetsInsideCheckout(args, cwd);
     assertGrepTargetIsFile(args, cwd);
   }
-  args = withProofJudge(whitelisted, args);
+  args = withProofJudge(whitelisted, args, cwd, preflightFiles);
   const replayArgs = args;
   delete whitelisted.proofCacheRelease;
   const cache = ownedVitestCache(whitelisted, cwd, args);
@@ -9510,6 +9516,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   "^plan/credit-overrides\\.yaml$",
   "^scripts/lib/ci-dependency-evidence\\.mjs$",
   "^scripts/preflight-author\\.mjs$",
+  "^scripts/native-test-run\\.mjs$",
+  "^src/lib/test-run-timeout\\.ts$",
   "^scripts/calibrate-author-runtime\\.mjs$",
   "^scripts/lib/author-step-capture\\.mjs$",
   "^src/lib/review\\.ts$",

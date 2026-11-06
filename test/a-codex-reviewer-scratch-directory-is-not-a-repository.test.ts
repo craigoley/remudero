@@ -100,7 +100,8 @@ test("W1-T2748: a write-capable worker outside Git remains fail-closed at Codex'
   try {
     const result = await captureSpawn(root, scratch, ["Read", "Write", "Edit", "Bash"]);
     assert.equal(result.args.includes("--skip-git-repo-check"), false);
-    assert.equal(result.args[result.args.indexOf("--sandbox") + 1], "workspace-write");
+    // W1-T11437 (operator 2026-11-05): writers run the allowlist-proxied :workspace profile, not --sandbox workspace-write.
+    assert.ok(result.args.includes('permissions.rmd_writer.extends=":workspace"'));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -9,8 +9,11 @@
   band_meaning: span
   origin: "2026-11-06 ledger: sweep.fix.dispatch_failed / sweep.fix.error / fix.commit_refused / sweep.plan_round.refused with 'selected instance registry unavailable (timeout)' while core's loop was held 60-200 s"
   plan_refs: [W1-T11368, W1-T11431, W1-T10573]
-  files: [src/lib/instance-registry-selection.ts, test/a-selected-registry-read-deadline-counts-only-loop-available-time.test.ts]
+  files: [src/lib/instance-registry-selection.ts, test/deploy/a-selected-registry-read-deadline-counts-only-loop-available-time.test.ts]
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=33472fe3b97e4510
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
   attempts: 0
   rationale: |
     Core has run with a selected instance registry since the 2026-11-05 recycles. Every fix-lane
@@ -40,9 +43,9 @@
     readWithDeadline. If W1-T11431 has merged or is in flight, build on its version of the function.
   acceptance:
     - claim: "A registry read whose result is ready when a held loop resumes past timeoutMs returns the bytes, not timeout, and a read still pending on a free loop past its window still returns timeout"
-      proof: "grep: W1-T11463 criterion 1 in test/a-selected-registry-read-deadline-counts-only-loop-available-time.test.ts"
+      proof: "grep: W1-T11463 criterion 1 in test/deploy/a-selected-registry-read-deadline-counts-only-loop-available-time.test.ts"
     - claim: "An external abort still returns cancelled, and the deadline is disarmed when the read settles"
-      proof: "grep: W1-T11463 criterion 2 in test/a-selected-registry-read-deadline-counts-only-loop-available-time.test.ts"
+      proof: "grep: W1-T11463 criterion 2 in test/deploy/a-selected-registry-read-deadline-counts-only-loop-available-time.test.ts"
   note: |
     The test holds the loop with a synchronous busy-wait longer than timeoutMs while an injected
     RegistryFileIO read has already completed (copy the technique from W1-T11368's clock test). At

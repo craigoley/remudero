@@ -1,0 +1,70 @@
+- id: W1-T11461
+  title: A tmp alias cannot pin a TSX cache elsewhere and cache-only passes scan the per-user root
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "Revised S3 handoff, 2026-11-06 01:55Z: installed helper dry-run held the 2.8 GB tsx-502 cache for a /tmp alias even though it lives under DARWIN_USER_TEMP_DIR"
+  plan_refs: []
+  files: [deploy/mac/tmp-reclaim.sh, deploy/mac/JANITOR.md, test/deploy/a-tsx-alias-follows-the-candidate-and-cache-only-scans-user-roots.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=b78c55347296abb4
+  # backlog gardener: placed=2026-11-06T05:13:51.452Z
+  attempts: 0
+  rationale: |
+    The operator's verified account dry run, with TMPDIR unset, printed KEEP RISKY (TSX cache
+    process command references /tmp alias) for /var/folders/.../T/tsx-502, then would-prune 0.
+    The revised brief reports a 2.8 GB cache with roughly 13,700 entries older than six hours.
+    The alias hold is intermittent: a command mentioning /tmp/tsx-502 is enough while it runs.
+    At source SHA256 1e38672c42bca8d3019eeb28ab87342b066e5367659080ec4a65778e32254e23,
+    path_is_live_or_unknown in deploy/mac/tmp-reclaim.sh:170 tests the global ROOT_REAL instead
+    of the candidate's canonical path before inventing /tmp/<basename>. A per-user cache outside
+    /private/tmp therefore gets an unrelated alias. The per-user TSX root loop at line 616 is
+    additionally gated on TSX_ONLY=0, so the delegated cache-only pass misses that root entirely.
+    Read-only comparison also confirms installed drift: the account's scheduled helper under
+    Library/Application Support/remudero has SHA256
+    13f93dea054626d4a73fadfbcb66bef1a4b3e1b7cb11e7d155861495e0d629d2 and lacks the current
+    inherited keep-name protections. No exact historical pin was found in the last 100 source
+    changes; this evidence establishes missing current safeguards, not a guessed release SHA.
+    Fourteen open PR head trees were swept against main with nine positive corpus matches each;
+    no head added overlapping alias or cache-only changes. The initial S3 broker-pinning theory
+    is superseded by this verified cause; live/open cache holds are preserved by this task.
+  design: |
+    Scope the /tmp alias check to a candidate whose qualified real path is inside /private/tmp,
+    independent of the global scan root. Preserve the complete relative suffix when mapping
+    /private/tmp/<suffix> to /tmp/<suffix>; do not invent aliases for caches elsewhere. Retain
+    genuine private-tmp alias liveness holds and every unknown process/CWD/open-file refusal.
+    Make --tsx-only scan TSX_TMP_ROOT's numeric tsx caches as the regular pass does, even when
+    the resolved per-user root differs from ROOT_REAL. Reuse prune_tsx_cache, its ownership and
+    recognition guards, and the existing six-hour mtime plus ctime floor. Avoid duplicate scans
+    when roots resolve to the same directory; do not pull unrelated Node/session cleanup into
+    cache-only mode. No new timing, count or size threshold and no relaxation of live endpoints.
+    Update JANITOR.md with the actual scheduled account-helper destination, alias semantics and
+    per-user cache-only coverage. Document that the installed helper is behind current safety
+    guards and must converge through the existing maintained installer targeting the actual
+    scheduled destination; the default HOME/bin target alone does not update the hourly helper.
+    The installer already supports an explicit destination, so no installer source or schedule
+    change is needed here. Preserve owner-managed installation and existing cron entries.
+    Use the existing tmp-reclaim fixture style with a contained process listing and old generated
+    files. One criterion exercises the false alias and, in the same behavioral test, a genuine
+    private-tmp alias hold. Another exercises the distinct per-user root in --tsx-only. Keep
+    recent/open/unrecognized files and cache directories protected. Only fixture-owned files may
+    be removed during tests; never invoke a live --apply, edit an installed helper or change cron.
+  acceptance:
+    - claim: "A non-tmp TSX cache is not held by a process mentioning its invented tmp alias, while genuine private-tmp aliases still protect their candidates and only eligible old generated files are pruned"
+      proof: "grep: W1-T11461 criterion 1 in test/deploy/a-tsx-alias-follows-the-candidate-and-cache-only-scans-user-roots.test.ts"
+    - claim: "A cache-only pass discovers the distinct per-user TSX root and applies the existing per-file safety rules without removing the cache directory or recent files"
+      proof: "grep: W1-T11461 criterion 2 in test/deploy/a-tsx-alias-follows-the-candidate-and-cache-only-scans-user-roots.test.ts"
+  note: |
+    The two criterion tests must fail at base for the reported behaviors. The genuine-alias
+    positive control belongs in the same criterion-1 test, not a separately passing base test.
+    Preserve source/installed hashes and read-only diff receipts. Installation convergence and
+    live disk recovery remain unproven until the existing owner installs and observes the change.
+  falsifier: |
+    Restore the global ROOT_REAL alias condition: criterion 1 wrongly holds the non-tmp cache.
+    Remove the real-alias guard: criterion 1 removes its protected tmp candidate. Restore the
+    TSX_ONLY=0 gate around per-user discovery: criterion 2 leaves eligible cache files untouched.
