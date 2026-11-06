@@ -398,7 +398,7 @@ export function primaryShadowOperatorChannel(opts: {
 } {
   const issues = opts.issues ?? ghIssueGatewayAsync(opts.owner, opts.repo);
   const clock = opts.clock ?? systemClock;
-  type State = { revision: number; first: string; prs: number[]; handled: boolean };
+  type State = { revision: number; first: string; prs: number[]; handled: boolean; pendingRecovery?: string };
   const states = new Map<string, State>();
   const historyMemo = createLedgerRotationMemo(rows => rows.filter(row =>
     row.step === "primary_shadow.observation" || row.step === "panel.escalation_marked_handled"), {
@@ -424,11 +424,13 @@ export function primaryShadowOperatorChannel(opts: {
     for (const row of history.rows.filter(r => r.task_id === id)) {
       if (row.step === "panel.escalation_marked_handled") { current.handled = true; continue; }
       if (!Number.isSafeInteger(row.revision) || Number(row.revision) <= 0 || typeof row.first_refusal_at !== "string"
-        || !Array.isArray(row.refused_prs) || row.refused_prs.some(n => !Number.isSafeInteger(n) || n <= 0)) {
+        || !Array.isArray(row.refused_prs) || row.refused_prs.some(n => !Number.isSafeInteger(n) || n <= 0)
+        || (row.pending_recovery !== undefined && (typeof row.pending_recovery !== "string" || !row.pending_recovery))) {
         throw new Error("primary shadow alert observation is malformed");
       }
       if (Number(row.revision) >= current.revision) {
         current.revision = Number(row.revision); current.first = row.first_refusal_at; current.prs = [...row.refused_prs];
+        current.pendingRecovery = row.pending_recovery as string | undefined;
       }
     }
     states.set(id, current);
@@ -437,26 +439,33 @@ export function primaryShadowOperatorChannel(opts: {
   const save = (s: PrimaryShadowSelection, proposed: State): State => {
     const next = { ...proposed, revision: proposed.revision + 1 };
     appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: key(s), step: "primary_shadow.observation",
-      revision: next.revision, first_refusal_at: next.first, refused_prs: [...next.prs] });
+      revision: next.revision, first_refusal_at: next.first, refused_prs: [...next.prs],
+      ...(next.pendingRecovery === undefined ? {} : { pending_recovery: next.pendingRecovery }) });
     states.set(key(s), next);
     return next;
   };
   const close = async (s: PrimaryShadowSelection, open: OpenIssue[], reason: string) => {
     const matching = open.filter(i => i.body?.includes(identity(s))
-      && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(TASK_LINE_RE.exec(normalizeCandidateBody(i.body))?.[1] ?? ""));
+      && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(TASK_LINE_RE.exec(normalizeCandidateBody(i.body))?.[1] ?? "")
+      && (s.mode === "live" || TASK_LINE_RE.exec(normalizeCandidateBody(i.body!))?.[1] === key(s)));
     if (matching.length && !issues.closeWithComment) throw new Error("primary shadow alert cannot close with a recovery citation");
     const digests = new Set([s.digest, ...matching.map(issue =>
       TASK_LINE_RE.exec(normalizeCandidateBody(issue.body!))![1].slice("PRIMARY-SHADOW-".length))]);
     // Record the positively observed recovery before its transport effect; a failed close retries.
     for (const digest of digests) {
       const episode = { ...s, digest }, current = await state(episode);
-      if (current.prs.length || current.first) save(episode, { ...current, prs: [], first: "" });
+      if (current.prs.length || current.first || current.pendingRecovery !== reason)
+        save(episode, { ...current, prs: [], first: "", pendingRecovery: reason });
     }
     for (const issue of matching) {
       await issues.closeWithComment!(issue.url, reason);
       appendLedger(opts.ledgerPath, { run_id: opts.runId,
         task_id: TASK_LINE_RE.exec(normalizeCandidateBody(issue.body!))![1],
         step: "primary_shadow.issue_closed", issue_url: issue.url, reason });
+    }
+    for (const digest of digests) {
+      const episode = { ...s, digest }, current = await state(episode);
+      if (current.pendingRecovery) save(episode, { ...current, pendingRecovery: undefined });
     }
   };
   const publish = async (selected: PrimaryShadowSelection, current: State): Promise<void> => {
@@ -510,14 +519,26 @@ export function primaryShadowOperatorChannel(opts: {
       let current = await state(selected);
       if (current.handled) return;
       if (!current.prs.includes(pr.prNumber)) current = save(selected, { ...current,
-        first: current.first || clock.iso(), prs: [...current.prs, pr.prNumber].sort((a, b) => a - b) });
+        first: current.first || clock.iso(), prs: [...current.prs, pr.prNumber].sort((a, b) => a - b), pendingRecovery: undefined });
       await publish(selected, current);
     }),
     reconcile: () => serial(async () => {
       const selected = opts.selection();
-      if (selected?.mode !== "live") return;
+      if (!selected) return;
       const open = await list();
-      if (open.some(i => i.body?.includes(identity(selected)))) await close(selected, open, `Primary instance ${selected.instance} is live again; the selected source is readable.`);
+      if (selected.mode === "live") {
+        if (open.some(i => i.body?.includes(identity(selected))))
+          await close(selected, open, `Primary instance ${selected.instance} is live again; the selected source is readable.`);
+        return;
+      }
+      // The existing pass retries acknowledged recovery even after merged PRs leave its open list.
+      const digests = new Set([selected.digest, ...open.filter(i => i.body?.includes(identity(selected)))
+        .map(i => TASK_LINE_RE.exec(normalizeCandidateBody(i.body!))?.[1] ?? "")
+        .filter(id => /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(id)).map(id => id.slice("PRIMARY-SHADOW-".length))]);
+      for (const digest of digests) {
+        const episode = { ...selected, digest }, current = await state(episode);
+        if (current.pendingRecovery) await close(episode, open, current.pendingRecovery);
+      }
     }),
     resolved: pr => serial(async () => {
       const selected = opts.selection();
