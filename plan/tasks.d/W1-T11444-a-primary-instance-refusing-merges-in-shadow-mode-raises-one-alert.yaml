@@ -1,0 +1,50 @@
+- id: W1-T11444
+  title: A primary instance that refuses merges because it is in shadow mode raises one alert, not silence
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-05 incident: core, the primary instance, ran as shadow from 16:58Z to about 21:07Z and refused every arm and merge with only a quiet ledger row"
+  plan_refs: [W1-T11431, W1-T11434, W1-T3596]
+  files: [src/lib/sweep.ts, src/lib/escalate.ts, test/deploy/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts, test/deploy/a-primary-shadow-alert-closes-on-live-mode.test.ts]
+  priority: 2
+  status: queued
+  # backlog gardener: band=2 evidence=503e76eaca988e51
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
+  attempts: 0
+  rationale: |
+    On 2026-11-05 the host registry, which is both the recycle catalog and (once a recycle passes
+    RMD_INSTANCE_REGISTRY) the active selection, marked core `mode: shadow` (remudero-ops #3). A
+    16:58Z recycle selected it, and so did later ones. From then until the 21:07Z live recycle,
+    every arm and merge on core logged automerge.shadow_refused (sweep.ts ~:2977) and nothing else:
+    no escalation, no Remudero issue, no status note. Operators saw green, reviewed PRs sit unmerged
+    for hours and spent the session hunting other causes.
+    W1-T11431 separates the catalog from the active selection, and W1-T11434 lets a deliberately
+    shadow core still merge its one selected plan PR. Neither tells an operator that the PRIMARY
+    instance is refusing merges, and shadow mode may be intended, so the signal must be one durable
+    notice, not noise.
+  design: |
+    When the primary instance (registry `primary: true`) refuses an arm or merge because of shadow
+    mode, open ONE escalation through the existing escalate.ts / Remudero Issues channel. It names
+    the instance, the selection source (registry path and digest when readable, never secret
+    values), the time the refusals began, and the count and list of refused PRs. Later refusals
+    update that same escalation in place (bounded by the existing per-escalation edit cadence) and
+    never open another. It closes itself, with a closing note, on the first pass where the primary
+    instance is live or the refusals stop because W1-T11434's lane merged the candidate. An
+    operator's existing mark-handled acknowledgement silences updates for the current selection
+    digest only: a changed selection re-opens the alert. Non-primary shadow instances keep today's
+    quiet row. No fixed thresholds: the escalation opens on the first refusal of a pass and its
+    update cadence reuses the escalation module's own.
+  acceptance:
+    - claim: "A primary instance's first shadow-mode arm or merge refusal opens exactly one escalation naming the instance, selection source and refused PRs; later refusals update that one escalation, and a non-primary shadow instance opens none"
+      proof: "unit test: test/deploy/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts"
+    - claim: "The escalation closes when the primary instance is live again, and a mark-handled acknowledgement silences it only for the current selection digest"
+      proof: "unit test: test/deploy/a-primary-shadow-alert-closes-on-live-mode.test.ts"
+  note: |
+    The builder names each criterion test with the marker "W1-T11444 criterion N" so the reviewer can map tests to criteria.
+  falsifier: |
+    Keep only the quiet automerge.shadow_refused row. Criterion 1's test must then fail, because no
+    escalation is opened for the primary instance.

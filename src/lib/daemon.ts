@@ -4020,6 +4020,15 @@ export async function runDaemon(
   // must not add a row of zeros to the ledger. The account is rolled, so a second call cannot double-count.
   const flushIdleLaneWindow = (report: typeof emitLog = emitLog): void => {
     const atMs = idleLaneClock.now();
+    const state = idleLaneAccount.state;
+    idleLaneAccount = accountIdleLaneMinutes(idleLaneAccount, {
+      atMs,
+      busyLanes: idleLaneCapacity - state.idleSlots,
+      capacity: idleLaneCapacity,
+      dispatchable: state.dispatchable,
+      cause: state.cause ?? undefined,
+      hold: state.hold ?? undefined,
+    });
     const row = summarizeIdleLaneAccount(idleLaneAccount, atMs);
     idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
     if (row.idle_minutes > 0) report("lane.idle_summary", { ...row, partial: true });

@@ -1,0 +1,55 @@
+- id: W1-T11443
+  title: A review FAIL that carried a reproduction is not overturned by a later PASS on the same head
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high
+  band_meaning: span
+  origin: "2026-11-05 incident: #16523 merged head 90be1a69ea, carrying a boot-adoption ReferenceError a review had already reproduced"
+  plan_refs: [W1-T178, W1-T5839, W1-T3704]
+  files: [src/lib/review.ts, src/cli/commands/review.ts, test/review/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts, test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts]
+  priority: 3
+  status: queued
+  # backlog gardener: band=3 evidence=c7d0eff7a219e1f9
+  # backlog gardener: placed=2026-11-06T03:53:33.122Z
+  attempts: 0
+  rationale: |
+    On 2026-11-05 PR #16523 (W1-T11129) head 90be1a69eaea5510184cf6eec69f7c72afd13c39 received
+    remudero-review FAILURE at 22:11:12Z from core (run review-PR16523-1793916123475). Its finding
+    carried an executed reproduction: "an in-memory runDaemon replay adopting a review child in
+    shadow mode throws ReferenceError at daemon.ts:4218". At 22:31:12Z an operator-machine local
+    review of the SAME unchanged head (Mac-mini, run review-PR16523-1793917858782, poster cao825)
+    posted SUCCESS at 22:33:28Z and took the clean-status direct merge at 22:33:44Z. The known
+    crash reached main.
+    Two gaps let that happen. First, verdict stability (applyVerdictStability, W1-T178) is
+    one-directional: it suppresses a later semantic FAIL after a prior PASS on an unchanged head,
+    but nothing protects a prior FAIL from a later PASS. Second, the prior verdict comes only from
+    the local ledger (priorReviewVerdictFromLedger). An operator-machine ledger never holds core's
+    review.posted rows, so a local review cannot see a FAIL core posted, and the reverse holds too.
+    GitHub's commit-status history for the remudero-review context is the only record every
+    reviewer shares.
+  design: |
+    Before posting a terminal SUCCESS for a head, read that head's remudero-review status history
+    from GitHub (the statuses list, not only the combined current state) and join each FAILURE to
+    its ledger or PR-review finding where one is readable. A prior FAILURE on the identical head
+    whose finding names an executed reproduction or counterexample makes the head's verdict
+    sticky: the new review may post SUCCESS only when its reviewer was handed that prior finding
+    verbatim and its verdict clause for the affected criterion explicitly addresses it, for example
+    by re-running the reproduction and recording that it no longer fails. Otherwise the review posts
+    the FAILURE again, citing the prior finding, never SUCCESS, and the head must change.
+    A prior FAILURE without a reproduction (an unexplained downgrade, or a reviewer that could not
+    inspect) keeps today's behaviour. An unreadable status history fails closed: it withholds the
+    SUCCESS as pending with a named reason, and never posts it blind. This extends W1-T178's rule
+    to both directions and to every poster without adding a store. No fixed thresholds.
+  acceptance:
+    - claim: "A PASS computed on the same head as a prior FAILURE whose finding carried a reproduction posts FAILURE citing the prior finding unless its reviewer explicitly addressed that reproduction; the prior FAILURE is read from GitHub status history, so a FAILURE another machine posted is honoured"
+      proof: "unit test: test/review/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts"
+    - claim: "A prior FAILURE without a reproduction keeps today's behaviour, and an unreadable status history withholds SUCCESS as pending with a named reason"
+      proof: "unit test: test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts"
+  note: |
+    The builder names each criterion test with the marker "W1-T11443 criterion N" so the reviewer can map tests to criteria.
+  falsifier: |
+    Drop the status-history read and the sticky check. Replaying 90be1a69ea's two reviews must then
+    post SUCCESS over the reproduced FAILURE, and criterion 1's test must fail.
