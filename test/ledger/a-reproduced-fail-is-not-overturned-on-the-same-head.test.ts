@@ -2,11 +2,40 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as review from "#src/lib/review.js";
 import * as reviewCommand from "#src/cli/commands/review.js";
-import { writeFileSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { appendLedger } from "#src/lib/ledger.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+function reviewFixtureHost(head: string): reviewCommand.ReviewCommandHost {
+  const unrelatedHostPort = (): never => { throw new Error("unexpected unrelated orchestration port"); };
+  return {
+    GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+    acceptedReviewAttemptId: value => typeof value === "string" ? value : undefined, attributeWorkerStreamEvent: unrelatedHostPort,
+    ledgeredNonDispatchSpawn: unrelatedHostPort, lintPlanForReview: unrelatedHostPort,
+    liveWorkerRunIds: new Set(), materializeReviewWorktree: unrelatedHostPort,
+    readHeadShaRest: () => head, readMainPlanTreeSha: unrelatedHostPort, realDeps: () => ({ reviewWorktree: { fetch: unrelatedHostPort } }) as unknown as ReturnType<reviewCommand.ReviewCommandHost["realDeps"]>,
+    reviewPostedDescription: verdict => {
+      assert.equal(verdict.capped, false, "this fixture exercises the production uncapped description branch");
+      return verdict.summary;
+    },
+    reviewWorkerLockId: runId => runId,
+    reviewerClockBoundMs: override => { assert.ok(Number.isFinite(override)); return override!; },
+    reviewSubjectGit: unrelatedHostPort,
+  };
+}
+
+function successfulReviewWorker(text: string): Awaited<ReturnType<NonNullable<Parameters<typeof reviewCommand.runReview>[1]["reviewerSpawnWorker"]>>> {
+  return {
+    sessionId: "reproduction-fixture", costUsd: 0, numTurns: 1, text,
+    blocks: [], stderr: "", subtype: "success", isError: false, apiError: false,
+    exit: { kind: "exit", code: 0 },
+    permissionDenials: [], childEnvKeys: [], model: "sonnet", provider: "codex", servedModel: "fixture", effort: "high",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
+  };
+}
 
 const SHA = "90be1a69eaea5510184cf6eec69f7c72afd13c39";
 const failureBody = `**remudero-review=failure**\n\n1. laneTarget's CPU bound is measured\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: an in-memory runDaemon replay adopting a review child in shadow mode throws ReferenceError at daemon.ts:4218. The proof omits review-child adoption.`;
@@ -108,21 +137,7 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
       const prompts: string[] = [];
       const phases: string[] = [];
       const sharedStatuses = [{ id: 1, context: "remudero-review", state: "failure" }];
-      const unrelatedHostPort = (): never => { throw new Error("unexpected unrelated orchestration port"); };
-      const host: reviewCommand.ReviewCommandHost = {
-        GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
-        acceptedReviewAttemptId: unrelatedHostPort, attributeWorkerStreamEvent: unrelatedHostPort,
-        ledgeredNonDispatchSpawn: unrelatedHostPort, lintPlanForReview: unrelatedHostPort,
-        liveWorkerRunIds: new Set(), materializeReviewWorktree: unrelatedHostPort,
-        readHeadShaRest: () => head, readMainPlanTreeSha: unrelatedHostPort, realDeps: unrelatedHostPort,
-        reviewPostedDescription: verdict => {
-          assert.equal(verdict.capped, false, "this fixture exercises the production uncapped description branch");
-          return verdict.summary;
-        },
-        reviewWorkerLockId: unrelatedHostPort,
-        reviewerClockBoundMs: override => { assert.ok(Number.isFinite(override)); return override!; },
-        reviewSubjectGit: unrelatedHostPort,
-      };
+      const host = reviewFixtureHost(head);
       shim = ghShim([
         { when: "pulls/1/reviews", stdout: "[]" },
         { when: "pulls/1", stdout: JSON.stringify({ number: 1, html_url: prUrl, state: "open", merged_at: null, head: { ref: "b", sha: head } }) },
@@ -150,13 +165,7 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
           prompts.push(args.prompt);
           const acknowledgement = scenario === "addressed" || scenario === "late"
             ? `REVIEW_ADDRESSED_FAILURE 1: ${failures[0].id}\n` : "";
-          return {
-            sessionId: "reproduction-fixture", costUsd: 0, numTurns: 1,
-            text: `${acknowledgement}REVIEW_VERDICT 1: PASS (re-ran the shadow adoption reproduction and it no longer throws)`,
-            blocks: [], stderr: "", subtype: "success", isError: false, apiError: false,
-            permissionDenials: [], childEnvKeys: [], model: "sonnet", provider: "codex", servedModel: "fixture", effort: "high",
-            tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
-          };
+          return successfulReviewWorker(`${acknowledgement}REVIEW_VERDICT 1: PASS (re-ran the shadow adoption reproduction and it no longer throws)`);
         },
         reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120_000 }, reviewerClockBoundMs: 120_000,
         headCheckoutDir: root, ledgerPath: join(root, "ledger.ndjson"), runId: `history-${scenario}`,
