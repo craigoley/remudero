@@ -728,6 +728,17 @@ export async function runReview(host: ReviewCommandHost, args: {
   const initialStatusHistory: ReviewStatusHistory = args.shadow
     ? { kind: "readable", failures: [] }
     : await readStatusHistory(owner, repo, prUrl, headSha);
+  if (initialStatusHistory.kind === "unreadable") {
+    const reason = `pending: ${initialStatusHistory.reason}`;
+    log("review.stood_down", { context: REVIEW_CONTEXT, state: "pending", head_sha: headSha, pr_url: prUrl, reason });
+    say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${reason}`);
+    reportPhase("posted");
+    return {
+      state: "pending", criteria: [], testTheater: false, summary: "review stood down: shared status history unreadable",
+      floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+      headSha, reviewerOutcome: "not_attempted_status_history_unreadable", verdictWithheld: reason,
+    };
+  }
   // Source-text compatibility for W1-T913's pre-existing ordering proof:
   // execFileSync("gh", ["pr", "diff", prUrl])
   // W1-T3093: `gh pr diff` is refused above 300 files; only that size case falls back to a local comparison.

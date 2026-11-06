@@ -90,7 +90,7 @@ test("W1-T11443 criterion 1: compressed unmet numbering maps back to the affecte
 });
 
 test("W1-T11443 criteria 1/2: production publication guards shared history and presents the prior finding", async () => {
-  for (const scenario of ["sticky", "addressed", "unreadable", "unreproduced", "late", "replay"] as const) {
+  for (const scenario of ["sticky", "addressed", "unreadable", "unreproduced", "late", "replay", "history-lost"] as const) {
     const fixture = gitRepo({ kind: "reproduced-failure-publication" });
     const root = fixture.dir;
     const oldPath = process.env.PATH;
@@ -107,6 +107,7 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
       let replayPhase = false;
       let historyRevision = "external-failure-v1";
       const prompts: string[] = [];
+      const phases: string[] = [];
       shim = ghShim([
         { when: "pulls/1/reviews", stdout: "[]" },
         { when: "pulls/1", stdout: JSON.stringify({ number: 1, html_url: prUrl, state: "open", merged_at: null, head: { ref: "b", sha: head } }) },
@@ -121,11 +122,11 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
         task: { id: "W1-T11443", files: ["changed.ts"], acceptance: [{ claim: "changed exists", proof: "grep: changed in changed.ts" }] },
         report: "changed", settingsFile: join(root, "settings.json"), config: { root, claudeBin: "/unused" },
         log: (step: string, extra: Record<string, unknown> = {}) => appendLedger(join(root, "ledger.ndjson"), { run_id: `history-${scenario}`, task_id: "W1-T11443", step, ...extra }), say: () => {}, account: (worker: unknown) => worker,
-        spawnReviewer: true, readReviewReuseFacts: () => undefined,
+        spawnReviewer: true, readReviewReuseFacts: () => undefined, onPhase: (phase: string) => phases.push(phase),
         readReviewStatusHistory: async () => {
           reads++;
-          if (scenario === "unreadable") return { kind: "unreadable", reason: "history unavailable in fixture" };
-          return { kind: "readable", failures: scenario === "unreproduced" || (scenario === "late" && reads === 1) || (scenario === "replay" && !replayPhase) ? [] : failures, ...(scenario === "replay" && replayPhase ? { revision: historyRevision } : {}) };
+          if (scenario === "unreadable" || (scenario === "history-lost" && reads > 1)) return { kind: "unreadable", reason: "history unavailable in fixture" };
+          return { kind: "readable", failures: scenario === "unreproduced" || scenario === "history-lost" || (scenario === "late" && reads === 1) || (scenario === "replay" && !replayPhase) ? [] : failures, ...(scenario === "replay" && replayPhase ? { revision: historyRevision } : {}) };
         },
         reviewerSpawnWorker: async (args: { prompt: string }) => {
           prompts.push(args.prompt);
@@ -144,8 +145,8 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
         disarm: () => "not-armed", arm: () => ({ armed: false, reason: "fixture" }),
       } as never);
       const verdict = await drive();
-      assert.equal(reads, 2, `${scenario}: history is checked before the prompt and again before publication`);
-      if (scenario === "unreadable") {
+      assert.equal(reads, scenario === "unreadable" ? 1 : 2, `${scenario}: unavailable initial history refuses before paid dispatch`);
+      if (scenario === "unreadable" || scenario === "history-lost") {
         assert.match(verdict.verdictWithheld ?? "", /history unavailable in fixture/);
       } else {
         assert.equal(verdict.state, scenario === "sticky" || scenario === "late" ? "failure" : "success", scenario);
@@ -161,6 +162,16 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
         const submitted = shim.calls().join("\n");
         assert.ok(submitted.includes("pulls/1/reviews") && submitted.includes("prior reproduced failure remains unaddressed: ReferenceError"), submitted);
       }
+      if (scenario === "unreadable") {
+        assert.equal(verdict.state, "pending", "an initial transport refusal claims no judgment");
+        assert.equal(prompts.length, 0, "known-unreadable history must not dispatch a paid reviewer");
+        assert.ok(phases.includes("posted"), "the withheld attempt releases its review slot");
+        const retry = await drive();
+        assert.equal(retry.state, "pending");
+        assert.equal(prompts.length, 0, "an ongoing outage must not multiply paid reviewer attempts");
+        assert.equal(reads, 2);
+      }
+      if (scenario === "history-lost") assert.ok(prompts.length > 0, "the final read protects an already-started review too");
       if (scenario === "replay") {
         replayPhase = true;
         const changed = await drive();
