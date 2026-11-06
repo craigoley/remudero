@@ -757,18 +757,18 @@ while :; do
     fi
   fi
   if [ "$supervise_daemon" -eq 1 ]; then
-    export RMD_SUPERVISED_DAEMON_RUN_ID="DAEMON-$(date +%s%3N)"
+    export REMUDERO_RUN_ID="DAEMON-$(date +%s%3N)-$$"
     mkdir -p "$CONFIG_ROOT/state"
     heap_line_path="$CONFIG_ROOT/state/.daemon-heap-line-$$"
     : > "$heap_line_path"
-    stderr_end="RMD-STDERR-END-${RMD_SUPERVISED_DAEMON_RUN_ID}-$$"
-    exec {daemon_stderr_fd}> >(awk -v evidence="$heap_line_path" -v stop="$stderr_end" '
+    stderr_end="RMD-STDERR-END-${REMUDERO_RUN_ID}-$$"
+    exec 19> >(awk -v evidence="$heap_line_path" -v stop="$stderr_end" '
       $0 == stop { exit }
       { if (tolower($0) ~ /heap limit/) { print substr($0, 1, 240) > evidence; close(evidence) }
         print; fflush() }
     ' >&2)
     daemon_stderr_pid=$!
-    "$@" 2>&"$daemon_stderr_fd" &
+    "$@" 2>&19 &
   else
     "$@" &
   fi
@@ -781,10 +781,10 @@ while :; do
 
   if [ "$supervise_daemon" -eq 1 ]; then
     # End the observer explicitly: orphaned workers may still hold their inherited stderr open.
-    printf '\n%s\n' "$stderr_end" >&"$daemon_stderr_fd" || log "stderr observer already exited"
-    exec {daemon_stderr_fd}>&-
+    printf '\n%s\n' "$stderr_end" >&19 || log "stderr observer already exited"
+    exec 19>&-
     wait "$daemon_stderr_pid" || log "stderr observer failed; exit status is still recorded"
-    if ! node --input-type=commonjs - "$CONFIG_ROOT/state/ledger.ndjson" "$RMD_SUPERVISED_DAEMON_RUN_ID" "$rc" "$heap_line_path" "$signal_forwarded" <<'DAEMON_EXIT_EVIDENCE'
+    if ! node --input-type=commonjs - "$CONFIG_ROOT/state/ledger.ndjson" "$REMUDERO_RUN_ID" "$rc" "$heap_line_path" "$signal_forwarded" <<'DAEMON_EXIT_EVIDENCE'
 const fs = require('node:fs');
 const [ledger, runId, code, heapPath, forwarded] = process.argv.slice(2);
 const heapLine = fs.readFileSync(heapPath, 'utf8').trim();
@@ -796,7 +796,7 @@ fs.appendFileSync(ledger, JSON.stringify({
 DAEMON_EXIT_EVIDENCE
     then log "could not persist daemon exit evidence (exit $rc)"; fi
     rm -f -- "$heap_line_path"
-    unset RMD_SUPERVISED_DAEMON_RUN_ID
+    unset REMUDERO_RUN_ID
   fi
 
   # W1-T2586: A SIGNAL THIS SHELL ITSELF FORWARDED OUTRANKS EVERY OTHER CLASSIFICATION BELOW.

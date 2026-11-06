@@ -390,7 +390,7 @@ test("W1-T11421 criterion 2: the real entrypoint supplies each exit code and hea
 exec node --input-type=commonjs - <<'CHILD'
 const fs = require('node:fs');
 const ts = new Date().toISOString();
-const base = { ts, run_id: process.env.RMD_SUPERVISED_DAEMON_RUN_ID, task_id: 'DAEMON' };
+const base = { ts, run_id: process.env.REMUDERO_RUN_ID, task_id: 'DAEMON' };
 const rows = [{ ...base, step: 'daemon.boot' },
   { ...base, step: 'daemon.memory', heap: { used_bytes: 7300000000, limit_bytes: ${HEAP_LIMIT} }, rss_bytes: 8000000000 }];
 fs.appendFileSync(process.env.TEST_LEDGER, rows.map(r => JSON.stringify(r) + '\\n').join(''));
