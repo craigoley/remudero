@@ -56,6 +56,14 @@ function pairedPassRows(intervalsMs: number[], scope = "idle"): Array<Record<str
   return rows;
 }
 
+function heldPlanRow(pr: OpenPrView, heldAtMs: number): Record<string, unknown> {
+  return {
+    ts: new Date(heldAtMs).toISOString(), run_id: "review-held", task_id: pr.taskId,
+    step: "automerge.plan_pr_held", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
+    mergeable_state: "blocked", remedy: "retry-later",
+  };
+}
+
 function sweepDeps(ledger: string, armed: number[], arm?: SweepDeps["arm"]): SweepDeps {
   return {
     log: (step, extra = {}) => appendFileSync(ledger, `${JSON.stringify({
@@ -128,8 +136,19 @@ test("W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bo
     { ts: new Date(BASE + 999).toISOString(), run_id: "dup", task_id: "SWEEP", step: "sweep.pass",
       pass_id: "prior-0", light_pass_scope: "idle" },
   ];
+  const clockRegressed = pairedPassRows([250, 250, 250, 250]);
+  for (const row of clockRegressed) {
+    if (row.step === "sweep.pass" && row.pass_id === "prior-2") row.ts = new Date(BASE + 200).toISOString();
+    if (row.step === "sweep.pass" && row.pass_id === "prior-3") row.ts = new Date(BASE + 500).toISOString();
+    if (row.step === "sweep.pass" && row.pass_id === "prior-4") row.ts = new Date(BASE + 750).toISOString();
+  }
+  const summaryBeforeStart = pairedPassRows([250, 250, 250]);
+  const summaryIndex = summaryBeforeStart.findIndex((row) => row.step === "sweep.summary" && row.pass_id === "prior-1");
+  const startIndex = summaryBeforeStart.findIndex((row) => row.step === "sweep.pass" && row.pass_id === "prior-1");
+  const [outOfOrderSummary] = summaryBeforeStart.splice(summaryIndex, 1);
+  summaryBeforeStart.splice(startIndex, 0, outOfOrderSummary!);
 
-  for (const rows of [sparse, malformed]) {
+  for (const rows of [sparse, malformed, clockRegressed, summaryBeforeStart]) {
     const ledger = ledgerWith(rows);
     const armed: number[] = [];
     const first = planPr(1144521);
@@ -137,8 +156,19 @@ test("W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bo
     await runSweepLightPass([first, second], sweepDeps(ledger, armed), DEFAULT_SWEEP_POLICY);
     assert.deepEqual(armed, [first.prNumber]);
     const deferred = ledgerRows(ledger).find((row) => row.step === "sweep.disposed" && row.pr_number === second.prNumber);
-    assert.match(String(deferred?.stand_down_reason), /one plan PR direct-merges per light pass/);
+    assert.match(String(deferred?.stand_down_reason), /one never-held plan PR direct-merges per light pass/);
   }
+
+  const olderHeld = planPr(1144523);
+  const newerHeld = planPr(1144524);
+  const heldLedger = ledgerWith([
+    heldPlanRow(olderHeld, BASE - 60_000),
+    heldPlanRow(newerHeld, BASE - 120_000),
+  ]);
+  const heldArmed: number[] = [];
+  await runSweepLightPass([olderHeld, newerHeld], sweepDeps(heldLedger, heldArmed), DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(heldArmed, [newerHeld.prNumber, olderHeld.prNumber],
+    "sparse cadence retains the oldest-held-first re-evaluation for every ready held plan PR");
 
   const noDurationLedger = ledgerWith(pairedPassRows([250, 250, 250]));
   const noDurationArmed: number[] = [];

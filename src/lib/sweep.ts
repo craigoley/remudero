@@ -24911,7 +24911,8 @@ function lightPassIntervalBudgetFromLedger(
       const elapsed = summary?.row.elapsed_ms;
       const valid = group.starts.length === 1 && group.summaries.length === 1 &&
         summary?.row.pass_id === passId && summary.row.light_pass_scope === scope &&
-        Number.isFinite(startMs) && typeof elapsed === "number" && Number.isFinite(elapsed) && elapsed >= 0;
+        summary.index > start.index && Number.isFinite(startMs) &&
+        typeof elapsed === "number" && Number.isFinite(elapsed) && elapsed >= 0;
       events.push({ index: start.index, valid,
         ...(valid ? { startedAtMs: startMs } : {}) });
     }
@@ -24927,7 +24928,11 @@ function lightPassIntervalBudgetFromLedger(
     }
     if (previousStartMs !== undefined) {
       const interval = event.startedAtMs - previousStartMs;
-      if (Number.isFinite(interval) && interval > 0) intervals.push(interval);
+      if (!Number.isFinite(interval) || interval <= 0) {
+        previousStartMs = undefined;
+        continue;
+      }
+      intervals.push(interval);
     }
     previousStartMs = event.startedAtMs;
   }
@@ -25094,13 +25099,15 @@ async function runSweepLightPassCore(
   const availablePlanMerges = lightPassPlanMergeOwner !== undefined
     ? []
     : selectLightPassPlanMerges(openPrs, policy, now, selectionLedgerLines, passIntervalBudgetMs !== undefined);
-  const planMerges = passIntervalBudgetMs === undefined ? availablePlanMerges.slice(0, 1) : availablePlanMerges;
+  // Without enough measured cadence, selection already admits at most the first never-held PR
+  // while preserving every previously held PR and their oldest-held-first order (W1-T9212).
+  const planMerges = availablePlanMerges;
   const planMergeBudget = { spentMs: 0, durationKnown: true };
   const unavailablePlanMergeReason = "measured light-pass interval unavailable (<3 valid same-scope intervals); " +
-    "one plan PR direct-merges per light pass (W1-T5901) — deferred to full sweep (light pass)";
-  const planMergeStopReason = (index: number | undefined): string | undefined => {
+    "one never-held plan PR direct-merges per light pass, while held PRs keep their W1-T9212 re-evaluation";
+  const planMergeStopReason = (index: number | undefined, held: boolean): string | undefined => {
+    if (passIntervalBudgetMs === undefined) return index === 0 || held ? undefined : unavailablePlanMergeReason;
     if (index === 0) return undefined;
-    if (passIntervalBudgetMs === undefined) return unavailablePlanMergeReason;
     if (!planMergeBudget.durationKnown) {
       return `measured interval budget ${passIntervalBudgetMs}ms; prior plan-merge duration unavailable or invalid, stopped before another attempt`;
     }
@@ -25235,12 +25242,13 @@ async function runSweepLightPassCore(
         // W1-T5901: the plan-merge owner preserves one-at-a-time merge-queue/safety behavior; a measured
         // interval only admits another attempt after the prior attempt's real arm duration is known.
         const laneActionable = scopedDeps.actionable;
+        const isHeldPlanPr = heldPlanPrFromLedger(selectionLedgerLines, pr) !== undefined;
         scopedDeps.actionable = (d) => d === "mergeable"
-          ? planMergeStopReason(planMergeTurn.index) === undefined
+          ? planMergeStopReason(planMergeTurn.index, isHeldPlanPr) === undefined
           : (laneActionable ? laneActionable(d) : true);
         const laneReason = scopedDeps.standDownReasonFor;
         scopedDeps.standDownReasonFor = (d) => d === "mergeable"
-          ? planMergeStopReason(planMergeTurn.index) ?? laneReason?.(d) : laneReason?.(d);
+          ? planMergeStopReason(planMergeTurn.index, isHeldPlanPr) ?? laneReason?.(d) : laneReason?.(d);
 
         const arm = scopedDeps.arm;
         const append = scopedDeps.appendLine ?? appendLedger;
@@ -25277,7 +25285,7 @@ async function runSweepLightPassCore(
         const laneReason = scopedDeps.standDownReasonFor;
         scopedDeps.actionable = (d) => d !== "mergeable" && (laneActionable ? laneActionable(d) : true);
         scopedDeps.standDownReasonFor = (d) => d === "mergeable"
-          ? planMergeStopReason(undefined) ?? "measured plan-merge budget did not admit this PR in the current pass"
+          ? planMergeStopReason(undefined, false) ?? "measured plan-merge budget did not admit this PR in the current pass"
           : laneReason?.(d);
       }
       // W1-T9743: every admitted review is detached, plan filings too — the ticker awaits this pass.
