@@ -151,6 +151,7 @@ test("W1-T9549: a slow gh during the review arm does not delay a concurrent time
       when: "pulls/",
       stdout: JSON.stringify({ number: 9549, html_url: PR_URL, updated_at: "t", body: BODY, state: "open", head: { ref: `run-${TASK_ID}-1`, sha: HEAD_SHA } }),
     },
+    { when: "/statuses?", stdout: "[[]]" },
     { when: "/status", stdout: JSON.stringify({ state: "success", statuses: [] }) },
   ], { kind: "t9549-review" });
   const order: string[] = [];
