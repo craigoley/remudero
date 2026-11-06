@@ -59,3 +59,27 @@ test("W1-T11443 criterion 2: the default reader shells to a contained gh and ref
     rmSync(shim.dir, { recursive: true, force: true });
   }
 });
+
+test("W1-T11443 criterion 2: an unknown status state is unreadable, never an empty failure history", async () => {
+  const result = await reviewCommand.readReviewStatusHistory("acme", "remudero", "https://github.com/acme/remudero/pull/1", SHA,
+    async () => [[{ context: "remudero-review", state: "not-a-github-state" }]]);
+  assert.equal(result.kind, "unreadable");
+});
+
+test("W1-T11443 criterion 2: malformed review rows cannot erase a readable failure status", async () => {
+  const result = await reviewCommand.readReviewStatusHistory("acme", "remudero", "https://github.com/acme/remudero/pull/1", SHA,
+    async (args) => args.at(-1)?.includes("/statuses?") ? [[{ context: "remudero-review", state: "failure" }]] : [[{}]]);
+  assert.equal(result.kind, "unreadable");
+});
+
+test("W1-T11443 criterion 2: shared status and finding reads explicitly revalidate broker history", async () => {
+  const options: unknown[] = [];
+  const result = await reviewCommand.readReviewStatusHistory("acme", "remudero", "https://github.com/acme/remudero/pull/1", SHA,
+    async (args, readOptions) => {
+      options.push(readOptions);
+      assert.equal(readOptions?.fresh, true, "shared evidence must bypass a previously cached PASS");
+      return args.at(-1)?.includes("/statuses?") ? [[{ context: "remudero-review", state: "failure" }]] : [[]];
+    });
+  assert.equal(result.kind, "readable");
+  assert.equal(options.length, 2);
+});

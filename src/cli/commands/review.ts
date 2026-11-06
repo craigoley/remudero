@@ -423,25 +423,32 @@ export async function readReviewStatusHistory(
   repo: string,
   prUrl: string,
   headSha: string,
-  readJson: (args: string[]) => unknown | Promise<unknown> = ghJsonAsync,
+  readJson: (args: string[], options: { fresh: true }) => unknown | Promise<unknown> =
+    (args, options) => ghJsonAsync(args, undefined, undefined, options),
 ): Promise<ReviewStatusHistory> {
   try {
     const number = reviewPrNumber(prUrl);
     if (number === undefined) throw new Error("PR number is unavailable from review URL");
     const statuses = rowsFromPaginatedApi(await readJson([
       "api", "--paginate", "--slurp", `repos/${owner}/${repo}/commits/${headSha}/statuses?per_page=100`,
-    ]));
+    ], { fresh: true }));
     if (statuses.some((row) => typeof row !== "object" || row === null ||
         typeof (row as Record<string, unknown>).context !== "string" ||
-        typeof (row as Record<string, unknown>).state !== "string")) {
+        typeof (row as Record<string, unknown>).state !== "string" ||
+        !["success", "failure", "pending", "error"].includes(String((row as Record<string, unknown>).state).toLowerCase()))) {
       throw new Error("GitHub returned an incomplete commit status history");
     }
     const hasFailure = statuses.some((row) =>
       (row as Record<string, unknown>).context === REVIEW_CONTEXT &&
       String((row as Record<string, unknown>).state).toLowerCase() === "failure");
     const reviews = hasFailure
-      ? rowsFromPaginatedApi(await readJson(["api", "--paginate", "--slurp", `repos/${owner}/${repo}/pulls/${number}/reviews?per_page=100`]))
+      ? rowsFromPaginatedApi(await readJson(["api", "--paginate", "--slurp", `repos/${owner}/${repo}/pulls/${number}/reviews?per_page=100`], { fresh: true }))
       : [];
+    if (reviews.some((row) => typeof row !== "object" || row === null ||
+        typeof (row as Record<string, unknown>).commit_id !== "string" ||
+        (typeof (row as Record<string, unknown>).body !== "string" && (row as Record<string, unknown>).body !== null))) {
+      throw new Error("GitHub returned an incomplete pull request review history");
+    }
     return { kind: "readable", failures: reproducedReviewFailuresFromHistory(statuses, reviews, headSha) };
   } catch (error) {
     return { kind: "unreadable", reason: `GitHub remudero-review status history unreadable: ${String((error as Error)?.message ?? error)}` };
