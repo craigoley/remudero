@@ -147,7 +147,8 @@ test("W1-T11449 criterion 1: workflow prechecks use the same bounded completion 
     if (args.includes("--test")) { argsSeen.push([...args]); assertTimedTestChild(args); }
     return spawnSync(file, args, options);
   };
-  assert.equal(preflightAuthor([], { root: fixture.root, spawn: run }), 0);
+  assert.equal(preflightAuthor([], { root: fixture.root, spawn: run,
+    select: () => ({ fullRun: false, suites: ["test/leaf.test.ts"], reasons: ["workflow argv fixture"] }) }), 0);
   const workflowArgs = argsSeen.find(args => args.includes(AUTHOR_WORKFLOW_CONTRACT_SUITES[0]));
   assert.ok(workflowArgs, "the actual workflow precheck ran");
   assert.ok(workflowArgs.includes(`--test-timeout=${FIXTURE_SLOW_THRESHOLD_MS * FAST_TIER_TEST_TIMEOUT_FACTOR}`));
