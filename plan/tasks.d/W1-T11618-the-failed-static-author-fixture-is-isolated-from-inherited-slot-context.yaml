@@ -1,0 +1,75 @@
+- id: W1-T11618
+  title: "THE FAILED-STATIC AUTHOR FIXTURE READS THE ENCLOSING RUN'S SLOT MARKER — test/author-preflight.test.ts case 'author static admission takes no suite slot for a failed static gate (W1-T9951)' asserts RMD_TEST_SLOT_PARENT is undefined inside its child but never clears it, so under a real author-preflight slot the child's assert throws (exitCode 1, not 7) at line 276; isolate that fixture from inherited or restored slot context, test-only"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low  # Rule 19: one concern, one test file; no src/, scripts/, dispatch or PAUSE code
+  origin: architect
+  plan_refs: [W1-T9951, W1-T10300]
+  files:
+    - test/author-preflight.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (initiative evidence): two complete author preflights on docs-only SHA
+    c940a31b9a4121294f2d729a9ce1598a8b019d48 each ran 56/56 selected files and 866 tests and failed ONLY
+    "author static admission takes no suite slot for a failed static gate (W1-T9951)" at
+    test/author-preflight.test.ts:276 (`receipt.steps[1].exitCode` expected 7, actual 1). The case passes alone (1/1)
+    and with the immediately preceding W1-T9951 case (2/2). Setting RMD_TEST_SLOT_PARENT explicitly reproduces the
+    child assertion failure.
+    READ test/author-preflight.test.ts at this worktree's HEAD:
+    - lines 210-220: the preceding W1-T9951 case saves RMD_TEST_SLOT_PARENT and RMD_TEST_SLOT_DIR, deletes both, and
+      restores them in t.after — so when the file runs inside a real author slot the marker is BACK in process.env
+      before the next case starts.
+    - lines 265-281: the failed-static case does no such save/clear. Its fixture src/run-task.ts asserts
+      `process.env.RMD_TEST_SLOT_PARENT === undefined` and only then sets exitCode 7. With the enclosing author's
+      marker inherited, the assert throws first, the child exits 1, and line 276 fails.
+    - lines 14-21: the file-level hook isolates RMD_TEST_SLOT_DIR only, not RMD_TEST_SLOT_PARENT.
+    - scripts/preflight-author.mjs contains no RMD_TEST_SLOT_PARENT reference, so the static child inherits whatever
+      the test process carries; this is a fixture-context defect, not an admission defect.
+    Settled by lookup: is this already filed or already decided? -> no; W1-T9951 owns the admission behaviour and its
+      own test file, W1-T10300 is a merged diagnose task for retro-container failures, and no plan shard names this
+      case, its line, or the slot-marker leak (grep of plan/, MASTER-PLAN.md, LEARNINGS.md, DECISIONS.md).
+    Settled by lookup: does the fix need production code? -> no; the defect is the fixture's unstated assumption that
+      the marker is absent (test/author-preflight.test.ts:265-271 versus 213-220).
+    Settled by lookup: does preflight-author strip the marker before static work? -> no reference to
+      RMD_TEST_SLOT_PARENT in scripts/preflight-author.mjs; out of scope to change here.
+  design: |
+    TEST-ONLY. Touch test/author-preflight.test.ts and nothing else.
+    1. ISOLATE THE CASE. Give the failed-static W1-T9951 case the same save / delete / t.after-restore of
+       RMD_TEST_SLOT_PARENT (and RMD_TEST_SLOT_DIR where the case needs the file-level fixture dir, keep that) that
+       the preceding case uses at lines 213-220. A small shared helper used by both W1-T9951 cases is fine; the
+       preceding case's behaviour must not change. The restore must put back exactly the enclosing value, so the
+       real author slot's ownership survives the file.
+    2. KEEP EVERY ASSERTION. Do not loosen the child's `assert.equal(process.env.RMD_TEST_SLOT_PARENT, undefined, ...)`,
+       the exitCode 7 check, steps.length, the not-run reason, testSlot undefined, or suiteQueue 'cancelled'. No
+       timeout, skip, todo, retry or unrelated fixture edits.
+    3. REGRESSION CASE. Add `test("W1-T11618: an inherited slot marker cannot reach the failed-static fixture", ...)`
+       that sets RMD_TEST_SLOT_PARENT to a sentinel claim JSON before running the isolated failed-static path, and
+       asserts steps[1].exitCode is 7 — proving the isolation, not luck of ordering.
+    4. POSITIVE CONTROL. In the same file, a case (or a sub-assertion of 3) that runs the UNISOLATED fixture with the
+       sentinel marker set and asserts the child's static step exits 1 with the "failed static work never held a
+       suite slot" assertion text — so the original failure stays observable and a future change that hides the
+       marker some other way is visible.
+    5. EVIDENCE IN THE PR BODY: (a) the pre-fix reproduction — the failed-static case with RMD_TEST_SLOT_PARENT set,
+       showing exitCode 1 at line 276; (b) the exact affected suite run inside a REAL author-preflight slot
+       (preflight-author on the branch, or the suite under an admitted slot) with its complete `# tests` / `# pass` /
+       `# fail 0` summary.
+    OUT OF SCOPE: src/, scripts/preflight-author.mjs, src/lib/test-slot.ts, dispatch or PAUSE code, any gate, the
+    research report scope, and test/an-author-preflight-checks-statically-while-its-suites-queue.test.ts.
+  acceptance:
+    - claim: "the whole author-preflight suite passes, including the failed-static W1-T9951 case with its assertions unchanged"
+      proof: "unit test: test/author-preflight.test.ts"
+    - claim: "a regression case runs the failed-static fixture with an inherited slot marker set and still sees exitCode 7, beside a positive control that observes the unisolated failure"
+      proof: "grep: W1-T11618: an inherited slot marker cannot reach the failed-static fixture in test/author-preflight.test.ts"
+  falsifier: |
+    At this worktree's HEAD, running test/author-preflight.test.ts with RMD_TEST_SLOT_PARENT set to any claim makes
+    the failed-static W1-T9951 case fail at line 276 (exitCode 1, expected 7), and the grep proof reads 0 because no
+    W1-T11618 case exists.
+  note: "verify:auto — pure test-file change asserted by the suite itself. risk:low — no production path. The real-slot
+    run with a complete # tests summary and the pre-fix reproduction are PR-body evidence the reviewer checks; the
+    proof grammar cannot express 'run inside a slot', so the regression case's sentinel marker stands in for it."

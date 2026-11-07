@@ -9,13 +9,18 @@
   band_meaning: span
   origin: "core CPU profile 2026-11-06 01:16-01:32Z (3 x 300 s windows, 10 ms sampling, holds detected by a loop-turn ping)"
   plan_refs: [W1-T11341, W1-T10068, W1-T3378, W1-T11369, W1-T147]
-  files: [src/lib/composition-root.ts, src/run-task.ts, src/lib/review-worktree-reclaim.ts, src/lib/sweep.ts, src/cli/commands/daemon.ts, src/lib/daemon.ts, src/cli/commands/review.ts, src/cli/commands/sweep.ts, test/daemon/a-fleet-store-on-an-exhausted-account-is-named-and-escalated.test.ts, test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts, test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts]
+  files: [src/lib/composition-root.ts, src/run-task.ts, src/lib/review-worktree-reclaim.ts, src/lib/sweep.ts, src/cli/commands/daemon.ts, src/lib/daemon.ts, src/cli/commands/review.ts, src/cli/commands/sweep.ts, test/daemon/a-fleet-store-on-an-exhausted-account-is-named-and-escalated.test.ts, test/daemon/the-daemon-review-worktree-git-runs-off-the-loop.test.ts, test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, test/review-status-pending.test.ts]
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=05e7c90230f710e6
   # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
+    The existing order check in test/review-status-pending.test.ts searches for synchronous
+    materialization. Implementation 210028685016 awaits that call, so the guard cannot locate it.
+    Include this test and require the awaited spelling. Preserve both assertions that the pending
+    status precedes materialization and review dispatch, and all fixtures, inputs, expected values,
+    timeouts and skips. Acceptance, budget and product design stay unchanged.
     Census integration observed at implementation 6ec49c3dfe79: real preflight reports the
     hardened Git population falling from 63 to 57 raw sites, two former synchronous-spawn
     rows falling to zero, and the old private helper declarations moving to shared steps.

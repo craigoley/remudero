@@ -1,0 +1,56 @@
+- id: W1-T11611
+  title: "A STRIKE-LADDER REBUILD CLOSES ONLY THE HEAD ITS PROGRESS JUDGE SAW, AND ITS REQUEUE NOTE IS DURABLE BEFORE THE CLOSE — applyStrikeLadder reads the live head, then spends a model call in judgeSloRebuild, then runs `gh pr close` with no second read and no branch claim, and writes the task's failure note only after the close, so a fix push during the judgment gets a PR closed at a head nobody judged and no note"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high # it changes the order and fencing of an existing autonomous close of an unmerged PR; it adds no new close and no new GitHub write verb
+  origin: architect
+  plan_refs:
+    - W1-T5690
+    - W1-T7096
+    - W1-T921
+    - W1-T11076
+    - W1-T11077
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-rebuild-close-is-fenced-at-the-judged-head.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the fix-progress judge routes a PR to rebuild, the sweep takes the PR's per-branch fix claim (fixBranchClaimKey, without reclaim), reads the live PR again after the judgment, and closes only if it is still OPEN at the head the judge was given. If the head moved, the claim is held or the read fails, the sweep stands down, closes nothing, writes no requeue row, and ledgers sweep.strike_ladder.held with the judged head and the head it read"
+      proof: "unit test: W1-T11611: a moved head stands the judged rebuild down"
+    - claim: "The rebuild's durable failure note for the PR's task (closed PR URL, judged head, failing checks, unmet claims, strike history) is written before the close. If the note cannot be written, the PR is not closed. If the close is not confirmed CLOSED at the judged head afterwards, the sweep writes no sweep.strike_ladder.requeued row and ledgers sweep.strike_ladder.close_unconfirmed with task_id, pr_number, expected_head_sha and observed_head_sha"
+      proof: "unit test: W1-T11611: the rebuild note is written before the close"
+    - claim: "A rebuild decided without a progress judge, the refresh and digest rungs, and the stale, stale-proof, empty-diff and dependency closes keep their current behaviour, and the per-day and lifetime rebuild caps count only confirmed sweep.strike_ladder.requeued rows, as they do today"
+      proof: "unit test: W1-T11611: an unjudged rebuild keeps its current behaviour"
+    - claim: The rebuild arm closes through a fenced close seam
+      proof: "grep: withRebuildCloseFence( in src/lib/sweep.ts"
+  rationale: |
+    OBSERVED in the source at this filing's base (src/lib/sweep.ts, applyStrikeLadder, near lines 19880-19939):
+    - Line ~19880 reads the live state (`deps.readLiveState`) and checks the head. Then, when `deps.fixProgressJudge` is wired (it is in production through productionFixProgressJudge, which spawns a model), line ~19909 awaits `judgeSloRebuild`. Only then does line ~19921 call `deps.close(pr, reason)`. That runs `gh pr close <url>` (line ~3376) with no head precondition, no second read and no branch claim. applyStrikeLadder takes no fixBranchClaimKey claim, while dispatchFix (line ~2820) and the dependency close fence (withDependencyCloseFence, line ~3316) both do. So a fix worker can push during the judgment, and the sweep then closes a head the judge never saw.
+    - The close comes first and the durable note second. After closing, line ~19923 checks the head and returns `close was not confirmed at the expected head; no note written`, and line ~19935 returns `closed PR ... but the durable failure note could not be written`. In both cases the PR is already closed, and the task it requeues has no record of why it was closed or what was tried. W1-T11077's own acceptance says no PR is closed while its note is not durable, but only for its future loop-decision routes, which wait on a human gate. The SLO and strike-ladder rebuilds that run today do not have that guarantee.
+    WHAT THE AUDIT FOUND ELSEWHERE, so the task stays small:
+    - Every other unmerged-PR close in the full sweep (stale supersession, stale-proof and empty-diff supersession) runs behind the act-time live-head guard (W1-T5749/W1-T7734, near line ~21902), with no model call between the guard and the close. Its successor is named: the superseding PR (re-read at write time by W1-T3784) or main itself.
+    - The dependency close already holds the branch claim and makes a strict fresh read (withDependencyCloseFence).
+    - The triage, feedback-landing and dep-review closes (src/run-task.ts ~34782, src/lib/feedback-landing.ts ~1098, src/run-task.ts ~12168) close work whose content is already on main.
+    - For a task PR, the replacement is the same task id. Its plan record stays queued when the PR closes unmerged, and the requeue row and note name it. The owner is the fleet's strike ladder (author "strike-ladder").
+    So the only path where a close can run ahead of its record and its exact-head check is the judged rebuild arm.
+    PLATFORM FACT: GitHub cannot bind a close to a head. The GraphQL ClosePullRequestInput has only pullRequestId and clientMutationId, while MergePullRequestInput carries expectedHeadOid (https://docs.github.com/en/graphql/reference/pulls). So exact-head binding for a close can only be a fence: hold the fleet's branch claim, make a fresh read after the last decision, then verify after the close. That is the pattern withDependencyCloseFence already uses.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T11077 adds note-before-close only for loop-decision rebuild/split routes and is held at verify: human. W1-T11076 (decideLoopOutcome, already called from sweep.ts) is shadow only and acts on nothing. W1-T5690 owns the ladder rungs, not close fencing. W1-T3784 re-reads only the supersession winner. W1-T4565 covers the resequence close. W1-T5030 caps stale-proof closes. W1-T921 owns branch deletion. None fences the judged rebuild close (plan/tasks.d/W1-T11077-*, W1-T11076-*, W1-T3784-*, W1-T4565-*, W1-T5030-*, W1-T921-*).
+    Settled by lookup: does this lift W1-T11077's evidence or human gate? -> No. It adds no new close route and no new trigger, and it closes nothing that is not closed today. It only narrows when the existing rebuild arm may close. W1-T11077 stays verify: human until W1-T11076 has seven days of loop.decision rows and the operator has spot-checked them (plan/tasks.d/W1-T11077-a-looping-pr-is-rebuilt-or-split-instead-of-escalated.yaml).
+    Settled by lookup: does it weaken any GitHub required check or review protection? -> No. It touches no merge path, required check, ruleset or review gate, and it keeps W1-T921's no `--delete-branch` close (src/lib/sweep.ts close effect).
+    Settled by lookup: can GitHub's close API carry an expected head? -> No (https://docs.github.com/en/graphql/reference/pulls). Hence the claim, re-read and post-close verification fence.
+  design: |
+    1. Add a `withRebuildCloseFence(pr, judgedHeadSha, note, close)` seam next to withDependencyCloseFence. Inside it: acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, pr.headRefName), { reclaim: false }); a fresh `pulls/<n>` read; then refuse unless the PR is open, not merged and the head equals judgedHeadSha. Next, write the note through effects.appendNote and refuse the close if that returns false. Then close and release the claim in finally. Do not add a reopen or any new GitHub write.
+    2. In applyStrikeLadder's rebuild arm, pass the head given to judgeSloRebuild (pr.headSha) as judgedHeadSha. Keep today's post-close readLiveState check. On a mismatch, write sweep.strike_ladder.close_unconfirmed instead of requeued, so the rebuild caps never count an unconfirmed close.
+    3. A rebuild with no progress judge keeps today's path, so the change is scoped to the arm that has a long await between read and close. The stale, stale-proof, empty-diff and dependency closes are not touched.
+    4. Tests drive applyStrikeLadder through runSweep with injected deps. They cover: a judge stub whose call advances the fake live head (close never called, held row names both heads); a held claim (no close); appendNote returning false (no close); a confirmed close (note row ordered before the close call, requeued row written); and a post-close head mismatch (close_unconfirmed, no requeued row).
+  falsifier: |
+    Revert the seam so the rebuild arm calls deps.close straight after judgeSloRebuild. The head-advancing judge stub must then show close called at an unjudged head, so criterion 1 fails. Move appendNote back after the close: the ordering assertion in criterion 2 must fail. If production already holds the fix branch claim through the whole of applyStrikeLadder (a claim this audit did not find), criterion 1's held-claim case is redundant, and the task shrinks to the note ordering alone.
+  note: |
+    Filed by the PLAN architect in expand mode (run PLAN-expand-1794073392255), auditing the cross-disposition PR-close invariant from the PR #17144 retrospective. Line numbers are approximate at the filing base. Re-derive by symbol (applyStrikeLadder, judgeSloRebuild, withDependencyCloseFence, fixBranchClaimKey).
+    Gated rollout still waiting and NOT touched by this task: W1-T11076's shadow decision is in the source (sweep.ts calls decideLoopOutcome from src/lib/loop-decision.ts), though its plan record still says queued. W1-T11077 (verify: human) is released only after seven days of those loop.decision rows and the operator's spot-check.

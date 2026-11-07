@@ -7,6 +7,8 @@ type Anchor = { path: string; line: number; kind: "changed" | "dependency"; chan
 type Candidate = { criterion: number; category: string; severity: "low" | "medium" | "high"; mechanism: string; remedy: string | null; anchor: Anchor };
 export type ReviewFinding = Omit<Candidate, "anchor"> & {
   id: string;
+  /** Round-independent: no head sha and no line, so the same issue on a moved line keeps its key. */
+  lineageKey: string;
   anchor: Anchor & { status: "verified" | "unsupported"; evidenceDigest: string };
 };
 export type FindingCapture = {
@@ -125,9 +127,10 @@ export function extractReviewFindings(input: {
     );
     const evidenceDigest = digest(JSON.stringify([item.anchor.path, item.anchor.line, anchorText ?? null, producer ?? null, producerText ?? null]));
     const id = digest(JSON.stringify([input.owner, input.repo, input.prUrl, input.headSha, item.criterion, item.category, evidenceDigest]));
+    const lineageKey = digest(JSON.stringify([input.owner, input.repo, input.prUrl, item.criterion, item.category, item.anchor.path, anchorText ?? null]));
     if (seen.has(id)) { droppedCount++; continue; }
     seen.add(id);
-    findings.push({ ...item, id, anchor: { ...item.anchor, status: verified ? "verified" : "unsupported", evidenceDigest } });
+    findings.push({ ...item, id, lineageKey, anchor: { ...item.anchor, status: verified ? "verified" : "unsupported", evidenceDigest } });
   }
   const verifiedCount = findings.filter((item) => item.anchor.status === "verified").length;
   return { state: invalidCount || droppedCount || truncated || none && rows.length ? "partial" : findings.length ? "captured" : "zero", findings, verifiedCount, invalidCount, droppedCount };
@@ -143,7 +146,7 @@ export function recordReviewFindings(capture: FindingCapture, input: {
     try {
       input.log("review.finding", {
         task_id: input.taskId, pr_url: input.prUrl, head_sha: input.headSha, review_decision_digest: input.decisionDigest,
-        finding_id: finding.id, criterion_index: finding.criterion, category: finding.category, severity: finding.severity,
+        finding_id: finding.id, lineage_key: finding.lineageKey, criterion_index: finding.criterion, category: finding.category, severity: finding.severity,
         mechanism: finding.mechanism, remedy: finding.remedy, anchor: finding.anchor, capture_state: finding.anchor.status,
         provider: input.provenance.provider, requested_model: input.provenance.requestedModel,
         served_model: input.provenance.servedModel, routed_model: input.provenance.routedModel ?? null,

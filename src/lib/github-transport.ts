@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { boundChildByLoopTime, childLoopBound, execFileLoopBounded } from "./loop-bounded-child.js";
 import type { ChildProcess, ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
@@ -556,7 +557,7 @@ export function createGhCallPacer(
   const lowWaterFraction = opts.lowWaterFraction ?? DEFAULT_GH_PACE_LOW_WATER_FRACTION;
   const floorFraction = opts.floorFraction ?? DEFAULT_GH_PACE_FLOOR_FRACTION;
   const now = opts.now ?? systemClock.now;
-  const sleepSync = opts.sleepSync ?? defaultBlockingSleepSync;
+  const sleepSync = loopSafeGhSleep(opts.sleepSync ?? defaultBlockingSleepSync);
   const sleep = opts.sleep ?? defaultTimerSleep;
   let lastCallAt: number | undefined;
   let gapMs = minGapMs;
@@ -617,6 +618,21 @@ export function createNonBlockingGhCallPacer(opts: Parameters<typeof createGhCal
       if (ms > 0) throw new GhPaceWouldBlockError(ms);
     },
   });
+}
+
+const ghLoopHost = new AsyncLocalStorage<boolean>();
+
+/** The sync escalation contract cannot acknowledge a deferred delivery. Keep that legacy
+ * delivery blocking until its one-shot callers have an awaited or durable retry contract. */
+export function withSynchronousGhDelivery<T>(fn: () => T): T {
+  return ghLoopHost.run(false, fn);
+}
+
+function loopSafeGhSleep(sleep: (ms: number) => void): (ms: number) => void {
+  return (ms) => {
+    if (ms > 0 && ghLoopHost.getStore() === true) throw new GhPaceWouldBlockError(ms);
+    sleep(ms);
+  };
 }
 
 function defaultBlockingSleepSync(ms: number): void {
@@ -1006,7 +1022,7 @@ export async function withGhTransportFloor<T>(fn: () => T | Promise<T>, env: Nod
  * Its GhCallPacer remains the per-call rate controller for normal multi-read sweeps.
  */
 export async function withDaemonGhTransportFloor<T>(fn: () => T | Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
-  return await withGhTransportFloorMode("advisory", fn, env);
+  return await ghLoopHost.run(true, () => withGhTransportFloorMode("advisory", fn, env));
 }
 
 export interface GhReadCadenceDecision {
@@ -1384,7 +1400,8 @@ function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void
       }
       if (step === "wait") sleepSync(GH_CADENCE_LOCK_WAIT_MS);
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof GhPaceWouldBlockError) throw error;
     // An unwritable cache is already a documented fail-open case; run the call without a lock.
   }
   try {
@@ -1681,7 +1698,7 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
   const plan = planGhReadCadence(args, deps);
   const stampPath = plan.coordinatedStampPath;
   if (stampPath === undefined) return plan.evaluate();
-  if (ghCadenceAsyncQueue.has(stampPath)) {
+  if (ghLoopHost.getStore() !== true && ghCadenceAsyncQueue.has(stampPath)) {
     if (!ghCadenceAsyncContentionAdvisoryEmitted) {
       ghCadenceAsyncContentionAdvisoryEmitted = true;
       const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
@@ -1698,7 +1715,7 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
     plan.stampAfterGap(stampPath);
     return decision;
   }
-  const sleepSync = deps.sleepSync ?? defaultBlockingSleepSync;
+  const sleepSync = loopSafeGhSleep(deps.sleepSync ?? defaultBlockingSleepSync);
   let decision: GhReadCadenceDecision | undefined;
   try {
     let waitMs: number;

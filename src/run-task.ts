@@ -2927,7 +2927,7 @@ import {
   liveWritesExempt,
   LIVE_WRITE_OVERRIDE_ENV,
 } from "./lib/live-write-guard.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail } from "./lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
 import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
@@ -43429,6 +43429,7 @@ type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log
   config?: Config;
   github?: GitHub;
   readPr?: (args: string[]) => Promise<unknown>;
+  sharedPauseGit?: SharedPauseGitDeps;
   runRetroSubprocess?: typeof runAutomatedRetroSubprocess;
   reviewCommand?: typeof reviewCommand;
 };
@@ -43487,6 +43488,11 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     return planMemo = synced.plan;
   };
   let projection: Map<string, StatusProjection> | undefined;
+  let childPauseGit: SharedPauseGitDeps | undefined;
+  if (envelope !== undefined && !ports.hold && stopDetail(cfg().root) === undefined) {
+    childPauseGit = ports.sharedPauseGit ?? realDeps().sharedPauseGit;
+    await prepareSharedPause(cfg().root, childPauseGit);
+  }
   await runFixDispatchChild(inputs, {
     log: ports.log ?? log,
     claimFixAdmission: ports.claimFixAdmission ?? ((pr) => createSweepFixAdmissionController({
@@ -43500,7 +43506,7 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     hold: ports.hold ?? (() => {
       const stopped = stopDetail(cfg().root);
       if (stopped !== undefined) return `STOP: ${stopped}`;
-      const paused = checkSharedPause(cfg().root, realDeps().sharedPauseGit);
+      const paused = checkSharedPause(cfg().root, childPauseGit ??= ports.sharedPauseGit ?? realDeps().sharedPauseGit);
       return paused === undefined ? undefined : `PAUSE: ${paused}`;
     }),
     readLivePr: async (prUrl) => {
@@ -43524,6 +43530,8 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     dispatcher: () => ports.dispatcher ? ports.dispatcher(planNow()) : (ports.buildEffects ?? buildSweepEffects)({ productionProgressJudge: true,
         owner: ownerName(), repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
         plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY }),
+  }).finally(() => {
+    if (childPauseGit) disposeSharedPauseRefresh(childPauseGit);
   });
   return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
 }
