@@ -20,14 +20,14 @@
     - src/cli/commands/review.ts
     - src/lib/run-child.ts
     - src/run-task.ts
-    - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
+    - test/worker/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: The worker auction accepts a set of providers to exclude and never selects an excluded provider while another candidate is eligible; with no eligible alternative it selects as today and records that the exclusion could not be honoured
-      proof: "unit test: test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts"
+      proof: "unit test: test/worker/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts"
     - claim: A review re-admitted after a cannot-evaluate whose prior review.reviewer row named a reviewer-unavailable provider spawns its reviewer with that provider excluded
-      proof: "grep: W1-T11432 criterion 2 in test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts"
+      proof: "grep: W1-T11432 criterion 2 in test/worker/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts"
   rationale: |
     Split from W1-T11428 (operator-approved, 2026-11-05). W1-T11428 makes an unable reviewer's review cannot-evaluate instead of a FAILURE, but the existing re-admission spawns the next reviewer through the same auction, which routed the 17:13Z #16758 review to codex while Claude was below its reserve; under the same pressure the retry lands on the same unable provider. The W1-T11428 builder found no exclude-provider mechanism anywhere in src: the reviewer is spawned at src/cli/commands/review.ts ~:849-890 with mountProvider, and the provider is chosen in src/lib/worker.ts (selectionPath "auction" ~:2867, ~:3390).
     The CLI sweep adapter in `src/cli/commands/sweep.ts` carries the excluded provider through the
