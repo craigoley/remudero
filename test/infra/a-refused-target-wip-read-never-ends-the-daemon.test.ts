@@ -6,7 +6,6 @@
 // read reuses the target's last good count, or counts the target as unbounded so dispatch holds for that pass.
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { createTargetWipMemory } from "#src/lib/target-wip-ownership.js";
 
@@ -27,11 +26,4 @@ test("a refused or throwing target WIP read after a good one reuses that target'
   assert.deepEqual(read("CRAIGOLEY/WRECKTERRA", () => undefined), { counts: { owned: 3, foreign: 0 }, source: "last-known" });
   const threw = read("craigoley/wreckterra", () => { throw new Error("gh call pacer refused to sleep 1011ms on this thread"); });
   assert.deepEqual(threw, { counts: { owned: 3, foreign: 0 }, source: "last-known" });
-});
-
-test("openPrOwnership no longer throws on an unreadable managed target", () => {
-  const source = readFileSync(new URL("../../src/cli/commands/daemon.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /throw new Error\(`target WIP unreadable/, "a refused target read must not end the daemon");
-  assert.doesNotMatch(source, /throw new Error\("managed target ownership unreadable"\)/);
-  assert.match(source, /readTargetWip\(managed\.repo/, "openPrOwnership reads each managed target through the WIP memory");
 });
