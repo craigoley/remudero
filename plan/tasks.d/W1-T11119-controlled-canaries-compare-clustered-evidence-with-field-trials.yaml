@@ -1,7 +1,7 @@
 - id: W1-T11119
   title: Controlled canaries compare clustered evidence with field trials and export unmeasured improvement proposals
   repo: remudero
-  depends_on: [W1-T11117, W1-T11118, W1-T10957]
+  depends_on: [W1-T11117, W1-T11118, W1-T10957, W1-T11572, W1-T11573, W1-T11574]
   plan_refs: [W1-T10956, W1-T10957, W1-T100001]
   type: implement
   verify: auto
@@ -17,6 +17,9 @@
   # refusal-amendment (W1-T11119, run DAEMON-1793999214575@faf5a5da604a1a14cb1f9f4782d0ca23994b0329, 2026-11-07T05:43:04.335Z): the worker refused criterion 14 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: No durable producer joins frozen pre-outcome router decisions and qualified static baselines to canary outcomes.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
+  # architect resolution (run PLAN-expand-1794060970299): criteria 8, 10 and 14 are kept unchanged. Their missing
+  #   producers are now prerequisites W1-T11572 (sealed provider-exchange provenance), W1-T11573 (frozen routing
+  #   replay) and W1-T11574 (development-qualified static comparator). These replace the unmerged PR #17178 proposal.
   status: queued
   attempts: 0
   origin: operator-approved-router-evaluation-plan:2026-11-02
@@ -45,6 +48,19 @@
     rates as a randomized comparison. Existing paired analysis is descriptive and supplies no
     uncertainty estimate. Repeated attempts are not independent cases. Failure patterns can
     inform a bounded improvement proposal without executing that proposal.
+    Settled by lookup: what producers do the refused criteria 8, 10 and 14 need? -> These three
+    prerequisites. W1-T11572 seals app-owned provider-exchange provenance in
+    collectWorkerResult (src/lib/worker.ts) and binds it to the run, canary attempt and worker
+    spawn. WorkerExecutionEvidenceV1 providerInvoked stays unavailable for ordinary results. W1-T11573
+    replays the actual pure selectFromRoutingPool on a frozen per-case pre-execution snapshot.
+    W1-T11574 qualifies the static comparator on development receipts only. Primary research:
+    RouteLLM ICLR 2025
+    (https://proceedings.iclr.cc/paper_files/paper/2025/hash/5503a7c69d48a2f86fc00b3dc09de686-Abstract-Conference.html),
+    RouterEval Findings EMNLP 2025 (https://aclanthology.org/2025.findings-emnlp.208/), and Efron
+    and Tibshirani 1986 (https://projecteuclid.org/euclid.ss/1177013815).
+    Settled by lookup: may the PR #17178 IDs W1-T11565..W1-T11567 be reused? -> No. That PR is open
+    under a merge hold and unmerged. Fresh reserved IDs are used, and this record's acceptance,
+    files, evaluation scope and owner are unchanged.
   design: >-
     Add pure private post-processing helpers over immutable manifests and existing canary and
     field-trial evidence contracts. Preserve observational versus registered randomized

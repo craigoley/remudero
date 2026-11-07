@@ -1,0 +1,71 @@
+- id: W1-T11574
+  title: Canary static comparator is selected only on native development receipts and then bound to identical evaluation digests and native owner outcomes
+  repo: remudero
+  depends_on: [W1-T11573, W1-T11118, W1-T10957]
+  plan_refs: [W1-T11119, W1-T11118, W1-T10957, W1-T5785, W1-T5838]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8
+  risk: high  # Rule 19 - one concern, qualification of the fixed single-configuration comparator
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: architect
+  files:
+    - src/lib/model-canary-static-comparator.ts
+    - test/routing/model-canary-static-comparator.test.ts
+  rationale: >-
+    W1-T11119 compares frozen router decisions with "development-selected qualified static
+    baselines". Its worker refused criterion 14 partly because no producer qualifies such a
+    comparator. RouteLLM (ICLR 2025,
+    https://proceedings.iclr.cc/paper_files/paper/2025/hash/5503a7c69d48a2f86fc00b3dc09de686-Abstract-Conference.html)
+    and RouterEval (Findings EMNLP 2025, https://aclanthology.org/2025.findings-emnlp.208/) both
+    judge a router against fixed single-model comparators on the same queries. If the best fixed
+    configuration is chosen on the evaluation cases, the comparison is optimistically biased.
+    Efron and Tibshirani 1986 (Statistical Science 1(1) 54-75,
+    https://projecteuclid.org/euclid.ss/1177013815) say a bootstrap must replicate the whole
+    estimation procedure. A comparator picked on the evaluation data would make that selection part
+    of the statistic being resampled. Fixing the comparator on development receipts keeps W1-T11119's
+    family-resampled uncertainty valid.
+    Settled by lookup: is this already filed or decided? -> No. There is no static-comparator task in
+    plan/tasks.d or plan/tasks.yaml. The held PR #17178 proposal is unmerged and its IDs are not
+    reused.
+    Settled by lookup: does the corpus already separate development from evaluation cases? -> Yes.
+    PrivateCanarySplit is development or sealed-holdout (src/lib/model-canary-private-corpus.ts,
+    owned by W1-T11118).
+    Settled by lookup: why did PR #17178 fail lint-plan? -> Its test basename matched
+    RULE_SUITE_NAME_RE (census, ratchet or baseline) in src/lib/rule-suites.ts, the pattern that
+    W1-T5838 enforces at filing. This shard's test basename is model-canary-static-comparator, which
+    does not match, so no @not-a-rule-suite marker is needed.
+  design: >-
+    Add src/lib/model-canary-static-comparator.ts as a pure helper. selectStaticComparator()
+    receives only native owner terminal receipts whose case split is development. It refuses with
+    unavailable if any sealed-holdout receipt is offered. It picks one fixed configuration by a
+    preregistered rule (endpoint, tie-break and minimum complete-case count) declared in the input,
+    and records the development receipt digests it used.
+    bindStaticComparator() then freezes that choice for evaluation. It requires identical case,
+    corpus, scorer, feature, source and matrix digests, taken from the W1-T11573 snapshot for the
+    same cases. It also requires native owner outcomes for the comparator on every evaluation case.
+    Any of the following returns unavailable with a named reason: a missing or mismatched digest, a
+    missing native outcome, a synthetic or replayed outcome, a selection that touched an evaluation
+    case, reselection after binding, and fewer development cases than the declared minimum.
+    The helper never chooses by evaluation outcome. It never relabels the selector's own fallback
+    route as this comparator, and never invokes a provider, schedule, allowance, routing, admission
+    or spend.
+  note: >-
+    Prerequisite 3 of 3 for W1-T11119. It depends on W1-T11573 only for the shared frozen feature and
+    case digests. The test basename avoids the rule-suite name pattern (W1-T5785, W1-T5838), so it
+    stays a focused unit test.
+  acceptance:
+    - claim: "the comparator is chosen only from development receipts by the preregistered rule, refuses any sealed-holdout input, and is bound to identical case, corpus, scorer, feature, source and matrix digests with native owner outcomes"
+      proof: "unit test: test/routing/model-canary-static-comparator.test.ts"
+    - claim: "selection and binding are distinct named helpers"
+      proof: "grep: bindStaticComparator( in src/lib/model-canary-static-comparator.ts"
+  falsifier: >-
+    Let selection read a sealed-holdout receipt, or choose the comparator by evaluation outcome,
+    and require the leakage control to fail. Bind with any one of the six digests changed, with a
+    synthetic or replayed outcome, with a missing native outcome, or after a reselection, and
+    require each unavailable control to fail. Drop the minimum development-case check and require
+    the undersized control to fail.

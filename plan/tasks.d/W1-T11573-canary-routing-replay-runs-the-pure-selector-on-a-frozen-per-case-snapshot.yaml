@@ -1,0 +1,75 @@
+- id: W1-T11573
+  title: Canary routing replay runs the actual pure selector on a versioned immutable per-case pre-execution snapshot
+  repo: remudero
+  depends_on: [W1-T11117, W1-T11118]
+  plan_refs: [W1-T11119, W1-T4617, W1-T11117, W1-T11118]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8
+  risk: high  # Rule 19 - one concern, frozen pre-outcome routing decisions for canary cases
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: architect
+  files:
+    - src/lib/model-canary-routing-snapshot.ts
+    - test/routing/model-canary-routing-snapshot.test.ts
+  rationale: >-
+    W1-T11119's worker refused criterion 14 because no durable producer joins frozen pre-outcome
+    router decisions to canary outcomes. W1-T11119 also scores any per-case oracle only as an
+    optimistic diagnostic. The production selector is selectFromRoutingPool(snapshot, request) in
+    src/lib/model-pool.ts, called by src/lib/worker-provider.ts. Its result depends only on its
+    arguments: the request carries nowMs and maxEvidenceAgeMs, and ties are broken by a hash of
+    session and candidate IDs. So a frozen snapshot plus a frozen request replays the real decision
+    exactly, with no live capacity refresh. RouteLLM (ICLR 2025,
+    https://proceedings.iclr.cc/paper_files/paper/2025/hash/5503a7c69d48a2f86fc00b3dc09de686-Abstract-Conference.html)
+    scores a router's per-query choice from pre-outcome inputs against fixed comparators.
+    RouterEval (Findings EMNLP 2025, https://aclanthology.org/2025.findings-emnlp.208/) shows that
+    router quality is measured per instance over a fixed candidate pool and that oracle selection
+    is an upper bound, not a router.
+    Settled by lookup: is this already filed or decided? -> No. There is no routing-snapshot task in
+    plan/tasks.d or plan/tasks.yaml. src/lib/model-canary-router-value.ts, the consumer named in
+    W1-T11119's files, does not exist yet and stays W1-T11119's own file. The held PR #17178 IDs are
+    not reused.
+    Settled by lookup: does the selector already log a usable propensity? -> Not for this pool.
+    selectFromRoutingPool is deterministic, so its propensity is degenerate. W1-T4617 (merged)
+    records probabilities only for provider draws, so weighting needs a genuinely captured
+    propensity.
+    Settled by lookup: is the pool's own fallback baseline the static comparator? -> No. The
+    RoutingPoolBaseline is the selector's fallback route. The separately qualified static comparator
+    is W1-T11574.
+  design: >-
+    Add src/lib/model-canary-routing-snapshot.ts. captureCanaryRoutingSnapshot() runs once per
+    case, before any slot for that case is admitted. It deep-freezes a versioned
+    canary-routing-snapshot-v1 record holding the RoutingPoolSnapshot, the full RoutingPoolRequest
+    (including a fixed nowMs) and the pre-execution feature vector. It also records digests of the
+    snapshot, features, candidate set and selector source, the case, corpus, scorer and matrix IDs,
+    and the capture ordinal. Persistence is append-only and content-addressed in owner-private
+    storage. A second capture for the same case is refused.
+    replayFrozenRoutingDecision() verifies every digest, then calls the real selectFromRoutingPool()
+    on the frozen inputs. It never reads live pools, capacity, health or the clock. It returns the
+    deterministic decision as the primary estimand. Any of the following returns unavailable with a
+    named reason: a missing, mismatched, mutated or post-execution snapshot; a feature, candidate or
+    selector-source digest mismatch; or an unknown version.
+    A propensity-weighted value may appear only as a preregistered diagnostic, and only when the
+    snapshot carries a genuine captured propensity. A degenerate or absent propensity yields
+    unavailable, never an implied 1.0. The module is pure apart from its private store: no provider,
+    schedule, allowance, routing, admission or spend effect.
+  note: >-
+    Prerequisite 2 of 3 for W1-T11119. It shares no files with W1-T11572 or W1-T11574.
+    W1-T11119's router-value helper consumes this replay; nothing here changes live routing.
+  acceptance:
+    - claim: "replay of a frozen per-case snapshot reproduces the real selector decision without live capacity or clock reads, and missing, mismatched, mutated or post-execution snapshot, feature, candidate or selector evidence returns unavailable"
+      proof: "unit test: test/routing/model-canary-routing-snapshot.test.ts"
+    - claim: "replay calls the actual production pure selector"
+      proof: "grep: selectFromRoutingPool( in src/lib/model-canary-routing-snapshot.ts"
+    - claim: "propensity weighting is labelled a preregistered diagnostic gated on a captured propensity"
+      proof: "grep: preregistered-propensity-diagnostic in src/lib/model-canary-routing-snapshot.ts"
+  falsifier: >-
+    Replace the selector call with a reimplementation, or let replay refresh live pool or capacity
+    state, and require the exact-decision test to fail. Accept a snapshot captured after the case's
+    first slot was admitted, or one whose feature, candidate or selector digest differs, and require
+    the unavailable controls to fail. Emit a weighted estimate from a degenerate deterministic
+    propensity and require the diagnostic-gate test to fail.
