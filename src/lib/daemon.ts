@@ -138,7 +138,7 @@ import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, typ
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
-import { explainDispatchScore, type DispatchValueContext } from "./dispatch-value.js";
+import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
 import { GhJsonUnreadableResponseError, takeGhReadCadenceTally, type GhReadCadenceTally } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { RetroTriggerDecision } from "./retro.js";
@@ -1278,6 +1278,10 @@ function kickRepoField(kick: DaemonKick): { repo?: string } {
 }
 
 export interface DaemonDeps {
+  /** W1-T11600: an optional, already-parsed second catalog used only for shadow comparison. No source
+   *  reader is installed here; absence preserves the single-plan path exactly, and this snapshot
+   *  can never contribute work to the actual dispatch set. */
+  secondaryPlanForShadow?: Plan | null;
   repositoryMaintenance?: (context: { activeLanes: number; disk: "healthy" | "low" | "unknown"; queueBusy: boolean }) => Promise<void>;
   /** Only a supervised dedicated daemon may exit into the shell's 30-minute zero-token probe. */
   idleStarvedSupervised?: boolean;
@@ -2033,6 +2037,119 @@ export function captureDispatchFrontier(plan: Plan, opts: NextRunnableOpts) {
     } },
   };
   return selection;
+}
+
+/** W1-T11600: the only data returned from a second-catalog comparison is aggregate evidence. */
+export interface SecondaryCatalogShadowResult {
+  outcome: "compared" | "unavailable" | "malformed" | "duplicate_task_id" | "comparison_deferred" | "comparison_failed";
+  basis: "cached_projection";
+  primary_candidate_count: number;
+  combined_candidate_count: number | null;
+  secondary_candidate_count: number | null;
+  displaced_primary_count: number | null;
+}
+
+function isParsedPlanSnapshot(value: unknown): value is Plan {
+  try {
+    if (value === null || typeof value !== "object") return false;
+    const plan = value as Plan;
+    if (!Array.isArray(plan.tasks) || !(plan.byId instanceof Map) || plan.byId.size !== plan.tasks.length) return false;
+    const seen = new Set<string>();
+    for (const task of plan.tasks) {
+      if (task === null || typeof task !== "object" || typeof task.id !== "string" || task.id.length === 0 ||
+          seen.has(task.id) || plan.byId.get(task.id) !== task) return false;
+      seen.add(task.id);
+    }
+    for (const [id, task] of plan.byId) {
+      if (typeof id !== "string" || !seen.has(id) || task?.id !== id) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * W1-T11600: compose valid snapshots and use the existing selector without its observation callbacks.
+ * The caller's `primaryCandidates` remain the dispatch source. A live-PR reread is intentionally omitted:
+ * the shadow uses the already-held projection and adds no GitHub read.
+ */
+export function compareSecondaryCatalogShadow(
+  primary: Plan,
+  secondary: Plan | null | undefined,
+  primaryCandidates: readonly Task[],
+  isMerged: MergedSet,
+  limit: number,
+  opts: NextRunnableOpts,
+  pushedRunBranchIds?: ReadonlySet<string>,
+): SecondaryCatalogShadowResult | undefined {
+  if (secondary === undefined) return undefined;
+  const result = (outcome: SecondaryCatalogShadowResult["outcome"], combined = primaryCandidates.length,
+    secondaryCount = 0, displaced = 0): SecondaryCatalogShadowResult => ({
+    outcome, basis: "cached_projection", primary_candidate_count: primaryCandidates.length,
+    combined_candidate_count: combined, secondary_candidate_count: secondaryCount, displaced_primary_count: displaced,
+  });
+  if (secondary === null) return result("unavailable");
+  if (!isParsedPlanSnapshot(primary) || !isParsedPlanSnapshot(secondary)) return result("malformed");
+  try {
+    const primaryIds = new Set(primary.tasks.map((task) => task.id));
+    // An ID alone cannot prove a byte-identical move or select its canonical copy, so reject the
+    // entire secondary snapshot rather than guessing which record should participate.
+    if (secondary.tasks.some((task) => primaryIds.has(task.id))) return result("duplicate_task_id");
+    // Precondition evaluation may spawn an rmd reader. Do not repeat or add that read in a shadow pass.
+    if ([...primary.tasks, ...secondary.tasks].some((task) => task.precondition !== undefined)) return result("comparison_deferred");
+    // The live run-branch predicate lazily reads closed-unmerged PRs and can log an exception. Only
+    // compare through the selector when its existing snapshot proves no catalog task has such a ref.
+    if (opts.hasPushedRunBranch) {
+      if (pushedRunBranchIds === undefined) return result("comparison_deferred");
+      const catalogIds = new Set([...primary.tasks, ...secondary.tasks].map((task) => task.id));
+      if ([...pushedRunBranchIds].some((id) => catalogIds.has(id))) return result("comparison_deferred");
+    }
+    const composed: Plan = {
+      tasks: [...primary.tasks, ...secondary.tasks],
+      byId: new Map([...primary.byId, ...secondary.byId]),
+    };
+    // Whitelist only snapshot-backed inputs. Callbacks and live readers are omitted so this observational
+    // pass cannot write ledger rows, escalate, or add a remote status read.
+    const shadowOpts: NextRunnableOpts = {
+      clock: opts.clock,
+      dispatchValueContext: opts.dispatchValueContext === undefined ? undefined : {
+        ...opts.dispatchValueContext,
+        openDependentFanoutByTaskId: openDependentFanout(
+          composed.tasks, new Set(composed.tasks.filter((task) => !isMerged(task.id)).map((task) => task.id)),
+        ),
+      },
+      isOpenPr: opts.isOpenPr,
+      resumableTaskIds: opts.resumableTaskIds,
+      isCreditIndeterminate: opts.isCreditIndeterminate,
+      excludeIds: opts.excludeIds,
+      isTerminalPreDispatchRefusalHeld: opts.isTerminalPreDispatchRefusalHeld,
+      isIndeterminate: opts.isIndeterminate,
+      isIndependentFailureBlocked: opts.isIndependentFailureBlocked,
+      isCircuitTripped: opts.isCircuitTripped,
+      isLifetimeCapExceeded: opts.isLifetimeCapExceeded,
+      releasedIds: opts.releasedIds,
+      targetRepo: opts.targetRepo,
+      isSinglePathCredit: opts.isSinglePathCredit,
+      creditFor: opts.creditFor,
+      observedByTask: opts.observedByTask,
+      inFlight: opts.inFlight,
+      priorityBackfill: opts.priorityBackfill,
+      isLiveMergeCredited: opts.isLiveMergeCredited,
+      // hasPushedRunBranch is intentionally omitted: it can perform a lazy GitHub read and ledger log.
+    };
+    const selected = runnableCandidates(composed, isMerged, limit, shadowOpts);
+    const secondaryIds = new Set(secondary.tasks.map((task) => task.id));
+    const primarySelected = new Set(primaryCandidates.map((task) => task.id));
+    return result("compared", selected.length, selected.filter((task) => secondaryIds.has(task.id)).length,
+      [...primarySelected].filter((id) => !selected.some((task) => task.id === id)).length);
+  } catch {
+    // Never serialize exception text: an invalid private snapshot could put content or paths in it.
+    return {
+      outcome: "comparison_failed", basis: "cached_projection", primary_candidate_count: primaryCandidates.length,
+      combined_candidate_count: null, secondary_candidate_count: null, displaced_primary_count: null,
+    };
+  }
 }
 
 export function dispatchPickPayload(
@@ -4643,6 +4760,7 @@ export async function runDaemon(
   let bootFirstSelectionAtMs: number | undefined;
   // The last `dispatch.overlap_shadow` hold set, so an unchanged hold is ledgered once, not once per tick.
   let lastOverlapShadowSignature = "[]";
+  let lastSecondaryCatalogShadowSignature: string | undefined;
   let bootFirstDispatchWritten = false;
   const noteBootFirstDispatch = (outcome: { startedAtMs: number; admitted: number } | { heldReason: string }): void => {
     if (bootFirstDispatchWritten) return;
@@ -7208,6 +7326,20 @@ export async function runDaemon(
         ...dispatchOpts, excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...childTaskIds()]), inFlight: occupiedTasks,
       });
       const candidates = runnableCandidates(planForBatch, isMerged, budget, selection.opts);
+      if (deps.secondaryPlanForShadow !== undefined && budget > 0) {
+        const secondaryShadow = compareSecondaryCatalogShadow(
+          planForBatch, deps.secondaryPlanForShadow, candidates, isMerged, budget, selection.opts,
+          runBranchStateThisTick.ids,
+        );
+        if (secondaryShadow) {
+          const signature = JSON.stringify(secondaryShadow);
+          if (signature !== lastSecondaryCatalogShadowSignature) {
+            try { log("dispatch.secondary_catalog_shadow", { ...secondaryShadow }); }
+            catch { /* shadow telemetry cannot interrupt or affect ordinary dispatch */ }
+            lastSecondaryCatalogShadowSignature = signature;
+          }
+        }
+      }
       forgetPassedOver(planForBatch, candidates);
       tickEligible = selection.eligible;
       tickContext = selection.context;
