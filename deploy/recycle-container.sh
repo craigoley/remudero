@@ -1397,15 +1397,12 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   # and W1-T1069's rationale), dropped here by the blank-line filter.
   CONTAINER_ENV_RAW="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
   CONTAINER_ENV_LINES=()
-  while IFS= read -r line || [ -n "${line}" ]; do
-    CONTAINER_ENV_LINES+=("${line}")
-  done < <(printf '%s\n' "${CONTAINER_ENV_RAW}" | sed '/^$/d')
-
   # Record only presence here; the selection path is consumed later only by the explicit leave path.
   SELECTED_REGISTRY_ENV_PRESENT=0
-  for line in "${CONTAINER_ENV_LINES[@]-}"; do
+  while IFS= read -r line || [ -n "${line}" ]; do
+    CONTAINER_ENV_LINES+=("${line}")
     case "${line}" in RMD_SELECTED_INSTANCE_REGISTRY=*) SELECTED_REGISTRY_ENV_PRESENT=1 ;; esac
-  done
+  done < <(printf '%s\n' "${CONTAINER_ENV_RAW}" | sed '/^$/d')
 
   # The container's OWN image env — subtracted below to find what is genuinely runtime-set. Read via
   # `.Image`, the id this container was created from. `.Config.Image` is a tag that any instance's
@@ -1481,9 +1478,28 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     selection_source="$(printf '%s\n' "${selection_rows}" | cut -f1)"
     selection_state=""
     catalog_state=""
+    if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then
+      selected_env=""
+      selected_env_count=0
+      digest_env=""
+      digest_env_count=0
+      binding_env=""
+      binding_env_count=0
+    fi
     for line in "${CONTAINER_ENV_LINES[@]-}"; do
       case "${line}" in
-        RMD_SELECTED_INSTANCE_REGISTRY=*|RMD_INSTANCE_REGISTRY_DIGEST=*|RMD_INSTANCE_REGISTRY_FILE_BINDING=*) selection_state=1 ;;
+        RMD_SELECTED_INSTANCE_REGISTRY=*)
+          selection_state=1
+          if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then selected_env="${line#*=}"; selected_env_count=$((selected_env_count + 1)); fi
+          ;;
+        RMD_INSTANCE_REGISTRY_DIGEST=*)
+          selection_state=1
+          if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then digest_env="${line#*=}"; digest_env_count=$((digest_env_count + 1)); fi
+          ;;
+        RMD_INSTANCE_REGISTRY_FILE_BINDING=*)
+          selection_state=1
+          if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then binding_env="${line#*=}"; binding_env_count=$((binding_env_count + 1)); fi
+          ;;
         RMD_INSTANCE_REGISTRY=*) catalog_state=1 ;;
       esac
     done
@@ -1494,19 +1510,6 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
         exit 1
       fi
       if [ "${selection_count}" -gt 0 ] || [ -n "${selection_state}" ]; then
-        selected_env=""
-        selected_env_count=0
-        digest_env=""
-        digest_env_count=0
-        binding_env=""
-        binding_env_count=0
-        for line in "${CONTAINER_ENV_LINES[@]-}"; do
-          case "${line}" in
-            RMD_SELECTED_INSTANCE_REGISTRY=*) selected_env="${line#*=}"; selected_env_count=$((selected_env_count + 1)) ;;
-            RMD_INSTANCE_REGISTRY_DIGEST=*) digest_env="${line#*=}"; digest_env_count=$((digest_env_count + 1)) ;;
-            RMD_INSTANCE_REGISTRY_FILE_BINDING=*) binding_env="${line#*=}"; binding_env_count=$((binding_env_count + 1)) ;;
-          esac
-        done
         if [ "${selection_count}" -ne 1 ] || [ "$(printf '%s\n' "${selection_rows}" | cut -f3,4)" != "false"$'\t'"bind" ] \
           || [ "${selection_source#/}" = "${selection_source}" ] \
           || [ "${selected_env_count}" -ne 1 ] || [ "${selected_env}" != "${selection_file}" ] \
