@@ -330,7 +330,7 @@ test("W1-T3799: MUTANT: bare empty-array expansions are refused by the regressio
   assert.ok(src.includes(safeExpansion), "the image-environment loop must use the nounset-safe expansion");
   assert.equal(
     (src.match(/"\$\{(?:CONTAINER_ENV_LINES|IMAGE_ENV_LINES)\[@\]-\}"/g) ?? []).length,
-    3,
+    4,
     "every line-array loop that may see zero values must use the nounset-safe form",
   );
   const mutant = src.replace(safeExpansion, '"${IMAGE_ENV_LINES[@]}"');

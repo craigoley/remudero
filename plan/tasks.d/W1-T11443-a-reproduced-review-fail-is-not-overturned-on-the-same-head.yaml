@@ -8,20 +8,14 @@
   risk: high
   band_meaning: span
   origin: "2026-11-05 incident: #16523 merged head 90be1a69ea, carrying a boot-adoption ReferenceError a review had already reproduced"
-  plan_refs: [W1-T178, W1-T5839, W1-T3704]
-  files: [src/lib/review.ts, src/cli/commands/review.ts, test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts, test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts, test/review-finding-receipts.test.ts, test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts, test/a-signal-ended-reviewer-is-re-run-once.test.ts, test/every-lane-records-how-its-worker-ended.test.ts, test/review-reservation-replay.test.ts, test/review/a-review-path-change-replays-recorded-reviews.test.ts, test/review/a-reviewers-explanation-reaches-the-binding-verdict.test.ts, test/review-skips-spawn-on-plan-only.test.ts, test/rubric-authorship-wiring.test.ts, test/ships-unwired-floor.test.ts, test/wiring-ordering-behaviour.test.ts, test/event-driven-semantic-review.test.ts, test/a-failed-proof-records-why-it-failed.test.ts, test/a-held-review-names-the-claim-it-stood-down-for.test.ts, test/a-lost-review-posted-row-is-reappended-before-the-arm-gate-reads.test.ts, test/a-new-task-id-must-be-reserved-by-its-own-branch.test.ts, test/a-review-fail-handed-back-for-the-sandbox-is-re-reviewed-on-a-newer-image.test.ts, test/a-stale-gate-cannot-publish-a-verdict.test.ts, test/codex-reviewer-materialized-checkout.test.ts, test/codex-reviewer-production-wiring.test.ts, test/every-worker-call-carries-its-assignment.test.ts, test/live-write-guard-command-sites.test.ts, test/review-closed-pending-short-circuit.test.ts, test/review-status-pending.test.ts, test/review.test.ts, test/review/the-cpu-bound-counts-only-reviews-running-their-proofs.test.ts, test/run-review-evidence-target.test.ts, test/run-review-holdout-integration.test.ts, test/worker.test.ts, test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts, test/retro-marker-atomic.test.ts]
+  plan_refs: [W1-T178, W1-T5839, W1-T3704, W1-T9366]
+  files: [src/lib/review.ts, src/cli/commands/review.ts, src/cli/commands/sweep.ts, src/run-task.ts, test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts, test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts, test/review-finding-receipts.test.ts, test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts, test/a-signal-ended-reviewer-is-re-run-once.test.ts, test/every-lane-records-how-its-worker-ended.test.ts, test/review-reservation-replay.test.ts, test/review/a-review-path-change-replays-recorded-reviews.test.ts, test/review/a-reviewers-explanation-reaches-the-binding-verdict.test.ts, test/review-skips-spawn-on-plan-only.test.ts, test/rubric-authorship-wiring.test.ts, test/ships-unwired-floor.test.ts, test/wiring-ordering-behaviour.test.ts, test/event-driven-semantic-review.test.ts, test/a-failed-proof-records-why-it-failed.test.ts, test/a-held-review-names-the-claim-it-stood-down-for.test.ts, test/a-lost-review-posted-row-is-reappended-before-the-arm-gate-reads.test.ts, test/a-new-task-id-must-be-reserved-by-its-own-branch.test.ts, test/a-review-fail-handed-back-for-the-sandbox-is-re-reviewed-on-a-newer-image.test.ts, test/a-stale-gate-cannot-publish-a-verdict.test.ts, test/codex-reviewer-materialized-checkout.test.ts, test/codex-reviewer-production-wiring.test.ts, test/every-worker-call-carries-its-assignment.test.ts, test/live-write-guard-command-sites.test.ts, test/review-closed-pending-short-circuit.test.ts, test/review-status-pending.test.ts, test/review.test.ts, test/review/the-cpu-bound-counts-only-reviews-running-their-proofs.test.ts, test/run-review-evidence-target.test.ts, test/run-review-holdout-integration.test.ts, test/worker.test.ts, test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts, test/retro-marker-atomic.test.ts, test/sweep.test.ts, test/run-task.test.ts]
   priority: 3
   status: queued
   # backlog gardener: band=3 evidence=c7d0eff7a219e1f9
   # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0
   rationale: |
-    The operator approved one additional history-only fixture response in
-    test/retro-marker-atomic.test.ts after current-main control 1d3b6c36c3e9 passed
-    and PR-head c51f79dbde6d failed the identical W1-T968 standing-arm regression.
-    Its fake GitHub CLI rejects the newly required paginated status-history request.
-    Add only valid empty history for that request; retain assertions, expected values,
-    timeouts, skips, the publication protocol and original acceptance criteria.
     On 2026-11-05 PR #16523 (W1-T11129) head 90be1a69eaea5510184cf6eec69f7c72afd13c39 received
     remudero-review FAILURE at 22:11:12Z from core (run review-PR16523-1793916123475). Its finding
     carried an executed reproduction: "an in-memory runDaemon replay adopting a review child in
@@ -53,6 +47,14 @@
     the earlier response adapters. Their new paginated /statuses? response must be a valid empty
     list; every existing assertion, expected value, timeout and other fake response is retained.
     Applying these adapters requires the operator's explicit approval and paired main controls.
+    Follow-up review on 2026-11-07 (PR #17156 head b6a834f) found the shared-history
+    safeguard still misses an executed reproduction phrased as “with no cached verdict”,
+    success publishers through sweep and dependency review, and a legacy retro fixture whose
+    fake GitHub response is malformed for the new paginated statuses endpoint. The unchanged-
+    main control at dc5d2b1 passes test/retro-marker-atomic.test.ts (61/61); the PR-head CI
+    run fails W1-T968 in that file. Add the existing sweep, dependency-review and retro test
+    files to scope for the shared-publisher regression tests and paired fixture adapter. Keep
+    both acceptance claims, proof paths, budget and all existing assertions unchanged.
   design: |
     Before posting a terminal SUCCESS for a head, read that head's remudero-review status history
     from GitHub (the statuses list, not only the combined current state) and join each FAILURE to
