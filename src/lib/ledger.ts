@@ -677,6 +677,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "verdict.merged",
   PR_TERMINAL_STEP, // W1-T5318: pruneCarriedRows' terminal fact, and runPrTerminalReconcile's live dedup
   "correction.provenance",
+  // W1-T11445: cadence derives start-to-start intervals from completed light-pass pairs. Losing
+  // either side makes measured history disappear during rotation and resets the safe one-plan bound.
+  "sweep.pass",
+  "sweep.summary",
   "sweep.disposed",
   "sweep.merge_probe", // W1-T9578: exact head/main conflict evidence selects the regeneration route.
   "sweep.conflict_regenerated", // W1-T9578: retain the once-per-(head, main) attempt receipt.

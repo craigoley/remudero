@@ -24914,15 +24914,129 @@ export function observeLightPassReviewEligibility(
   return lines;
 }
 
+function lightPassIntervalBudgetFromLedger(
+  lines: readonly Readonly<Record<string, unknown>>[],
+  scope: LightPassScopeName,
+): number | undefined {
+  type RowAt = { row: Readonly<Record<string, unknown>>; index: number };
+  type PassRows = { starts: RowAt[]; summaries: RowAt[] };
+  const byId = new Map<string, PassRows>();
+  const events: Array<{ index: number; valid: boolean; startedAtMs?: number }> = [];
+  const groupFor = (id: string): PassRows => {
+    const current = byId.get(id);
+    if (current) return current;
+    const created = { starts: [], summaries: [] };
+    byId.set(id, created);
+    return created;
+  };
+
+  lines.forEach((row, index) => {
+    if (row.step !== "sweep.pass" && row.step !== "sweep.summary") return;
+    const hasId = typeof row.pass_id === "string" && row.pass_id.trim().length > 0;
+    if (row.step === "sweep.pass" && row.light_pass_scope === scope && !hasId) {
+      events.push({ index, valid: false });
+      return;
+    }
+    if (!hasId) return;
+    const group = groupFor(row.pass_id as string);
+    if (row.step === "sweep.pass") group.starts.push({ row, index });
+    else group.summaries.push({ row, index });
+  });
+
+  for (const [passId, group] of byId) {
+    for (const start of group.starts) {
+      if (start.row.light_pass_scope !== scope) continue;
+      const summary = group.summaries[0];
+      const startMs = typeof start.row.ts === "string" ? Date.parse(start.row.ts) : Number.NaN;
+      const elapsed = summary?.row.elapsed_ms;
+      const valid = group.starts.length === 1 && group.summaries.length === 1 &&
+        summary?.row.pass_id === passId && summary.row.light_pass_scope === scope &&
+        summary.index > start.index && Number.isFinite(startMs) &&
+        typeof elapsed === "number" && Number.isFinite(elapsed) && elapsed >= 0;
+      events.push({ index: start.index, valid,
+        ...(valid ? { startedAtMs: startMs } : {}) });
+    }
+  }
+
+  events.sort((left, right) => left.index - right.index);
+  const intervals: number[] = [];
+  let previousStartMs: number | undefined;
+  for (const event of events) {
+    if (!event.valid || event.startedAtMs === undefined) {
+      previousStartMs = undefined;
+      continue;
+    }
+    if (previousStartMs !== undefined) {
+      const interval = event.startedAtMs - previousStartMs;
+      if (!Number.isFinite(interval) || interval <= 0) {
+        previousStartMs = undefined;
+        continue;
+      }
+      intervals.push(interval);
+    }
+    previousStartMs = event.startedAtMs;
+  }
+  const newest = intervals.slice(-3).sort((left, right) => left - right);
+  return newest.length === 3 ? newest[1] : undefined;
+}
+
 export async function runSweepLightPass(
   openPrs: OpenPrView[],
   deps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
+  const passId = randomUUID();
+  const passScope = deps.lightPassScope ?? "idle";
+  if (deps.dryRun || !deps.log) {
+    return runSweepLightPassCore(openPrs, deps, policy, passId, passScope);
+  }
+
+  const startedAtMs = performance.now();
+  const startedAt = clockFromMillisFn(deps.now ?? Date.now).iso();
+  let passRecorded = false;
+  const summaries: Record<string, unknown>[] = [];
+  const log = deps.log;
+  const measuredDeps: SweepDeps = {
+    ...deps,
+    log: (step, extra = {}) => {
+      if (step === "sweep.pass") {
+        if (passRecorded) return;
+        passRecorded = true;
+        log(step, { ...extra, ts: startedAt, pass_id: passId, light_pass_scope: passScope });
+      } else if (step === "sweep.summary") {
+        summaries.push(extra);
+      } else {
+        log(step, extra);
+      }
+    },
+  };
+  const result = await runSweepLightPassCore(openPrs, measuredDeps, policy, passId, passScope);
+  const elapsedMs = performance.now() - startedAtMs;
+  if (passRecorded && Number.isFinite(elapsedMs) && elapsedMs >= 0) {
+    const aggregate: Record<string, unknown> = {};
+    for (const fields of summaries) {
+      for (const [key, value] of Object.entries(fields)) {
+        aggregate[key] = typeof value === "number" && Number.isFinite(value)
+          ? ((typeof aggregate[key] === "number" ? aggregate[key] as number : 0) + value)
+          : value;
+      }
+    }
+    log("sweep.summary", { ...aggregate, pass_id: passId, light_pass_scope: passScope, elapsed_ms: elapsedMs });
+  }
+  return result;
+}
+
+async function runSweepLightPassCore(
+  openPrs: OpenPrView[],
+  deps: SweepDeps,
+  policy: SweepPolicy,
+  passId: string,
+  passScope: LightPassScopeName,
+): Promise<SweepSummary[]> {
   const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
   if (memoryHeld.length > 0) {
     const held = memoryHeld.map((pr) => lightPassMemoryWaitSummary(pr, deps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
-    return [...held, ...await runSweepLightPass(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy)];
+    return [...held, ...await runSweepLightPassCore(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy, passId, passScope)];
   }
   if (openPrs.length === 0) {
     noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
@@ -25046,9 +25160,33 @@ export async function runSweepLightPass(
   const planMergeToken = Symbol("light-pass-plan-merge");
   // W1-T9212: the pass that owns the claim also re-evaluates every OTHER held plan PR it observes ready,
   // one at a time under that same claim, instead of leaving each for a later pass.
-  const planMerges = lightPassPlanMergeOwner !== undefined
+  const passIntervalBudgetMs = lightPassIntervalBudgetFromLedger(
+    selectionLedgerLines.filter((row) => row.pass_id !== passId), passScope);
+  const availablePlanMerges = lightPassPlanMergeOwner !== undefined
     ? []
-    : selectLightPassPlanMerges(openPrs, policy, now, selectionLedgerLines);
+    : selectLightPassPlanMerges(openPrs, policy, now, selectionLedgerLines, passIntervalBudgetMs !== undefined);
+  // Without enough measured cadence, selection already admits at most the first never-held PR
+  // while preserving every previously held PR and their oldest-held-first order (W1-T9212).
+  const planMerges = availablePlanMerges;
+  const planMergeBudget = { spentMs: 0, durationKnown: true };
+  const unavailablePlanMergeReason = "one never-held plan PR direct-merges per light pass " +
+    "(the one plan PR direct-merges per light pass bound remains; measured interval unavailable: " +
+    "fewer than three valid same-scope intervals); held PRs keep their W1-T9212 re-evaluation";
+  const planMergeStopReason = (index: number | undefined, held: boolean): string | undefined => {
+    if (passIntervalBudgetMs === undefined) return index === 0 || held ? undefined : unavailablePlanMergeReason;
+    if (index === 0) return undefined;
+    if (!planMergeBudget.durationKnown) {
+      return `measured interval budget ${passIntervalBudgetMs}ms; prior plan-merge duration unavailable or invalid, stopped before another attempt`;
+    }
+    if (planMergeBudget.spentMs >= passIntervalBudgetMs) {
+      return `measured interval budget ${passIntervalBudgetMs}ms spent ${planMergeBudget.spentMs}ms; stopped before the next plan merge`;
+    }
+    if (index === undefined) {
+      return `measured interval budget ${passIntervalBudgetMs}ms spent ${planMergeBudget.spentMs}ms; ` +
+        "plan-merge claim or eligibility left this PR unattempted (light pass)";
+    }
+    return undefined;
+  };
   const planMergeCandidate = planMerges[0];
   if (planMergeCandidate) lightPassPlanMergeOwner = planMergeToken;
   const releasePlanMerge = (): void => {
@@ -25165,20 +25303,57 @@ export async function runSweepLightPass(
                         needsPersonNote(pr, selectionLedgerLines))
                   : baseStandDownReasonFor?.(d),
             };
+      let planMergeDurationRecorded = false;
       const planMergeTurn = planMergeSequence.get(pr.prNumber);
       if (planMergeTurn !== undefined) {
-        // W1-T5901: admit `mergeable` for this one plan PR only. `deps.arm` is the full sweep's own
-        // path — it merge-queues when the base requires one (W1-T4405) and otherwise reads fresh
-        // mergeability, rules through W1-T5748's `decidePlanPrMergeSafety`, and updates-then-merges.
+        // W1-T5901: the plan-merge owner preserves one-at-a-time merge-queue/safety behavior; a measured
+        // interval only admits another attempt after the prior attempt's real arm duration is known.
         const laneActionable = scopedDeps.actionable;
-        scopedDeps.actionable = (d) => d === "mergeable" || (laneActionable ? laneActionable(d) : true);
+        const isHeldPlanPr = heldPlanPrFromLedger(selectionLedgerLines, pr) !== undefined;
+        scopedDeps.actionable = (d) => d === "mergeable"
+          ? planMergeStopReason(planMergeTurn.index, isHeldPlanPr) === undefined
+          : (laneActionable ? laneActionable(d) : true);
+        const laneReason = scopedDeps.standDownReasonFor;
+        scopedDeps.standDownReasonFor = (d) => d === "mergeable"
+          ? planMergeStopReason(planMergeTurn.index, isHeldPlanPr) ?? laneReason?.(d) : laneReason?.(d);
+
+        const arm = scopedDeps.arm;
+        const append = scopedDeps.appendLine ?? appendLedger;
+        let attempt: { outcome: string; elapsedMs?: number } | undefined;
+        scopedDeps.arm = async (attemptedPr, mode) => {
+          const mergeStartedAtMs = performance.now();
+          let outcome = "threw";
+          try {
+            const result = await arm(attemptedPr, mode);
+            outcome = typeof result === "string" ? result
+              : typeof result === "object" && result !== null && typeof result.outcome === "string"
+                ? result.outcome : "legacy-void-assumed-armed";
+            return result;
+          } finally {
+            const elapsed = performance.now() - mergeStartedAtMs;
+            const elapsedMs = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined;
+            attempt = { outcome, ...(elapsedMs === undefined ? {} : { elapsedMs }) };
+            if (elapsedMs === undefined) planMergeBudget.durationKnown = false;
+            else {
+              planMergeDurationRecorded = true;
+              planMergeBudget.spentMs += elapsedMs;
+            }
+          }
+        };
+        scopedDeps.appendLine = (path, line) => {
+          if (attempt && line.step === "sweep.disposed" && line.pr_number === pr.prNumber) {
+            append(path, { ...line, pass_id: passId, plan_merge_outcome: attempt.outcome,
+              ...(attempt.elapsedMs === undefined ? {} : { plan_merge_elapsed_ms: attempt.elapsedMs }) });
+          } else append(path, line);
+        };
       } else if (pr.isPlanFiling === true && deps.actionable?.("mergeable") === true) {
-        // W1-T5922: the light pass arms code PRs; every other plan PR keeps W1-T5901's one-per-pass bound.
+        // W1-T5922: the light pass arms code PRs; every other plan PR keeps the measured bound.
         const laneActionable = scopedDeps.actionable;
         const laneReason = scopedDeps.standDownReasonFor;
         scopedDeps.actionable = (d) => d !== "mergeable" && (laneActionable ? laneActionable(d) : true);
         scopedDeps.standDownReasonFor = (d) => d === "mergeable"
-          ? "one plan PR direct-merges per light pass (W1-T5901) — deferred to full sweep (light pass)" : laneReason?.(d);
+          ? planMergeStopReason(undefined, false) ?? "measured plan-merge budget did not admit this PR in the current pass"
+          : laneReason?.(d);
       }
       // W1-T9743: every admitted review is detached, plan filings too — the ticker awaits this pass.
       if (releases.has(pr.prNumber)) {
@@ -25214,6 +25389,7 @@ export async function runSweepLightPass(
         }
         return summary;
       }).finally(() => {
+        if (planMergeTurn?.index === 0 && !planMergeDurationRecorded) planMergeBudget.durationKnown = false;
         planMergeTurn?.finish();
         if (pr.prNumber === lastPlanMergeNumber) releasePlanMerge();
         if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
@@ -25433,6 +25609,7 @@ export function selectLightPassPlanMerges(
   policy: SweepPolicy,
   now: number,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  includeAllNeverHeld = false,
 ): OpenPrView[] {
   const attempts = (pr: OpenPrView): number =>
     ledgerLines.filter((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
@@ -25443,7 +25620,8 @@ export function selectLightPassPlanMerges(
   ready.sort((a, b) =>
     (a.held?.heldAtMs ?? Infinity) - (b.held?.heldAtMs ?? Infinity) || attempts(a.pr) - attempts(b.pr) ||
     a.pr.prNumber - b.pr.prNumber);
-  return ready.filter((entry, index) => index === 0 || entry.held !== undefined).map((entry) => entry.pr);
+  return ready.filter((entry, index) => includeAllNeverHeld || index === 0 || entry.held !== undefined)
+    .map((entry) => entry.pr);
 }
 
 /** Outcome keys already known, before admission, to make the action-time review guard stand down. */

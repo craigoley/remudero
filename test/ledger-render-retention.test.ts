@@ -578,14 +578,14 @@ test("W1-T1237: sweep.summary is retained beside sweep.pass", () => {
   }
 });
 
-test("W1-T1237: the decision core is unchanged by this registration", () => {
+test("W1-T1237: sweep cadence evidence is decision-retained and still render-windowed", () => {
   assert.ok(
-    !DECISION_RELEVANT_LEDGER_STEPS.has("sweep.pass"),
-    "sweep.pass belongs in the recency-bounded render set, never the never-rotated decision core (W1-T275's ruling, applied unchanged)",
+    DECISION_RELEVANT_LEDGER_STEPS.has("sweep.pass"),
+    "sweep.pass is durable decision evidence for measured cadence",
   );
   assert.ok(
-    !DECISION_RELEVANT_LEDGER_STEPS.has("sweep.summary"),
-    "sweep.summary belongs in the recency-bounded render set, never the never-rotated decision core (W1-T275's ruling, applied unchanged)",
+    DECISION_RELEVANT_LEDGER_STEPS.has("sweep.summary"),
+    "sweep.summary is durable decision evidence for measured cadence",
   );
   assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("sweep.pass"));
   assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("sweep.summary"));
