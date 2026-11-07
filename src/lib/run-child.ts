@@ -320,6 +320,17 @@ export type RunChildProbeOutcome =
 
 const reasonOf = (error: unknown): string => String((error as Error)?.message ?? error).slice(0, 400);
 
+/** Remove only an empty run directory; a concurrent child that wrote content keeps its contract intact. */
+function removeEmptyRunDir(dir: string): void {
+  try {
+    rmdirSync(dir);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST") return;
+    throw error;
+  }
+}
+
 /**
  * W1-T9906: main's tip as last fetched into `repoDir`, the commit a run child's engine must be reachable from. Never the
  * checkout's HEAD: that moves only at a restart, and every engine is cut at a run worktree's origin/main.
@@ -456,11 +467,11 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
         ...(input.work ? { work: input.work } : {}),
       } as RunChildSpec), seams.enginePin);
     } catch (error) {
-      try { rmdirSync(dir); } catch (cleanupError) { void cleanupError; }
+      removeEmptyRunDir(dir);
       throw error;
     }
     if ("unavailable" in pinnedProbe) {
-      try { rmdirSync(dir); } catch (cleanupError) { void cleanupError; }
+      removeEmptyRunDir(dir);
       reservation.releaseOccupancy();
       reservation = undefined;
       return skip(pinnedProbe.unavailable);
@@ -894,12 +905,12 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
       } as RunChildSpec), ports.enginePin);
     } catch (error) {
       inFlightRunDirs.delete(dir);
-      try { rmdirSync(dir); } catch (cleanupError) { void cleanupError; }
+      removeEmptyRunDir(dir);
       throw error;
     }
     if ("unavailable" in pinned) {
       inFlightRunDirs.delete(dir);
-      try { rmdirSync(dir); } catch (cleanupError) { void cleanupError; }
+      removeEmptyRunDir(dir);
       throw new Error(pinned.unavailable);
     }
     engineSha = pinned.sha;
