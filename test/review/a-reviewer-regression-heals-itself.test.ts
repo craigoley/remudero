@@ -760,13 +760,19 @@ test("W1-T10269: the route's healed tree survives a restart and refuses a tree i
   assert.equal(spawned[0], spawned[1], "the same healed path, removed and cut again");
   assert.equal(execFileSync("git", ["-C", spawned[1]!, "rev-parse", "HEAD^1"], { encoding: "utf8" }).trim(), f.m2);
   health.resetHealedReviewerTrees();
+  pushMain(f, { "src/lib/required-semantic-review.ts": 'export const refusal = () => "a different main-line change";\n' },
+    "fix(review): change the reverted semantic refusal (#107)");
   const logs: Array<{ step: string; extra: Row }> = [];
   let normal = 0;
   const refusing = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath, (step, extra = {}) => logs.push({ step, extra }),
-    freshTree(f, async () => 0, { worktreeRoot: join(f.root, "fresh-root"), addWorktree: () => { throw new Error("worktree add refused"); } }), h.issues, h.lane);
+    freshTree(f, async () => 0, { worktreeRoot: join(f.root, "fresh-root") }), h.issues, h.lane);
   assert.equal(await refusing("232", [], {}, async () => ++normal), 1);
   assert.equal(logs[0]!.step, "reviewer.healed_tree_unavailable");
-  assert.match(String(logs[0]!.extra.reason), /worktree add refused/);
+  assert.equal(logs[0]!.extra.state, "conflict");
+  assert.match(String(logs[0]!.extra.reason), /does not apply cleanly/);
+  assert.equal(await refusing("233", [], {}, async () => ++normal), 2);
+  assert.equal(logs[1]!.step, "reviewer.healed_tree_unavailable");
+  assert.equal(logs[1]!.extra.remembered, true, "the route logs that it reused this same-main conflict");
 });
 
 test("W1-T10269: blame reads run-task.ts's review path and the modules it imports", async (t) => {
