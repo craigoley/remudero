@@ -401,12 +401,14 @@ export function primaryShadowOperatorChannel(opts: {
   const clock = opts.clock ?? systemClock;
   type State = { revision: number; first: string; prs: number[]; handledDigests: string[];
     digest: string; sourcePath: string;
-    pendingRecovery?: string };
+    pendingRecovery?: string; publishedTaskId?: string; publishedIssueUrl?: string };
   const states = new Map<string, State>();
   const historyMemo = createLedgerRotationMemo(rows => rows.filter(row =>
-    row.step === "primary_shadow.observation" || row.step === "panel.escalation_marked_handled" || row.step === "panel.manual_approved"), {
-    holder: "primary-shadow-notice", durableDigest: { reducerVersion: "primary-shadow-notice-v3" },
-    pattern: /primary_shadow\.observation|panel\.(escalation_marked_handled|manual_approved)|PRIMARY-SHADOW-/, requireObjects: true,
+    row.step === "primary_shadow.observation" || row.step === "panel.escalation_marked_handled" || row.step === "panel.manual_approved"
+    || ((row.step === "escalation.issue_opened" || row.step === "primary_shadow.issue_published")
+      && typeof row.task_id === "string" && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(row.task_id))), {
+    holder: "primary-shadow-notice", durableDigest: { reducerVersion: "primary-shadow-notice-v4" },
+    pattern: /primary_shadow\.(observation|issue_published)|panel\.(escalation_marked_handled|manual_approved)|PRIMARY-SHADOW-/, requireObjects: true,
   });
   const identity = (s: PrimaryShadowSelection) => `<!-- primary-shadow ${JSON.stringify([opts.owner, opts.repo, s.instance])} -->`;
   const key = (s: PrimaryShadowSelection) => `PRIMARY-SHADOW-${s.digest}`;
@@ -419,15 +421,24 @@ export function primaryShadowOperatorChannel(opts: {
     if (known) return known;
     let damaged = false;
     const history = await readLedgerUnionRecordsMemoized(dirname(opts.ledgerPath), historyMemo, {
-      step: ["primary_shadow.observation", "panel.escalation_marked_handled", "panel.manual_approved"], refuseIncomplete: true,
-      onTorn: raw => { if (raw.includes("primary_shadow.observation") || raw.includes("panel.escalation_marked_handled") || raw.includes("panel.manual_approved")) damaged = true; },
+      step: ["primary_shadow.observation", "panel.escalation_marked_handled", "panel.manual_approved", "escalation.issue_opened", "primary_shadow.issue_published"], refuseIncomplete: true,
+      onTorn: raw => { if (raw.includes("primary_shadow.observation") || raw.includes("primary_shadow.issue_published") || raw.includes("panel.escalation_marked_handled") || raw.includes("panel.manual_approved")) damaged = true; },
     });
     if (!history.ok || damaged) throw new Error("primary shadow alert history is unreadable");
     const current: State = { revision: 0, first: "", prs: [], handledDigests: [], digest: s.digest, sourcePath: s.sourcePath };
     const ownTaskIds = new Set([id, ...history.rows.filter(row => row.instance_key === instanceKey).map(row => row.task_id)]);
+    const delivered = new Map<string, string>();
     for (const row of history.rows) {
+      if (row.step === "escalation.issue_opened" || row.step === "primary_shadow.issue_published") {
+        if (typeof row.issue_url === "string" && typeof row.task_id === "string" && ownTaskIds.has(row.task_id)) {
+          delivered.set(row.issue_url, row.task_id);
+          current.publishedTaskId = row.task_id; current.publishedIssueUrl = row.issue_url;
+        }
+        continue;
+      }
       if (row.step === "panel.escalation_marked_handled" || row.step === "panel.manual_approved") {
-        if (typeof row.task_id === "string" && ownTaskIds.has(row.task_id) && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(row.task_id)) {
+        if (typeof row.task_id === "string" && ownTaskIds.has(row.task_id) && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(row.task_id)
+          && typeof row.issue_url === "string" && delivered.get(row.issue_url) === row.task_id) {
           const handled = row.task_id.slice("PRIMARY-SHADOW-".length);
           if (!current.handledDigests.includes(handled)) current.handledDigests.push(handled);
         }
@@ -476,7 +487,7 @@ export function primaryShadowOperatorChannel(opts: {
     const recovered = await state(s);
     if (recovered.pendingRecovery) save(s, { ...recovered, pendingRecovery: undefined });
   };
-  const publish = async (selected: PrimaryShadowSelection, current: State): Promise<void> => {
+  const publish = async (selected: PrimaryShadowSelection, current: State, boundary: boolean, firstNotice = false): Promise<void> => {
     const open = await list();
     const existing = open.find(i => i.body?.includes(identity(selected))
       && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(TASK_LINE_RE.exec(normalizeCandidateBody(i.body))?.[1] ?? ""));
@@ -491,17 +502,18 @@ export function primaryShadowOperatorChannel(opts: {
       const updated = (body.slice(0, start) + observation + body.slice(stop + end.length))
         .replace(/^(\*\*Task:\*\*[ \t]*)\S+/m, `$1${key(selected)}`);
       if (updated !== body) {
-        // The shared escalation gateway owns delivery timing; serialize and await its edit as other producers do.
+        if (!boundary) return;
+        // Only the ordinary pass boundary flushes pending edits, through the existing awaited gateway.
         if (!issues.editBody) throw new Error("primary shadow alert cannot update its issue");
         await issues.editBody(existing.url, updated);
-        if (TASK_LINE_RE.exec(normalizeCandidateBody(body))?.[1] !== key(selected)) {
-          // Rebind the existing issue's board action only after its displayed selection was delivered.
-          appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: key(selected),
-            step: "escalation.issue_opened", issue_url: existing.url, class: "MANUAL",
-            reason: "primary shadow alert selection updated in place" });
-        }
       }
-    } else {
+      if (boundary && (current.publishedTaskId !== key(selected) || current.publishedIssueUrl !== existing.url)) {
+        // An observed matching body also repairs an interrupted edit's missing delivery receipt.
+        appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: key(selected),
+          step: "primary_shadow.issue_published", issue_url: existing.url, class: "MANUAL",
+          instance_key: identity(selected), reason: "primary shadow alert selection delivered in place" });
+      }
+    } else if (boundary || firstNotice) {
       const escalation: Escalation = { class: "MANUAL", taskId: key(selected),
         summary: `Primary instance ${selected.instance} refuses merges in shadow mode`, detail: observation,
         consequence: "Reviewed PRs remain unmerged while the primary instance refuses them.",
@@ -542,10 +554,12 @@ export function primaryShadowOperatorChannel(opts: {
       }
       let current = await state(selected);
       if (current.handledDigests.includes(selected.digest)) return;
+      const firstNotice = !current.first || (current.publishedTaskId !== undefined
+        && current.handledDigests.includes(current.publishedTaskId.slice("PRIMARY-SHADOW-".length)));
       if (!current.prs.includes(pr.prNumber) || current.digest !== selected.digest) current = save(selected, { ...current,
         digest: selected.digest, sourcePath: selected.sourcePath,
         first: current.first || clock.iso(), prs: [...new Set([...current.prs, pr.prNumber])].sort((a, b) => a - b), pendingRecovery: undefined });
-      await publish(selected, current);
+      await publish(selected, current, false, firstNotice);
     }),
     reconcile: () => serial(async () => {
       const selected = opts.selection();
@@ -562,7 +576,7 @@ export function primaryShadowOperatorChannel(opts: {
         await close(selected, open, current.pendingRecovery);
         return;
       }
-      if (current.handledDigests.includes(current.digest)) return;
+      if (current.handledDigests.includes(selected.digest)) return;
       // Production's open-PR population cannot contain a candidate another lane just merged.
       for (const prNumber of current.prs) {
         const prUrl = `https://github.com/${opts.owner}/${opts.repo}/pull/${prNumber}`;
@@ -570,7 +584,7 @@ export function primaryShadowOperatorChannel(opts: {
         if (observed?.ok && observed.state?.toUpperCase() === "MERGED") await resolvePr(selected, { prNumber, prUrl });
       }
       const pending = await state(selected);
-      if (pending.prs.length) await publish({ ...selected, digest: pending.digest, sourcePath: pending.sourcePath }, pending);
+      if (pending.prs.length && pending.digest === selected.digest) await publish(selected, pending, true);
     }),
     resolved: pr => serial(async () => {
       const selected = opts.selection();
@@ -584,9 +598,7 @@ export function primaryShadowOperatorChannel(opts: {
         return;
       }
       await resolvePr(selected, pr);
-      const pending = await state(selected);
-      if (pending.prs.length && !pending.handledDigests.includes(pending.digest))
-        await publish({ ...selected, digest: pending.digest, sourcePath: pending.sourcePath }, pending);
+      // A remaining PR set is durable; its changed body belongs to the next ordinary boundary.
     }),
   };
 }

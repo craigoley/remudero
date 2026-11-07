@@ -489,3 +489,24 @@ test("W1-T11444 criterion 2: a torn delivery binding refuses reconciliation with
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("W1-T11444 criterion 2: a torn primary opening refuses reconciliation without another issue or body edit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-torn-opening-"));
+  try {
+    const ledgerPath = join(root, "ledger.ndjson"), all: OpenIssue[] = [];
+    let edits = 0;
+    const selected = { instance: "core", sourcePath: join(root, "selection.yaml"), digest: "a".repeat(64), mode: "shadow" as const };
+    const issues: IssueGateway = {
+      create: (title, body) => { const number = all.length + 1, url = `https://github.com/owner/repo/issues/${number}`;
+        all.push({ number, url, title, body }); return url; },
+      listOpen: () => [...all], editBody: () => { edits += 1; },
+    };
+    const channel = () => escalation.primaryShadowOperatorChannel({ owner: "owner", repo: "repo", ledgerPath,
+      runId: "torn-opening", selection: () => ({ ...selected }), issues });
+    await channel().refuse({ prNumber: 11, prUrl: "https://github.com/owner/repo/pull/11" });
+    appendFileSync(ledgerPath, `{"step":"escalation.issue_opened","task_id":"PRIMARY-SHADOW-${selected.digest}","issue_url":`);
+    await assert.rejects(channel().reconcile(), /history is unreadable/);
+    assert.equal(all.length, 1, "damaged history is never permission to create another issue");
+    assert.equal(edits, 0, "an unreadable delivery record cannot establish a safe body update");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
