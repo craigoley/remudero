@@ -1138,3 +1138,32 @@ test("W1-T11454 criterion 3: the deployer never leaves a selection, and a select
       "the real missing-source refusal names the scoped command the deployer will quote");
   } finally { rmSync(refusalRoot, { recursive: true, force: true }); }
 });
+
+test("W1-T11454 criterion 3: active selected-reader refusals preserve the scoped remedy through diagnostic filtering", () => {
+  const script = [
+    'source "$1"',
+    'SELECTED_REGISTRY_CALLER=recycle-container',
+    'SELECTED_REGISTRY_NAME=core',
+    'SELECTED_REGISTRY_ACTIVE=1',
+    'SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION=fixture-end-frame',
+    'SELECTED_REGISTRY_LAUNCH_ARGS=()',
+    'DOCKER_HOST=unix:///fixture/docker.sock',
+    'recycle_reason() { printf "%s\\n" "$1"; }',
+    'selected_registry_recheck() { return 0; }',
+    'selected_registry_planned_mounts() { return 0; }',
+    'selected_registry_docker_read() { return 2; }',
+    '{ selected_registry_image fixture-image 2>&1; printf "\\n%s\\n" "$SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION"; } | selected_registry_diagnostic_filter',
+  ].join("\n");
+  const result = spawnSync("bash", ["-c", script, "fixture", join(REPO_ROOT, "deploy", "recycle-container.sh")], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    timeout: 10000,
+    env: process.env,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /REFUSING -- selected registry unavailable \(image_reader_unknown\)\./,
+    "the real active image-reader refusal still passes through the private diagnostic filter");
+  assert.equal(refusalRemedyLine(result.stdout),
+    "Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy/recycle-container.sh --instance core, or add --leave-selected-registry with no selection to leave it.",
+    "the filtered active-selection refusal retains the exact scoped command the deployer quotes");
+});

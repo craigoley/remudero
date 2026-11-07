@@ -180,7 +180,11 @@ selected_registry_diagnostic_filter() {
     const emit=line=>{ if(count++<64) process.stdout.write(caller+": "+line+"\n"); };
     const line=text=>{
       const reason=/REFUSING -- selected registry unavailable \(([a-z_]+)\)[.]$/.exec(text)?.[1];
-      if(reason && reasons.has(reason)) emit("REFUSING -- selected registry unavailable ("+reason+").");
+      const remedy=/^\s*Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy\/recycle-container\.sh --instance ([a-zA-Z0-9_-]+|<instance>), or add --leave-selected-registry with no selection to leave it\.$/.exec(text);
+      if(remedy && caller==="recycle-container"){
+        if(count++<64) process.stdout.write("Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy/recycle-container.sh --instance "+remedy[1]+", or add --leave-selected-registry with no selection to leave it.\n");
+      }
+      else if(reason && reasons.has(reason)) emit("REFUSING -- selected registry unavailable ("+reason+").");
       else if(text.includes("REFUSING")||text.includes("FAILED")) emit("selected lifecycle reported refusal/failure (private details withheld).");
       else if(text.includes("--dry-run")) emit("selected lifecycle dry-run; image capability and live effects NOT RUN.");
       else if(text.trim()) emit("selected lifecycle diagnostic (private details withheld).");
