@@ -1,0 +1,29 @@
+- id: W1-T11553
+  title: The resource-policy suite passes on a host whose memory differs from its fixture, so a real host's size cannot redden an author preflight
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # test hermeticity only; no policy or deploy script changes
+  origin: operator-session#containment-probe-2026-11-06
+  plan_refs:
+    - W1-T11370
+  files:
+    - test/a-changed-resource-policy-reaches-a-running-container.test.ts
+    - test/deploy/the-resource-policy-suite-is-independent-of-its-host.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The drift reader under test reads the fixture's meminfo and recorded peaks rather than the host's, so "the recycle reason names each drifted limit as expected and actual" gets the same numbers on any host
+      proof: "grep: W1-T11553 criterion 1 in test/deploy/the-resource-policy-suite-is-independent-of-its-host.test.ts"
+  rationale: |
+    OBSERVED 2026-11-06 on the Azure host: "the recycle reason names each drifted limit as expected and actual" in test/a-changed-resource-policy-reaches-a-running-container.test.ts fails on a clean base (df7ac473b) with no change applied. It expected Memory 8,867,807,232 and read 25,921,847,296 from a fixture written as a 16 GB host. It failed W1-T11431's author preflight, the only failure in 2,501 tests.
+    The fixture writes a meminfo, but the mechanism by which the real value leaks in is not established. Establish it first.
+  design: |
+    Find why the shipped reader does not see the fixture's RMD_MEMINFO_PATH, and pin it in the fixture. Keep the assertions.
+  note: |
+    reservation hand-off: run-unfiled-1794002639754 -> run-unfiled-1794002639754
+    Reserved with rmd next-task-id (W1-T11553 on run-unfiled-1794002639754). From the operator session's 2026-11-06 preflight of W1-T11431.

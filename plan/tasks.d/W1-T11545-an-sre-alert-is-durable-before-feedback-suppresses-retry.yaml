@@ -1,0 +1,85 @@
+- id: W1-T11545
+  title: An SRE operator alert is durable before feedback can suppress its retry and delivered off the loop with its assignment intact
+  repo: remudero
+  depends_on: [W1-T11474]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high
+  band_meaning: span
+  origin: "W1-T11458 full gateway-constructor audit, 2026-11-06: custom SRE delivery and downstream incident consumption"
+  plan_refs: [W1-T11458, W1-T11474]
+  files: [src/lib/host-escalation-spool.ts, src/lib/sre-runbooks.ts, src/lib/sre-lane.ts, src/run-task.ts, src/cli/commands/daemon.ts, test/sre/an-sre-alert-is-queued-before-feedback-can-suppress-its-retry.test.ts, test/the-sre-lane-runs-on-the-primary-instance.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=4867125eda0a55c4
+  # backlog gardener: placed=2026-11-06T22:24:39.776Z
+  attempts: 0
+  rationale: |
+    At 557690834, sreOperatorEscalation in src/lib/sre-runbooks.ts supplies a custom synchronous
+    ghIssueGateway executor that creates the issue and assigns the repository owner. It is
+    reachable through daemonSreRunbookPass. runSreLanePass can stage feedback after the attempted
+    escalation, even with no issue URL; its next pass filters that fingerprint as already open.
+    A final failed runbook also records its failed receipt before escalation. The identical-
+    evidence fast path can then suppress another attempt. These are static call-order findings,
+    not a measured claim that a live notice was lost. A cadence refusal is therefore not a safe
+    generic retry contract. W1-T11458 preserves this supplied synchronous route until it has a
+    durable asynchronous handoff.
+    W1-T11474 supplies qualified spool routing for quarantine, sustained-memory, stalled-worker
+    and capacity-decision producers. Its four-producer scope neither includes the SRE consumers
+    nor preserves their custom post-create assignment. This dependent task handles that distinct
+    consumption boundary after the generic qualified spool lands.
+  design: |
+    Reuse W1-T11474's qualified durable spool and existing drain cadence. The daemon SRE producer
+    must capture the complete operator notification durably before either feedback staging or
+    a receipt can suppress its retry. Distinguish queued acknowledgement from an actual issue
+    URL; never invent a delivered URL for a successful enqueue.
+    A failed durable write leaves the same incident eligible for another enqueue on the normal
+    pass, including an identical lastSeenMs after the final runbook failure and a pass with no
+    feedback room. Do not re-run an already-recorded physical runbook action merely to retry its
+    notice. Carry a visible pending/not-acknowledged disposition through runbookPass into the
+    lane, so neither feedback's open-fingerprint filter nor no_new_evidence hides the ask.
+    Resolve the SRE route explicitly to its same-repository asynchronous issue transport and a
+    typed repository-owner assignment policy. Do not serialize executor functions, environment
+    objects or credentials. Include every routing/effect dimension in pending and delivered
+    identity. Unknown explicit policies or routes remain pending with a named failure; never
+    fall back to the fleet repository or silently drop the assignment.
+    Preserve the current nonfatal assignment-failure contract: record actual issue publication
+    separately from an assignment failure and retain its real URL. A retry or restart must not
+    create a duplicate issue because assignment failed; never claim assignment succeeded when
+    it did not. Use the existing bounded async GitHub leaf for both create and assignment.
+    Wire the real daemon SRE producer and drain adapter. Preserve standalone synchronous APIs
+    and explicitly injected transport contracts. Convert only this verified SRE path; launcher,
+    retro and gateway-liveness clients are not a class-wide conversion in this task.
+    Exercise real on-disk enqueue/restart and the real default child transport against a private
+    GitHub executable fixture. Cover fast-burn and final-failure consumption, failed writes,
+    identical-evidence retry, repository collision, assignment failure and unsupported policy.
+    Append the daemon integration case to the existing Root-importing primary-instance suite
+    without weakening its assertions; this adds no Root importer. The new module test uses
+    package aliases and the shared repository-root helper. Recompute its placement on completion.
+    Keep all census caps, allowances, timers, thresholds and production rollout policy unchanged.
+  acceptance:
+    - claim: "An SRE notice is durably captured before feedback or a runbook receipt suppresses retry, and a failed write retries identical evidence without repeating the physical action"
+      proof: "grep: W1-T11545 criterion 1 in test/sre/an-sre-alert-is-queued-before-feedback-can-suppress-its-retry.test.ts"
+    - claim: "The async drain preserves the qualified repository and owner-assignment policy across restart, names unknown policies, and never duplicates an issue after assignment failure"
+      proof: "grep: W1-T11545 criterion 2 in test/sre/an-sre-alert-is-queued-before-feedback-can-suppress-its-retry.test.ts"
+    - claim: "The real daemon SRE binding uses the durable handoff and its default create and assignment children leave the loop responsive"
+      proof: "grep: W1-T11545 criterion 3 in test/the-sre-lane-runs-on-the-primary-instance.test.ts"
+  note: |
+    Follow-up explicitly required by W1-T11458's unsafe-retry exception. The ten-line sketch
+    computes test/sre/ at medium confidence, inbox-operator runner-up. The existing integration
+    suite already imports Root; do not add a new Root importer or change a cap.
+    The constructor census sees 51 real calls across 23 source files and four supplied executors.
+    The subject sweep covers all three open heads against eleven positive main subject lines,
+    counting each head and its authored delta; none adds or removes this subject. W1-T11474 is
+    the prerequisite generic handoff, not a duplicate of SRE's feedback and assignment contract.
+    This filing authorizes no live notification, janitor application, deploy, recycle or cutover.
+  falsifier: |
+    Move feedback or episode acknowledgement before durable enqueue: criterion 1 fails on a
+    write failure. Let no_new_evidence suppress the failed enqueue, or repeat the physical act
+    while retrying its ask: criterion 1 fails on identical evidence. Drop the repository or
+    assignment policy from routing or identity, erase an assignment failure, or recreate its
+    already-published issue after restart: criterion 2 fails. Restore synchronous real GitHub
+    delivery on the daemon path: criterion 3's actual-child heartbeat assertion fails. Each
+    removal must reach its intended assertion and restore green; missing APIs are structural.
