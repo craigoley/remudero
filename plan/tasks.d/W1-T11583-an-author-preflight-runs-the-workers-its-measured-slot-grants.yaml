@@ -12,7 +12,7 @@
   plan_refs: [W1-T7809, W1-T9951, W1-T9952, W1-T9953]
   files:
     - scripts/preflight-author.mjs
-    - test/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts
+    - test/ci/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts
   status: queued
   priority: 2  # every author preflight runs its affected suites one file at a time on a host that measured room for up to four
   attempts: 0
@@ -67,11 +67,11 @@
     affected-tests argv and `receipt.executionWorkers`.
   acceptance:
     - claim: "on an injected idle 8-core host with ample memory headroom, the affected-tests child is spawned with --test-concurrency greater than 1 and never above AUTHOR_MAX_WORKERS, and receipt.executionWorkers matches it"
-      proof: "unit test: test/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts"
+      proof: "unit test: W1-T11583 criterion 1: an idle eight-core host uses more than one author test worker"
     - claim: "capacity still limits concurrency: with injected load or memory headroom that leaves room for exactly one test file, the child gets --test-concurrency=1 and the selection is priced at a one-worker budget"
-      proof: "unit test: test/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts"
+      proof: "unit test: W1-T11583 criterion 2: measured CPU and memory capacity still cap author test concurrency"
     - claim: "a Mac pressure refusal or a disk-reserve refusal from admitHost still ends the run NOT_RUN / over-capacity, and the affected-tests child is never spawned"
-      proof: "unit test: test/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts"
+      proof: "unit test: W1-T11583 criterion 3: pressure or disk refusal does not spawn affected tests"
     - claim: "the author suite ticket asks the shared slot for the AUTHOR_MAX_WORKERS ceiling"
       proof: "grep: maxConcurrency: AUTHOR_MAX_WORKERS in scripts/preflight-author.mjs"
   falsifier: |
