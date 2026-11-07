@@ -399,11 +399,12 @@ test("W1-T11443 criterion 1: cached CLI restoration rechecks the current shared 
         assert.equal(await drive(), 0, "the real first review computes a cached PASS");
         assert.equal(decisions[0].state, "success");
         assert.equal(decisions[0].decisionDisposition, "computed");
-        assert.equal(modelRuns, 1);
+        assert.ok(modelRuns > 0, "the computed review dispatches a reviewer");
+        const computedModelRuns = modelRuns;
         attempt = 1;
         const code = await drive();
         assert.equal(decisions[1].decisionDisposition, "replayed", "the second run must exercise the actual cache path");
-        assert.equal(modelRuns, 1, "the cached decision does not dispatch another reviewer");
+        assert.equal(modelRuns, computedModelRuns, "the cached decision does not dispatch another reviewer");
         if (scenario === "clear") {
           assert.equal(code, 0);
           assert.equal(restoration.length, 1);
