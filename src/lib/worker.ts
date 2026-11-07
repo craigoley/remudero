@@ -3228,6 +3228,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       allowApiKey: config.overflow === "api_key" && frontierClaudeSpawn === false,
     });
     delete childEnv.RMD_INSTANCE_REGISTRY;
+    delete childEnv.RMD_SELECTED_INSTANCE_REGISTRY;
     // W1-T2699: every spawn's env routes through secretBoundaryEnv, a no-op absent a model boundary (see its doc).
     // MUTATING `childEnv` in place, never rebinding it: W1-T2800's structural falsifier (test/codex-worker-home-
     // redirection.test.ts) greps this file for the literal `const childEnv = buildWorkerEnv(...)` above, so the

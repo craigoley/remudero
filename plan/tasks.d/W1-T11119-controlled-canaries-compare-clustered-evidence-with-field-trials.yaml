@@ -10,6 +10,13 @@
   risk: high
   band_meaning: span
   priority: 2
+  # refusal-amendment (W1-T11119, run DAEMON-1793999214575@faf5a5da604a1a14cb1f9f4782d0ca23994b0329, 2026-11-07T05:43:04.335Z): the worker refused criterion 8 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: No production native receipt producer reaches the clustered analysis path; coding execution requires a test-only factory.
+  # refusal-amendment (W1-T11119, run DAEMON-1793999214575@faf5a5da604a1a14cb1f9f4782d0ca23994b0329, 2026-11-07T05:43:04.335Z): the worker refused criterion 10 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: Failed grade reasons are now classified, but native export cannot produce a runtime draft without that production receipt path.
+  # refusal-amendment (W1-T11119, run DAEMON-1793999214575@faf5a5da604a1a14cb1f9f4782d0ca23994b0329, 2026-11-07T05:43:04.335Z): the worker refused criterion 14 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: No durable producer joins frozen pre-outcome router decisions and qualified static baselines to canary outcomes.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   origin: operator-approved-router-evaluation-plan:2026-11-02
