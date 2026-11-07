@@ -48,7 +48,7 @@ import { sweepStaleTempDirsAsync, type TempSweepOpts, type TempSweepSummary } fr
 import { IMAGE_BUILD_SHA_PATH } from "../../lib/deployer.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "../../lib/baked-closure-catalog.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
-import { instanceRegistryRuntimePresent, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
+import { instanceRegistryRuntimePresent, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import type { RegistryFileIO } from "../../lib/instance-registry-selection.js";
 import { resolveInstallRoot } from "../../lib/install-root.js";
 import { escalate, escalateAsync, ghIssueGateway, ghIssueGatewayAsync, tryEscalate, type Escalation, type EscalationJudgeVerdict, type AsyncIssueGateway, type IssueGateway } from "../../lib/escalate.js";
@@ -4438,7 +4438,7 @@ export async function runTask(
   host: RunTaskCommandHost,
 ): Promise<RunResult> {
   opts = { ...opts };
-  if (process.env.RMD_INSTANCE_REGISTRY !== undefined && !instanceRegistryRuntimePresent()) {
+  if (selectedInstanceRegistryEnvPath() !== undefined && !instanceRegistryRuntimePresent()) {
     return withInstanceRegistryRuntime(() => runTask(taskId, opts, host));
   }
   const execute = async (): Promise<RunResult> => {
@@ -5092,7 +5092,7 @@ export async function runTask(
   }
   const config = opts.config ?? loadConfig();
   const intent = await qualifySelectedRegistryIntent(Object.hasOwn(opts, "selectedRegistryIntent")
-    ? opts.selectedRegistryIntent : captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY } }));
+    ? opts.selectedRegistryIntent : captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: selectedInstanceRegistryEnvPath() } }));
   let runId: string | undefined;
   const onRunCreated = opts.onRunCreated;
   const observer = selectedRegistryObserverFromIntent(intent, (step, fields) => {
@@ -5395,7 +5395,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     ? createSelectedModeQualification({ mode: "shadow", instanceName: registryIntent.instanceName }, `${owner}/${task.repo}`,
       { ...registryIntent.input, instanceName: registryIntent.instanceName }, log, opts.selectedModeFileIO)
     : createSelectedModeQualification(Object.hasOwn(opts, "selectedRegistryIntent") ? undefined : config.selectedRegistryMode, `${owner}/${task.repo}`,
-      { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME }, log, opts.selectedModeFileIO);
+      { envPath: selectedInstanceRegistryEnvPath(), instanceName: process.env.RMD_INSTANCE_NAME }, log, opts.selectedModeFileIO);
 
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a

@@ -7,11 +7,14 @@ The full Apache public core and owner/admin override remain intact.
 
 ## Selection and evidence
 
-Explicit CLI path wins over the supplied RMD_INSTANCE_REGISTRY value, which wins
-over an explicitly configured path. Only genuine absence returns legacy. Empty,
-relative or invalid selected paths refuse; selected read failures never consult a
-healthy legacy file or served-view cache. Paths are absolute host/container read
-targets, not repository-relative writer targets or GitHub file-SHA permission.
+Explicit CLI path wins over the selected environment path, which wins over an
+explicitly configured path. The selected environment path is
+RMD_SELECTED_INSTANCE_REGISTRY when that variable is defined; RMD_INSTANCE_REGISTRY
+is a compatibility fallback only when the selected name is absent. Only genuine
+absence returns legacy. Empty, relative or invalid selected paths refuse; selected
+read failures never consult a healthy legacy file or served-view cache. Paths are
+absolute host/container read targets, not repository-relative writer targets or
+GitHub file-SHA permission.
 
 The default async reader accepts regular nonsymlink files, reads at most the
 configured byte bound plus one overflow probe, checks descriptor and pathname
@@ -59,9 +62,11 @@ instances:
 ```
 
 After separate rollout approval, the host launcher would receive an absolute
-`RMD_INSTANCE_REGISTRY` path and explicit `--instance example-shadow`. It qualifies
-the selected bytes, physical identity, Docker source namespace and image reader
-before any replacement. The generated container arguments contain exactly one
+`RMD_SELECTED_INSTANCE_REGISTRY` path and explicit `--instance example-shadow`.
+During mixed-version compatibility, `RMD_INSTANCE_REGISTRY` remains the fallback
+only when the selected name is absent. The launcher qualifies the selected bytes,
+physical identity, Docker source namespace and image reader before any replacement.
+The generated container arguments contain exactly one
 `--mount type=bind,src=<qualified-host-file>,dst=/home/node/.config/remudero/selected-registry.yaml,readonly`;
 only the trusted daemon/serve readers receive that container path, the original
 digest, instance name and `RMD_INSTANCE_REGISTRY_FILE_BINDING` identity. Both the
