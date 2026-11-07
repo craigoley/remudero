@@ -2738,7 +2738,9 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
               Config?: { Env?: unknown };
             };
           const env = live.Config?.Env;
-          const expectedEnv = [`RMD_INSTANCE_NAME=${selectedInstance}`, `RMD_INSTANCE_REGISTRY=${selectedFile}`,
+          const selectionName = Array.isArray(env) && env.some(value => typeof value === "string" && value.split("=")[0] === "RMD_SELECTED_INSTANCE_REGISTRY")
+            ? "RMD_SELECTED_INSTANCE_REGISTRY" : "RMD_INSTANCE_REGISTRY";
+          const expectedEnv = [`RMD_INSTANCE_NAME=${selectedInstance}`, `${selectionName}=${selectedFile}`,
             `RMD_INSTANCE_REGISTRY_DIGEST=${packet[2]}`, `RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet[4]}`];
           const stateMounts = live.Mounts?.filter(mount => mount.Destination === o.stateRoot);
           const registryMounts = live.Mounts?.filter(mount => mount.Destination === selectedFile);

@@ -51,7 +51,8 @@ import {
 } from "../src/run-task.js";
 
 test("selected runtime CLI entry refuses invalid input without changing unselected read-only dispatch", async (t) => withTempDir("selected-runtime-cli", async root => {
-  const fixture = { selected: join(root, "selected.yaml") }, prior = process.env.RMD_INSTANCE_REGISTRY, argv = process.argv;
+  const fixture = { selected: join(root, "selected.yaml") }, prior = process.env.RMD_INSTANCE_REGISTRY,
+    priorSelected = process.env.RMD_SELECTED_INSTANCE_REGISTRY, argv = process.argv;
   writeFileSync(fixture.selected, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
   const reachedExit = new Error("contained CLI exit");
   let code: number | string | undefined;
@@ -63,6 +64,7 @@ test("selected runtime CLI entry refuses invalid input without changing unselect
   });
   process.argv = [process.execPath, "rmd", "daemon"];
   try {
+    delete process.env.RMD_SELECTED_INSTANCE_REGISTRY;
     process.env.RMD_INSTANCE_REGISTRY = "";
     await assert.rejects(main(), /selected instance registry unavailable/);
     assert.equal(code, undefined, "invalid selection stops before the actual dispatch exit");
@@ -75,6 +77,7 @@ test("selected runtime CLI entry refuses invalid input without changing unselect
   } finally {
     process.argv = argv;
     if (prior === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = prior;
+    if (priorSelected === undefined) delete process.env.RMD_SELECTED_INSTANCE_REGISTRY; else process.env.RMD_SELECTED_INSTANCE_REGISTRY = priorSelected;
   }
 }));
 
@@ -88,7 +91,7 @@ const registry = (mode?: string) => [
   "",
 ].join("\n");
 
-type RuntimeRegistryRunner = <T>(operation: () => T | Promise<T>, input: { envPath?: string; instanceName?: string }) => Promise<T>;
+type RuntimeRegistryRunner = <T>(operation: () => T | Promise<T>, input?: { envPath?: string; instanceName?: string }) => Promise<T>;
 function runtimeRegistryRunner(): RuntimeRegistryRunner {
   const run = Reflect.get(runtimeRegistry, "withInstanceRegistryRuntime");
   assert.equal(typeof run, "function", "production invocation binding must exist, not a supplied current-subject fixture");
@@ -105,7 +108,8 @@ function runtimeRegistryFixture(mode = "shadow") {
 }
 
 test("private registry selection reaches real host and daemon readers: actual entry points", async () => {
-  const fixture = runtimeRegistryFixture(), prior = process.env.RMD_INSTANCE_REGISTRY;
+  const fixture = runtimeRegistryFixture(), prior = process.env.RMD_INSTANCE_REGISTRY,
+    priorSelected = process.env.RMD_SELECTED_INSTANCE_REGISTRY;
   const reachedHost = new Error("contained host boundary reached");
   let reads = 0, observed: string | undefined;
   const host = new Proxy({}, { get: () => {
@@ -119,19 +123,36 @@ test("private registry selection reaches real host and daemon readers: actual en
   ];
   try {
     for (const enter of entries) {
+      delete process.env.RMD_SELECTED_INSTANCE_REGISTRY;
       process.env.RMD_INSTANCE_REGISTRY = "";
       const before = reads;
       await assert.rejects(enter(), /selected instance registry unavailable/);
-      assert.equal(reads, before, "explicit invalid selection must not touch the command host");
+      assert.equal(reads, before, "explicit invalid legacy selection must not touch the command host");
       process.env.RMD_INSTANCE_REGISTRY = fixture.selected;
       await assert.rejects(enter(), error => error === reachedHost);
-      assert.equal(observed, "shadow", "actual entrypoint host reads must see selected default bytes");
+      assert.equal(observed, "shadow", "legacy selected-path alias keeps working during transition");
       delete process.env.RMD_INSTANCE_REGISTRY;
       await assert.rejects(enter(), error => error === reachedHost);
       assert.equal(observed, "live", "genuine absence retains the existing legacy reader");
+
+      process.env.RMD_INSTANCE_REGISTRY = join(fixture.root, ".remudero", "daemon-instances.yaml");
+      process.env.RMD_SELECTED_INSTANCE_REGISTRY = fixture.selected;
+      await assert.rejects(enter(), error => error === reachedHost);
+      assert.equal(observed, "shadow", "explicit selection wins while the old variable remains the legacy catalog");
+      process.env.RMD_SELECTED_INSTANCE_REGISTRY = join(fixture.root, "missing-selected.yaml");
+      const beforeInvalid = reads;
+      await assert.rejects(enter(), /selected instance registry unavailable/);
+      assert.equal(reads, beforeInvalid, "an invalid explicit selection never falls back to the valid legacy catalog");
+      process.env.RMD_SELECTED_INSTANCE_REGISTRY = "";
+      await assert.rejects(enter(), /selected instance registry unavailable/);
+      assert.equal(reads, beforeInvalid, "an explicitly empty selected path remains present and refuses without reading the legacy catalog");
+      delete process.env.RMD_SELECTED_INSTANCE_REGISTRY;
+      await assert.rejects(enter(), error => error === reachedHost);
+      assert.equal(observed, "live", "absence of the new variable retains the old catalog-path fallback");
     }
   } finally {
     if (prior === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = prior;
+    if (priorSelected === undefined) delete process.env.RMD_SELECTED_INSTANCE_REGISTRY; else process.env.RMD_SELECTED_INSTANCE_REGISTRY = priorSelected;
     fixture.cleanup();
   }
 });
@@ -385,7 +406,8 @@ else { process.stderr.write("forbidden fixture transport"); process.exitCode=97;
     await runtimeRegistryRunner()(async () => {
       const packet = runtimeRegistry.trustedInstanceRegistryLaunchPacket().split("\n");
       const inspect = { Name: `/${container}`, Config: { Env: ["RMD_INSTANCE_NAME=worker",
-        `RMD_INSTANCE_REGISTRY=${fixture.selected}`, `RMD_INSTANCE_REGISTRY_DIGEST=${packet[2]}`,
+        "RMD_INSTANCE_REGISTRY=/home/node/Remudero/.remudero/daemon-instances.yaml",
+        `RMD_SELECTED_INSTANCE_REGISTRY=${fixture.selected}`, `RMD_INSTANCE_REGISTRY_DIGEST=${packet[2]}`,
         `RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet[4]}`] }, Mounts: [
         { Type: "bind", Source: hostRoot, Destination: containerRoot, RW: true },
         { Type: "bind", Source: "/srv/synthetic/private.yaml", Destination: fixture.selected, RW: false },
@@ -411,10 +433,18 @@ else { process.stderr.write("forbidden fixture transport"); process.exitCode=97;
       assert.ok(calls().some(args => args[0] === "docker" && args[1] === "exec" && args[2] === container));
       assert.ok(calls().some(args => args[0] === "docker" && args[1] === "manifest" && args.includes(`synthetic.invalid/selected-worker:${sha}`)));
       assert.equal(calls().some(args => args.includes("remudero-daemon")), false, "the public core is never an image fallback");
+      const oldNameOnly = { ...inspect, Config: { Env: inspect.Config.Env.filter(line => !line.startsWith("RMD_SELECTED_INSTANCE_REGISTRY="))
+        .map(line => line.startsWith("RMD_INSTANCE_REGISTRY=") ? `RMD_INSTANCE_REGISTRY=${fixture.selected}` : line) } };
+      const compatible = await read(oldNameOnly);
+      assert.ok(compatible.rows.some(row => row.pipeline === "image"), "an old-name-only container with the selected file remains readable");
+      assert.ok(calls().some(args => args[0] === "docker" && args[1] === "manifest" && args.includes(`synthetic.invalid/selected-worker:${sha}`)),
+        "the compatible container reaches the real image manifest reader");
       assert.throws(() => realDeployDeps({ installPath: fixture.root, stateRoot: containerRoot, ledgerPath,
         daemonLabel: "fixture", serveLabel: "fixture", servePort: 1, uid: 1 }), /selected instance registry unavailable/,
         "a synchronous supervisor cannot claim fresh asynchronous container binding");
       for (const invalid of ["invalid json", { ...inspect, Name: "/another-instance" },
+        { ...inspect, Config: { Env: inspect.Config.Env.map(line => line.startsWith("RMD_SELECTED_INSTANCE_REGISTRY=")
+          ? "RMD_SELECTED_INSTANCE_REGISTRY=" : line) } },
         { ...inspect, Config: { Env: inspect.Config.Env.map(line => line === "RMD_INSTANCE_NAME=worker" ? "RMD_INSTANCE_NAME=other" : line) } },
         { ...inspect, Mounts: inspect.Mounts.map((mount, i) => i === 0 ? { ...mount, Source: "/srv/synthetic/other-state" } : mount) },
         { ...inspect, Mounts: inspect.Mounts.map((mount, i) => i === 1 ? { ...mount, RW: true } : mount) },
@@ -1285,7 +1315,7 @@ test("selected Claude SDK boundary snapshots private denials across queued argum
 });
 
 test("selected Claude scopes and worker environment refuse unknown private access before query", async () => {
-  for (const mode of ["tmp-overlap", "tmp-relative", "home-override", "unsafe-allow", "unsafe-read", "private-policy", "private-env", "selection-env"] as const) {
+  for (const mode of ["tmp-overlap", "tmp-relative", "home-override", "unsafe-allow", "unsafe-read", "private-policy", "private-env", "selection-env", "selected-registry-env"] as const) {
     const fixture = runtimeRegistryFixture(), sink = { calls: 0 };
     try {
       const args = privateClaudeArgs(fixture, sink), policy = JSON.parse(readFileSync(args.settingsFile, "utf8"));
@@ -1297,6 +1327,7 @@ test("selected Claude scopes and worker environment refuse unknown private acces
       if (mode === "private-policy") policy.sandbox.filesystem = { denyRead: [fixture.selected] };
       if (mode === "private-env") args.env!.ARBITRARY_FIXTURE_VALUE = fixture.selected;
       if (mode === "selection-env") args.env!.RMD_INSTANCE_REGISTRY_DIGEST = "fixture-not-a-worker-grant";
+      if (mode === "selected-registry-env") args.env!.RMD_SELECTED_INSTANCE_REGISTRY = fixture.selected;
       writeFileSync(args.settingsFile, JSON.stringify(policy));
       await assert.rejects(runtimeRegistryRunner()(() => spawnWorker(args), { envPath: fixture.selected }), error => {
         assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);
@@ -1645,16 +1676,18 @@ test("private registry selection preserves owner holds and private-safe boundari
     // Each child is a cold tsx start of the whole CLI graph, so its wall time is the host's load, not the verb's.
     // The first child is the measurement; every later one may take the slowest seen times the spawns after the first.
     const stopPaths = ["", join(root, "missing-private.yaml"), selected], refusedPaths = ["", join(root, "missing-private.yaml")];
-    const spawnsAfterFirst = stopPaths.length + refusedPaths.length * 2;
+    const spawnsAfterFirst = stopPaths.length + refusedPaths.length * 2 + 2;
     let slowestMs: number | undefined;
-    const child = async (verb: string, path: string) => {
+    const child = async (verb: string, path: string | undefined, activeSelection?: string) => {
       const bound = slowestMs === undefined ? undefined : slowestMs * spawnsAfterFirst;
       const started = process.hrtime.bigint();
       const proc = spawn(process.execPath,
         ["--import", "tsx", "--input-type=module", "-e",
           `import { main } from "#src/run-task.js"; process.argv = [process.execPath, "rmd", ${JSON.stringify(verb)}];
            await main({ checkFreshness: () => ({ status: "guarded" }) }).catch(error => { console.error(error.message); process.exitCode = 2; });`],
-        { cwd: REPO_ROOT, env: { ...withoutRegistrySelection(process.env), HOME: home, GH_TOKEN: "fixture-not-a-credential", RMD_INSTANCE_REGISTRY: path,
+        { cwd: REPO_ROOT, env: { ...withoutRegistrySelection(process.env), HOME: home, GH_TOKEN: "fixture-not-a-credential",
+          ...(path === undefined ? {} : { RMD_INSTANCE_REGISTRY: path }),
+          ...(activeSelection === undefined ? {} : { RMD_SELECTED_INSTANCE_REGISTRY: activeSelection }),
           GH_CONFIG_DIR: join(home, "gh"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = "";
       proc.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
@@ -1685,6 +1718,16 @@ test("private registry selection preserves owner holds and private-safe boundari
       assert.equal(existsSync(join(state, "state", "PAUSE")), false, "an unknown target never becomes a hold on another instance");
       assert.equal((await child("resume", path)).status, 2, "resume must still require selected evidence");
     }
+    const emptySelection = await child("pause", selected, "");
+    assert.equal(emptySelection.status, 2, "an explicitly empty new selection cannot borrow the valid legacy path");
+    assert.match(emptySelection.stderr, /REFUSED/);
+    assert.equal(existsSync(join(state, "state", "PAUSE")), false);
+    const activeOnly = await child("pause", undefined, selected);
+    assert.equal(activeOnly.status, 0, activeOnly.stderr);
+    assert.equal(existsSync(join(state, "state", "PAUSE")), true, "owner PAUSE honors only the valid new selection");
+    assert.equal((activeOnly.stdout + activeOnly.stderr).includes(root), false,
+      "owner diagnostics do not reveal the selected state root");
+    rmSync(join(state, "state", "PAUSE"));
     const paused = await child("pause", selected);
     assert.equal(paused.status, 0, paused.stderr);
     assert.equal((paused.stdout + paused.stderr).includes(root), false, "selected success diagnostics hide private state paths");
