@@ -737,6 +737,7 @@ fs_id() {
 
 DOCKER_OK=1
 DOCKER_MOUNTS=""
+DOCKER_IDS=""
 container_path_identity() {
   [ -e "$1" ] || return 1
   stat -Lc '%d:%i' -- "$1" 2>/dev/null || stat -Lf '%d:%i' -- "$1" 2>/dev/null
@@ -745,6 +746,7 @@ snapshot_docker() {
   local ids id mounts mount identity
   DOCKER_IDENTITIES="|"; DOCKER_PATH_REASON="Docker mount snapshot failed"
   if ! ids="$($DOCKER_CMD ps -q 2>/dev/null)"; then DOCKER_OK=0; return; fi
+  DOCKER_IDS="$ids"
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     if ! mounts="$($DOCKER_CMD inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$id" 2>/dev/null)"; then
@@ -1920,19 +1922,54 @@ expire_preserved_copies() {
 # the same files DUMP_RESUMABLE_ROOTS keeps uncompressed for a resume; a resume happens within its
 # run, never a week later. On 2026-11-07 18,426 logs idle over 7 days held 10 GB of /mnt/rmd.
 sweep_codex_sessions() {
-  local dir f bytes n=0
+  local dir f bytes id mounts source dest extra resolved identity held i cursor suffix
+  local -a source_ids=() destinations=()
   [ "$CODEX_SESSION_DAYS" -gt 0 ] || return 0
+  [ -d "$CLEAN_HOME/.codex/sessions" ] || [ -d "$CLEAN_HOME/.codex/archived_sessions" ] || return 0
+  snapshot_docker
+  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $CLEAN_HOME/.codex: $DOCKER_PATH_REASON (fail closed)"; return; fi
+  snapshot_open
+  if [ "$OPEN_OK" != 1 ]; then log "KEEP $CLEAN_HOME/.codex: $OPEN_FAILURE (fail closed)"; return; fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if ! mounts="$($DOCKER_CMD inspect --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' "$id" 2>/dev/null)"; then
+      log "KEEP $CLEAN_HOME/.codex: container log aliases unreadable (fail closed)"; return
+    fi
+    while IFS=$'\t' read -r source dest extra; do
+      [ -n "$source$dest$extra" ] || continue
+      case "$source:$dest" in /*:/*) ;; *) log "KEEP $CLEAN_HOME/.codex: container log aliases invalid (fail closed)"; return ;; esac
+      [ -z "$extra" ] || { log "KEEP $CLEAN_HOME/.codex: container log aliases invalid (fail closed)"; return; }
+      [ -d "$source" ] || continue
+      identity="$(container_path_identity "$source")" || { log "KEEP $CLEAN_HOME/.codex: mount source unreadable (fail closed)"; return; }
+      source_ids+=("$identity"); destinations+=("${dest%/}")
+    done <<< "$mounts"
+  done <<< "$DOCKER_IDS"
   for dir in "$CLEAN_HOME/.codex/sessions" "$CLEAN_HOME/.codex/archived_sessions"; do
     [ -d "$dir" ] && [ ! -L "$dir" ] || continue
     while IFS= read -r -d '' f; do
-      keep_container_path "$f" && continue
-      if is_open "$f"; then log "KEEP $f: held open by a process"; continue; fi
+      # A mounted Codex HOME is expected; a bind-mounted log itself must still stay in place.
+      identity="$(container_path_identity "$f")" || { log "KEEP $f: log identity unreadable (unknown)"; continue; }
+      case "$DOCKER_IDENTITIES" in *"|$identity|"*) log "KEEP $f: running container mount"; continue ;; esac
+      resolved="$(cd -P -- "${f%/*}" 2>/dev/null && pwd -P)" || { log "KEEP $f: log path unreadable (unknown)"; continue; }
+      resolved="$resolved/${f##*/}"; held=0
+      if is_open "$f" || is_open "$resolved"; then held=1; fi
+      if [ "${#source_ids[@]}" -gt 0 ]; then
+        cursor="${resolved%/*}"; suffix="/${resolved##*/}"
+        while :; do
+          identity="$(container_path_identity "$cursor")" || { held=1; break; }
+          for i in "${!source_ids[@]}"; do
+            if [ "$identity" = "${source_ids[$i]}" ] && is_open "${destinations[$i]}$suffix"; then held=1; fi
+          done
+          [ "$cursor" = / ] && break
+          suffix="/${cursor##*/}$suffix"; cursor="${cursor%/*}"; [ -n "$cursor" ] || cursor=/
+        done
+      fi
+      if [ "$held" = 1 ]; then log "KEEP $f: held open by a process"; continue; fi
       bytes="$(du_bytes "$f")"
       log "REMOVE $f: Codex session log idle ${CODEX_SESSION_DAYS} days"
-      act rm -f -- "$f" && { tally "codex-sessions $dir" "$bytes"; n=$((n + 1)); }
+      act rm -f -- "$f" && tally "codex-sessions $dir" "$bytes"
     done < <($FIND_CMD -P "$dir" -xdev -type f \( -name 'rollout-*.jsonl' -o -name 'rollout-*.jsonl.zst' -o -name 'rollout-*.jsonl.gz' \) \
                -mmin "+$(( CODEX_SESSION_DAYS * 1440 ))" -cmin "+$(( CODEX_SESSION_DAYS * 1440 ))" -print0 2>/dev/null)
-    [ "$n" = 0 ] || [ "$DRY_RUN" = 1 ] || find "$dir" -mindepth 1 -depth -type d -empty -delete 2>/dev/null
   done
 }
 
@@ -1941,7 +1978,7 @@ sweep_codex_sessions() {
 # everything in it is idle and nothing holds it, unless it holds state, keys or coordination files.
 # On 2026-11-07, 693 such entries (903 MB) sat in Azure's rmd-work, some from August.
 AGENT_SCRATCH_HOLD=(-name .rmd-janitor-keep -o \( -type f \( -name ledger -o -name 'ledger.*' \) \) -o -name '*.ndjson'
-  -o -name '*.jsonl' -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' -o -name .env -o -name '.env.*'
+  -o -name '*.jsonl' -o -name '*.json' -o -name state -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' -o -name .env -o -name '.env.*'
   -o -name '*.pem' -o -name '*.key' -o -name 'id_rsa*' -o -name 'id_ed25519*' -o -type s -o -type p)
 sweep_agent_scratch() {
   local root="${1%/}" e found idle_status bytes
@@ -1950,7 +1987,7 @@ sweep_agent_scratch() {
     { [ -e "$e" ] || [ -L "$e" ]; } || continue
     keep_container_path "$e" && continue
     if [ -d "$e" ] && [ ! -L "$e" ]; then
-      found="$(find -P "$e" -maxdepth 3 -name .git -print -quit 2>/dev/null)" || { log "KEEP $e: repository scan failed (unknown)"; continue; }
+      found="$($FIND_CMD -P "$e" \( -name .git -o \( -type d -name objects -exec test -f '{}/../HEAD' \; -exec test -d '{}/../refs' \; \) \) -print -quit 2>/dev/null)" || { log "KEEP $e: repository scan failed (unknown)"; continue; }
       [ -z "$found" ] || continue
     fi
     is_idle "$e"; idle_status=$?
