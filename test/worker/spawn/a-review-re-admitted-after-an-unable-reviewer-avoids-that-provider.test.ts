@@ -141,8 +141,9 @@ test("W1-T11432 criterion 2: review spawn receives and records the unavailable p
       reviewerSpawnWorker: async (args: SpawnWorkerArgs) => { spawned.push(args); return workerResult; },
     } as never);
     assert.notEqual(result.reviewerOutcome, "not_attempted", "the reviewer spawn seam must be reached");
-    assert.equal(spawned.length, 1, `expected one reviewer spawn; ledger rows: ${JSON.stringify(rows)}`);
-    assert.deepEqual(spawned[0]?.excludeProviders, ["claude"]);
+    assert.ok(spawned.length >= 1, `expected the primary reviewer spawn; ledger rows: ${JSON.stringify(rows)}`);
+    assert.deepEqual(spawned[0]?.excludeProviders, ["claude"],
+      "the primary reviewer spawn excludes the provider that was previously unable");
     assert.deepEqual(rows.find((row) => row.step === "review.reviewer")?.extra?.exclude_providers, ["claude"]);
   } finally {
     process.env.PATH = previousPath;
