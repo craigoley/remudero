@@ -127,10 +127,10 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
     transport.stampGhRead(transport.ghReadCadenceStampPath(process.env));
     Atomics.wait = (() => { legacySleeps += 1; return "timed-out"; }) as typeof Atomics.wait;
     try {
-      const delivered = await withLiveWritesAllowed(() => transport.withDaemonGhTransportFloor(() => escalate({ ...ask, taskId: "LEGACY-LATCH" }, { issues: ghIssueGateway("fixture", "loop"), ledgerPath: join(root, "legacy.ndjson"), runId: "LEGACY", triage: { mode: "shadow" } })));
+      const delivered = await withLiveWritesAllowed(() => escalate({ ...ask, taskId: "LEGACY-LATCH" }, { issues: ghIssueGateway("fixture", "loop"), ledgerPath: join(root, "legacy.ndjson"), runId: "LEGACY", triage: { mode: "shadow" } }));
       assert.equal(typeof delivered, "string", "the documented legacy latch contract stays synchronous");
       assert.equal(delivered, "https://github.com/fixture/loop/issues/7");
-      assert.ok(legacySleeps > 0, "retain the explicitly documented unsafe-retry delivery exception until its durable follow-up");
+      assert.ok(legacySleeps > 0, "standalone CLI callers retain their synchronous wait contract");
       const beforeCustom = legacySleeps;
       let assigned = false;
       shim.addRoute({ when: "issue edit", delaySeconds: 0.03 });
@@ -145,16 +145,9 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
         }
         return out;
       } });
-      const customDelivered = await withLiveWritesAllowed(() => transport.withDaemonGhTransportFloor(() => {
-        const url = escalate({ ...ask, taskId: "LEGACY-CUSTOM-LATCH" }, { issues: routed,
-          ledgerPath: join(root, "legacy-custom.ndjson"), runId: "LEGACY-CUSTOM", triage: { mode: "shadow" } });
-        const stillLoop = cache();
-        try { assert.throws(() => transport.applyGhReadCadence(read, stillLoop.deps), transport.GhPaceWouldBlockError,
-          "a legacy delivery exception must not escape its synchronous call"); }
-        finally { rmSync(stillLoop.root, { recursive: true, force: true }); }
-        return url;
-      }));
-      assert.equal(customDelivered, "https://github.com/fixture/loop/issues/7", "an unsafe custom route keeps synchronous delivery before its caller consumes the incident");
+      const customDelivered = await withLiveWritesAllowed(() => escalate({ ...ask, taskId: "LEGACY-CUSTOM-LATCH" }, { issues: routed,
+        ledgerPath: join(root, "legacy-custom.ndjson"), runId: "LEGACY-CUSTOM", triage: { mode: "shadow" } }));
+      assert.equal(customDelivered, "https://github.com/fixture/loop/issues/7", "standalone custom callers keep synchronous delivery before consuming the incident");
       assert.equal(assigned, true, "the supplied route retains its real post-create assignment");
       assert.ok(legacySleeps > beforeCustom, "a custom legacy caller keeps its existing positive wait contract");
     } finally { Atomics.wait = previousWait; }
@@ -182,6 +175,15 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
           createFixRungWorktreeImpl: () => { throw new Error("fixture must not create a repair worktree"); },
         });
         const rows = (): Array<Record<string, unknown>> => readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+        const cancelBefore = shim.events().length;
+        await withLiveWritesAllowed(() => transport.withDaemonGhTransportFloor(() =>
+          effects.escalateCancelledCheck!(pr, { name: "required-check" }, "cancelled twice")));
+        const cancelCommands = shim.events().slice(cancelBefore).filter((event) => event.phase === "start");
+        assert.ok(cancelCommands.some((event) => event.args.slice(0, 2).join(" ") === "issue create"), "the production cancellation callback must deliver through the real default gateway");
+        for (const event of cancelCommands) {
+          assertRoute(event.args);
+          assert.ok(during.has(event.id), `cancellation escalation must yield to the loop timer during ${event.args.join(" ")}`);
+        }
         const beforeEvents = shim.events().length;
         try {
           await withLiveWritesAllowed(() => transport.withDaemonGhTransportFloor(() => effects.dispatchFix(pr, { unmetCriteria: [] })));

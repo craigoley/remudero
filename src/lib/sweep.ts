@@ -3441,15 +3441,15 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     // W1-T1223 (design iii) — a SECOND cancellation of the SAME required check on the SAME head
-    // sha names the check and both cancellations to a human. `tryEscalate` (not the throwing
-    // `escalate`), because this runs inside the sweep's own per-PR loop alongside every other
-    // effect (W1-T254's throw containment) — a delivery failure here degrades to an
-    // `escalation.failed` ledger row rather than aborting the rest of the pass.
+    // sha names the check and both cancellations to a human. `tryEscalateAsync` (not the
+    // synchronous gateway), because this runs inside the sweep's own per-PR loop and must not
+    // block its cadence. A delivery failure degrades to an `escalation.failed` ledger row rather
+    // than aborting the rest of the pass.
     // `findDuplicateEscalation` (inside `escalate()`/`tryEscalate()`) already dedupes a repeated
     // call for the SAME (taskId, headSha, cause) into one issue, so this is safe to call every
     // pass the same pair keeps observing a re-cancellation, never opening a sibling issue.
     escalateCancelledCheck: (pr, check, reason, kind = "cancelled-twice") => {
-      tryEscalate(
+      return tryEscalateAsync(
         {
           class: "BLOCKED",
           taskId: escalationTaskIdFor(pr),
