@@ -1,0 +1,31 @@
+id: incident-1ca90b0f1832897e
+ts: 2026-11-07T07:41:16.908Z
+raw: >-
+  Incident 1ca90b0f1832: flow pr-stage-stall:own-red:required checks red —
+  coverage-ratchet refused by diff-coverage — ci-log fix, fix round <n> — judge:
+  change-approach (The first round made no diff and ended NEEDS_DESIGN. All
+  three semantic revie...)
+
+  First seen: 2026-11-07T07:31:57.351Z
+
+  Last seen: 2026-11-07T07:31:57.351Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=17132 own-red: repeat: "required checks red — coverage-ratchet refused by diff-coverage — ci-log fix, fix round <n> — judge: change-approach (The first round made no diff and ended NEEDS_DESIGN. All three semantic revie...)" x14
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#1ca90b0f1832897e69538bba5909786c6637efcdaabdd1442133b2a352c449a6
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

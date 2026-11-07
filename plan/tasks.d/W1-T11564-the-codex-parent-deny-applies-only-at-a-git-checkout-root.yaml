@@ -1,0 +1,39 @@
+- id: W1-T11564
+  title: The private-registry Codex profile denies the working directory's parent only at a git checkout root, so a plain probe directory keeps its parent readable and Codex can load AGENTS.md
+  repo: remudero
+  depends_on: []
+  priority: 0.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # narrows where W1-T11550's added deny applies; containment keeps it at every worktree, the gate is unchanged
+  band_meaning: blast-radius
+  origin: operator-session#containment-probe-2026-11-07
+  plan_refs:
+    - W1-T11550
+  files:
+    - src/lib/worker-provider.ts
+    - test/deploy/a-private-registry-codex-profile-can-start-its-own-sandbox.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: For reader, writer and review intents, a working directory that is not a git checkout root (no .git entry) gets no deny on its parent in either profile surface, and the root deny stays; a git checkout root still gets W1-T11550's parent deny
+      proof: "grep: W1-T11564 criterion 1 in test/deploy/a-private-registry-codex-profile-can-start-its-own-sandbox.test.ts"
+  rationale: |
+    OBSERVED 2026-11-07 on remudero-daemon after W1-T11550 reached the engine (engine.built 1a0020984 at 09:28:19Z):
+    - Containment now passes: 8 runs reported contained true with an OS denial seen, against 0 since 2026-11-05.
+    - Every one of those 8 runs then failed its isolation probe within about 2 s with isolation_preflight_failed: "Failed to create session: failed to load AGENTS.md instructions for environment local: Permission denied (os error 13)".
+    - That error first appears at 09:34:25Z. None appear from 2026-11-06 18:00Z to the engine change.
+    - The isolation probe (defaultExecutor in src/lib/isolation.ts) runs in join(config.root, "tmp", "isolation-probe-<ts>"), a plain directory with no .git. Codex reads AGENTS.md upward from its working directory to the project root. With no .git to stop at, it reaches the denied parent, gets EACCES rather than ENOENT, and aborts.
+    - Containment passes because worker worktrees and review checkouts are git checkout roots, where that walk stops.
+    So builds are still blocked, now at isolation instead of containment.
+  design: |
+    In withPrivateRegistryCodexProfile, keep W1-T11550's parent deny only when join(cwd, ".git") exists. Every other condition stays. A directory that is not a checkout root keeps the pre-W1-T11550 shape, where a write beside it lands on the private tmpfs; the containment probe only runs in worktrees.
+    NOT IN SCOPE:
+    - src/lib/isolation.ts and src/lib/containment.ts;
+    - moving the isolation probe's directory.
+  note: |
+    Proof that counts: isolation.probe rows with isolated true on Codex-served runs after this reaches the engine.
+    reservation hand-off: run-unfiled-1794049271183 -> run-unfiled-1794049271183
+    Reserved with rmd next-task-id (W1-T11564 on run-unfiled-1794049271183). From the operator session's 2026-11-07 check of W1-T11550 in production.
