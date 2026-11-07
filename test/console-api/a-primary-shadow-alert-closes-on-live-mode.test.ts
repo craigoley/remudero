@@ -3,8 +3,12 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Socket } from "node:net";
-import { IncomingMessage, ServerResponse } from "node:http";
+import { createService } from "#src/lib/service.js";
+import type { AddressInfo } from "node:net";
+import { createBoardProjection } from "#src/lib/board-projection.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { acquireLease, flushReadModelTransactions } from "#src/lib/read-model-db.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import { computeBoardSnapshot } from "#src/lib/board.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { escalationClasses, escalationDecisions } from "#src/lib/now-decisions.js";
@@ -21,41 +25,56 @@ import type { Plan } from "#src/lib/plan.js";
 import type { OpenPrView } from "#src/lib/sweep.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 
-function displayedAlertDecision(ledgerPath: string, all: OpenIssue[], closed: Set<string>, digest: string) {
-  const board = computeBoardSnapshot({ plan: { tasks: [], byId: new Map() }, ledgerPath,
-    github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined,
-      prBody: () => undefined, listOpenHeadBranches: () => [], listMergedHeadBranches: () => [],
-      issueByUrl: url => { const issue = all.find(i => i.url === url);
-        return issue ? { state: closed.has(url) ? "CLOSED" : "OPEN", title: issue.title } : null; } } });
-  const decisions = escalationDecisions("core", board.tasks, escalationClasses(readLedgerLines(ledgerPath)));
-  assert.equal(decisions.length, 1, "the production board offers exactly one action for the live issue");
-  const decision = decisions[0]!;
-  assert.equal(decision.answer.fields.taskId, `PRIMARY-SHADOW-${digest}`,
-    "the board action acknowledges the issue's displayed selection, not its original birth digest");
-  assert.equal(decision.answer.path, "/v1/manual/approve", "the MANUAL notice uses its actual operator route");
-  return decision;
+async function displayedAlertDecision(ledgerPath: string, all: OpenIssue[], closed: Set<string>, digest: string) {
+  const plan = { tasks: [], byId: new Map() } as unknown as Plan;
+  const github = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined,
+    prBody: () => undefined, listOpenHeadBranches: () => [], listMergedHeadBranches: () => [],
+    issueByUrl: (url: string) => { const issue = all.find(i => i.url === url);
+      return issue ? { state: closed.has(url) ? "CLOSED" : "OPEN", title: issue.title } : null; } };
+  const full = computeBoardSnapshot({ plan, ledgerPath, github });
+  // A later normal task row displaces lastActivity retention; the published binding must survive independently.
+  appendLedger(ledgerPath, { run_id: "projection-followup", task_id: `PRIMARY-SHADOW-${digest}`,
+    step: "sweep.disposed", pr_number: 11, disposition: "waiting", reason: "ordinary follow-up" });
+  const root = join(ledgerPath, "..");
+  const db = openProjectorReadModel(join(root, "read-model-home"), "core");
+  try {
+    const acquired = acquireLease(db, { holder: "primary-shadow-operator-fixture" }); assert.ok(acquired.ok);
+    createLedgerProjector({ ledgerDir: root, db, lease: acquired.lease }).tick();
+    const retained = createBoardProjection({ db, ledgerPath, readPlan: () => plan, github,
+      readCreditStore: () => ({}), readCreditOverrideFile: () => "" });
+    while (!retained.update({ force: true }).caughtUp) { /* ingest the actual fact store */ }
+    for (const [board, rows] of [[full, readLedgerLines(ledgerPath)],
+      [computeBoardSnapshot({ plan, ledgerPath, github, readLedger: () => [...retained.rows()] }), retained.rows()]] as const) {
+      const decisions = escalationDecisions("core", board.tasks, escalationClasses(rows));
+      assert.equal(decisions.length, 1, "both full and retained production boards offer exactly one live issue action");
+      const decision = decisions[0]!;
+      assert.equal(decision.answer.fields.taskId, `PRIMARY-SHADOW-${digest}`,
+        "the board action acknowledges the delivered selection, not its birth or pending digest");
+      assert.equal(decision.answer.path, "/v1/manual/approve", "the MANUAL notice uses its actual operator route");
+    }
+    return escalationDecisions("core", full.tasks, escalationClasses(readLedgerLines(ledgerPath)))[0]!;
+  } finally { db.close(); await flushReadModelTransactions(); }
 }
 
 async function handleDisplayedAlert(root: string, ledgerPath: string, all: OpenIssue[], closed: Set<string>,
   digest: string, markHandled = false): Promise<void> {
-  const decision = displayedAlertDecision(ledgerPath, all, closed, digest);
+  const decision = await displayedAlertDecision(ledgerPath, all, closed, digest);
   const deps = { root, ledgerPath, issues: { close: (url: string) => { closed.add(url); } } };
   const route = markHandled ? buildEscalationMarkHandledRoute(deps) : buildApproveManualRoute(deps);
   assert.equal(route.path, markHandled ? "/v1/escalation/mark-handled" : decision.answer.path);
-  const socket = new Socket();
-  const req = new IncomingMessage(socket);
-  req.headers = { authorization: "Bearer write", "content-type": "application/json" };
-  req.push(JSON.stringify({ ...decision.answer.fields, ...(markHandled ? { class: "MANUAL", disposition: "acted" } : {}) }));
-  req.push(null);
-  const response = new ServerResponse(req);
+  const server = createService({ tokens: { read: "read", write: "write" }, routes: [route] });
   try {
-    await route.handler(req, response, { params: {} });
-    assert.equal(response.statusCode, 200);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}${route.path}`, {
+      method: "POST", headers: { authorization: "Bearer write", "content-type": "application/json" },
+      body: JSON.stringify({ ...decision.answer.fields, ...(markHandled ? { class: "MANUAL", disposition: "acted" } : {}) }),
+    });
+    assert.equal(response.status, 200, await response.text());
     const row = readLedgerLines(ledgerPath).at(-1)!;
     assert.equal(row.step, markHandled ? "panel.escalation_marked_handled" : "panel.manual_approved");
     assert.equal(row.task_id, `PRIMARY-SHADOW-${digest}`);
     assert.equal(row.issue_url, decision.answer.fields.issueUrl);
-  } finally { req.destroy(); response.destroy(); socket.destroy(); }
+  } finally { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve())); }
 }
 
 test("W1-T11444 criterion 2: the general lifecycle cannot retire the primary episode through one terminal PR", async () => {
@@ -110,8 +129,9 @@ test("W1-T11444 criterion 2: acknowledgement after an in-place selection update 
     await channel().refuse(pr(11));
     selection.digest = "b".repeat(64); now += 1;
     failEdit = true;
-    await assert.rejects(channel().refuse(pr(12)), /selection edit delivery failed/);
-    displayedAlertDecision(ledgerPath, all, closed, "a".repeat(64));
+    await channel().refuse(pr(12));
+    await assert.rejects(channel().reconcile(), /selection edit delivery failed/);
+    await displayedAlertDecision(ledgerPath, all, closed, "a".repeat(64));
     assert.ok(all[0]!.body!.includes(`Selection digest: ${"a".repeat(64)}`));
     failEdit = false;
     await channel().reconcile();
@@ -130,6 +150,7 @@ test("W1-T11444 criterion 2: acknowledgement after an in-place selection update 
     assert.equal(all[1]!.body!.includes("/pull/13"), false, "silenced observations must not leak into the reopened alert");
     selection.digest = "d".repeat(64);
     await channel().refuse(pr(15));
+    await channel().reconcile();
     assert.equal(all.length, 2, "the reopened episode also updates its displayed selection in place");
     await handleDisplayedAlert(root, ledgerPath, all, closed, selection.digest, true);
     await channel().refuse(pr(16)); await channel().reconcile();
@@ -277,8 +298,9 @@ test("W1-T11444 criterion 2: only fresh merged observations retire the recorded 
       assert.equal(closed.size, 0, "a different repository's merge cannot resolve this refusal");
       await effects.readLiveState!(pr(11));
       assert.equal(closed.size, 0, "another recorded refused PR is still outstanding");
-      assert.match(all[0]!.body!, /2 refused PR/);
-      assert.equal(all[0]!.body!.includes("https://github.com/owner/repo/pull/11"), false);
+      assert.match(all[0]!.body!, /1 refused PR/, "recovery defers the changed body to the ordinary boundary");
+      const pending = readLedgerLines(ledgerPath).filter(row => row.step === "primary_shadow.observation").at(-1)!;
+      assert.deepEqual(pending.refused_prs, [12, 13], "the durable pending set retires only the positively merged candidate");
       const otherEffects = buildSweepEffects({ owner: "owner", repo: "repo", repoMode: "shadow", config: { root } as Config,
         ledgerPath, runId: "primary-merged-other-effect", plan: { tasks: [], byId: new Map() } as unknown as Plan,
         issuesImpl: issues, ghLiveStateImpl: async () => observation, log: () => {} });
@@ -356,6 +378,78 @@ test("W1-T11444 criterion 2: failed recovery delivery survives reconstruction an
       task_id: "PRIMARY-SHADOW-" + selected.digest, step: "primary_shadow.observation", revision: 999,
       first_refusal_at: "", refused_prs: [], pending_recovery: 3 }) + "\n");
     await assert.rejects(channel().reconcile(), /observation is malformed/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("W1-T11444 criterion 2: returning to an acknowledged selection never flushes another selection's pending body", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-digest-return-"));
+  try {
+    const ledgerPath = join(root, "ledger.ndjson"), all: OpenIssue[] = [], closed = new Set<string>(), edits: string[] = [];
+    const selected = { instance: "core", sourcePath: join(root, "selection.yaml"), digest: "a".repeat(64), mode: "shadow" as const };
+    const issues: IssueGateway = {
+      create: (title, body) => { const number = all.length + 1, url = `https://github.com/owner/repo/issues/${number}`;
+        all.push({ number, url, title, body }); return url; },
+      listOpen: () => all.filter(i => !closed.has(i.url)),
+      editBody: (url, body) => { edits.push(body); all.find(i => i.url === url)!.body = body; },
+    };
+    const channel = () => escalation.primaryShadowOperatorChannel({ owner: "owner", repo: "repo", ledgerPath,
+      runId: "digest-return", selection: () => ({ ...selected }), issues });
+    const pr = (prNumber: number) => ({ prNumber, prUrl: `https://github.com/owner/repo/pull/${prNumber}` });
+    await channel().refuse(pr(11));
+    await handleDisplayedAlert(root, ledgerPath, all, closed, selected.digest);
+    selected.digest = "b".repeat(64); await channel().refuse(pr(12));
+    selected.digest = "c".repeat(64); await channel().refuse(pr(13));
+    assert.equal(edits.length, 0);
+    await displayedAlertDecision(ledgerPath, all, closed, "b".repeat(64));
+    selected.digest = "a".repeat(64); await channel().reconcile();
+    assert.equal(edits.length, 0, "the actual selected acknowledged digest gates the boundary, not persisted pending C");
+    assert.ok(all[1]!.body!.includes("b".repeat(64)));
+    selected.digest = "c".repeat(64); await channel().reconcile();
+    assert.equal(edits.length, 1, "returning to unacknowledged C delivers its durable pending PRs without another refusal");
+    assert.ok(all[1]!.body!.includes("c".repeat(64)));
+    await displayedAlertDecision(ledgerPath, all, closed, selected.digest);
+    const births = readLedgerLines(ledgerPath).filter(row => row.step === "escalation.issue_opened");
+    assert.equal(births.length, 2, "editing the same issue never invents another issue-opened event");
+    await handleDisplayedAlert(root, ledgerPath, all, closed, selected.digest);
+    await channel().refuse(pr(14)); await channel().reconcile();
+    assert.equal(all.length, 2, "the delivered C acknowledgement stays silent across reconstruction");
+    selected.digest = "d".repeat(64); await channel().refuse(pr(15));
+    assert.equal(all.length, 3, "that acknowledgement cannot silence a later selection");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T11444 criterion 2: an observed delivered body repairs its interrupted binding receipt without another edit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-binding-retry-"));
+  try {
+    const ledgerPath = join(root, "ledger.ndjson"), all: OpenIssue[] = [], closed = new Set<string>();
+    let editCount = 0;
+    const selected = { instance: "core", sourcePath: join(root, "selection.yaml"), digest: "a".repeat(64), mode: "shadow" as const };
+    const issues: IssueGateway = {
+      create: (title, body) => { const number = all.length + 1, url = `https://github.com/owner/repo/issues/${number}`;
+        all.push({ number, url, title, body }); return url; },
+      listOpen: () => all.filter(i => !closed.has(i.url)),
+      editBody: (url, body) => { editCount += 1; all.find(i => i.url === url)!.body = body; },
+    };
+    const channel = () => escalation.primaryShadowOperatorChannel({ owner: "owner", repo: "repo", ledgerPath,
+      runId: "binding-retry", selection: () => ({ ...selected }), issues });
+    const pr = (prNumber: number) => ({ prNumber, prUrl: `https://github.com/owner/repo/pull/${prNumber}` });
+    await channel().refuse(pr(11));
+    selected.digest = "b".repeat(64); await channel().refuse(pr(12)); await channel().reconcile();
+    assert.equal(editCount, 1);
+    const delivered = readLedgerLines(ledgerPath);
+    assert.equal(delivered.filter(row => row.step === "primary_shadow.issue_published").length, 1);
+    // Simulate a crash after GitHub accepted the body and before the delivery row became durable.
+    writeFileSync(ledgerPath, delivered.filter(row => row.step !== "primary_shadow.issue_published").map(row => JSON.stringify(row) + "\n").join(""));
+    await channel().reconcile();
+    assert.equal(editCount, 1, "an already matching body needs no second transport edit");
+    await displayedAlertDecision(ledgerPath, all, closed, selected.digest);
+    const recovered = readLedgerLines(ledgerPath);
+    assert.equal(recovered.filter(row => row.step === "primary_shadow.issue_published").length, 1);
+    assert.equal(recovered.filter(row => row.step === "escalation.issue_opened").length, 1);
+    await handleDisplayedAlert(root, ledgerPath, all, closed, selected.digest);
+    await channel().refuse(pr(13)); await channel().reconcile();
+    assert.equal(all.length, 1, "the repaired binding reaches the real digest-scoped acknowledgement route");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

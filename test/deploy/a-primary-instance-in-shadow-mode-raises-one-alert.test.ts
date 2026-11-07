@@ -15,7 +15,7 @@ import type { OpenPrView } from "#src/lib/sweep.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
-test("W1-T11444 criterion 1: alert edits inherit the escalation gateway timing without an idle-poll delay", async () => {
+test("W1-T11444 criterion 1: pass boundaries coalesce durable changes through the awaited escalation gateway", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-cadence-"));
   try {
     let now = 1_800_000_000_000;
@@ -49,14 +49,17 @@ test("W1-T11444 criterion 1: alert edits inherit the escalation gateway timing w
     selection.digest = "b".repeat(64); selection.sourcePath = join(root, "second.yaml");
     await channel().refuse(pr(12));
     assert.equal(all.length, 1, "an unacknowledged selection change must reuse the instance's open issue");
-    assert.deepEqual(alertEdits, controlEdits, "a primary alert must reach the same gateway at the same time as an ordinary edit");
-    assert.equal(edits.length, 1, "the existing gateway accepts updates one millisecond after creation");
+    assert.equal(controlEdits.length, 1, "the shared gateway still accepts an ordinary immediate edit");
+    assert.equal(alertEdits.length, 0, "an existing episode durably defers body edits to its pass boundary");
     now += 1;
     await gateway.editBody!("https://github.com/owner/repo/issues/99", "next ordinary escalation update");
     await channel().refuse(pr(13));
-    assert.deepEqual(alertEdits, controlEdits, "successive edits inherit gateway timing without another delay");
+    assert.equal(controlEdits.length, 2);
+    assert.equal(edits.length, 0, "several distinct refusals in a pass cause no repeated body writes");
     await channel().reconcile();
-    assert.equal(edits.length, 2, "an unchanged observation needs no edit");
+    assert.equal(edits.length, 1, "a reconstructed channel flushes the whole durable PR set once at the boundary");
+    await channel().reconcile();
+    assert.equal(edits.length, 1, "an unchanged observation needs no edit");
     assert.equal(all.length, 1);
     assert.match(all[0]!.body!, /3 refused PRs:/);
     for (const n of [11, 12, 13]) assert.ok(all[0]!.body!.includes(`/pull/${n}`));
@@ -64,11 +67,12 @@ test("W1-T11444 criterion 1: alert edits inherit the escalation gateway timing w
     assert.ok(all[0]!.body!.includes(selection.sourcePath));
     assert.equal(/Refusals began: ([^\n]+)/.exec(all[0]!.body!)![1], first);
     failEdit = true;
-    await assert.rejects(channel().refuse(pr(14)), /fixture edit delivery failed/);
-    assert.equal(edits.length, 2, "a failed delivery leaves the published body intact");
+    await channel().refuse(pr(14));
+    await assert.rejects(channel().reconcile(), /fixture edit delivery failed/);
+    assert.equal(edits.length, 1, "a failed delivery leaves the published body intact");
     failEdit = false;
     await channel().reconcile();
-    assert.equal(edits.length, 3, "reconstruction retries the pending observation without a new refusal or clock advance");
+    assert.equal(edits.length, 2, "reconstruction retries the pending observation without a new refusal or clock advance");
     assert.match(all[0]!.body!, /4 refused PRs:/);
     assert.equal(all.length, 1);
     assert.equal(/Refusals began: ([^\n]+)/.exec(all[0]!.body!)![1], first);
@@ -104,10 +108,12 @@ test("W1-T11444 criterion 1: a pending gateway edit holds later refusals until d
     const pr = (prNumber: number) => ({ prNumber, prUrl: `https://github.com/owner/repo/pull/${prNumber}` });
     await channel().refuse(pr(11));
     let completed = false;
-    pending.push(channel().refuse(pr(12)).then(() => { completed = true; }));
+    await channel().refuse(pr(12));
+    assert.equal(edits.length, 0, "the refusal itself persists its observation without a body edit");
+    pending.push(channel().reconcile().then(() => { completed = true; }));
     // Observe a settled operation too, so an implementation that suppresses edits fails instead of hanging.
     await Promise.race([started, pending[0]]);
-    assert.equal(edits.length, 1, "a changed refusal reaches the gateway without advancing the clock");
+    assert.equal(edits.length, 1, "the ordinary boundary reaches the gateway without advancing the clock");
     pending.push(channel().refuse(pr(13)));
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(completed, false, "the channel must await the gateway's delivery receipt");
@@ -117,7 +123,10 @@ test("W1-T11444 criterion 1: a pending gateway edit holds later refusals until d
     await Promise.all(pending);
     assert.equal(completed, true);
     assert.equal(all.length, 1);
-    assert.equal(edits.length, 2, "gateway completion permits the next edit at the same clock time");
+    assert.equal(edits.length, 1, "a refusal queued behind the flush persists without a second edit in that pass");
+    assert.match(all[0]!.body!, /2 refused PRs:/);
+    await channel().reconcile();
+    assert.equal(edits.length, 2, "the next ordinary boundary delivers the later durable observation");
     assert.match(all[0]!.body!, /3 refused PRs:/);
     for (const n of [11, 12, 13]) assert.ok(all[0]!.body!.includes(`/pull/${n}`));
   } finally {
@@ -159,7 +168,7 @@ test("W1-T11444 criterion 1: primary shadow refusals open and update one durable
           assert.deepEqual(results, ["shadow-refused", "shadow-refused"]);
           assert.equal(await effects.arm(pr(13)), "shadow-refused");
           assert.equal(await effects.arm(pr(13)), "shadow-refused");
-          assert.equal(edits.length, 2, "each changed observation awaits the shared gateway; identical refusals do not edit");
+          assert.equal(edits.length, 0, "changed observations persist without repeated body edits within one pass");
           await effects.reconcilePrimaryShadowAlert!();
         } else for (const n of [11, 12, 12]) assert.equal(await effects.arm(pr(n)), "shadow-refused");
       }, { envPath: selected, ...(named ? { instanceName: "core" } : {}) });
@@ -175,7 +184,7 @@ test("W1-T11444 criterion 1: primary shadow refusals open and update one durable
     assert.match(body, /\/pull\/12/, "all concurrent refusals must survive a later update from the first factory");
     assert.match(body, /\/pull\/13/);
     assert.match(body, /3 refused PR/);
-    assert.equal(edits.length, 2, "serialized edits preserve every concurrent refused PR");
+    assert.equal(edits.length, 1, "one boundary edit preserves every concurrent refused PR");
     assert.equal(body.includes("state_dir:"), false, "registry contents must never enter the alert");
     assert.match(readFileSync(ledgerPath, "utf8"), /escalation.issue_opened/);
     const began = /Refusals began: ([^\n]+)/.exec(body)![1];
@@ -190,7 +199,7 @@ test("W1-T11444 criterion 1: primary shadow refusals open and update one durable
     await run(true);
     assert.equal(open.length, 1, "a reconstructed effects object reuses the durable alert");
     assert.equal(/Refusals began: ([^\n]+)/.exec(open[0]!.body!)![1], began);
-    assert.equal(edits.length, 2, "reconstruction preserves the refused set without another edit");
+    assert.equal(edits.length, 1, "reconstruction preserves the refused set without another edit");
     await run(false);
     assert.equal(open.length, 1, "non-primary shadow instances stay quiet");
   } finally { rmSync(root, { recursive: true, force: true }); }
