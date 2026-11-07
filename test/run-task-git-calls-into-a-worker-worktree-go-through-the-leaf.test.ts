@@ -159,7 +159,6 @@ function sitesByDeclaration(text: string): { raw: Map<string, number>; leaf: Set
 /** Shared recovery steps receive the leaf explicitly; public drivers must bind the matching leaf. */
 const RECOVERY_DRIVERS = [
   ["readOwnerHasTrackedWork", false],
-  ["removeAbandonedFixWorktreeOwner", true],
   ["temporaryIndexTree", false],
   ["preserveTrackedDirtyFixOwner", true],
   ["preserveOrDiscardFixOwnerResidue", true],
@@ -174,7 +173,6 @@ const RECOVERY_DRIVERS = [
 /** Every direct Git use or shared-step forwarding edge in the recovery implementation. */
 const RECOVERY_STEPS: Readonly<Record<string, readonly string[]>> = {
   readOwnerHasTrackedWorkSteps: ["git"],
-  removeAbandonedFixWorktreeOwnerSteps: ["git"],
   temporaryIndexTreeSteps: ["git"],
   refCommitMatchesDirtyRecoverySteps: ["git"],
   preserveTrackedDirtyFixOwnerSteps: ["preserveTrackedDirtyPatchSteps", "readTrackedDirtyOwnerPatchSteps"],
@@ -201,6 +199,17 @@ function recoveryBindingFailures(text: string): string[] {
       if (!body.includes(binding)) failures.push(`${driver}: missing ${binding}`);
       if (raw.has(driver)) failures.push(`${driver}: holds raw git`);
     }
+  }
+  for (const suffix of ["", "Async"] as const) {
+    const driver = `removeAbandonedFixWorktreeOwner${suffix}`;
+    const body = bodies.get(driver) ?? "";
+    const call = `${suffix ? "await " : ""}hostWorktreeGit${suffix}(repoDir, ["worktree", "remove", worktreePath]);`;
+    if (!body.includes(call)) failures.push(`${driver}: missing ${call}`);
+    if (raw.has(driver)) failures.push(`${driver}: holds raw git`);
+    const gitAt = body.indexOf(call);
+    const lockAt = body.indexOf("removeRunLock(worktreePath);");
+    const baseAt = body.indexOf("removeWorktreeBase(worktreePath);");
+    if (!(gitAt >= 0 && lockAt > gitAt && baseAt > lockAt)) failures.push(`${driver}: metadata cleanup precedes Git completion`);
   }
   for (const [name, calls] of Object.entries(RECOVERY_STEPS)) {
     const body = bodies.get(name) ?? "";

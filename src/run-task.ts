@@ -30530,16 +30530,15 @@ function* readOwnerHasTrackedWorkSteps(git: ReviewRecoveryGit, ownerPath: string
 }
 
 export function removeAbandonedFixWorktreeOwner(repoDir: string, worktreePath: string): void {
-  return runStepsSync(removeAbandonedFixWorktreeOwnerSteps(hostWorktreeGit, repoDir, worktreePath));
-}
-
-export function removeAbandonedFixWorktreeOwnerAsync(repoDir: string, worktreePath: string): Promise<void> {
-  return runStepsAsync(removeAbandonedFixWorktreeOwnerSteps(hostWorktreeGitAsync, repoDir, worktreePath));
-}
-
-function* removeAbandonedFixWorktreeOwnerSteps(git: ReviewRecoveryGit, repoDir: string, worktreePath: string): Steps<void> {
   // No --force: a dirty owner is refused. The fix clone is pinned through the hardened leaf.
-  yield* step(() => git(repoDir, ["worktree", "remove", worktreePath]));
+  hostWorktreeGit(repoDir, ["worktree", "remove", worktreePath]);
+  removeRunLock(worktreePath);
+  removeWorktreeBase(worktreePath);
+}
+
+export async function removeAbandonedFixWorktreeOwnerAsync(repoDir: string, worktreePath: string): Promise<void> {
+  // Metadata cleanup follows completion of the same pinned Git operation.
+  await hostWorktreeGitAsync(repoDir, ["worktree", "remove", worktreePath]);
   removeRunLock(worktreePath);
   removeWorktreeBase(worktreePath);
 }

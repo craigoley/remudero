@@ -118,17 +118,20 @@ function widenedByFunction(text: string): Record<string, number> {
   return out;
 }
 
-/** The converted removal has two public drivers over one typed hardened Git step. */
+/** A single Git removal stays direct in both drivers, with metadata after completed Git. */
 function assertHardenedRemovalBindings(text: string): void {
   const sync = functionBody(text, "removeAbandonedFixWorktreeOwner");
   const asynchronous = functionBody(text, "removeAbandonedFixWorktreeOwnerAsync");
-  const shared = functionBody(text, "removeAbandonedFixWorktreeOwnerSteps");
-  assert.ok(sync && asynchronous && shared, "both removal drivers and their shared steps exist");
-  assert.match(sync, /return runStepsSync\(removeAbandonedFixWorktreeOwnerSteps\(hostWorktreeGit,/);
-  assert.match(asynchronous, /return runStepsAsync\(removeAbandonedFixWorktreeOwnerSteps\(hostWorktreeGitAsync,/);
-  assert.match(shared, /^function\* removeAbandonedFixWorktreeOwnerSteps\(git: ReviewRecoveryGit,/);
-  assert.match(shared, /yield\* step\(\(\) => git\(repoDir, \["worktree", "remove", worktreePath\]\)\)/);
-  for (const body of [sync, asynchronous, shared]) assert.equal(widenedGitSites(body).length, 0, "the converted removal holds no raw Git site");
+  assert.ok(sync && asynchronous, "both hardened removal drivers exist");
+  assert.match(sync, /hostWorktreeGit\(repoDir, \["worktree", "remove", worktreePath\]\);/);
+  assert.match(asynchronous, /await hostWorktreeGitAsync\(repoDir, \["worktree", "remove", worktreePath\]\);/);
+  for (const [body, call] of [[sync, "hostWorktreeGit("], [asynchronous, "await hostWorktreeGitAsync("]] as const) {
+    assert.equal(widenedGitSites(body).length, 0, "the converted removal holds no raw Git site");
+    const gitAt = body.indexOf(call);
+    const lockAt = body.indexOf("removeRunLock(worktreePath);");
+    const baseAt = body.indexOf("removeWorktreeBase(worktreePath);");
+    assert.ok(gitAt >= 0 && lockAt > gitAt && baseAt > lockAt, "metadata cleanup follows completed hardened Git");
+  }
 }
 
 const sorted = (r: Record<string, number>): Record<string, number> =>
@@ -181,9 +184,9 @@ describe("W1-T6135: every widened git site left in run-task.ts is a classed CHEC
     }
   });
 
-  it("an async removal driver bound to the synchronous leaf fails its shared-binding guard", () => {
-    const binding = "runStepsAsync(removeAbandonedFixWorktreeOwnerSteps(hostWorktreeGitAsync,";
-    const mutant = text.replace(binding, "runStepsAsync(removeAbandonedFixWorktreeOwnerSteps(hostWorktreeGit,");
+  it("an async removal bound to the synchronous leaf fails its binding guard", () => {
+    const binding = 'await hostWorktreeGitAsync(repoDir, ["worktree", "remove", worktreePath]);';
+    const mutant = text.replace(binding, 'hostWorktreeGit(repoDir, ["worktree", "remove", worktreePath]);');
     assert.notEqual(mutant, text, "the fixture edit applied");
     assert.throws(() => assertHardenedRemovalBindings(mutant), { code: "ERR_ASSERTION" });
   });
