@@ -1,0 +1,38 @@
+- id: W1-T11596
+  title: Under a selected private registry a Codex continuation takes its fresh handoff instead of a resume the adapter refuses, so a run that reaches a resumed turn keeps going
+  repo: remudero
+  depends_on: []
+  priority: 0.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes which continuation form selected Codex workers receive; the adapter's resume refusal is unchanged
+  band_meaning: blast-radius
+  origin: operator-session#containment-probe-2026-11-07
+  plan_refs:
+    - W1-T11550
+    - W1-T11564
+  files:
+    - src/lib/worker.ts
+    - test/worker/spawn/provider-safe-continuation.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Under a selected private registry, a read-only Codex call carrying a resume session and a fresh handoff gets no resume, a fresh-handoff receipt with reason private-registry-fresh-only, and a prompt led by the handoff that keeps the pending action. With no selected registry the same call still resumes, and a Claude resume is unchanged
+      proof: "grep: W1-T11596 criterion 1 in test/worker/spawn/provider-safe-continuation.test.ts"
+  rationale: |
+    OBSERVED 2026-11-07 on remudero-daemon, once W1-T11550 and W1-T11564 let runs past the containment and isolation probes:
+    - W1-T9365 (13:28:20Z) and W1-T11232 (15:05:39Z) ended verdict failed with "selected instance registry unavailable (worker_resume_not_qualified)". In each, a successful worker attempt was followed by a spawn that threw before assignment.
+    - That error first appears on 2026-11-07. Runs only now reach a resumed turn.
+    - withPrivateRegistryCodexProfile (src/lib/worker-provider.ts) throws worker_resume_not_qualified for any resumeSessionId: "A saved session may carry older permissions."
+    - workerExecutionForProvider (src/lib/worker.ts) already gives Codex writers a fresh handoff, but still passes the resume through for read-only Codex calls. Every resume site in src/cli/commands/run-task-verb.ts also supplies a continuation built by workerContinuation, a self-contained fresh-session handoff.
+  design: |
+    In workerExecutionForProvider, when the target provider is Codex, a fresh handoff is present, and a selected private registry is active (runtimeInstanceRegistryPrivateFile() is defined), take the fresh handoff instead of the resume, with receipt reason private-registry-fresh-only. Every other case is unchanged.
+    NOT IN SCOPE:
+    - the adapter's worker_resume_not_qualified refusal, which stays as the backstop for a call with no handoff;
+    - qualifying sessions for resume.
+  note: |
+    Proof that counts: no worker_resume_not_qualified verdicts after this reaches the engine.
+    reservation hand-off: run-unfiled-1794064517840 -> run-unfiled-1794064517840
+    Reserved with rmd next-task-id (W1-T11596 on run-unfiled-1794064517840). From the operator session's 2026-11-07 check of fleet builds after W1-T11564.

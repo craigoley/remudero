@@ -123,7 +123,7 @@ export function taskQuestionDecisions(
 export function escalationClasses(rows: ReadonlyArray<Record<string, unknown>>): Map<string, { class?: string; ts?: string }> {
   const out = new Map<string, { class?: string; ts?: string }>();
   for (const row of rows) {
-    if (row.step !== "escalation.issue_opened" || typeof row.task_id !== "string") continue;
+    if ((row.step !== "escalation.issue_opened" && row.step !== "primary_shadow.issue_published") || typeof row.task_id !== "string") continue;
     out.set(row.task_id, { ...(typeof row.class === "string" ? { class: row.class } : {}), ...(typeof row.ts === "string" ? { ts: row.ts } : {}) });
   }
   return out;

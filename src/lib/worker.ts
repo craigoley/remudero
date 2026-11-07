@@ -147,6 +147,7 @@ import {
 } from "./worker-home.js";
 import { awaitMemoryAdmission, type AdmissionPorts } from "./host-memory-admission.js";
 import { currentRunChildReservationId, liveRunChildCount } from "./run-child-reservation.js";
+import { pauseDetail, stopDetail } from "./fleet-control.js";
 import type { RunChildProbe } from "./run-child-contract.js";
 import { feedbackLineagePayload, feedbackLineageSnapshot } from "./contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./untrusted-envelope.js";
@@ -1114,6 +1115,12 @@ export interface SpawnWorkerArgs {
   workerClass?: WorkerClass;
   /** Test seam for the counterfactual host-memory verdict (W1-T7094). Omitted: the process-installed sink and real reads. */
   memoryShadow?: Partial<AdmissionPorts>;
+  /** W1-T11336: admission seam for proving a newly held start releases its reservation. */
+  admitWorkerMemory?: typeof awaitMemoryAdmission;
+  /** W1-T11336: read the STOP/PAUSE hold at the in-process fix spawn boundary. Production reads fleet-control state. */
+  readWorkerAdmissionHold?: (root: string) => { control: "STOP" | "PAUSE"; detail: string } | undefined;
+  /** Observe a fix spawn withheld by a fresh fleet hold; omitted, the row is written to stderr. */
+  logWorkerSpawnWithheld?: (row: Record<string, unknown>) => void;
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
     onPulled: (id: string, status: "found" | "missing" | "error") => void;
@@ -2134,6 +2141,14 @@ function workerClassOf(args: Pick<SpawnWorkerArgs, "workerClass" | "sandboxInten
   return args.ruleLookup ? "implement" : "unclassified";
 }
 
+/** Read the fleet hold at a worker's final in-process start boundary, matching run-child admission. */
+function workerAdmissionHold(root: string): { control: "STOP" | "PAUSE"; detail: string } | undefined {
+  const stop = stopDetail(root);
+  if (stop !== undefined) return { control: "STOP", detail: stop };
+  const pause = pauseDetail(root);
+  return pause === undefined ? undefined : { control: "PAUSE", detail: pause };
+}
+
 /** The contained spawn, wrapped so each process it starts is bound to the claim's reservation as (pid, start time). */
 function reservationBoundContainment(
   containment: SpawnWorkerArgs["containment"],
@@ -2458,7 +2473,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
   const childReservationId = currentRunChildReservationId();
   const admissionStartedAtMs = systemClock.now();
-  const admission = childReservationId ? undefined : await awaitMemoryAdmission({
+  const admission = childReservationId ? undefined : await (args.admitWorkerMemory ?? awaitMemoryAdmission)({
     workerClass: workerClassOf(args),
     signal: args.signal,
     sinceMs: args.memoryAdmissionSinceMs,
@@ -2467,7 +2482,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     ...(args.taskId ? { taskId: args.taskId } : {}),
   }, args.memoryShadow);
   args.onMemoryAdmissionEnd?.();
-  if (admission?.kind === "abandoned" || args.signal?.aborted) {
+  const admissionAbandoned = (): WorkerResult => {
     if (admission && "reservation" in admission) admission.reservation?.releaseOccupancy();
     if (admission?.kind === "admitted") admission.endAged?.();
     return { notStarted: "admission-abandoned", subtype: "admission_abandoned",
@@ -2476,6 +2491,25 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       text: "", blocks: [], stderr: "", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
       model: args.model ?? "", effort: args.effort ?? "", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
       modelUsage: {}, compactionEvents: [], qualitySuspect: false };
+  };
+  if (admission?.kind === "abandoned" || args.signal?.aborted) return admissionAbandoned();
+  // W1-T11336: the sweep's admission may precede a fleet PAUSE by tens of minutes. In-process fix starts
+  // re-read at the same boundary as run children; reviews and other classes retain their existing path.
+  if (childReservationId === undefined && workerClassOf(args) === "fix") {
+    const root = (args.config ?? loadConfig()).root;
+    const hold = (args.readWorkerAdmissionHold ?? workerAdmissionHold)(root);
+    if (hold) {
+      const abandoned = admissionAbandoned();
+      const row = { step: "worker.spawn_withheld", ...(args.taskId ? { task_id: args.taskId } : {}),
+        ...(args.runId ? { run_id: args.runId } : {}), hold: `fleet ${hold.control} hold: ${hold.detail}` };
+      try {
+        if (args.logWorkerSpawnWithheld) args.logWorkerSpawnWithheld(row);
+        else process.stderr.write(`${JSON.stringify(row)}\n`);
+      } catch (error) {
+        try { process.stderr.write(`${JSON.stringify(row)}\n`); } catch { /* diagnostics cannot reopen a refused start */ }
+      }
+      return abandoned;
+    }
   }
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   const memoryReservation = childReservationId ? undefined :
@@ -3228,6 +3262,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       allowApiKey: config.overflow === "api_key" && frontierClaudeSpawn === false,
     });
     delete childEnv.RMD_INSTANCE_REGISTRY;
+    delete childEnv.RMD_SELECTED_INSTANCE_REGISTRY;
     // W1-T2699: every spawn's env routes through secretBoundaryEnv, a no-op absent a model boundary (see its doc).
     // MUTATING `childEnv` in place, never rebinding it: W1-T2800's structural falsifier (test/codex-worker-home-
     // redirection.test.ts) greps this file for the literal `const childEnv = buildWorkerEnv(...)` above, so the
