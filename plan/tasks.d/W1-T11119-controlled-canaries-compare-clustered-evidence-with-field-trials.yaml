@@ -21,6 +21,9 @@
   #   refusals above in ONE diff — adds the durable router-decision receipt and static-baseline producers plus the
   #   field-flow assignment provenance; folds criteria 15-25 (closed PR #17189) and 26-27 (closed PR #17192). Neither
   #   closed PR is on main; they are reference drafts only. Criteria 1-14 are unchanged.
+  # architect-clarification (W1-T11119, run PLAN-clarify-1794067930429, 2026-11-07): the census-named
+  #   static-baseline unit test takes the reasoned @not-a-rule-suite header marker (W1-T5785). It gets no
+  #   PRECHECK_PARITY row, and files and criteria 1-27 are unchanged.
   status: queued
   attempts: 0
   origin: operator-approved-router-evaluation-plan:2026-11-02
@@ -95,6 +98,31 @@
     Settled by lookup: is the graph acyclic? -> yes; none of W1-T11597, W1-T11598 or W1-T11599 depends on
     W1-T11119, W1-T11120, W1-T11213, W1-T11264 or W1-T11265, and worker.ts edits serialise behind
     W1-T11432 (plan/tasks.d dependency grep). No source scope changes and no source task is dispatched.
+    Architect clarification (plan-only, run PLAN-clarify-1794067930429, 2026-11-07): the ask was to add
+    scripts/census-precheck.mjs to files so the author preflight could ask the CI census that
+    test/routing/model-canary-static-baseline.test.ts would join. The lookups below show the settled remedy
+    for a plain unit test caught only by its name is the reasoned header marker, not a parity row. So
+    files and criteria 1-27 are unchanged, and only the design's RULE-SUITE NAME paragraph and this note
+    are added.
+    Settled by lookup: why does this test join a CI census? -> isRuleSuitePath admits any test basename
+    matching RULE_SUITE_NAME_RE /(?:census|ratchet|baseline)/i, and test/every-ci-census-is-asked-before-the-push.test.ts
+    plus censusParityViolations (scripts/census-precheck.mjs) refuse a member that is neither in
+    PRECHECK_PARITY nor in the shrink-only baseline (src/lib/rule-suites.ts; W1-T5616).
+    Settled by lookup: is this already decided? -> yes; W1-T5785 (merged) added the
+    `@not-a-rule-suite: <reason>` header opt-out because a plain unit test so named has no truthful
+    parity row, and W1-T9877 (merged) keeps that opt-out for legacy basename matches. The task-linter
+    refusal text says: for a legacy name match, declare the marker; only a real census lists
+    scripts/census-precheck.mjs (src/lib/task-linter.ts newShardRuleSuiteViolations; W1-T5838).
+    Settled by lookup: is this test a real census? -> no; criterion 21 and the STATIC BASELINE design
+    exercise the pure qualifyCanaryStaticBaseline helper over development-split owner receipts. It
+    walks no tracked tree and holds no tree-wide count, so a PRECHECK_PARITY modeled row would claim a
+    question nothing asks.
+    Settled by lookup: may the test be renamed instead? -> no; criterion 21's proof names this path, and
+    the operator directed that all 27 criteria stay unchanged.
+    Settled by lookup: does the census-precheck reader honour the marker? -> yes; its tree reader parses
+    the same header @not-a-rule-suite marker and requires a reason (scripts/census-precheck.mjs).
+    Settled by lookup: does any other canary prerequisite name a census, ratchet or baseline test? -> no;
+    only this shard does (grep of W1-T11119, W1-T11120 and W1-T11597 to W1-T11599).
   design: >-
     Add pure private post-processing helpers over immutable manifests and existing canary and
     field-trial evidence contracts. Preserve observational versus registered randomized
@@ -152,6 +180,14 @@
     LIMITS: every existing privacy and no-side-effect limit holds. The only new write is the
     private exclusive-create decision receipt. No ledger, task, schedule, policy, promotion,
     budget or provider-call side effects. Adapter integration tests stay in scope.
+    RULE-SUITE NAME (criterion 21's file): test/routing/model-canary-static-baseline.test.ts matches
+    RULE_SUITE_NAME_RE only through the word baseline in its legacy basename. It is a plain unit test of
+    qualifyCanaryStaticBaseline over private fixtures, not a tree census. Its leading header comment
+    therefore carries this exact marker line (W1-T5785, W1-T9877), which leaves it out of listRuleSuites
+    and so out of the PRECHECK_PARITY population while the coverage shards still run it. Add no
+    PRECHECK_PARITY row, no census-precheck-parity-baseline.json row and no edit to
+    scripts/census-precheck.mjs.
+    // @not-a-rule-suite: unit test of qualifyCanaryStaticBaseline over private fixtures; it walks no tree and asserts no tree-wide count
   note: >-
     The operator approved coordinated implementation on 2026-11-02. Proposal export is an
     inert artifact, not an approval, autonomous self-modification or new allowance. Native source
