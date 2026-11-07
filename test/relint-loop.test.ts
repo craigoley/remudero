@@ -732,8 +732,30 @@ test("lintPlanForReview runs its real offline child against changed tasks", asyn
     const taskId = "W1-T90000";
     const shardDir = join(repoDir, "plan", "tasks.d");
     mkdirSync(shardDir, { recursive: true });
-    writeFileSync(join(shardDir, `${taskId}-fixture.yaml`), CLEAN_TASK(taskId));
-    execFileSync("git", ["-C", repoDir, "add", "plan/tasks.d"], { encoding: "utf8", env: GIT_ENV });
+    const marker = "relint_real_child_fixture_discriminates_head";
+    const fixture = [
+      `- id: ${taskId}`,
+      `  title: "a guard with a head-only proof line"`,
+      "  repo: remudero",
+      "  origin: architect",
+      "  depends_on: []",
+      "  type: implement",
+      "  verify: auto",
+      "  status: queued",
+      "  attempts: 0",
+      "  files: [test/relint-loop.test.ts]",
+      "  acceptance:",
+      '    - claim: "the new fixture line distinguishes the head from base"',
+      "      kind: guard",
+      '      proof: "grep: relint_real_child_fixture_discriminates_head test/relint-loop.test.ts"',
+      "",
+    ].join("\n");
+    writeFileSync(join(shardDir, `${taskId}-fixture.yaml`), fixture);
+    mkdirSync(join(repoDir, "test"), { recursive: true });
+    writeFileSync(join(repoDir, "test", "relint-loop.test.ts"), `const ${marker} = true;\n`);
+    const proofHit = execFileSync("grep", ["-arn", "--", marker, "test/relint-loop.test.ts"], { cwd: repoDir, encoding: "utf8" });
+    assert.match(proofHit, /relint_real_child_fixture_discriminates_head/);
+    execFileSync("git", ["-C", repoDir, "add", "plan/tasks.d", "test/relint-loop.test.ts"], { encoding: "utf8", env: GIT_ENV });
     execFileSync("git", ["-C", repoDir, "commit", "--quiet", "-m", "test: add a clean changed-task fixture"], {
       encoding: "utf8",
       env: GIT_ENV,
