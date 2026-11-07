@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import {
   assessBootHealth,
   daemonIsIdle,
@@ -7,6 +8,7 @@ import {
   describeFailureKind,
   evaluateIdleGate,
   readLatestBootSha,
+  refusalRemedyLine,
   sameCommit,
   runDeployCycle,
   treeFfSafe,
@@ -1099,4 +1101,16 @@ test("W1-T4200: a drift-only tick with no marker still returns early", () => {
   const stale = decideDeployTrigger({ markerPresent: false, autoMode: false, installHead: "same", originMain: "same", runningHead: "older", imageDriftOnly: true });
   assert.equal(stale.deploy, false);
   assert.equal(stale.blocker?.kind, "stale_running_daemon");
+});
+
+test("W1-T11454 criterion 3: the deployer never leaves a selection, and a selection refusal's remedy names the scoped command", () => {
+  assert.equal(readFileSync(join(REPO_ROOT, "src/lib/deployer.ts"), "utf8").includes("--leave-selected-registry"), false,
+    "only an operator may leave a selection; the deployer never opts out or retries unselected");
+  const script = readFileSync(join(REPO_ROOT, "deploy/recycle-container.sh"), "utf8");
+  const remedy = /selection_remedy="(Remedy: [^"]+)"/.exec(script)?.[1];
+  assert.ok(remedy, "every selection refusal prints one remedy line");
+  const message = ["recycle-container: REFUSING -- remudero-daemon is not one read-only bind this recycle can inherit; NOTHING has been touched.", `  ${remedy}`].join("\n");
+  assert.equal(refusalRemedyLine(message), remedy, "the alert quotes the remedy, not the tail of the refusal");
+  assert.match(remedy, /RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy\/recycle-container\.sh --instance/);
+  assert.match(remedy, /--leave-selected-registry/);
 });
