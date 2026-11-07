@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import {
   assessBootHealth,
   daemonIsIdle,
@@ -1104,13 +1103,20 @@ test("W1-T4200: a drift-only tick with no marker still returns early", () => {
 });
 
 test("W1-T11454 criterion 3: the deployer never leaves a selection, and a selection refusal's remedy names the scoped command", () => {
-  assert.equal(readFileSync(join(REPO_ROOT, "src/lib/deployer.ts"), "utf8").includes("--leave-selected-registry"), false,
-    "only an operator may leave a selection; the deployer never opts out or retries unselected");
-  const script = readFileSync(join(REPO_ROOT, "deploy/recycle-container.sh"), "utf8");
-  const remedy = /selection_remedy="(Remedy: [^"]+)"/.exec(script)?.[1];
-  assert.ok(remedy, "every selection refusal prints one remedy line");
-  const message = ["recycle-container: REFUSING -- remudero-daemon is not one read-only bind this recycle can inherit; NOTHING has been touched.", `  ${remedy}`].join("\n");
+  const root = mkdtempSync(join(tmpdir(), "rmd-deployer-leave-"));
+  try {
+    mkdirSync(join(root, "deploy"));
+    writeFileSync(join(root, "deploy", "recycle-container.sh"), "#!/usr/bin/env bash\n");
+    const calls: string[][] = [];
+    const deps = realDeployDeps({ installPath: root, stateRoot: root, daemonLabel: "d", serveLabel: "s", servePort: 4317, uid: 1,
+      ledgerPath: join(root, "ledger.ndjson"), sleep: () => {},
+      execFile: (cmd: string, args: string[]) => { calls.push([cmd, ...args]); return ""; } });
+    const backend = deps.restartBackends!().find(candidate => candidate.name !== "launchctl")!;
+    backend.restart();
+    assert.ok(calls.some(call => call.join(" ").includes("recycle-container.sh")), "positive control: the deployer ran the recycle");
+    assert.equal(calls.some(call => call.includes("--leave-selected-registry")), false, "only an operator may leave a selection");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+  const remedy = "Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy/recycle-container.sh --instance core, or add --leave-selected-registry with no selection to leave it.";
+  const message = ["recycle-container: REFUSING -- remudero-daemon's mount is not one read-only bind; NOTHING has been touched.", `  ${remedy}`].join("\n");
   assert.equal(refusalRemedyLine(message), remedy, "the alert quotes the remedy, not the tail of the refusal");
-  assert.match(remedy, /RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy\/recycle-container\.sh --instance/);
-  assert.match(remedy, /--leave-selected-registry/);
 });

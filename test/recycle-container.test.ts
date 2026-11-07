@@ -666,6 +666,7 @@ test("W1-T11454 criterion 1: a bare recycle of a selected container keeps its qu
     const refused = fixture.bare("good", [], { STUB_PREVIOUS_ENV: orphan });
     assert.notEqual(refused.status, 0, "selection state with no mount is never silently discarded");
     assert.match(refused.stderr, /no qualifying mount/);
+    assert.match(refused.stderr, /Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy\/recycle-container\.sh --instance fixture.*--leave-selected-registry/);
     assert.equal(refused.calls.some(isStop), false);
     const invalid = fixture.bare("private-good", [], { RMD_SELECTED_INSTANCE_REGISTRY: join(fixture.root, "missing-selected.yaml") });
     assert.equal(invalid.status, 2, "an invalid explicit selection never falls back to the container");
