@@ -40,11 +40,31 @@
     - test/routing/model-canary-native-field-evidence.test.ts
     - test/routing/model-canary-router-value.test.ts
     - test/routing/model-canary-whole-pipeline-clustered-analysis.test.ts
+    - src/lib/field-trials-flow.ts
+    - src/lib/field-trials-cohorts.ts
+    - test/field-trials-flow.test.ts
   rationale: >-
     The approved benchmark must measure router value without treating observational model win
     rates as a randomized comparison. Existing paired analysis is descriptive and supplies no
     uncertainty estimate. Repeated attempts are not independent cases. Failure patterns can
     inform a bounded improvement proposal without executing that proposal.
+    Field-provenance amendment (PR #17132, base 5106cd9): the randomized-row producer the prior
+    amendment cited does not reach this task through its field reader, so the reader files join
+    this same task with no new budget or task.
+    Settled by lookup: does a recorded pre-execution randomized assignment exist? -> yes;
+    selectionAssignment writes worker_assignment.phase "pre-execution" with
+    routing.experiment {id, unit, assignedArm, assignedProbability, servedArm, crossover} from
+    experimentIntentionToTreat (src/lib/worker.ts, src/lib/routing-experiments.ts).
+    Settled by lookup: does the field reader carry it? -> no; FlowRow/projectFlowRow read
+    worker_assignment but drop routing.experiment and assignedProbability
+    (src/lib/field-trials-flow.ts), and servedTrialCohorts emits only observational counts with
+    no assignment provenance (src/lib/field-trials-cohorts.ts).
+    Settled by lookup: is this projection already filed or decided? -> no; W1-T10833 and
+    W1-T10875 touch field-trials-cohorts.ts for provider joins and outcome attribution only, and
+    DECISIONS.md/LEARNINGS.md record nothing on assignment-probability projection
+    (plan/tasks.d, DECISIONS.md, LEARNINGS.md).
+    Settled by lookup: where are the reader's existing tests? -> test/field-trials-flow.test.ts
+    covers projectFlowRow and servedTrialCohorts (test/field-trials-flow.test.ts).
   design: >-
     Add pure private post-processing helpers over immutable manifests and existing canary and
     field-trial evidence contracts. Preserve observational versus registered randomized
@@ -64,6 +84,22 @@
     existing proposal/experiment contract only where compatible; otherwise return unavailable.
     Add bounded private analysis and proposal-export modes to the existing offline command that
     call all three helpers directly. Serialize these command edits after W1-T11118.
+    Field provenance: add a bounded, read-only projection in projectFlowRow that copies only a
+    worker.assignment row's recorded worker_assignment.routing.experiment when
+    worker_assignment.phase is "pre-execution": experiment id, assigned arm, assignedProbability,
+    served arm and crossover, each type-checked (probability finite and within (0, 1], crossover
+    boolean). An absent, malformed or self-contradictory record projects no
+    experiment provenance and is counted as unavailable; it is never repaired. Never call
+    experimentIntentionToTreat, experimentArmForTask or any draw to infer, recompute or backfill
+    an arm or probability. Have servedTrialCohorts carry that recorded provenance into a separate,
+    bounded, private, assignment-keyed partition beside its unchanged observational cohorts,
+    labelled as registered-randomized, with its own denominator, omitted count and output bound.
+    Do not change existing cohort counts, exclusion reasons, versioned observational labels or
+    snapshot privacy. Randomized field comparison consumes only rows with that recorded
+    provenance or a verifiable registered-epoch receipt; when neither can be joined, it returns
+    unavailable with a named reason rather than relabelling observational rows. Keep observational
+    rows, missing outcomes and incomplete matrix blocks visible, and keep all prior provenance,
+    router-decision, static-baseline and integration-proof work unchanged.
   note: >-
     The operator approved coordinated implementation on 2026-11-02. Proposal export is an
     inert artifact, not an approval, autonomous self-modification or new allowance. Native source
@@ -101,8 +137,16 @@
       proof: 'grep: createNativeFieldEvidenceReader( in src/lib/model-canary-command.ts'
     - claim: Native CLI consumes the frozen router replay helper
       proof: 'grep: evaluateCanaryRouterValue( in src/lib/model-canary-command.ts'
+    - claim: The field reader preserves only recorded pre-execution experiment assignment provenance and never recomputes it
+      proof: 'grep: W1-T11119 criterion 15: field flow preserves recorded pre-execution experiment assignment provenance without recomputing it in test/field-trials-flow.test.ts'
+    - claim: Randomized field comparison returns unavailable when no recorded assignment provenance or registered-epoch receipt joins
+      proof: 'grep: W1-T11119 criterion 16: randomized field comparison returns unavailable without joinable recorded assignment provenance in test/routing/model-canary-field-comparison.test.ts'
   falsifier: >-
     Use paired positive controls and known missing/mismatched inputs. Duplicate repeats within
     each family and require the independent-family count to stay fixed. Remove identity/split
     guards or replace family resampling with attempt resampling and require named controls to
     fail. Remove the inert-proposal guard and require the no-side-effects control to fail.
+    Feed a pre-execution assignment whose recorded assignedProbability differs from the
+    equal-split value and require that recorded value to survive unchanged; strip, corrupt or
+    move the record to a non-pre-execution row and require no provenance plus an unavailable
+    randomized comparison while observational cohort counts stay identical.
