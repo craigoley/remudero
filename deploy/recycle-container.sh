@@ -1456,6 +1456,14 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
           echo "  ${selection_remedy}" >&2
           exit 1
         fi
+        if ! leave_packet="$(SELECTED_REGISTRY_READER_ROOT="${SCRIPT_DIR%/deploy}" SELECTED_REGISTRY_NAME="${INSTANCE_NAME}" \
+          SELECTED_REGISTRY_INPUT="${selection_source}" SELECTED_REGISTRY_DIGEST="${digest_env}" selected_registry_packet)" \
+          || [ "$(printf '%s\n' "${leave_packet}" | sed -n '3p')" != "${digest_env}" ] \
+          || [ "$(printf '%s\n' "${leave_packet}" | sed -n '5p')" != "${binding_env}" ]; then
+          recycle_reason "recycle-container: REFUSING -- selected registry packet does not match its mounted file and runtime binding (leave_unqualified); NOTHING has been touched." >&2
+          echo "  ${selection_remedy}" >&2
+          exit 1
+        fi
         SELECTED_REGISTRY_LEAVING=1
       fi
     elif [ "${selection_count}" -eq 0 ]; then

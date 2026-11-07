@@ -683,8 +683,14 @@ test("W1-T11454 criterion 1: a bare recycle of a selected container keeps its qu
 test("W1-T11454 criterion 2: the leave flag removes only a qualified selection, refuses catalog fallback, and ledgers only a successful replacement", () => {
   const fixture = bareSelectedInstall();
   try {
+    const seed = fixture.bare("private-good");
+    assert.equal(seed.status, 0, seed.stderr);
+    const seedLaunch = seed.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
+    const digest = seedLaunch.argv.find(a => /^RMD_INSTANCE_REGISTRY_DIGEST=[a-f0-9]{64}$/.test(a))?.slice("RMD_INSTANCE_REGISTRY_DIGEST=".length);
+    const binding = seedLaunch.argv.find(a => /^RMD_INSTANCE_REGISTRY_FILE_BINDING=[a-f0-9]{64}$/.test(a))?.slice("RMD_INSTANCE_REGISTRY_FILE_BINDING=".length);
+    assert.ok(digest && binding, "the positive control captured the real qualified packet");
     const env = join(fixture.root, "previous-env");
-    writeFileSync(env, `GH_TOKEN=fixture-not-a-token\nRMD_RESTART_THROTTLE_S=60\nRMD_INSTANCE_REGISTRY_DIGEST=${"a".repeat(64)}\nRMD_INSTANCE_REGISTRY_FILE_BINDING=${"b".repeat(64)}\nRMD_SELECTED_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml\n`);
+    writeFileSync(env, `GH_TOKEN=fixture-not-a-token\nRMD_RESTART_THROTTLE_S=60\nRMD_INSTANCE_REGISTRY_DIGEST=${digest}\nRMD_INSTANCE_REGISTRY_FILE_BINDING=${binding}\nRMD_SELECTED_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml\n`);
     const left = fixture.bare("private-good", ["--leave-selected-registry"], { STUB_PREVIOUS_ENV: env });
     assert.equal(left.status, 0, left.stderr);
     const launch = left.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
@@ -708,6 +714,18 @@ test("W1-T11454 criterion 2: the leave flag removes only a qualified selection, 
       assert.match(refused.stderr, /NOTHING has been touched/);
       assert.equal(refused.calls.some(isStop), false);
       assert.equal(rows().length, 1, "an incompatible leave never claims selection_left");
+    }
+    for (const wrongEnv of [
+      readFileSync(env, "utf8").replace(digest, "c".repeat(64)),
+      readFileSync(env, "utf8").replace(binding, "d".repeat(64)),
+    ]) {
+      const unqualifiedEnv = join(fixture.root, "previous-env-unqualified");
+      writeFileSync(unqualifiedEnv, wrongEnv);
+      const refused = fixture.bare("private-good", ["--leave-selected-registry"], { STUB_PREVIOUS_ENV: unqualifiedEnv });
+      assert.notEqual(refused.status, 0, "a syntactically shaped but mismatched packet is not qualified");
+      assert.match(refused.stderr, /leave_unqualified/);
+      assert.equal(refused.calls.some(isStop), false);
+      assert.equal(rows().length, 1, "an unqualified packet never claims selection_left");
     }
     const contradictory = fixture.bare("private-good", ["--leave-selected-registry"], { RMD_SELECTED_INSTANCE_REGISTRY: fixture.selected });
     assert.equal(contradictory.status, 2);
