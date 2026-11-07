@@ -34,7 +34,7 @@ import { startDaemonSreLane } from "../../lib/daemon.js";
 import { REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
 import { gardenSchedule } from "../../lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "../../lib/gardener-runtime.js";
-import { daemonSreLaneInput, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "../../lib/sre-lane.js";
+import { daemonSreLaneInput, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow, type SreLaneInput } from "../../lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "../../lib/sre-runbooks.js";
 import { daemonBreakerRunbookHost } from "../../lib/breaker-release.js";
 import { inboxThreadStorePath, type RatifyCliHandle } from "../../lib/panel-graph.js";
@@ -555,6 +555,40 @@ function renderDaemonSummary(s: DaemonSummary): string {
     `cost      : notional $${s.costUsd.toFixed(4)}`,
     "──────────────────────────────────────────────────────────",
   ].join("\n");
+}
+
+export function startBoundedDaemonSreLane(
+  input: (mergedLastDay: number) => Promise<SreLaneInput>,
+  mergedLastDay: () => Promise<number>,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): ReturnType<typeof startDaemonSreLane> {
+  return intervalMs => {
+    let current: SreLaneInput;
+    return startDaemonSreLane(() => current, async () => {
+      const rate = await mergedLastDay();
+      current = await input(rate);
+      return rate;
+    }, log)(intervalMs);
+  };
+}
+
+export async function daemonSreLaneEnabled(
+  stateRoot: string,
+  installRoot: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<boolean> {
+  const sreLane = {
+    instance: await resolveSreLaneInstance({
+      stateRoot,
+      registryPath: process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
+        ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
+        : process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(installRoot),
+    }),
+    env: { RMD_SRE_LANE: process.env.RMD_SRE_LANE },
+  };
+  const row = sreLaneStartRow(sreLane);
+  log(row.step, row.fields);
+  return sreLaneEnabled(sreLane);
 }
 
 export async function daemonCommand(
@@ -2076,8 +2110,8 @@ export async function daemonCommand(
                 // it on anywhere. The starter is inert until called, so it is built on every start
                 // and dropped when off; either way one `sre_lane.started`/`sre_lane.disabled` row
                 // says so. `state/SRE_LANE_OFF` stays the pause switch.
-                ...[
-                  startDaemonSreLane(
+                ...(await daemonSreLaneEnabled(config.root, repoRoot, log) ? [
+                  startBoundedDaemonSreLane(
                     (mergedLastDay) => daemonSreLaneInput({
                       stateDir: join(config.root, "state"),
                       root: repoRoot,
@@ -2110,20 +2144,7 @@ export async function daemonCommand(
                     () => mergedInLastDayAsync(repoRoot),
                     log,
                   ),
-                ].filter(() => {
-                  const sreLane = {
-                    instance: resolveSreLaneInstance({
-                      stateRoot: config.root,
-                      registryPath: process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
-                        ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
-                        : process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(repoRoot),
-                    }),
-                    env: { RMD_SRE_LANE: process.env.RMD_SRE_LANE },
-                  };
-                  const row = sreLaneStartRow(sreLane);
-                  log(row.step, row.fields);
-                  return sreLaneEnabled(sreLane);
-                }),
+                ] : []),
               ],
             }
           // Operator 2026-11-01: a managed target runs its per-target gardens (the issue-revalidation garden, shadow).
