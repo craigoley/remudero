@@ -248,6 +248,7 @@ test("W1-T3337: a throwing just-in-time reader is converted to an unreadable ref
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
   const gh = ghShim(
     [
+      { when: "/statuses?", stdout: "[[]]" },
       { when: "api repos/", stdout: JSON.stringify({ number: 1, html_url: "https://github.com/acme/remudero/pull/1", updated_at: "t", body: "", head: { ref: "fixture", sha: head }, state: "open" }) },
       { when: "pr diff", stdout: "diff --git a/README.md b/README.md" },
       { when: "pr view", stdout: JSON.stringify({ state: "OPEN" }) },

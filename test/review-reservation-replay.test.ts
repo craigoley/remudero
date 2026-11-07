@@ -105,6 +105,7 @@ test("production review refreshes ownership before replay", async () => {
   mkdirSync(join(root, "state"), { recursive: true });
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const gh = ghShim([
+    { when: "/statuses?", stdout: "[[]]" },
     { when: "api repos/", stdout: JSON.stringify({ number: 4561, html_url: PR, updated_at: "t", body: REPORT, head: { ref: BRANCH, sha }, state: "open" }) },
     { when: "pr diff", stdout: DIFF },
     { when: "pr view", stdout: '{"state":"OPEN"}' },

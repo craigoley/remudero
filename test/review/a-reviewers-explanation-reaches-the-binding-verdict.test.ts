@@ -42,7 +42,7 @@ async function fixture(t: TestContext, text: string, prior?: "same" | "old-engin
         ...(prior === "old-contract" ? { amendment: "prior task instruction" } : {}) }) }) });
   }
   const shim = ghShim([{ when: "pulls/1", stdout: JSON.stringify({ number: 1, state: "open", body: report,
-    head: { ref: "fixture", sha: headSha }, html_url: prUrl }) }, { when: "pr diff", stdout: diff }, { when: "api", stdout: "{}" }]);
+    head: { ref: "fixture", sha: headSha }, html_url: prUrl }) }, { when: "pr diff", stdout: diff }, { when: "/statuses?", stdout: "[[]]" }, { when: "api", stdout: "{}" }]);
   const previousPath = process.env.PATH;
   const rows: { step: string; fields: Record<string, unknown> }[] = [];
   let arms = 0;

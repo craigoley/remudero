@@ -137,6 +137,7 @@ printf '%s\\n' "$*" >> ${JSON.stringify(ghLog)}
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *"/statuses?"*) echo '[[]]' ;;
       *commits/*/status*) echo '{"statuses":[]}' ;;
       *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"}}' ;;
       *) echo '{}' ;;
