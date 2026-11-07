@@ -631,9 +631,8 @@ function bareSelectedInstall() {
   const fixture = privateRecyclerFixture();
   mkdirSync(join(fixture.root, "deploy"));
   mkdirSync(join(fixture.root, ".remudero"));
-  for (const name of readdirSync(join(REPO_ROOT, "deploy"))) {
-    if (name.endsWith(".sh")) copyFileSync(join(REPO_ROOT, "deploy", name), join(fixture.root, "deploy", name));
-  }
+  // A fixed list of the scripts the recycler sources, so the suite names its fixtures rather than walking deploy/.
+  for (const name of ["acr-login.sh", "app-private-key-mount.sh", "claude-directory.sh", "codex-sessions-mount.sh", "recycle-actions.sh", "recycle-container.sh", "release-orphan-recycle-pause.sh", "resource-policy.sh", "runtime-env-vars.sh", "scratch-mounts.sh"]) copyFileSync(join(REPO_ROOT, "deploy", name), join(fixture.root, "deploy", name));
   for (const name of ["src", "node_modules", "package.json", "tsconfig.json"]) symlinkSync(join(REPO_ROOT, name), join(fixture.root, name));
   writeFileSync(join(fixture.root, ".remudero", "daemon-instances.yaml"), readFileSync(fixture.selected));
   const bare = (mode: string, args: string[] = [], extraEnv: Record<string, string> = {}) => runRecycle(mode, {
