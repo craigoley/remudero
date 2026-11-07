@@ -128,11 +128,14 @@ test("W1-T11444 criterion 2: acknowledgement after an in-place selection update 
     assert.ok(all[1]!.body!.includes(selection.digest));
     assert.ok(all[1]!.body!.includes("/pull/14"));
     assert.equal(all[1]!.body!.includes("/pull/13"), false, "silenced observations must not leak into the reopened alert");
-    await handleDisplayedAlert(root, ledgerPath, all, closed, selection.digest, true);
-    await channel().refuse(pr(15)); await channel().reconcile();
-    assert.equal(all.length, 2, "the existing mark-handled route also silences its displayed selection");
     selection.digest = "d".repeat(64);
-    await channel().refuse(pr(16));
+    await channel().refuse(pr(15));
+    assert.equal(all.length, 2, "the reopened episode also updates its displayed selection in place");
+    await handleDisplayedAlert(root, ledgerPath, all, closed, selection.digest, true);
+    await channel().refuse(pr(16)); await channel().reconcile();
+    assert.equal(all.length, 2, "mark-handled also silences an in-place updated selection after reconstruction");
+    selection.digest = "e".repeat(64);
+    await channel().refuse(pr(17));
     assert.equal(all.length, 3, "neither operator action silences a later selection");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

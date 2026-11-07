@@ -4262,10 +4262,12 @@ export function projectPlan(
   }
   for (const taskId of effectiveDeps.skipTasklessEscalations ? [] : taskIdsWithEscalationLines(ledgerLinesOnce, ledgerIndex)) {
     if (plan.byId.has(taskId)) continue;
+    if (/^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(taskId)) {
+      const issueUrl = latestEscalationLine(ledgerLinesOnce, taskId, ledgerIndex)?.issueUrl;
+      if (issueUrl && primaryShadowCurrent.get(issueUrl) !== taskId) continue;
+    }
     const escalation = resolveEscalation(ledgerLinesOnce, taskId, effectiveDeps.github, ledgerIndex);
     if (!escalation) continue; // confirmed closed (or otherwise resolved) — no row, same as above.
-    if (/^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(taskId) && escalation.issueUrl
-      && primaryShadowCurrent.get(escalation.issueUrl) !== taskId) continue;
     byId.set(taskId, {
       taskId,
       status: "blocked",
