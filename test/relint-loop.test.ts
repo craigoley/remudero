@@ -723,7 +723,9 @@ test("relint preserves one original contract and only the current findings at ev
   assert.ok(prompts[1].includes("FIRST_FINDING"));
   assert.ok(prompts[2].includes("SECOND_FINDING"));
   assert.ok(!prompts[2].includes("FIRST_FINDING"), "superseded findings do not accumulate");
-});\n\ntest("lintPlanForReview runs its real offline child against changed tasks", async () => {
+});
+
+test("lintPlanForReview runs its real offline child against changed tasks", async () => {
   let outcome: { ran: true; checked: number; violations: string[] } | { ran: false; reason: string } | undefined;
   await withLane(undefined, async (configRoot) => {
     const repoDir = join(configRoot, "repos", "remudero");
