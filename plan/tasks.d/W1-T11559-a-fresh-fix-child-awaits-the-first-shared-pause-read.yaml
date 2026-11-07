@@ -5,6 +5,7 @@
   priority: 1
   type: implement
   verify: auto
+  budget_usd: 5.00
   principles:
     tdd: strict
   risk: high # this is the fail-closed fleet dispatch gate; preserve STOP and held/unreachable refusal
@@ -16,15 +17,27 @@
     - W1-T11383
   files:
     - src/run-task.ts
-    - test/worker/a-fix-child-awaits-first-shared-pause-read.test.ts
+    - test/reviews-and-detached-actions-run-as-run-children.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: A fresh detached fix child awaits the first asynchronous shared-PAUSE read before treating an absent ref as permission to continue; after absence it performs the live PR and task rechecks and reaches the normal dispatcher
-      proof: "unit test: W1-T11559: a fresh fix-dispatch child awaits its first shared-PAUSE read"
+      proof: "grep: W1-T11559 criterion 1 in test/reviews-and-detached-actions-run-as-run-children.test.ts"
     - claim: A held or genuinely unreachable shared-PAUSE ref still refuses before dispatch, while a local STOP short-circuits the remote read
-      proof: "unit test: W1-T11559: held, unreachable and STOP outcomes retain fail-closed order"
+      proof: "grep: W1-T11559 criterion 2 in test/reviews-and-detached-actions-run-as-run-children.test.ts"
   rationale: |
+    Operator-approved integration, 2026-11-07: use the existing owning detached-child
+    fixture, which already exercises runDetachedWork and real local STOP/PAUSE refusals.
+    Add cold-clear and asynchronous-settlement cases without changing existing inputs,
+    assertions, timeouts or skips. This creates no new Root importer or census allowance.
+    The same two-file repair was specifically approved at a $5 ceiling; record that budget
+    explicitly for this already-filed task rather than creating another repair task.
+    Bind each proof to its distinct new criterion marker in the owning fixture, following
+    the repository's plan-filing contract for new behavior in an existing test file.
+    Source qualification must execute both new behavioral regressions and the complete
+    fixture, prove the intended base failures and removal falsifiers, and retain all
+    existing assertions. Marker presence alone is not behavioral validation.
+
     OBSERVED 2026-11-07 during queue recovery: the native fix children for #17144, #17132 and #17081 each ended at recheckFixDispatch with `worker admission is held: PAUSE: cannot reach origin to read refs/rmd-pause/hold`. A direct `git ls-remote` from the exact engine root inside the daemon container returned success with no matching ref, so this was not an observed fleet hold.
 
     SOURCE-DERIVED ROOT CAUSE: every run child is a new process with a fresh sharedPauseRefreshes WeakMap. In checkSharedPause, a first call initializes state.detail to the fail-closed `unreachable` result, starts refreshSharedPause asynchronously, then immediately returns that initial detail. The child path runFixDispatchWork calls this synchronous check through runFixDispatchChild's hold recheck, and the source has no prepareSharedPause call in that path. Unlike `rmd drain`, it never awaits the first shared-PAUSE read. The child therefore refuses before its asynchronous read can update the detail; its process exits and repeats this on the next sweep. This preserves the fail-closed contract but strands valid fix work.
