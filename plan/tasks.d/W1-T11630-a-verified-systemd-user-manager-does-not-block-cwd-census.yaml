@@ -1,0 +1,61 @@
+- id: W1-T11630
+  title: A verified systemd user manager does not block the process-cwd census
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium  # a narrow process classifier feeds a fail-closed ownership safety guard
+  priority: 1  # this verified Azure environment currently blocks the governed repair lane
+  origin: "Operator-approved bounded follow-up to Azure fix-dispatch refusal, 2026-11-07"
+  plan_refs: [W1-T2952, W1-T10389, W1-T11623]
+  files:
+    - src/lib/process-cwd-census.ts
+    - test/ci/gates/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on the approved Azure worker host while dispatching the governed proof repair for PR #17229:
+    `readBoundedProcessCwdCensus` returned `state=unknown`, `scanned=139`, `skippedForeign=138`, with
+    `pid=1220 errno=EACCES uid=same walk=reached_init`. A fresh SSH session reported that process as
+    `/usr/lib/systemd/systemd --user`, UID 1000, PPID 1, in
+    `/user.slice/user-1000.slice/user@1000.service/init.scope`. As the task user, `/proc/1220/cwd` is
+    unreadable; a read-only root diagnostic resolves it to `/`. This process is the per-user systemd
+    manager, not a worker, but its unreadable cwd currently makes the conservative census refuse the
+    entire owner recovery before a fix child can start. Running the repair lane as root is not an
+    acceptable workaround because it changes which task processes the same-UID guard observes.
+    The implementation task must therefore recognize only this positively identified infrastructure
+    process and keep every other unreadable same-UID process fail-closed.
+  design: |
+    Touch only the two declared paths. Add a narrow identity reader for the process command line and
+    cgroup, with injectable readers for a synthetic process table and real `/proc` defaults.
+    When cwd access returns EACCES/EPERM and status confirms the process has the census owner's real
+    UID, skip that PID only if all of these facts are readable and exact: PPID is 1; argv is exactly
+    `/usr/lib/systemd/systemd --user`; and cgroup v2 places it in
+    `user.slice/user-<uid>.slice/user@<uid>.service/init.scope`. Any unreadable, malformed or near-match
+    identity returns the existing `unknown` result. Do not infer a clear census from a process name,
+    UID, PPID, an ancestor or an unreadable metadata field alone.
+    Continue scanning every other PID after skipping the verified manager. A readable same-UID
+    descendant whose cwd is under the owner path remains `occupied`; an inaccessible same-UID
+    descendant remains `unknown` if its cwd cannot be attributed. Keep wall/entry bounds, foreign UID
+    handling, current unknown cases and occupied behavior unchanged. Add an auditable count for verified
+    managers skipped, but never include command lines, cwd values or private paths in logs.
+    The declared test folder is required by `rmd test-place`; mark the suite
+    `@not-a-rule-suite: a process-cwd utility fixture, not a CI rule suite` because it does not test a CI
+    rule or census roster. First add the positive manager-control and negative near-match controls against the production
+    census seam. Prove the exact manager no longer blocks a clear census, a same-UID child in the owner
+    path is still found, and same-UID EACCES cases with wrong PPID/cgroup/argv or unreadable identity
+    remain unknown. Run the dedicated suite and adjacent process-census suite, then prove deleting the
+    classifier restores the original manager failure and the fail-closed controls still pass after
+    restoring it. Do not use root, weaken unknown handling, exempt a broad process class, or touch
+    `src/run-task.ts`, branch-claim policy, retry behavior, or PR #17229 directly.
+  acceptance:
+    - claim: "A verified per-user systemd manager is skipped, while a same-uid child under the owner path remains occupied and ambiguous near-matches remain unknown"
+      proof: "grep: the verified systemd user manager is skipped while same-uid children remain in the cwd census in test/ci/gates/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts"
+  falsifier: |
+    Remove the exact manager identity classifier: the positive regression must again return unknown on
+    the manager's EACCES/reached-init shape. Change any one of argv, PPID, cgroup, UID, or identity
+    readability in a near-match fixture: it must remain unknown. A same-UID child whose readable cwd
+    is inside the owner path must always remain occupied, even when its manager parent is skipped.
+  note: "No process-census bypass is authorized. The only exception is the per-user systemd manager after exact identity proof; ambiguity remains unknown."
