@@ -4169,10 +4169,14 @@ test("W1-T11600 criterion 3: invalid secondary snapshot is rejected atomically",
   const primaryCandidates = [primary.byId.get("A")!];
   const validSecondary: Task = { ...primary.byId.get("D")!, id: "W1-T11600-SECONDARY", title: "secondary" };
   const malformed = { tasks: [validSecondary], byId: new Map() } as unknown as Plan;
+  const invalidStatus = shadowPlanOf([{ ...validSecondary, status: "in_progress" as Task["status"] }]);
+  const invalidTaskType = shadowPlanOf([{ ...validSecondary, type: "unknown" as Task["type"] }]);
   const duplicate = shadowPlanOf([{ ...primary.byId.get("A")! }]);
   const cases: Array<[Plan | null, string]> = [
     [null, "unavailable"],
     [malformed, "malformed"],
+    [invalidStatus, "malformed"],
+    [invalidTaskType, "malformed"],
     [duplicate, "duplicate_task_id"],
   ];
   for (const [secondary, outcome] of cases) {

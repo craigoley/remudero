@@ -134,7 +134,7 @@ import {
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
-import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { assertRunnable, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
@@ -2049,15 +2049,29 @@ export interface SecondaryCatalogShadowResult {
   displaced_primary_count: number | null;
 }
 
+function isParsedPlanTask(value: unknown): value is Task {
+  if (value === null || typeof value !== "object") return false;
+  const task = value as Task;
+  return typeof task.id === "string" && task.id.length > 0 &&
+    typeof task.title === "string" && task.title.length > 0 &&
+    typeof task.repo === "string" && task.repo.length > 0 &&
+    Array.isArray(task.depends_on) && task.depends_on.every((dependency) => typeof dependency === "string") &&
+    TASK_TYPES.includes(task.type) && TASK_RISKS.includes(task.risk) && TASK_STATUSES.includes(task.status) &&
+    (task.verify === "auto" || task.verify === "human") &&
+    (task.dispatch_hold === undefined || typeof task.dispatch_hold === "boolean") &&
+    (task.priority === undefined || typeof task.priority === "number");
+}
+
 function isParsedPlanSnapshot(value: unknown): value is Plan {
   try {
     if (value === null || typeof value !== "object") return false;
     const plan = value as Plan;
     if (!Array.isArray(plan.tasks) || !(plan.byId instanceof Map) || plan.byId.size !== plan.tasks.length) return false;
     const seen = new Set<string>();
-    for (const task of plan.tasks) {
-      if (task === null || typeof task !== "object" || typeof task.id !== "string" || task.id.length === 0 ||
-          seen.has(task.id) || plan.byId.get(task.id) !== task) return false;
+    for (const value of plan.tasks) {
+      if (!isParsedPlanTask(value)) return false;
+      const task = value;
+      if (seen.has(task.id) || plan.byId.get(task.id) !== task) return false;
       seen.add(task.id);
     }
     for (const [id, task] of plan.byId) {
