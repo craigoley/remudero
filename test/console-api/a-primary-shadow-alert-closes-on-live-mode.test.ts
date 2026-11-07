@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { createService } from "#src/lib/service.js";
 import type { AddressInfo } from "node:net";
 import { createBoardProjection } from "#src/lib/board-projection.js";
-import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { createLedgerProjector, openProjectorReadModel, isFactStep } from "#src/lib/ledger-projector.js";
 import { acquireLease, flushReadModelTransactions } from "#src/lib/read-model-db.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { computeBoardSnapshot } from "#src/lib/board.js";
@@ -447,9 +447,45 @@ test("W1-T11444 criterion 2: an observed delivered body repairs its interrupted 
     const recovered = readLedgerLines(ledgerPath);
     assert.equal(recovered.filter(row => row.step === "primary_shadow.issue_published").length, 1);
     assert.equal(recovered.filter(row => row.step === "escalation.issue_opened").length, 1);
+    const legacy = openProjectorReadModel(join(root, "legacy-read-model"), "core");
+    try {
+      const acquired = acquireLease(legacy); assert.ok(acquired.ok);
+      createLedgerProjector({ ledgerDir: root, db: legacy, lease: acquired.lease,
+        factStep: step => isFactStep(step) && step !== "primary_shadow.issue_published" }).tick();
+      assert.equal(Number(legacy.prepare("SELECT COUNT(*) AS n FROM fact WHERE step = 'escalation.issue_opened'").get()!.n), 1,
+        "the old model saw this ledger's original opening, so its missing delivery fact is measured");
+      assert.equal(Number(legacy.prepare("SELECT COUNT(*) AS n FROM fact WHERE step = 'primary_shadow.issue_published'").get()!.n), 0);
+      // Version 3 is the actual pre-delivery-event fact set, not a value derived from the new constant.
+      legacy.exec("UPDATE meta SET v = '3' WHERE k = 'projection:fact'");
+      createLedgerProjector({ ledgerDir: root, db: legacy, lease: acquired.lease }).tick();
+      assert.equal(Number(legacy.prepare("SELECT COUNT(*) AS n FROM fact WHERE step = 'primary_shadow.issue_published'").get()!.n), 1,
+        "the maintained fact-set upgrade replays a previously unclassified delivered binding");
+    } finally { legacy.close(); await flushReadModelTransactions(); }
     await handleDisplayedAlert(root, ledgerPath, all, closed, selected.digest);
     await channel().refuse(pr(13)); await channel().reconcile();
     assert.equal(all.length, 1, "the repaired binding reaches the real digest-scoped acknowledgement route");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("W1-T11444 criterion 2: a torn delivery binding refuses reconciliation without another issue or body edit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-torn-delivery-"));
+  try {
+    const ledgerPath = join(root, "ledger.ndjson"), all: OpenIssue[] = [];
+    let edits = 0;
+    const selected = { instance: "core", sourcePath: join(root, "selection.yaml"), digest: "a".repeat(64), mode: "shadow" as const };
+    const issues: IssueGateway = {
+      create: (title, body) => { const number = all.length + 1, url = `https://github.com/owner/repo/issues/${number}`;
+        all.push({ number, url, title, body }); return url; },
+      listOpen: () => [...all], editBody: () => { edits += 1; },
+    };
+    const channel = () => escalation.primaryShadowOperatorChannel({ owner: "owner", repo: "repo", ledgerPath,
+      runId: "torn-delivery", selection: () => ({ ...selected }), issues });
+    await channel().refuse({ prNumber: 11, prUrl: "https://github.com/owner/repo/pull/11" });
+    appendFileSync(ledgerPath, `{"step":"primary_shadow.issue_published","task_id":"PRIMARY-SHADOW-${selected.digest}","issue_url":`);
+    await assert.rejects(channel().reconcile(), /history is unreadable/);
+    assert.equal(all.length, 1, "damaged history is never permission to create another issue");
+    assert.equal(edits, 0, "an unreadable delivery record cannot establish a safe body update");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

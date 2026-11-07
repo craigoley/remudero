@@ -7,13 +7,19 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { buildSweepEffects } from "#src/lib/sweep.js";
 import { withInstanceRegistryRuntime } from "#src/lib/instance-registry-selection.js";
-import { ghIssueGatewayAsync, primaryShadowOperatorChannel, type AsyncIssueGateway, type IssueGateway, type OpenIssue } from "#src/lib/escalate.js";
+import { ghIssueGatewayAsync, type AsyncIssueGateway, type IssueGateway, type OpenIssue } from "#src/lib/escalate.js";
+import * as escalation from "#src/lib/escalate.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
 import type { Plan } from "#src/lib/plan.js";
 import type { OpenPrView } from "#src/lib/sweep.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+
+function primaryShadowOperatorChannel(opts: Parameters<typeof escalation.primaryShadowOperatorChannel>[0]) {
+  assert.equal(typeof escalation.primaryShadowOperatorChannel, "function", "the primary-shadow channel is available");
+  return escalation.primaryShadowOperatorChannel(opts);
+}
 
 test("W1-T11444 criterion 1: pass boundaries coalesce durable changes through the awaited escalation gateway", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-cadence-"));
@@ -108,11 +114,16 @@ test("W1-T11444 criterion 1: a pending gateway edit holds later refusals until d
     const pr = (prNumber: number) => ({ prNumber, prUrl: `https://github.com/owner/repo/pull/${prNumber}` });
     await channel().refuse(pr(11));
     let completed = false;
-    await channel().refuse(pr(12));
+    const recorded = channel().refuse(pr(12));
+    pending.push(recorded);
+    // Observe the old immediate edit before awaiting its blocked receipt, so removal fails an assertion.
+    await Promise.race([recorded, started]);
     assert.equal(edits.length, 0, "the refusal itself persists its observation without a body edit");
-    pending.push(channel().reconcile().then(() => { completed = true; }));
-    // Observe a settled operation too, so an implementation that suppresses edits fails instead of hanging.
-    await Promise.race([started, pending[0]]);
+    await recorded;
+    const flushed = channel().reconcile().then(() => { completed = true; });
+    pending.push(flushed);
+    // Observe a settled flush too, so suppressing the boundary write fails instead of hanging.
+    await Promise.race([started, flushed]);
     assert.equal(edits.length, 1, "the ordinary boundary reaches the gateway without advancing the clock");
     pending.push(channel().refuse(pr(13)));
     await new Promise<void>(resolve => setImmediate(resolve));
