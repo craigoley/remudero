@@ -1,0 +1,88 @@
+- id: W1-T11566
+  title: Each canary case freezes a pre-execution routing snapshot, and router replay runs the real selector against it
+  repo: remudero
+  depends_on: [W1-T11565]
+  plan_refs: [W1-T11119, W1-T11565]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: blast-radius
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: architect
+  files:
+    - src/lib/model-canary-routing-snapshot.ts
+    - src/lib/model-canary-owner.ts
+    - src/lib/model-canary-command.ts
+    - test/routing/model-canary-routing-snapshot.test.ts
+  rationale: >-
+    W1-T11119's worker refused criterion 14 because no durable producer joins frozen pre-outcome router
+    decisions to canary outcomes. The router's decision is a pure function of state that changes
+    minute to minute. selectWorkerProviderForPolicy (src/lib/provider-routing-policy.ts) and
+    selectWorkerProvider (src/lib/worker-provider.ts) take capacity windows, the reserve, the effective
+    routing policy and a keyed draw. Replaying them against live capacity after outcomes are known
+    would measure a different policy than the one that would have run, and would let outcome-time
+    state leak into the decision. RouteLLM (ICLR 2025, https://openreview.net/pdf?id=8sSqNntaMr)
+    scores a router by the decision it makes from the query alone, before any candidate's response,
+    and then compares it against fixed-model baselines on held-out data. The equivalent here is a
+    deterministic decision from an immutable pre-execution snapshot. RouterEval (Findings of EMNLP
+    2025, https://aclanthology.org/2025.findings-emnlp.208.pdf) evaluates routers over diverse
+    candidate pools. A decision counts only if its chosen candidate is a real, identified member of
+    the evaluated pool. A provider choice that maps to no matrix configuration is not a scored
+    decision. Efron (1986, https://doi.org/10.1214/ss/1177013815) bootstrap resamples cases. Every
+    resampled case must carry its own fixed decision, so the decision has to be frozen per case
+    rather than recomputed for each resample.
+    Settled by lookup: is this already filed? -> no. W1-T11119 declares
+    src/lib/model-canary-router-value.ts and requires evaluateCanaryRouterValue( in the command, but no
+    task produces the snapshot it would consume. W1-T11264 and W1-T11265 freeze census and matrix
+    identity, not router inputs, and come after W1-T11119 (plan/tasks.d).
+    Settled by lookup: does the selector record genuine propensities? -> yes. RoutingDraw.probabilities
+    is computed by the selector itself (src/lib/worker-provider.ts), so a propensity diagnostic is
+    possible only from a draw recorded at capture.
+    Settled by lookup: is the estimand decided? -> yes, by the operator's design resolution for this
+    run. The primary estimand is the deterministic replayed decision. Live capacity is never refreshed,
+    and propensity-weighted evaluation is only a separately preregistered diagnostic.
+  design: >-
+    Add a pure module with three parts. First, a versioned per-case routing snapshot contract:
+    ProviderCapacity readings, the effective routing policy, the reserve, the RoutingDrawSeed key, a
+    selector version (ROUTING_DRAW_METHOD plus a module version constant), and the candidate list
+    mapping each provider choice to an exact matrix configId. It also records the pre-outcome feature
+    digest, computed from the private-corpus request projection with no scorer expectations, the
+    corpus, scorer, census and matrix-plan digests, and the RoutingDraw the selector itself returned at
+    capture. Second, a routerEvaluationBindingDigest helper over (caseId, corpusDigest, scorerDigest,
+    featureDigest, censusDigest, matrix sourceDigests, matrixPlanDigest). Third, a pure
+    replayFrozenRouterDecision that calls the actual selectWorkerProviderForPolicy against the stored
+    snapshot only. It maps the chosen provider to its candidate configId. It requires the replayed
+    draw to equal the captured draw. It returns unavailable, with a named reason, for: snapshot
+    missing, selector-version mismatch, feature or binding mismatch, a candidate missing from the
+    matrix eligible set, duplicate or ambiguous candidate identity, captured and replayed draws
+    disagreeing, or a blocked selector. In the owned schedule composition, capture the snapshot once
+    per (replicate, case) block. Capture happens before the first slot of that case is claimed, through
+    an injected snapshot-source port, and the snapshot is persisted in the W1-T11565 sibling evidence
+    table under the owner. Later arms of the same case reuse it, and nothing refreshes it. A missing
+    port or failed read records unavailable and never blocks or alters execution. Expose the captured
+    draw's probabilities only as a labelled diagnostic field. Never compute, impute or smooth a
+    propensity. Offline tests use fake capacity readers and transports: zero provider calls. No
+    routing policy, override, schedule, allowance, admission or live selection behaviour changes.
+  note: >-
+    Prerequisite for W1-T11119 (architect expand run PLAN-expand-1794059304004).
+    evaluateCanaryRouterValue in W1-T11119 composes replayFrozenRouterDecision with W1-T11567's
+    qualified baseline. It must not re-run the selector against live state. Consent, private-owner,
+    source, admission and no-spend gates and the separate $25 pilot ceiling are unchanged.
+  acceptance:
+    - claim: Replay calls the real selector against the frozen snapshot only and returns unavailable for a missing snapshot, selector version, feature binding or candidate identity
+      proof: 'unit test: test/routing/model-canary-routing-snapshot.test.ts'
+    - claim: The replay module invokes the actual pure routing selector rather than a reimplementation
+      proof: 'grep: selectWorkerProviderForPolicy( in src/lib/model-canary-routing-snapshot.ts'
+    - claim: The owned schedule composition captures the per-case snapshot before claim through the real command path
+      proof: 'grep: captureCanaryRoutingSnapshot( in src/lib/model-canary-command.ts'
+  falsifier: >-
+    Mutate a capacity reading after capture and require the replayed decision to stay fixed. Changing
+    it fails. Swap the live capacity reader into replay and require the frozen-snapshot control to
+    fail. Change the selector version constant, the feature digest or a candidate configId and require
+    each to read unavailable. Drop the captured-draw equality check and require the draw-mismatch
+    control to fail. Remove the captured RoutingDraw and require the propensity diagnostic to read
+    unavailable rather than a recomputed value. Count fake sends and require zero provider calls.

@@ -1,0 +1,104 @@
+- id: W1-T11565
+  title: Native canary invocation provenance is an owner receipt bound to slot, case, config, replicate, arm and execution window
+  repo: remudero
+  depends_on: [W1-T10957, W1-T11117, W1-T11118]
+  plan_refs: [W1-T11119, W1-T11213, W1-T11264]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: blast-radius
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: architect
+  files:
+    - src/lib/model-canary-invocation-provenance.ts
+    - src/lib/model-canary-owner.ts
+    - src/lib/model-canary-matrix-plan.ts
+    - src/lib/model-canary-coding-adapter.ts
+    - src/lib/model-canary-command.ts
+    - src/lib/model-canary-replay-private.ts
+    - test/routing/model-canary-invocation-provenance.test.ts
+    - test/model-canary-owner.test.ts
+  rationale: >-
+    W1-T11119's worker refused criteria 8 and 10 because no production native receipt producer
+    reaches the clustered analysis path. Current main confirms it. The owned coding schedule's save
+    port in src/lib/model-canary-command.ts sets run.executionSource to native-provider-execution for
+    every coding run, whether or not a provider invocation was observed. The CanarySlotOwner terminal
+    receipt (src/lib/model-canary-owner.ts) records slot, run and grade. It records no census configId,
+    replicateId, matrix slot, arm or owner-observed execution window. CanarySlot itself carries only
+    id, caseId, pin and aaLabel, and MatrixShard notes that native slots cannot tell apart configurations
+    that share a pin projection. So the analysis cannot tell a native arm outcome from a relabelled one.
+    It also cannot place that outcome in its matrix cell. RouteLLM (ICLR 2025,
+    https://openreview.net/pdf?id=8sSqNntaMr) compares routers against fixed-model baselines on
+    held-out benchmarks where every query has a known outcome for every candidate model. Router value
+    is only measurable when each (case, candidate) cell is a genuine, attributable observation.
+    RouterEval (Findings of EMNLP 2025, https://aclanthology.org/2025.findings-emnlp.208.pdf) builds
+    its router comparisons on a complete per-model performance record across a diverse pool and many
+    workloads. A missing cell is a coverage gap. It must not be filled in. Efron (1986,
+    https://doi.org/10.1214/ss/1177013815) bootstrap standard errors and intervals resample the observed
+    sample as a stand-in for the sampling distribution. Blocks missing for non-random reasons such as
+    deferral, busy owner or crash make that stand-in invalid, so uncertainty must be withheld rather
+    than computed over the survivors.
+    Settled by lookup: is this already filed? -> no. W1-T11213 adds the one-shot A/A owner and a
+    beforeProviderInvocation hook, and W1-T11264 adds campaign-specific owner state. Both depend on
+    W1-T11120, which depends on W1-T11119, so W1-T11119 cannot consume either without a cycle
+    (plan/tasks.d/W1-T11213-*.yaml, W1-T11264-*.yaml, W1-T11120-*.yaml).
+    Settled by lookup: does producer-observed invocation evidence exist? -> yes.
+    WorkerExecutionEvidenceV1.providerInvoked is normalized from the actual worker result
+    (src/lib/worker-execution-evidence.ts), and codingWorkerRequestPorts already forwards it
+    (src/lib/model-canary-coding-adapter.ts).
+    Settled by lookup: is synthetic replay already labelled? -> yes. replayPrivateControl marks
+    activity synthetic-canary (src/lib/model-canary-replay-private.ts). This task keeps that label and
+    never upgrades it.
+    Settled by lookup: does the matrix already map native slots to config, replicate and arm? -> yes.
+    MatrixShard.slotMappings (src/lib/model-canary-matrix-plan.ts, W1-T11117).
+  design: >-
+    Add a small module that issues an app-sealed native invocation observation. It uses a WeakMap
+    capability, following the existing codingProviderRequestLifecycle pattern. The observation is
+    issued only inside the app-owned worker request port, from the worker's own
+    WorkerExecutionEvidenceV1. It requires providerInvoked observed true, a worker-spawn attempt ID and
+    the exact canary runId and canaryAttemptId. providerInvoked false, unavailable or absent issues
+    nothing. Aggregate worker.assignment rows, caller-authored JSON, a self-reported executionSource and
+    a model-authored field are never authority. Replace the unconditional native relabel in the owned
+    schedule with a classifier. It returns native-provider-execution only when every attempt carries a
+    sealed observation matching its run and attempt. It returns synthetic-control-replay for
+    replayPrivateControl. Otherwise the source is absent or unclassified, never native. Let
+    CanarySlotOwner.claim optionally accept a matrix-slot binding: the MatrixSlotMapping plus the plan
+    digest, accepted only from the in-process plan that planCanaryMatrix returned. Membership must be
+    proven against that plan's shard slotMappings, and deserialized plan JSON is refused. The owner
+    records the claim and terminal instants from its own injected clock. Persist the binding, the
+    owner execution window and the sealed-observation summary in an append-only sibling evidence
+    table that the owner constructor creates. Do not change the canary_slots_v1 DDL or
+    assertExistingCanaryOwnerV1. A store without the sibling table reads as unavailable, never
+    created or repaired. Add a strictly read-only owner reader. Given the in-process matrix plan, it
+    returns one row per planned eligible matrix slot with state native, synthetic, unavailable (with
+    reason) or missing. It also returns an uncertainty field that is unavailable whenever any planned
+    eligible block is missing or non-native. Offline tests use fake workers and transports only: zero
+    provider calls and zero spend. No schedule, lease, allowance, admission change or provider route
+    is added. The separate $25 pilot ceiling and the existing $10 lifetime and $2 smoke caps are not
+    read, raised or reused.
+  note: >-
+    Prerequisite for W1-T11119 (architect expand run PLAN-expand-1794059304004). W1-T11213 and
+    W1-T11264 should reuse this sealed observation and reader rather than add a second invocation
+    classifier. W1-T11264's recognized-legacy-schema migration must treat this sibling evidence table
+    as part of the legacy schema. Consent, private-owner, source-qualification, admission and no-spend
+    gates are unchanged.
+  acceptance:
+    - claim: Only a positive producer-observed provider invocation from the app-owned worker port yields a native classification; caller JSON, assignment rows and a self-set executionSource do not
+      proof: 'unit test: test/routing/model-canary-invocation-provenance.test.ts'
+    - claim: The app-owned coding worker request port issues the sealed invocation observation from the worker result
+      proof: 'grep: issueNativeInvocationObservation( in src/lib/model-canary-coding-adapter.ts'
+    - claim: The owned schedule classifies execution source through the sealed-observation classifier rather than an unconditional relabel
+      proof: 'grep: classifyCanaryExecutionSource( in src/lib/model-canary-command.ts'
+    - claim: Owner receipts bind slot, case, config, replicate and arm from the in-process matrix plan with an owner-observed execution window; missing blocks stay explicit and make uncertainty unavailable
+      proof: 'unit test: test/model-canary-owner.test.ts'
+  falsifier: >-
+    Restore the unconditional native relabel and require the forged-run control to read native, which
+    fails. Accept providerInvoked unavailable or false as native and require the negative control to
+    fail. Feed a deserialized matrix-plan JSON or a mapping outside the plan's shard and require the
+    claim to refuse. Delete one terminal receipt from a complete fixture matrix and require the reader
+    to report that cell missing and uncertainty unavailable. Count fake transport sends and require
+    zero real provider calls.

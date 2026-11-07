@@ -1,8 +1,8 @@
 - id: W1-T11119
   title: Controlled canaries compare clustered evidence with field trials and export unmeasured improvement proposals
   repo: remudero
-  depends_on: [W1-T11117, W1-T11118, W1-T10957]
-  plan_refs: [W1-T10956, W1-T10957, W1-T100001]
+  depends_on: [W1-T11117, W1-T11118, W1-T10957, W1-T11565, W1-T11566, W1-T11567]
+  plan_refs: [W1-T10956, W1-T10957, W1-T100001, W1-T11565, W1-T11566, W1-T11567]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -45,6 +45,10 @@
     rates as a randomized comparison. Existing paired analysis is descriptive and supplies no
     uncertainty estimate. Repeated attempts are not independent cases. Failure patterns can
     inform a bounded improvement proposal without executing that proposal.
+    Settled by lookup: did any task produce native receipts, frozen router decisions or qualified
+    baselines before this one? -> no. W1-T11213 and W1-T11264 come after it via W1-T11120, so
+    W1-T11565, W1-T11566 and W1-T11567 are its prerequisites (plan/tasks.d;
+    https://openreview.net/pdf?id=8sSqNntaMr).
   design: >-
     Add pure private post-processing helpers over immutable manifests and existing canary and
     field-trial evidence contracts. Preserve observational versus registered randomized
@@ -72,6 +76,15 @@
     replay and their real CLI controls. Consume W1-T10957 first-class case and owner contracts
     after they merge; this orders existing preparation and grants no inference, new allowance,
     schedule, routing promotion or duplicate full Linux qualification.
+    Architect expand PLAN-expand-1794059304004 resolves the three outside-declared-files refusals
+    above by ordering, not by widening or narrowing. W1-T11565 supplies the production native
+    invocation receipts and the matrix-cell reader (criteria 8 and 10). W1-T11566 supplies the frozen
+    per-case routing snapshot and pure replay, and W1-T11567 the separately qualified static
+    baseline (criterion 14). Consume them through src/lib/model-canary-command.ts and
+    src/lib/model-canary-router-value.ts. Every acceptance criterion and the owner record are
+    unchanged. None of the three prerequisites depends on W1-T11120, W1-T11213, W1-T11264 or
+    W1-T11265, so the ordering adds no cycle. Grounding: https://openreview.net/pdf?id=8sSqNntaMr,
+    https://aclanthology.org/2025.findings-emnlp.208.pdf, https://doi.org/10.1214/ss/1177013815.
   acceptance:
     - claim: Paired uncertainty uses independent source families rather than treating repeats as new cases
       proof: 'unit test: test/routing/model-canary-cluster-analysis.test.ts'

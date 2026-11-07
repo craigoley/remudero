@@ -1,0 +1,70 @@
+- id: W1-T11567
+  title: Static-baseline evidence is selected on development cases only and bound to the router replay's case, corpus, scorer, features, digests and owner execution
+  repo: remudero
+  depends_on: [W1-T11565, W1-T11566]
+  plan_refs: [W1-T11119, W1-T11565, W1-T11566]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: architect
+  files:
+    - src/lib/model-canary-static-baseline.ts
+    - test/routing/model-canary-static-baseline.test.ts
+  rationale: >-
+    W1-T11119's design compares frozen router decisions with development-selected, qualified static
+    baselines. No contract yet defines what qualified means, so its criterion 14 cannot be met without
+    a guess. RouteLLM (ICLR 2025, https://openreview.net/pdf?id=8sSqNntaMr) measures router value
+    relative to fixed single-model baselines and random routing on held-out benchmarks, with router
+    choices trained separately from the evaluation data. A baseline picked after looking at held-out
+    outcomes inflates the comparison. RouterEval (Findings of EMNLP 2025,
+    https://aclanthology.org/2025.findings-emnlp.208.pdf) judges a router against the best single
+    model in a diverse candidate pool. That comparison is meaningful only when the baseline and the
+    router are scored on the same cases with the same scorer. Efron (1986,
+    https://doi.org/10.1214/ss/1177013815) paired bootstrap of the router-minus-baseline difference
+    needs both arms observed on every resampled case. If either arm's cell is missing or non-native,
+    that case cannot contribute and confirmatory uncertainty is unavailable.
+    Settled by lookup: is this already filed? -> no. No shard defines static-baseline qualification
+    (grep of plan/tasks.d for static baseline finds only W1-T11119's design sentence).
+    Settled by lookup: does the corpus carry split identity? -> yes. W1-T11118 keeps time and split
+    identity, sealed holdouts and whole-family splits (plan/tasks.d/W1-T11118-*.yaml), so development
+    and holdout membership is app-owned rather than caller-declared.
+    Settled by lookup: is the empirical per-case oracle a baseline? -> no. W1-T11119's design labels
+    it an optimistic diagnostic only.
+  design: >-
+    Add a pure module. It selects the static baseline from W1-T11565 owner-read native receipts on
+    validated private-corpus development cases only. The rule is preregistered: the highest
+    development pass rate among matrix configIds with complete native development coverage, with ties
+    broken by the canonical configId order. It emits a frozen selection record carrying the
+    development case set digest, the rule version and the chosen configId, computed before any
+    holdout outcome is read. Qualifying a baseline for comparison requires, per holdout case, the
+    same routerEvaluationBindingDigest as the W1-T11566 snapshot for that case: case, corpus, scorer,
+    pre-outcome features, census, matrix source and matrix-plan digests. It also requires a native
+    owner terminal receipt for the baseline's cell with an owner execution window, and a case outside
+    the selection's development set. Any mismatch, development-holdout overlap, missing cell, synthetic
+    cell or caller-supplied selection marks that case unavailable with a named reason and makes
+    confirmatory uncertainty unavailable. It never substitutes another configuration. The module
+    reads no live state, writes nothing and calls no provider. W1-T11119's evaluateCanaryRouterValue
+    consumes it. Offline tests use fixture owner stores only: zero provider calls.
+  note: >-
+    Prerequisite for W1-T11119 (architect expand run PLAN-expand-1794059304004). This adds no routing
+    promotion, policy or schedule. Consent, private-owner, source, admission and no-spend gates and the
+    separate $25 pilot ceiling are unchanged.
+  acceptance:
+    - claim: The baseline is chosen from development native receipts only and is invariant to holdout outcomes; binding, overlap or coverage mismatches return unavailable
+      proof: 'unit test: test/routing/model-canary-static-baseline.test.ts'
+    - claim: Baseline qualification checks the same evaluation binding digest as the frozen router replay
+      proof: 'grep: routerEvaluationBindingDigest( in src/lib/model-canary-static-baseline.ts'
+    - claim: Baseline cells come from owner-read native receipts rather than caller JSON
+      proof: 'grep: readOwnedNativeInvocationReceipts( in src/lib/model-canary-static-baseline.ts'
+  falsifier: >-
+    Flip every holdout outcome and require the selected baseline to stay identical. Selecting on
+    holdout data fails. Perturb the scorer or feature digest for one case and require that case to
+    read unavailable. Put a development case into the holdout set and require refusal. Replace one
+    native cell with a synthetic replay cell or caller JSON and require unavailable with uncertainty
+    withheld.
