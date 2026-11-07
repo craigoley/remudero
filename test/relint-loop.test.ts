@@ -747,7 +747,7 @@ test("lintPlanForReview runs its real offline child against changed tasks", asyn
       "  acceptance:",
       '    - claim: "the new fixture line distinguishes the head from base"',
       "      kind: guard",
-      '      proof: "grep: relint_real_child_fixture_discriminates_head test/relint-loop.test.ts"',
+      '      proof: "grep: relint_real_child_fixture_discriminates_head in test/relint-loop.test.ts"',
       "",
     ].join("\n");
     writeFileSync(join(shardDir, `${taskId}-fixture.yaml`), fixture);
