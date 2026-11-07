@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const SCRIPT = join(REPO_ROOT, "deploy", "mac", "tmp-reclaim.sh");
 const osNowMs = () => Number(spawnSync("date", ["+%s"], { encoding: "utf8" }).stdout.trim()) * 1000;

@@ -20,8 +20,7 @@ function setup(config: Record<string, unknown>): Fx {
   mkdirSync(join(home, ".local/state/remudero"), { recursive: true });
   for (const dir of [home, join(home, ".local"), join(home, ".local/state"), join(home, ".local/state/remudero")]) chmodSync(dir, 0o700);
   const cfg = join(home, ".local/state/remudero/preserve-retire.json");
-  writeFileSync(cfg, JSON.stringify({ enabled: true, idle_hours: 24, retain_days: 7, interval_hours: 0, roots: [], ...config }));
-  chmodSync(cfg, 0o600);
+  writeFileSync(cfg, JSON.stringify({ enabled: true, idle_hours: 24, retain_days: 7, interval_hours: 0, roots: [], ...config }), { mode: 0o600 });
   const bin = join(root, "bin"); mkdirSync(bin);
   writeFileSync(join(bin, "ps"), '#!/bin/bash\nprintf "%s\\n" /bin/sh\n', { mode: 0o755 });
   writeFileSync(join(bin, "lsof"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
