@@ -1,0 +1,47 @@
+- id: W1-T11550
+  title: A private-registry Codex profile denies the worktree's parent, so a write beside the worktree is refused by the OS and the containment probe can pass again
+  repo: remudero
+  depends_on: []
+  priority: 0.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one added deny in the profile every selected Codex worker runs under; it loosens nothing, and a wrong deny could hide a grant
+  band_meaning: blast-radius
+  origin: operator-session#containment-probe-2026-11-06
+  plan_refs:
+    - W1-T11437
+    - W1-T10573
+  files:
+    - src/lib/worker-provider.ts
+    - test/deploy/a-private-registry-codex-profile-can-start-its-own-sandbox.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: For reader, writer and review intents, when no other grant lies beside the worktree, both surfaces of the private-registry Codex profile deny the worktree's parent, never grant it read, and keep the root deny
+      proof: "grep: W1-T11550 criterion 1 in test/deploy/a-private-registry-codex-profile-can-start-its-own-sandbox.test.ts"
+    - claim: When a granted path lies under the worktree's parent but outside the worktree, the parent is not denied, because a parent deny hides a nested grant, and that grant keeps its read
+      proof: "grep: W1-T11550 criterion 2 in test/deploy/a-private-registry-codex-profile-can-start-its-own-sandbox.test.ts"
+    - claim: Under the real codex sandbox, a write beside the worktree fails with a read-only file system error and creates no host file, while a write inside the worktree succeeds
+      proof: "grep: W1-T11550 criterion 3 in test/deploy/a-private-registry-codex-profile-can-start-its-own-sandbox.test.ts"
+  rationale: |
+    OBSERVED 2026-11-06:
+    - Every fleet build has ended verdict blocked_containment since about 2026-11-05T17:00Z: 237 rows on 11-06 against 1 to 3 a day before, with reason "containment UNPROVEN: no OS-denial was observed for the outside-cwd write", observed write-never-attempted. The last handed_off verdicts were in hour 16 on 11-05.
+    - Onset: core's first selected-registry container (RECYCLE-2822248, 11-05 16:57:39Z). A selected registry makes runtimeInstanceRegistryPrivateFile() defined, which puts Codex workers on withPrivateRegistryCodexProfile with :root denied.
+    - Ledger, Azure probes served by Codex: 7 of 7 contained before onset; 597 of 603 not contained after. Mac probes with no selected registry: 13 of 13 contained.
+    - Phase 1, 17:16 to 20:40Z, was the bwrap execvp failure #16909 fixed. Phase 2, from 20:43Z: 501 rows report rc=0 for the outside write with no host file, and 65 report the model declining the write.
+    - Reproduced with codex-cli 0.166.0 (the deployed pin) on a worktree layout with the git dir elsewhere. Deployed shape: `touch ../tok` exits 0, no host file, no error text. With the parent denied: "Read-only file system", rc 1, no host file, git dir and node_modules readable, sibling unreadable, inside write succeeds.
+    - The probe reads an OS denial from the transcript. A write that silently lands on a tmpfs leaves nothing to read, so the check fails closed. The check is right and is not changed here. The boundary held in the reproduction.
+    - A parent deny hides grants nested under it: with the git dir under the denied parent, it became unreadable in the same reproduction. Hence the guard.
+    INFERRED: the reproduction ran on the host, without /etc/codex/requirements.toml. The container's behaviour is inferred from the matching ledger symptom, so the proof that counts is containment.probe rows after this ships.
+  design: |
+    In withPrivateRegistryCodexProfile (src/lib/worker-provider.ts), after the filesystem map is built, set dirname(cwd) to deny unless cwd is its own parent or some grant root lies under that parent and outside cwd. The map feeds both the profile file and the inline overrides, so both surfaces carry it.
+    NOT IN SCOPE:
+    - src/lib/containment.ts and the gate's strictness;
+    - the grandparent, where a write can still exit 0 and vanish;
+    - the roughly 11 percent of probes where the model declines the write.
+  note: |
+    Read containment.probe rows after this reaches the daemon; a healthy result is contained true on Codex-served probes.
+    reservation hand-off: run-unfiled-1794002639754 -> run-unfiled-1794002639754
+    Reserved with rmd next-task-id (W1-T11550 on run-unfiled-1794002639754). From the operator session's 2026-11-06 containment diagnosis, under the operator's "can you fix all of this?". W1-T11437's rationale names this symptom as out of scope and wanting its own task.

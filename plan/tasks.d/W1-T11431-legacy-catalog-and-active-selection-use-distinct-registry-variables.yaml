@@ -32,10 +32,10 @@
     - test/serve-launch-uniformity.test.ts
     - test/env-var-registry.test.ts
     - docs/instance-registry-selection-contract.md
-  priority: 4
+  priority: 2
   status: queued
-  # backlog gardener: band=4 evidence=ca641a32e0c4b9f3
-  # backlog gardener: placed=2026-11-05T23:00:35.430Z
+  # backlog gardener: band=2 evidence=92d23f3556e9ef27
+  # backlog gardener: placed=2026-11-06T23:38:48.735Z
   attempts: 0
   acceptance:
     - claim: "Private registry selection reaches the real host and daemon readers through their existing bounded selection seams."
