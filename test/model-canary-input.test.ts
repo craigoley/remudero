@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { canaryCommand } from "../src/lib/model-canary-command.js";
+import { canaryCommand, projectNativeCanaryEstimands, parseNativeCanaryAnalysisInput } from "#src/lib/model-canary-command.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { readExistingNativeCanaryConfig } from "#src/lib/model-canary-native-config.js";
 test("canary descriptor input refuses a platform without the required no-follow flag", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-descriptor-flags-`));
   try {
@@ -65,4 +66,54 @@ test("canary descriptor input retains its byte bound when the opened file grows 
     assert.equal(child.status, 1, child.stderr); assert.match(child.stderr, /canary-input-bound/);
     assert.equal(readFileSync(input).length, 8 * 1024 * 1024 + 2);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("native analysis input requires predeclared matrix identity and window", () => {
+  const input = {
+    version: "model-canary-analysis-input-v1", seed: "fixed-analysis-seed", censusInput: {},
+    matrixOptions: { day: "2026-11-05", seed: "fixed-matrix-seed", replicates: 1 },
+    matrixDigest: "a".repeat(64),
+    design: { comparisons: [{ id: "comparison-a", endpoints: ["correctness"], estimands: ["first-attempt"] }],
+      splits: ["development", "sealed-holdout"] },
+    comparisons: [{ id: "comparison-a", endpoint: "correctness", leftConfigId: "config-a", rightConfigId: "config-b" }],
+    observationWindow: { start: "2026-11-01T00:00:00.000Z", end: "2026-11-08T00:00:00.000Z" },
+  };
+  assert.equal(parseNativeCanaryAnalysisInput(input).matrixDigest, input.matrixDigest);
+  assert.throws(() => parseNativeCanaryAnalysisInput({ ...input, observationWindow: undefined }),
+    /canary-analysis-input-invalid/);
+  assert.throws(() => parseNativeCanaryAnalysisInput({ ...input, matrixDigest: "not-a-digest" }),
+    /canary-analysis-input-invalid/);
+});
+
+test("native analysis command rejects incomplete CLI arguments before reading evidence", () => {
+  assert.throws(() => canaryCommand(["analyze-private"]), /usage: model-canary-command analyze-private/);
+});
+
+test("native estimands do not turn extra terminal attempts into graded cases", () => {
+  const repeated = projectNativeCanaryEstimands({ attempts: [{}, {}, {}] as never, verified: true });
+  assert.deepEqual(repeated.outcomes, { "first-attempt": null, "all-repeats": null, "best-of-k": null });
+  assert.match(repeated.availability["all-repeats"], /no-per-attempt-outcomes/);
+  assert.match(repeated.availability["best-of-k"], /no-per-attempt-outcomes/);
+  const single = projectNativeCanaryEstimands({ attempts: [{}] as never, verified: true });
+  assert.deepEqual(single.outcomes, { "first-attempt": true, "all-repeats": null, "best-of-k": null });
+});
+
+test("native config reader reads only an existing config and does not provision defaults", () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}native-canary-config-`));
+  const prior = process.env.HOME;
+  try {
+    process.env.HOME = home;
+    const missing = readExistingNativeCanaryConfig();
+    assert.deepEqual(missing, { state: "unavailable", reason: "native-config-not-found" });
+    assert.equal(existsSync(join(home, ".config", "remudero")), false);
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true, mode: 0o700 });
+    const path = join(home, ".config", "remudero", "config.json");
+    writeFileSync(path, JSON.stringify({ claudeBin: "/bin/true", root: join(home, "Remudero") }), { mode: 0o600 });
+    const found = readExistingNativeCanaryConfig();
+    assert.equal(found.state, "available");
+    if (found.state === "available") assert.equal(found.config.root, join(home, "Remudero"));
+  } finally {
+    if (prior === undefined) delete process.env.HOME; else process.env.HOME = prior;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
