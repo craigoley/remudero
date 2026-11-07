@@ -1,0 +1,30 @@
+id: incident-2d772850a4a75380
+ts: 2026-11-07T11:20:04.667Z
+raw: >-
+  Incident 2d772850a4a7: flow pr-stage-stall:own-red:ci-shard (<n>/<n>) failed
+  on <sha> — ci-log fix, fix round <n> — judge: continue (first fix round: no
+  round, strike or parked wait yet, so there is no progress...)
+
+  First seen: 2026-11-07T11:19:13.996Z
+
+  Last seen: 2026-11-07T11:19:13.996Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=17160 own-red: repeat: "ci-shard (<n>/<n>) failed on <sha> — ci-log fix, fix round <n> — judge: continue (first fix round: no round, strike or parked wait yet, so there is no progress...)" x6; review loop
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#2d772850a4a75380666c2912364e306352f265312f22768c2d6f07d8d9745b28
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
