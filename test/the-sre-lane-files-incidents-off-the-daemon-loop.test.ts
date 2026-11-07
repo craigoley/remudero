@@ -131,11 +131,11 @@ test("W1-T9615: a staged incident is not filed again by the next pass", async ()
   assert.equal(logged.filter(([step]) => step === "sre_lane.filed").length, 1);
 });
 
-test("W1-T9615: the daemon's SRE lane input stages in its own state root's queue", () => {
+test("W1-T9615: the daemon's SRE lane input stages in its own state root's queue", async () => {
   const { root, stateRoot } = laneRoots();
   const base = { stateDir: join(stateRoot, "state"), root, ledgerPath: join(stateRoot, "state", "ledger.ndjson"), owner: "o", repo: "r", mergedLastDay: () => 1, log: () => {} };
-  assert.equal(daemonSreLaneInput(base).landingStateRoot, stateRoot, "the parent of the lane's state dir, the root the landing sweep drains");
-  assert.equal(daemonSreLaneInput({ ...base, landingStateRoot: join(stateRoot, "other") }).landingStateRoot, join(stateRoot, "other"));
+  assert.equal((await daemonSreLaneInput(base)).landingStateRoot, stateRoot, "the parent of the lane's state dir, the root the landing sweep drains");
+  assert.equal((await daemonSreLaneInput({ ...base, landingStateRoot: join(stateRoot, "other") })).landingStateRoot, join(stateRoot, "other"));
 });
 
 test("W1-T9615: a staged capture lands nothing inline, and an id already queued is returned untouched", async () => {

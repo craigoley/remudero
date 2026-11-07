@@ -240,7 +240,7 @@ test("the daemon's SRE lane reads only the INCIDENT rows of this instance's own 
     mergedLastDay: () => 1, log: (step: string) => { logged.push(step); },
   };
 
-  const lane = startSreLane(daemonSreLaneInput(input))(60_000);
+  const lane = startSreLane(await daemonSreLaneInput(input))(60_000);
   await lane.settled();
   lane.stop();
   // W1-T9615: the daemon input stages the filing in its state root's landing queue (here `root`), not the checkout.

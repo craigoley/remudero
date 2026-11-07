@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "2026-11-05 core loop-hold incident: #16943, #16944 and #16945 green plan PRs waited 40+ min; the W1-T5901 one-per-pass claim deferred two of them each pass"
   plan_refs: [W1-T5901, W1-T9212, W1-T5748, W1-T5615, W1-T4405, W1-T11434]
-  files: [src/lib/sweep.ts, src/lib/ledger.ts, src/lib/status.ts, test/ledger/light-pass-merge-budget-uses-measured-interval.test.ts]
+  files: [src/lib/sweep.ts, src/lib/ledger.ts, src/lib/status.ts, test/ledger-rotation.test.ts, test/ledger/light-pass-merge-budget-uses-measured-interval.test.ts]
   priority: 3
   status: queued
   # backlog gardener: band=3 evidence=b9d53b979d20e381
@@ -29,8 +29,10 @@
     Because the cadence reader consumes `sweep.pass` and `sweep.summary` across ledger rotation, register
     those steps in `src/lib/ledger.ts` so the interval sample survives retention. Keep `src/lib/status.ts`
     in the approved scope because the ledger-rotation reader census includes its status projection when
-    classifying step reads; verify the cadence measurements remain non-decision display data there. The
-    computed `test/sweep/` placement must use a basename distinct from the existing root-level W1-T5901 test
+    classifying step reads; verify the cadence measurements remain non-decision display data there. Add
+    `test/ledger-rotation.test.ts` to classify the sweep-liveness consumer's `sweep.pass` and `sweep.summary`
+    reads as display-only: they derive operator health from recency-bounded render rows, not durable decisions.
+    The computed `test/sweep/` placement must use a basename distinct from the existing root-level W1-T5901 test
     so the repository's unique-test-basename census resolves each test by identity.
 
     First add correlated, durable measurements to the existing retained sweep rows: a unique pass id

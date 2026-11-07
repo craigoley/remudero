@@ -66,6 +66,9 @@ const DECLARED_RUNTIME_FIXTURE: Record<string, string> = {
   RMD_CASH_EASTUS_API_KEY: "eastus-key-fixture-8ca921",
   RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.test/anthropic",
   RMD_FOUNDRY_CLAUDE_API_KEY: "foundry-key-fixture-6b84d2",
+  RMD_INSTANCE_REGISTRY: "/fixture/legacy-catalog.yaml",
+  RMD_INSTANCE_REGISTRY_DIGEST: "a".repeat(64),
+  RMD_INSTANCE_REGISTRY_FILE_BINDING: "b".repeat(64),
 };
 
 /** The image env plus every declared runtime var at its fixture value, one override or drop applied. */
@@ -194,7 +197,7 @@ function writeStubs(dir: string): void {
     '        if [ -d "${RMD_CODEX_DIR:-}" ]; then printf \'%s\\t%s\\ttrue\\n\' "$RMD_CODEX_DIR" /home/node/.codex; fi',
     '        if [ -d "${RMD_CONTAINER_CONFIG_DIR:-}" ]; then printf \'%s\\t%s\\ttrue\\n\' "$RMD_CONTAINER_CONFIG_DIR" /home/node/.config/remudero; fi',
     '        if [ -n "${STUB_EXTRA_MOUNTS:-}" ]; then printf \'%s\\n\' "$STUB_EXTRA_MOUNTS"; fi',
-    '        if [ "$STUB_MODE" = private-good ]; then printf \'%s\\t%s\\tfalse\\n\' "$RMD_INSTANCE_REGISTRY" /home/node/.config/remudero/selected-registry.yaml; fi',
+    '        if [ "$STUB_MODE" = private-good ]; then if [ "${RMD_SELECTED_INSTANCE_REGISTRY+x}" = x ]; then selected_registry="$RMD_SELECTED_INSTANCE_REGISTRY"; else selected_registry="$RMD_INSTANCE_REGISTRY"; fi; printf \'%s\\t%s\\tfalse\\n\' "$selected_registry" /home/node/.config/remudero/selected-registry.yaml; fi',
     "        exit 0 ;;",
     "      *Config.Image*)",
     '        echo "test-registry/remudero:old"',
@@ -228,7 +231,7 @@ function writeStubs(dir: string): void {
     "    esac",
     "    exit 0 ;;",
     "  pull)",
-    '    if [ "$STUB_MODE" = private-revised ]; then printf "\\n# changed after capture\\n" >> "$RMD_INSTANCE_REGISTRY"; fi',
+    '    if [ "$STUB_MODE" = private-revised ]; then if [ "${RMD_SELECTED_INSTANCE_REGISTRY+x}" = x ]; then printf "\\n# changed after capture\\n" >> "$RMD_SELECTED_INSTANCE_REGISTRY"; else printf "\\n# changed after capture\\n" >> "$RMD_INSTANCE_REGISTRY"; fi; fi',
     '    case "$STUB_MODE" in',
     '      pull-fail) echo "unauthorized: authentication required" >&2; exit 1 ;;',
     "    esac",
@@ -267,15 +270,15 @@ function writeStubs(dir: string): void {
     "    esac",
     "    exit 0 ;;",
     // W1-T4197: this mode models an operator replacing the recycle's PAUSE with their own mid-run.
-    '  stop) [ "$STUB_MODE" = pause-swapped ] && printf \'%s\' \'{"reason":"operator hold","requestedAt":"2026-10-01T00:00:00.000Z"}\' > "$RMD_STATE_DIR/state/PAUSE"; if [ "$STUB_MODE" = private-final-revised ]; then printf "\\n# revised after qualification\\n" >> "$RMD_INSTANCE_REGISTRY"; fi; exit 0 ;;',
+    '  stop) [ "$STUB_MODE" = pause-swapped ] && printf \'%s\' \'{"reason":"operator hold","requestedAt":"2026-10-01T00:00:00.000Z"}\' > "$RMD_STATE_DIR/state/PAUSE"; if [ "$STUB_MODE" = private-final-revised ]; then if [ "${RMD_SELECTED_INSTANCE_REGISTRY+x}" = x ]; then printf "\\n# revised after qualification\\n" >> "$RMD_SELECTED_INSTANCE_REGISTRY"; else printf "\\n# revised after qualification\\n" >> "$RMD_INSTANCE_REGISTRY"; fi; fi; exit 0 ;;',
     '  run) case "$*" in *selected-registry-capability-*)',
     '    case "$STUB_MODE" in private-old-image|private-probe-fail) exit 2 ;; private-marker-only) echo selected-registry-capability-v1; exit 0 ;; esac',
-    '    source_file="$RMD_INSTANCE_REGISTRY"',
+    '    if [ "${RMD_SELECTED_INSTANCE_REGISTRY+x}" = x ]; then source_file="$RMD_SELECTED_INSTANCE_REGISTRY"; else source_file="$RMD_INSTANCE_REGISTRY"; fi',
     '    case "$STUB_MODE" in private-alias|private-replaced|private-lost-binding) cp "$source_file" "$STUB_REC/same-bytes.yaml"; source_file="$STUB_REC/same-bytes.yaml" ;; esac',
     '    if [ "$STUB_MODE" = private-replaced ]; then mv "$source_file" "$RMD_INSTANCE_REGISTRY"; source_file="$RMD_INSTANCE_REGISTRY"; fi',
     '    code="${!#}"',
-    '    while [ "$#" -gt 0 ]; do if [ "$1" = -e ]; then shift; case "$1" in RMD_INSTANCE_*) export "$1" ;; esac; fi; shift; done',
-    '    export RMD_INSTANCE_REGISTRY="$source_file"',
+    '    while [ "$#" -gt 0 ]; do if [ "$1" = -e ]; then shift; case "$1" in RMD_INSTANCE_*|RMD_SELECTED_INSTANCE_REGISTRY) export "$1" ;; esac; fi; shift; done',
+    '    export RMD_SELECTED_INSTANCE_REGISTRY="$source_file"',
     '    if [ "$STUB_MODE" = private-lost-binding ]; then unset RMD_INSTANCE_REGISTRY_FILE_BINDING; fi',
     '    cd "$STUB_READER_ROOT" || exit 2',
     '    exec node --import tsx --import ./test/setup/tmp-hygiene.ts --input-type=module -e "$code"',
@@ -442,7 +445,7 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
         RMD_MEMINFO_PATH: recycleFixtureMeminfo(dir),
         ...opts.extraEnv,
         ...(opts.unsetDockerHost ? { DOCKER_HOST: undefined } : {}),
-        ...(opts.unselectedRegistry ? { RMD_INSTANCE_REGISTRY: undefined, RMD_INSTANCE_REGISTRY_DIGEST: undefined,
+        ...(opts.unselectedRegistry ? { RMD_INSTANCE_REGISTRY: undefined, RMD_SELECTED_INSTANCE_REGISTRY: undefined, RMD_INSTANCE_REGISTRY_DIGEST: undefined,
           RMD_INSTANCE_REGISTRY_LAUNCH_BINDING: undefined } : {}),
       },
     });
@@ -484,7 +487,8 @@ test("selected registry shared launcher import defines guards without running a 
 
 test("selected private recycler refuses unknown input before any transport or public fallback", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}private-recycle-binding-`));
-  const scriptPath = join(root, "deploy", "recycle-container.sh"), prior = process.env.RMD_INSTANCE_REGISTRY;
+  const scriptPath = join(root, "deploy", "recycle-container.sh"), prior = process.env.RMD_INSTANCE_REGISTRY,
+    priorSelected = process.env.RMD_SELECTED_INSTANCE_REGISTRY;
   try {
     for (const dir of ["deploy", ".remudero", "state", "claude", "codex", "config"]) mkdirSync(join(root, dir));
     writeFileSync(scriptPath, readFileSync(SCRIPT));
@@ -495,6 +499,7 @@ test("selected private recycler refuses unknown input before any transport or pu
       `    claude_dir: ${join(root, "claude")}`, `    codex_dir: ${join(root, "codex")}`,
       `    container_config_dir: ${join(root, "config")}`, ""].join("\n"));
     delete process.env.RMD_INSTANCE_REGISTRY;
+    delete process.env.RMD_SELECTED_INSTANCE_REGISTRY;
     const opts = { scriptPath, args: ["--instance", "fixture"], stateDir: join(root, "state") };
     const control = runRecycle("good", opts);
     assert.equal(control.status, 0, control.stderr);
@@ -507,8 +512,16 @@ test("selected private recycler refuses unknown input before any transport or pu
       assert.match(result.stderr, /selected registry unavailable/);
       assert.deepEqual(result.calls, [], "unknown selection must not consult or mutate Docker/Azure state");
     }
+    const legacyCatalog = join(root, ".remudero", "daemon-instances.yaml");
+    for (const selected of ["", "relative.yaml", join(root, "missing-selected.yaml"), fragment]) {
+      const result = runRecycle("good", { ...opts, extraEnv: { RMD_INSTANCE_REGISTRY: legacyCatalog, RMD_SELECTED_INSTANCE_REGISTRY: selected } });
+      assert.equal(result.status, 2, result.stderr);
+      assert.match(result.stderr, /selected registry unavailable/);
+      assert.deepEqual(result.calls, [], "an invalid explicit selection cannot fall back to a valid legacy catalog");
+    }
   } finally {
     if (prior === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = prior;
+    if (priorSelected === undefined) delete process.env.RMD_SELECTED_INSTANCE_REGISTRY; else process.env.RMD_SELECTED_INSTANCE_REGISTRY = priorSelected;
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -578,13 +591,50 @@ test("private registry selection reaches real host and daemon readers: recorded 
     const launch = result.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
     assert.ok(launch, "the positive control reaches the actual final launch argument assembly");
     assert.ok(launch.argv.includes(`type=bind,src=${fixture.selected},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`));
-    assert.ok(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"));
+    assert.ok(launch.argv.includes("RMD_SELECTED_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"));
+    assert.ok(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"), "old-only callers preserve the in-container alias");
     assert.ok(launch.argv.some(a => /^RMD_INSTANCE_REGISTRY_DIGEST=[a-f0-9]{64}$/.test(a)));
     const packet = await withInstanceRegistryRuntime(() => trustedInstanceRegistryLaunchPacket(),
       { envPath: fixture.selected, instanceName: "fixture" });
     assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet.split("\n")[4]}`),
       "the daemon adoption receives the original physical identity, not just equal bytes");
     assert.equal(launch.argv.includes(`type=bind,src=${fixture.root},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`), false);
+  } finally { fixture.cleanup(); }
+});
+
+test("W1-T11431: a bare recycle of a selected container refuses before replacement instead of dropping its private mount", () => {
+  const run = runRecycle("good", { unselectedRegistry: true, extraEnv: {
+    STUB_EXTRA_MOUNTS: "/srv/fixture/private.yaml\t/home/node/.config/remudero/selected-registry.yaml\tfalse" } });
+  assert.notEqual(run.status, 0, `a bare recycle replaced a selected container: ${run.stderr}`);
+  assert.match(run.stderr, /selected registry/i);
+  assert.equal(run.calls.some(c => isRun(c) && c.argv.includes("-d")), false, "no replacement container was launched");
+  assert.equal(run.calls.some(isStop), false, "the selected container was never stopped");
+});
+
+test("W1-T11431: an unselected launch never passes an empty registry name, which would read as an invalid selection", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}unselected-launch-`));
+  try {
+    const previousEnv = join(dir, "previous-env");
+    writeFileSync(previousEnv, "GH_TOKEN=fixture-not-a-token\nRMD_RESTART_THROTTLE_S=60\n");
+    const run = runRecycle("good", { unselectedRegistry: true, extraEnv: { STUB_PREVIOUS_ENV: previousEnv } });
+    assert.equal(run.status, 0, run.stderr);
+    const launch = run.calls.find(c => isRun(c) && c.argv.includes("-d"))!;
+    assert.ok(launch, "the positive control reaches the final launch");
+    assert.deepEqual(launch.argv.filter(a => a.startsWith("RMD_INSTANCE_REGISTRY") || a.startsWith("RMD_SELECTED_INSTANCE_REGISTRY")), []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("explicit selected registry leaves a distinct legacy catalog in the daemon environment", () => {
+  const fixture = privateRecyclerFixture();
+  const legacyCatalog = "/home/node/Remudero/.remudero/daemon-instances.yaml";
+  try {
+    const result = fixture.run("private-good", false, { RMD_INSTANCE_REGISTRY: legacyCatalog, RMD_SELECTED_INSTANCE_REGISTRY: fixture.selected });
+    assert.equal(result.status, 0, result.stderr);
+    const launch = result.calls.find(c => isRun(c) && c.argv.includes("-d"))!;
+    assert.ok(launch.argv.includes("RMD_SELECTED_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"));
+    assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY=${legacyCatalog}`));
+    assert.equal(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"), false,
+      "explicit new selection must not overwrite the legacy catalog variable");
   } finally { fixture.cleanup(); }
 });
 
@@ -633,13 +683,16 @@ test("selected private recycler refuses unsupported image remote namespace and r
 test("private registry selection defaults and falsifiers forbid live effects: real serve assembly", async () => {
   const fixture = privateRecyclerFixture();
   try {
-    const result = fixture.run("private-good", true);
+    const legacyCatalog = "/home/node/Remudero/.remudero/daemon-instances.yaml";
+    const result = fixture.run("private-good", true, { RMD_INSTANCE_REGISTRY: legacyCatalog, RMD_SELECTED_INSTANCE_REGISTRY: fixture.selected });
     assert.equal(result.status, 0, result.stderr);
     const probe = result.calls.findIndex(c => isRun(c) && c.argv.some(a => a.includes("selected-registry-capability-")));
     assert.ok(probe >= 0 && result.calls.findIndex(isStop) > probe);
     const launch = result.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
     assert.ok(launch.argv.includes(`type=bind,src=${fixture.selected},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`));
-    assert.ok(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"));
+    assert.ok(launch.argv.includes("RMD_SELECTED_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"));
+    assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY=${legacyCatalog}`));
+    assert.equal(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"), false);
     assert.ok(launch.argv.includes("sha256:PULLEDID"), "the launched image must be the immutable qualified image, not a moving tag");
     const packet = await withInstanceRegistryRuntime(() => trustedInstanceRegistryLaunchPacket(),
       { envPath: fixture.selected, instanceName: "fixture" });
@@ -1705,7 +1758,7 @@ test("W1-T1069: MUTANT: a fallback array edited out of sync with deploy/runtime-
   // Proves the consistency test above actually discriminates, rather than passing on any six names.
   const recycleSrc = readFileSync(SCRIPT, "utf8");
   const mutated = recycleSrc.replace(
-    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_CASH_EASTUS_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)",
+    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_CASH_EASTUS_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY RMD_INSTANCE_REGISTRY RMD_INSTANCE_REGISTRY_DIGEST RMD_INSTANCE_REGISTRY_FILE_BINDING)",
     "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S)",
   );
   assert.notEqual(mutated, recycleSrc, "the mutation target must actually be present and unique");
