@@ -3448,8 +3448,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `findDuplicateEscalation` (inside `escalate()`/`tryEscalate()`) already dedupes a repeated
     // call for the SAME (taskId, headSha, cause) into one issue, so this is safe to call every
     // pass the same pair keeps observing a re-cancellation, never opening a sibling issue.
-    escalateCancelledCheck: (pr, check, reason, kind = "cancelled-twice") => {
-      return tryEscalateAsync(
+    escalateCancelledCheck: async (pr, check, reason, kind = "cancelled-twice") => {
+      await tryEscalateAsync(
         {
           class: "BLOCKED",
           taskId: escalationTaskIdFor(pr),
