@@ -219,6 +219,7 @@ import {
   resolveProviderRoutingPolicy,
   policyForCapability,
   selectWorkerProviderForPolicy,
+  type EffectiveProviderRoutingPolicy,
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
 import { cashDeploymentEndpoint } from "./config-schema.js";
@@ -450,6 +451,49 @@ export interface WorkerResult {
 export const DEFAULT_MODEL_LABEL = "default";
 export const DEFAULT_EFFORT_LABEL = "default";
 
+interface ProviderExclusionCandidateResult {
+  capacities: ProviderCapacity[];
+  excludeProviders: WorkerProviderId[];
+  exclusion_unhonoured?: { reason: "no-eligible-alternative"; excludedProviders: WorkerProviderId[] };
+}
+
+function providerExclusionCandidates(
+  capacities: ProviderCapacity[],
+  reservePercent: number,
+  excludeProviders: readonly WorkerProviderId[] | undefined,
+  routableProviders?: readonly WorkerProviderId[],
+): ProviderExclusionCandidateResult {
+  const excluded = [...new Set(excludeProviders ?? [])];
+  if (excluded.length === 0) return { capacities, excludeProviders: [] };
+  const considered = routableProviders === undefined ? capacities
+    : capacities.filter((capacity) => routableProviders.includes(capacity.provider));
+  const eligibleAlternative = considered.some((capacity) => !excluded.includes(capacity.provider) &&
+    providerEligibility(capacity, reservePercent).eligible);
+  if (eligibleAlternative) {
+    return { capacities: capacities.filter((capacity) => !excluded.includes(capacity.provider)), excludeProviders: excluded };
+  }
+  const eligibleExcluded = considered.some((capacity) => excluded.includes(capacity.provider) &&
+    providerEligibility(capacity, reservePercent).eligible);
+  return {
+    capacities,
+    excludeProviders: excluded,
+    ...(eligibleExcluded ? { exclusion_unhonoured: { reason: "no-eligible-alternative", excludedProviders: excluded } } : {}),
+  };
+}
+
+/** Apply the same exclusion rule as spawnWorker's auction so the no-alternative fallback stays testable. */
+export function selectWorkerProviderWithExclusions(
+  capacities: ProviderCapacity[],
+  policy: EffectiveProviderRoutingPolicy,
+  draw: number | RoutingDrawSeed,
+  excludeProviders: readonly WorkerProviderId[] = [],
+): ReturnType<typeof selectWorkerProviderForPolicy> & Omit<ProviderExclusionCandidateResult, "capacities"> {
+  const candidates = providerExclusionCandidates(capacities, policy.reservePercent, excludeProviders, policy.routableProviders);
+  return { ...selectWorkerProviderForPolicy(candidates.capacities, policy, draw),
+    excludeProviders: candidates.excludeProviders,
+    ...(candidates.exclusion_unhonoured ? { exclusion_unhonoured: candidates.exclusion_unhonoured } : {}) };
+}
+
 /** The routing decision recorded just before a worker call: an assignment, not a provider receipt
  * ({@link WorkerResult.servedModel} alone says what was served). Its bounded capacity snapshot makes a
  * later policy proposal reproducible without keeping a prompt, credential, reset-credit id or raw response. */
@@ -479,6 +523,8 @@ export interface WorkerSelectionAssignment {
       reservePercent: number;
       provenance: "default" | "overridden";
     };
+    excludeProviders?: WorkerProviderId[];
+    exclusion_unhonoured?: { reason: "no-eligible-alternative"; excludedProviders: WorkerProviderId[] };
     tightestRemainingPercent?: number;
     allocationSharePercent?: number;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
@@ -1143,6 +1189,9 @@ export interface SpawnWorkerArgs {
    * invented capacity telemetry.
    */
   mountProvider?: WorkerProviderId;
+  /** Providers to skip when an alternative subscription candidate is eligible. If no eligible alternative remains,
+   *  the existing route is preserved and the assignment names the unhonoured exclusion. */
+  excludeProviders?: readonly WorkerProviderId[];
   /** this spawn reached cash ONLY because the capacity auction found no subscription with
    *  readable headroom (the W1-T3692 fallback). Selects `dailyCapUsd.squeezed` over `.normal`. Set
    *  by that fallback alone -- routine mount-affinity cash work must never carry it, or the raised
@@ -1654,6 +1703,7 @@ export function workerSelectionAssignment(
       reservePercent: number;
       provenance: "default" | "overridden";
     };
+    exclusion_unhonoured?: { reason: "no-eligible-alternative"; excludedProviders: WorkerProviderId[] };
     selection?: ProviderSelection;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
     capabilityPreference?: { capability: string; provider: WorkerProviderId };
@@ -1693,6 +1743,8 @@ export function workerSelectionAssignment(
         reservePercent: input.policy.reservePercent,
         provenance: input.policy.provenance,
       },
+      ...(args.excludeProviders?.length ? { excludeProviders: [...new Set(args.excludeProviders)] } : {}),
+      ...(input.exclusion_unhonoured ? { exclusion_unhonoured: input.exclusion_unhonoured } : {}),
       ...(input.selection ? { tightestRemainingPercent: input.selection.tightestRemainingPercent } : {}),
       ...(input.selection?.allocationSharePercent !== undefined
         ? { allocationSharePercent: input.selection.allocationSharePercent }
@@ -2516,6 +2568,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   if (args.mountProvider !== undefined) {
     args.mountProvider = canonicalWorkerProviderId(args.mountProvider) as WorkerProviderId;
   }
+  if (args.excludeProviders?.length) {
+    args.excludeProviders = [...new Set(args.excludeProviders.map((provider) => canonicalWorkerProviderId(provider) as WorkerProviderId))];
+  }
+  // A reviewer mount normally pins its provider. A re-admission exclusion takes precedence only when it names that provider.
+  if (args.mountProvider && args.excludeProviders?.includes(args.mountProvider)) args.mountProvider = undefined;
   if (args.mountProvider && !enabledWorkerProviders(config).includes(args.mountProvider)) {
     throw new Error(`mount provider '${args.mountProvider}' is not enabled by the committed host config`);
   }
@@ -2541,6 +2598,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const claudeHealthRoute = providers.includes("claude")
     ? await resolveWorkerClaudeHealth(args, capabilities)
     : undefined;
+  let assignmentExclusionUnhonoured: WorkerSelectionAssignment["routing"]["exclusion_unhonoured"];
+  if (providers.length === 1 && providers[0] === "claude" && args.excludeProviders?.includes("claude") &&
+      claudeHealthRoute?.eligible) {
+    assignmentExclusionUnhonoured = { reason: "no-eligible-alternative", excludedProviders: [...args.excludeProviders] };
+  }
   if (claudeHealthRoute) {
     console.error(JSON.stringify({
       event: "worker.model_health.resolved",
@@ -2637,9 +2699,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         capabilities?.providerPreference,
       );
       routedCapabilityPreference = auction.capabilityPreference;
+      const initialCandidates = providerExclusionCandidates(
+        capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders,
+      );
       // W1-T5535: the draw key is read BEFORE the learner may re-read a Codex model, so a task's experiment enrolment
       // is judged on the arms the auction would have drawn without the learner.
-      const keyed = auctionDrawSeed(args, auction.policy, capacities, requestedCapability);
+      const keyed = auctionDrawSeed(args, auction.policy, initialCandidates.capacities, requestedCapability);
       const draw = args.providerRouting?.draw ?? keyed;
       const learned = args.providerRouting?.learnedArms;
       let fixLearning: { mixing: ProviderMixing; weights: FixRoutingWeights } | undefined;
@@ -2656,17 +2721,22 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           fixLearning = { mixing: learning.mixing, weights: learning.weights };
         }
       }
+      const finalCandidates = providerExclusionCandidates(
+        capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders,
+      );
       const routed = fixLearning
         ? {
           selection: selectWorkerProvider(
-            capacities.filter((capacity) => auction.policy.routableProviders.includes(capacity.provider)),
+            finalCandidates.capacities.filter((capacity) => auction.policy.routableProviders.includes(capacity.provider)),
             auction.policy.reservePercent, draw, fixLearning.mixing,
           ),
           preferenceBypass: undefined,
+          exclusion_unhonoured: finalCandidates.exclusion_unhonoured,
         }
-        : selectWorkerProviderForPolicy(capacities, auction.policy, draw);
+        : selectWorkerProviderWithExclusions(capacities, auction.policy, draw, args.excludeProviders);
       selection = routed.selection;
       preferenceBypass = routed.preferenceBypass;
+      assignmentExclusionUnhonoured = routed.exclusion_unhonoured;
       const learnedProbabilities = selection.draw?.learned?.probabilities;
       if (fixLearning && learned && learnedProbabilities) {
         emitFixRoutingDecision(learned, fixRoutingDecisionFields({
@@ -2870,6 +2940,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         preferenceBypass,
         capabilityPreference: routedCapabilityPreference,
         capability: requestedCapability,
+        exclusion_unhonoured: assignmentExclusionUnhonoured,
       });
       let measurement: ProviderWindowMeasurement | undefined;
       try {
@@ -3394,6 +3465,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       preferenceBypass: routedClaudePreferenceBypass,
       capabilityPreference: routedCapabilityPreference,
       capability: requestedCapability,
+      exclusion_unhonoured: assignmentExclusionUnhonoured,
     });
 
     let unregisterRunningWorker: (() => void) | undefined;
