@@ -43325,6 +43325,8 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     dispatcher: () => ports.dispatcher ? ports.dispatcher(planNow()) : (ports.buildEffects ?? buildSweepEffects)({ productionProgressJudge: true,
         owner: ownerName(), repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
         plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY }),
+  }).finally(() => {
+    if (childPauseGit) disposeSharedPauseRefresh(childPauseGit);
   });
   return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
 }
