@@ -17,6 +17,13 @@
   # backlog gardener: placed=2026-11-06T05:13:51.452Z
   attempts: 0
   rationale: |
+    Post-merge compatibility check: W1-T11431 merged in #17090 at 2fd6dd526eb7. Its
+    selectedInstanceRegistryEnvPath (instance-registry-selection.ts:296-299) falls back
+    to RMD_INSTANCE_REGISTRY whenever the active variable is absent. Therefore removing
+    the active variable while retaining a distinct catalog can reactivate selection.
+    Bound leave mode to qualified packets that can leave without losing catalog state;
+    refuse incompatible or ambiguous packets rather than dropping a catalog or inventing
+    an empty-value/sentinel override. This changes the leave compatibility contract only.
     At c5119b5428, recycle-container.sh declares the selection runtime variables only when its
     caller explicitly selected a registry. deployer.ts:2920 invokes the script without a
     selection when selectedPacket is undefined. The host supervisor has no selected packet,
@@ -44,10 +51,15 @@
     An explicitly present but invalid caller selection must never fall back to the container.
     No selection mount and no selection variables preserve legacy unselected behavior. Selection
     variables without a qualifying mount remain a refusal; never silently discard unknown state.
-    Add --leave-selected-registry as an explicit operator option. It removes exactly the active
-    selection variables and its private mount, using W1-T11431's final variable/alias contract;
-    it must not drop a catalog variable or bypass unrelated runtime-drift, PAUSE, STOP, drain,
-    image, identity or environment guards. Refuse contradictory explicit-selection inputs.
+    Add --leave-selected-registry as an explicit operator option. For a positively qualified
+    packet that can leave without losing catalog state, remove only active selection variables
+    and its private mount under W1-T11431's merged variable/alias contract. If retaining a
+    catalog would reactivate the legacy selection fallback, or a value's catalog-versus-alias
+    role cannot be established, refuse before mutation with a named compatibility reason.
+    Never drop a possible catalog, clear it merely because its path equals the active path,
+    or use an empty active value, sentinel, new runtime opt-out or selector change to mask it.
+    Preserve unrelated runtime-drift, PAUSE, STOP, drain, image, identity and environment guards.
+    Refuse contradictory explicit-selection inputs.
     Ledger recycle.selection_left only after a successful replacement actually leaves selection;
     dry-run, smoke failure and refused replacement never claim the effect occurred. No private
     file bytes or environment values may enter diagnostics or that row. The deployer never
@@ -63,7 +75,7 @@
   acceptance:
     - claim: "A selected container recycled without caller selection keeps its qualified mount and digest; unknown or unreadable mount sources and invalid explicit selections still refuse before mutation"
       proof: "grep: W1-T11454 criterion 1 in test/recycle-container.test.ts"
-    - claim: "The explicit leave flag removes only active selection state, preserves unrelated guards and catalog state, and ledgers selection_left only after successful replacement"
+    - claim: "The explicit leave flag removes only qualified active selection state, refuses before mutation when a retained catalog would reactivate selection, preserves unrelated guards and catalog state, and ledgers selection_left only after successful replacement"
       proof: "grep: W1-T11454 criterion 2 in test/recycle-container.test.ts"
     - claim: "The deployer never opts out automatically and selection-only refusals name the exact scoped remedy command"
       proof: "grep: W1-T11454 criterion 3 in test/deployer.test.ts"
@@ -73,5 +85,6 @@
     Source-only work grants no release, production recycle, private selection or cutover authority.
   falsifier: |
     Remove mount-source inheritance: criterion 1 returns the current undeclared-variable refusal.
-    Remove leave handling or its successful-effect row: criterion 2 fails. Let the deployer pass
+    Remove leave handling, its incompatible-catalog refusal or its successful-effect row:
+    criterion 2 fails. Let the deployer pass
     the leave flag or restore the meaningless remedy tail: criterion 3 fails.

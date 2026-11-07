@@ -1,0 +1,29 @@
+id: incident-17faaf2f4770ca90
+ts: 2026-11-07T13:36:37.451Z
+raw: >-
+  Incident 17faaf2f4770: flow pr-stage-stall:own-red:fixed-on-main (branch
+  refresh unavailable)
+
+  First seen: 2026-11-07T13:32:41.127Z
+
+  Last seen: 2026-11-07T13:32:41.127Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=17156 own-red: fixed-on-main (branch refresh unavailable)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#17faaf2f4770ca9059f2fe5f8425a20bb13e263bc4934de984d685baeb08a18e
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

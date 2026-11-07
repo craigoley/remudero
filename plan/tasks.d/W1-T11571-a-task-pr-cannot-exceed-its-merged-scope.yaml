@@ -1,0 +1,82 @@
+- id: W1-T11571
+  title: A task implementation PR cannot add paths outside its already-merged declared scope
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "operator:scope-gate-after-W1-T11431"
+  plan_refs: [W1-T401, W1-T9394, W1-T11431]
+  files:
+    - scripts/acceptance-author-gate.mjs
+    - test/acceptance-author-gate.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    PR #17090 implemented W1-T11431. Its merged plan declared 22 paths; the merged PR changed 25,
+    including seven additional tests. This is recorded as a scope deviation, not retroactively
+    authorized by the PR body. The required `acceptance-author-gate` already has the PR's task
+    identity, verified changed-path range and canonical task-file resolver, but currently checks
+    proof/test-path validity rather than requiring every implementation path to be declared.
+
+    W1-T9394 is not the same remedy: its queued task concerns the fix lane's
+    `fix_refusal:non-test-paths-need-scope` in `src/run-task.ts` / `src/lib/fix-outcome.ts`; it does
+    not enforce the required PR admission check. W1-T401 is a related, already-merged review-time
+    inverse-scope advisory. Its measured sample found 7 of 13 task PRs had extra paths and recorded
+    legitimate causes (generated artifacts, structural task shards and explicitly approved scope
+    growth), so that task deliberately chose advisory severity. This task deliberately changes the
+    merge-admission outcome for future task implementation PRs: legitimate added paths remain
+    available through a separate task amendment that is merged before the implementation PR. No
+    PR-local task-file edit widens its own authority, and no historical merge is rewritten.
+
+    The current required acceptance-author-gate is the enforcement point; no new workflow, GitHub
+    setting, reviewer, allowlist or baseline change is proposed. The rule applies to a resolvable
+    canonical task implementation only. Plan-only amendments, non-task PRs and existing explicit
+    exemptions keep their present behavior. The comparison uses the complete PR path census and
+    the task `files:` bytes at the merge base, not a PR-head widening. Unknown identity stays on the
+    existing non-task path; once a canonical task identity is established, unreadable task-scope
+    or incomplete changed-path evidence refuses with a named diagnostic. The supported correction
+    is a normal, separately merged scope amendment before source work.
+  design: |
+    1. Re-derive the current acceptance-author-gate path: reuse its existing task identity and
+       complete changed-path evidence. For a task implementation, resolve `files:` from the
+       canonical task record at the merge base. Do not trust a PR body, an unmerged task amendment,
+       title, commit subject or PR-head task record as scope authority.
+    2. For each changed implementation path absent from that canonical `files:` list, refuse the
+       required author gate and name every offending path. Do not silently widen scope or treat a
+       partial path list as a clean diff. An established task identity with unreadable scope or an
+       incomplete diff census is UNKNOWN and fails closed.
+    3. Keep the normal owner/admin route: add a required path through a separate plan-only
+       amendment, let it merge normally, then rerun the implementation PR against that merged
+       scope. A same-PR task-file edit cannot authorize its source changes.
+    4. Preserve current plan-only, non-task, dependency-bot and other existing acceptance-gate
+       behavior. This is not a change to `src/lib/run-task.ts`, W1-T401's advisory, task selection,
+       branch protection or required-check settings.
+    5. Exercise the real event/default path against temporary Git ranges as well as the pure
+       predicate. Prove the exact #17090 shape refuses, an actually merged scope amendment admits
+       the added path, a PR-local widening does not, and unreadable evidence cannot pass.
+  acceptance:
+    - claim: A task implementation PR with any undeclared changed path is refused by the required gate and the diagnostic names every offending path.
+      proof: "unit test: a plan-only diff cannot credit a task that declares source files"
+    - claim: Only a separately merged task scope amendment admits an added implementation path; an unmerged PR-local widening does not.
+      proof: "unit test: acceptance gate: Rule 15 mixed diff refuses before review"
+    - claim: Plan-only amendments, non-task PRs and fully in-scope task PRs retain their supported gate outcomes.
+      proof: "unit test: a PR shipping its declared files still passes"
+    - claim: An identified task with unreadable scope or an incomplete changed-path census fails closed, while absence of a task identity is not misclassified as a task PR.
+      proof: "unit test: W1-T3149 criterion 4"
+  note: |
+    All four tests belong in the existing `test/acceptance-author-gate.test.ts`; no test file is
+    added. Extend the current test-title anchors used by the four proof selectors with criterion-
+    specific task-scope cases, preserving each anchor as a literal title substring. A real temporary
+    Git range must prove that task scope comes from the merge-base plan snapshot. The #17090
+    regression must be red with the new refusal absent and green only after every undeclared path is
+    covered by a separately merged scope amendment. Scope comparison does not ratify #17090's
+    historical seven-path deviation.
+  falsifier: |
+    Remove the task-scope refusal from the required gate: the exact #17090 25-path versus 22-path
+    fixture must no longer refuse, so criterion 1 fails. Restore the refusal and the test must name
+    all seven undeclared test paths. Change the fixture's amendment only in the PR head: criterion
+    2 must still refuse. Move the amendment to the base snapshot: criterion 2 must pass. Restore
+    unreadable scope or incomplete path evidence: criterion 4 must refuse rather than pass empty.
