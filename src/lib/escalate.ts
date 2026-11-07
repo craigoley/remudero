@@ -1,4 +1,4 @@
-import { ghExec, ghTextAsync } from "./github-transport.js";
+import { ghExec, ghTextAsync, withSynchronousGhDelivery } from "./github-transport.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
@@ -1751,7 +1751,15 @@ function recordThreadMessage(e: Escalation, deps: Pick<EscalateDeps, "threadStor
  *  observer context. Missing listOpen permits creation; throwing listOpen refuses it (W1-T2912).
  *  Why: docs/forensics/escalate.md. */
 export function escalate(e: Escalation, deps: EscalateDeps): string {
-  return runStepsSync(escalateSteps(e, deps));
+  return driveSynchronousEscalation(() => runStepsSync(escalateSteps(e, deps)));
+}
+
+const asyncIssueTwins = new WeakMap<IssueGateway, AsyncIssueGateway>();
+
+function driveSynchronousEscalation<T>(drive: () => T): T {
+  // Latched producers and SRE feedback can consume an incident after this call. Preserve
+  // synchronous delivery for default and custom routes until their durable async handoff.
+  return withSynchronousGhDelivery(drive);
 }
 
 /** W1-T5283 — {@link escalate} with every gateway call awaited, for the main-health rung on the
@@ -1886,6 +1894,10 @@ function* triageRoute(
 }
 
 function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, allowAsyncJudge = false): Steps<string> {
+  if (allowAsyncJudge) {
+    const asyncIssues = asyncIssueTwins.get(deps.issues as IssueGateway);
+    if (asyncIssues) deps = { ...deps, issues: asyncIssues };
+  }
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
@@ -1950,7 +1962,7 @@ export async function escalateWithJudge(
  *  (W1-T2912), so `!== null` delivery callers cannot report phantom success. */
 // Why: the 2026-07-21 daemon boot loop this wrapper ended (W1-T197's sibling) — docs/forensics/escalate.md.
 export function tryEscalate(e: Escalation, deps: EscalateDeps): string | null {
-  return runStepsSync(tryEscalateSteps(e, deps));
+  return driveSynchronousEscalation(() => runStepsSync(tryEscalateSteps(e, deps)));
 }
 
 /** W1-T5283 — {@link tryEscalate} over {@link escalateAsync}: never rejects, and ledgers the same
@@ -2025,7 +2037,9 @@ export function ghIssueGateway(
   const run =
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
-  return issueGatewaySteps(`${owner}/${repo}`, run, runStepsSync) as IssueGateway;
+  const gateway = issueGatewaySteps(`${owner}/${repo}`, run, runStepsSync) as IssueGateway;
+  if (opts.exec === undefined) asyncIssueTwins.set(gateway, ghIssueGatewayAsync(owner, repo));
+  return gateway;
 }
 
 /** W1-T5283 — {@link ghIssueGateway} for the main-health rung on the daemon loop: the same argv and

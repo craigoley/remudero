@@ -289,6 +289,7 @@ import {
   taskContractRevision,
   taskSemanticRevision,
   tryEscalate,
+  tryEscalateAsync,
   type AskType,
   type Escalation,
   type EscalationCause,
@@ -2636,7 +2637,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     log("primary_shadow.alert_failed", { error_class: error instanceof Error ? error.name : "unknown" });
   };
   const terminalHeads = terminalUncreditableHeads(ledgerPath);
-  const escalateTerminalHead = (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): void => {
+  const escalateTerminalHead = async (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): Promise<void> => {
     if (terminal.escalated) return;
     // W1-T3168: the ownership fact alone is not an ask. A foreign head on a PR that is not stuck
     // needs no decision from anyone today, so it is LEDGERED and not escalated — never silently
@@ -2652,7 +2653,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       return;
     }
     const prUrl = `https://github.com/${owner}/${repo}/pull/${terminal.prNumber}`;
-    const issueUrl = tryEscalate(
+    const issueUrl = await tryEscalateAsync(
       {
         class: "BLOCKED",
         taskId: terminal.taskId,
@@ -3045,7 +3046,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             attemptError = result.error;
             const preflight = result.directMergePreflight;
             if (result.outcome === "plan-pr-held" && preflight?.reason === "plan_pr_refresh_bound") {
-              tryEscalate(
+              await tryEscalateAsync(
                 {
                   class: "MANUAL",
                   taskId: escalationTaskIdFor(pr),
@@ -3471,15 +3472,15 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     // W1-T1223 (design iii) — a SECOND cancellation of the SAME required check on the SAME head
-    // sha names the check and both cancellations to a human. `tryEscalate` (not the throwing
-    // `escalate`), because this runs inside the sweep's own per-PR loop alongside every other
-    // effect (W1-T254's throw containment) — a delivery failure here degrades to an
-    // `escalation.failed` ledger row rather than aborting the rest of the pass.
+    // sha names the check and both cancellations to a human. `tryEscalateAsync` (not the
+    // synchronous gateway), because this runs inside the sweep's own per-PR loop and must not
+    // block its cadence. A delivery failure degrades to an `escalation.failed` ledger row rather
+    // than aborting the rest of the pass.
     // `findDuplicateEscalation` (inside `escalate()`/`tryEscalate()`) already dedupes a repeated
     // call for the SAME (taskId, headSha, cause) into one issue, so this is safe to call every
     // pass the same pair keeps observing a re-cancellation, never opening a sibling issue.
-    escalateCancelledCheck: (pr, check, reason, kind = "cancelled-twice") => {
-      tryEscalate(
+    escalateCancelledCheck: async (pr, check, reason, kind = "cancelled-twice") => {
+      await tryEscalateAsync(
         {
           class: "BLOCKED",
           taskId: escalationTaskIdFor(pr),
@@ -3511,7 +3512,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     // W1-T5909: the same gateway dedup as the two check escalations — one issue per task/head/cause.
     escalateRearmExhausted: (pr, rearms, bound, judgedReason) => {
-      return tryEscalate(
+      return tryEscalateAsync(
         {
           class: "BLOCKED",
           taskId: escalationTaskIdFor(pr),
@@ -3534,8 +3535,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       );
     },
 
-    escalateInfrastructureCheck: (pr, check, reason, signature) => {
-      tryEscalate(
+    escalateInfrastructureCheck: async (pr, check, reason, signature) => {
+      await tryEscalateAsync(
         {
           class: "BLOCKED",
           taskId: escalationTaskIdFor(pr),
@@ -3994,7 +3995,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const preflightStandDown = await dispatchFixPreflightStandDown(ghLiveState, pr, log);
         if (preflightStandDown) return;
         if (priorTerminal) {
-          escalateTerminalHead(priorTerminal, pr);
+          await escalateTerminalHead(priorTerminal, pr);
           return;
         }
 
@@ -4104,7 +4105,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               escalated: false,
             };
             terminalHeads.set(terminalKey, terminal);
-            escalateTerminalHead(terminal, pr);
+            await escalateTerminalHead(terminal, pr);
           }
           return;
         }
