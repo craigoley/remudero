@@ -3253,6 +3253,13 @@ async function withPrivateRegistryCodexProfile<T>(
       [":workspace_roots", readOnly ? "read" : "write"], [":slash_tmp", "deny"], [":tmpdir", readOnly ? "read" : "write"],
       ...[...roots].filter(root => root !== cwd && root !== slotRoot).map(root => [root, "read"] as [string, string]),
       ...executableReads.filter(root => !roots.has(root)).map(root => [root, "read"] as [string, string])]);
+    // W1-T11550: with :root denied, the worktree's parent is a private writable tmpfs, so a write beside the worktree
+    // exits 0 and vanishes, and the containment probe can never see a denial. Denying the parent restores the OS error.
+    // A parent deny also hides any grant nested under it, so a layout with a grant beside the worktree keeps today's shape.
+    const parent = dirname(cwd);
+    if (parent !== cwd && !grantRoots.some(root => root !== cwd && isWithin(parent, root) && !isWithin(cwd, root))) {
+      filesystem.set(parent, "deny");
+    }
     text = `default_permissions=${JSON.stringify(name)}\n[permissions.${name}]\nextends="${readOnly ? ":read-only" : ":workspace"}"\n`
       + `[permissions.${name}.network]\nenabled=${review || !readOnly}\n`
       + (review || !readOnly ? `domains=${codexNetworkDomains()}\n` : "")

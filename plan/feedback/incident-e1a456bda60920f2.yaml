@@ -1,0 +1,33 @@
+id: incident-e1a456bda60920f2
+ts: 2026-11-07T05:50:24.582Z
+raw: >-
+  Incident e1a456bda609: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  Production native receipts and router decision/baseline provenance need
+  producer contracts before criteria <n>, <n>, and <n> can be met within this
+  post-processing task.
+
+  First seen: 2026-11-07T05:40:21.449Z
+
+  Last seen: 2026-11-07T05:40:21.449Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=17132 escalated: already escalated (reason unreadable: no escalation of this PR at head faf5a5d is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793999214575:1:1794028494013) — Production native receipts and router decision/baseline provenance need producer contracts before criteria 8, 10, and 14 can be met within this post-processing task.
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#e1a456bda60920f2bcc996b77904dfcecfa67cb3bcf8fac96ff7d06b2ca7098d
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

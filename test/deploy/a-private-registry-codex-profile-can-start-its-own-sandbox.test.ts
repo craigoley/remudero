@@ -4,11 +4,11 @@
 // registry container ran every Codex worker under this profile and every sandboxed command failed
 // `execvp codex-linux-sandbox` before it ran, so every daemon review posted a false FAIL.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import * as runtimeRegistry from "#src/lib/instance-registry-selection.js";
@@ -82,8 +82,8 @@ function selectedFixture(root: string) {
 }
 
 /** Spawn through the real private-registry path and hand back the enforced inline -c overrides. */
-async function selectedProfileOverrides(root: string, codexBin: string, intent: "reader" | "writer" | "review") {
-  const selected = selectedFixture(root), codexHome = join(root, "codex-home"), cwd = join(root, "checkout");
+async function selectedProfileOverrides(root: string, codexBin: string, intent: "reader" | "writer" | "review", cwdPath = "checkout") {
+  const selected = selectedFixture(root), codexHome = join(root, "codex-home"), cwd = join(root, cwdPath);
   mkdirSync(codexHome, { recursive: true }); mkdirSync(cwd, { recursive: true });
   let overrides: string[] = [], profileText = "";
   const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough();
@@ -101,7 +101,7 @@ async function selectedProfileOverrides(root: string, codexBin: string, intent: 
     }, teardown: () => {} },
   }, { root, claudeBin: "/unused", workerProviders: { enabled: ["codex"], codexBin, codexModel: "gpt-6-luna", codexHome } }),
   { envPath: selected });
-  return { overrides, profileText, selected, codexHome };
+  return { overrides, profileText, selected, codexHome, cwd };
 }
 
 test("the selected-registry profile grants the derived executable reads and still denies the private and credential paths", TIMEOUT, async () => {
@@ -125,6 +125,33 @@ test("the selected-registry profile grants the derived executable reads and stil
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("W1-T11550 criterion 1: the worktree's parent is denied on both profile surfaces for every intent", TIMEOUT, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}codex-parent-deny-`)));
+  try {
+    const install = codexInstall(root);
+    for (const intent of ["reader", "writer", "review"] as const) {
+      const { overrides, profileText, cwd } = await selectedProfileOverrides(root, install.bin, intent, "worktrees/run-1");
+      for (const surface of [profileText, overrides.join("\n")]) {
+        assert.ok(surface.includes(`${JSON.stringify(dirname(cwd))}="deny"`), `${intent}: the parent is denied`);
+        assert.equal(surface.includes(`${JSON.stringify(dirname(cwd))}="read"`), false, `${intent}: never readable, which would expose sibling worktrees`);
+        assert.ok(surface.includes('":root"="deny"'), `${intent}: the root deny stays`);
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T11550 criterion 2: a grant beside the worktree keeps its read, because a parent deny would hide it", TIMEOUT, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}codex-parent-grant-`)));
+  try {
+    const install = codexInstall(root);
+    const { overrides, profileText } = await selectedProfileOverrides(root, install.bin, "writer");
+    for (const surface of [profileText, overrides.join("\n")]) {
+      assert.equal(surface.includes(`${JSON.stringify(root)}="deny"`), false, "the shared parent holds the vendor grant, so it is not denied");
+      assert.ok(surface.includes(`${JSON.stringify(install.platformVendor)}="read"`), "the nested grant still applies");
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 function linuxCodex(): string | undefined {
   if (process.platform !== "linux") return undefined;
   try { return execFileSync("which", ["codex"], { encoding: "utf8" }).trim() || undefined; } catch { return undefined; }
@@ -142,5 +169,24 @@ test("a real codex sandbox starts under the selected-registry profile and runs a
       { encoding: "utf8", cwd: join(root, "checkout"), env: { ...process.env, CODEX_HOME: codexHome }, timeout: 45_000 });
     assert.match(out, /sandbox-ok/);
     assert.ok(existsSync(codexHome));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T11550 criterion 3: a real sandbox refuses a write beside the worktree with an OS error and still writes inside it", {
+  ...TIMEOUT,
+  skip: linuxCodex() === undefined ? "needs Linux with codex on PATH; the image is the real check" : false,
+}, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}codex-parent-real-`)));
+  try {
+    const codex = linuxCodex()!;
+    const { overrides, codexHome, cwd } = await selectedProfileOverrides(root, codex, "writer", "worktrees/run-1");
+    const privateTmp = join(root, "private-tmp");
+    mkdirSync(privateTmp);
+    const run = spawnSync(codex, ["sandbox", ...overrides, "--", "/bin/bash", "-c", "touch ../beside; echo rc=$?; touch inside; echo rc=$?"],
+      { encoding: "utf8", cwd, env: { ...process.env, CODEX_HOME: codexHome, TMPDIR: privateTmp }, timeout: 45_000 });
+    assert.match(`${run.stdout}${run.stderr}`, /read-only file system/i, "the OS denial the containment probe reads");
+    assert.match(run.stdout, /rc=1\nrc=0/);
+    assert.equal(existsSync(join(dirname(cwd), "beside")), false);
+    assert.ok(existsSync(join(cwd, "inside")));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
