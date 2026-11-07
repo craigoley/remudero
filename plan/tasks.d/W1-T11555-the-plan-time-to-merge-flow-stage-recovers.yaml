@@ -22,3 +22,11 @@
     Last 24 h: n 10, p50 75.6, p90 409.5 min.
     Slowest PRs: #16973 (682.1 min), #17022 (409.5 min), #17003 (179.5 min).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filing supplies aggregate timings and three PR references, but leaves their shared cause to future investigation; the supplied evidence does not establish a verifiable finding or bounded remedy.; on the change's description/files alone, no diff was read — Acceptance requires live p50 recovery below twice baseline, while its sole proof greps for a test declaration; that proof cannot establish the stated timing recovery."
+    judged_at: "2026-11-07T02:58:10.243Z"
+    pin: "be2c1d26ed2cba8a71cc662d22b7875df6a5e722f6d0d7f1a55ec7417cb1bdf1"
