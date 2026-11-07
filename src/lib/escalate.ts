@@ -422,7 +422,9 @@ export function primaryShadowOperatorChannel(opts: {
     let damaged = false;
     const history = await readLedgerUnionRecordsMemoized(dirname(opts.ledgerPath), historyMemo, {
       step: ["primary_shadow.observation", "panel.escalation_marked_handled", "panel.manual_approved", "escalation.issue_opened", "primary_shadow.issue_published"], refuseIncomplete: true,
-      onTorn: raw => { if (raw.includes("primary_shadow.observation") || raw.includes("primary_shadow.issue_published") || raw.includes("panel.escalation_marked_handled") || raw.includes("panel.manual_approved")) damaged = true; },
+      onTorn: raw => { if (raw.includes("primary_shadow.observation") || raw.includes("primary_shadow.issue_published")
+        || (raw.includes("escalation.issue_opened") && raw.includes("PRIMARY-SHADOW-"))
+        || raw.includes("panel.escalation_marked_handled") || raw.includes("panel.manual_approved")) damaged = true; },
     });
     if (!history.ok || damaged) throw new Error("primary shadow alert history is unreadable");
     const current: State = { revision: 0, first: "", prs: [], handledDigests: [], digest: s.digest, sourcePath: s.sourcePath };
