@@ -129,7 +129,7 @@ describe("test/idle-capacity-behind-a-hold-is-an-incident.test.ts", () => {
         cause: "recycle_drain", idle_slots: 2, dispatchable: 9,
         hold: { reason: "fleet PAUSE hold: container recycle", pid: 4242 },
       })) + "\n");
-      const deps = daemonSreLaneInput({
+      const deps = await daemonSreLaneInput({
         stateDir, root: home, ledgerPath, owner: "craigoley", repo: "remudero",
         mergedLastDay: () => 0, log: () => {},
       });

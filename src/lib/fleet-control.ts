@@ -5,7 +5,8 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { describeActorEvidence, gatherActorEvidence, readActorEvidence, type ActorEvidence, type ActorEvidenceProbe } from "./actor-evidence.js";
 import { fixedClock, systemClock } from "./clock.js";
-import { repoScopedTaskKey } from "./ledger.js";
+import { appendLedger, repoScopedTaskKey } from "./ledger.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 
 /**
@@ -919,5 +920,61 @@ export function consumeDrainNow(root: string): DrainNowRequest | null {
     parsed = null;
   }
   clearFlag(path); // consumed-once regardless of parse outcome — a garbage marker never lingers
+  return parsed;
+}
+
+/** W1-T11327: a `RESTART_REQUESTED` marker, which asks a live daemon to leave through its own freshness exit. */
+export interface RestartInPlaceRequest {
+  origin: string;
+  requestedAt: string;
+}
+
+/** W1-T11327: the one-shot marker the progress watchdog writes instead of a recycle while the daemon's loop is alive. */
+export const RESTART_REQUESTED = "RESTART_REQUESTED";
+/** W1-T11327: progress-watchdog.ts's RESTART_REQUESTED_STEP, kept literal so the supervisor's closure stays as baked. */
+const RESTART_REQUESTED_ROW = "watchdog.restart_requested";
+
+export function restartInPlaceFilePath(root: string): string {
+  return join(root, "state", RESTART_REQUESTED);
+}
+
+/** W1-T11327: write the `RESTART_REQUESTED` marker; the daemon consumes it at a cycle top or a dispatch tick. */
+export function requestRestartInPlace(root: string, origin: string): RestartInPlaceRequest {
+  const req: RestartInPlaceRequest = { origin, requestedAt: systemClock.iso() };
+  const path = restartInPlaceFilePath(root);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(req, null, 2));
+  return req;
+}
+
+/** W1-T11327: `rmd progress-watchdog --request-restart --state-root <stateDir>`, the launcher's restart-in-place rung.
+ *  Writes the marker under the state root's parent and ledgers the request the next verdict reads. */
+export function restartInPlaceVerb(stateDir: string, print: (line: string) => void): number {
+  const req = requestRestartInPlace(dirname(stateDir), "progress-watchdog");
+  appendLedger(join(stateDir, LEDGER_FILENAME), { run_id: "PROGRESS-WATCHDOG", task_id: "DAEMON", step: RESTART_REQUESTED_ROW,
+    origin: req.origin, requested_at: req.requestedAt });
+  print(`progress-watchdog: restart in place requested at ${req.requestedAt}`);
+  return 0;
+}
+
+/** W1-T11327: read the marker without deleting it; `null` when none, unreadable or garbage. */
+export function peekRestartInPlace(root: string): RestartInPlaceRequest | null {
+  try {
+    const o = JSON.parse(readFileSync(restartInPlaceFilePath(root), "utf8"));
+    if (typeof o?.origin === "string" && typeof o?.requestedAt === "string" && Number.isFinite(Date.parse(o.requestedAt))) {
+      return { origin: o.origin, requestedAt: o.requestedAt };
+    }
+  } catch {
+    // No marker, or one that does not parse: neither is a request.
+  }
+  return null;
+}
+
+/** W1-T11327: read + DELETE the marker (consumed-once). A garbage marker is deleted and never acted on. */
+export function consumeRestartInPlace(root: string): RestartInPlaceRequest | null {
+  const path = restartInPlaceFilePath(root);
+  if (!existsSync(path)) return null;
+  const parsed = peekRestartInPlace(root);
+  clearFlag(path);
   return parsed;
 }

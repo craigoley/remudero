@@ -1,0 +1,29 @@
+id: incident-478a844f94b3e8ef
+ts: 2026-11-06T14:21:31.385Z
+raw: >-
+  Incident 478a844f94b3: intervention
+  plan-proof-unrunnable:plan-repair:fix-progress-judgment-failed-error-selec
+
+  First seen: 2026-11-06T14:21:24.271Z
+
+  Last seen: 2026-11-06T14:21:24.271Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#17022@f08550809 actor=cao825 cause=plan-proof-unrunnable:plan-repair:fix-progress-judgment-failed-error-selec — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#478a844f94b3e8ef36df87757b8a788393862414e10a42132507ea0cff2f08fa
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

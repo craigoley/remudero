@@ -639,7 +639,7 @@ import { readPlanBase } from "./lib/plan-base-reader.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
-import { assertInstanceRegistryRuntimeCurrent, InstanceRegistryRuntimeError, instanceRegistryRuntimePresent, runtimeInstanceRegistryText, withInstanceRegistryRuntime } from "./lib/instance-registry-selection.js";
+import { assertInstanceRegistryRuntimeCurrent, InstanceRegistryRuntimeError, instanceRegistryRuntimePresent, runtimeInstanceRegistryText, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "./lib/instance-registry-selection.js";
 import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
@@ -1891,7 +1891,7 @@ export type FreshTreeReviewSeams = {
 
 /** Existing loaded configuration is the opt-in boundary; never load/create config in an offline reader. */
 function selectedRegistryIntentForConfig(config: Config) {
-  return captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY } });
+  return captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: selectedInstanceRegistryEnvPath() } });
 }
 
 /** Parse only the facts a restart must prove before it reuses W1-T3723's stable reviewer path.
@@ -2926,7 +2926,7 @@ import {
   liveWritesExempt,
   LIVE_WRITE_OVERRIDE_ENV,
 } from "./lib/live-write-guard.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail } from "./lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
 import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
@@ -28546,7 +28546,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
       selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
-        settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+        settings: effectiveConfig.selectedRegistryMode, input: { envPath: selectedInstanceRegistryEnvPath() },
         record: (step, fields) => appendLedger(ledgerPathFor(effectiveConfig), { run_id: "DEPLOY", task_id: "DEPLOY", step, ...fields }),
       } : undefined,
       ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig), { stateDir: join(effectiveConfig.root, "state"), host: hostname() }),
@@ -28574,7 +28574,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
   const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root,
     selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
-      settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+      settings: effectiveConfig.selectedRegistryMode, input: { envPath: selectedInstanceRegistryEnvPath() },
       record: (step, fields) => deps.log(step, fields),
     } : undefined,
   }, lifecycleExec) }, {
@@ -29555,7 +29555,7 @@ export async function serveCommand(
   const channel = supervised && (deps.generation ?? processChannel());
   const server = await buildReadyServeServer({
     selectedRegistryObservation: config.selectedRegistryMode?.mode === "shadow" ? {
-      settings: { ...config.selectedRegistryMode }, input: { envPath: process.env.RMD_INSTANCE_REGISTRY }, record: log,
+      settings: { ...config.selectedRegistryMode }, input: { envPath: selectedInstanceRegistryEnvPath() }, record: log,
     } : undefined,
     ...(channel ? { generation: { requestHandoff: (detail) => channel.send({ ...detail, type: GENERATION_MESSAGES.handoffRequest }) } } : {}),
     boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
@@ -33487,7 +33487,7 @@ async function stopCommand(rest: string[]): Promise<number> {
  * never the cwd, the repository, the hostname or a pid. A refusal returns before anything is written.
  */
 async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], config: Config): Promise<PauseTarget | undefined> {
-  const explicit = process.env.RMD_INSTANCE_REGISTRY !== undefined;
+  const explicit = selectedInstanceRegistryEnvPath() !== undefined;
   const resolveTarget = async (): Promise<PauseTarget | undefined> => {
     const registryPath = explicit ? "selected registry" : daemonInstanceRegistryPath(repoRoot);
     let registryText: string | undefined;
@@ -33579,7 +33579,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     requested_by_pid: info.pid,
   });
   console.log(
-    `### rmd pause — instance '${target.instance}'${process.env.RMD_INSTANCE_REGISTRY === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
+    `### rmd pause — instance '${target.instance}'${selectedInstanceRegistryEnvPath() === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
       `reaches merge; it spawns nothing new until \`rmd resume --instance ${target.instance}\`. No other instance is held.`,
   );
   return 0;
@@ -41125,12 +41125,14 @@ export function progressWatchdogCommand(
   rest: string[],
   run: (file: string, args: string[]) => string = (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 30_000 }),
 ): number {
-  const badArg = unknownArgError("progress-watchdog", rest, ["--state-root"], ["--json"]);
+  const badArg = unknownArgError("progress-watchdog", rest, ["--state-root"], ["--json", "--request-restart"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
   const stateDir = flagValue(rest, "--state-root") ?? join(loadConfig().root, "state");
+  // W1-T11327: the launcher's restart-in-place rung writes the daemon's one-shot request (fleet-control.ts).
+  if (rest.includes("--request-restart")) return restartInPlaceVerb(stateDir, (line) => console.log(line));
   const nowMs = systemClock.now();
   const read = readLedgerUnionRecordsSync(stateDir, {
     since: new Date(nowMs - 24 * 3_600_000).toISOString(),
@@ -42996,7 +42998,7 @@ export async function main(
   // Recovery controls keep their existing authority and target checks even if selection is broken.
   // PAUSE validates its target locally; --fleet retains its independent authenticated Git path.
   if (inspectionArgv[0] !== "stop" && inspectionArgv[0] !== "pause"
-    && process.env.RMD_INSTANCE_REGISTRY !== undefined && !instanceRegistryRuntimePresent()) {
+    && selectedInstanceRegistryEnvPath() !== undefined && !instanceRegistryRuntimePresent()) {
     return withInstanceRegistryRuntime(() => main(deps));
   }
   // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's

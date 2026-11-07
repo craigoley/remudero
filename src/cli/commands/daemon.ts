@@ -25,7 +25,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
+import { daemonCrashSentinel, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
 import { resolveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
@@ -34,7 +34,7 @@ import { startDaemonSreLane } from "../../lib/daemon.js";
 import { REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
 import { gardenSchedule } from "../../lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "../../lib/gardener-runtime.js";
-import { daemonSreLaneInput, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "../../lib/sre-lane.js";
+import { daemonSreLaneInput, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow, type SreLaneInput } from "../../lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "../../lib/sre-runbooks.js";
 import { daemonBreakerRunbookHost } from "../../lib/breaker-release.js";
 import { inboxThreadStorePath, type RatifyCliHandle } from "../../lib/panel-graph.js";
@@ -57,7 +57,7 @@ import { daemonInstanceRegistryPath } from "../../lib/deployer.js";
 import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
-import { instanceRegistryRuntimePresent, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
+import { instanceRegistryRuntimePresent, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
 import { createGhCallPacer } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
@@ -102,7 +102,7 @@ import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from
 import { acquireDrainLock, DrainLockError } from "../../lib/drain-lock.js";
 import { testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
 import { withLiveEditLadders } from "../../lib/live-edit-ladder.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, consumeRestartInPlace, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
 import { wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "../../lib/github-app.js";
 import { LEDGER_REQUEST_STEP, realScopedMint, startDaemonGitCredentialSocket, type ScopedTokenMint } from "../../lib/secret-boundary.js";
@@ -557,6 +557,40 @@ function renderDaemonSummary(s: DaemonSummary): string {
   ].join("\n");
 }
 
+export function startBoundedDaemonSreLane(
+  input: (mergedLastDay: number) => Promise<SreLaneInput>,
+  mergedLastDay: () => Promise<number>,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): ReturnType<typeof startDaemonSreLane> {
+  return intervalMs => {
+    let current: SreLaneInput;
+    return startDaemonSreLane(() => current, async () => {
+      const rate = await mergedLastDay();
+      current = await input(rate);
+      return rate;
+    }, log)(intervalMs);
+  };
+}
+
+export async function daemonSreLaneEnabled(
+  stateRoot: string,
+  installRoot: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<boolean> {
+  const sreLane = {
+    instance: await resolveSreLaneInstance({
+      stateRoot,
+      registryPath: process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
+        ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
+        : process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(installRoot),
+    }),
+    env: { RMD_SRE_LANE: process.env.RMD_SRE_LANE },
+  };
+  const row = sreLaneStartRow(sreLane);
+  log(row.step, row.fields);
+  return sreLaneEnabled(sreLane);
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -648,7 +682,7 @@ export async function daemonCommand(
   } = {},
   host: DaemonCommandHost,
 ): Promise<number> {
-  if (process.env.RMD_INSTANCE_REGISTRY !== undefined && !instanceRegistryRuntimePresent()) {
+  if (selectedInstanceRegistryEnvPath() !== undefined && !instanceRegistryRuntimePresent()) {
     return withInstanceRegistryRuntime(() => daemonCommand(rest, deps, host));
   }
   const {
@@ -842,7 +876,7 @@ export async function daemonCommand(
   }
   const target = resolved.target;
 
-  const runId = `DAEMON-${Date.now()}`;
+  const runId = process.env.REMUDERO_RUN_ID ?? `DAEMON-${Date.now()}`;
   let lastReadPlaneStep: string | undefined;
   let onMainEntryStep: ((step: string) => void) | undefined;
   const log = (step: string, extra: Record<string, unknown> = {}) => {
@@ -1292,6 +1326,8 @@ export async function daemonCommand(
   cleanup.push({ resource: "github_event_wake", close: () => githubEventWake.close() });
   const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const onSignal = (sig: NodeJS.Signals) => {
+    // W1-T11421: a signalled stop is a deliberate end, so the next boot's crash sentinel reads it as clean.
+    log("daemon.signal_exit", { signal: sig });
     archivedLifetime.history?.close?.();
     githubEventWake.close();
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
@@ -1498,6 +1534,10 @@ export async function daemonCommand(
       priorBoots: () => priorDaemonBootTs,
       onBreach: (verdict: CrashLoopVerdict) =>
         escalateCrashLoop(verdict, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+      // W1-T11421: the same pre-boot snapshot, judged against this instance's learned clean lifetime.
+      sentinel: daemonCrashSentinel(bootLedgerLines, { owner: target.owner, repo: target.repo, ledgerPath, runId }, {
+        onArmed: (cancel) => cleanup.push({ resource: "crashloop_clear_timer", close: cancel }),
+      }),
     },
     // W1-T357: wire the SAME resolver/cache spawnWorker uses (worker.ts's
     // resolveClaudeExecutable against its shared, per-process
@@ -2045,6 +2085,11 @@ export async function daemonCommand(
           }),
         } : {}),
         consumeDrainNow: () => consumeDrainNow(config.root),
+        // W1-T11327: the progress watchdog's restart-in-place request, exited on with this process's own boot sha.
+        consumeRestartRequest: () => {
+          const request = consumeRestartInPlace(config.root);
+          return request && { ...request, ...(daemonLoadedCodeSha ? { codeSha: daemonLoadedCodeSha } : {}) };
+        },
         // Selected-repository PR controls (W1-T3989). The HTTP surface only writes a bounded
         // marker; this is the sole point that reaches the established selected-repository CLI
         // commands. Their own disposition, strike, worktree and review-lock gates remain the
@@ -2065,8 +2110,8 @@ export async function daemonCommand(
                 // it on anywhere. The starter is inert until called, so it is built on every start
                 // and dropped when off; either way one `sre_lane.started`/`sre_lane.disabled` row
                 // says so. `state/SRE_LANE_OFF` stays the pause switch.
-                ...[
-                  startDaemonSreLane(
+                ...(await daemonSreLaneEnabled(config.root, repoRoot, log) ? [
+                  startBoundedDaemonSreLane(
                     (mergedLastDay) => daemonSreLaneInput({
                       stateDir: join(config.root, "state"),
                       root: repoRoot,
@@ -2099,18 +2144,7 @@ export async function daemonCommand(
                     () => mergedInLastDayAsync(repoRoot),
                     log,
                   ),
-                ].filter(() => {
-                  const sreLane = {
-                    instance: resolveSreLaneInstance({
-                      stateRoot: config.root,
-                      registryPath: process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(repoRoot),
-                    }),
-                    env: { RMD_SRE_LANE: process.env.RMD_SRE_LANE },
-                  };
-                  const row = sreLaneStartRow(sreLane);
-                  log(row.step, row.fields);
-                  return sreLaneEnabled(sreLane);
-                }),
+                ] : []),
               ],
             }
           // Operator 2026-11-01: a managed target runs its per-target gardens (the issue-revalidation garden, shadow).

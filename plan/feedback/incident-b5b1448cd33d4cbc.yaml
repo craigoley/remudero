@@ -1,0 +1,28 @@
+id: incident-b5b1448cd33d4cbc
+ts: 2026-11-06T16:29:21.400Z
+raw: >-
+  Incident b5b1448cd33d: intervention hand-recycle:agent session
+
+  First seen: 2026-11-06T16:19:25.878Z
+
+  Last seen: 2026-11-06T16:19:25.878Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=control action=recycle.invoked target=core actor=unknown cause=hand-recycle:agent session — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#b5b1448cd33d4cbcdb8e2bcec4c99b8575f3714c8d2f827e0c3af82bf5a9889f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
