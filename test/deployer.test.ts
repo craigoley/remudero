@@ -506,10 +506,11 @@ test("cycle #4 — clean-tree guard: a conflicting dirty file ⇒ abort, alert, 
 
 // ── realDeployDeps + marker helpers (adapter coverage; injected exec + real temp fs) ──
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import {
   deployAutoPath,
   deployFailedAlertPath,
@@ -1116,7 +1117,24 @@ test("W1-T11454 criterion 3: the deployer never leaves a selection, and a select
     assert.ok(calls.some(call => call.join(" ").includes("recycle-container.sh")), "positive control: the deployer ran the recycle");
     assert.equal(calls.some(call => call.includes("--leave-selected-registry")), false, "only an operator may leave a selection");
   } finally { rmSync(root, { recursive: true, force: true }); }
-  const remedy = "Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy/recycle-container.sh --instance core, or add --leave-selected-registry with no selection to leave it.";
-  const message = ["recycle-container: REFUSING -- remudero-daemon's mount is not one read-only bind; NOTHING has been touched.", `  ${remedy}`].join("\n");
-  assert.equal(refusalRemedyLine(message), remedy, "the alert quotes the remedy, not the tail of the refusal");
+  const refusalRoot = mkdtempSync(join(tmpdir(), "rmd-deployer-remedy-"));
+  try {
+    const result = spawnSync("bash", [join(REPO_ROOT, "deploy", "recycle-container.sh"), "--instance", "core"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      timeout: 10000,
+      env: {
+        ...process.env,
+        RMD_SELECTED_INSTANCE_REGISTRY: join(refusalRoot, "missing-selected.yaml"),
+        RMD_INSTANCE_REGISTRY: undefined,
+        RMD_INSTANCE_REGISTRY_DIGEST: undefined,
+        RMD_INSTANCE_REGISTRY_FILE_BINDING: undefined,
+        RMD_RECYCLE_DOCKERENV_PATH: join(refusalRoot, "missing-dockerenv"),
+      },
+    });
+    assert.equal(result.status, 2, result.stderr);
+    const remedy = refusalRemedyLine(result.stderr);
+    assert.equal(remedy, "Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy/recycle-container.sh --instance core, or add --leave-selected-registry with no selection to leave it.",
+      "the real missing-source refusal names the scoped command the deployer will quote");
+  } finally { rmSync(refusalRoot, { recursive: true, force: true }); }
 });
