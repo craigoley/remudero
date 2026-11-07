@@ -1432,7 +1432,6 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     # runtime-env list as zero iterations rather than turning the safety check into an abort.
     for line in "${CONTAINER_ENV_LINES[@]-}"; do
       name="${line%%=*}"
-      value="${line#*=}"
       [ -n "${name}" ] || continue
       image_has_name=0
       image_value=""
@@ -1443,6 +1442,9 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
           "${name}="*) image_has_name=1; image_value="${iline#*=}" ;;
         esac
       done
+      # Declared names cannot trigger this refusal; do not read their values in the drift scan.
+      if is_declared_runtime_var "${name}"; then continue; fi
+      value="${line#*=}"
       if [ "${image_has_name}" -eq 0 ] || [ "${value}" != "${image_value}" ]; then
         if ! is_declared_runtime_var "${name}"; then
           UNDECLARED_RUNTIME_VARS="${UNDECLARED_RUNTIME_VARS}${UNDECLARED_RUNTIME_VARS:+, }${name}"
@@ -1565,6 +1567,15 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   # CAPTURED_SOURCE records which source each name actually came from, so the refusal below can
   # name what it consulted instead of asserting it.
   for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
+    if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+      case "${name}" in
+        RMD_INSTANCE_REGISTRY_DIGEST|RMD_INSTANCE_REGISTRY_FILE_BINDING)
+          CAPTURED_set "${name}" ""
+          CAPTURED_SOURCE_set "${name}" "registry"
+          continue
+          ;;
+      esac
+    fi
     val=""
     for line in "${CONTAINER_ENV_LINES[@]-}"; do
       case "${line}" in
