@@ -44,6 +44,19 @@
       real projection (test/review-finding-outcomes.test.ts:7,14).
     Settled by lookup: does adding the field widen the telemetry boundary? -> no. `FindingFlowRow` feeds only
       `deriveReviewFindingOutcomes`, and design step 3 still bars every gate, status and repair-label reader.
+    PROOF-SHAPE CORRECTION (architect clarify 2026-11-07, PR #17212 at 56a6c0b held for scope proofs and the
+    missing projector wiring):
+    - The projection-regression criterion named the whole file test/review-finding-outcomes.test.ts. That file
+      already passes in full at merge base 55390dd, so proof-discrimination is right to reject it as non-discriminating.
+    - It now names the one new test by its exact title. That title exists only once the raw-ledger regression lands,
+      so the proof discriminates against main. The separate `grep:` proof on the title, the `projectFlowRow` mapping
+      proof, the telemetry-only boundary and `files:` are unchanged. No allowance is added and the proof-discrimination
+      policy is unchanged.
+    Settled by lookup: is the exact-title `unit test:` form valid here? -> yes. Title proofs are an accepted dialect
+      (src/lib/task-linter.ts:743; e.g. plan/tasks.d/W1-T10772-*.yaml). This title has no regex metacharacters
+      (LITERAL_ONLY_METACHARS_RE, task-linter.ts:1527). It resolves into test/review-finding-outcomes.test.ts, which
+      exists at base, so the base-wrapper block (task-linter.ts:1700) does not apply.
+    Settled by lookup: is this already filed or decided? -> no. No other task or DECISIONS.md entry touches this criterion.
   design: |
     1. Each receipt gains `lineage_key`: a digest of owner, repo, PR, criterion, category, anchor path and anchor text.
        It has no head sha and no line number, so a moved line keeps its key.
@@ -67,8 +80,8 @@
       proof: 'grep: test("W1-T9649: a finding raised again at a later head on a moved line is persisted" in test/a-review-finding-is-tracked-across-rounds.test.ts'
     - claim: "a finding no later head raises is counted not re-raised, and confirmed-repair counts are unchanged"
       proof: 'grep: test("W1-T9649: a finding no later head raises is not re-raised and repairs are unchanged" in test/a-review-finding-is-tracked-across-rounds.test.ts'
-    - claim: "the field-trials projection regression file passes"
-      proof: "unit test: test/review-finding-outcomes.test.ts"
+    - claim: "the raw-ledger field-trials projection regression test passes"
+      proof: "unit test: W1-T9649: a ledger lineage_key survives projectFlowRow and is classified persisted or not-re-raised"
     - claim: "a ledger receipt carrying lineage_key passes through the real field-trials projection and is classified persisted or not re-raised"
       proof: 'grep: test("W1-T9649: a ledger lineage_key survives projectFlowRow and is classified persisted or not-re-raised" in test/review-finding-outcomes.test.ts'
     - claim: "projectFlowRow reads the receipt's lineage_key"
