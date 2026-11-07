@@ -283,9 +283,53 @@ kept_name_risk() {
   return 1
 }
 
+# Test suites leave temp trees of fixture repositories that were never meant to
+# be published: no remote at all, or only a path remote to another fixture in
+# the same tree. Their history exists nowhere else by design. Print the first
+# repository that could hold real work (a network remote, a store or remote
+# outside this tree, unreadable config) and return success; return 1 when
+# every repository inside is such a fixture.
+fixture_git_risk() {
+  local tree="$1" marker repo line url target gitdir status markers
+  tree=$(cd "$tree" 2>/dev/null && pwd -P) || { printf '%s' "$1"; return 0; }
+  markers=$(find "$tree" -xdev -name .git -print 2>/dev/null); status=$?
+  [ "$status" -eq 0 ] && [ -n "$markers" ] || { printf '%s' "$tree"; return 0; }
+  # Spend reservations, ledgers and other state never make a tree a fixture.
+  line=$(find "$tree" -xdev \( -name 'openweight-allowance*' -o -name 'ledger' -o -name 'ledger.*' -o -name '*.ndjson' -o -name '*.sqlite*' \) -print -quit 2>/dev/null); status=$?
+  [ "$status" -eq 0 ] && [ -z "$line" ] || { printf '%s' "${line:-$tree}"; return 0; }
+  while IFS= read -r marker; do
+    repo=${marker%/.git}
+    if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+      IFS= read -r line < "$marker" 2>/dev/null || { printf '%s' "$marker"; return 0; }
+      gitdir=${line#gitdir: }
+      case "$gitdir" in /*) ;; *) gitdir="$repo/$gitdir" ;; esac
+      gitdir=$(cd "$gitdir" 2>/dev/null && pwd -P) || { printf '%s' "$marker"; return 0; }
+      case "$gitdir" in "$tree"/*) ;; *) printf '%s' "$marker"; return 0 ;; esac
+    elif [ ! -d "$marker" ] || [ -L "$marker" ]; then printf '%s' "$marker"; return 0
+    else gitdir=$(cd "$marker" 2>/dev/null && pwd -P) || { printf '%s' "$marker"; return 0; }
+    fi
+    # Only a repository Git can open as exactly this .git qualifies; a bare or
+    # half-made .git stand-in holds the tree.
+    line=$(GIT_CEILING_DIRECTORIES="${repo%/*}" git -C "$repo" rev-parse --absolute-git-dir 2>/dev/null) || { printf '%s' "$marker"; return 0; }
+    line=$(cd "$line" 2>/dev/null && pwd -P) || { printf '%s' "$marker"; return 0; }
+    [ "$line" = "$gitdir" ] || { printf '%s' "$marker"; return 0; }
+    line=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$repo" config --get-regexp '^remote\..*\.url$' 2>/dev/null); status=$?
+    [ "$status" -le 1 ] || { printf '%s' "$marker"; return 0; }
+    while read -r _ url; do
+      [ -n "$url" ] || continue
+      case "$url" in *://*|*@*:*) [ "${url#file://}" != "$url" ] || { printf '%s' "$marker"; return 0; } ;; esac
+      target=${url#file://}
+      case "$target" in /*) ;; *) target="$repo/$target" ;; esac
+      target=$(cd "$target" 2>/dev/null && pwd -P) || { printf '%s' "$marker"; return 0; }
+      case "$target" in "$tree"/*) ;; *) printf '%s' "$marker"; return 0 ;; esac
+    done <<< "$line"
+  done <<< "$markers"
+  return 1
+}
+
 # Print a reason and return success if a path must be retained.
 artifact_risk() {
-  local path="$1" found status owner_name structure_only="${2:-0}"
+  local path="$1" found status owner_name structure_only="${2:-0}" top
   if found=$(rmd_dependency_seed_risk "$path"); then echo "$found"; return 0; fi
   [ ! -L "$path" ] || { echo 'symbolic link'; return 0; }
   owner_name=$(owner "$path" 2>/dev/null)
@@ -299,7 +343,13 @@ artifact_risk() {
   fi
   found=$(find "$path" -xdev -name .git -print -quit 2>/dev/null); status=$?
   [ "$status" -eq 0 ] || { echo 'Git metadata scan unavailable'; return 0; }
-  [ -z "$found" ] || { echo "Git checkout/worktree: $found"; return 0; }
+  if [ -n "$found" ]; then
+    # Only a whole top-level temp entry can be a fixture tree; session scratch and
+    # anything nested keep every checkout.
+    case "$path" in "${TEMP_ROOT_REAL:-/-}"/*/*|./*/*) top=0 ;; "${TEMP_ROOT_REAL:-/-}"/*|./*) top=1 ;; *) top=0 ;; esac
+    [ "${ROOT_REAL:-}" = "${TEMP_ROOT_REAL:-}" ] && [ "$top" = 1 ] && ! found=$(fixture_git_risk "$path") || {
+      echo "Git checkout/worktree: $found"; return 0; }
+  fi
   case "${path##*/}" in
     claude-*|com.apple.*|launchd*|powerlog|.X*|.font-unix|.ICE-unix) echo 'protected Claude/macOS temp name'; return 0 ;;
   esac
@@ -582,6 +632,7 @@ process_session_scratch_dir() {
 
 cd "$ROOT" || exit 1
 ROOT_REAL=$(pwd -P)
+TEMP_ROOT_REAL="$ROOT_REAL"
 discover_tsx_caches() {
   # Scheduled janitor calls cover each configured root, including historical
   # job TMPDIRs. Never follow symlinks, enter dependencies/Git/runtime state,

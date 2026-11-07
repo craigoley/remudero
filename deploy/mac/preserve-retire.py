@@ -21,7 +21,9 @@ Invariants (JANITOR.md "Preserve-then-retire"):
   borrower census always walks the temp folders as well as the home, so a kept clone of this
   account keeps a temp lender; macOS clears /private/tmp at boot, so no account can rely on
   borrowing objects from it.
-- Codex session logs idle for `codex_session_days` (0 = never) and not open are deleted.
+- Codex session logs idle for `codex_session_days` (0 = never) and not open are deleted. Archived
+  ones (in archived_sessions) use `codex_archived_days` instead (default 1, 0 = never), and every
+  archived, unpinned Codex thread archived that long ago is deleted with `codex delete --force`.
 - No action touches a path under a keep declaration (`KEEP_MARKERS`, or a seed generation's
   `ready.json` beside `consumers/`) on it, above it or inside it, or one that cannot be inspected:
   it is never retired, repacked, pruned, compressed, expired or removed. Seed stores belong to the
@@ -42,7 +44,7 @@ MIN_IDLE_HOURS = 6
 DEFAULTS = {"enabled": False, "idle_hours": 24, "retain_days": 7, "interval_hours": 6,
             "preserve_root": "Remudero-preserved", "max_untracked_mb": 50, "census_seconds": 180,
             "repack_min_packs": 50, "repack_seconds": 1800, "dump_min_mb": 5, "dump_retain_days": 7,
-            "codex_session_days": 0,
+            "codex_session_days": 0, "codex_archived_days": 1,
             "roots": ["Remudero", "rmd-work", ".codex/work-artifacts", "Developer/remudero-operator-worktrees",
                       "Developer/remudero-operator-recovered-worktrees-*", "Downloads/remudero-*",
                       ".local/share/remudero/source-recovery"],
@@ -70,6 +72,10 @@ MAX_DEPTH = 8
 CENSUS_PRUNE = {"Library", ".Trash", "Music", "Movies", "Pictures", "node_modules"}
 TEMP_BASE = "/private/tmp"
 CODEX_SESSION_DIRS = (".codex/sessions", ".codex/archived_sessions")
+CODEX_ARCHIVED_DIR = ".codex/archived_sessions"
+CODEX_STATE_DB = ".codex/state_5.sqlite"
+# The desktop app bundles the CLI; cron's PATH rarely includes it.
+CODEX_APP_CLI = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
 MIN_FREE_BYTES = 1 << 30
 MAIN_HISTORY = 20000
 
@@ -137,7 +143,8 @@ def load_config(home, path, temp_base=TEMP_BASE):
         return None, "refused: config has unknown keys"
     cfg = dict(DEFAULTS, **raw)
     ints = ("idle_hours", "retain_days", "interval_hours", "max_untracked_mb", "census_seconds",
-            "repack_min_packs", "repack_seconds", "dump_min_mb", "dump_retain_days", "codex_session_days")
+            "repack_min_packs", "repack_seconds", "dump_min_mb", "dump_retain_days", "codex_session_days",
+            "codex_archived_days")
     if any(type(cfg[k]) is not int or cfg[k] < 0 for k in ints) or cfg["idle_hours"] < MIN_IDLE_HOURS:
         return None, f"refused: numeric settings must be whole numbers, idle_hours >= {MIN_IDLE_HOURS}"
     if cfg["enabled"] is not True:
@@ -1011,7 +1018,7 @@ def compress(path):
 def housekeeping(cfg, protected, repos, snap, now, apply):
     """Repack, compress, expire and clear what retirement never reaches. Returns counts."""
     counts = {"repacked": 0, "compressed": 0, "dumps-expired": 0, "build-dirs-removed": 0,
-              "codex-sessions-removed": 0}
+              "codex-sessions-removed": 0, "codex-threads-removed": 0}
     planned = {"REPACKED": "WOULD-REPACK", "REMOVED": "WOULD-REMOVE", "EXPIRED": "WOULD-EXPIRE",
                "COMPRESSED": "WOULD-COMPRESS"}
     verb = (lambda done: done) if apply else planned.get
@@ -1094,8 +1101,14 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
                         continue
                 counts["compressed"] += 1
                 say(verb("COMPRESSED"), f"{st.st_size >> 20}MB", p)
-    days = cfg["codex_session_days"]
-    for p in codex_sessions(cfg["home"]) if days else []:
+    if cfg["codex_archived_days"]:
+        counts["codex-threads-removed"] += purge_archived_threads(cfg, now, apply, verb)
+    archived_dir = os.path.join(cfg["home"], CODEX_ARCHIVED_DIR) + "/"
+    for p in codex_sessions(cfg["home"]):
+        # Archiving renames the log, which resets its ctime: the archive clock starts there.
+        days = cfg["codex_archived_days"] if p.startswith(archived_dir) else cfg["codex_session_days"]
+        if not days or not os.path.lexists(p):
+            continue
         st = os.lstat(p)
         if max(st.st_mtime, st.st_ctime) >= now - days * 86400 or in_use(p, snap) or keep_scope(p, below=False):
             continue
@@ -1105,6 +1118,55 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
         counts["codex-sessions-removed"] += 1
         say(verb("REMOVED"), f"codex session idle {days}d+", p)
     return counts
+
+
+def archived_thread_ids(db, before):
+    """Archived, unpinned Codex threads archived before `before`, read without taking a write lock."""
+    import sqlite3
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
+    try:
+        return [r[0] for r in con.execute(
+            "SELECT id FROM threads WHERE archived = 1 AND COALESCE(is_pinned, 0) = 0"
+            " AND archived_at IS NOT NULL AND archived_at < ?", (before,))]
+    finally:
+        con.close()
+
+
+def purge_archived_threads(cfg, now, apply, verb):
+    """Delete archived Codex threads through the Codex CLI, so its history database stays consistent.
+    No CLI or database is a clean skip. A failed delete whose row is gone counts: sub-threads cascade."""
+    import sqlite3
+    db = os.path.join(cfg["home"], CODEX_STATE_DB)
+    cli = shutil.which("codex") or (CODEX_APP_CLI if os.access(CODEX_APP_CLI, os.X_OK) else None)
+    if not os.path.isfile(db) or not cli:
+        return 0
+    before = now - cfg["codex_archived_days"] * 86400
+    try:
+        ids = archived_thread_ids(db, before)
+    except sqlite3.Error as error:
+        say("HOLD", f"codex-threads (state unreadable: {error.__class__.__name__})", db)
+        return 0
+    removed = 0
+    env = dict(os.environ, CODEX_HOME=os.path.join(cfg["home"], ".codex"))
+    for tid in ids:
+        if apply:
+            require_action_authorized()
+            try:
+                ok = subprocess.run([cli, "delete", "--force", tid], env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                ok = False
+            if not ok:
+                try:
+                    ok = tid not in archived_thread_ids(db, now + 86400)
+                except sqlite3.Error:
+                    ok = False
+            if not ok:
+                say("HOLD", "codex-thread delete-failed", tid)
+                continue
+        removed += 1
+        say(verb("REMOVED"), f"codex thread archived {cfg['codex_archived_days']}d+", tid)
+    return removed
 
 
 def codex_sessions(home):
