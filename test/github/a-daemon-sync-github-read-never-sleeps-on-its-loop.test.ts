@@ -75,10 +75,10 @@ test("W1-T11458 criterion 1: lock contention refusal propagates instead of faili
 test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to its same-repository async transport", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-loop-issue-"));
   const shim = ghShim([
-    { when: "api repos/fixture/loop/issues", stdout: "[]", delaySeconds: 0.03 },
-    { when: "issue create", stdout: "https://github.com/fixture/loop/issues/7", delaySeconds: 0.03 },
-    { when: "label", delaySeconds: 0.03 },
-    { when: "", exit: 93, delaySeconds: 0.03 },
+    { when: "api repos/fixture/loop/issues", stdout: "[]", delaySeconds: 0.1 },
+    { when: "issue create", stdout: "https://github.com/fixture/loop/issues/7", delaySeconds: 0.1 },
+    { when: "label", delaySeconds: 0.1 },
+    { when: "", exit: 93, delaySeconds: 0.1 },
   ]);
   const changes = { PATH: `${shim.dir}:${process.env.PATH}`, RMD_GH_CACHE_HOME: join(root, "cache"), RMD_GH_SHARED_READ_GAP_MS: "0", RMD_GH_TRANSPORT_FLOOR: "advisory" };
   const previous = Object.fromEntries(Object.keys(changes).map((key) => [key, process.env[key]]));
