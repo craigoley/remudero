@@ -1,0 +1,2044 @@
+TAP version 13
+# Subtest: every FAST_GATE_STEPS entry carrying boundMs corresponds to exactly one CENSUS_POPULATION member with an ADMITTED verdict — the admission set has a checkable denominator, not a remembered count
+ok 1 - every FAST_GATE_STEPS entry carrying boundMs corresponds to exactly one CENSUS_POPULATION member with an ADMITTED verdict — the admission set has a checkable denominator, not a remembered count
+  ---
+  duration_ms: 1.152745
+  type: 'test'
+  ...
+# Subtest: every CENSUS_POPULATION member carries both a disposition (verdict.status) and a reason string — a candidate the population contains with either missing is a defect this test catches, never a silent omission
+ok 2 - every CENSUS_POPULATION member carries both a disposition (verdict.status) and a reason string — a candidate the population contains with either missing is a defect this test catches, never a silent omission
+  ---
+  duration_ms: 0.415816
+  type: 'test'
+  ...
+# Subtest: test/enforcement-data-carveout.test.ts — W1-T2478's own fifth candidate, straddling FAST_GATE_CENSUS_BOUND_MS — is a named CENSUS_POPULATION member with an explicit REFUSED-for-cost disposition, never left as prose only
+ok 3 - test/enforcement-data-carveout.test.ts — W1-T2478's own fifth candidate, straddling FAST_GATE_CENSUS_BOUND_MS — is a named CENSUS_POPULATION member with an explicit REFUSED-for-cost disposition, never left as prose only
+  ---
+  duration_ms: 0.301213
+  type: 'test'
+  ...
+# Subtest: censusPopulationDrift: a census-shaped file the live tree's recognizer finds with no CENSUS_POPULATION entry is reported in `unknown`, never silently absorbed as 'no change needed'
+ok 4 - censusPopulationDrift: a census-shaped file the live tree's recognizer finds with no CENSUS_POPULATION entry is reported in `unknown`, never silently absorbed as 'no change needed'
+  ---
+  duration_ms: 7.18393
+  type: 'test'
+  ...
+# Subtest: censusPopulationDrift: the live, unmocked tree today reports zero unknown coverage — every census-shaped suite this recognizer can find already has a CENSUS_POPULATION entry
+ok 5 - censusPopulationDrift: the live, unmocked tree today reports zero unknown coverage — every census-shaped suite this recognizer can find already has a CENSUS_POPULATION entry
+  ---
+  duration_ms: 6298.231704
+  type: 'test'
+  ...
+# Subtest: the population's re-application of the predicate against every recognizer candidate finds exactly ONE refused-for-cost member — the population is never padded to reconstruct W1-T2478's stale 'six', and the count that survives is named, not asserted by coincidence
+ok 6 - the population's re-application of the predicate against every recognizer candidate finds exactly ONE refused-for-cost member — the population is never padded to reconstruct W1-T2478's stale 'six', and the count that survives is named, not asserted by coincidence
+  ---
+  duration_ms: 0.376606
+  type: 'test'
+  ...
+# Subtest: censusPopulationDrift: two independent calls against the same unchanged, unmocked tree yield identical unknown/stale sets — a re-runnable query, not a one-time measurement
+ok 7 - censusPopulationDrift: two independent calls against the same unchanged, unmocked tree yield identical unknown/stale sets — a re-runnable query, not a one-time measurement
+  ---
+  duration_ms: 9211.849396
+  type: 'test'
+  ...
+# Subtest: CENSUS_POPULATION and CENSUS_ADMITTED_MEMBERS read identically across repeated accesses in this process — no per-call recomputation that could drift a disposition between reads
+ok 8 - CENSUS_POPULATION and CENSUS_ADMITTED_MEMBERS read identically across repeated accesses in this process — no per-call recomputation that could drift a disposition between reads
+  ---
+  duration_ms: 0.849458
+  type: 'test'
+  ...
+# Subtest: FAST_GATE_CENSUS_BOUND_MS is unchanged at 2000ms — this task does not touch the per-step bound, a primary control
+ok 9 - FAST_GATE_CENSUS_BOUND_MS is unchanged at 2000ms — this task does not touch the per-step bound, a primary control
+  ---
+  duration_ms: 0.248584
+  type: 'test'
+  ...
+# Subtest: the seven census entries admitted since W1-T2478 are still admitted, by job name, and CENSUS_POPULATION carries no `ok`/refusal field of its own — the derivation is data, never a second gate
+ok 10 - the seven census entries admitted since W1-T2478 are still admitted, by job name, and CENSUS_POPULATION carries no `ok`/refusal field of its own — the derivation is data, never a second gate
+  ---
+  duration_ms: 0.328784
+  type: 'test'
+  ...
+# Subtest: src/lib/ci-parity.ts marks CENSUS_POPULATION as the single census-population predicate (ONE CENSUS PREDICATE, NEVER TWO) at its own definition
+ok 11 - src/lib/ci-parity.ts marks CENSUS_POPULATION as the single census-population predicate (ONE CENSUS PREDICATE, NEVER TWO) at its own definition
+  ---
+  duration_ms: 4.185298
+  type: 'test'
+  ...
+# Subtest: the denominator assertions above read CENSUS_POPULATION's own live shape, never a restated literal count — deleting or emptying the export would fail this file's own assertions (population non-empty, exactly one cost refusal, admitted jobs list, drift report) rather than leaving them silently vacuous
+ok 12 - the denominator assertions above read CENSUS_POPULATION's own live shape, never a restated literal count — deleting or emptying the export would fail this file's own assertions (population non-empty, exactly one cost refusal, admitted jobs list, drift report) rather than leaving them silently vacuous
+  ---
+  duration_ms: 0.233621
+  type: 'test'
+  ...
+1..12
+# tests 12
+# suites 0
+# pass 12
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 16963.491884
+TAP version 13
+# Interrupted while running: test/check-proof-executor-parity.test.ts at /home/node/Remudero/worktrees/run-W1-T11294-1794073795162/test/check-proof-executor-parity.test.ts:1:1
+TAP version 13
+# Subtest: W1-T9877: a suite under test/rules is a rule suite whatever its name
+ok 1 - W1-T9877: a suite under test/rules is a rule suite whatever its name
+  ---
+  duration_ms: 24.657222
+  type: 'test'
+  ...
+# Subtest: W1-T9877: a folder named like a rule suite enrols nothing
+ok 2 - W1-T9877: a folder named like a rule suite enrols nothing
+  ---
+  duration_ms: 8.979946
+  type: 'test'
+  ...
+# Subtest: W1-T9877: a legacy basename match keeps its enrolment in any folder
+ok 3 - W1-T9877: a legacy basename match keeps its enrolment in any folder
+  ---
+  duration_ms: 35.696448
+  type: 'test'
+  ...
+# Subtest: W1-T9877: a nested rule suite gets a job slug without a slash
+ok 4 - W1-T9877: a nested rule suite gets a job slug without a slash
+  ---
+  duration_ms: 0.396918
+  type: 'test'
+  ...
+# Subtest: W1-T9877: header opt-outs apply only to legacy basename matches
+ok 5 - W1-T9877: header opt-outs apply only to legacy basename matches
+  ---
+  duration_ms: 64.411958
+  type: 'test'
+  ...
+# Subtest: W1-T9877: a roster member stays enrolled after a move and cannot opt out
+ok 6 - W1-T9877: a roster member stays enrolled after a move and cannot opt out
+  ---
+  duration_ms: 9.663705
+  type: 'test'
+  ...
+# Subtest: W1-T9877: diff classification includes declared rules and preserves structural discovery
+ok 7 - W1-T9877: diff classification includes declared rules and preserves structural discovery
+  ---
+  duration_ms: 12.551893
+  type: 'test'
+  ...
+# Subtest: W1-T9877: census drift resolves moved roster paths with the shared resolver
+ok 8 - W1-T9877: census drift resolves moved roster paths with the shared resolver
+  ---
+  duration_ms: 4.455166
+  type: 'test'
+  ...
+# Subtest: W1-T9877: census drift uses its default resolver for exact roster paths
+ok 9 - W1-T9877: census drift uses its default resolver for exact roster paths
+  ---
+  duration_ms: 6.688376
+  type: 'test'
+  ...
+1..9
+# tests 9
+# suites 0
+# pass 9
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2694.479751
+TAP version 13
+# Subtest: W1-T10354: a test that imports a module through \#src is one of its direct importers
+ok 1 - W1-T10354: a test that imports a module through \#src is one of its direct importers
+  ---
+  duration_ms: 5.626659
+  type: 'test'
+  ...
+# Subtest: W1-T10354: the alias targets come from package.json imports
+ok 2 - W1-T10354: the alias targets come from package.json imports
+  ---
+  duration_ms: 6.325059
+  type: 'test'
+  ...
+# Subtest: W1-T10354: a literal dynamic import of a src module is an importer edge
+ok 3 - W1-T10354: a literal dynamic import of a src module is an importer edge
+  ---
+  duration_ms: 5.403543
+  type: 'test'
+  ...
+# Subtest: W1-T10354: an import specifier inside fixture text is not an importer edge
+ok 4 - W1-T10354: an import specifier inside fixture text is not an importer edge
+  ---
+  duration_ms: 5.244553
+  type: 'test'
+  ...
+# Subtest: W1-T10354: the nightly plan fails loudly on a src or alias import it cannot resolve
+ok 5 - W1-T10354: the nightly plan fails loudly on a src or alias import it cannot resolve
+  ---
+  duration_ms: 380.504255
+  type: 'test'
+  ...
+# Subtest: W1-T10354: on the real tree every test that imports src through \#src is in the importer map
+ok 6 - W1-T10354: on the real tree every test that imports src through \#src is in the importer map
+  ---
+  duration_ms: 74327.795715
+  type: 'test'
+  ...
+# Subtest: non-literal imports and alias coverage are reported without following helpers
+ok 7 - non-literal imports and alias coverage are reported without following helpers
+  ---
+  duration_ms: 2.044197
+  type: 'test'
+  ...
+# Subtest: bare imports, re-exports and type imports each contribute a direct edge
+ok 8 - bare imports, re-exports and type imports each contribute a direct edge
+  ---
+  duration_ms: 1.347508
+  type: 'test'
+  ...
+# Subtest: a malformed test is named rather than silently removing its importers
+ok 9 - a malformed test is named rather than silently removing its importers
+  ---
+  duration_ms: 1.769053
+  type: 'test'
+  ...
+# Subtest: the nightly CLI logs non-literal imports and coverage for known non-mutable src
+ok 10 - the nightly CLI logs non-literal imports and coverage for known non-mutable src
+  ---
+  duration_ms: 169.198259
+  type: 'test'
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 10
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 77009.125762
+TAP version 13
+# Subtest: W1-T10820: a suite importing \#src/run-task.js is selected for a change to src/run-task.ts
+ok 1 - W1-T10820: a suite importing \#src/run-task.js is selected for a change to src/run-task.ts
+  ---
+  duration_ms: 12.865618
+  type: 'test'
+  ...
+# Subtest: W1-T10820: the alias targets are read from package.json imports
+ok 2 - W1-T10820: the alias targets are read from package.json imports
+  ---
+  duration_ms: 165.221802
+  type: 'test'
+  ...
+# Subtest: W1-T10820: \#scripts and \#test specifiers resolve like \#src
+ok 3 - W1-T10820: \#scripts and \#test specifiers resolve like \#src
+  ---
+  duration_ms: 12.684285
+  type: 'test'
+  ...
+# Subtest: W1-T10820: an imports target the resolver does not model is a named full run
+ok 4 - W1-T10820: an imports target the resolver does not model is a named full run
+  ---
+  duration_ms: 499.522313
+  type: 'test'
+  ...
+# Subtest: W1-T10820: coverage-narrow lists a \#src importer as a direct importer
+ok 5 - W1-T10820: coverage-narrow lists a \#src importer as a direct importer
+  ---
+  duration_ms: 685.890431
+  type: 'test'
+  ...
+# Subtest: W1-T10820: on the real tree every suite importing \#src/run-task.js is an importer of src/run-task.ts
+ok 6 - W1-T10820: on the real tree every suite importing \#src/run-task.js is an importer of src/run-task.ts
+  ---
+  duration_ms: 40188.043944
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 43028.702141
+TAP version 13
+# Subtest: CENSUS: every existing test/ fixture that seeds a config for loadConfig writes it where configPath resolves
+ok 1 - CENSUS: every existing test/ fixture that seeds a config for loadConfig writes it where configPath resolves
+  ---
+  duration_ms: 3233.154817
+  type: 'test'
+  ...
+# Subtest: the parity check fails when a fixture seeds the legacy .remudero home
+ok 2 - the parity check fails when a fixture seeds the legacy .remudero home
+  ---
+  duration_ms: 0.450718
+  type: 'test'
+  ...
+# Subtest: the check names the offending file and the path it expected
+ok 3 - the check names the offending file and the path it expected
+  ---
+  duration_ms: 2.696078
+  type: 'test'
+  ...
+# Subtest: a fixture that redirects HOME and reaches loadConfig but seeds no config file at all is never reported
+ok 4 - a fixture that redirects HOME and reaches loadConfig but seeds no config file at all is never reported
+  ---
+  duration_ms: 0.154262
+  type: 'test'
+  ...
+# Subtest: a correctly-seeded fixture (direct literal path) is never reported
+ok 5 - a correctly-seeded fixture (direct literal path) is never reported
+  ---
+  duration_ms: 0.144747
+  type: 'test'
+  ...
+# Subtest: a correctly-seeded fixture via an indirected configDir variable is never reported (the false-positive this check must not make)
+ok 6 - a correctly-seeded fixture via an indirected configDir variable is never reported (the false-positive this check must not make)
+  ---
+  duration_ms: 0.102895
+  type: 'test'
+  ...
+# Subtest: a fixture that seeds a wrong-shaped config.json but never redirects HOME is out of scope, not reported
+ok 7 - a fixture that seeds a wrong-shaped config.json but never redirects HOME is out of scope, not reported
+  ---
+  duration_ms: 0.087511
+  type: 'test'
+  ...
+# Subtest: a fixture that seeds a .remudero artifact but never calls loadConfig/configPath is out of scope, not reported
+ok 8 - a fixture that seeds a .remudero artifact but never calls loadConfig/configPath is out of scope, not reported
+  ---
+  duration_ms: 0.116376
+  type: 'test'
+  ...
+# Subtest: the claude lookup failure names the config path it was reached from
+ok 9 - the claude lookup failure names the config path it was reached from
+  ---
+  duration_ms: 701.01098
+  type: 'test'
+  ...
+# Subtest: loadConfig's creation branch still calls resolveClaudeBin unconditionally — the eager read did not become lazy
+ok 10 - loadConfig's creation branch still calls resolveClaudeBin unconditionally — the eager read did not become lazy
+  ---
+  duration_ms: 1.512977
+  type: 'test'
+  ...
+# Subtest: the claude lookup names the config path when `which` succeeds but resolves nothing
+ok 11 - the claude lookup names the config path when `which` succeeds but resolves nothing
+  ---
+  duration_ms: 17.473942
+  type: 'test'
+  ...
+# Subtest: test/config-fixture-path-parity.test.ts — a mounts-only target renders worker settings from the daemon install root
+ok 12 - test/config-fixture-path-parity.test.ts — a mounts-only target renders worker settings from the daemon install root
+  ---
+  duration_ms: 4.655828
+  type: 'test'
+  ...
+1..12
+# tests 12
+# suites 0
+# pass 12
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 21000.978413
+TAP version 13
+# Subtest: CALIBRATION: the detection finds the readers recon-EJ measured, and no more
+ok 1 - CALIBRATION: the detection finds the readers recon-EJ measured, and no more
+  ---
+  duration_ms: 251.921593
+  type: 'test'
+  ...
+# Subtest: every unredirectable policy reader has a seam or a reasoned allowlist entry
+ok 2 - every unredirectable policy reader has a seam or a reasoned allowlist entry
+  ---
+  duration_ms: 522.026492
+  type: 'test'
+  ...
+# Subtest: STALE-ENTRY LOCK: an allowlisted reader that has gained a seam fails
+ok 3 - STALE-ENTRY LOCK: an allowlisted reader that has gained a seam fails
+  ---
+  duration_ms: 859.973297
+  type: 'test'
+  ...
+# Subtest: every allowlist entry states a specific reason
+ok 4 - every allowlist entry states a specific reason
+  ---
+  duration_ms: 1.963185
+  type: 'test'
+  ...
+# Subtest: a reader WITH a seam passes, so the common case is not a false positive
+ok 5 - a reader WITH a seam passes, so the common case is not a false positive
+  ---
+  duration_ms: 1502.653101
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 5
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 4867.860043
+TAP version 13
+# Subtest: containment.ts's module header no longer says the probe is proven or called once per run
+ok 1 - containment.ts's module header no longer says the probe is proven or called once per run
+  ---
+  duration_ms: 12.314446
+  type: 'test'
+  ...
+# Subtest: containment.ts's module header states the once-per-boot ruling and names probeVerdictKey and W1-T5346
+ok 2 - containment.ts's module header states the once-per-boot ruling and names probeVerdictKey and W1-T5346
+  ---
+  duration_ms: 0.771181
+  type: 'test'
+  ...
+# Subtest: isolation.ts's module header no longer says the probe is proven or called once per run
+ok 3 - isolation.ts's module header no longer says the probe is proven or called once per run
+  ---
+  duration_ms: 0.295174
+  type: 'test'
+  ...
+# Subtest: isolation.ts's module header states the once-per-boot ruling and names probeVerdictKey and W1-T5346
+ok 4 - isolation.ts's module header states the once-per-boot ruling and names probeVerdictKey and W1-T5346
+  ---
+  duration_ms: 0.207893
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 960.679882
+TAP version 13
+# Subtest: src runtime package uses are dependencies
+ok 1 - src runtime package uses are dependencies
+  ---
+  duration_ms: 4040.535117
+  type: 'test'
+  ...
+# Subtest: package overrides all carry rationale
+ok 2 - package overrides all carry rationale
+  ---
+  duration_ms: 0.417508
+  type: 'test'
+  ...
+# Subtest: tool-only dependencies carry rationale
+ok 3 - tool-only dependencies carry rationale
+  ---
+  duration_ms: 0.811261
+  type: 'test'
+  ...
+# Subtest: settings SDK citation matches installed package
+ok 4 - settings SDK citation matches installed package
+  ---
+  duration_ms: 36.094561
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 7022.009568
+TAP version 13
+# Subtest: PRECONDITION: the shard fixture really lands on the capped-success branch the carve-out governs
+ok 1 - PRECONDITION: the shard fixture really lands on the capped-success branch the carve-out governs
+  ---
+  duration_ms: 15.567193
+  type: 'test'
+  ...
+# Subtest: a diff touching only plan/claims.yaml is NOT plan-only, and the reason names the file and the category
+ok 2 - a diff touching only plan/claims.yaml is NOT plan-only, and the reason names the file and the category
+  ---
+  duration_ms: 3.763906
+  type: 'test'
+  ...
+# Subtest: the denial has TEETH: the arm decision refuses without an override, which is the whole point
+ok 3 - the denial has TEETH: the arm decision refuses without an override, which is the whole point
+  ---
+  duration_ms: 5.914893
+  type: 'test'
+  ...
+# Subtest: every declared enforcement-data path loses the carve-out, not just the one the fixture names
+ok 4 - every declared enforcement-data path loses the carve-out, not just the one the fixture names
+  ---
+  duration_ms: 20.953041
+  type: 'test'
+  ...
+# Subtest: a diff touching only a plan/tasks.d/ shard KEEPS the carve-out, with the summary byte-identical to today
+ok 5 - a diff touching only a plan/tasks.d/ shard KEEPS the carve-out, with the summary byte-identical to today
+  ---
+  duration_ms: 0.555426
+  type: 'test'
+  ...
+# Subtest: the plan monolith, MASTER-PLAN.md and the excused record stores all keep the carve-out too
+ok 6 - the plan monolith, MASTER-PLAN.md and the excused record stores all keep the carve-out too
+  ---
+  duration_ms: 0.605181
+  type: 'test'
+  ...
+# Subtest: a diff touching a shard AND plan/policy.yaml pays the floor — enforcement data is not laundered by paperwork
+ok 7 - a diff touching a shard AND plan/policy.yaml pays the floor — enforcement data is not laundered by paperwork
+  ---
+  duration_ms: 12.576045
+  type: 'test'
+  ...
+# Subtest: enforcementDataInDiff: exact paths only — a lookalike prefix and an inherited key are both refused
+ok 8 - enforcementDataInDiff: exact paths only — a lookalike prefix and an inherited key are both refused
+  ---
+  duration_ms: 1.193256
+  type: 'test'
+  ...
+# Subtest: a legitimate enforcement-data edit still PASSES — it loses an exemption, it does not acquire a failure
+ok 9 - a legitimate enforcement-data edit still PASSES — it loses an exemption, it does not acquire a failure
+  ---
+  duration_ms: 0.45883
+  type: 'test'
+  ...
+# Subtest: the rule-15 interaction is REAL but empty here: criteriaTampered needs a criterion-field edit, which this is not
+ok 10 - the rule-15 interaction is REAL but empty here: criteriaTampered needs a criterion-field edit, which this is not
+  ---
+  duration_ms: 9.469024
+  type: 'test'
+  ...
+# Subtest: findUnexplainedGaps: a plan data file that is neither declared nor excused is REPORTED, not silently passed
+ok 11 - findUnexplainedGaps: a plan data file that is neither declared nor excused is REPORTED, not silently passed
+  ---
+  duration_ms: 0.461915
+  type: 'test'
+  ...
+# Subtest: findUnexplainedGaps: a declared path, and a member of an excused record store, are never reported
+ok 12 - findUnexplainedGaps: a declared path, and a member of an excused record store, are never reported
+  ---
+  duration_ms: 0.215976
+  type: 'test'
+  ...
+# Subtest: findUnexplainedGaps: a BARE exclusion (empty or whitespace-only reason) does not silence the alarm
+ok 13 - findUnexplainedGaps: a BARE exclusion (empty or whitespace-only reason) does not silence the alarm
+  ---
+  duration_ms: 0.241333
+  type: 'test'
+  ...
+# Subtest: both maps carry substantive reasons — the thing that makes them readable rather than a bare list
+ok 14 - both maps carry substantive reasons — the thing that makes them readable rather than a bare list
+  ---
+  duration_ms: 0.262024
+  type: 'test'
+  ...
+# Subtest: enforcement-data completeness: every plan data file this tree's own src/ or scripts/ reads by name is declared or reasoned-away
+ok 15 - enforcement-data completeness: every plan data file this tree's own src/ or scripts/ reads by name is declared or reasoned-away
+  ---
+  duration_ms: 126996.729487
+  type: 'test'
+  ...
+1..15
+# tests 15
+# suites 0
+# pass 15
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 130457.552016
+TAP version 13
+# Subtest: every RMD_ or REMUDERO_ env-name literal or dot read in src is registered once
+ok 1 - every RMD_ or REMUDERO_ env-name literal or dot read in src is registered once
+  ---
+  duration_ms: 1906.2754
+  type: 'test'
+  ...
+# Subtest: each registered env var names its purpose and readers
+ok 2 - each registered env var names its purpose and readers
+  ---
+  duration_ms: 0.523108
+  type: 'test'
+  ...
+# Subtest: env.ts exposes the same registry for runtime readers
+ok 3 - env.ts exposes the same registry for runtime readers
+  ---
+  duration_ms: 0.447013
+  type: 'test'
+  ...
+1..3
+# tests 3
+# suites 0
+# pass 3
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3748.349822
+TAP version 13
+# Subtest: the direct Error subclass census sees tracked classes on this git grep engine
+ok 1 - the direct Error subclass census sees tracked classes on this git grep engine
+  ---
+  duration_ms: 267.747457
+  type: 'test'
+  ...
+# Subtest: the count of classes extending Error directly is recorded in scripts/error-subclass-baseline.json
+ok 2 - the count of classes extending Error directly is recorded in scripts/error-subclass-baseline.json
+  ---
+  duration_ms: 0.572072
+  type: 'test'
+  ...
+# Subtest: the count of classes extending Error directly under tracked src/**/*.ts cannot grow past the recorded ceiling
+ok 3 - the count of classes extending Error directly under tracked src/**/*.ts cannot grow past the recorded ceiling
+  ---
+  duration_ms: 592.835874
+  type: 'test'
+  ...
+1..3
+# tests 3
+# suites 0
+# pass 3
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3177.013424
+TAP version 13
+# Subtest: W1-T8233: every incident rule input has a writer
+ok 1 - W1-T8233: every incident rule input has a writer
+  ---
+  duration_ms: 1522.187437
+  type: 'test'
+  ...
+# Subtest: W1-T8233: every runbook incident name is emitted or listed as debt
+ok 2 - W1-T8233: every runbook incident name is emitted or listed as debt
+  ---
+  duration_ms: 1156.234559
+  type: 'test'
+  ...
+# Subtest: W1-T8236: every registered fleet-flow detector input has a writer
+ok 3 - W1-T8236: every registered fleet-flow detector input has a writer
+  ---
+  duration_ms: 1165.838022
+  type: 'test'
+  ...
+# Subtest: W1-T8233: dispatch-stall fires on the recycle-hold replay
+ok 4 - W1-T8233: dispatch-stall fires on the recycle-hold replay
+  ---
+  duration_ms: 147.892652
+  type: 'test'
+  ...
+# Subtest: W1-T8233: no-merges fires on awaiting-arm with no verdict.merged
+ok 5 - W1-T8233: no-merges fires on awaiting-arm with no verdict.merged
+  ---
+  duration_ms: 0.911893
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 5
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 13281.566468
+TAP version 13
+# Subtest: the lexer counts only real Worker spawns, never comments, strings or templates
+ok 1 - the lexer counts only real Worker spawns, never comments, strings or templates
+  ---
+  duration_ms: 3.485578
+  type: 'test'
+  ...
+# Subtest: the census fails by file and kind on a Worker spawn with neither env SHARE_ENV nor an exemption row
+ok 2 - the census fails by file and kind on a Worker spawn with neither env SHARE_ENV nor an exemption row
+  ---
+  duration_ms: 10273.586798
+  type: 'test'
+  ...
+# Subtest: the census fails on a stale exemption row
+ok 3 - the census fails on a stale exemption row
+  ---
+  duration_ms: 18571.481493
+  type: 'test'
+  ...
+# Subtest: the census passes on the recorded tree
+ok 4 - the census passes on the recorded tree
+  ---
+  duration_ms: 6653.607865
+  type: 'test'
+  ...
+# Subtest: removing env SHARE_ENV from read-plane.ts makes the census name read-plane.ts
+ok 5 - removing env SHARE_ENV from read-plane.ts makes the census name read-plane.ts
+  ---
+  duration_ms: 5533.558943
+  type: 'test'
+  ...
+# Subtest: a SHARE_ENV fixture thread reads a GH_TOKEN its parent changed after spawn
+ok 6 - a SHARE_ENV fixture thread reads a GH_TOKEN its parent changed after spawn
+  ---
+  duration_ms: 879.169559
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 45557.786967
+TAP version 13
+# Subtest: test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+ok 1 - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+  ---
+  duration_ms: 335.54503
+  type: 'test'
+  ...
+# Subtest: every exemption names a step the census still finds and the gardener does not read
+ok 2 - every exemption names a step the census still finds and the gardener does not read
+  ---
+  duration_ms: 0.362997
+  type: 'test'
+  ...
+# Subtest: sweep review telemetry does not change the config gardener's gathered runs
+ok 3 - sweep review telemetry does not change the config gardener's gathered runs
+  ---
+  duration_ms: 3.076752
+  type: 'test'
+  ...
+# Subtest: closed review skips preserve the config gardener's gathered runs
+ok 4 - closed review skips preserve the config gardener's gathered runs
+  ---
+  duration_ms: 1.300007
+  type: 'test'
+  ...
+# Subtest: the census reads each write idiom and ignores an unpriced or total-only row
+ok 5 - the census reads each write idiom and ignores an unpriced or total-only row
+  ---
+  duration_ms: 0.333783
+  type: 'test'
+  ...
+# Subtest: the priced-step census sees owned settlement adapters but not unrelated reporters
+ok 6 - the priced-step census sees owned settlement adapters but not unrelated reporters
+  ---
+  duration_ms: 1.447279
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 7290.110008
+TAP version 13
+# Subtest: every source-reading suite is placed by what it reads or declares it
+ok 1 - every source-reading suite is placed by what it reads or declares it
+  ---
+  duration_ms: 9064.785406
+  type: 'test'
+  ...
+# Subtest: the meta-census names a marked suite whose read cannot be derived
+ok 2 - the meta-census names a marked suite whose read cannot be derived
+  ---
+  duration_ms: 0.582477
+  type: 'test'
+  ...
+# Subtest: a read is placed by the path it names, in every spelling
+ok 3 - a read is placed by the path it names, in every spelling
+  ---
+  duration_ms: 0.427694
+  type: 'test'
+  ...
+# Subtest: a git pathspec walk is placed by its pathspec, and an exclusion is not a walk
+ok 4 - a git pathspec walk is placed by its pathspec, and an exclusion is not a walk
+  ---
+  duration_ms: 0.218829
+  type: 'test'
+  ...
+# Subtest: a reader joins the paths under its walks and nothing else
+ok 5 - a reader joins the paths under its walks and nothing else
+  ---
+  duration_ms: 0.138979
+  type: 'test'
+  ...
+# Subtest: discovery reads a git grep no-match as zero readers and any other failure as a failure
+ok 6 - discovery reads a git grep no-match as zero readers and any other failure as a failure
+  ---
+  duration_ms: 0.419983
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 11838.722354
+TAP version 13
+# Subtest: W1-T9860: two tests sharing a basename are refused by name
+ok 1 - W1-T9860: two tests sharing a basename are refused by name
+  ---
+  duration_ms: 938.307101
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1951.96659
+TAP version 13
+# Subtest: Code health scope clocks are registered without weakening the fixture census
+ok 1 - Code health scope clocks are registered without weakening the fixture census
+  ---
+  duration_ms: 173.754026
+  type: 'test'
+  ...
+# Subtest: W1-T3838: an unlisted clock-aged field fails the census
+ok 2 - W1-T3838: an unlisted clock-aged field fails the census
+  ---
+  duration_ms: 0.789889
+  type: 'test'
+  ...
+# Subtest: daily progress due and snapshot clocks are covered by the fixture census
+ok 3 - daily progress due and snapshot clocks are covered by the fixture census
+  ---
+  duration_ms: 82.669199
+  type: 'test'
+  ...
+# Subtest: W1-T4820: the generated ledger rotation-lock timestamp is accounted for
+ok 4 - W1-T4820: the generated ledger rotation-lock timestamp is accounted for
+  ---
+  duration_ms: 6.235197
+  type: 'test'
+  ...
+# Subtest: W1-T3838: the completeness failure names the field and its source
+ok 5 - W1-T3838: the completeness failure names the field and its source
+  ---
+  duration_ms: 0.506332
+  type: 'test'
+  ...
+# Subtest: W1-T3838: a waived field passes and an unwaived one still fails
+ok 6 - W1-T3838: a waived field passes and an unwaived one still fails
+  ---
+  duration_ms: 0.476057
+  type: 'test'
+  ...
+# Subtest: W1-T3839: a BLOCKED headline never accompanies a zero exit
+ok 7 - W1-T3839: a BLOCKED headline never accompanies a zero exit
+  ---
+  duration_ms: 0.563258
+  type: 'test'
+  ...
+# Subtest: W1-T3839: an all-inherited run reports its crossings without a BLOCKED headline
+ok 8 - W1-T3839: an all-inherited run reports its crossings without a BLOCKED headline
+  ---
+  duration_ms: 3.004944
+  type: 'test'
+  ...
+# Subtest: W1-T3839: what blocks is unchanged by the wording
+ok 9 - W1-T3839: what blocks is unchanged by the wording
+  ---
+  duration_ms: 0.553182
+  type: 'test'
+  ...
+# Subtest: W1-T3272: a fixture about to cross its threshold is reported, and the report names the date it goes red
+ok 10 - W1-T3272: a fixture about to cross its threshold is reported, and the report names the date it goes red
+  ---
+  duration_ms: 1.065554
+  type: 'test'
+  ...
+# Subtest: W1-T3272: the margin fires BEFORE the boundary, not at it — a check that reddens the same hour as the suite has bought nothing
+ok 11 - W1-T3272: the margin fires BEFORE the boundary, not at it — a check that reddens the same hour as the suite has bought nothing
+  ---
+  duration_ms: 1.168389
+  type: 'test'
+  ...
+# Subtest: W1-T3272: a fixture whose crossing does not matter opts out WITH ITS REASON, and the exempt set is printed rather than silently skipped
+ok 12 - W1-T3272: a fixture whose crossing does not matter opts out WITH ITS REASON, and the exempt set is printed rather than silently skipped
+  ---
+  duration_ms: 0.233101
+  type: 'test'
+  ...
+# Subtest: W1-T3272: the census proves it can see its corpus — a table that stops describing the source REFUSES rather than reporting all-clear
+ok 13 - W1-T3272: the census proves it can see its corpus — a table that stops describing the source REFUSES rather than reporting all-clear
+  ---
+  duration_ms: 24871.612144
+  type: 'test'
+  ...
+# Subtest: W1-T3879: the census lists every follow-up timestamp that ages against the evaluation clock
+ok 14 - W1-T3879: the census lists every follow-up timestamp that ages against the evaluation clock
+  ---
+  duration_ms: 0.261103
+  type: 'test'
+  ...
+# Subtest: W1-T3272: a hardcoded date that NO threshold ages is not reported — the check does not ban dates as such
+ok 15 - W1-T3272: a hardcoded date that NO threshold ages is not reported — the check does not ban dates as such
+  ---
+  duration_ms: 0.208183
+  type: 'test'
+  ...
+# Subtest: W1-T3272: main reads the real test-file population and sweep staleDays policy through the CLI seams
+ok 16 - W1-T3272: main reads the real test-file population and sweep staleDays policy through the CLI seams
+  ---
+  duration_ms: 1.020846
+  type: 'test'
+  ...
+# Subtest: W1-T3272: main returns a blocking exit code when its census reports an expiring fixture
+ok 17 - W1-T3272: main returns a blocking exit code when its census reports an expiring fixture
+  ---
+  duration_ms: 9.878732
+  type: 'test'
+  ...
+# Subtest: W1-T3272: a report NAMES the already-expired population, which is state rather than a transition
+ok 18 - W1-T3272: a report NAMES the already-expired population, which is state rather than a transition
+  ---
+  duration_ms: 0.342857
+  type: 'test'
+  ...
+# Subtest: W1-T3334: moving a fixture date behind a helper drops it from the population and is refused
+ok 19 - W1-T3334: moving a fixture date behind a helper drops it from the population and is refused
+  ---
+  duration_ms: 0.354934
+  type: 'test'
+  ...
+# Subtest: W1-T3334: a genuinely deleted fixture is refused with the file name and recorded remedy
+ok 20 - W1-T3334: a genuinely deleted fixture is refused with the file name and recorded remedy
+  ---
+  duration_ms: 0.124447
+  type: 'test'
+  ...
+# Subtest: W1-T3334: unchanged and growing fixture populations still pass the population ratchet
+ok 21 - W1-T3334: unchanged and growing fixture populations still pass the population ratchet
+  ---
+  duration_ms: 0.55818
+  type: 'test'
+  ...
+# Subtest: W1-T3334: main exits nonzero when the measured population falls below the recorded ledger
+ok 22 - W1-T3334: main exits nonzero when the measured population falls below the recorded ledger
+  ---
+  duration_ms: 0.382616
+  type: 'test'
+  ...
+# Subtest: W1-T3578 census BLOCKED report is emitted as actionable annotation evidence
+ok 23 - W1-T3578 census BLOCKED report is emitted as actionable annotation evidence
+  ---
+  duration_ms: 0.290397
+  type: 'test'
+  ...
+# Subtest: W1-T3578 census annotation is opt-in and clean runs stay silent
+ok 24 - W1-T3578 census annotation is opt-in and clean runs stay silent
+  ---
+  duration_ms: 0.196065
+  type: 'test'
+  ...
+# Subtest: W1-T3578 workflow opts in only the expiring-fixture census
+ok 25 - W1-T3578 workflow opts in only the expiring-fixture census
+  ---
+  duration_ms: 101.097384
+  type: 'test'
+  ...
+# Subtest: W1-T3388: a crossing already present at the base is marked inherited, not charged to the diff
+ok 26 - W1-T3388: a crossing already present at the base is marked inherited, not charged to the diff
+  ---
+  duration_ms: 0.493703
+  type: 'test'
+  ...
+# Subtest: W1-T3388: a crossing this diff introduced is NOT excused by an unrelated stamp at the base
+ok 27 - W1-T3388: a crossing this diff introduced is NOT excused by an unrelated stamp at the base
+  ---
+  duration_ms: 0.399952
+  type: 'test'
+  ...
+# Subtest: W1-T3388: a file absent at the base is entirely this diff's
+ok 28 - W1-T3388: a file absent at the base is entirely this diff's
+  ---
+  duration_ms: 0.157848
+  type: 'test'
+  ...
+# Subtest: W1-T3388: with no base reader the strict, un-attributed reading is unchanged
+ok 29 - W1-T3388: with no base reader the strict, un-attributed reading is unchanged
+  ---
+  duration_ms: 0.124287
+  type: 'test'
+  ...
+# Subtest: W1-T3388: attribution names the owner and does NOT hide an inherited crossing
+ok 30 - W1-T3388: attribution names the owner and does NOT hide an inherited crossing
+  ---
+  duration_ms: 0.226491
+  type: 'test'
+  ...
+# Subtest: W1-T3388: a file absent at the base is read as this diff's own, not as an error
+ok 31 - W1-T3388: a file absent at the base is read as this diff's own, not as an error
+  ---
+  duration_ms: 113.410519
+  type: 'test'
+  ...
+# Subtest: W1-T3388: an unreadable base ref turns attribution off rather than refusing everything
+ok 32 - W1-T3388: an unreadable base ref turns attribution off rather than refusing everything
+  ---
+  duration_ms: 0.50463
+  type: 'test'
+  ...
+# Subtest: W1-T5826: a pull_request run names an inherited crossing in its report but publishes no warning annotation
+ok 33 - W1-T5826: a pull_request run names an inherited crossing in its report but publishes no warning annotation
+  ---
+  duration_ms: 0.686663
+  type: 'test'
+  ...
+# Subtest: the freshness-restart fixture is exempt because runSweep judges it against the injected clock
+ok 34 - the freshness-restart fixture is exempt because runSweep judges it against the injected clock
+  ---
+  duration_ms: 1.968624
+  type: 'test'
+  ...
+# Subtest: the census flags the pre-\#10656 cost-of-delay fixture on the day it was written, naming 2026-10-10
+ok 35 - the census flags the pre-\#10656 cost-of-delay fixture on the day it was written, naming 2026-10-10
+  ---
+  duration_ms: 0.727996
+  type: 'test'
+  ...
+# Subtest: a derived-stamp crossing already on the base is inherited, not charged to the diff
+ok 36 - a derived-stamp crossing already on the base is inherited, not charged to the diff
+  ---
+  duration_ms: 3.363924
+  type: 'test'
+  ...
+# Subtest: the dispatch-window row reads only a file that reaches the real-clock reader
+ok 37 - the dispatch-window row reads only a file that reaches the real-clock reader
+  ---
+  duration_ms: 0.44466
+  type: 'test'
+  ...
+# Subtest: a stamp derived from the real clock, or waived with its reason, is not reported
+ok 38 - a stamp derived from the real clock, or waived with its reason, is not reported
+  ---
+  duration_ms: 0.780245
+  type: 'test'
+  ...
+# Subtest: anchor arithmetic resolves units, products and getTime anchors, and skips what it cannot evaluate
+ok 39 - anchor arithmetic resolves units, products and getTime anchors, and skips what it cannot evaluate
+  ---
+  duration_ms: 0.238039
+  type: 'test'
+  ...
+# Subtest: derived stamps are opt-in per row: a sweep field derived from an anchor stays unmeasured
+ok 40 - derived stamps are opt-in per row: a sweep field derived from an anchor stays unmeasured
+  ---
+  duration_ms: 0.621886
+  type: 'test'
+  ...
+1..40
+# tests 40
+# suites 0
+# pass 40
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 27717.129439
+TAP version 13
+# Subtest: the ledger filename literal appears only in the ledger owner modules
+ok 1 - the ledger filename literal appears only in the ledger owner modules
+  ---
+  duration_ms: 129.999166
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1254.64813
+TAP version 13
+# Subtest: PROPERTY a readLedgerLines call that takes the live file alone without declaring intent is refused
+ok 1 - PROPERTY a readLedgerLines call that takes the live file alone without declaring intent is refused
+  ---
+  duration_ms: 1.199686
+  type: 'test'
+  ...
+# Subtest: PROPERTY a call that declares the newest-rows (live) intent still passes
+ok 2 - PROPERTY a call that declares the newest-rows (live) intent still passes
+  ---
+  duration_ms: 1.780811
+  type: 'test'
+  ...
+# Subtest: PROPERTY a union read is distinguishable from a live-file read at the call site, not by inspection
+ok 3 - PROPERTY a union read is distinguishable from a live-file read at the call site, not by inspection
+  ---
+  duration_ms: 0.501786
+  type: 'test'
+  ...
+# Subtest: PROPERTY the check names the offending reader rather than reporting a bare count
+ok 4 - PROPERTY the check names the offending reader rather than reporting a bare count
+  ---
+  duration_ms: 0.206781
+  type: 'test'
+  ...
+# Subtest: PROPERTY src/lib/status.ts — the narrowing point readLedgerLines is defined at — is itself clean
+ok 5 - PROPERTY src/lib/status.ts — the narrowing point readLedgerLines is defined at — is itself clean
+  ---
+  duration_ms: 75.094079
+  type: 'test'
+  ...
+# Subtest: PROPERTY sweep.ts's three value-bound readLedger call sites declare the live intent, not union
+ok 6 - PROPERTY sweep.ts's three value-bound readLedger call sites declare the live intent, not union
+  ---
+  duration_ms: 55.776935
+  type: 'test'
+  ...
+# Subtest: PROPERTY the gate's regex is unchanged — it still cannot see a value-bound alias call
+ok 7 - PROPERTY the gate's regex is unchanged — it still cannot see a value-bound alias call
+  ---
+  duration_ms: 1.576984
+  type: 'test'
+  ...
+# Subtest: PROPERTY the enforced corpus is unchanged — this test file still feeds exactly src/lib/status.ts from disk
+ok 8 - PROPERTY the enforced corpus is unchanged — this test file still feeds exactly src/lib/status.ts from disk
+  ---
+  duration_ms: 0.437589
+  type: 'test'
+  ...
+# Subtest: PROPERTY sweep.ts's new markers are documentation only — nothing paces, throttles, sleeps or delays
+ok 9 - PROPERTY sweep.ts's new markers are documentation only — nothing paces, throttles, sleeps or delays
+  ---
+  duration_ms: 12.351945
+  type: 'test'
+  ...
+1..9
+# tests 9
+# suites 0
+# pass 9
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3192.861509
+TAP version 13
+# Subtest: W1-T11423 criterion 3: every non-test union read carries a bound or a written allowlist reason
+ok 1 - W1-T11423 criterion 3: every non-test union read carries a bound or a written allowlist reason
+  ---
+  duration_ms: 16325.075378
+  type: 'test'
+  ...
+# Subtest: W1-T11423 criterion 3: a planted unbounded union read reddens the census, and a bounded one does not
+ok 2 - W1-T11423 criterion 3: a planted unbounded union read reddens the census, and a bounded one does not
+  ---
+  duration_ms: 0.732693
+  type: 'test'
+  ...
+# Subtest: W1-T11423 criterion 3: callback properties cannot bound a call, including imported and local reader aliases
+ok 3 - W1-T11423 criterion 3: callback properties cannot bound a call, including imported and local reader aliases
+  ---
+  duration_ms: 1.017111
+  type: 'test'
+  ...
+# Subtest: W1-T11423 criterion 3: option and reader aliases keep their lexical scope
+ok 4 - W1-T11423 criterion 3: option and reader aliases keep their lexical scope
+  ---
+  duration_ms: 0.481715
+  type: 'test'
+  ...
+# Subtest: W1-T11423 criterion 3: every conditional options branch must carry an honoured bound
+ok 5 - W1-T11423 criterion 3: every conditional options branch must carry an honoured bound
+  ---
+  duration_ms: 0.578291
+  type: 'test'
+  ...
+# Subtest: W1-T11423 criterion 3: undefined bounds and object aliases stay unbounded
+ok 6 - W1-T11423 criterion 3: undefined bounds and object aliases stay unbounded
+  ---
+  duration_ms: 0.479381
+  type: 'test'
+  ...
+# Subtest: W1-T11423 criterion 3: ignored options cannot bound raw or streaming readers, including aliases
+ok 7 - W1-T11423 criterion 3: ignored options cannot bound raw or streaming readers, including aliases
+  ---
+  duration_ms: 4.82631
+  type: 'test'
+  ...
+1..7
+# tests 7
+# suites 0
+# pass 7
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 17837.111114
+TAP version 13
+# Subtest: negative-reachability-ratchet: a fixture merely touching the symbol (no invocation) satisfies nothing (acceptance criterion 2)
+ok 1 - negative-reachability-ratchet: a fixture merely touching the symbol (no invocation) satisfies nothing (acceptance criterion 2)
+  ---
+  duration_ms: 1.243011
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: a fixture exercising only the healthy arm satisfies nothing (acceptance criterion 2)
+ok 2 - negative-reachability-ratchet: a fixture exercising only the healthy arm satisfies nothing (acceptance criterion 2)
+  ---
+  duration_ms: 0.35202
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: a fixture driving the unhealthy arm AND asserting a distinct healthy-arm output satisfies the surface (acceptance criterion 3)
+ok 3 - negative-reachability-ratchet: a fixture driving the unhealthy arm AND asserting a distinct healthy-arm output satisfies the surface (acceptance criterion 3)
+  ---
+  duration_ms: 0.195975
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: exec-shaped surfaces are recognised the same way, via null vs. a captured match
+ok 4 - negative-reachability-ratchet: exec-shaped surfaces are recognised the same way, via null vs. a captured match
+  ---
+  duration_ms: 0.181303
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: a structurally-total validator passes via its in-place sentence, with no fixture at all (acceptance criterion 4)
+ok 5 - negative-reachability-ratchet: a structurally-total validator passes via its in-place sentence, with no fixture at all (acceptance criterion 4)
+  ---
+  duration_ms: 0.927646
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: the same declaration with no marker sentence is NOT exempt
+ok 6 - negative-reachability-ratchet: the same declaration with no marker sentence is NOT exempt
+  ---
+  duration_ms: 0.195695
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: an indented (function-local) `_RE` declaration is not enumerated as a module-scope surface
+ok 7 - negative-reachability-ratchet: an indented (function-local) `_RE` declaration is not enumerated as a module-scope surface
+  ---
+  duration_ms: 0.165339
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: a FixClass row fixture that only proves the negative arm satisfies nothing
+ok 8 - negative-reachability-ratchet: a FixClass row fixture that only proves the negative arm satisfies nothing
+  ---
+  duration_ms: 0.228574
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: a FixClass row fixture proving both arms -- match names its class, and an unrelated red is refused -- satisfies the surface
+ok 9 - negative-reachability-ratchet: a FixClass row fixture proving both arms -- match names its class, and an unrelated red is refused -- satisfies the surface
+  ---
+  duration_ms: 0.169465
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: fixClassSurfaces enumerates DEFAULT_FIX_CLASSES's members by bracket-matching the array literal, never the type annotation's own brackets
+ok 10 - negative-reachability-ratchet: fixClassSurfaces enumerates DEFAULT_FIX_CLASSES's members by bracket-matching the array literal, never the type annotation's own brackets
+  ---
+  duration_ms: 315.158544
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: the one-pass invocation index preserves literal boundaries, nested windows and distinct arms
+ok 11 - negative-reachability-ratchet: the one-pass invocation index preserves literal boundaries, nested windows and distinct arms
+  ---
+  duration_ms: 26.662792
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: every validator uses one real corpus index and a later tracked fixture edit is freshly observed
+ok 12 - negative-reachability-ratchet: every validator uses one real corpus index and a later tracked fixture edit is freshly observed
+  ---
+  duration_ms: 244.70792
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: an unreadable tracked fixture is refused, never credited as an empty index
+ok 13 - negative-reachability-ratchet: an unreadable tracked fixture is refused, never credited as an empty index
+  ---
+  duration_ms: 211.884383
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: a fixture-less surface past its file's baseline fails naming file and surface (acceptance criterion 1)
+ok 14 - negative-reachability-ratchet: a fixture-less surface past its file's baseline fails naming file and surface (acceptance criterion 1)
+  ---
+  duration_ms: 123.957962
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: a brand-new file with any fixture-less surface enters at zero baseline and fails immediately -- no allowlist to add it to
+ok 15 - negative-reachability-ratchet: a brand-new file with any fixture-less surface enters at zero baseline and fails immediately -- no allowlist to add it to
+  ---
+  duration_ms: 145.916032
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: a file dropping below its baseline passes with no edit to the gate (acceptance criterion 5)
+ok 16 - negative-reachability-ratchet: a file dropping below its baseline passes with no edit to the gate (acceptance criterion 5)
+  ---
+  duration_ms: 110.876079
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: a new surface added to an already-baselined file pays immediately rather than entering the baseline (acceptance criterion 6)
+ok 17 - negative-reachability-ratchet: a new surface added to an already-baselined file pays immediately rather than entering the baseline (acceptance criterion 6)
+  ---
+  duration_ms: 217.783133
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: a structurally-total surface never counts against its file's baseline, fixture or none
+ok 18 - negative-reachability-ratchet: a structurally-total surface never counts against its file's baseline, fixture or none
+  ---
+  duration_ms: 54.282174
+  type: 'test'
+  ...
+# Subtest: PROPERTY no tracked src/**/*.ts file's fixture-less `_RE` validator count exceeds its baseline
+ok 19 - PROPERTY no tracked src/**/*.ts file's fixture-less `_RE` validator count exceeds its baseline
+  ---
+  duration_ms: 2561.975936
+  type: 'test'
+  ...
+# Subtest: PROPERTY no DEFAULT_FIX_CLASSES row's fixture-less count exceeds its baseline
+ok 20 - PROPERTY no DEFAULT_FIX_CLASSES row's fixture-less count exceeds its baseline
+  ---
+  duration_ms: 1422.901109
+  type: 'test'
+  ...
+# Subtest: negative-reachability-ratchet: every row in both baseline tables names a currently-tracked src/**/*.ts file (no stale allowance left behind by a rename)
+ok 21 - negative-reachability-ratchet: every row in both baseline tables names a currently-tracked src/**/*.ts file (no stale allowance left behind by a rename)
+  ---
+  duration_ms: 48.983588
+  type: 'test'
+  ...
+1..21
+# tests 21
+# suites 0
+# pass 21
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6993.151251
+TAP version 13
+# Subtest: W1-T9651: the census names a daemon-reachable async child call that arms a wall-clock timeout
+ok 1 - W1-T9651: the census names a daemon-reachable async child call that arms a wall-clock timeout
+  ---
+  duration_ms: 23210.007393
+  type: 'test'
+  ...
+# Subtest: a row above its real count is refused and names the row to delete
+ok 2 - a row above its real count is refused and names the row to delete
+  ---
+  duration_ms: 9405.1652
+  type: 'test'
+  ...
+# Subtest: W1-T9703: the census names an AbortController-plus-timer kill of a daemon-reachable child
+ok 3 - W1-T9703: the census names an AbortController-plus-timer kill of a daemon-reachable child
+  ---
+  duration_ms: 13732.172524
+  type: 'test'
+  ...
+1..3
+# tests 3
+# suites 0
+# pass 3
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 47478.716591
+TAP version 13
+# Subtest: census: the seed and the population are real, so the walk cannot pass vacuously
+ok 1 - census: the seed and the population are real, so the walk cannot pass vacuously
+  ---
+  duration_ms: 1375.019831
+  type: 'test'
+  ...
+# Subtest: unit test: test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts — the census names a loop-reachable function that builds ghGateway
+ok 2 - unit test: test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts — the census names a loop-reachable function that builds ghGateway
+  ---
+  duration_ms: 2005.43805
+  type: 'test'
+  ...
+# Subtest: the exemption table is shrink-only: every entry states why its calls are bounded
+ok 3 - the exemption table is shrink-only: every entry states why its calls are bounded
+  ---
+  duration_ms: 0.366553
+  type: 'test'
+  ...
+# Subtest: unit test: test/the-inbox-intake-rung-derives-readiness-from-the-batched-gateway.test.ts — the census refuses an unbatched inboxCommand without an exemption
+ok 4 - unit test: test/the-inbox-intake-rung-derives-readiness-from-the-batched-gateway.test.ts — the census refuses an unbatched inboxCommand without an exemption
+  ---
+  duration_ms: 3837.578337
+  type: 'test'
+  ...
+# Subtest: unit test: test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts — the inbox draft hook builds no gateway
+ok 5 - unit test: test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts — the inbox draft hook builds no gateway
+  ---
+  duration_ms: 655.85727
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 5
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 9161.497789
+TAP version 13
+# Subtest: census: the seed and the population are real, so the walk cannot pass vacuously
+ok 1 - census: the seed and the population are real, so the walk cannot pass vacuously
+  ---
+  duration_ms: 4406.622123
+  type: 'test'
+  ...
+# Subtest: unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — the census names a loop-reachable function that gains a synchronous spawn
+ok 2 - unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — the census names a loop-reachable function that gains a synchronous spawn
+  ---
+  duration_ms: 988.598607
+  type: 'test'
+  ...
+# Subtest: unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — a count below its row fails and names the row to lower
+ok 3 - unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — a count below its row fails and names the row to lower
+  ---
+  duration_ms: 1860.427973
+  type: 'test'
+  ...
+# Subtest: unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — a sync primitive handed over as a seam default counts
+ok 4 - unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — a sync primitive handed over as a seam default counts
+  ---
+  duration_ms: 725.512608
+  type: 'test'
+  ...
+# Subtest: an emptied population scan fails the positive control
+ok 5 - an emptied population scan fails the positive control
+  ---
+  duration_ms: 307.319894
+  type: 'test'
+  ...
+# Subtest: the baseline records only positive counts for real functions
+ok 6 - the baseline records only positive counts for real functions
+  ---
+  duration_ms: 4.864579
+  type: 'test'
+  ...
+# Subtest: W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR preflight
+ok 7 - W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR preflight
+  ---
+  duration_ms: 1162.42768
+  type: 'test'
+  ...
+# Subtest: W1-T9696: the staged daemon-loop captures reach no inline captureFeedback
+ok 8 - W1-T9696: the staged daemon-loop captures reach no inline captureFeedback
+  ---
+  duration_ms: 78.116168
+  type: 'test'
+  ...
+# Subtest: W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const
+ok 9 - W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const
+  ---
+  duration_ms: 6678.54043
+  type: 'test'
+  ...
+# Subtest: W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment
+ok 10 - W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment
+  ---
+  duration_ms: 4037.566256
+  type: 'test'
+  ...
+# Subtest: W1-T9701: the census attributes a const initializer call to module load, not the loop
+ok 11 - W1-T9701: the census attributes a const initializer call to module load, not the loop
+  ---
+  duration_ms: 789.631145
+  type: 'test'
+  ...
+# Subtest: W1-T9701: an object literal member function is still loop reach
+ok 12 - W1-T9701: an object literal member function is still loop reach
+  ---
+  duration_ms: 638.112193
+  type: 'test'
+  ...
+# Subtest: W1-T9737: a factory member of a const initializer stays loop reach
+ok 13 - W1-T9737: a factory member of a const initializer stays loop reach
+  ---
+  duration_ms: 985.094556
+  type: 'test'
+  ...
+# Subtest: W1-T9737: a data-returning initializer call stays module load
+ok 14 - W1-T9737: a data-returning initializer call stays module load
+  ---
+  duration_ms: 0.415615
+  type: 'test'
+  ...
+1..14
+# tests 14
+# suites 0
+# pass 14
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 23712.479729
+TAP version 13
+# Subtest: the census refuses a source file that opens a draft pull request
+ok 1 - the census refuses a source file that opens a draft pull request
+  ---
+  duration_ms: 1.97592
+  type: 'test'
+  ...
+# Subtest: no tracked source opens a draft pull request
+ok 2 - no tracked source opens a draft pull request
+  ---
+  duration_ms: 958.602007
+  type: 'test'
+  ...
+# Subtest: the census CLI reports OK on a clean tree and refuses a tree that opens a draft
+ok 3 - the census CLI reports OK on a clean tree and refuses a tree that opens a draft
+  ---
+  duration_ms: 931.078906
+  type: 'test'
+  ...
+1..3
+# tests 3
+# suites 0
+# pass 3
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2402.579022
+TAP version 13
+# Subtest: FORBIDDEN_FLAGS is a plain data array (a table, not a branch) naming exactly the four repair-excluded flags, and --unshallow is not one of them
+ok 1 - FORBIDDEN_FLAGS is a plain data array (a table, not a branch) naming exactly the four repair-excluded flags, and --unshallow is not one of them
+  ---
+  duration_ms: 1.619163
+  type: 'test'
+  ...
+# Subtest: no-shallowing-of-the-canonical-checkout: src/, scripts/, deploy/ and .github/workflows/ carry no unexempted depth-limiting git invocation
+ok 2 - no-shallowing-of-the-canonical-checkout: src/, scripts/, deploy/ and .github/workflows/ carry no unexempted depth-limiting git invocation
+  ---
+  duration_ms: 403.822771
+  type: 'test'
+  ...
+# Subtest: no-shallowing-of-the-canonical-checkout: every test/ fixture that shallow-clones also `git init`s the repo it clones from
+ok 3 - no-shallowing-of-the-canonical-checkout: every test/ fixture that shallow-clones also `git init`s the repo it clones from
+  ---
+  duration_ms: 1156.731917
+  type: 'test'
+  ...
+# Subtest: findForbiddenFlagHits: a seeded production-shaped offender is caught, and the failure names the file, the line and the flag
+ok 4 - findForbiddenFlagHits: a seeded production-shaped offender is caught, and the failure names the file, the line and the flag
+  ---
+  duration_ms: 0.743157
+  type: 'test'
+  ...
+# Subtest: findForbiddenFlagHits + hasSelfCreatedGitSource: a seeded test/ fixture that shallow-clones an existing checkout (no git init anywhere in the file) is caught by name, line and flag
+ok 5 - findForbiddenFlagHits + hasSelfCreatedGitSource: a seeded test/ fixture that shallow-clones an existing checkout (no git init anywhere in the file) is caught by name, line and flag
+  ---
+  duration_ms: 2.030942
+  type: 'test'
+  ...
+# Subtest: W1-T10210: shallow fixture census recognizes only initialized shared Git sources
+ok 6 - W1-T10210: shallow fixture census recognizes only initialized shared Git sources
+  ---
+  duration_ms: 135.243055
+  type: 'test'
+  ...
+# Subtest: shared fixture census keeps clone-only, unknown and shadowed constructors unproven
+ok 7 - shared fixture census keeps clone-only, unknown and shadowed constructors unproven
+  ---
+  duration_ms: 9.148609
+  type: 'test'
+  ...
+# Subtest: validateExemptions: the real EXEMPTIONS table is well-formed (every entry carries a non-empty reason)
+ok 8 - validateExemptions: the real EXEMPTIONS table is well-formed (every entry carries a non-empty reason)
+  ---
+  duration_ms: 1.198872
+  type: 'test'
+  ...
+# Subtest: validateExemptions: an exemption with no reason (missing, empty, or whitespace-only) fails the scan, naming the file and flag
+ok 9 - validateExemptions: an exemption with no reason (missing, empty, or whitespace-only) fails the scan, naming the file and flag
+  ---
+  duration_ms: 19.16988
+  type: 'test'
+  ...
+# Subtest: validateExemptions: an exemption that quotes NO call fails too — the anchor is not optional
+ok 10 - validateExemptions: an exemption that quotes NO call fails too — the anchor is not optional
+  ---
+  duration_ms: 4.008054
+  type: 'test'
+  ...
+# Subtest: scanForForbiddenFlagHits: the live scope-(a) scan finds at least the one known call site — a zero result with no control would be indistinguishable from a broken scan
+ok 11 - scanForForbiddenFlagHits: the live scope-(a) scan finds at least the one known call site — a zero result with no control would be indistinguishable from a broken scan
+  ---
+  duration_ms: 605.528984
+  type: 'test'
+  ...
+# Subtest: scanForForbiddenFlagHits: a path `git ls-files` lists but the filesystem cannot deliver (tracked, then deleted on disk) makes the scan throw — it never reports that file clean by silently skipping it
+ok 12 - scanForForbiddenFlagHits: a path `git ls-files` lists but the filesystem cannot deliver (tracked, then deleted on disk) makes the scan throw — it never reports that file clean by silently skipping it
+  ---
+  duration_ms: 67.745374
+  type: 'test'
+  ...
+# Subtest: the exemption survives the file GROWING above the call — the failure that produced this change
+ok 13 - the exemption survives the file GROWING above the call — the failure that produced this change
+  ---
+  duration_ms: 1.658542
+  type: 'test'
+  ...
+# Subtest: NARROWNESS: a SECOND --depth call in the same workflow is still refused
+ok 14 - NARROWNESS: a SECOND --depth call in the same workflow is still refused
+  ---
+  duration_ms: 0.605951
+  type: 'test'
+  ...
+# Subtest: a change to the blessed call's OWN tokens re-arms the guard — the deliberate, wanted failure
+ok 15 - a change to the blessed call's OWN tokens re-arms the guard — the deliberate, wanted failure
+  ---
+  duration_ms: 0.414293
+  type: 'test'
+  ...
+# Subtest: re-indentation alone does NOT re-arm it — whitespace is normalised, tokens are not
+ok 16 - re-indentation alone does NOT re-arm it — whitespace is normalised, tokens are not
+  ---
+  duration_ms: 0.478159
+  type: 'test'
+  ...
+1..16
+# tests 16
+# suites 0
+# pass 16
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3792.35045
+TAP version 13
+# Subtest: no test file drives a real preflightCommand against the repository root
+ok 1 - no test file drives a real preflightCommand against the repository root
+  ---
+  duration_ms: 494.587667
+  type: 'test'
+  ...
+# Subtest: every allowed exception still names a call the census actually finds
+ok 2 - every allowed exception still names a call the census actually finds
+  ---
+  duration_ms: 0.597679
+  type: 'test'
+  ...
+# Subtest: the scanner flags each real-preflight shape and passes each seam-injected one
+ok 3 - the scanner flags each real-preflight shape and passes each seam-injected one
+  ---
+  duration_ms: 0.429997
+  type: 'test'
+  ...
+1..3
+# tests 3
+# suites 0
+# pass 3
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1318.905651
+TAP version 13
+# Subtest: W1-T9872: a test listing only the top level of test/ is refused
+ok 1 - W1-T9872: a test listing only the top level of test/ is refused
+  ---
+  duration_ms: 14690.745171
+  type: 'test'
+  ...
+# Subtest: W1-T9872: the guard goes red on a planted top-level-only walk and stays quiet on the safe shapes
+ok 2 - W1-T9872: the guard goes red on a planted top-level-only walk and stays quiet on the safe shapes
+  ---
+  duration_ms: 1.539724
+  type: 'test'
+  ...
+# Subtest: W1-T9872: the walk guard inspects a non-empty population
+ok 3 - W1-T9872: the walk guard inspects a non-empty population
+  ---
+  duration_ms: 19.846125
+  type: 'test'
+  ...
+# Subtest: W1-T9872: every KNOWN_DEBT entry still walks only the top level
+ok 4 - W1-T9872: every KNOWN_DEBT entry still walks only the top level
+  ---
+  duration_ms: 14741.220698
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 30333.81295
+TAP version 13
+# Subtest: W1-T5882: every captured nested node --test run names the TAP reporter
+ok 1 - W1-T5882: every captured nested node --test run names the TAP reporter
+  ---
+  duration_ms: 511.488372
+  type: 'test'
+  ...
+# Subtest: W1-T5882: a proof run prints TAP whichever runtime executes it
+ok 2 - W1-T5882: a proof run prints TAP whichever runtime executes it
+  ---
+  duration_ms: 1505.335433
+  type: 'test'
+  ...
+# Subtest: W1-T5882: test-with-retry names TAP for a node --test command that names no reporter
+ok 3 - W1-T5882: test-with-retry names TAP for a node --test command that names no reporter
+  ---
+  duration_ms: 0.354522
+  type: 'test'
+  ...
+# Subtest: W1-T5882: no worker thread is handed process.execArgv
+ok 4 - W1-T5882: no worker thread is handed process.execArgv
+  ---
+  duration_ms: 1250.501785
+  type: 'test'
+  ...
+# Subtest: W1-T5882: the coverage merger builds Node's TestCoverage for either constructor shape
+ok 5 - W1-T5882: the coverage merger builds Node's TestCoverage for either constructor shape
+  ---
+  duration_ms: 454.416489
+  type: 'test'
+  ...
+# Subtest: W1-T5882: a ledger row carrying U+2028 reads as one row
+ok 6 - W1-T5882: a ledger row carrying U+2028 reads as one row
+  ---
+  duration_ms: 57.214007
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6887.092661
+TAP version 13
+# Subtest: a src/lib change is named for every known census suite whose walk covers src/
+ok 1 - a src/lib change is named for every known census suite whose walk covers src/
+  ---
+  duration_ms: 3.713625
+  type: 'test'
+  ...
+# Subtest: bound-kind-census and negative-reachability-census are both named for a classify.ts change
+ok 2 - bound-kind-census and negative-reachability-census are both named for a classify.ts change
+  ---
+  duration_ms: 0.244027
+  type: 'test'
+  ...
+# Subtest: a path under no known census walk reports an explicit empty suites array
+ok 3 - a path under no known census walk reports an explicit empty suites array
+  ---
+  duration_ms: 0.77844
+  type: 'test'
+  ...
+# Subtest: a test/ change does not report the src-only census suites, but does report the one that also walks test/
+ok 4 - a test/ change does not report the src-only census suites, but does report the one that also walks test/
+  ---
+  duration_ms: 0.181954
+  type: 'test'
+  ...
+# Subtest: a discovered ls-files caller not in KNOWN_CENSUS_SUITES is named in unknownCoverage
+ok 5 - a discovered ls-files caller not in KNOWN_CENSUS_SUITES is named in unknownCoverage
+  ---
+  duration_ms: 1.665855
+  type: 'test'
+  ...
+# Subtest: a known census suite's own test file is never duplicated into unknownCoverage
+ok 6 - a known census suite's own test file is never duplicated into unknownCoverage
+  ---
+  duration_ms: 0.158989
+  type: 'test'
+  ...
+# Subtest: the report shape carries no ok/verdict field — a caller cannot wire it into a refusal
+ok 7 - the report shape carries no ok/verdict field — a caller cannot wire it into a refusal
+  ---
+  duration_ms: 1.173425
+  type: 'test'
+  ...
+# Subtest: an empty change set and an empty caller set both resolve without throwing
+ok 8 - an empty change set and an empty caller set both resolve without throwing
+  ---
+  duration_ms: 1.390651
+  type: 'test'
+  ...
+# Subtest: censusSuiteMembershipFor drives 'git grep -l ls-files -- test/*.test.ts' via the injected PreflightSpawn
+ok 9 - censusSuiteMembershipFor drives 'git grep -l ls-files -- test/*.test.ts' via the injected PreflightSpawn
+  ---
+  duration_ms: 5.33159
+  type: 'test'
+  ...
+# Subtest: censusSuiteMembershipFor names an unrecognised src/-filtering caller as unknownCoverage, never omits it
+ok 10 - censusSuiteMembershipFor names an unrecognised src/-filtering caller as unknownCoverage, never omits it
+  ---
+  duration_ms: 4.260098
+  type: 'test'
+  ...
+# Subtest: censusSuiteMembershipFor reads a 'git grep' exit-1 (no match) as zero callers, never a thrown failure
+ok 11 - censusSuiteMembershipFor reads a 'git grep' exit-1 (no match) as zero callers, never a thrown failure
+  ---
+  duration_ms: 0.188203
+  type: 'test'
+  ...
+# Subtest: censusSuiteMembershipFor keeps an unreadable discovered file rather than silently dropping it
+ok 12 - censusSuiteMembershipFor keeps an unreadable discovered file rather than silently dropping it
+  ---
+  duration_ms: 0.161433
+  type: 'test'
+  ...
+1..12
+# tests 12
+# suites 0
+# pass 12
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1907.163273
+TAP version 13
+# Subtest: W1-T3654: one recorded list (SWEEP_EFFECT_SURFACE) validates both the lib and the entrypoint surface
+ok 1 - W1-T3654: one recorded list (SWEEP_EFFECT_SURFACE) validates both the lib and the entrypoint surface
+  ---
+  duration_ms: 343.972451
+  type: 'test'
+  ...
+# Subtest: W1-T2890's invariant survives: the lib-built and entrypoint-built surfaces are still compared to each other
+ok 2 - W1-T2890's invariant survives: the lib-built and entrypoint-built surfaces are still compared to each other
+  ---
+  duration_ms: 32.667794
+  type: 'test'
+  ...
+# Subtest: the lib-vs-entrypoint suite still imports and compares both builders
+ok 3 - the lib-vs-entrypoint suite still imports and compares both builders
+  ---
+  duration_ms: 56.037352
+  type: 'test'
+  ...
+# Subtest: a member present on the entrypoint builder only fails exactly one assertion, and it names the lib side
+ok 4 - a member present on the entrypoint builder only fails exactly one assertion, and it names the lib side
+  ---
+  duration_ms: 13.357208
+  type: 'test'
+  ...
+# Subtest: a member present on the lib builder only fails exactly one assertion, and it names the entrypoint side
+ok 5 - a member present on the lib builder only fails exactly one assertion, and it names the entrypoint side
+  ---
+  duration_ms: 7.937211
+  type: 'test'
+  ...
+# Subtest: identical surfaces raise neither directional assertion
+ok 6 - identical surfaces raise neither directional assertion
+  ---
+  duration_ms: 0.173431
+  type: 'test'
+  ...
+# Subtest: SWEEP_EFFECT_SURFACE is exported from exactly one place: src/lib/sweep.ts
+ok 7 - SWEEP_EFFECT_SURFACE is exported from exactly one place: src/lib/sweep.ts
+  ---
+  duration_ms: 143.088711
+  type: 'test'
+  ...
+# Subtest: neither surface suite carries a re-introduced hand-copied list of surface members
+ok 8 - neither surface suite carries a re-introduced hand-copied list of surface members
+  ---
+  duration_ms: 12927.37836
+  type: 'test'
+  ...
+# Subtest: both surface suites import SWEEP_EFFECT_SURFACE from the lib module
+ok 9 - both surface suites import SWEEP_EFFECT_SURFACE from the lib module
+  ---
+  duration_ms: 707.168514
+  type: 'test'
+  ...
+1..9
+# tests 9
+# suites 0
+# pass 9
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 26427.623739
+TAP version 13
+# Subtest: deriveRealArmDepsPopulation: LEVEL-1 entry points are found by matching the `deps: T = realArmDeps()` SHAPE, not by name
+ok 1 - deriveRealArmDepsPopulation: LEVEL-1 entry points are found by matching the `deps: T = realArmDeps()` SHAPE, not by name
+  ---
+  duration_ms: 6.617518
+  type: 'test'
+  ...
+# Subtest: deriveRealArmDepsPopulation: LEVEL-2 family membership is derived from a `deps.x ?? Y` chain to a LEVEL-1 name, never a hardcoded owner list
+ok 2 - deriveRealArmDepsPopulation: LEVEL-2 family membership is derived from a `deps.x ?? Y` chain to a LEVEL-1 name, never a hardcoded owner list
+  ---
+  duration_ms: 0.396747
+  type: 'test'
+  ...
+# Subtest: positionalDepsOmitted: a LEVEL-1 call with fewer args than the deps position reaches the default
+ok 3 - positionalDepsOmitted: a LEVEL-1 call with fewer args than the deps position reaches the default
+  ---
+  duration_ms: 1.65649
+  type: 'test'
+  ...
+# Subtest: positionalDepsOmitted: a LEVEL-1 call supplying ANY value at the deps position never reaches the default — JS default-parameter semantics, not field-by-field completeness
+ok 4 - positionalDepsOmitted: a LEVEL-1 call supplying ANY value at the deps position never reaches the default — JS default-parameter semantics, not field-by-field completeness
+  ---
+  duration_ms: 0.160631
+  type: 'test'
+  ...
+# Subtest: omittedObjectKeys: an inline object literal missing a field is reported for THAT field, by reading its own keys
+ok 5 - omittedObjectKeys: an inline object literal missing a field is reported for THAT field, by reading its own keys
+  ---
+  duration_ms: 0.640253
+  type: 'test'
+  ...
+# Subtest: omittedObjectKeys: a bare variable/property reference this static pass cannot read returns undefined, never a false 'nothing omitted'
+ok 6 - omittedObjectKeys: a bare variable/property reference this static pass cannot read returns undefined, never a false 'nothing omitted'
+  ---
+  duration_ms: 0.154242
+  type: 'test'
+  ...
+# Subtest: findTestCallSites + omittedObjectKeys: a FABRICATED suite calling a family entry point without the seam is reported as reaching it
+ok 7 - findTestCallSites + omittedObjectKeys: a FABRICATED suite calling a family entry point without the seam is reported as reaching it
+  ---
+  duration_ms: 0.159009
+  type: 'test'
+  ...
+# Subtest: classifyRealEffect: an implementation guarded by assertLiveWriteAllowed is write-fenced
+ok 8 - classifyRealEffect: an implementation guarded by assertLiveWriteAllowed is write-fenced
+  ---
+  duration_ms: 2.041739
+  type: 'test'
+  ...
+# Subtest: classifyRealEffect: a live REST/gh read with NO assertLiveWriteAllowed is unfenced-read, never mistaken for guarded
+ok 9 - classifyRealEffect: a live REST/gh read with NO assertLiveWriteAllowed is unfenced-read, never mistaken for guarded
+  ---
+  duration_ms: 0.410087
+  type: 'test'
+  ...
+# Subtest: classifyRealEffect: an inert callback (console.log, a blocking sleep) is neither fenced nor a reportable effect
+ok 10 - classifyRealEffect: an inert callback (console.log, a blocking sleep) is neither fenced nor a reportable effect
+  ---
+  duration_ms: 0.19904
+  type: 'test'
+  ...
+# Subtest: classifyRealEffect: the SAME real-effect object can be simultaneously fenced (its write leaves) and unfenced (its reads) — rationale (2)'s worked example, never collapsed to one verdict
+ok 11 - classifyRealEffect: the SAME real-effect object can be simultaneously fenced (its write leaves) and unfenced (its reads) — rationale (2)'s worked example, never collapsed to one verdict
+  ---
+  duration_ms: 1.077169
+  type: 'test'
+  ...
+# Subtest: classifyRealEffect: a default that calls loadConfig()/loadConfigImpl() is unfenced-ambient, even wrapped in a try/catch that discards the result
+ok 12 - classifyRealEffect: a default that calls loadConfig()/loadConfigImpl() is unfenced-ambient, even wrapped in a try/catch that discards the result
+  ---
+  duration_ms: 0.100491
+  type: 'test'
+  ...
+# Subtest: classifyRealEffect: ledgerPathFor(...) alone (no loadConfig call in view) is still ambient — either marker suffices, per acceptance claim 4's own wording
+ok 13 - classifyRealEffect: ledgerPathFor(...) alone (no loadConfig call in view) is still ambient — either marker suffices, per acceptance claim 4's own wording
+  ---
+  duration_ms: 0.058177
+  type: 'test'
+  ...
+# Subtest: findUnexplainedReach: a candidate absent from the exclusion map is reported
+ok 14 - findUnexplainedReach: a candidate absent from the exclusion map is reported
+  ---
+  duration_ms: 1.52329
+  type: 'test'
+  ...
+# Subtest: findUnexplainedReach: a bare (empty or whitespace-only) exclusion reason does not silence the alarm
+ok 15 - findUnexplainedReach: a bare (empty or whitespace-only) exclusion reason does not silence the alarm
+  ---
+  duration_ms: 0.229896
+  type: 'test'
+  ...
+# Subtest: findUnexplainedReach: a real, substantive reason silences the candidate
+ok 16 - findUnexplainedReach: a real, substantive reason silences the candidate
+  ---
+  duration_ms: 0.104608
+  type: 'test'
+  ...
+# Subtest: REACHABILITY_EXCLUSIONS: every entry (if any are ever added) must carry a substantive, non-blank reason
+ok 17 - REACHABILITY_EXCLUSIONS: every entry (if any are ever added) must carry a substantive, non-blank reason
+  ---
+  duration_ms: 0.144978
+  type: 'test'
+  ...
+# Subtest: the whole census runs with no suite spawned and no clock/network touched
+ok 18 - the whole census runs with no suite spawned and no clock/network touched
+  ---
+  duration_ms: 5569.644758
+  type: 'test'
+  ...
+# Subtest: real tree: realArmDeps() is derived with its currently-real field/classification shape — a regression pin, not an assumption
+ok 19 - real tree: realArmDeps() is derived with its currently-real field/classification shape — a regression pin, not an assumption
+  ---
+  duration_ms: 0.441473
+  type: 'test'
+  ...
+# Subtest: real tree: LEVEL-1 entry points are exactly the four `deps: ArmDeps = realArmDeps()` sites — derived, and independently re-countable by anyone re-deriving this the rationale's own way
+ok 20 - real tree: LEVEL-1 entry points are exactly the four `deps: ArmDeps = realArmDeps()` sites — derived, and independently re-countable by anyone re-deriving this the rationale's own way
+  ---
+  duration_ms: 0.173421
+  type: 'test'
+  ...
+# Subtest: real tree: armIfVerdictPermits is derived as a LEVEL-2 family member via ITS OWN `deps.arm ?? armAutoMergeDetailed` chain — the exact site rationale (1) quotes
+ok 21 - real tree: armIfVerdictPermits is derived as a LEVEL-2 family member via ITS OWN `deps.arm ?? armAutoMergeDetailed` chain — the exact site rationale (1) quotes
+  ---
+  duration_ms: 3.139158
+  type: 'test'
+  ...
+# Subtest: real tree: withdrawArmIfVerdictRefuses is ALSO derived as family, via its own `deps.disarm ?? disarmAutoMerge` chain — found by the SAME mechanism, no second hand-picked name
+ok 22 - real tree: withdrawArmIfVerdictRefuses is ALSO derived as family, via its own `deps.disarm ?? disarmAutoMerge` chain — found by the SAME mechanism, no second hand-picked name
+  ---
+  duration_ms: 0.085238
+  type: 'test'
+  ...
+# Subtest: real tree: no UNEXCUSED test/ call site of a LEVEL-1 entry point (armAutoMerge/armAutoMergeDetailed/armAutoMergeAtOpen/disarmAutoMerge) omits the deps argument today
+ok 23 - real tree: no UNEXCUSED test/ call site of a LEVEL-1 entry point (armAutoMerge/armAutoMergeDetailed/armAutoMergeAtOpen/disarmAutoMerge) omits the deps argument today
+  ---
+  duration_ms: 7818.463042
+  type: 'test'
+  ...
+# Subtest: real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that omit a field are REPORTED, unexcused — the class this task exists to name
+ok 24 - real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that omit a field are REPORTED, unexcused — the class this task exists to name
+  ---
+  duration_ms: 4289.109053
+  type: 'test'
+  ...
+# Subtest: real tree: runReview forwards its own optional `arm` parameter straight into armIfVerdictPermits's `deps.arm` — the LEVEL-3 caller-facing seam rationale (1) quotes verbatim
+ok 25 - real tree: runReview forwards its own optional `arm` parameter straight into armIfVerdictPermits's `deps.arm` — the LEVEL-3 caller-facing seam rationale (1) quotes verbatim
+  ---
+  duration_ms: 9.175063
+  type: 'test'
+  ...
+# Subtest: real tree: at least one test/ call site of runReview omits `arm:` entirely — the population rationale (4) says is unknown, made non-empty and named
+ok 26 - real tree: at least one test/ call site of runReview omits `arm:` entirely — the population rationale (4) says is unknown, made non-empty and named
+  ---
+  duration_ms: 3737.955181
+  type: 'test'
+  ...
+# Subtest: real tree: at least one test/ call site of runReview DOES supply `arm:` — proving the seam is reachable, not merely theoretical (rubric-authorship-wiring.test.ts's own header names the exact hazard this task's rationale describes)
+ok 27 - real tree: at least one test/ call site of runReview DOES supply `arm:` — proving the seam is reachable, not merely theoretical (rubric-authorship-wiring.test.ts's own header names the exact hazard this task's rationale describes)
+  ---
+  duration_ms: 3978.31804
+  type: 'test'
+  ...
+1..27
+# tests 27
+# suites 0
+# pass 27
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 29266.30774

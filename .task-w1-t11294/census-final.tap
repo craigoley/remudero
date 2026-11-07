@@ -1,0 +1,1789 @@
+TAP version 13
+# Preparing worktree (new branch 'feature')
+# Subtest: a validated trailered capped PR creates one proof-only plan amendment
+ok 1 - a validated trailered capped PR creates one proof-only plan amendment
+  ---
+  duration_ms: 3.388018
+  type: 'test'
+  ...
+# Subtest: an invalid or non-discriminating replacement opens no amendment
+ok 2 - an invalid or non-discriminating replacement opens no amendment
+  ---
+  duration_ms: 3.369691
+  type: 'test'
+  ...
+# Subtest: a duplicate proof-amendment identity resumes instead of creating another PR
+ok 3 - a duplicate proof-amendment identity resumes instead of creating another PR
+  ---
+  duration_ms: 0.455756
+  type: 'test'
+  ...
+# Subtest: a duplicate identity also resumes via a live probe when the identity was never recorded
+ok 4 - a duplicate identity also resumes via a live probe when the identity was never recorded
+  ---
+  duration_ms: 0.233311
+  type: 'test'
+  ...
+# Subtest: a shard that drifted since the evidence was read is refused, never rewritten against a stale line
+ok 5 - a shard that drifted since the evidence was read is refused, never rewritten against a stale line
+  ---
+  duration_ms: 0.550579
+  type: 'test'
+  ...
+# Subtest: a merged amendment requests only an expected-head branch update
+ok 6 - a merged amendment requests only an expected-head branch update
+  ---
+  duration_ms: 0.508104
+  type: 'test'
+  ...
+# Subtest: the live fix rung calls the proof-amendment parent rather than granting the worker direct write authority
+ok 7 - the live fix rung calls the proof-amendment parent rather than granting the worker direct write authority
+  ---
+  duration_ms: 77.390311
+  type: 'test'
+  ...
+# Subtest: buildProofAmendmentGitOps runs git add/commit through an injected spawn, never a real process
+ok 8 - buildProofAmendmentGitOps runs git add/commit through an injected spawn, never a real process
+  ---
+  duration_ms: 11.593026
+  type: 'test'
+  ...
+# Subtest: buildProofAmendmentWritePorts wires every write port through its own injected I/O, never a live process/network call
+ok 9 - buildProofAmendmentWritePorts wires every write port through its own injected I/O, never a live process/network call
+  ---
+  duration_ms: 31.520123
+  type: 'test'
+  ...
+# Subtest: dispatchProofAmendmentWrite is the whole proof-discrimination arm, extracted out of runFixRung and exercisable without a live git/GitHub write
+ok 10 - dispatchProofAmendmentWrite is the whole proof-discrimination arm, extracted out of runFixRung and exercisable without a live git/GitHub write
+  ---
+  duration_ms: 1.502741
+  type: 'test'
+  ...
+# Subtest: dispatchProofAmendmentWrite removes the merge-base worktree a unit-test proposal checked out, on the refusal and the throw path
+ok 11 - dispatchProofAmendmentWrite removes the merge-base worktree a unit-test proposal checked out, on the refusal and the throw path
+  ---
+  duration_ms: 2.176725
+  type: 'test'
+  ...
+# Subtest: a unit-test proposal leaves no merge-base worktree on disk or in the git worktree list after dispatchProofAmendmentWrite
+ok 12 - a unit-test proposal leaves no merge-base worktree on disk or in the git worktree list after dispatchProofAmendmentWrite
+  ---
+  duration_ms: 2791.428894
+  type: 'test'
+  ...
+# Subtest: renderFixPrompt gives a proof-discrimination worker a proposal grammar, not PR-body write instructions
+ok 13 - renderFixPrompt gives a proof-discrimination worker a proposal grammar, not PR-body write instructions
+  ---
+  duration_ms: 6.469396
+  type: 'test'
+  ...
+# Subtest: checkProofCommand treats a grep target added on the head as discriminating despite base test materialisation
+ok 14 - checkProofCommand treats a grep target added on the head as discriminating despite base test materialisation
+  ---
+  duration_ms: 2716.91691
+  type: 'test'
+  ...
+# Subtest: parseProofAmendmentProposal returns nothing for a report with no PROOF_AMENDMENT block
+ok 15 - parseProofAmendmentProposal returns nothing for a report with no PROOF_AMENDMENT block
+  ---
+  duration_ms: 0.53145
+  type: 'test'
+  ...
+# Subtest: proofAmendmentIneligibleReason checks the five gates in order
+ok 16 - proofAmendmentIneligibleReason checks the five gates in order
+  ---
+  duration_ms: 4.228153
+  type: 'test'
+  ...
+# Subtest: validateProofAmendmentProposal refuses when an executor throws, not only when it returns fail
+ok 17 - validateProofAmendmentProposal refuses when an executor throws, not only when it returns fail
+  ---
+  duration_ms: 0.35219
+  type: 'test'
+  ...
+# Subtest: validateProofAmendmentProposal is the same gate requestProofAmendment uses internally
+ok 18 - validateProofAmendmentProposal is the same gate requestProofAmendment uses internally
+  ---
+  duration_ms: 0.316126
+  type: 'test'
+  ...
+# Subtest: replaceProofScalar touches only the proof line under its own claim, never the claim text
+ok 19 - replaceProofScalar touches only the proof line under its own claim, never the claim text
+  ---
+  duration_ms: 0.254343
+  type: 'test'
+  ...
+# Subtest: proofAmendmentIdempotencyKey is keyed on the OLD-proof digest, not the proposed replacement
+ok 20 - proofAmendmentIdempotencyKey is keyed on the OLD-proof digest, not the proposed replacement
+  ---
+  duration_ms: 0.211439
+  type: 'test'
+  ...
+# Subtest: findTaskShard reads the plan/tasks.d shard by task-id prefix, matching dispatchPlanOnlyRepair's own convention
+ok 21 - findTaskShard reads the plan/tasks.d shard by task-id prefix, matching dispatchPlanOnlyRepair's own convention
+  ---
+  duration_ms: 66.01023
+  type: 'test'
+  ...
+# Subtest: findTaskShard falls back to the plan monolith when the task declares no shard file
+ok 22 - findTaskShard falls back to the plan monolith when the task declares no shard file
+  ---
+  duration_ms: 0.554544
+  type: 'test'
+  ...
+# diff-class: FAILED to enumerate the census suite set — ENOENT: no such file or directory, scandir '/home/node/Remudero/worktrees/run-W1-T11294-1794073795162/no-such-directory-at-all/test'
+# diff-class: printing NOTHING — a caller reading zero lines here must fail closed and run the full suite.
+# Subtest: W1-T2680 (acceptance 1): the verb lists census suites for a changed-file set, enumerated from the TREE
+ok 23 - W1-T2680 (acceptance 1): the verb lists census suites for a changed-file set, enumerated from the TREE
+  ---
+  duration_ms: 17593.443532
+  type: 'test'
+  ...
+# Subtest: W1-T2680: the source holds NO hardcoded suite list — a census added tomorrow is found tomorrow
+ok 24 - W1-T2680: the source holds NO hardcoded suite list — a census added tomorrow is found tomorrow
+  ---
+  duration_ms: 2.361254
+  type: 'test'
+  ...
+# Subtest: W1-T2680 (acceptance 2): config-reader-seams and mounts-wiring are BOTH listed, replayed over the REAL diffs that caught them
+ok 25 - W1-T2680 (acceptance 2): config-reader-seams and mounts-wiring are BOTH listed, replayed over the REAL diffs that caught them
+  ---
+  duration_ms: 22485.540035
+  type: 'test'
+  ...
+# Subtest: W1-T2680: the three suites that went red in CI on 2026-09-05, after a caller sweep ran green over 45 files
+ok 26 - W1-T2680: the three suites that went red in CI on 2026-09-05, after a caller sweep ran green over 45 files
+  ---
+  duration_ms: 18756.779094
+  type: 'test'
+  ...
+# Subtest: W1-T2680 (acceptance 3): an ordinary suite that merely IMPORTS a changed module is NOT listed
+ok 27 - W1-T2680 (acceptance 3): an ordinary suite that merely IMPORTS a changed module is NOT listed
+  ---
+  duration_ms: 29288.570096
+  type: 'test'
+  ...
+# Subtest: W1-T2680: shelling git is not enough — a fixture repo is not a census
+ok 28 - W1-T2680: shelling git is not enough — a fixture repo is not a census
+  ---
+  duration_ms: 0.307964
+  type: 'test'
+  ...
+# Subtest: W1-T2680 (acceptance 4): a census suite ADDED to the tree is found, with no registry to edit
+ok 29 - W1-T2680 (acceptance 4): a census suite ADDED to the tree is found, with no registry to edit
+  ---
+  duration_ms: 1.273467
+  type: 'test'
+  ...
+# Subtest: W1-T3602: a listed entry that ENOENTs on read — torn down by a concurrent suite between readdirSync and readFileSync — is skipped, never a crash, and a real sibling is still found
+ok 30 - W1-T3602: a listed entry that ENOENTs on read — torn down by a concurrent suite between readdirSync and readFileSync — is skipped, never a crash, and a real sibling is still found
+  ---
+  duration_ms: 1.200016
+  type: 'test'
+  ...
+# Subtest: W1-T3602: a NON-ENOENT read failure (a genuinely unreadable file, not a torn-down one) still throws — this is a narrow TOCTOU tolerance, not a blanket swallow
+ok 31 - W1-T3602: a NON-ENOENT read failure (a genuinely unreadable file, not a torn-down one) still throws — this is a narrow TOCTOU tolerance, not a blanket swallow
+  ---
+  duration_ms: 1.403072
+  type: 'test'
+  ...
+# Subtest: W1-T2680 (acceptance 5): an empty changed-file set yields an EMPTY list, never every suite
+ok 32 - W1-T2680 (acceptance 5): an empty changed-file set yields an EMPTY list, never every suite
+  ---
+  duration_ms: 0.535917
+  type: 'test'
+  ...
+# Subtest: W1-T2680: changedAreas names the directory AND its immediate subdirectory, and nothing for a root file
+ok 33 - W1-T2680: changedAreas names the directory AND its immediate subdirectory, and nothing for a root file
+  ---
+  duration_ms: 0.310497
+  type: 'test'
+  ...
+# Subtest: W1-T2680: an area named only in an IMPORT or a COMMENT is not a population
+ok 34 - W1-T2680: an area named only in an IMPORT or a COMMENT is not a population
+  ---
+  duration_ms: 0.763369
+  type: 'test'
+  ...
+# Subtest: W1-T2680: sourceTextPathsRead reads paths from the CALL, not from fixture data elsewhere in the file
+ok 35 - W1-T2680: sourceTextPathsRead reads paths from the CALL, not from fixture data elsewhere in the file
+  ---
+  duration_ms: 0.131307
+  type: 'test'
+  ...
+# Subtest: W1-T2680: the CLI FAILS CLOSED — an unreadable tree prints NOTHING and exits 1, never an empty list a caller could read as 'no suites matter'
+ok 36 - W1-T2680: the CLI FAILS CLOSED — an unreadable tree prints NOTHING and exits 1, never an empty list a caller could read as 'no suites matter'
+  ---
+  duration_ms: 255.035216
+  type: 'test'
+  ...
+# Subtest: W1-T2680 (wiring): the CLI verb prints the list on stdout, one path per line
+ok 37 - W1-T2680 (wiring): the CLI verb prints the list on stdout, one path per line
+  ---
+  duration_ms: 12211.315064
+  type: 'test'
+  ...
+# Switched to a new branch 'run-unfiled-native-runtime'
+# Switched to a new branch 'run-unfiled-native-runtime'
+# Switched to a new branch 'run-unfiled-native-runtime'
+# Switched to a new branch 'run-unfiled-native-runtime'
+# Subtest: W1-T7728: the narrow check-proof entry never imports the run-task module
+ok 38 - W1-T7728: the narrow check-proof entry never imports the run-task module
+  ---
+  duration_ms: 2211.677697
+  type: 'test'
+  ...
+# Subtest: W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit code
+not ok 39 - W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit code
+  ---
+  duration_ms: 8390.719657
+  type: 'test'
+  location: '/home/node/Remudero/worktrees/run-W1-T11294-1794073795162/test/a-check-proof-child-loads-a-narrow-entry.test.ts:3:483'
+  failureType: 'testCodeFailure'
+  error: |-
+    
+    node:net:2368
+          const error = new UVExceptionWithHostPort(rval, 'listen', address, port);
+                        ^
+    
+    Error: listen EPERM: operation not permitted /tmp/rmd-codex-worker-N5ALto/tsx-1000/198.pipe
+        at Server.setupListenHandle [as _listen2] (node:net:2368:21)
+        at listenInCluster (node:net:2499:12)
+        at Server.listen (node:net:2641:5)
+        at file:///home/node/Remudero/repos/remudero/node_modules/tsx/dist/cli.mjs:53:32174
+        at new Promise (<anonymous>)
+        at createIpcServer (file:///home/node/Remudero/repos/remudero/node_modules/tsx/dist/cli.mjs:53:32152)
+        at async file:///home/node/Remudero/repos/remudero/node_modules/tsx/dist/cli.mjs:55:542 {
+      code: 'EPERM',
+      errno: -1,
+      syscall: 'listen',
+      address: '/tmp/rmd-codex-worker-N5ALto/tsx-1000/198.pipe',
+      port: -1
+    }
+    
+    Node.js v24.22.2
+    
+    
+    1 !== 0
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    Server.setupListenHandle [as _listen2] (node:net:2368:21)
+    listenInCluster (node:net:2499:12)
+    Server.listen (node:net:2641:5)
+    file:///home/node/Remudero/repos/remudero/node_modules/tsx/dist/cli.mjs:53:32174
+    new Promise (<anonymous>)
+    createIpcServer (file:///home/node/Remudero/repos/remudero/node_modules/tsx/dist/cli.mjs:53:32152)
+    async file:///home/node/Remudero/repos/remudero/node_modules/tsx/dist/cli.mjs:55:542 {
+    assertProofParity (/home/node/Remudero/worktrees/run-W1-T11294-1794073795162/test/a-check-proof-child-loads-a-narrow-entry.test.ts:71:14)
+    async TestContext.<anonymous> (/home/node/Remudero/worktrees/run-W1-T11294-1794073795162/test/a-check-proof-child-loads-a-narrow-entry.test.ts:84:3)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: W1-T9956: the check-proof CLI arm agrees under an over-long TMPDIR
+not ok 40 - W1-T9956: the check-proof CLI arm agrees under an over-long TMPDIR
+  ---
+  duration_ms: 3.964346
+  type: 'test'
+  location: '/home/node/Remudero/worktrees/run-W1-T11294-1794073795162/test/a-check-proof-child-loads-a-narrow-entry.test.ts:3:614'
+  failureType: 'testCodeFailure'
+  error: "EROFS: read-only file system, mkdtemp '/tmp/rmd-check-proof-long-XXXXXX'"
+  code: 'EROFS'
+  stack: |-
+    mkdtempSync (node:fs:3144:18)
+    <anonymous> (/home/node/Remudero/worktrees/run-W1-T11294-1794073795162/test/setup/tmp-hygiene.ts:200:16)
+    TestContext.<anonymous> (/home/node/Remudero/worktrees/run-W1-T11294-1794073795162/test/a-check-proof-child-loads-a-narrow-entry.test.ts:88:19)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1402:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+    Test.postRun (node:internal/test_runner/test:1542:19)
+    Test.run (node:internal/test_runner/test:1467:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: the narrow CLI awaits a real missing-export observation before claiming discrimination
+ok 41 - the narrow CLI awaits a real missing-export observation before claiming discrimination
+  ---
+  duration_ms: 13616.487011
+  type: 'test'
+  ...
+# Subtest: the narrow CLI retains unknown for an unrelated base load failure
+ok 42 - the narrow CLI retains unknown for an unrelated base load failure
+  ---
+  duration_ms: 13448.860326
+  type: 'test'
+  ...
+# Subtest: the narrow observation protocol reads real fixtures and refuses invalid requests
+ok 43 - the narrow observation protocol reads real fixtures and refuses invalid requests
+  ---
+  duration_ms: 22640.102395
+  type: 'test'
+  ...
+# Subtest: an unavailable CLI export observation never produces an attribution
+ok 44 - an unavailable CLI export observation never produces an attribution
+  ---
+  duration_ms: 4525.759637
+  type: 'test'
+  ...
+# Subtest: the CLI reports an unavailable export observer while retaining unknown
+ok 45 - the CLI reports an unavailable export observer while retaining unknown
+  ---
+  duration_ms: 9336.358829
+  type: 'test'
+  ...
+# Subtest: a count assertion over a table the SAME test also enumerates with deepEqual is flagged, naming the file and the line
+ok 46 - a count assertion over a table the SAME test also enumerates with deepEqual is flagged, naming the file and the line
+  ---
+  duration_ms: 24.267826
+  type: 'test'
+  ...
+# Subtest: a count assertion that is the only assertion about its collection is NOT flagged
+ok 47 - a count assertion that is the only assertion about its collection is NOT flagged
+  ---
+  duration_ms: 0.670519
+  type: 'test'
+  ...
+# Subtest: W1-T4474: a literal count over a test-local baseline list is named
+ok 48 - W1-T4474: a literal count over a test-local baseline list is named
+  ---
+  duration_ms: 6.361114
+  type: 'test'
+  ...
+# Subtest: quoted or commented lookalikes are not treated as executable count and deep-comparison assertions
+ok 49 - quoted or commented lookalikes are not treated as executable count and deep-comparison assertions
+  ---
+  duration_ms: 20.238871
+  type: 'test'
+  ...
+# Subtest: an ordinary per-test local (never a module-level table) is never flagged, even when the same test both counts and deepEquals it -- the mock-recorder shape this rule must not treat as hazardous
+ok 50 - an ordinary per-test local (never a module-level table) is never flagged, even when the same test both counts and deepEquals it -- the mock-recorder shape this rule must not treat as hazardous
+  ---
+  duration_ms: 0.600113
+  type: 'test'
+  ...
+# Subtest: the \#3331-versus-\#3335 shape (a shared table counted in one test, enumerated by deepEqual in another) is reproduced as a fixture and flagged
+ok 51 - the \#3331-versus-\#3335 shape (a shared table counted in one test, enumerated by deepEqual in another) is reproduced as a fixture and flagged
+  ---
+  duration_ms: 0.350448
+  type: 'test'
+  ...
+# Subtest: scanning the live, git-tracked test/ tree is not vacuous (it walks a real, sizeable corpus) and reports zero unsafe count assertions -- measured at sha 7e86a241, 886 tracked test/**/*.test.ts files, no pre-existing hit to grandfather
+ok 52 - scanning the live, git-tracked test/ tree is not vacuous (it walks a real, sizeable corpus) and reports zero unsafe count assertions -- measured at sha 7e86a241, 886 tracked test/**/*.test.ts files, no pre-existing hit to grandfather
+  ---
+  duration_ms: 16760.649125
+  type: 'test'
+  ...
+# Subtest: removing the co-location condition (matching the SAME receiver) makes the negative fixture flag too -- proving the condition is load-bearing, not decorative
+ok 53 - removing the co-location condition (matching the SAME receiver) makes the negative fixture flag too -- proving the condition is load-bearing, not decorative
+  ---
+  duration_ms: 0.465531
+  type: 'test'
+  ...
+# Subtest: test/a-daemon-lane-reclaim-needs-current-reservation-code.test.ts
+    # Subtest: triage: differs policy controls takeover and its durable row
+    ok 1 - triage: differs policy controls takeover and its durable row
+      ---
+      duration_ms: 14.859155
+      type: 'test'
+      ...
+    # Subtest: triage: unprovable policy controls takeover and its durable row
+    ok 2 - triage: unprovable policy controls takeover and its durable row
+      ---
+      duration_ms: 1.182379
+      type: 'test'
+      ...
+    # Subtest: triage: current policy controls takeover and its durable row
+    ok 3 - triage: current policy controls takeover and its durable row
+      ---
+      duration_ms: 11.802395
+      type: 'test'
+      ...
+    # Subtest: plan: differs policy controls takeover and its durable row
+    ok 4 - plan: differs policy controls takeover and its durable row
+      ---
+      duration_ms: 0.679383
+      type: 'test'
+      ...
+    # Subtest: plan: unprovable policy controls takeover and its durable row
+    ok 5 - plan: unprovable policy controls takeover and its durable row
+      ---
+      duration_ms: 2.022865
+      type: 'test'
+      ...
+    # Subtest: plan: current policy controls takeover and its durable row
+    ok 6 - plan: current policy controls takeover and its durable row
+      ---
+      duration_ms: 3.60767
+      type: 'test'
+      ...
+    # Subtest: approve: differs policy controls takeover and its durable row
+    ok 7 - approve: differs policy controls takeover and its durable row
+      ---
+      duration_ms: 0.428865
+      type: 'test'
+      ...
+    # Subtest: approve: unprovable policy controls takeover and its durable row
+    ok 8 - approve: unprovable policy controls takeover and its durable row
+      ---
+      duration_ms: 1.394349
+      type: 'test'
+      ...
+    # Subtest: approve: current policy controls takeover and its durable row
+    ok 9 - approve: current policy controls takeover and its durable row
+      ---
+      duration_ms: 8.397159
+      type: 'test'
+      ...
+    # Subtest: approve-batch: differs policy controls takeover and its durable row
+    ok 10 - approve-batch: differs policy controls takeover and its durable row
+      ---
+      duration_ms: 1.765988
+      type: 'test'
+      ...
+    # Subtest: approve-batch: unprovable policy controls takeover and its durable row
+    ok 11 - approve-batch: unprovable policy controls takeover and its durable row
+      ---
+      duration_ms: 0.436817
+      type: 'test'
+      ...
+    # Subtest: approve-batch: current policy controls takeover and its durable row
+    ok 12 - approve-batch: current policy controls takeover and its durable row
+      ---
+      duration_ms: 13.788784
+      type: 'test'
+      ...
+    # Subtest: ci-learning: differs policy controls takeover and its durable row
+    ok 13 - ci-learning: differs policy controls takeover and its durable row
+      ---
+      duration_ms: 2.838522
+      type: 'test'
+      ...
+    # Subtest: ci-learning: unprovable policy controls takeover and its durable row
+    ok 14 - ci-learning: unprovable policy controls takeover and its durable row
+      ---
+      duration_ms: 3.270793
+      type: 'test'
+      ...
+    # Subtest: ci-learning: current policy controls takeover and its durable row
+    ok 15 - ci-learning: current policy controls takeover and its durable row
+      ---
+      duration_ms: 1.082519
+      type: 'test'
+      ...
+    # Subtest: plan-repair: differs policy controls takeover and its durable row
+    ok 16 - plan-repair: differs policy controls takeover and its durable row
+      ---
+      duration_ms: 0.297398
+      type: 'test'
+      ...
+    # Subtest: plan-repair: unprovable policy controls takeover and its durable row
+    ok 17 - plan-repair: unprovable policy controls takeover and its durable row
+      ---
+      duration_ms: 10.039351
+      type: 'test'
+      ...
+    # Subtest: plan-repair: current policy controls takeover and its durable row
+    ok 18 - plan-repair: current policy controls takeover and its durable row
+      ---
+      duration_ms: 1.577544
+      type: 'test'
+      ...
+    # Subtest: next-task-id-prefix: differs policy controls takeover and its durable row
+    ok 19 - next-task-id-prefix: differs policy controls takeover and its durable row
+      ---
+      duration_ms: 1.064052
+      type: 'test'
+      ...
+    # Subtest: next-task-id-prefix: unprovable policy controls takeover and its durable row
+    ok 20 - next-task-id-prefix: unprovable policy controls takeover and its durable row
+      ---
+      duration_ms: 0.401595
+      type: 'test'
+      ...
+    # Subtest: next-task-id-prefix: current policy controls takeover and its durable row
+    ok 21 - next-task-id-prefix: current policy controls takeover and its durable row
+      ---
+      duration_ms: 1.6015
+      type: 'test'
+      ...
+    # Subtest: the default arm really checks the installed module with real git
+    ok 22 - the default arm really checks the installed module with real git
+      ---
+      duration_ms: 719.060143
+      type: 'test'
+      ...
+    # Subtest: fresh holders, free ids and failed takeover pushes emit no takeover row
+    ok 23 - fresh holders, free ids and failed takeover pushes emit no takeover row
+      ---
+      duration_ms: 1.295931
+      type: 'test'
+      ...
+    # Subtest: --prefix uses the gate with differs policy
+    ok 24 - --prefix uses the gate with differs policy
+      ---
+      duration_ms: 6.16473
+      type: 'test'
+      ...
+    # Subtest: --prefix uses the gate with unprovable policy
+    ok 25 - --prefix uses the gate with unprovable policy
+      ---
+      duration_ms: 0.414243
+      type: 'test'
+      ...
+    # Subtest: --prefix uses the gate with current policy
+    ok 26 - --prefix uses the gate with current policy
+      ---
+      duration_ms: 0.407533
+      type: 'test'
+      ...
+    # Subtest: --prefix default ledger sink with valid config
+    ok 27 - --prefix default ledger sink with valid config
+      ---
+      duration_ms: 9.502804
+      type: 'test'
+      ...
+    # Subtest: --prefix default ledger sink with unreadable config
+    ok 28 - --prefix default ledger sink with unreadable config
+      ---
+      duration_ms: 8.710552
+      type: 'test'
+      ...
+    # Subtest: the production construction census names any lane bypassing the factory
+    ok 29 - the production construction census names any lane bypassing the factory
+      ---
+      duration_ms: 225.050886
+      type: 'test'
+      ...
+    1..29
+ok 54 - test/a-daemon-lane-reclaim-needs-current-reservation-code.test.ts
+  ---
+  duration_ms: 1398.931135
+  type: 'test'
+  ...
+# Subtest: W1-T5380: a check family named by a generic term locates no owner and escalates
+ok 55 - W1-T5380: a check family named by a generic term locates no owner and escalates
+  ---
+  duration_ms: 9.297836
+  type: 'test'
+  ...
+# Subtest: W1-T5380: a distinctive refusal reason still locates its owning file
+ok 56 - W1-T5380: a distinctive refusal reason still locates its owning file
+  ---
+  duration_ms: 2.721077
+  type: 'test'
+  ...
+# Subtest: a failing-test signature outranks a family spanning more files regardless of hit counts
+ok 57 - a failing-test signature outranks a family spanning more files regardless of hit counts
+  ---
+  duration_ms: 1.768122
+  type: 'test'
+  ...
+# Subtest: an unmatched signature preserves a distinctive family and a tied signature takes priority
+ok 58 - an unmatched signature preserves a distinctive family and a tied signature takes priority
+  ---
+  duration_ms: 1.475511
+  type: 'test'
+  ...
+# Subtest: whole-token search distinguishes no matches from search failures
+ok 59 - whole-token search distinguishes no matches from search failures
+  ---
+  duration_ms: 0.593764
+  type: 'test'
+  ...
+# Subtest: refusal terms spanning more files contribute no owners
+ok 60 - refusal terms spanning more files contribute no owners
+  ---
+  duration_ms: 1.347468
+  type: 'test'
+  ...
+# Subtest: test/a-no-commit-fix-on-a-moved-main-refreshes-instead-of-replaying-the-old-merge.test.ts
+ok 61 - test/a-no-commit-fix-on-a-moved-main-refreshes-instead-of-replaying-the-old-merge.test.ts
+  ---
+  duration_ms: 95.506154
+  type: 'test'
+  ...
+# Subtest: W1-T11294 criterion 2: refresh spends the same receipt and cannot rerun on a later round
+ok 62 - W1-T11294 criterion 2: refresh spends the same receipt and cannot rerun on a later round
+  ---
+  duration_ms: 17.739962
+  type: 'test'
+  ...
+# Subtest: W1-T11294 criterion 2: concurrent passes claim only one refresh
+ok 63 - W1-T11294 criterion 2: concurrent passes claim only one refresh
+  ---
+  duration_ms: 4.306191
+  type: 'test'
+  ...
+# Subtest: W1-T11294 criterion 2: unreadable run bases preserve the one-shot rerun
+ok 64 - W1-T11294 criterion 2: unreadable run bases preserve the one-shot rerun
+  ---
+  duration_ms: 156.436706
+  type: 'test'
+  ...
+# Subtest: W1-T11294: an unavailable base reader or main tip retains the rerun
+ok 65 - W1-T11294: an unavailable base reader or main tip retains the rerun
+  ---
+  duration_ms: 3.543644
+  type: 'test'
+  ...
+# Subtest: W1-T11294: a base read failure is logged and falls back to the rerun
+ok 66 - W1-T11294: a base read failure is logged and falls back to the rerun
+  ---
+  duration_ms: 2.317048
+  type: 'test'
+  ...
+# Subtest: W1-T11294: a failed refresh records its reason without rerunning
+ok 67 - W1-T11294: a failed refresh records its reason without rerunning
+  ---
+  duration_ms: 3.453168
+  type: 'test'
+  ...
+# Subtest: W1-T11294: a stale run waits for an update gateway without spending its receipt
+ok 68 - W1-T11294: a stale run waits for an update gateway without spending its receipt
+  ---
+  duration_ms: 1.649633
+  type: 'test'
+  ...
+# Subtest: W1-T11294: the base reader uses only this PR's completed failed run at this head
+ok 69 - W1-T11294: the base reader uses only this PR's completed failed run at this head
+  ---
+  duration_ms: 0.846754
+  type: 'test'
+  ...
+# Subtest: W1-T8533: every step a refresh decision reads is in the retention set
+ok 70 - W1-T8533: every step a refresh decision reads is in the retention set
+  ---
+  duration_ms: 423.110615
+  type: 'test'
+  ...
+# Subtest: W1-T8533: the refresh census finds the four known steps and reports an unretained one
+ok 71 - W1-T8533: the refresh census finds the four known steps and reports an unretained one
+  ---
+  duration_ms: 445.704618
+  type: 'test'
+  ...
+# Subtest: W1-T8533: a refresh row survives rotation and still refuses a second refresh on the same red
+ok 72 - W1-T8533: a refresh row survives rotation and still refuses a second refresh on the same red
+  ---
+  duration_ms: 610.564412
+  type: 'test'
+  ...
+# Subtest: W1-T8533: a PR older than the live window reads its refresh history from the rotations
+ok 73 - W1-T8533: a PR older than the live window reads its refresh history from the rotations
+  ---
+  duration_ms: 3405.648525
+  type: 'test'
+  ...
+# Subtest: W1-T8533: an unreadable refresh history is named and never read as no prior refresh
+ok 74 - W1-T8533: an unreadable refresh history is named and never read as no prior refresh
+  ---
+  duration_ms: 897.478481
+  type: 'test'
+  ...
+# Subtest: W1-T8533: an unreadable history still uses the prefilter and a readable merged probe
+ok 75 - W1-T8533: an unreadable history still uses the prefilter and a readable merged probe
+  ---
+  duration_ms: 1070.074407
+  type: 'test'
+  ...
+# Subtest: W1-T8533: an archived refusal memo is reused without probing
+ok 76 - W1-T8533: an archived refusal memo is reused without probing
+  ---
+  duration_ms: 131.812938
+  type: 'test'
+  ...
+# Subtest: W1-T8533: refresh history is read once per PR per pass and reused by the clearance
+ok 77 - W1-T8533: refresh history is read once per PR per pass and reused by the clearance
+  ---
+  duration_ms: 637.529297
+  type: 'test'
+  ...
+# Subtest: W1-T8533: the union restores the once-per-head refresh guard
+ok 78 - W1-T8533: the union restores the once-per-head refresh guard
+  ---
+  duration_ms: 251.144377
+  type: 'test'
+  ...
+# Subtest: W1-T8533: incomplete history cannot authorize a fileless, partial or failed probe refresh
+ok 79 - W1-T8533: incomplete history cannot authorize a fileless, partial or failed probe refresh
+  ---
+  duration_ms: 2.6979
+  type: 'test'
+  ...
+# Subtest: W1-T8533: the base-red arm cannot refresh on an unreadable history without merge evidence
+ok 80 - W1-T8533: the base-red arm cannot refresh on an unreadable history without merge evidence
+  ---
+  duration_ms: 846.102299
+  type: 'test'
+  ...
+# Subtest: W1-T8533: unreadable history alone never becomes a settled refusal memo
+ok 81 - W1-T8533: unreadable history alone never becomes a settled refusal memo
+  ---
+  duration_ms: 10.547446
+  type: 'test'
+  ...
+# Subtest: W1-T8533: a complete live history preserves the unwired-probe fallback
+ok 82 - W1-T8533: a complete live history preserves the unwired-probe fallback
+  ---
+  duration_ms: 150.885493
+  type: 'test'
+  ...
+# Subtest: W1-T8533: a complete history preserves the main-green base-red refresh
+ok 83 - W1-T8533: a complete history preserves the main-green base-red refresh
+  ---
+  duration_ms: 163.308721
+  type: 'test'
+  ...
+# Subtest: a failed semantic amendment refresh survives real ledger rotation and never earns a repeat attempt
+ok 84 - a failed semantic amendment refresh survives real ledger rotation and never earns a repeat attempt
+  ---
+  duration_ms: 604.702225
+  type: 'test'
+  ...
+# Subtest: test/a-refuted-flake-claim-releases-the-head-for-a-real-fix.test.ts
+    # Subtest: a refuted rerun releases the head and the next pass dispatches a real fix
+    ok 1 - a refuted rerun releases the head and the next pass dispatches a real fix
+      ---
+      duration_ms: 863.55073
+      type: 'test'
+      ...
+    # Subtest: a repeated FLAKE is recorded as a no-op without rerunning, waiting or pushing
+    ok 2 - a repeated FLAKE is recorded as a no-op without rerunning, waiting or pushing
+      ---
+      duration_ms: 1609.064397
+      type: 'test'
+      ...
+    # Subtest: an unavailable progress verdict holds and is asked again on the next pass
+    ok 3 - an unavailable progress verdict holds and is asked again on the next pass
+      ---
+      duration_ms: 29.231099
+      type: 'test'
+      ...
+    # Subtest: the fix rung gives the refutation to its own progress judge before starting the worker
+    ok 4 - the fix rung gives the refutation to its own progress judge before starting the worker
+      ---
+      duration_ms: 2059.052365
+      type: 'test'
+      ...
+    # Subtest: many repeated claims remain the progress judge's decision rather than a strike ceiling
+    ok 5 - many repeated claims remain the progress judge's decision rather than a strike ceiling
+      ---
+      duration_ms: 1.898668
+      type: 'test'
+      ...
+    # Subtest: confirmed claims and a fresh dispatch keep their hold
+    ok 6 - confirmed claims and a fresh dispatch keep their hold
+      ---
+      duration_ms: 0.261063
+      type: 'test'
+      ...
+    # Subtest: flake pre-signals preserve the parked reason and exclude other PRs and missing identities
+    ok 7 - flake pre-signals preserve the parked reason and exclude other PRs and missing identities
+      ---
+      duration_ms: 0.652812
+      type: 'test'
+      ...
+    # Subtest: another head or task's refutation does not suppress a first FLAKE rerun
+    ok 8 - another head or task's refutation does not suppress a first FLAKE rerun
+      ---
+      duration_ms: 5192.182899
+      type: 'test'
+      ...
+    1..8
+ok 85 - test/a-refuted-flake-claim-releases-the-head-for-a-real-fix.test.ts
+  ---
+  duration_ms: 9841.504484
+  type: 'suite'
+  ...
+# gh read cadence (advisory, W1-T3297): a read 0s after the last on the core limiter, under the 180s floor. Set RMD_GH_TRANSPORT_FLOOR=enforce to refuse instead.
+# Subtest: W1-T3337: the CLI self-reexec guard never suppresses the reviewer code probe
+ok 86 - W1-T3337: the CLI self-reexec guard never suppresses the reviewer code probe
+  ---
+  duration_ms: 36.857349
+  type: 'test'
+  ...
+# Subtest: W1-T3337: an unreadable guarded diff withholds the terminal verdict
+ok 87 - W1-T3337: an unreadable guarded diff withholds the terminal verdict
+  ---
+  duration_ms: 0.474805
+  type: 'test'
+  ...
+# Subtest: W1-T3337: every unreadable Git observation and a no-advance head have distinct freshness outcomes
+ok 88 - W1-T3337: every unreadable Git observation and a no-advance head have distinct freshness outcomes
+  ---
+  duration_ms: 17.664229
+  type: 'test'
+  ...
+# Subtest: W1-T3337: a material source advance withholds the stale reviewer's failure instead of publishing a binding verdict
+ok 89 - W1-T3337: a material source advance withholds the stale reviewer's failure instead of publishing a binding verdict
+  ---
+  duration_ms: 22.077292
+  type: 'test'
+  ...
+# Subtest: W1-T3337: an immaterial advance still publishes and makes the reviewer's loaded code SHA visible on the verdict
+ok 90 - W1-T3337: an immaterial advance still publishes and makes the reviewer's loaded code SHA visible on the verdict
+  ---
+  duration_ms: 22.014748
+  type: 'test'
+  ...
+# warning: You appear to have cloned an empty repository.
+# To /tmp/rmd-codex-worker-N5ALto/rmd-stale-review-run-origin-W9TNcD
+#  * [new branch]      main -> main
+# \#\#\# [W1-T3337] run W1-T3337-1785000000000 — target craigoley/remudero · mount sonnet/high · 400 turns (implement×high×src)
+# \#\#\# [W1-T3337] worker settings validated against pinned SandboxSettingsSchema
+# \#\#\# [W1-T3337] binary pin UNKNOWN — claude --version emitted no recognisable version
+# \#\#\# [W1-T3337] containment preflight PASSED — outside-cwd write OS-DENIED; inside-cwd write succeeded
+# \#\#\# [W1-T3337] isolation preflight PASSED — worker reports 0 aliases and 0 functions inherited (alias=0, functions=0)
+# Subtest: W1-T3337: a throwing just-in-time reader is converted to an unreadable refusal before the review status can post
+ok 91 - W1-T3337: a throwing just-in-time reader is converted to an unreadable refusal before the review status can post
+  ---
+  duration_ms: 1564.213376
+  type: 'test'
+  ...
+# Subtest: W1-T3337: a withheld re-review stands the fix rung down without another worker strike
+ok 92 - W1-T3337: a withheld re-review stands the fix rung down without another worker strike
+  ---
+  duration_ms: 3614.759629
+  type: 'test'
+  ...
+# Subtest: W1-T3337: rmd review exits non-zero and names a withheld terminal verdict
+ok 93 - W1-T3337: rmd review exits non-zero and names a withheld terminal verdict
+  ---
+  duration_ms: 1000.228893
+  type: 'test'
+  ...
+# HEAD is now at 67e1f68 seed
+# Preparing worktree (new branch 'run-W1-T3337-1785000000000')
+# \#\#\# [W1-T3337] recon worker
+# \#\#\# [W1-T3337] prompt provenance-linted: clean
+# \#\#\# [W1-T3337] implement worker
+# \#\#\# [W1-T3337] fallback push firing for run-W1-T3337-1785000000000 — cause: push_not_attempted (no "git push" invocation appears anywhere in the worker's own transcript)
+# \#\#\# [W1-T3337] fallback: pushing branch from orchestrator (outside sandbox)
+# rule15-precheck: OK -- no criterion field added or edited in the plan
+# rule25-precheck: OK -- no instrument path rides with a src/ product path
+# ci-control-plane-precheck: SKIP -- this diff does not change a control-plane or capability-snapshot input
+# test-tier-manifest: OK — every row in scripts/test-tier-manifest.json names an existing test file (0 test file(s) on disk).
+# census-precheck: OK — 0 changed file(s) checked against origin/main
+# head-identity-gate: OK — identified via its run-shaped head ref (run-W1-T3337-1785000000000)
+# worker-branch-shape: OK — no self-crediting plan filing
+# proof-resolve-precheck: SKIP -- W1-T3337 resolves no acceptance criteria at HEAD
+# tier: 0 files matched by basename
+# pre-push: lint-plan-precheck runs the branch's own package.json lint argv; the host gate runs no worktree code: ENOENT: no such file or directory, open '/tmp/rmd-codex-worker-N5ALto/rmd-stale-review-run-task-B27MBK/worktrees/run-W1-T3337-1785000000000/package.json': skipped, NOT passed (CI runs it)
+# pre-push: lint-plan-precheck could not run the lint — not blocking on an unreadable check
+# fatal: path 'plan/tasks.yaml' does not exist in '67e1f6811a578cf8e0b0b1a531d0b4096882020f'
+# \#\#\# [W1-T3337] PR: https://github.com/acme/remudero/pull/3337
+# \#\#\# [W1-T3337] verdict: blocked — reviewer code freshness withheld the review verdict: https://github.com/acme/remudero/pull/3337
+# Subtest: W1-T3337: the implementation run records a blocked verdict when its injected terminal review was withheld
+ok 94 - W1-T3337: the implementation run records a blocked verdict when its injected terminal review was withheld
+  ---
+  duration_ms: 78615.13363
+  type: 'test'
+  ...
+# Subtest: W1-T3337 wiring: every production terminal-review path supplies a just-in-time code-freshness reader
+ok 95 - W1-T3337 wiring: every production terminal-review path supplies a just-in-time code-freshness reader
+  ---
+  duration_ms: 18.121879
+  type: 'test'
+  ...
+# Subtest: W1-T2543 THE MEASUREMENT: most suites here are named after their claim, not their module
+ok 96 - W1-T2543 THE MEASUREMENT: most suites here are named after their claim, not their module
+  ---
+  duration_ms: 459.543894
+  type: 'test'
+  ...
+# Subtest: W1-T2543 criterion 1: a source file plus a test file in the same task scores ONE concern, not two
+ok 97 - W1-T2543 criterion 1: a source file plus a test file in the same task scores ONE concern, not two
+  ---
+  duration_ms: 2.223397
+  type: 'test'
+  ...
+# Subtest: W1-T2543 criterion 1 (the real refusals): the two PRs that fired this rubric within one hour
+ok 98 - W1-T2543 criterion 1 (the real refusals): the two PRs that fired this rubric within one hour
+  ---
+  duration_ms: 0.519221
+  type: 'test'
+  ...
+# Subtest: W1-T2543 criterion 2: a task genuinely spanning two source subsystems STILL scores two
+ok 99 - W1-T2543 criterion 2: a task genuinely spanning two source subsystems STILL scores two
+  ---
+  duration_ms: 0.560914
+  type: 'test'
+  ...
+# Subtest: W1-T2543 criterion 3: a test path the task does NOT declare is not discounted, because it is not there to discount
+ok 100 - W1-T2543 criterion 3: a test path the task does NOT declare is not discounted, because it is not there to discount
+  ---
+  duration_ms: 0.197557
+  type: 'test'
+  ...
+# Subtest: W1-T2543: a task declaring ONLY suites still counts them — the discount can never empty the tally
+ok 101 - W1-T2543: a task declaring ONLY suites still counts them — the discount can never empty the tally
+  ---
+  duration_ms: 0.303257
+  type: 'test'
+  ...
+# Subtest: W1-T2543 criterion 4: the discount is a TABLE, so a later path class needs no change to the counting function
+ok 102 - W1-T2543 criterion 4: the discount is a TABLE, so a later path class needs no change to the counting function
+  ---
+  duration_ms: 0.270227
+  type: 'test'
+  ...
+# Subtest: W1-T9806: a census-closure seed walks its whole runtime import closure
+ok 103 - W1-T9806: a census-closure seed walks its whole runtime import closure
+  ---
+  duration_ms: 5.844012
+  type: 'test'
+  ...
+# Subtest: W1-T9806: the baked-closure censuses join a ledger diff
+ok 104 - W1-T9806: the baked-closure censuses join a ledger diff
+  ---
+  duration_ms: 6630.35397
+  type: 'test'
+  ...
+# Subtest: W1-T9806: a type-only import or a missing seed adds no walk
+ok 105 - W1-T9806: a type-only import or a missing seed adds no walk
+  ---
+  duration_ms: 1.822074
+  type: 'test'
+  ...
+# Subtest: W1-T9806: the push precheck asks the baked-closure censuses for a closure import change
+ok 106 - W1-T9806: the push precheck asks the baked-closure censuses for a closure import change
+  ---
+  duration_ms: 14.630521
+  type: 'test'
+  ...
+# Subtest: W1-T9806: a baked-closure refusal names the lists that catalog the closure
+ok 107 - W1-T9806: a baked-closure refusal names the lists that catalog the closure
+  ---
+  duration_ms: 10.095762
+  type: 'test'
+  ...
+# Subtest: W1-T9806: an import outside both closures asks no baked-closure census
+ok 108 - W1-T9806: an import outside both closures asks no baked-closure census
+  ---
+  duration_ms: 0.579743
+  type: 'test'
+  ...
+# Subtest: W1-T9806: unchanged import sets never read the baked closures to select suites
+ok 109 - W1-T9806: unchanged import sets never read the baked closures to select suites
+  ---
+  duration_ms: 2.206603
+  type: 'test'
+  ...
+# REWROTE test/nested/portable.test.ts: 1 specifier(s)
+# 1 of 1 file(s) rewritten
+# Subtest: W1-T9864: package.json declares the three subpath aliases
+ok 110 - W1-T9864: package.json declares the three subpath aliases
+  ---
+  duration_ms: 11.257601
+  type: 'test'
+  ...
+# Subtest: W1-T9864: a nested test importing through the aliases runs and typechecks
+ok 111 - W1-T9864: a nested test importing through the aliases runs and typechecks
+  ---
+  duration_ms: 4898.179142
+  type: 'test'
+  ...
+# Subtest: W1-T9864: location-relative test files never rise above the merge base
+ok 112 - W1-T9864: location-relative test files never rise above the merge base
+  ---
+  duration_ms: 4304.382344
+  type: 'test'
+  ...
+# Subtest: W1-T9864: a new test file carries no location-relative specifier
+ok 113 - W1-T9864: a new test file carries no location-relative specifier
+  ---
+  duration_ms: 296.60944
+  type: 'test'
+  ...
+# Subtest: W1-T9864: the codemod rewrites relative specifiers to the aliases
+ok 114 - W1-T9864: the codemod rewrites relative specifiers to the aliases
+  ---
+  duration_ms: 9.686345
+  type: 'test'
+  ...
+# Subtest: W1-T9866: the codemod rewrites code but leaves import-like text inside a string or template literal as written
+ok 115 - W1-T9866: the codemod rewrites code but leaves import-like text inside a string or template literal as written
+  ---
+  duration_ms: 0.984652
+  type: 'test'
+  ...
+# Subtest: W1-T9864: the codemod writes a file in place, and --folder degrades when the placement table is absent
+ok 116 - W1-T9864: the codemod writes a file in place, and --folder degrades when the placement table is absent
+  ---
+  duration_ms: 1.809484
+  type: 'test'
+  ...
+# Subtest: W1-T9864: --folder selects the tests the placement table maps to that folder
+ok 117 - W1-T9864: --folder selects the tests the placement table maps to that folder
+  ---
+  duration_ms: 406.917475
+  type: 'test'
+  ...
+# Subtest: alias fixture package uses supplied scratch and real source bindings
+ok 118 - alias fixture package uses supplied scratch and real source bindings
+  ---
+  duration_ms: 96.912625
+  type: 'test'
+  ...
+# Subtest: alias codemod fixtures use supplied scratch without mutating donors
+ok 119 - alias codemod fixtures use supplied scratch without mutating donors
+  ---
+  duration_ms: 54.131202
+  type: 'test'
+  ...
+# Subtest: \#10092: a test-only diff also runs the censuses that walk the test tree, git grep included
+ok 120 - \#10092: a test-only diff also runs the censuses that walk the test tree, git grep included
+  ---
+  duration_ms: 14819.033438
+  type: 'test'
+  ...
+# Subtest: assertWallClockBound asserts exactly the bound the call site asserted -- no tolerance, no slack
+ok 121 - assertWallClockBound asserts exactly the bound the call site asserted -- no tolerance, no slack
+  ---
+  duration_ms: 73.347756
+  type: 'test'
+  ...
+# Subtest: assertWallClockBound's failure NAMES the wall-clock dependence, so the red is self-explaining
+ok 122 - assertWallClockBound's failure NAMES the wall-clock dependence, so the red is self-explaining
+  ---
+  duration_ms: 0.502706
+  type: 'test'
+  ...
+# Subtest: the bare-bound falsifier fires on a reverted member and stays quiet on the migrated form
+ok 123 - the bare-bound falsifier fires on a reverted member and stays quiet on the migrated form
+  ---
+  duration_ms: 0.482687
+  type: 'test'
+  ...
+# Subtest: the build-time declaration census records the measured population and enforces its abandonment floor
+ok 124 - the build-time declaration census records the measured population and enforces its abandonment floor
+  ---
+  duration_ms: 4478.626975
+  type: 'test'
+  ...
+# Subtest: the declaration recognizer is the helper import query, not a clock-idiom text match
+ok 125 - the declaration recognizer is the helper import query, not a clock-idiom text match
+  ---
+  duration_ms: 5775.434092
+  type: 'test'
+  ...
+# Subtest: every bare wall-clock upper bound is migrated, and reverting a member fails by file name
+ok 126 - every bare wall-clock upper bound is migrated, and reverting a member fails by file name
+  ---
+  duration_ms: 4004.617984
+  type: 'test'
+  ...
+# Subtest: the census is registered as its own census:* script, like every sibling census
+ok 127 - the census is registered as its own census:* script, like every sibling census
+  ---
+  duration_ms: 4.739705
+  type: 'test'
+  ...
+# SKIPPED — no browser: the pinned Playwright needs chromium-1248, chromium_headless_shell-1248 and the cache does not hold them. Run `npx playwright install chromium`. This suite did NOT pass; it did not run.
+# Subtest: a cache holding the WRONG build is classified absent, and the classification names both builds
+ok 128 - a cache holding the WRONG build is classified absent, and the classification names both builds
+  ---
+  duration_ms: 5.365517
+  type: 'test'
+  ...
+# Subtest: a complete install of the pinned build is classified present
+ok 129 - a complete install of the pinned build is classified present
+  ---
+  duration_ms: 0.260692
+  type: 'test'
+  ...
+# Subtest: a HALF-EXTRACTED install is absent, matching the INSTALLATION_COMPLETE contract the browser preflight already relies on
+ok 130 - a HALF-EXTRACTED install is absent, matching the INSTALLATION_COMPLETE contract the browser preflight already relies on
+  ---
+  duration_ms: 15.687796
+  type: 'test'
+  ...
+# Subtest: an unreadable or malformed manifest is UNKNOWN, never absent — the skip fires only on verified absence
+ok 131 - an unreadable or malformed manifest is UNKNOWN, never absent — the skip fires only on verified absence
+  ---
+  duration_ms: 44.472984
+  type: 'test'
+  ...
+# Subtest: UNDER CI an absent browser produces NO skip, so nothing can reach green by way of a missing browser
+ok 132 - UNDER CI an absent browser produces NO skip, so nothing can reach green by way of a missing browser
+  ---
+  duration_ms: 0.992615
+  type: 'test'
+  ...
+# Subtest: an UNKNOWN classification never skips, on either host — absence must be proven, not assumed
+ok 133 - an UNKNOWN classification never skips, on either host — absence must be proven, not assumed
+  ---
+  duration_ms: 0.779123
+  type: 'test'
+  ...
+# Subtest: a PRESENT browser never skips, so the mechanism is inert on a healthy host
+ok 134 - a PRESENT browser never skips, so the mechanism is inert on a healthy host
+  ---
+  duration_ms: 0.435015
+  type: 'test'
+  ...
+# Subtest: the skip reason names the missing build and says the suite was SKIPPED, never that it passed
+ok 135 - the skip reason names the missing build and says the suite was SKIPPED, never that it passed
+  ---
+  duration_ms: 0.270467
+  type: 'test'
+  ...
+# Subtest: the announcement is emitted ONCE per process, so eleven suites produce one line and not eleven
+ok 136 - the announcement is emitted ONCE per process, so eleven suites produce one line and not eleven
+  ---
+  duration_ms: 0.23908
+  type: 'test'
+  ...
+# Subtest: a manifest naming NO chromium build is UNKNOWN, not present — an empty requirement set proves nothing
+ok 137 - a manifest naming NO chromium build is UNKNOWN, not present — an empty requirement set proves nothing
+  ---
+  duration_ms: 0.276056
+  type: 'test'
+  ...
+# Subtest: every browser-launching suite EXCEPT W1-T1027's falsifier routes its tests through the absence-aware wrapper
+ok 138 - every browser-launching suite EXCEPT W1-T1027's falsifier routes its tests through the absence-aware wrapper
+  ---
+  duration_ms: 375.972919
+  type: 'test'
+  ...
+# Subtest: no browser-launching suite still imports `test` directly from node:test, which would bypass the wrapper entirely
+ok 139 - no browser-launching suite still imports `test` directly from node:test, which would bypass the wrapper entirely
+  ---
+  duration_ms: 1507.001554
+  type: 'test'
+  ...
+# Subtest: W1-T8625: the alert-fix prompt carries a proof grammar whose examples all execute
+ok 140 - W1-T8625: the alert-fix prompt carries a proof grammar whose examples all execute
+  ---
+  duration_ms: 23.930744
+  type: 'test'
+  ...
+# Subtest: W1-T8625: an alert-fix body with a prose proof is ledgered as a defect
+ok 141 - W1-T8625: an alert-fix body with a prose proof is ledgered as a defect
+  ---
+  duration_ms: 44.681089
+  type: 'test'
+  ...
+# Subtest: W1-T8625: a prose proof naming a test path is still an inert proof
+ok 142 - W1-T8625: a prose proof naming a test path is still an inert proof
+  ---
+  duration_ms: 17.214043
+  type: 'test'
+  ...
+# Subtest: W1-T8625: a trailered alert-fix body with a prose proof is still ledgered
+ok 143 - W1-T8625: a trailered alert-fix body with a prose proof is still ledgered
+  ---
+  duration_ms: 28.4521
+  type: 'test'
+  ...
+# Subtest: W1-T8625: an alert-fix body whose proofs all execute ledgers no defect
+ok 144 - W1-T8625: an alert-fix body whose proofs all execute ledgers no defect
+  ---
+  duration_ms: 40.520667
+  type: 'test'
+  ...
+# Subtest: W1-T8625: an unreadable opened body is ledgered as a check error, never as a clean body
+ok 145 - W1-T8625: an unreadable opened body is ledgered as a check error, never as a clean body
+  ---
+  duration_ms: 194.27637
+  type: 'test'
+  ...
+# Subtest: W1-T8625: the real body reader reads the PR body over gh once
+ok 146 - W1-T8625: the real body reader reads the PR body over gh once
+  ---
+  duration_ms: 0.441975
+  type: 'test'
+  ...
+# Subtest: W1-T3238: an unmodelled suite that walks a corpus is named as a candidate with its glob
+ok 147 - W1-T3238: an unmodelled suite that walks a corpus is named as a candidate with its glob
+  ---
+  duration_ms: 10484.778572
+  type: 'test'
+  ...
+# Subtest: W1-T3238: --files keeps candidate and unmodelled warnings off the runnable file list
+ok 148 - W1-T3238: --files keeps candidate and unmodelled warnings off the runnable file list
+  ---
+  duration_ms: 11515.092545
+  type: 'test'
+  ...
+# Subtest: W1-T3238: a suite that only imports symbols is not a candidate
+ok 149 - W1-T3238: a suite that only imports symbols is not a candidate
+  ---
+  duration_ms: 10.29892
+  type: 'test'
+  ...
+# Subtest: W1-T3238: candidate walks include joined source and plan-task directories
+ok 150 - W1-T3238: candidate walks include joined source and plan-task directories
+  ---
+  duration_ms: 12.247022
+  type: 'test'
+  ...
+# Subtest: W1-T3238: an unreadable discovered suite is still reported as src-shaped
+ok 151 - W1-T3238: an unreadable discovered suite is still reported as src-shaped
+  ---
+  duration_ms: 0.390177
+  type: 'test'
+  ...
+# Subtest: W1-T3238: the drift guard keeps its src-only ls-files projection
+ok 152 - W1-T3238: the drift guard keeps its src-only ls-files projection
+  ---
+  duration_ms: 14.460063
+  type: 'test'
+  ...
+# Subtest: W1-T3238: candidates are a separate section and the named set is byte-identical
+ok 153 - W1-T3238: candidates are a separate section and the named set is byte-identical
+  ---
+  duration_ms: 0.454884
+  type: 'test'
+  ...
+# Subtest: census-membership --files selects the suite \#12104 reddened for a src/run-task.ts diff
+ok 154 - census-membership --files selects the suite \#12104 reddened for a src/run-task.ts diff
+  ---
+  duration_ms: 5546.913084
+  type: 'test'
+  ...
+# Subtest: census-membership --files selects the suite \#12019 reddened for a diff adding a test file
+ok 155 - census-membership --files selects the suite \#12019 reddened for a diff adding a test file
+  ---
+  duration_ms: 4.835472
+  type: 'test'
+  ...
+# Subtest: census-membership --files keeps a plain text reader off the run list and names it on stderr
+ok 156 - census-membership --files keeps a plain text reader off the run list and names it on stderr
+  ---
+  duration_ms: 1.356173
+  type: 'test'
+  ...
+# Subtest: census-membership renders the joined source-text censuses in its human report
+ok 157 - census-membership renders the joined source-text censuses in its human report
+  ---
+  duration_ms: 2.634499
+  type: 'test'
+  ...
+# Subtest: the detector is non-vacuous: it finds a real, known population at this HEAD
+ok 158 - the detector is non-vacuous: it finds a real, known population at this HEAD
+  ---
+  duration_ms: 606.644493
+  type: 'test'
+  ...
+# Subtest: every tracked src file with a detectable external write is named in AUTHORITY_TABLE by module
+ok 159 - every tracked src file with a detectable external write is named in AUTHORITY_TABLE by module
+  ---
+  duration_ms: 609.978891
+  type: 'test'
+  ...
+# Subtest: every AUTHORITY_TABLE row's module is a real tracked src file, not a stale or mistyped path
+ok 160 - every AUTHORITY_TABLE row's module is a real tracked src file, not a stale or mistyped path
+  ---
+  duration_ms: 14.449529
+  type: 'test'
+  ...
+# Subtest: FALSIFIER: each detector shape matches its own known-write fixture text
+ok 161 - FALSIFIER: each detector shape matches its own known-write fixture text
+  ---
+  duration_ms: 0.49412
+  type: 'test'
+  ...
+# Subtest: FALSIFIER: a synthetic new external write with no AUTHORITY_TABLE entry is caught, never silently accepted
+ok 162 - FALSIFIER: a synthetic new external write with no AUTHORITY_TABLE entry is caught, never silently accepted
+  ---
+  duration_ms: 0.322653
+  type: 'test'
+  ...
+# Subtest: AUTHORITY_TABLE carries no unused rows for files the detector no longer finds (drift in the other direction)
+ok 163 - AUTHORITY_TABLE carries no unused rows for files the detector no longer finds (drift in the other direction)
+  ---
+  duration_ms: 322.218155
+  type: 'test'
+  ...
+# {"event":"benchmark.caller_coverage_debt","file":"src/cli/commands/run-task-verb.ts","kind":"injected-default","line":4666,"reason":"unclassified-spawn-site","followup":"file-worker-evidence-task"}
+# {"event":"benchmark.caller_coverage_debt","file":"src/lib/ci-escalation-judge.ts","kind":"injected-default","line":340,"reason":"unclassified-spawn-site","followup":"file-worker-evidence-task"}
+# {"event":"benchmark.caller_coverage_debt","file":"src/lib/product-research.ts","kind":"injected-default","line":73,"reason":"unclassified-spawn-site","followup":"file-worker-evidence-task"}
+# {"event":"benchmark.caller_coverage_debt","file":"src/lib/refresh-value.ts","kind":"injected-default","line":340,"reason":"unclassified-spawn-site","followup":"file-worker-evidence-task"}
+# {"event":"benchmark.caller_coverage_debt","file":"src/lib/worker.ts","kind":"call","line":2834,"reason":"unclassified-spawn-site","followup":"file-worker-evidence-task"}
+# {"event":"benchmark.caller_coverage_debt","file":"src/lib/worker.ts","kind":"call","line":3172,"reason":"unclassified-spawn-site","followup":"file-worker-evidence-task"}
+# {"event":"benchmark.caller_coverage_debt","file":"src/run-task.ts","kind":"parameter-default","line":10521,"reason":"unclassified-spawn-site","followup":"file-worker-evidence-task"}
+# Subtest: benchmark worker caller census catches an unclassified spawn
+ok 164 - benchmark worker caller census catches an unclassified spawn
+  ---
+  duration_ms: 1419.593694
+  type: 'test'
+  ...
+# Subtest: PROPERTY every bound-shaped constant under src/ either declares its kind or is grandfathered
+ok 165 - PROPERTY every bound-shaped constant under src/ either declares its kind or is grandfathered
+  ---
+  duration_ms: 747.869526
+  type: 'test'
+  ...
+# Subtest: PROPERTY the baseline names only constants that actually exist and are actually undeclared
+ok 166 - PROPERTY the baseline names only constants that actually exist and are actually undeclared
+  ---
+  duration_ms: 1440.693487
+  type: 'test'
+  ...
+# Subtest: PROPERTY a newly added bound-shaped constant with no declared kind fails and names it
+ok 167 - PROPERTY a newly added bound-shaped constant with no declared kind fails and names it
+  ---
+  duration_ms: 149.710677
+  type: 'test'
+  ...
+# Subtest: PROPERTY a newly added bound that declares BACKSTOP or PRIMARY CONTROL passes unchanged
+ok 168 - PROPERTY a newly added bound that declares BACKSTOP or PRIMARY CONTROL passes unchanged
+  ---
+  duration_ms: 238.037584
+  type: 'test'
+  ...
+# Subtest: PROPERTY an existing grandfathered bound with no declared kind still passes the build
+ok 169 - PROPERTY an existing grandfathered bound with no declared kind still passes the build
+  ---
+  duration_ms: 279.465342
+  type: 'test'
+  ...
+# Subtest: PROPERTY a constant whose name is not bound-shaped is never flagged, tagged or not
+ok 170 - PROPERTY a constant whose name is not bound-shaped is never flagged, tagged or not
+  ---
+  duration_ms: 218.899513
+  type: 'test'
+  ...
+# Subtest: W1-T3020: the prune deletes exactly the manifest it is given, and pushes those names and no others
+ok 171 - W1-T3020: the prune deletes exactly the manifest it is given, and pushes those names and no others
+  ---
+  duration_ms: 13.79396
+  type: 'test'
+  ...
+# Subtest: W1-T3020: a branch whose sha did not resolve is skipped with its reason, never deleted
+ok 172 - W1-T3020: a branch whose sha did not resolve is skipped with its reason, never deleted
+  ---
+  duration_ms: 3.732795
+  type: 'test'
+  ...
+# Subtest: W1-T3020: a failed push reports every name in its chunk as still on origin, and none as deleted
+ok 173 - W1-T3020: a failed push reports every name in its chunk as still on origin, and none as deleted
+  ---
+  duration_ms: 1.410361
+  type: 'test'
+  ...
+# Subtest: W1-T3020: chunking confines a failure — one bad ref loses its own chunk, not every deletion
+ok 174 - W1-T3020: chunking confines a failure — one bad ref loses its own chunk, not every deletion
+  ---
+  duration_ms: 0.432781
+  type: 'test'
+  ...
+# Subtest: W1-T3020: an empty manifest is a no-op that pushes nothing at all
+ok 175 - W1-T3020: an empty manifest is a no-op that pushes nothing at all
+  ---
+  duration_ms: 0.36587
+  type: 'test'
+  ...
+# Subtest: W1-T3020: the prune has one shared automatic full-sweep adapter
+ok 176 - W1-T3020: the prune has one shared automatic full-sweep adapter
+  ---
+  duration_ms: 481.790439
+  type: 'test'
+  ...
+# Subtest: W1-T3020: an open PR on a reused branch name dominates every merged PR that name ever carried
+ok 177 - W1-T3020: an open PR on a reused branch name dominates every merged PR that name ever carried
+  ---
+  duration_ms: 2.666191
+  type: 'test'
+  ...
+# Subtest: W1-T3020: merged still beats closed, so the fold did not simply become 'last row wins'
+ok 178 - W1-T3020: merged still beats closed, so the fold did not simply become 'last row wins'
+  ---
+  duration_ms: 0.266721
+  type: 'test'
+  ...
+# Subtest: W1-T3020: a head with an open PR right now is withheld whatever the classification said
+ok 179 - W1-T3020: a head with an open PR right now is withheld whatever the classification said
+  ---
+  duration_ms: 0.790849
+  type: 'test'
+  ...
+# Subtest: W1-T3020: a no-PR-evidence branch younger than the bound is withheld — the just-started worker case
+ok 180 - W1-T3020: a no-PR-evidence branch younger than the bound is withheld — the just-started worker case
+  ---
+  duration_ms: 0.643919
+  type: 'test'
+  ...
+# Subtest: W1-T3020: the same branch passes once its tip is older than the bound
+ok 181 - W1-T3020: the same branch passes once its tip is older than the bound
+  ---
+  duration_ms: 0.212179
+  type: 'test'
+  ...
+# Subtest: W1-T3020: an unreadable tip age withholds rather than deletes — unknown is not 'old enough'
+ok 182 - W1-T3020: an unreadable tip age withholds rather than deletes — unknown is not 'old enough'
+  ---
+  duration_ms: 0.497459
+  type: 'test'
+  ...
+# Subtest: W1-T3020: a merged or closed PR is NOT age-gated, so work finished an hour ago still prunes
+ok 183 - W1-T3020: a merged or closed PR is NOT age-gated, so work finished an hour ago still prunes
+  ---
+  duration_ms: 0.262024
+  type: 'test'
+  ...
+# Subtest: W1-T3020: the screen only ever REMOVES — it can never add a branch the dry run did not offer
+ok 184 - W1-T3020: the screen only ever REMOVES — it can never add a branch the dry run did not offer
+  ---
+  duration_ms: 0.218549
+  type: 'test'
+  ...
+# Subtest: browser teardown corpus reads tracked nested tests without traversing transient fixtures
+ok 185 - browser teardown corpus reads tracked nested tests without traversing transient fixtures
+  ---
+  duration_ms: 977.382177
+  type: 'test'
+  ...
+# Subtest: browser teardown corpus reads tracked nested tests without traversing transient fixtures: the shipped guard ignores an untracked broken suite
+ok 186 - browser teardown corpus reads tracked nested tests without traversing transient fixtures: the shipped guard ignores an untracked broken suite
+  ---
+  duration_ms: 1640.013502
+  type: 'test'
+  ...
+# Subtest: browser teardown corpus refuses unavailable tracked sources without hiding a real regression
+ok 187 - browser teardown corpus refuses unavailable tracked sources without hiding a real regression
+  ---
+  duration_ms: 411.967132
+  type: 'test'
+  ...
+# Subtest: browser teardown corpus refuses unavailable tracked sources without hiding a real regression: the shipped guard fails on a deleted tracked suite
+ok 188 - browser teardown corpus refuses unavailable tracked sources without hiding a real regression: the shipped guard fails on a deleted tracked suite
+  ---
+  duration_ms: 1579.203433
+  type: 'test'
+  ...
+# Subtest: browser teardown corpus refuses empty failed malformed and binary evidence
+ok 189 - browser teardown corpus refuses empty failed malformed and binary evidence
+  ---
+  duration_ms: 363.023882
+  type: 'test'
+  ...
+# Subtest: browser teardown corpus rejects missing repository and empty real default listing
+ok 190 - browser teardown corpus rejects missing repository and empty real default listing
+  ---
+  duration_ms: 24.609014
+  type: 'test'
+  ...
+# Subtest: browser teardown corpus excludes only its own source and retains every teardown assertion
+ok 191 - browser teardown corpus excludes only its own source and retains every teardown assertion
+  ---
+  duration_ms: 108.688463
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a catch stating its reason inside the braces passes the gate (acceptance criterion 3)
+ok 192 - catch-erasure-ratchet: a catch stating its reason inside the braces passes the gate (acceptance criterion 3)
+  ---
+  duration_ms: 4.206111
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a catch carrying the distinction in its return shape passes the gate (acceptance criterion 4)
+ok 193 - catch-erasure-ratchet: a catch carrying the distinction in its return shape passes the gate (acceptance criterion 4)
+  ---
+  duration_ms: 1.462838
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a catch that rethrows passes the gate
+ok 194 - catch-erasure-ratchet: a catch that rethrows passes the gate
+  ---
+  duration_ms: 0.175564
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a catch that records the failure passes the gate
+ok 195 - catch-erasure-ratchet: a catch that records the failure passes the gate
+  ---
+  duration_ms: 0.116064
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a catch with none of the four routes is counted as a bare erasure
+ok 196 - catch-erasure-ratchet: a catch with none of the four routes is counted as a bare erasure
+  ---
+  duration_ms: 0.243066
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a `.catch(() => null)` promise-chain erasure is counted the same as try/catch
+ok 197 - catch-erasure-ratchet: a `.catch(() => null)` promise-chain erasure is counted the same as try/catch
+  ---
+  duration_ms: 0.155283
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: findConflatorSites finds a negated optional chain through a call with nested parens (the daemon-liveness shape)
+ok 198 - catch-erasure-ratchet: findConflatorSites finds a negated optional chain through a call with nested parens (the daemon-liveness shape)
+  ---
+  duration_ms: 12.052133
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: findConflatorSites ignores !== / != and ordinary negation with no optional chain
+ok 199 - catch-erasure-ratchet: findConflatorSites ignores !== / != and ordinary negation with no optional chain
+  ---
+  duration_ms: 0.300301
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: findConflatorSites ignores a conflator-shaped string that appears only inside a comment
+ok 200 - catch-erasure-ratchet: findConflatorSites ignores a conflator-shaped string that appears only inside a comment
+  ---
+  duration_ms: 0.257307
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a string literal holding `test/**` does not open a block comment that hides the code after it
+ok 201 - catch-erasure-ratchet: a string literal holding `test/**` does not open a block comment that hides the code after it
+  ---
+  duration_ms: 21.884474
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a `/**` inside a line comment does not open a block comment that hides the next lines
+ok 202 - catch-erasure-ratchet: a `/**` inside a line comment does not open a block comment that hides the next lines
+  ---
+  duration_ms: 0.440703
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: comments are still blanked when strings, templates and regex literals hold comment markers
+ok 203 - catch-erasure-ratchet: comments are still blanked when strings, templates and regex literals hold comment markers
+  ---
+  duration_ms: 0.355464
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a file whose bare-catch count exceeds its baseline fails naming file and count (acceptance criterion 2)
+ok 204 - catch-erasure-ratchet: a file whose bare-catch count exceeds its baseline fails naming file and count (acceptance criterion 2)
+  ---
+  duration_ms: 87.379844
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a brand-new file with any bare catch enters at zero baseline and fails immediately -- no allowlist to add it to
+ok 205 - catch-erasure-ratchet: a brand-new file with any bare catch enters at zero baseline and fails immediately -- no allowlist to add it to
+  ---
+  duration_ms: 31.12091
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a file dropping below its baseline passes with no edit to the gate (acceptance criterion 5)
+ok 206 - catch-erasure-ratchet: a file dropping below its baseline passes with no edit to the gate (acceptance criterion 5)
+  ---
+  duration_ms: 119.347502
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: an allowance sitting slack above the actual count fails and names the new allowance (acceptance criterion, W1-T2906)
+ok 207 - catch-erasure-ratchet: an allowance sitting slack above the actual count fails and names the new allowance (acceptance criterion, W1-T2906)
+  ---
+  duration_ms: 156.688039
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: an allowance exactly matching the actual count is not slack
+ok 208 - catch-erasure-ratchet: an allowance exactly matching the actual count is not slack
+  ---
+  duration_ms: 75.608468
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a file entirely cleaned up (actual 0) still fails while its row is not removed
+ok 209 - catch-erasure-ratchet: a file entirely cleaned up (actual 0) still fails while its row is not removed
+  ---
+  duration_ms: 149.527439
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a new negated optional-chain conflator fails the gate naming its site (acceptance criterion 1)
+ok 210 - catch-erasure-ratchet: a new negated optional-chain conflator fails the gate naming its site (acceptance criterion 1)
+  ---
+  duration_ms: 46.547539
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a conflator site already in the reviewed baseline does not re-trip the gate
+ok 211 - catch-erasure-ratchet: a conflator site already in the reviewed baseline does not re-trip the gate
+  ---
+  duration_ms: 200.646543
+  type: 'test'
+  ...
+# Subtest: PROPERTY no tracked src/**/*.ts file's bare-catch count exceeds its baseline
+ok 212 - PROPERTY no tracked src/**/*.ts file's bare-catch count exceeds its baseline
+  ---
+  duration_ms: 633.345838
+  type: 'test'
+  ...
+# Subtest: PROPERTY no tracked src/**/*.ts file's baseline allowance sits slack above its actual bare-catch count
+ok 213 - PROPERTY no tracked src/**/*.ts file's baseline allowance sits slack above its actual bare-catch count
+  ---
+  duration_ms: 307.871259
+  type: 'test'
+  ...
+# Subtest: PROPERTY no negated optional-chain conflator exists beyond the reviewed baseline
+ok 214 - PROPERTY no negated optional-chain conflator exists beyond the reviewed baseline
+  ---
+  duration_ms: 6550.277599
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: every row in both baseline tables names a currently-tracked src/**/*.ts file (no stale allowance left behind by a rename)
+ok 215 - catch-erasure-ratchet: every row in both baseline tables names a currently-tracked src/**/*.ts file (no stale allowance left behind by a rename)
+  ---
+  duration_ms: 38.553728
+  type: 'test'
+  ...
+# Subtest: W1-T2670: a catch recording through an INJECTED log binding is not counted as bare
+ok 216 - W1-T2670: a catch recording through an INJECTED log binding is not counted as bare
+  ---
+  duration_ms: 0.181814
+  type: 'test'
+  ...
+# Subtest: W1-T2670: a catch binding its reason by const and CARRYING it into a recorded object is not counted as bare
+ok 217 - W1-T2670: a catch binding its reason by const and CARRYING it into a recorded object is not counted as bare
+  ---
+  duration_ms: 0.147983
+  type: 'test'
+  ...
+# Subtest: W1-T2670: a const binding that goes NOWHERE is still erasure — the recognition needs both halves
+ok 218 - W1-T2670: a const binding that goes NOWHERE is still erasure — the recognition needs both halves
+  ---
+  duration_ms: 0.097026
+  type: 'test'
+  ...
+# Subtest: W1-T2670: a catch returning a bare value with no record, reason or marker is STILL counted — the direction is unchanged
+ok 219 - W1-T2670: a catch returning a bare value with no record, reason or marker is STILL counted — the direction is unchanged
+  ---
+  duration_ms: 0.090066
+  type: 'test'
+  ...
+# Subtest: W1-T2670: the recognition moves exactly the catches that record by a house form — every other count is untouched
+ok 220 - W1-T2670: the recognition moves exactly the catches that record by a house form — every other count is untouched
+  ---
+  duration_ms: 392.253905
+  type: 'test'
+  ...
+# Subtest: W1-T2809: censusSuiteMembershipFor over \#2639's own changed paths REQUIRES the suite that PR reddened
+ok 221 - W1-T2809: censusSuiteMembershipFor over \#2639's own changed paths REQUIRES the suite that PR reddened
+  ---
+  duration_ms: 6867.084921
+  type: 'test'
+  ...
+# Subtest: W1-T2809: the control is falsifiable BY CONSTRUCTION — restore the single ls-files probe and it fails, naming the suite
+ok 222 - W1-T2809: the control is falsifiable BY CONSTRUCTION — restore the single ls-files probe and it fails, naming the suite
+  ---
+  duration_ms: 6988.754983
+  type: 'test'
+  ...
+# Subtest: W1-T2809: the ls-files and dir-walk populations are DISJOINT at head — the blindness is structural
+ok 223 - W1-T2809: the ls-files and dir-walk populations are DISJOINT at head — the blindness is structural
+  ---
+  duration_ms: 9544.142493
+  type: 'test'
+  ...
+# Subtest: W1-T2809: the widened matcher carries a STOPGAP label naming the seam as its successor
+ok 224 - W1-T2809: the widened matcher carries a STOPGAP label naming the seam as its successor
+  ---
+  duration_ms: 16.689361
+  type: 'test'
+  ...
+# Subtest: W1-T2809: the probe is ONE spawn carrying BOTH idioms — never a second recognizer
+ok 225 - W1-T2809: the probe is ONE spawn carrying BOTH idioms — never a second recognizer
+  ---
+  duration_ms: 0.659802
+  type: 'test'
+  ...
+# Subtest: W1-T2809: censusPopulationDrift still gates on the ls-files projection alone — widening the report moved no gate
+ok 226 - W1-T2809: censusPopulationDrift still gates on the ls-files projection alone — widening the report moved no gate
+  ---
+  duration_ms: 10054.611419
+  type: 'test'
+  ...
+# Subtest: W1-T2809: every discovered candidate is placed or NAMED — widening never converts a visible unknown into a silent omission
+ok 227 - W1-T2809: every discovered candidate is placed or NAMED — widening never converts a visible unknown into a silent omission
+  ---
+  duration_ms: 14980.51819
+  type: 'test'
+  ...
+# Subtest: W1-T2809: discovered-but-unplaceable callers from BOTH idioms are reported in unknownCoverage
+ok 228 - W1-T2809: discovered-but-unplaceable callers from BOTH idioms are reported in unknownCoverage
+  ---
+  duration_ms: 0.992602
+  type: 'test'
+  ...
+# Subtest: W1-T2809: an unreadable hit is still KEPT, tagged with the gated idiom — the pre-existing posture, unchanged
+ok 229 - W1-T2809: an unreadable hit is still KEPT, tagged with the gated idiom — the pre-existing posture, unchanged
+  ---
+  duration_ms: 0.344678
+  type: 'test'
+  ...
+# Subtest: W1-T2809: a hit that walks no supported repository corpus is still filtered out
+ok 230 - W1-T2809: a hit that walks no supported repository corpus is still filtered out
+  ---
+  duration_ms: 0.500462
+  type: 'test'
+  ...
+# Subtest: W1-T2809: ls-files takes precedence for a file carrying both tokens, so the gated projection is unchanged
+ok 231 - W1-T2809: ls-files takes precedence for a file carrying both tokens, so the gated projection is unchanged
+  ---
+  duration_ms: 0.91822
+  type: 'test'
+  ...
+# Subtest: every FAST_GATE_STEPS entry carrying boundMs corresponds to exactly one CENSUS_POPULATION member with an ADMITTED verdict — the admission set has a checkable denominator, not a remembered count
+ok 232 - every FAST_GATE_STEPS entry carrying boundMs corresponds to exactly one CENSUS_POPULATION member with an ADMITTED verdict — the admission set has a checkable denominator, not a remembered count
+  ---
+  duration_ms: 1.210289
+  type: 'test'
+  ...
+# Subtest: every CENSUS_POPULATION member carries both a disposition (verdict.status) and a reason string — a candidate the population contains with either missing is a defect this test catches, never a silent omission
+ok 233 - every CENSUS_POPULATION member carries both a disposition (verdict.status) and a reason string — a candidate the population contains with either missing is a defect this test catches, never a silent omission
+  ---
+  duration_ms: 0.265829
+  type: 'test'
+  ...
+# Subtest: test/enforcement-data-carveout.test.ts — W1-T2478's own fifth candidate, straddling FAST_GATE_CENSUS_BOUND_MS — is a named CENSUS_POPULATION member with an explicit REFUSED-for-cost disposition, never left as prose only
+ok 234 - test/enforcement-data-carveout.test.ts — W1-T2478's own fifth candidate, straddling FAST_GATE_CENSUS_BOUND_MS — is a named CENSUS_POPULATION member with an explicit REFUSED-for-cost disposition, never left as prose only
+  ---
+  duration_ms: 34.351643
+  type: 'test'
+  ...
+# Subtest: censusPopulationDrift: a census-shaped file the live tree's recognizer finds with no CENSUS_POPULATION entry is reported in `unknown`, never silently absorbed as 'no change needed'
+ok 235 - censusPopulationDrift: a census-shaped file the live tree's recognizer finds with no CENSUS_POPULATION entry is reported in `unknown`, never silently absorbed as 'no change needed'
+  ---
+  duration_ms: 25.265865
+  type: 'test'
+  ...
+# Subtest: censusPopulationDrift: the live, unmocked tree today reports zero unknown coverage — every census-shaped suite this recognizer can find already has a CENSUS_POPULATION entry
+ok 236 - censusPopulationDrift: the live, unmocked tree today reports zero unknown coverage — every census-shaped suite this recognizer can find already has a CENSUS_POPULATION entry
+  ---
+  duration_ms: 9137.491935
+  type: 'test'
+  ...
+# Subtest: the population's re-application of the predicate against every recognizer candidate finds exactly ONE refused-for-cost member — the population is never padded to reconstruct W1-T2478's stale 'six', and the count that survives is named, not asserted by coincidence
+ok 237 - the population's re-application of the predicate against every recognizer candidate finds exactly ONE refused-for-cost member — the population is never padded to reconstruct W1-T2478's stale 'six', and the count that survives is named, not asserted by coincidence
+  ---
+  duration_ms: 0.373291
+  type: 'test'
+  ...
+# Subtest: censusPopulationDrift: two independent calls against the same unchanged, unmocked tree yield identical unknown/stale sets — a re-runnable query, not a one-time measurement
+ok 238 - censusPopulationDrift: two independent calls against the same unchanged, unmocked tree yield identical unknown/stale sets — a re-runnable query, not a one-time measurement
+  ---
+  duration_ms: 15393.979454
+  type: 'test'
+  ...
+# Subtest: CENSUS_POPULATION and CENSUS_ADMITTED_MEMBERS read identically across repeated accesses in this process — no per-call recomputation that could drift a disposition between reads
+ok 239 - CENSUS_POPULATION and CENSUS_ADMITTED_MEMBERS read identically across repeated accesses in this process — no per-call recomputation that could drift a disposition between reads
+  ---
+  duration_ms: 0.705811
+  type: 'test'
+  ...
+# Subtest: FAST_GATE_CENSUS_BOUND_MS is unchanged at 2000ms — this task does not touch the per-step bound, a primary control
+ok 240 - FAST_GATE_CENSUS_BOUND_MS is unchanged at 2000ms — this task does not touch the per-step bound, a primary control
+  ---
+  duration_ms: 0.570808
+  type: 'test'
+  ...
+# Subtest: the seven census entries admitted since W1-T2478 are still admitted, by job name, and CENSUS_POPULATION carries no `ok`/refusal field of its own — the derivation is data, never a second gate
+ok 241 - the seven census entries admitted since W1-T2478 are still admitted, by job name, and CENSUS_POPULATION carries no `ok`/refusal field of its own — the derivation is data, never a second gate
+  ---
+  duration_ms: 0.638841
+  type: 'test'
+  ...
+# Subtest: src/lib/ci-parity.ts marks CENSUS_POPULATION as the single census-population predicate (ONE CENSUS PREDICATE, NEVER TWO) at its own definition
+ok 242 - src/lib/ci-parity.ts marks CENSUS_POPULATION as the single census-population predicate (ONE CENSUS PREDICATE, NEVER TWO) at its own definition
+  ---
+  duration_ms: 1.717733
+  type: 'test'
+  ...
+# Subtest: the denominator assertions above read CENSUS_POPULATION's own live shape, never a restated literal count — deleting or emptying the export would fail this file's own assertions (population non-empty, exactly one cost refusal, admitted jobs list, drift report) rather than leaving them silently vacuous
+ok 243 - the denominator assertions above read CENSUS_POPULATION's own live shape, never a restated literal count — deleting or emptying the export would fail this file's own assertions (population non-empty, exactly one cost refusal, admitted jobs list, drift report) rather than leaving them silently vacuous
+  ---
+  duration_ms: 0.487713
+  type: 'test'
+  ...

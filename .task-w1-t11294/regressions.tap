@@ -1,0 +1,199 @@
+TAP version 13
+# Subtest: W1-T8041: a deferred requeue is retried before the no-commit rerun once its run completes
+ok 1 - W1-T8041: a deferred requeue is retried before the no-commit rerun once its run completes
+  ---
+  duration_ms: 151.650995
+  type: 'test'
+  ...
+# Subtest: W1-T8041: an unavailable failed-job rerun falls through to the requeue arms
+ok 2 - W1-T8041: an unavailable failed-job rerun falls through to the requeue arms
+  ---
+  duration_ms: 7.262512
+  type: 'test'
+  ...
+# Subtest: W1-T8041: an unavailable rerun with no requeue arm to take the pass still stands down
+ok 3 - W1-T8041: an unavailable rerun with no requeue arm to take the pass still stands down
+  ---
+  duration_ms: 34.984886
+  type: 'test'
+  ...
+# Subtest: a ci-log round refused because the worker changed nothing reruns the failed checks once
+ok 4 - a ci-log round refused because the worker changed nothing reruns the failed checks once
+  ---
+  duration_ms: 194.320608
+  type: 'test'
+  ...
+# Subtest: a round refused for another reason earns no rerun
+ok 5 - a round refused for another reason earns no rerun
+  ---
+  duration_ms: 2.14014
+  type: 'test'
+  ...
+# Subtest: W1-T6353: a fix round with no commit reruns the failed checks once
+ok 6 - W1-T6353: a fix round with no commit reruns the failed checks once
+  ---
+  duration_ms: 325.913823
+  type: 'test'
+  ...
+# Subtest: W1-T6353: a repeated no-commit round at one head counts a strike
+ok 7 - W1-T6353: a repeated no-commit round at one head counts a strike
+  ---
+  duration_ms: 26.889083
+  type: 'test'
+  ...
+# Subtest: W1-T6353: explicit flake outcomes keep their accounting without a second rerun
+ok 8 - W1-T6353: explicit flake outcomes keep their accounting without a second rerun
+  ---
+  duration_ms: 14.429863
+  type: 'test'
+  ...
+# Subtest: W1-T6353: in-flight, pushed, refused and non-ci rounds do not earn a no-commit rerun
+ok 9 - W1-T6353: in-flight, pushed, refused and non-ci rounds do not earn a no-commit rerun
+  ---
+  duration_ms: 27.600603
+  type: 'test'
+  ...
+# Subtest: W1-T6353: a rerun failure records its reason and cannot retry the same head
+ok 10 - W1-T6353: a rerun failure records its reason and cannot retry the same head
+  ---
+  duration_ms: 9.551203
+  type: 'test'
+  ...
+# Subtest: W1-T6353: reruns hold on a moved head, missing gateway or dry run
+ok 11 - W1-T6353: reruns hold on a moved head, missing gateway or dry run
+  ---
+  duration_ms: 3.287296
+  type: 'test'
+  ...
+# Subtest: W1-T6353: the one-rerun receipt survives ledger rotation after another dispatch
+ok 12 - W1-T6353: the one-rerun receipt survives ledger rotation after another dispatch
+  ---
+  duration_ms: 46.917711
+  type: 'test'
+  ...
+# Subtest: W1-T6353: concurrent passes claim one failed-job rerun before awaiting its gateway
+ok 13 - W1-T6353: concurrent passes claim one failed-job rerun before awaiting its gateway
+  ---
+  duration_ms: 4.876619
+  type: 'test'
+  ...
+# Subtest: W1-T6353: the gateway pages failed runs and rejects an unreadable run list
+ok 14 - W1-T6353: the gateway pages failed runs and rejects an unreadable run list
+  ---
+  duration_ms: 9.246884
+  type: 'test'
+  ...
+# Subtest: buildSweepEffects takes one typed deps object and returns the sweep effects surface
+ok 15 - buildSweepEffects takes one typed deps object and returns the sweep effects surface
+  ---
+  duration_ms: 257.739593
+  type: 'test'
+  ...
+# Subtest: fixCommand builds the sweep effects from one deps object before routing the PR
+ok 16 - fixCommand builds the sweep effects from one deps object before routing the PR
+  ---
+  duration_ms: 23640.315035
+  type: 'test'
+  ...
+# Subtest: W1-T2889: defaultSweepGhRun is the real spawn — the ghRunImpl seam's default does not quietly do nothing
+ok 17 - W1-T2889: defaultSweepGhRun is the real spawn — the ghRunImpl seam's default does not quietly do nothing
+  ---
+  duration_ms: 213.328854
+  type: 'test'
+  ...
+# Subtest: W1-T2889: the DEFAULT reviewRunner opts in explicitly — driven through postReview, not read from the source
+ok 18 - W1-T2889: the DEFAULT reviewRunner opts in explicitly — driven through postReview, not read from the source
+  ---
+  duration_ms: 383.686369
+  type: 'test'
+  ...
+# Subtest: W1-T4032: a review-reuse fallback forwards the plan-only flag
+ok 19 - W1-T4032: a review-reuse fallback forwards the plan-only flag
+  ---
+  duration_ms: 151.237161
+  type: 'test'
+  ...
+# Subtest: W1-T4032: an implementation fallback forwards false
+ok 20 - W1-T4032: an implementation fallback forwards false
+  ---
+  duration_ms: 47.689796
+  type: 'test'
+  ...
+# Subtest: W1-T3283 EFFECT: repairMissingTaskTrailer writes the repaired body and ledgers the write
+ok 21 - W1-T3283 EFFECT: repairMissingTaskTrailer writes the repaired body and ledgers the write
+  ---
+  duration_ms: 177.137592
+  type: 'test'
+  ...
+# Subtest: W1-T2890: sweep effects are built from the lib module with the same effect surface
+ok 22 - W1-T2890: sweep effects are built from the lib module with the same effect surface
+  ---
+  duration_ms: 315.31557
+  type: 'test'
+  ...
+# Subtest: W1-T2890: lib buildSweepEffects keeps the moved default seam failures explicit
+ok 23 - W1-T2890: lib buildSweepEffects keeps the moved default seam failures explicit
+  ---
+  duration_ms: 7.226584
+  type: 'test'
+  ...
+# Subtest: W1-T2890: lib constructor defaults fail with the same explicit adapter message
+ok 24 - W1-T2890: lib constructor defaults fail with the same explicit adapter message
+  ---
+  duration_ms: 3.240696
+  type: 'test'
+  ...
+# Subtest: W1-T2890: lib arm wiring parses PR numbers from URL and bare refs before applying session policy
+ok 25 - W1-T2890: lib arm wiring parses PR numbers from URL and bare refs before applying session policy
+  ---
+  duration_ms: 19.474123
+  type: 'test'
+  ...
+# Subtest: W1-T2890: moved arm attribution still treats undefined as legacy armed and names skips
+ok 26 - W1-T2890: moved arm attribution still treats undefined as legacy armed and names skips
+  ---
+  duration_ms: 31.660666
+  type: 'test'
+  ...
+# Subtest: W1-T2890: sweep arm-attempt folding leaves direct-merge failures retryable
+ok 27 - W1-T2890: sweep arm-attempt folding leaves direct-merge failures retryable
+  ---
+  duration_ms: 0.491149
+  type: 'test'
+  ...
+# gh read cadence (advisory, W1-T3297): a read 0s after the last on the core limiter, under the 180s floor. Set RMD_GH_TRANSPORT_FLOOR=enforce to refuse instead.
+# {"event":"worktree_git.pointer_refused","worktree":"/tmp/rmd-codex-worker-N5ALto/rmd-sweep-effects-dispatch-cFGfdO/repos/remudero-fixture","recorded_git_dir":null,"observed":"<absent>","reason":"the worktree has no .git entry"}
+# Subtest: W1-T2890: dispatchFix moved to lib wires owner recovery and fix-rung adapter deps
+ok 28 - W1-T2890: dispatchFix moved to lib wires owner recovery and fix-rung adapter deps
+  ---
+  duration_ms: 612.488656
+  type: 'test'
+  ...
+# {"event":"worktree_git.pointer_refused","worktree":"/tmp/rmd-codex-worker-N5ALto/rmd-sweep-effects-dispatch-diverged-P8PWgb/repos/remudero-fixture","recorded_git_dir":null,"observed":"<absent>","reason":"the worktree has no .git entry"}
+# Subtest: W1-T2890: dispatchFix moved to lib preserves diverged owner refs before recovery
+ok 29 - W1-T2890: dispatchFix moved to lib preserves diverged owner refs before recovery
+  ---
+  duration_ms: 94.617795
+  type: 'test'
+  ...
+# Subtest: W1-T2890: dispatchFix moved to lib names unreadable owner salvage identity
+ok 30 - W1-T2890: dispatchFix moved to lib names unreadable owner salvage identity
+  ---
+  duration_ms: 92.658977
+  type: 'test'
+  ...
+# Subtest: W1-T2890: readMainTip from the lib-built effects degrades unreadable REST to undefined
+ok 31 - W1-T2890: readMainTip from the lib-built effects degrades unreadable REST to undefined
+  ---
+  duration_ms: 3.305113
+  type: 'test'
+  ...
+1..31
+# tests 31
+# suites 0
+# pass 31
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 101725.341278

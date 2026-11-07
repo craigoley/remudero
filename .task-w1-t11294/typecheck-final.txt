@@ -1,0 +1,2 @@
+packages/daemon-client-smoke/src/index.ts(19,33): error TS2307: Cannot find module '@remudero/api-client' or its corresponding type declarations.
+packages/daemon-client-smoke/src/index.ts(46,13): error TS2322: Type 'components' is not assignable to type 'never'.

@@ -1,0 +1,238 @@
+TAP version 13
+# Subtest: test/a-no-commit-fix-on-a-moved-main-refreshes-instead-of-replaying-the-old-merge.test.ts
+ok 1 - test/a-no-commit-fix-on-a-moved-main-refreshes-instead-of-replaying-the-old-merge.test.ts
+  ---
+  duration_ms: 302.819953
+  type: 'test'
+  ...
+# Subtest: W1-T11294 criterion 2: refresh spends the same receipt and cannot rerun on a later round
+ok 2 - W1-T11294 criterion 2: refresh spends the same receipt and cannot rerun on a later round
+  ---
+  duration_ms: 11.525938
+  type: 'test'
+  ...
+# Subtest: W1-T11294 criterion 2: concurrent passes claim only one refresh
+ok 3 - W1-T11294 criterion 2: concurrent passes claim only one refresh
+  ---
+  duration_ms: 5.43087
+  type: 'test'
+  ...
+# Subtest: W1-T11294 criterion 2: unreadable run bases preserve the one-shot rerun
+ok 4 - W1-T11294 criterion 2: unreadable run bases preserve the one-shot rerun
+  ---
+  duration_ms: 12.548075
+  type: 'test'
+  ...
+# Subtest: W1-T11294: an unavailable base reader or main tip retains the rerun
+ok 5 - W1-T11294: an unavailable base reader or main tip retains the rerun
+  ---
+  duration_ms: 13.316882
+  type: 'test'
+  ...
+# Subtest: W1-T11294: a base read failure is logged and falls back to the rerun
+ok 6 - W1-T11294: a base read failure is logged and falls back to the rerun
+  ---
+  duration_ms: 8.355579
+  type: 'test'
+  ...
+# Subtest: W1-T11294: a failed refresh records its reason without rerunning
+ok 7 - W1-T11294: a failed refresh records its reason without rerunning
+  ---
+  duration_ms: 53.607879
+  type: 'test'
+  ...
+# Subtest: W1-T11294: a stale run waits for an update gateway without spending its receipt
+ok 8 - W1-T11294: a stale run waits for an update gateway without spending its receipt
+  ---
+  duration_ms: 20.497663
+  type: 'test'
+  ...
+# Subtest: W1-T11294: the base reader uses only this PR's completed failed run at this head
+ok 9 - W1-T11294: the base reader uses only this PR's completed failed run at this head
+  ---
+  duration_ms: 1.129379
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a catch stating its reason inside the braces passes the gate (acceptance criterion 3)
+ok 10 - catch-erasure-ratchet: a catch stating its reason inside the braces passes the gate (acceptance criterion 3)
+  ---
+  duration_ms: 3.392675
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a catch carrying the distinction in its return shape passes the gate (acceptance criterion 4)
+ok 11 - catch-erasure-ratchet: a catch carrying the distinction in its return shape passes the gate (acceptance criterion 4)
+  ---
+  duration_ms: 0.311438
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a catch that rethrows passes the gate
+ok 12 - catch-erasure-ratchet: a catch that rethrows passes the gate
+  ---
+  duration_ms: 1.281949
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a catch that records the failure passes the gate
+ok 13 - catch-erasure-ratchet: a catch that records the failure passes the gate
+  ---
+  duration_ms: 0.164007
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a catch with none of the four routes is counted as a bare erasure
+ok 14 - catch-erasure-ratchet: a catch with none of the four routes is counted as a bare erasure
+  ---
+  duration_ms: 0.515996
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a `.catch(() => null)` promise-chain erasure is counted the same as try/catch
+ok 15 - catch-erasure-ratchet: a `.catch(() => null)` promise-chain erasure is counted the same as try/catch
+  ---
+  duration_ms: 0.171428
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: findConflatorSites finds a negated optional chain through a call with nested parens (the daemon-liveness shape)
+ok 16 - catch-erasure-ratchet: findConflatorSites finds a negated optional chain through a call with nested parens (the daemon-liveness shape)
+  ---
+  duration_ms: 1.167527
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: findConflatorSites ignores !== / != and ordinary negation with no optional chain
+ok 17 - catch-erasure-ratchet: findConflatorSites ignores !== / != and ordinary negation with no optional chain
+  ---
+  duration_ms: 1.018974
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: findConflatorSites ignores a conflator-shaped string that appears only inside a comment
+ok 18 - catch-erasure-ratchet: findConflatorSites ignores a conflator-shaped string that appears only inside a comment
+  ---
+  duration_ms: 0.209555
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a string literal holding `test/**` does not open a block comment that hides the code after it
+ok 19 - catch-erasure-ratchet: a string literal holding `test/**` does not open a block comment that hides the code after it
+  ---
+  duration_ms: 2.356426
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a `/**` inside a line comment does not open a block comment that hides the next lines
+ok 20 - catch-erasure-ratchet: a `/**` inside a line comment does not open a block comment that hides the next lines
+  ---
+  duration_ms: 0.182755
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: comments are still blanked when strings, templates and regex literals hold comment markers
+ok 21 - catch-erasure-ratchet: comments are still blanked when strings, templates and regex literals hold comment markers
+  ---
+  duration_ms: 0.969168
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a file whose bare-catch count exceeds its baseline fails naming file and count (acceptance criterion 2)
+ok 22 - catch-erasure-ratchet: a file whose bare-catch count exceeds its baseline fails naming file and count (acceptance criterion 2)
+  ---
+  duration_ms: 46.924983
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a brand-new file with any bare catch enters at zero baseline and fails immediately -- no allowlist to add it to
+ok 23 - catch-erasure-ratchet: a brand-new file with any bare catch enters at zero baseline and fails immediately -- no allowlist to add it to
+  ---
+  duration_ms: 358.366558
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a file dropping below its baseline passes with no edit to the gate (acceptance criterion 5)
+ok 24 - catch-erasure-ratchet: a file dropping below its baseline passes with no edit to the gate (acceptance criterion 5)
+  ---
+  duration_ms: 168.967182
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: an allowance sitting slack above the actual count fails and names the new allowance (acceptance criterion, W1-T2906)
+ok 25 - catch-erasure-ratchet: an allowance sitting slack above the actual count fails and names the new allowance (acceptance criterion, W1-T2906)
+  ---
+  duration_ms: 30.585663
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: an allowance exactly matching the actual count is not slack
+ok 26 - catch-erasure-ratchet: an allowance exactly matching the actual count is not slack
+  ---
+  duration_ms: 135.503989
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a file entirely cleaned up (actual 0) still fails while its row is not removed
+ok 27 - catch-erasure-ratchet: a file entirely cleaned up (actual 0) still fails while its row is not removed
+  ---
+  duration_ms: 136.738622
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a new negated optional-chain conflator fails the gate naming its site (acceptance criterion 1)
+ok 28 - catch-erasure-ratchet: a new negated optional-chain conflator fails the gate naming its site (acceptance criterion 1)
+  ---
+  duration_ms: 115.365166
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: a conflator site already in the reviewed baseline does not re-trip the gate
+ok 29 - catch-erasure-ratchet: a conflator site already in the reviewed baseline does not re-trip the gate
+  ---
+  duration_ms: 103.10306
+  type: 'test'
+  ...
+# Subtest: PROPERTY no tracked src/**/*.ts file's bare-catch count exceeds its baseline
+ok 30 - PROPERTY no tracked src/**/*.ts file's bare-catch count exceeds its baseline
+  ---
+  duration_ms: 475.44426
+  type: 'test'
+  ...
+# Subtest: PROPERTY no tracked src/**/*.ts file's baseline allowance sits slack above its actual bare-catch count
+ok 31 - PROPERTY no tracked src/**/*.ts file's baseline allowance sits slack above its actual bare-catch count
+  ---
+  duration_ms: 486.00494
+  type: 'test'
+  ...
+# Subtest: PROPERTY no negated optional-chain conflator exists beyond the reviewed baseline
+ok 32 - PROPERTY no negated optional-chain conflator exists beyond the reviewed baseline
+  ---
+  duration_ms: 4811.162473
+  type: 'test'
+  ...
+# Subtest: catch-erasure-ratchet: every row in both baseline tables names a currently-tracked src/**/*.ts file (no stale allowance left behind by a rename)
+ok 33 - catch-erasure-ratchet: every row in both baseline tables names a currently-tracked src/**/*.ts file (no stale allowance left behind by a rename)
+  ---
+  duration_ms: 19.035691
+  type: 'test'
+  ...
+# Subtest: W1-T2670: a catch recording through an INJECTED log binding is not counted as bare
+ok 34 - W1-T2670: a catch recording through an INJECTED log binding is not counted as bare
+  ---
+  duration_ms: 0.263998
+  type: 'test'
+  ...
+# Subtest: W1-T2670: a catch binding its reason by const and CARRYING it into a recorded object is not counted as bare
+ok 35 - W1-T2670: a catch binding its reason by const and CARRYING it into a recorded object is not counted as bare
+  ---
+  duration_ms: 0.214522
+  type: 'test'
+  ...
+# Subtest: W1-T2670: a const binding that goes NOWHERE is still erasure — the recognition needs both halves
+ok 36 - W1-T2670: a const binding that goes NOWHERE is still erasure — the recognition needs both halves
+  ---
+  duration_ms: 0.101033
+  type: 'test'
+  ...
+# Subtest: W1-T2670: a catch returning a bare value with no record, reason or marker is STILL counted — the direction is unchanged
+ok 37 - W1-T2670: a catch returning a bare value with no record, reason or marker is STILL counted — the direction is unchanged
+  ---
+  duration_ms: 0.131759
+  type: 'test'
+  ...
+# Subtest: W1-T2670: the recognition moves exactly the catches that record by a house form — every other count is untouched
+ok 38 - W1-T2670: the recognition moves exactly the catches that record by a house form — every other count is untouched
+  ---
+  duration_ms: 1042.263992
+  type: 'test'
+  ...
+1..38
+# tests 38
+# suites 0
+# pass 38
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 15895.511384
