@@ -433,10 +433,18 @@ else { process.stderr.write("forbidden fixture transport"); process.exitCode=97;
       assert.ok(calls().some(args => args[0] === "docker" && args[1] === "exec" && args[2] === container));
       assert.ok(calls().some(args => args[0] === "docker" && args[1] === "manifest" && args.includes(`synthetic.invalid/selected-worker:${sha}`)));
       assert.equal(calls().some(args => args.includes("remudero-daemon")), false, "the public core is never an image fallback");
+      const oldNameOnly = { ...inspect, Config: { Env: inspect.Config.Env.filter(line => !line.startsWith("RMD_SELECTED_INSTANCE_REGISTRY="))
+        .map(line => line.startsWith("RMD_INSTANCE_REGISTRY=") ? `RMD_INSTANCE_REGISTRY=${fixture.selected}` : line) } };
+      const compatible = await read(oldNameOnly);
+      assert.ok(compatible.rows.some(row => row.pipeline === "image"), "an old-name-only container with the selected file remains readable");
+      assert.ok(calls().some(args => args[0] === "docker" && args[1] === "manifest" && args.includes(`synthetic.invalid/selected-worker:${sha}`)),
+        "the compatible container reaches the real image manifest reader");
       assert.throws(() => realDeployDeps({ installPath: fixture.root, stateRoot: containerRoot, ledgerPath,
         daemonLabel: "fixture", serveLabel: "fixture", servePort: 1, uid: 1 }), /selected instance registry unavailable/,
         "a synchronous supervisor cannot claim fresh asynchronous container binding");
       for (const invalid of ["invalid json", { ...inspect, Name: "/another-instance" },
+        { ...inspect, Config: { Env: inspect.Config.Env.map(line => line.startsWith("RMD_SELECTED_INSTANCE_REGISTRY=")
+          ? "RMD_SELECTED_INSTANCE_REGISTRY=" : line) } },
         { ...inspect, Config: { Env: inspect.Config.Env.map(line => line === "RMD_INSTANCE_NAME=worker" ? "RMD_INSTANCE_NAME=other" : line) } },
         { ...inspect, Mounts: inspect.Mounts.map((mount, i) => i === 0 ? { ...mount, Source: "/srv/synthetic/other-state" } : mount) },
         { ...inspect, Mounts: inspect.Mounts.map((mount, i) => i === 1 ? { ...mount, RW: true } : mount) },
@@ -1668,16 +1676,18 @@ test("private registry selection preserves owner holds and private-safe boundari
     // Each child is a cold tsx start of the whole CLI graph, so its wall time is the host's load, not the verb's.
     // The first child is the measurement; every later one may take the slowest seen times the spawns after the first.
     const stopPaths = ["", join(root, "missing-private.yaml"), selected], refusedPaths = ["", join(root, "missing-private.yaml")];
-    const spawnsAfterFirst = stopPaths.length + refusedPaths.length * 2;
+    const spawnsAfterFirst = stopPaths.length + refusedPaths.length * 2 + 2;
     let slowestMs: number | undefined;
-    const child = async (verb: string, path: string) => {
+    const child = async (verb: string, path: string | undefined, activeSelection?: string) => {
       const bound = slowestMs === undefined ? undefined : slowestMs * spawnsAfterFirst;
       const started = process.hrtime.bigint();
       const proc = spawn(process.execPath,
         ["--import", "tsx", "--input-type=module", "-e",
           `import { main } from "#src/run-task.js"; process.argv = [process.execPath, "rmd", ${JSON.stringify(verb)}];
            await main({ checkFreshness: () => ({ status: "guarded" }) }).catch(error => { console.error(error.message); process.exitCode = 2; });`],
-        { cwd: REPO_ROOT, env: { ...withoutRegistrySelection(process.env), HOME: home, GH_TOKEN: "fixture-not-a-credential", RMD_INSTANCE_REGISTRY: path,
+        { cwd: REPO_ROOT, env: { ...withoutRegistrySelection(process.env), HOME: home, GH_TOKEN: "fixture-not-a-credential",
+          ...(path === undefined ? {} : { RMD_INSTANCE_REGISTRY: path }),
+          ...(activeSelection === undefined ? {} : { RMD_SELECTED_INSTANCE_REGISTRY: activeSelection }),
           GH_CONFIG_DIR: join(home, "gh"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = "";
       proc.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
@@ -1708,6 +1718,16 @@ test("private registry selection preserves owner holds and private-safe boundari
       assert.equal(existsSync(join(state, "state", "PAUSE")), false, "an unknown target never becomes a hold on another instance");
       assert.equal((await child("resume", path)).status, 2, "resume must still require selected evidence");
     }
+    const emptySelection = await child("pause", selected, "");
+    assert.equal(emptySelection.status, 2, "an explicitly empty new selection cannot borrow the valid legacy path");
+    assert.match(emptySelection.stderr, /REFUSED/);
+    assert.equal(existsSync(join(state, "state", "PAUSE")), false);
+    const activeOnly = await child("pause", undefined, selected);
+    assert.equal(activeOnly.status, 0, activeOnly.stderr);
+    assert.equal(existsSync(join(state, "state", "PAUSE")), true, "owner PAUSE honors only the valid new selection");
+    assert.equal((activeOnly.stdout + activeOnly.stderr).includes(root), false,
+      "owner diagnostics do not reveal the selected state root");
+    rmSync(join(state, "state", "PAUSE"));
     const paused = await child("pause", selected);
     assert.equal(paused.status, 0, paused.stderr);
     assert.equal((paused.stdout + paused.stderr).includes(root), false, "selected success diagnostics hide private state paths");

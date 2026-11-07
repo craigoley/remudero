@@ -33487,7 +33487,7 @@ async function stopCommand(rest: string[]): Promise<number> {
  * never the cwd, the repository, the hostname or a pid. A refusal returns before anything is written.
  */
 async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], config: Config): Promise<PauseTarget | undefined> {
-  const explicit = process.env.RMD_INSTANCE_REGISTRY !== undefined;
+  const explicit = selectedInstanceRegistryEnvPath() !== undefined;
   const resolveTarget = async (): Promise<PauseTarget | undefined> => {
     const registryPath = explicit ? "selected registry" : daemonInstanceRegistryPath(repoRoot);
     let registryText: string | undefined;
@@ -33579,7 +33579,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     requested_by_pid: info.pid,
   });
   console.log(
-    `### rmd pause — instance '${target.instance}'${process.env.RMD_INSTANCE_REGISTRY === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
+    `### rmd pause — instance '${target.instance}'${selectedInstanceRegistryEnvPath() === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
       `reaches merge; it spawns nothing new until \`rmd resume --instance ${target.instance}\`. No other instance is held.`,
   );
   return 0;
