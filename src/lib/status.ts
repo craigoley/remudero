@@ -4252,10 +4252,20 @@ export function projectPlan(
   // TASK-LESS ESCALATIONS (W1-T283): the loop above is a function of plan.tasks ALONE, so an escalation whose
   // `task_id` names no plan task had no row to attach to — the panel read "nothing needs you" while dozens were
   // open. A SECOND, INDEPENDENT source. An id the plan DOES own is skipped.
+  // An in-place selection edit rebinds the same issue URL to its delivered digest.
+  // Pending observations must not change what an operator acknowledges on the board.
+  const primaryShadowCurrent = new Map<string, string>();
+  for (const row of indexedStepRows(ledgerLinesOnce, "escalation.issue_opened", ledgerIndex)) {
+    if (row.step !== "escalation.issue_opened" || typeof row.task_id !== "string" || !/^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(row.task_id)
+      || typeof row.issue_url !== "string") continue;
+    primaryShadowCurrent.set(row.issue_url, row.task_id);
+  }
   for (const taskId of effectiveDeps.skipTasklessEscalations ? [] : taskIdsWithEscalationLines(ledgerLinesOnce, ledgerIndex)) {
     if (plan.byId.has(taskId)) continue;
     const escalation = resolveEscalation(ledgerLinesOnce, taskId, effectiveDeps.github, ledgerIndex);
     if (!escalation) continue; // confirmed closed (or otherwise resolved) — no row, same as above.
+    if (/^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(taskId) && escalation.issueUrl
+      && primaryShadowCurrent.get(escalation.issueUrl) !== taskId) continue;
     byId.set(taskId, {
       taskId,
       status: "blocked",

@@ -3,6 +3,12 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { Socket } from "node:net";
+import { IncomingMessage, ServerResponse } from "node:http";
+import { computeBoardSnapshot } from "#src/lib/board.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { escalationClasses, escalationDecisions } from "#src/lib/now-decisions.js";
+import { buildApproveManualRoute, buildEscalationMarkHandledRoute } from "#src/lib/panel-actions.js";
 import { buildSweepEffects } from "#src/lib/sweep.js";
 import { runSweep } from "#src/lib/sweep.js";
 import { runEscalationReconcile } from "#src/lib/sweep.js";
@@ -14,6 +20,43 @@ import type { Config } from "#src/lib/config.js";
 import type { Plan } from "#src/lib/plan.js";
 import type { OpenPrView } from "#src/lib/sweep.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
+
+function displayedAlertDecision(ledgerPath: string, all: OpenIssue[], closed: Set<string>, digest: string) {
+  const board = computeBoardSnapshot({ plan: { tasks: [], byId: new Map() }, ledgerPath,
+    github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined,
+      prBody: () => undefined, listOpenHeadBranches: () => [], listMergedHeadBranches: () => [],
+      issueByUrl: url => { const issue = all.find(i => i.url === url);
+        return issue ? { state: closed.has(url) ? "CLOSED" : "OPEN", title: issue.title } : null; } } });
+  const decisions = escalationDecisions("core", board.tasks, escalationClasses(readLedgerLines(ledgerPath)));
+  assert.equal(decisions.length, 1, "the production board offers exactly one action for the live issue");
+  const decision = decisions[0]!;
+  assert.equal(decision.answer.fields.taskId, `PRIMARY-SHADOW-${digest}`,
+    "the board action acknowledges the issue's displayed selection, not its original birth digest");
+  assert.equal(decision.answer.path, "/v1/manual/approve", "the MANUAL notice uses its actual operator route");
+  return decision;
+}
+
+async function handleDisplayedAlert(root: string, ledgerPath: string, all: OpenIssue[], closed: Set<string>,
+  digest: string, markHandled = false): Promise<void> {
+  const decision = displayedAlertDecision(ledgerPath, all, closed, digest);
+  const deps = { root, ledgerPath, issues: { close: (url: string) => { closed.add(url); } } };
+  const route = markHandled ? buildEscalationMarkHandledRoute(deps) : buildApproveManualRoute(deps);
+  assert.equal(route.path, markHandled ? "/v1/escalation/mark-handled" : decision.answer.path);
+  const socket = new Socket();
+  const req = new IncomingMessage(socket);
+  req.headers = { authorization: "Bearer write", "content-type": "application/json" };
+  req.push(JSON.stringify({ ...decision.answer.fields, ...(markHandled ? { class: "MANUAL", disposition: "acted" } : {}) }));
+  req.push(null);
+  const response = new ServerResponse(req);
+  try {
+    await route.handler(req, response, { params: {} });
+    assert.equal(response.statusCode, 200);
+    const row = readLedgerLines(ledgerPath).at(-1)!;
+    assert.equal(row.step, markHandled ? "panel.escalation_marked_handled" : "panel.manual_approved");
+    assert.equal(row.task_id, `PRIMARY-SHADOW-${digest}`);
+    assert.equal(row.issue_url, decision.answer.fields.issueUrl);
+  } finally { req.destroy(); response.destroy(); socket.destroy(); }
+}
 
 test("W1-T11444 criterion 2: the general lifecycle cannot retire the primary episode through one terminal PR", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-general-close-"));
@@ -50,25 +93,32 @@ test("W1-T11444 criterion 2: acknowledgement after an in-place selection update 
   try {
     const ledgerPath = join(root, "ledger.ndjson"), all: OpenIssue[] = [], closed = new Set<string>();
     let now = 1_800_000_000_000;
+    let failEdit = false;
     const selection = { instance: "core", sourcePath: join(root, "selection.yaml"), digest: "a".repeat(64), mode: "shadow" as const };
     const issues: IssueGateway = {
       create: (title, body) => { const number = all.length + 1, url = `https://github.com/owner/repo/issues/${number}`;
         all.push({ number, url, title, body }); return url; },
       listOpen: () => all.filter(i => !closed.has(i.url)),
-      editBody: (url, body) => { all.find(i => i.url === url)!.body = body; },
+      editBody: (url, body) => {
+        if (failEdit) throw new Error("selection edit delivery failed");
+        all.find(i => i.url === url)!.body = body;
+      },
     };
     const channel = () => escalation.primaryShadowOperatorChannel({ owner: "owner", repo: "repo", ledgerPath,
       runId: "updated-ack", selection: () => ({ ...selection }), issues, clock: clockFromMillisFn(() => now) });
     const pr = (prNumber: number) => ({ prNumber, prUrl: `https://github.com/owner/repo/pull/${prNumber}` });
     await channel().refuse(pr(11));
     selection.digest = "b".repeat(64); now += 1;
-    await channel().refuse(pr(12));
+    failEdit = true;
+    await assert.rejects(channel().refuse(pr(12)), /selection edit delivery failed/);
+    displayedAlertDecision(ledgerPath, all, closed, "a".repeat(64));
+    assert.ok(all[0]!.body!.includes(`Selection digest: ${"a".repeat(64)}`));
+    failEdit = false;
+    await channel().reconcile();
     assert.equal(all.length, 1, "a changed selection updates the unacknowledged issue in place");
     const taskId = /\*\*Task:\*\*\s*(\S+)/.exec(all[0]!.body!)![1];
     assert.equal(taskId, `PRIMARY-SHADOW-${selection.digest}`, "mark-handled must acknowledge the displayed selection");
-    closed.add(all[0]!.url);
-    appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "PANEL", task_id: taskId,
-      step: "panel.escalation_marked_handled", issue_url: all[0]!.url, class: "MANUAL", disposition: "acted" }) + "\n");
+    await handleDisplayedAlert(root, ledgerPath, all, closed, selection.digest);
     now += 1;
     await channel().refuse(pr(13)); await channel().reconcile();
     assert.equal(all.length, 1, "reconstructing the channel cannot unsilence the acknowledged selection");
@@ -78,6 +128,12 @@ test("W1-T11444 criterion 2: acknowledgement after an in-place selection update 
     assert.ok(all[1]!.body!.includes(selection.digest));
     assert.ok(all[1]!.body!.includes("/pull/14"));
     assert.equal(all[1]!.body!.includes("/pull/13"), false, "silenced observations must not leak into the reopened alert");
+    await handleDisplayedAlert(root, ledgerPath, all, closed, selection.digest, true);
+    await channel().refuse(pr(15)); await channel().reconcile();
+    assert.equal(all.length, 2, "the existing mark-handled route also silences its displayed selection");
+    selection.digest = "d".repeat(64);
+    await channel().refuse(pr(16));
+    assert.equal(all.length, 3, "neither operator action silences a later selection");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -165,9 +221,7 @@ test("W1-T11444 criterion 2: live recovery closes the alert and handling is sele
     await pass("shadow", "first");
     assert.equal(all.length, 1, "a primary refusal opens the alert before acknowledgment");
     const taskId = /\*\*Task:\*\*\s*`?([^`\s]+)/.exec(all[0]!.body!)![1];
-    closed.add(all[0]!.url);
-    appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "PANEL", task_id: taskId,
-      step: "panel.escalation_marked_handled", issue_url: all[0]!.url, class: "MANUAL", disposition: "acted" }) + "\n");
+    await handleDisplayedAlert(root, ledgerPath, all, closed, taskId!.slice("PRIMARY-SHADOW-".length));
     await pass("shadow", "first");
     assert.equal(all.length, 1, "a handled selection must stay silent across effect reconstruction");
     await pass("shadow", "second");

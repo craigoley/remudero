@@ -404,9 +404,9 @@ export function primaryShadowOperatorChannel(opts: {
     pendingRecovery?: string };
   const states = new Map<string, State>();
   const historyMemo = createLedgerRotationMemo(rows => rows.filter(row =>
-    row.step === "primary_shadow.observation" || row.step === "panel.escalation_marked_handled"), {
-    holder: "primary-shadow-notice", durableDigest: { reducerVersion: "primary-shadow-notice-v2" },
-    pattern: /primary_shadow\.observation|panel\.escalation_marked_handled|PRIMARY-SHADOW-/, requireObjects: true,
+    row.step === "primary_shadow.observation" || row.step === "panel.escalation_marked_handled" || row.step === "panel.manual_approved"), {
+    holder: "primary-shadow-notice", durableDigest: { reducerVersion: "primary-shadow-notice-v3" },
+    pattern: /primary_shadow\.observation|panel\.(escalation_marked_handled|manual_approved)|PRIMARY-SHADOW-/, requireObjects: true,
   });
   const identity = (s: PrimaryShadowSelection) => `<!-- primary-shadow ${JSON.stringify([opts.owner, opts.repo, s.instance])} -->`;
   const key = (s: PrimaryShadowSelection) => `PRIMARY-SHADOW-${s.digest}`;
@@ -419,14 +419,14 @@ export function primaryShadowOperatorChannel(opts: {
     if (known) return known;
     let damaged = false;
     const history = await readLedgerUnionRecordsMemoized(dirname(opts.ledgerPath), historyMemo, {
-      step: ["primary_shadow.observation", "panel.escalation_marked_handled"], refuseIncomplete: true,
-      onTorn: raw => { if (raw.includes("primary_shadow.observation") || raw.includes("panel.escalation_marked_handled")) damaged = true; },
+      step: ["primary_shadow.observation", "panel.escalation_marked_handled", "panel.manual_approved"], refuseIncomplete: true,
+      onTorn: raw => { if (raw.includes("primary_shadow.observation") || raw.includes("panel.escalation_marked_handled") || raw.includes("panel.manual_approved")) damaged = true; },
     });
     if (!history.ok || damaged) throw new Error("primary shadow alert history is unreadable");
     const current: State = { revision: 0, first: "", prs: [], handledDigests: [], digest: s.digest, sourcePath: s.sourcePath };
     const ownTaskIds = new Set([id, ...history.rows.filter(row => row.instance_key === instanceKey).map(row => row.task_id)]);
     for (const row of history.rows) {
-      if (row.step === "panel.escalation_marked_handled") {
+      if (row.step === "panel.escalation_marked_handled" || row.step === "panel.manual_approved") {
         if (typeof row.task_id === "string" && ownTaskIds.has(row.task_id) && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(row.task_id)) {
           const handled = row.task_id.slice("PRIMARY-SHADOW-".length);
           if (!current.handledDigests.includes(handled)) current.handledDigests.push(handled);
@@ -494,6 +494,12 @@ export function primaryShadowOperatorChannel(opts: {
         // The shared escalation gateway owns delivery timing; serialize and await its edit as other producers do.
         if (!issues.editBody) throw new Error("primary shadow alert cannot update its issue");
         await issues.editBody(existing.url, updated);
+        if (TASK_LINE_RE.exec(normalizeCandidateBody(body))?.[1] !== key(selected)) {
+          // Rebind the existing issue's board action only after its displayed selection was delivered.
+          appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: key(selected),
+            step: "escalation.issue_opened", issue_url: existing.url, class: "MANUAL",
+            reason: "primary shadow alert selection updated in place" });
+        }
       }
     } else {
       const escalation: Escalation = { class: "MANUAL", taskId: key(selected),
