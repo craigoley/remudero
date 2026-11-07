@@ -613,7 +613,7 @@ import { daemonExitCode, readRestartHistoryLines, type RetroCheckCompanions, typ
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
-import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
+import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
@@ -641,7 +641,7 @@ import { readPlanBase } from "./lib/plan-base-reader.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
-import { assertInstanceRegistryRuntimeCurrent, InstanceRegistryRuntimeError, instanceRegistryRuntimePresent, runtimeInstanceRegistryText, withInstanceRegistryRuntime } from "./lib/instance-registry-selection.js";
+import { assertInstanceRegistryRuntimeCurrent, InstanceRegistryRuntimeError, instanceRegistryRuntimePresent, runtimeInstanceRegistryText, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "./lib/instance-registry-selection.js";
 import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
@@ -1893,7 +1893,7 @@ export type FreshTreeReviewSeams = {
 
 /** Existing loaded configuration is the opt-in boundary; never load/create config in an offline reader. */
 function selectedRegistryIntentForConfig(config: Config) {
-  return captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY } });
+  return captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: selectedInstanceRegistryEnvPath() } });
 }
 
 /** Parse only the facts a restart must prove before it reuses W1-T3723's stable reviewer path.
@@ -2338,8 +2338,7 @@ export function buildReviewerHealthRoute(
       return normal();
     }
     if (healed.state !== "ready") {
-      log("reviewer.healed_tree_unavailable", { incident_id: incident.id, pr: prArg, state: healed.state, reason: healed.reason,
-        ...(healed.state === "conflict" ? { conflict_paths: healed.paths } : {}), origin_main_sha: healed.originMainSha });
+      log("reviewer.healed_tree_unavailable", { incident_id: incident.id, pr: prArg, ...reviewerHealedTreeUnavailableFields(healed) });
       const key = `${incident.id}:${healed.originMainSha}`;
       if (healed.state === "conflict" && !escalatedConflicts.has(key)) {
         escalatedConflicts.add(key);
@@ -28606,7 +28605,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
       selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
-        settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+        settings: effectiveConfig.selectedRegistryMode, input: { envPath: selectedInstanceRegistryEnvPath() },
         record: (step, fields) => appendLedger(ledgerPathFor(effectiveConfig), { run_id: "DEPLOY", task_id: "DEPLOY", step, ...fields }),
       } : undefined,
       ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig), { stateDir: join(effectiveConfig.root, "state"), host: hostname() }),
@@ -28634,7 +28633,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
   const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root,
     selectedRegistryObservation: effectiveConfig.selectedRegistryMode?.mode === "shadow" ? {
-      settings: effectiveConfig.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY },
+      settings: effectiveConfig.selectedRegistryMode, input: { envPath: selectedInstanceRegistryEnvPath() },
       record: (step, fields) => deps.log(step, fields),
     } : undefined,
   }, lifecycleExec) }, {
@@ -29615,7 +29614,7 @@ export async function serveCommand(
   const channel = supervised && (deps.generation ?? processChannel());
   const server = await buildReadyServeServer({
     selectedRegistryObservation: config.selectedRegistryMode?.mode === "shadow" ? {
-      settings: { ...config.selectedRegistryMode }, input: { envPath: process.env.RMD_INSTANCE_REGISTRY }, record: log,
+      settings: { ...config.selectedRegistryMode }, input: { envPath: selectedInstanceRegistryEnvPath() }, record: log,
     } : undefined,
     ...(channel ? { generation: { requestHandoff: (detail) => channel.send({ ...detail, type: GENERATION_MESSAGES.handoffRequest }) } } : {}),
     boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
@@ -33692,7 +33691,7 @@ async function stopCommand(rest: string[]): Promise<number> {
  * never the cwd, the repository, the hostname or a pid. A refusal returns before anything is written.
  */
 async function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], config: Config): Promise<PauseTarget | undefined> {
-  const explicit = process.env.RMD_INSTANCE_REGISTRY !== undefined;
+  const explicit = selectedInstanceRegistryEnvPath() !== undefined;
   const resolveTarget = async (): Promise<PauseTarget | undefined> => {
     const registryPath = explicit ? "selected registry" : daemonInstanceRegistryPath(repoRoot);
     let registryText: string | undefined;
@@ -33784,7 +33783,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     requested_by_pid: info.pid,
   });
   console.log(
-    `### rmd pause — instance '${target.instance}'${process.env.RMD_INSTANCE_REGISTRY === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
+    `### rmd pause — instance '${target.instance}'${selectedInstanceRegistryEnvPath() === undefined ? ` (${target.root})` : ""} is PAUSED (drain-and-hold). Its in-flight task still ` +
       `reaches merge; it spawns nothing new until \`rmd resume --instance ${target.instance}\`. No other instance is held.`,
   );
   return 0;
@@ -43203,7 +43202,7 @@ export async function main(
   // Recovery controls keep their existing authority and target checks even if selection is broken.
   // PAUSE validates its target locally; --fleet retains its independent authenticated Git path.
   if (inspectionArgv[0] !== "stop" && inspectionArgv[0] !== "pause"
-    && process.env.RMD_INSTANCE_REGISTRY !== undefined && !instanceRegistryRuntimePresent()) {
+    && selectedInstanceRegistryEnvPath() !== undefined && !instanceRegistryRuntimePresent()) {
     return withInstanceRegistryRuntime(() => main(deps));
   }
   // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's

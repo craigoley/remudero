@@ -1,0 +1,38 @@
+- id: W1-T11559
+  title: A fresh fix-dispatch child waits for its first shared-PAUSE read before deciding whether the remote hold is unreachable
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # this is the fail-closed fleet dispatch gate; preserve STOP and held/unreachable refusal
+  band_meaning: span
+  origin: operator-session#queue-recovery-shared-pause-child-2026-11-07
+  plan_refs:
+    - W1-T9114
+    - W1-T11336
+    - W1-T11383
+  files:
+    - src/run-task.ts
+    - test/worker/a-fix-child-awaits-first-shared-pause-read.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A fresh detached fix child awaits the first asynchronous shared-PAUSE read before treating an absent ref as permission to continue; after absence it performs the live PR and task rechecks and reaches the normal dispatcher
+      proof: "unit test: W1-T11559: a fresh fix-dispatch child awaits its first shared-PAUSE read"
+    - claim: A held or genuinely unreachable shared-PAUSE ref still refuses before dispatch, while a local STOP short-circuits the remote read
+      proof: "unit test: W1-T11559: held, unreachable and STOP outcomes retain fail-closed order"
+  rationale: |
+    OBSERVED 2026-11-07 during queue recovery: the native fix children for #17144, #17132 and #17081 each ended at recheckFixDispatch with `worker admission is held: PAUSE: cannot reach origin to read refs/rmd-pause/hold`. A direct `git ls-remote` from the exact engine root inside the daemon container returned success with no matching ref, so this was not an observed fleet hold.
+
+    SOURCE-DERIVED ROOT CAUSE: every run child is a new process with a fresh sharedPauseRefreshes WeakMap. In checkSharedPause, a first call initializes state.detail to the fail-closed `unreachable` result, starts refreshSharedPause asynchronously, then immediately returns that initial detail. The child path runFixDispatchWork calls this synchronous check through runFixDispatchChild's hold recheck, and the source has no prepareSharedPause call in that path. Unlike `rmd drain`, it never awaits the first shared-PAUSE read. The child therefore refuses before its asynchronous read can update the detail; its process exits and repeats this on the next sweep. This preserves the fail-closed contract but strands valid fix work.
+
+    DISTINCTION FROM W1-T9114: that task added the detached child's live PR, task and shared-hold recheck before dispatch. This task leaves that fence in place and fixes only its first-read ordering: a fresh child must await the bounded read before the existing synchronous decision can distinguish absent, held and unreachable.
+
+    BOUNDARY: a real held or unreachable ref remains a refusal; local STOP still wins without a remote read. Do not weaken the gate, change credentials, or reuse the daemon process's in-memory verdict.
+  falsifier: |
+    On main, a fresh detached fix child whose remote shared-PAUSE ref is absent immediately sees the provisional unreachable state and never reaches the live PR/task checks. Removing the awaited first read restores that refusal; held and unreachable controls must continue to refuse.
+  note: |
+    Reserved with `rmd next-task-id` on the operator checkout; reservation ref `refs/rmd-id/W1-T11559` is held by branch `plan-file-child-pause-20261107T090600Z`.

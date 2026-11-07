@@ -153,7 +153,7 @@ if [ ! -r "${CLAUDE_DIRECTORY_FILE}" ]; then
 fi
 source "${CLAUDE_DIRECTORY_FILE}"
 INSTANCE_NAME="${RMD_SERVE_INSTANCE:-}"
-INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY-${SCRIPT_ROOT}/.remudero/daemon-instances.yaml}"
+INSTANCE_REGISTRY="${RMD_SELECTED_INSTANCE_REGISTRY-${RMD_INSTANCE_REGISTRY-${SCRIPT_ROOT}/.remudero/daemon-instances.yaml}}"
 SELECTED_REGISTRY_ACTIVE=0
 SELECTED_REGISTRY_LAUNCH_ARGS=()
 INSTANCE_STATE_DIR=""
@@ -259,7 +259,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
+if [ "${RMD_SELECTED_INSTANCE_REGISTRY+x}" = x ] || [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
   if [ ! -r "${SCRIPT_ROOT}/deploy/recycle-container.sh" ]; then
     echo "serve-container: REFUSING -- selected registry unavailable (reader_unavailable)." >&2
     exit 2

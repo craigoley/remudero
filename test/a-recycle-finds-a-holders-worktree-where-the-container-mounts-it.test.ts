@@ -114,7 +114,9 @@ exit 0
   });
   assert.ifError(run.error);
   assert.equal(run.status, 1, run.stdout + run.stderr);
-  assert.match(run.stderr, /REFUSING — \d+ lane-holding and \d+ lane-less/);
+  if (options.mount === "failed") {
+    assert.match(run.stderr, /REFUSING -- selected registry mounts of remudero are unreadable; NOTHING has been touched/);
+  } else assert.match(run.stderr, /REFUSING — \d+ lane-holding and \d+ lane-less/);
   assert.equal(existsSync(join(dir, "lifecycle")), false, "the fixture never replaces a container");
   assert.equal(existsSync(join(state, "state/PAUSE")), false, "refusal releases its pause");
   assert.equal(existsSync(join(state, ".scratch-mounts")), false, "resolving a plan prepares no mounts");
@@ -161,12 +163,18 @@ test("W1-T9713: with scratch off the state-dir worktrees are read as before", t 
   assert.ok(busy.stderr.includes(`  pid 4321  age 5s  lane ${TASK}  claude --output-format stream-json\n`));
 });
 
-test("W1-T9713: an absent or unreadable live bind falls back to the scratch plan", t => {
-  for (const mount of ["absent", "missing", "failed"] as const) {
+test("W1-T9713: an absent or missing live bind falls back to the scratch plan", t => {
+  for (const mount of ["absent", "missing"] as const) {
     const r = recycle(t, { mount });
     assert.match(r.stderr, /REFUSING — 1 lane-holding and 0 lane-less/);
     assert.ok(r.stderr.includes(`worktrees: ${r.planned}`));
   }
+});
+
+test("W1-T11431: unreadable mount metadata cannot rule out a selected registry and refuses replacement", t => {
+  const r = recycle(t, { mount: "failed" });
+  assert.equal(r.stderr.includes(r.planned), false, "unknown registry mounts refuse before scratch fallback");
+  assert.equal(r.stderr.includes(r.live), false, "the refusal does not expose host mount sources");
 });
 
 test("W1-T9713: an unreadable plan falls back to state worktrees", t => {
