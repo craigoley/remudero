@@ -24947,17 +24947,43 @@ export async function runSweepLightPass(
 ): Promise<SweepSummary[]> {
   const passId = randomUUID();
   const passScope = deps.lightPassScope ?? "idle";
+  if (deps.dryRun || !deps.log) {
+    return runSweepLightPassCore(openPrs, deps, policy, passId, passScope);
+  }
+
   const startedAtMs = performance.now();
   const startedAt = clockFromMillisFn(deps.now ?? Date.now).iso();
-  const log = deps.log ?? ((step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step, ...extra }));
-  log("sweep.pass", { ts: startedAt, pass_id: passId, light_pass_scope: passScope });
-  const summaries = await runSweepLightPassCore(openPrs, deps, policy, passId, passScope);
+  let passRecorded = false;
+  const summaries: Record<string, unknown>[] = [];
+  const log = deps.log;
+  const measuredDeps: SweepDeps = {
+    ...deps,
+    log: (step, extra = {}) => {
+      if (step === "sweep.pass") {
+        if (passRecorded) return;
+        passRecorded = true;
+        log(step, { ...extra, ts: startedAt, pass_id: passId, light_pass_scope: passScope });
+      } else if (step === "sweep.summary") {
+        summaries.push(extra);
+      } else {
+        log(step, extra);
+      }
+    },
+  };
+  const result = await runSweepLightPassCore(openPrs, measuredDeps, policy, passId, passScope);
   const elapsedMs = performance.now() - startedAtMs;
-  if (Number.isFinite(elapsedMs) && elapsedMs >= 0) {
-    log("sweep.summary", { pass_id: passId, light_pass_scope: passScope, elapsed_ms: elapsedMs });
+  if (passRecorded && Number.isFinite(elapsedMs) && elapsedMs >= 0) {
+    const aggregate: Record<string, unknown> = {};
+    for (const fields of summaries) {
+      for (const [key, value] of Object.entries(fields)) {
+        aggregate[key] = typeof value === "number" && Number.isFinite(value)
+          ? ((typeof aggregate[key] === "number" ? aggregate[key] as number : 0) + value)
+          : value;
+      }
+    }
+    log("sweep.summary", { ...aggregate, pass_id: passId, light_pass_scope: passScope, elapsed_ms: elapsedMs });
   }
-  return summaries;
+  return result;
 }
 
 async function runSweepLightPassCore(
@@ -25103,8 +25129,9 @@ async function runSweepLightPassCore(
   // while preserving every previously held PR and their oldest-held-first order (W1-T9212).
   const planMerges = availablePlanMerges;
   const planMergeBudget = { spentMs: 0, durationKnown: true };
-  const unavailablePlanMergeReason = "measured light-pass interval unavailable (<3 valid same-scope intervals); " +
-    "one never-held plan PR direct-merges per light pass, while held PRs keep their W1-T9212 re-evaluation";
+  const unavailablePlanMergeReason = "one never-held plan PR direct-merges per light pass " +
+    "(the one plan PR direct-merges per light pass bound remains; measured interval unavailable: " +
+    "fewer than three valid same-scope intervals); held PRs keep their W1-T9212 re-evaluation";
   const planMergeStopReason = (index: number | undefined, held: boolean): string | undefined => {
     if (passIntervalBudgetMs === undefined) return index === 0 || held ? undefined : unavailablePlanMergeReason;
     if (index === 0) return undefined;
