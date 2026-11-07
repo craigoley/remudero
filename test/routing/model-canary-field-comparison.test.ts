@@ -108,3 +108,29 @@ test("field comparison withholds a caller window when benchmark execution time i
   assert.equal(result.unmatched.length, 1);
   assert.equal(result.unmatched[0]!.reason, "observation-window-unverified");
 });
+
+test("field comparison counts an identical duplicate run once and refuses a contradictory duplicate run", () => {
+  const first = benchmark("run-dup", "case-1");
+  const result = compareCanaryToFieldTrials({ benchmarkCases: [first, { ...first }], fieldTrials: [field()] });
+  assert.equal(result.comparisons[0]!.benchmark.denominator.count, 1);
+  assert.throws(() => compareCanaryToFieldTrials({ benchmarkCases: [first, benchmark("run-dup", "case-1", {
+    outcomes: { "first-attempt": false, "all-repeats": false, "best-of-k": false } })], fieldTrials: [field()] }),
+  /canary-field-duplicate-run-contradictory/);
+});
+
+test("field comparison counts an identical duplicate cohort once and refuses a contradictory duplicate cohort", () => {
+  const result = compareCanaryToFieldTrials({ benchmarkCases: [benchmark("run-1", "case-1")],
+    fieldTrials: [field(), field()] });
+  assert.equal(result.comparisons.length, 1);
+  assert.equal(result.denominators.observationalAssignedTasks, 20);
+  assert.throws(() => compareCanaryToFieldTrials({ benchmarkCases: [benchmark("run-1", "case-1")],
+    fieldTrials: [field(), field({ successfulTasks: 3 })] }), /canary-field-duplicate-cohort-contradictory/);
+});
+
+test("field comparison labels an observational cohort with no observed tasks as an empty denominator", () => {
+  const result = compareCanaryToFieldTrials({ benchmarkCases: [benchmark("run-1", "case-1")],
+    fieldTrials: [field({ observedTasks: 0, successfulTasks: 0 })] });
+  assert.equal(result.comparisons.length, 0);
+  assert.equal(result.unmatched.length, 1);
+  assert.equal(result.unmatched[0]!.reason, "field-trial-denominator-empty");
+});

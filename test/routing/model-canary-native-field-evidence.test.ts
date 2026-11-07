@@ -19,7 +19,7 @@ test("native field reader withholds missing serving identity and an unverified o
           host: "linux", period: "2026-10", provider: "claude", selectedModel: "model-a", servedModel: "model-b",
           selectedEffort: "medium", taskClass: "coding", risk: "low", workLane: "worker",
           revisions: { harness: "a".repeat(40), prompt: "b".repeat(40), tool: "c".repeat(40),
-            scorer: "d".repeat(40), environment: "e".repeat(40) },
+            scorer: "d".repeat(40), environment: "e".repeat(40), cache: "f".repeat(40) },
           assignments: 3, workerSucceeded: 2, workerFailed: 1,
         }],
       } }],
