@@ -1,0 +1,77 @@
+- id: W1-T11599
+  title: Canary single-model comparator is selected on development cases from native owner receipts and bound to the holdout
+  repo: remudero
+  depends_on: [W1-T11597, W1-T11598, W1-T10957, W1-T11117, W1-T11118]
+  plan_refs: [W1-T11119, W1-T11597, W1-T11598, W1-T11117, W1-T11118, W1-T10957]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: architect
+  files:
+    - src/lib/model-canary-dev-selected-comparator.ts
+    - src/lib/model-canary-command.ts
+    - test/routing/model-canary-dev-selected-comparator.test.ts
+  rationale: >-
+    Plan-only replacement for the comparator slice of held PR #17194. PR #17194 was made conflicting by
+    merged plan amendment PR #17193, which changed the W1-T11119 shard (widened files, folded criteria
+    15-27); this replacement carries that latest W1-T11119 shard forward and uses fresh reserved ids
+    because W1-T11593, W1-T11594 and W1-T11595 are still declared by the open PR. W1-T11119 compares
+    frozen router decisions with a development-selected single-model comparator, but nothing produces a
+    comparator chosen without seeing holdout outcomes. RouteLLM (ICLR 2025,
+    https://proceedings.iclr.cc/paper_files/paper/2025/hash/5503a7c69d48a2f86fc00b3dc09de686-Abstract-Conference.html)
+    and RouterEval (Findings of EMNLP 2025, https://aclanthology.org/2025.findings-emnlp.208/) compare a
+    router against fixed single-model choices; picking that choice on the evaluation cases biases the
+    comparison toward the oracle. Efron 1986 (https://doi.org/10.1214/ss/1177013815) grounds the paired
+    bootstrap over independent units, which is valid only when both arms are bound to exactly the same
+    holdout cases. Only native exchanges sealed per the Claude Agent SDK TypeScript reference
+    (https://code.claude.com/docs/en/agent-sdk/typescript, via W1-T11597) count as comparator outcomes.
+    Settled by lookup: is this already filed or decided? -> no; only open PR #17194 (W1-T11595) declares
+    selectDevelopmentComparator, and no main shard names it (grep of plan/tasks.d). W1-T11119's
+    qualifyCanaryStaticBaseline remains its own consumer-side qualification; this task supplies the
+    native development-selected comparator it qualifies.
+    Settled by lookup: why not a baseline-named test? -> RULE_SUITE_NAME_RE matches census, ratchet or
+    baseline basenames and isRuleSuitePath (src/lib/rule-suites.ts) would enrol it as a rule suite, so the
+    computed path is test/routing/model-canary-dev-selected-comparator.test.ts.
+    Settled by lookup: who owns the identities? -> W1-T11118 owns the development/holdout split and
+    corpus/scorer digests, W1-T10957 owns cases and the native owner, W1-T11117 owns matrix digests.
+    Settled by lookup: ordering -> model-canary-command.ts is also declared by W1-T11119, which depends on
+    this task; this task depends on none of W1-T11119, W1-T11120, W1-T11213, W1-T11264 or W1-T11265.
+  design: >-
+    Add a pure selectDevelopmentComparator( that reads existing native CanarySlotOwner terminal receipts
+    through the existing owner reader and picks one fixed configuration from development cases only. The
+    holdout outcomes are not passed to, and cannot be reached by, the selection step; they are attached
+    only after the choice is sealed. The result binds that choice to the same holdout case, corpus,
+    scorer, feature, source and matrix digests and attaches its native holdout outcomes. Any identity or
+    digest mismatch, development/holdout family overlap, missing or non-native receipt, receipt lacking
+    W1-T11597 provider-exchange evidence, or caller-authored or imported JSON returns unavailable.
+    Self-reported trust flags and caller-supplied comparators get no authority. The offline model-canary
+    command calls it on its private preparation path and emits a sealed private comparator artifact for
+    evaluateCanaryRouterValue (W1-T11119). No new schedule, store, mode authority or provider call is added.
+  note: >-
+    Grants no consent, native-owner, admission, source-qualification or spend release, and changes no
+    privacy control. The first live pilot keeps its separate USD 25 total cap with no retries or top-ups.
+    This plan and its offline tests make no provider calls. W1-T11119's owner, branch and status are
+    untouched; no source task is dispatched by this filing.
+  acceptance:
+    - claim: The comparator is selected from native owner receipts using development cases only and holdout outcomes are inaccessible to selection
+      proof: 'unit test: test/routing/model-canary-dev-selected-comparator.test.ts'
+    - claim: The selected comparator is bound to the same holdout case, corpus, scorer, feature, source and matrix digests, plus its native owner outcomes
+      proof: 'grep: W1-T11599 criterion 2: comparator binds the same holdout digests and native owner outcomes in test/routing/model-canary-dev-selected-comparator.test.ts'
+    - claim: Any identity or digest mismatch, development and holdout overlap, or missing, non-native or caller-authored evidence returns unavailable
+      proof: 'grep: W1-T11599 criterion 3: identity mismatch overlap missing non-native or caller-authored evidence returns unavailable in test/routing/model-canary-dev-selected-comparator.test.ts'
+    - claim: Comparator preparation makes zero provider calls and zero spend
+      proof: 'grep: W1-T11599 criterion 4: comparator preparation uses zero transport and zero spend in test/routing/model-canary-dev-selected-comparator.test.ts'
+    - claim: The native offline command actually produces the development-selected comparator
+      proof: 'grep: selectDevelopmentComparator( in src/lib/model-canary-command.ts'
+  falsifier: >-
+    Seed receipts where the best development configuration differs from the best holdout one; if
+    selection can read holdout outcomes, criterion 1 fails. Alter one digest or case identity, or overlap
+    one source family across splits, and criterion 3 must read unavailable. Supply a caller-authored
+    receipt marked trusted and criterion 3 must again read unavailable. Any transport stub call fails
+    criterion 4.

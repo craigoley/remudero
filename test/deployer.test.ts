@@ -7,6 +7,7 @@ import {
   describeFailureKind,
   evaluateIdleGate,
   readLatestBootSha,
+  refusalRemedyLine,
   sameCommit,
   runDeployCycle,
   treeFfSafe,
@@ -505,10 +506,11 @@ test("cycle #4 — clean-tree guard: a conflicting dirty file ⇒ abort, alert, 
 
 // ── realDeployDeps + marker helpers (adapter coverage; injected exec + real temp fs) ──
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import {
   deployAutoPath,
   deployFailedAlertPath,
@@ -1099,4 +1101,69 @@ test("W1-T4200: a drift-only tick with no marker still returns early", () => {
   const stale = decideDeployTrigger({ markerPresent: false, autoMode: false, installHead: "same", originMain: "same", runningHead: "older", imageDriftOnly: true });
   assert.equal(stale.deploy, false);
   assert.equal(stale.blocker?.kind, "stale_running_daemon");
+});
+
+test("W1-T11454 criterion 3: the deployer never leaves a selection, and a selection refusal's remedy names the scoped command", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-deployer-leave-"));
+  try {
+    mkdirSync(join(root, "deploy"));
+    writeFileSync(join(root, "deploy", "recycle-container.sh"), "#!/usr/bin/env bash\n");
+    const calls: string[][] = [];
+    const deps = realDeployDeps({ installPath: root, stateRoot: root, daemonLabel: "d", serveLabel: "s", servePort: 4317, uid: 1,
+      ledgerPath: join(root, "ledger.ndjson"), sleep: () => {},
+      execFile: (cmd: string, args: string[]) => { calls.push([cmd, ...args]); return ""; } });
+    const backend = deps.restartBackends!().find(candidate => candidate.name !== "launchctl")!;
+    backend.restart();
+    assert.ok(calls.some(call => call.join(" ").includes("recycle-container.sh")), "positive control: the deployer ran the recycle");
+    assert.equal(calls.some(call => call.includes("--leave-selected-registry")), false, "only an operator may leave a selection");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+  const refusalRoot = mkdtempSync(join(tmpdir(), "rmd-deployer-remedy-"));
+  try {
+    const result = spawnSync("bash", [join(REPO_ROOT, "deploy", "recycle-container.sh"), "--instance", "core"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      timeout: 10000,
+      env: {
+        ...process.env,
+        RMD_SELECTED_INSTANCE_REGISTRY: join(refusalRoot, "missing-selected.yaml"),
+        RMD_INSTANCE_REGISTRY: undefined,
+        RMD_INSTANCE_REGISTRY_DIGEST: undefined,
+        RMD_INSTANCE_REGISTRY_FILE_BINDING: undefined,
+        RMD_RECYCLE_DOCKERENV_PATH: join(refusalRoot, "missing-dockerenv"),
+      },
+    });
+    assert.equal(result.status, 2, result.stderr);
+    const remedy = refusalRemedyLine(result.stderr);
+    assert.equal(remedy, "Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy/recycle-container.sh --instance core, or add --leave-selected-registry with no selection to leave it.",
+      "the real missing-source refusal names the scoped command the deployer will quote");
+  } finally { rmSync(refusalRoot, { recursive: true, force: true }); }
+});
+
+test("W1-T11454 criterion 3: active selected-reader refusals preserve the scoped remedy through diagnostic filtering", () => {
+  const script = [
+    'source "$1"',
+    'SELECTED_REGISTRY_CALLER=recycle-container',
+    'SELECTED_REGISTRY_NAME=core',
+    'SELECTED_REGISTRY_ACTIVE=1',
+    'SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION=fixture-end-frame',
+    'SELECTED_REGISTRY_LAUNCH_ARGS=()',
+    'DOCKER_HOST=unix:///fixture/docker.sock',
+    'recycle_reason() { printf "%s\\n" "$1"; }',
+    'selected_registry_recheck() { return 0; }',
+    'selected_registry_planned_mounts() { return 0; }',
+    'selected_registry_docker_read() { return 2; }',
+    '{ selected_registry_image fixture-image 2>&1; printf "\\n%s\\n" "$SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION"; } | selected_registry_diagnostic_filter',
+  ].join("\n");
+  const result = spawnSync("bash", ["-c", script, "fixture", join(REPO_ROOT, "deploy", "recycle-container.sh")], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    timeout: 10000,
+    env: process.env,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /REFUSING -- selected registry unavailable \(image_reader_unknown\)\./,
+    "the real active image-reader refusal still passes through the private diagnostic filter");
+  assert.equal(refusalRemedyLine(result.stdout),
+    "Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy/recycle-container.sh --instance core, or add --leave-selected-registry with no selection to leave it.",
+    "the filtered active-selection refusal retains the exact scoped command the deployer quotes");
 });

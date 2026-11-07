@@ -38,8 +38,9 @@ export const DIR_GATE_SETTLE_MS = 2_000;
 export const DIR_GATE_RELIST_MS = 60_000;
 /** The fewest lines a tick's first transaction applies, so a collapsed rate estimate still moves a backlog. */
 export const MIN_TRANSACTION_LINES = 64;
-/** The fact set's version: a step added to {@link isFactStep} bumps it, so a store built before re-reads the ledger in place. 3: every costed row. */
-export const FACT_SET_VERSION = 3;
+/** The fact set's version: a step added to {@link isFactStep} bumps it, so an existing store replays the ledger.
+ * 4: the primary shadow notice's delivered selection binding. */
+export const FACT_SET_VERSION = 4;
 /** How many of the newest rows of any step the activity ring keeps (Phase 4 design, `workstreams`). */
 export const ACTIVITY_RING_ROWS = 500;
 const FINGERPRINT_BYTES = 4_096;

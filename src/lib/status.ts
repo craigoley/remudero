@@ -3329,7 +3329,7 @@ export function latestEscalationLine(
     if (line.task_id !== taskId) continue;
     if (line.step === "run.start") {
       last = "run";
-    } else if (line.step === "escalation.issue_opened") {
+    } else if (line.step === "escalation.issue_opened" || line.step === "primary_shadow.issue_published") {
       last = "escalation";
       issueUrl = typeof line.issue_url === "string" ? line.issue_url : undefined;
       escalationClass = typeof line.class === "string" ? line.class : undefined;
@@ -3470,7 +3470,7 @@ const WORKER_RESULT_STEPS: ReadonlySet<string> = new Set(["recon.done", "impleme
  *  `ts` anywhere. A reader feeding it only plan tasks' rows must keep these too. */
 export const PROJECTION_STEP_READS: ReadonlySet<string> = new Set([
   "pr.opened", "review.posted", PLAN_ONLY_REVIEW_MARKER_STEP, "daemon.boot", "verdict", "verdict.merged",
-  "escalation.issue_opened", ...WORKER_RESULT_STEPS,
+  "escalation.issue_opened", "primary_shadow.issue_published", ...WORKER_RESULT_STEPS,
 ]);
 /** W1-T8676: the reasons `workerErrorVerdict` (src/run-task.ts) gives a non-budget worker error. W1-T9034: only the
  *  fallback for a verdict row carrying neither `stage` nor `subtype`, since `failOnWorkerError` may overwrite it. */
@@ -3867,8 +3867,8 @@ function taskIdsWithEscalationLines(
 ): string[] {
   const seen = new Set<string>();
   const ids: string[] = [];
-  for (const line of indexedStepRows(lines, "escalation.issue_opened", index)) {
-    if (line.step !== "escalation.issue_opened") continue;
+  for (const line of [...indexedStepRows(lines, "escalation.issue_opened", index), ...indexedStepRows(lines, "primary_shadow.issue_published", index)]) {
+    if (line.step !== "escalation.issue_opened" && line.step !== "primary_shadow.issue_published") continue;
     if (typeof line.task_id !== "string") continue;
     if (seen.has(line.task_id)) continue;
     seen.add(line.task_id);
@@ -4252,8 +4252,23 @@ export function projectPlan(
   // TASK-LESS ESCALATIONS (W1-T283): the loop above is a function of plan.tasks ALONE, so an escalation whose
   // `task_id` names no plan task had no row to attach to — the panel read "nothing needs you" while dozens were
   // open. A SECOND, INDEPENDENT source. An id the plan DOES own is skipped.
+  // An in-place selection edit rebinds the same issue URL to its delivered digest.
+  // Pending observations must not change what an operator acknowledges on the board.
+  const primaryShadowCurrent = new Map<string, string>();
+  // A published edit follows its issue's actual creation; each bucket preserves append order.
+  for (const row of [...indexedStepRows(ledgerLinesOnce, "escalation.issue_opened", ledgerIndex),
+    ...indexedStepRows(ledgerLinesOnce, "primary_shadow.issue_published", ledgerIndex)]) {
+    if ((row.step !== "escalation.issue_opened" && row.step !== "primary_shadow.issue_published")
+      || typeof row.task_id !== "string" || !/^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(row.task_id)
+      || typeof row.issue_url !== "string") continue;
+    primaryShadowCurrent.set(row.issue_url, row.task_id);
+  }
   for (const taskId of effectiveDeps.skipTasklessEscalations ? [] : taskIdsWithEscalationLines(ledgerLinesOnce, ledgerIndex)) {
     if (plan.byId.has(taskId)) continue;
+    if (/^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(taskId)) {
+      const issueUrl = latestEscalationLine(ledgerLinesOnce, taskId, ledgerIndex)?.issueUrl;
+      if (issueUrl && primaryShadowCurrent.get(issueUrl) !== taskId) continue;
+    }
     const escalation = resolveEscalation(ledgerLinesOnce, taskId, effectiveDeps.github, ledgerIndex);
     if (!escalation) continue; // confirmed closed (or otherwise resolved) — no row, same as above.
     byId.set(taskId, {

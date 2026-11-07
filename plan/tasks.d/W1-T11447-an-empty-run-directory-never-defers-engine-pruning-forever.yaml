@@ -8,8 +8,13 @@
   risk: high
   band_meaning: span
   origin: "2026-11-05 operator engine cut: engine.prune_deferred on run-W1-T9328-1792218295640-5526, an empty run directory from 2026-10-17"
-  plan_refs: [W1-T9910, W1-T10000, W1-T9738]
-  files: [src/lib/engine-tree.ts, src/lib/run-child.ts, test/deploy/an-empty-run-directory-never-defers-engine-pruning-forever.test.ts]
+  plan_refs: [W1-T9910, W1-T10000, W1-T9738, W1-T9077, W1-T9838]
+  files:
+    - src/lib/engine-tree.ts
+    - src/lib/run-child.ts
+    - test/deploy/an-empty-run-directory-never-defers-engine-pruning-forever.test.ts
+    - test/a-run-child-runs-from-an-engine-tree-pinned-to-its-revision.test.ts
+    - test/an-unsafe-engine-is-rebuilt-in-the-pass-that-finds-it.test.ts
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=f6932c3cb875d215
@@ -34,6 +39,16 @@
     Simply skipping empty directories would reopen that race.
     rmd test-place computes this test's folder as test/deploy/ from its imports, so
     the test file and both proof paths must use that computed placement.
+    The existing W1-T9077 and W1-T9838 safety tests also model spec-less/status-less
+    run directories. W1-T9838 covers unsafe-engine rebuilding when a live-run answer
+    is undecidable; it does not define when a directory is known empty versus unknown.
+    W1-T9077 likewise preserves the fail-closed no-metadata case. This task owns that
+    empty/contentful distinction and the prune/pin race. Their current fixtures are
+    empty, which would now represent the
+    known-empty case rather than uncertainty. Preserve their existing engine-retention
+    assertions by updating only those fixtures to contain non-metadata content while
+    keeping spec.json and status.json absent. This keeps the fail-closed contract for
+    contentful unknown state without making empty directories pin engines forever.
   design: |
     1. Prune under the pin. For each engine pruneEngineTrees would remove, it takes that engine's pin lock
        with the same non-blocking tryAcquirePin that pinEngineForRun uses. If the lock is held, the
@@ -48,6 +63,10 @@
     3. Forward: both creation sites in run-child.ts remove the directory they just created
        (rmdirSync, which only succeeds on an empty directory) when pinEngineForRun returns unavailable or
        throws before the spec is written. The run site also drops it from inFlightRunDirs.
+    4. Preserve the W1-T9077 and W1-T9838 undecidable-run cases by making their
+       fixtures non-empty but still without spec.json/status.json. Keep their current
+       engine-retention and build-failure assertions intact; these cases must remain
+       undecidable while truly empty directories no longer defer pruning.
     No new constant, no age or count bound. The pin lock and the directory's emptiness are the whole rule.
   acceptance:
     - claim: "An empty run directory no longer defers pruning: with one present, pruneEngineTrees removes an unnamed, unpinned engine, and an engine whose pin lock is held at prune time is kept that pass"
@@ -59,7 +78,9 @@
     runs/<id> directory, then run the real pruneEngineTrees. At base the older engine is kept
     (engine.prune_deferred). With the fix it is GONE; assert its absence. Pin-held case: take the older
     engine's pin lock in the test, prune, and the engine is kept. The builder names each criterion test
-    with the marker "W1-T11447 criterion N" so the reviewer can map tests to criteria.
+    with the marker "W1-T11447 criterion N" so the reviewer can map tests to criteria. The W1-T9077 and
+    W1-T9838 fixture-only changes are allowed solely to represent contentful unknown run directories;
+    all existing retention/build-failure assertions must remain intact.
   falsifier: |
     Drop step 2, so empty directories stay undecidable. Criterion 1's test must then fail, because the
     unnamed engine is kept. Drop step 1's pin acquisition while keeping step 2. The pin-held case must
