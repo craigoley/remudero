@@ -8,7 +8,7 @@ import {
   type RetroPrepublishCommandResult,
   type RetroPrepublishRunner,
 } from "#src/lib/retro-preflight.js";
-import { startTestSlotHeartbeat, type TestSlotHeartbeatHandle } from "#src/lib/test-slot.js";
+import { startTestSlotHeartbeat, TEST_SLOT_HEARTBEAT_MS, type TestSlotHeartbeatHandle } from "#src/lib/test-slot.js";
 import { withTempDir } from "#src/lib/tmp.js";
 
 const PASS = "# tests 1\n# pass 1\n# fail 0\n";
@@ -108,6 +108,29 @@ test("W1-T11335: a retro suite run beats its held slot and withdraws the cadence
       assert.deepEqual(withdrawn, Array.from({ length: ending.attempts }, () => undefined), `${ending.name}: cadence was withdrawn before slot release`);
       assert.equal(existsSync(join(caseDir, "slots", "slot-1.json")), false, `${ending.name}: slot is released after heartbeat withdrawal`);
     }
+  });
+});
+
+test("W1-T11335: the default heartbeat publishes its cadence during the held suite run", async () => {
+  await withTempDir("retro-slot-default-heartbeat", async (dir) => {
+    const rows: Row[] = [];
+    let observed = false;
+    const run: RetroPrepublishRunner = (_command, args) => {
+      if (args.includes("--list-plan-reading-suites")) {
+        return { status: 0, signal: null, stdout: "test/a.test.ts\n", stderr: "" };
+      }
+      const path = join(dir, "slots", "slot-1.json");
+      const held = JSON.parse(readFileSync(path, "utf8")) as { heartbeatIntervalMs?: number; workIdentity?: string };
+      assert.equal(held.heartbeatIntervalMs, TEST_SLOT_HEARTBEAT_MS);
+      assert.equal(held.workIdentity, "reservation-marker-v1");
+      observed = true;
+      return { status: 0, signal: null, stdout: PASS, stderr: "" };
+    };
+    const result = await preflight(dir, rows, run);
+
+    assert.equal(result.ok, true);
+    assert.equal(observed, true);
+    assert.equal(existsSync(join(dir, "slots", "slot-1.json")), false);
   });
 });
 

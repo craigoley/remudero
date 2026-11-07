@@ -604,7 +604,10 @@ async function runAttempt(
     if (!testSlotExecutionAllowed(slot)) throw new Error(`retro preflight NOT_RUN (${slot.note})`);
     if (slot.heartbeat) {
       try {
-        heartbeat = (deps?.startHeartbeat ?? startTestSlotHeartbeat)(slot.heartbeat, row => onHeartbeatEvent?.(row));
+        const logHeartbeat = (row: Record<string, unknown>) => onHeartbeatEvent?.(row);
+        heartbeat = deps?.startHeartbeat
+          ? deps.startHeartbeat(slot.heartbeat, logHeartbeat)
+          : startTestSlotHeartbeat(slot.heartbeat, logHeartbeat);
       } catch (error) {
         onHeartbeatEvent?.({ step: "test_slot.heartbeat_start_failed", path: slot.heartbeat.path, error: String(error) });
       }
