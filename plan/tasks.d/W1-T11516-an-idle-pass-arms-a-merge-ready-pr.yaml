@@ -1,7 +1,7 @@
 - id: W1-T11516
   title: "Idle reconciliation sees a merge-ready PR and sends it through the existing guarded arm path, as cover for missed events"
   repo: remudero
-  depends_on: [W1-T11515]
+  depends_on: [W1-T11515, W1-T11510]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -16,14 +16,16 @@
   status: queued
   attempts: 0
   note: |
-    DISPATCH HOLD: release only after W1-T11510 has merged (PR #17065, open at filing) and W1-T11515's
-    idle-sleep rows have been read. On release, add W1-T11510 to depends_on and remove dispatch_hold in
-    one plan edit. The edge is absent only because loadPlan refuses a depends_on naming a task this base
-    does not yet hold.
+    DISPATCH HOLD: release only after W1-T11515's idle-sleep rows (`daemon.idle_sleep.decision`) have
+    been read and the reading is recorded in this note. W1-T11510's IMPLEMENTATION must also have merged
+    (merged credit, `lightPassArmAdmitted` on main). Its filing PR #17065 alone does not count. The
+    depends_on edge enforces that, so on release remove dispatch_hold and nothing else.
 
-    This shard was filed before that edge could exist, so the hold carries the ordering the operator
-    ruled. Without it, this task could dispatch as soon as step 1 merges. It would then build on a tree
-    with no arm predicate to widen, and with the idle assertion it replaces not yet written.
+    The original filing put W1-T11510 in the hold prose only because loadPlan refused a depends_on
+    naming a task the base did not yet hold. W1-T11510's shard is on main now, so the edge is declared
+    (clarify pass PLAN-clarify-1794061610414). Without it, this task could dispatch as soon as step 1
+    merges. It would then build on a tree with no arm predicate to widen, and with the idle assertion it
+    replaces not yet written.
     verify:auto, because every criterion runs against an in-process fixture with no live PR. risk:high
     because it changes which pass may arm. The builder names each criterion test with the marker
     "W1-T11516 criterion N".
@@ -48,10 +50,13 @@
 
     Settled by lookup: is this already filed or decided? -> Not for the idle scope. W1-T11510 arms on interphase-review passes only and pins idle as unable to arm; W1-T5922 arms on the ordinary light pass; W1-T7734 built the idle pass for review demand (PR #17065, plan/tasks.d/W1-T5922-a-ready-pr-is-armed-and-its-review-admitted-on-the-next-light-pass.yaml, plan/tasks.d/W1-T7734-the-sweep-sees-a-new-head-in-the-same-pass.yaml).
     Settled by lookup: does W1-T11510 exist, and what does it pin? -> Yes, in open PR #17065 (plan/tasks.d/W1-T11510-an-interphase-review-pass-arms-a-ready-pr.yaml on branch run-PLAN-create-1793980641461), not yet on main. Its second criterion says pause, drain, boot and idle passes do not arm. This task deliberately replaces the idle part of that one assertion. https://github.com/craigoley/remudero/pull/17065
-    Settled by lookup: can this shard declare depends_on W1-T11510 today? -> No. loadPlan throws "depends_on unknown task" and the relint step reports that as a blocking plan-load violation, so the filing would open no PR (src/lib/plan.ts:1041, src/lib/relint.ts:138). dispatch_hold holds it instead, and the hold-readiness observer names it for release (src/lib/plan.ts:1340, src/lib/hold-readiness.ts).
+    Settled by lookup (at filing, since superseded below): can this shard declare depends_on W1-T11510 today? -> No. loadPlan throws "depends_on unknown task" and the relint step reports that as a blocking plan-load violation, so the filing would open no PR (src/lib/plan.ts:1041, src/lib/relint.ts:138). dispatch_hold holds it instead, and the hold-readiness observer names it for release (src/lib/plan.ts:1340, src/lib/hold-readiness.ts).
     Settled by lookup: may this shard cite W1-T11510 while it is unmerged? -> Yes. A pushed filing keeps its reservation ref, and the id gate accepts a reservation or a declared id (src/run-task.ts:16437, scripts/task-id-existence-check.mjs).
     Settled by lookup: does W1-T11502 overlap? -> On src/lib/daemon.ts and src/lib/sweep.ts only. It covers repair turns, and the file-overlap partition serializes the two (plan/tasks.d/W1-T11502-a-due-repair-gets-a-turn-between-overlapping-reviews.yaml).
     Settled by lookup: are W1-T5922 and W1-T9569 merged, and is W1-T10620 relevant? -> Both are status merged. W1-T10620 is not relevant here (their shards under plan/tasks.d/).
+    Settled by lookup: does "W1-T11510 has merged" mean its filing PR or its implementation? -> Its implementation. The design reads "W1-T11510's merged source" and widens the predicate W1-T11510 adds, and the hold-readiness observer counts only merged credit, a Remudero-Task trailer or a squash subject (plan/tasks.d/W1-T11516-an-idle-pass-arms-a-merge-ready-pr.yaml design step 1, src/lib/hold-readiness.ts).
+    Settled by lookup: can depends_on name W1-T11510 now? -> Yes. Its shard is on main at status queued, so loadPlan resolves the edge. lightPassArmAdmitted is not yet in src/, so the edge still blocks dispatch (plan/tasks.d/W1-T11510-an-interphase-review-pass-arms-a-ready-pr.yaml, src/lib/plan.ts).
+    Settled by lookup: does the edge make the hold redundant? -> No. The W1-T11515 row reading is an observation that no dependency can gate, so dispatch_hold stays for that alone (plan/tasks.d/W1-T11515-an-idle-sleep-ledgers-why-its-light-pass-ran-or-did-not.yaml note).
   design: |
     Read W1-T11510's merged source first. This filing could read its record only on PR #17065, and it
     is the base for what follows. That task adds `lightPassArmAdmitted(scope)`.
