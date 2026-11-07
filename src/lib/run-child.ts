@@ -7,7 +7,7 @@
 // it ran as and why. Nothing here touches the run. A probe that fails ledgers why, and `startRunChildProbe` never rejects.
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -447,13 +447,20 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
     )))(launch.kind, sampler);
     // The spec names the revision the engine's record holds under the pin, never the one resolved before the wait.
     const probeReservation = reservation;
-    const pinnedProbe = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (pinned) => writeSpec(dir, {
-      schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
-      engine: pinned, planSnapshotPath: snapshot.path,
-      reservationId: probeReservation.id ?? "", options,
-      ...(input.work ? { work: input.work } : {}),
-    } as RunChildSpec), seams.enginePin);
+    let pinnedProbe: Awaited<ReturnType<typeof pinEngineForRun>>;
+    try {
+      pinnedProbe = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (pinned) => writeSpec(dir, {
+        schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
+        engine: pinned, planSnapshotPath: snapshot.path,
+        reservationId: probeReservation.id ?? "", options,
+        ...(input.work ? { work: input.work } : {}),
+      } as RunChildSpec), seams.enginePin);
+    } catch (error) {
+      try { rmdirSync(dir); } catch (cleanupError) { void cleanupError; }
+      throw error;
+    }
     if ("unavailable" in pinnedProbe) {
+      try { rmdirSync(dir); } catch (cleanupError) { void cleanupError; }
       reservation.releaseOccupancy();
       reservation = undefined;
       return skip(pinnedProbe.unavailable);
@@ -877,13 +884,24 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     inFlightRunDirs.add(dir);
     // The spec names the revision the engine's record holds under the pin, never the one resolved before the wait.
     const runReservation = reservation;
-    const pinned = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (current) => writeSpec(dir, {
-      schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
-      engine: current, planSnapshotPath: snapshot.path,
-      reservationId: runReservation.id ?? "", options,
-      ...(input.work ? { work: input.work } : {}),
-    } as RunChildSpec), ports.enginePin);
-    if ("unavailable" in pinned) throw new Error(pinned.unavailable);
+    let pinned: Awaited<ReturnType<typeof pinEngineForRun>>;
+    try {
+      pinned = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (current) => writeSpec(dir, {
+        schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
+        engine: current, planSnapshotPath: snapshot.path,
+        reservationId: runReservation.id ?? "", options,
+        ...(input.work ? { work: input.work } : {}),
+      } as RunChildSpec), ports.enginePin);
+    } catch (error) {
+      inFlightRunDirs.delete(dir);
+      try { rmdirSync(dir); } catch (cleanupError) { void cleanupError; }
+      throw error;
+    }
+    if ("unavailable" in pinned) {
+      inFlightRunDirs.delete(dir);
+      try { rmdirSync(dir); } catch (cleanupError) { void cleanupError; }
+      throw new Error(pinned.unavailable);
+    }
     engineSha = pinned.sha;
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
