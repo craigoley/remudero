@@ -454,11 +454,22 @@ async function prefetchedRunTaskGit(git: GitText, from: string, to: string): Pro
 export type HealedTree =
   | { state: "ready"; path: string; sha: string; originMainSha: string; patch: "revert" | "with-pr"; withPr?: number }
   | { state: "empty"; originMainSha: string }
-  | { state: "conflict"; originMainSha: string; reason: string; paths: string[] }
+  | { state: "conflict"; originMainSha: string; reason: string; paths: string[]; remembered?: true }
   | { state: "unavailable"; originMainSha: string | null; reason: string };
+
+/** Project a failed healed-tree result into the route's stable ledger/log fields. */
+export function reviewerHealedTreeUnavailableFields(healed: Exclude<HealedTree, { state: "ready" | "empty" }>): Record<string, unknown> {
+  return {
+    state: healed.state,
+    reason: healed.reason,
+    ...(healed.state === "conflict" ? { conflict_paths: healed.paths, ...(healed.remembered ? { remembered: true } : {}) } : {}),
+    origin_main_sha: healed.originMainSha,
+  };
+}
 
 const HEAL_IDENTITY = ["-c", "user.name=remudero reviewer-heal", "-c", "user.email=reviewer-heal@remudero.invalid"];
 const healedMemo = new Map<string, { path: string; sha: string }>();
+const healedConflictMemo = new Map<string, { reason: string; paths: string[] }>();
 
 /** Build (or reuse) the healed tree for `offendingSha` at origin/main. Never an old head, never an
  *  engine tree: every route here starts from origin/main. */
@@ -483,6 +494,8 @@ export async function buildHealedReviewerTree(
   }
   const patch = opts.withPr === undefined ? "revert" as const : "with-pr" as const;
   const key = `${patch}:${opts.withPr ?? offendingSha}:${originMainSha}`;
+  const knownConflict = healedConflictMemo.get(key);
+  if (knownConflict !== undefined) return { state: "conflict", originMainSha, ...knownConflict, remembered: true };
   const known = healedMemo.get(key);
   if (known !== undefined) {
     try {
@@ -547,8 +560,9 @@ export async function buildHealedReviewerTree(
       // deliberate: an unremoved tree is reaped with the reviewer's other trees
     }
     const what = opts.withPr === undefined ? `the revert of ${offendingSha.slice(0, 12)}` : `PR #${opts.withPr}`;
-    return { state: "conflict", originMainSha, paths,
-      reason: `${what} does not apply cleanly on origin/main ${originMainSha.slice(0, 12)}: ${String((error as Error)?.message ?? error).split("\n")[0]}` };
+    const reason = `${what} does not apply cleanly on origin/main ${originMainSha.slice(0, 12)}: ${String((error as Error)?.message ?? error).split("\n")[0]}`;
+    healedConflictMemo.set(key, { reason, paths });
+    return { state: "conflict", originMainSha, paths, reason };
   }
   const sha = (await treeGit(tree, ["rev-parse", "HEAD"])).trim();
   healedMemo.set(key, { path: tree, sha });
@@ -558,6 +572,7 @@ export async function buildHealedReviewerTree(
 /** Test seam: forget every healed tree this process built. */
 export function resetHealedReviewerTrees(): void {
   healedMemo.clear();
+  healedConflictMemo.clear();
 }
 
 /** The outcome-mix evidence, as the revert PR body and the issue name it. */
@@ -668,33 +683,45 @@ export async function evaluateReviewerHealthNow(
     return undefined;
   };
 
+  const findBlame = async (rec: ReviewerShaRecord) => {
+    const lastHealthy = await newestHealthyAncestor(rec);
+    let offending: OffendingMerge | undefined;
+    let offendingUnavailable: string | undefined;
+    if (lastHealthy === undefined) offendingUnavailable = "no healthy reviewer code sha precedes the regression";
+    else {
+      try {
+        offending = await findOffendingMerge(git, lastHealthy.sha, rec.sha);
+        if (offending === undefined) offendingUnavailable = `no review-material merge in ${lastHealthy.sha.slice(0, 12)}..${rec.sha.slice(0, 12)}`;
+      } catch (error) {
+        offendingUnavailable = `merge history unreadable: ${String((error as Error)?.message ?? error)}`;
+      }
+    }
+    return { lastHealthy, offending, offendingUnavailable };
+  };
   const openIncident = async (rec: ReviewerShaRecord, judgment: ReviewerShaJudgment, live: boolean): Promise<void> => {
     const signature = signatureOf(rec);
     const bootHeadSha = rec.firstFailHost === undefined ? null : state.bootHeads[rec.firstFailHost] ?? null;
     const prior = [...state.closed].reverse().find((c) => c.signature.some((s) => signature.includes(s)));
     let incident: ReviewerIncident;
     if (prior !== undefined) {
-      // The same failure mode again after a close: the same cause, so the same blame and the same heal.
-      const { closedAt: _closedAt, revertPrUrl: _url, revertRefused: _refused, ...rest } = prior;
-      void [_closedAt, _url, _refused];
-      incident = { ...rest, signature: [...new Set([...rest.signature, ...signature])].sort(), evidence: judgment, reopenedFrom: prior.id };
+      const { closedAt: _closedAt, revertPrUrl: _url, revertRefused: _refused,
+        offendingUnavailable: _oldUnavailable, ...rest } = prior;
+      void [_closedAt, _url, _refused, _oldUnavailable];
+      const blame = await findBlame(rec);
+      const priorOffenderInRange = prior.offending !== null && blame.lastHealthy !== undefined
+        && await isAncestor(blame.lastHealthy.sha, prior.offending.sha) && await isAncestor(prior.offending.sha, rec.sha);
+      incident = { ...rest, id: `reviewer-regression-${rec.sha.slice(0, 12)}`, openedAt: clock.iso(),
+        regressedSha: rec.sha, regressedSeq: rec.seq, bootHeadSha,
+        lastHealthySha: blame.lastHealthy?.sha ?? null,
+        offending: priorOffenderInRange ? prior.offending : blame.offending ?? null,
+        ...(priorOffenderInRange || blame.offendingUnavailable === undefined ? {} : { offendingUnavailable: blame.offendingUnavailable }),
+        signature: [...new Set([...rest.signature, ...signature])].sort(), evidence: judgment, reopenedFrom: prior.id };
       state.closed = state.closed.filter((c) => c.id !== prior.id);
     } else {
-      const lastHealthy = await newestHealthyAncestor(rec);
-      let offending: OffendingMerge | undefined;
-      let offendingUnavailable: string | undefined;
-      if (lastHealthy === undefined) offendingUnavailable = "no healthy reviewer code sha precedes the regression";
-      else {
-        try {
-          offending = await findOffendingMerge(git, lastHealthy.sha, rec.sha);
-          if (offending === undefined) offendingUnavailable = `no review-material merge in ${lastHealthy.sha.slice(0, 12)}..${rec.sha.slice(0, 12)}`;
-        } catch (error) {
-          offendingUnavailable = `merge history unreadable: ${String((error as Error)?.message ?? error)}`;
-        }
-      }
+      const blame = await findBlame(rec);
       incident = { id: `reviewer-regression-${rec.sha.slice(0, 12)}`, openedAt: clock.iso(), regressedSha: rec.sha, regressedSeq: rec.seq,
-        bootHeadSha, lastHealthySha: lastHealthy?.sha ?? null, offending: offending ?? null,
-        ...(offendingUnavailable === undefined ? {} : { offendingUnavailable }), signature, evidence: judgment };
+        bootHeadSha, lastHealthySha: blame.lastHealthy?.sha ?? null, offending: blame.offending ?? null,
+        ...(blame.offendingUnavailable === undefined ? {} : { offendingUnavailable: blame.offendingUnavailable }), signature, evidence: judgment };
     }
     state.incident = incident;
     if (!live) return;

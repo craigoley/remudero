@@ -82,9 +82,10 @@ function selectedFixture(root: string) {
 }
 
 /** Spawn through the real private-registry path and hand back the enforced inline -c overrides. */
-async function selectedProfileOverrides(root: string, codexBin: string, intent: "reader" | "writer" | "review", cwdPath = "checkout") {
+async function selectedProfileOverrides(root: string, codexBin: string, intent: "reader" | "writer" | "review", cwdPath = "checkout", gitRoot = false) {
   const selected = selectedFixture(root), codexHome = join(root, "codex-home"), cwd = join(root, cwdPath);
   mkdirSync(codexHome, { recursive: true }); mkdirSync(cwd, { recursive: true });
+  if (gitRoot) writeFileSync(join(cwd, ".git"), "gitdir: /nonexistent/worktree-git-dir\n");
   let overrides: string[] = [], profileText = "";
   const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough();
   const child = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
@@ -130,7 +131,7 @@ test("W1-T11550 criterion 1: the worktree's parent is denied on both profile sur
   try {
     const install = codexInstall(root);
     for (const intent of ["reader", "writer", "review"] as const) {
-      const { overrides, profileText, cwd } = await selectedProfileOverrides(root, install.bin, intent, "worktrees/run-1");
+      const { overrides, profileText, cwd } = await selectedProfileOverrides(root, install.bin, intent, "worktrees/run-1", true);
       for (const surface of [profileText, overrides.join("\n")]) {
         assert.ok(surface.includes(`${JSON.stringify(dirname(cwd))}="deny"`), `${intent}: the parent is denied`);
         assert.equal(surface.includes(`${JSON.stringify(dirname(cwd))}="read"`), false, `${intent}: never readable, which would expose sibling worktrees`);
@@ -148,6 +149,20 @@ test("W1-T11550 criterion 2: a grant beside the worktree keeps its read, because
     for (const surface of [profileText, overrides.join("\n")]) {
       assert.equal(surface.includes(`${JSON.stringify(root)}="deny"`), false, "the shared parent holds the vendor grant, so it is not denied");
       assert.ok(surface.includes(`${JSON.stringify(install.platformVendor)}="read"`), "the nested grant still applies");
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T11564 criterion 1: a working directory that is not a git checkout root keeps its parent undenied, so Codex's AGENTS.md walk reads no denied directory", TIMEOUT, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}codex-probe-dir-`)));
+  try {
+    const install = codexInstall(root);
+    for (const intent of ["reader", "writer", "review"] as const) {
+      const { overrides, profileText, cwd } = await selectedProfileOverrides(root, install.bin, intent, "tmp/isolation-probe-1");
+      for (const surface of [profileText, overrides.join("\n")]) {
+        assert.equal(surface.includes(`${JSON.stringify(dirname(cwd))}=`), false, `${intent}: a plain probe directory's parent is untouched`);
+        assert.ok(surface.includes('":root"="deny"'), `${intent}: the root deny stays`);
+      }
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -179,7 +194,7 @@ test("W1-T11550 criterion 3: a real sandbox refuses a write beside the worktree 
   const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}codex-parent-real-`)));
   try {
     const codex = linuxCodex()!;
-    const { overrides, codexHome, cwd } = await selectedProfileOverrides(root, codex, "writer", "worktrees/run-1");
+    const { overrides, codexHome, cwd } = await selectedProfileOverrides(root, codex, "writer", "worktrees/run-1", true);
     const privateTmp = join(root, "private-tmp");
     mkdirSync(privateTmp);
     const run = spawnSync(codex, ["sandbox", ...overrides, "--", "/bin/bash", "-c", "touch ../beside; echo rc=$?; touch inside; echo rc=$?"],
