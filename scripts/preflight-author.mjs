@@ -30,8 +30,6 @@ import { scanRepo as scanCoverageBlanking } from './coverage-session-blanking-ch
 export const OVER_CAPACITY_EXIT = 3;
 /** The most test files an author run runs at once (the cap test-slot.ts has always applied here). */
 export const AUTHOR_MAX_WORKERS = 4;
-/** The author's suite slot asks for one worker; before admission the suites are priced at it. */
-const AUTHOR_SLOT_CEILING = 1;
 const AUTHOR_SUITE_LABEL = 'preflight-author:static-and-affected';
 const AUTHOR_STATIC_LABEL = 'preflight-author:static';
 /** BACKSTOP: a docs freshness failure must not wait through a heavy author phase. */
@@ -584,7 +582,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         }
         // The cheap census runs first. W1-T9951: the suite ticket is taken NOW, so it holds its place in
         // line while the static stage runs on its own memory admission; suites are admitted after it.
-        const queue = enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: AUTHOR_SLOT_CEILING });
+        const queue = enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: AUTHOR_MAX_WORKERS });
         receipt.suiteQueue = { ticketed: queue.ticketed, positionAtEnqueue: queue.position ?? null, note: queue.note };
         let staticEndedAt;
         const admitSuites = () => {
@@ -604,9 +602,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         try {
           let runtimeProfile, runtimeManifest;
           const admitRuntime = (stage, staticReserveMs, files = receipt.suites,
-            workers = Math.min(AUTHOR_MAX_WORKERS, slot?.concurrency ?? AUTHOR_SLOT_CEILING)) => {
+            workers = hostBudget((host ?? readHostCapacityInputs)()).workers) => {
             if (deadline === undefined) return;
-            // Before static no slot is held yet; the suites are priced at the ceiling the slot is asked for.
+            // Before static the slot is not held yet; price suites at the capacity the measured host can grant.
             if (stage !== 'before-static' && !['acquired', 'inherited'].includes(slot?.outcome)) throw new Error('runtime admission requires a real slot; unslotted fallback is not deadline-fit capacity');
             runtimeProfile ??= readRuntimeProfile(root, values['runtime-profile'], runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
             // An empty full-fallback partial set runs no suite: the profile is still validated, nothing is priced.
@@ -660,13 +658,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             let manifest = { files: {} };
             try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
             catch (error) { receipt.manifestUnavailable = error.message; }
-            const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot?.concurrency ?? AUTHOR_SLOT_CEILING });
+            const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot.concurrency });
             // A deadline without a validated native profile was refused before static work.
             // Never expand workers or restart the deadline to admit a larger selection.
             const nativeBudget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline }) : legacyBudget;
             // W1-T9953: a full fallback is priced against the HOST, never the deadline; a deadline may only shrink it.
             const budget = partial && nativeBudget.budgetMs > legacyBudget.budgetMs ? legacyBudget : nativeBudget;
-            const executionWorkers = runtimeProfile ? budget.workers : Math.min(AUTHOR_MAX_WORKERS, slot?.concurrency ?? AUTHOR_SLOT_CEILING);
+            const executionWorkers = Math.min(AUTHOR_MAX_WORKERS, budget.workers);
             receipt.executionWorkers = executionWorkers;
             const priced = partial ? partial.suites : receipt.suites;
             reportManifestFallbacks(priced, manifest);
