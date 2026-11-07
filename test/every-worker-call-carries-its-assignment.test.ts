@@ -229,6 +229,7 @@ async function reviewWith(opts: { assign: boolean; resultCarries: boolean }): Pr
     const headSha = repo.git("rev-parse", "HEAD");
     writeFileSync(join(root, "settings.json"), "{}\n", "utf8");
     const shim = ghShim([
+      { when: "/statuses?", stdout: "[[]]" },
       { when: "pulls/", stdout: JSON.stringify({ number: 4615, html_url: "https://github.com/acme/remudero/pull/4615", updated_at: "t", body: "fixed", state: "open", head: { ref: "b", sha: headSha } }) },
       { when: "pr diff", stdout: "diff --git a/src/example.ts b/src/example.ts\n+export const fixed = true;" },
       { when: "api ", stdout: "{}" },
