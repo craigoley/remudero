@@ -17,6 +17,9 @@
   # refusal-amendment (W1-T11119, run DAEMON-1793999214575@faf5a5da604a1a14cb1f9f4782d0ca23994b0329, 2026-11-07T05:43:04.335Z): the worker refused criterion 14 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: No durable producer joins frozen pre-outcome router decisions and qualified static baselines to canary outcomes.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
+  # architect clarify (run PLAN-clarify-1794062588206, 2026-11-07, PR #17132): all three refusals resolved by naming
+  #   the native production producers (existing owner terminal receipts, digest-bound matrix manifest, recorded
+  #   pre-execution worker assignment rows, prepare-time decision and baseline receipts) and widening files:.
   status: queued
   attempts: 0
   origin: operator-approved-router-evaluation-plan:2026-11-02
@@ -40,11 +43,42 @@
     - test/routing/model-canary-native-field-evidence.test.ts
     - test/routing/model-canary-router-value.test.ts
     - test/routing/model-canary-whole-pipeline-clustered-analysis.test.ts
+    - src/lib/model-canary-router-decision-receipt.ts
+    - src/lib/model-canary-static-baseline.ts
+    - test/routing/model-canary-router-decision-receipt.test.ts
+    - test/routing/model-canary-static-baseline.test.ts
   rationale: >-
     The approved benchmark must measure router value without treating observational model win
     rates as a randomized comparison. Existing paired analysis is descriptive and supplies no
     uncertainty estimate. Repeated attempts are not independent cases. Failure patterns can
     inform a bounded improvement proposal without executing that proposal.
+    Settled by lookup: is this already filed or decided? -> No other task owns the analysis-side
+    producers; W1-T11117 owns the matrix manifest, W1-T11118 the trace receipt, W1-T10957 the
+    coding contract, W1-T11313 native coding execution, W1-T11120 the benchmark bundle/report
+    (plan/tasks.d). No DECISIONS.md, LEARNINGS.md or MASTER-PLAN.md entry names router value or
+    static baselines.
+    Settled by lookup: what native producer supplies trusted execution provenance? -> the existing
+    CanarySlotOwner terminal row, whose receipt carries slot, run (with run.trial scheduleDigest,
+    blockId and plannedSlotIds), grade, privateTrace and coding fields, read read-only like
+    readOwnedPrivateTraceReceipt and assertExistingCanaryOwnerV1 (src/lib/model-canary-owner.ts,
+    src/lib/model-canary-schedule.ts).
+    Settled by lookup: must analysis wait for a production coding execution port? -> No. That port
+    belongs to W1-T11313 (verify human, needs a systemd+bwrap host); until it merges, coding cells
+    are named missing blocks, and a test-only coding factory is not a receipt producer
+    (plan/tasks.d/W1-T11313, W1-T10957 amendment).
+    Settled by lookup: where does shard identity come from? -> ModelCanaryMatrixPlanV1.shards, each
+    with schedule.digest and slotMappings nativeSlotId to matrixSlotId/configId/replicateId
+    (src/lib/model-canary-matrix-plan.ts). No new owner column is needed, and owner DDL is
+    exact-match checked.
+    Settled by lookup: what makes a field row randomized? -> a pre-execution worker.assignment row
+    carrying routing experiment ITT with assignedProbability (src/lib/worker.ts,
+    src/lib/routing-experiments.ts experimentIntentionToTreat), or a registered controlled epoch
+    (src/lib/field-trials-flow.ts W1-T10843). The plain snapshot is observational
+    (causalEffect observational-only-no-randomized-allocation).
+    Settled by lookup: is an unavailable grade a model failure? -> No (W1-T11118 criterion
+    "missing traces and scorer errors remain unavailable").
+    Settled by lookup: does this need a new budget or a split? -> No. The operator focus for PR
+    #17132 asks to widen this held task in place. budget_usd stays 12 and no task is filed.
   design: >-
     Add pure private post-processing helpers over immutable manifests and existing canary and
     field-trial evidence contracts. Preserve observational versus registered randomized
@@ -64,6 +98,49 @@
     existing proposal/experiment contract only where compatible; otherwise return unavailable.
     Add bounded private analysis and proposal-export modes to the existing offline command that
     call all three helpers directly. Serialize these command edits after W1-T11118.
+    NATIVE PRODUCTION PATHS (clarified 2026-11-07, PR #17132). (1) Execution provenance. The
+    analysis evidence adapter reads terminal rows from the existing private CanarySlotOwner
+    directory, through a strictly read-only owner reader beside readOwnedPrivateTraceReceipt that
+    first passes assertExistingCanaryOwnerV1. It never creates, migrates or claims anything. It
+    trusts no imported JSON, self-reported origin or test-only factory. Non-terminal (started)
+    rows stay owned and unavailable, never free or failed. (2) Shard identity. Join each receipt to
+    the private digest-bound matrix manifest written by the W1-T11117 prepare path: its
+    run.trial.scheduleDigest must equal exactly one shards[].schedule.digest, and its slot id must
+    resolve through that shard's slotMappings to replicateId/caseId/configId/aaLabel. A receipt
+    whose binding, suite hash or digest conflicts is rejected with a named reason. (3)
+    Expected-matrix completeness. The expected set is every slotMapping of every manifest shard.
+    Each expected cell is either an observed terminal receipt or a named missing block, with one
+    of these reasons: never-claimed, started-not-terminal, unavailable-grade,
+    coding-native-profile-unavailable, binding-conflict or shard-absent. Receipts outside the
+    manifest are reported as unexpected and excluded. A family with any missing block in a
+    compared pair withholds confirmatory uncertainty for that comparison, and the denominators
+    disclose expected, observed and missing counts. Coding cells stay
+    coding-native-profile-unavailable until W1-T11313's production port merges. (4) Field
+    design provenance. The native field reader classifies a row as registered-randomized only
+    when either of these was recorded before execution: a worker.assignment row whose routing
+    experiment ITT carries an assignedProbability, or a registered controlled epoch. It copies that
+    recorded probability, never recomputes it or assumes 1/arms, and keeps crossover from the
+    recorded served arm. Every other row is observational, and a missing probability is never
+    filled in. The reader goes through the existing read-only readFieldTrialsLedger and
+    projectFlowRow, with no new ledger writer. (5) Grader failure evidence. Failure signatures
+    come from the owner receipt's recorded reasons (privateGrade.reason such as
+    unauthorized-action, the legacy grade reason, codingGrade.reason), each carrying its receipt
+    slot id and digest. Unavailable grades, scorer errors and missing traces are evidence gaps and
+    never failures. (6) Durable pre-outcome router decision. A new pure helper freezes router
+    decisions at prepare time, before any slot can be claimed. It applies the same parsed routing
+    policy the census consumes to a closed pre-outcome feature schema (case id, family, role, task
+    class, risk, split). Any outcome-bearing key is refused. It writes a private exclusive-create
+    receipt bound to the manifest digest, the policy source digest and the feature digest.
+    Replay recomputes the decision and refuses a mismatched, missing or overwritten receipt.
+    (7) Static baseline. A new pure helper selects the static baseline under a predeclared rule
+    from development-split owner receipts only. Its private receipt records the development
+    manifest digest, the family-set digest and the rule. Replay refuses any baseline whose
+    families intersect the evaluated split, or that lacks a receipt. Router value then returns
+    unavailable rather than falling back to the per-case oracle. evaluateCanaryRouterValue reads
+    only these two receipt kinds plus owner outcomes. The offline command's private prepare and
+    analysis modes call both helpers. Their only writes are private artifacts in the
+    operator-supplied output directory. The command makes no provider call and acquires no lease,
+    and it writes no ledger rows, tasks, schedules, policy, promotions or budget changes.
   note: >-
     The operator approved coordinated implementation on 2026-11-02. Proposal export is an
     inert artifact, not an approval, autonomous self-modification or new allowance. Native source
@@ -101,8 +178,42 @@
       proof: 'grep: createNativeFieldEvidenceReader( in src/lib/model-canary-command.ts'
     - claim: Native CLI consumes the frozen router replay helper
       proof: 'grep: evaluateCanaryRouterValue( in src/lib/model-canary-command.ts'
+    - claim: Native analysis evidence comes only from existing private owner terminal receipts read without creating or claiming state, never from imported JSON or a test-only factory
+      proof: 'grep: W1-T11119 criterion 15: analysis evidence comes only from existing owner terminal receipts in test/routing/model-canary-analysis-evidence-adapter.test.ts'
+    - claim: Each receipt joins exactly one matrix shard through the manifest schedule digest and slot mapping and conflicting identities are rejected by name
+      proof: 'grep: W1-T11119 criterion 16: receipts join matrix shard identity by schedule digest and slot mapping in test/routing/model-canary-analysis-evidence-adapter.test.ts'
+    - claim: Every expected matrix cell is observed or a named missing block and any missing block withholds that comparison's confirmatory uncertainty
+      proof: 'grep: W1-T11119 criterion 17: every expected matrix cell is observed or a named missing block in test/routing/model-canary-analysis-evidence-adapter.test.ts'
+    - claim: Field rows are randomized only with a recorded pre-execution assignment probability or registered epoch and the recorded probability is never recomputed
+      proof: 'grep: W1-T11119 criterion 18: field design is randomized only with a recorded pre-execution assignment probability in test/routing/model-canary-native-field-evidence.test.ts'
+    - claim: Proposal failure signatures map recorded grader reasons with receipt provenance and never count unavailable grades as failures
+      proof: 'grep: W1-T11119 criterion 19: proposal failure signatures map recorded grader reasons and exclude unavailable grades in test/routing/model-canary-proposal-export.test.ts'
+    - claim: Frozen router decisions are computed from a closed pre-outcome feature schema and persisted as exclusive-create receipts bound to manifest policy and feature digests
+      proof: 'unit test: test/routing/model-canary-router-decision-receipt.test.ts'
+    - claim: Static baselines are qualified from development-split receipts only and a missing or overlapping baseline makes router value unavailable
+      proof: 'unit test: test/routing/model-canary-static-baseline.test.ts'
+    - claim: Native offline preparation persists the frozen router decision receipt
+      proof: 'grep: freezeCanaryRouterDecisions( in src/lib/model-canary-command.ts'
+    - claim: Native offline analysis qualifies the static baseline from development evidence
+      proof: 'grep: qualifyStaticCanaryBaseline( in src/lib/model-canary-command.ts'
+    - claim: Router value replay consumes only durable decision and baseline receipts plus owner outcomes
+      proof: 'grep: W1-T11119 criterion 24: router value replay consumes only durable decision and baseline receipts in test/routing/model-canary-router-value.test.ts'
+    - claim: The whole native pipeline analyses real owner receipts end to end with zero provider calls and no ledger task schedule policy or promotion writes
+      proof: 'grep: W1-T11119 criterion 25: whole pipeline analyses real owner receipts with no provider call in test/routing/model-canary-whole-pipeline-clustered-analysis.test.ts'
   falsifier: >-
     Use paired positive controls and known missing/mismatched inputs. Duplicate repeats within
     each family and require the independent-family count to stay fixed. Remove identity/split
     guards or replace family resampling with attempt resampling and require named controls to
     fail. Remove the inert-proposal guard and require the no-side-effects control to fail.
+    The whole-pipeline control builds a real matrix manifest with planCanaryMatrix. It runs real
+    executeCanarySchedule into a real CanarySlotOwner in a private temporary directory, through
+    an injected transport that counts calls and must end at zero real provider invocations. It
+    then runs the command's analysis mode. Hand-written owner rows and fabricated receipts are
+    forbidden. Each of the following is a separate discriminating check and must fail its named
+    criterion. Delete one terminal row (17 must report never-claimed). Leave one row started (17
+    must report started-not-terminal). Alter a receipt's scheduleDigest (16). Feed an imported
+    JSON receipt (15). Strip assignedProbability from a worker.assignment row (18 must report
+    observational). Turn an unavailable grade into a failure signature (19). Add an outcome key to
+    the router feature input, or overwrite a decision receipt (20). Draw the baseline from
+    evaluation-split families (21). Fall back to the oracle when a receipt is missing (24).
+    Restore each change and require complete verified-file TAP with zero failures.
