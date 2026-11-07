@@ -1,8 +1,8 @@
 - id: W1-T11119
   title: Controlled canaries compare clustered evidence with field trials and export unmeasured improvement proposals
   repo: remudero
-  depends_on: [W1-T11117, W1-T11118, W1-T10957]
-  plan_refs: [W1-T10956, W1-T10957, W1-T100001]
+  depends_on: [W1-T11117, W1-T11118, W1-T10957, W1-T11597, W1-T11598, W1-T11599]
+  plan_refs: [W1-T10956, W1-T10957, W1-T100001, W1-T11597, W1-T11598, W1-T11599]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -10,6 +10,20 @@
   risk: high
   band_meaning: span
   priority: 2
+  # refusal-amendment (W1-T11119, run DAEMON-1793999214575@faf5a5da604a1a14cb1f9f4782d0ca23994b0329, 2026-11-07T05:43:04.335Z): the worker refused criterion 8 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: No production native receipt producer reaches the clustered analysis path; coding execution requires a test-only factory.
+  # refusal-amendment (W1-T11119, run DAEMON-1793999214575@faf5a5da604a1a14cb1f9f4782d0ca23994b0329, 2026-11-07T05:43:04.335Z): the worker refused criterion 10 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: Failed grade reasons are now classified, but native export cannot produce a runtime draft without that production receipt path.
+  # refusal-amendment (W1-T11119, run DAEMON-1793999214575@faf5a5da604a1a14cb1f9f4782d0ca23994b0329, 2026-11-07T05:43:04.335Z): the worker refused criterion 14 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: No durable producer joins frozen pre-outcome router decisions and qualified static baselines to canary outcomes.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
+  # architect-amendment (W1-T11119, run PLAN-clarify-1794063404315, 2026-11-07, PR #17132): widen-files resolves the three
+  #   refusals above in ONE diff — adds the durable router-decision receipt and static-baseline producers plus the
+  #   field-flow assignment provenance; folds criteria 15-25 (closed PR #17189) and 26-27 (closed PR #17192). Neither
+  #   closed PR is on main; they are reference drafts only. Criteria 1-14 are unchanged.
+  # architect-clarification (W1-T11119, run PLAN-clarify-1794067930429, 2026-11-07): the census-named
+  #   static-baseline unit test takes the reasoned @not-a-rule-suite header marker (W1-T5785). It gets no
+  #   PRECHECK_PARITY row, and files and criteria 1-27 are unchanged.
   status: queued
   attempts: 0
   origin: operator-approved-router-evaluation-plan:2026-11-02
@@ -25,6 +39,7 @@
     - src/lib/model-canary-native-config.ts
     - src/lib/model-canary-native-field-evidence.ts
     - src/lib/model-canary-owner.ts
+    - test/model-canary-owner.test.ts
     - src/lib/model-canary-router-value.ts
     - test/model-canary-input.test.ts
     - test/routing/model-canary-analysis-command.test.ts
@@ -32,11 +47,82 @@
     - test/routing/model-canary-native-field-evidence.test.ts
     - test/routing/model-canary-router-value.test.ts
     - test/routing/model-canary-whole-pipeline-clustered-analysis.test.ts
+    - src/lib/model-canary-router-decision-receipt.ts
+    - test/routing/model-canary-router-decision-receipt.test.ts
+    - src/lib/model-canary-static-baseline.ts
+    - test/routing/model-canary-static-baseline.test.ts
+    - src/lib/field-trials-flow.ts
+    - src/lib/field-trials-cohorts.ts
+    - test/field-trials-flow.test.ts
   rationale: >-
     The approved benchmark must measure router value without treating observational model win
     rates as a randomized comparison. Existing paired analysis is descriptive and supplies no
     uncertainty estimate. Repeated attempts are not independent cases. Failure patterns can
     inform a bounded improvement proposal without executing that proposal.
+    The 2026-11-07 refusals of criteria 8, 10 and 14 were outside-declared-files: no durable
+    producer of frozen router decisions, qualified static baselines, or recorded field assignment
+    existed inside the old file set, so the files are widened and the producers are named.
+    Settled by lookup: is this already filed or decided? -> no; no other task declares
+    model-canary-router-decision-receipt, model-canary-static-baseline, or a routing.experiment
+    whitelist in projectFlowRow (grep of plan/tasks.d). Its proposed criteria exist only in closed
+    unmerged PRs #17189 and #17192, folded in here as the operator directed for PR #17132.
+    Settled by lookup: where is real field assignment provenance recorded? -> worker_assignment.routing.experiment,
+    typed ExperimentIntentionToTreat {id, unit, assignedArm, assignedProbability, servedArm,
+    crossover} (src/lib/worker.ts routing.experiment; src/lib/routing-experiments.ts).
+    Settled by lookup: does projectFlowRow carry it today? -> no; it reads worker_assignment
+    requested/selected/stack only (src/lib/field-trials-flow.ts projectFlowRow).
+    Settled by lookup: how does the expected matrix bind? -> ModelCanaryMatrixPlanV1 shards carry
+    schedule and slotMappings {nativeSlotId, matrixSlotId, replicateId, caseId, configId, aaLabel}
+    (src/lib/model-canary-matrix-plan.ts).
+    Settled by lookup: what is a terminal owner receipt? -> canary_slots_v1 rows with
+    phase terminal read by readOwnedPrivateTraceReceipt, which reports
+    canary-owner-terminal-receipt-missing otherwise (src/lib/model-canary-owner.ts).
+    Settled by lookup: is a registered-epoch receipt verifiable? -> only when loadPaidPilotProtocol
+    returns the matching version, pilotId and revisions (src/lib/field-trials-flow.ts
+    controlled-registered path).
+    Architect rewiring (plan-only, run PLAN-expand-1794065451754, 2026-11-07): held PR #17194 split the
+    criteria 8, 10 and 14 producers into prerequisites but was made conflicting when merged PR #17193
+    changed this shard; this rewiring carries the latest post-#17193 shard forward unchanged (files,
+    criteria 1-27, owner and status) and adds only depends_on, plan_refs and this note. The prerequisites
+    are W1-T11597 (positive-only provider-exchange seal in collectWorkerResult, excluding
+    cloud_credential_error per https://code.claude.com/docs/en/agent-sdk/typescript, with
+    WorkerExecutionEvidenceV1 unchanged), W1-T11598 (frozen replay of the exact production selector,
+    selectWorkerProviderForPolicy or selectWorkerProvider after learned mixing, with routingPool only a
+    non-production counterfactual) and W1-T11599 (development-selected comparator with holdout outcomes
+    inaccessible to selection, grounded in RouteLLM ICLR 2025
+    https://proceedings.iclr.cc/paper_files/paper/2025/hash/5503a7c69d48a2f86fc00b3dc09de686-Abstract-Conference.html,
+    RouterEval Findings of EMNLP 2025 https://aclanthology.org/2025.findings-emnlp.208/ and Efron 1986
+    https://doi.org/10.1214/ss/1177013815).
+    Settled by lookup: are the held ids reusable? -> no; W1-T11593, W1-T11594 and W1-T11595 are declared by
+    open PR #17194, so fresh reserved ids are used.
+    Settled by lookup: is the graph acyclic? -> yes; none of W1-T11597, W1-T11598 or W1-T11599 depends on
+    W1-T11119, W1-T11120, W1-T11213, W1-T11264 or W1-T11265, and worker.ts edits serialise behind
+    W1-T11432 (plan/tasks.d dependency grep). No source scope changes and no source task is dispatched.
+    Architect clarification (plan-only, run PLAN-clarify-1794067930429, 2026-11-07): the ask was to add
+    scripts/census-precheck.mjs to files so the author preflight could ask the CI census that
+    test/routing/model-canary-static-baseline.test.ts would join. The lookups below show the settled remedy
+    for a plain unit test caught only by its name is the reasoned header marker, not a parity row. So
+    files and criteria 1-27 are unchanged, and only the design's RULE-SUITE NAME paragraph and this note
+    are added.
+    Settled by lookup: why does this test join a CI census? -> isRuleSuitePath admits any test basename
+    matching RULE_SUITE_NAME_RE /(?:census|ratchet|baseline)/i, and test/every-ci-census-is-asked-before-the-push.test.ts
+    plus censusParityViolations (scripts/census-precheck.mjs) refuse a member that is neither in
+    PRECHECK_PARITY nor in the shrink-only baseline (src/lib/rule-suites.ts; W1-T5616).
+    Settled by lookup: is this already decided? -> yes; W1-T5785 (merged) added the
+    `@not-a-rule-suite: <reason>` header opt-out because a plain unit test so named has no truthful
+    parity row, and W1-T9877 (merged) keeps that opt-out for legacy basename matches. The task-linter
+    refusal text says: for a legacy name match, declare the marker; only a real census lists
+    scripts/census-precheck.mjs (src/lib/task-linter.ts newShardRuleSuiteViolations; W1-T5838).
+    Settled by lookup: is this test a real census? -> no; criterion 21 and the STATIC BASELINE design
+    exercise the pure qualifyCanaryStaticBaseline helper over development-split owner receipts. It
+    walks no tracked tree and holds no tree-wide count, so a PRECHECK_PARITY modeled row would claim a
+    question nothing asks.
+    Settled by lookup: may the test be renamed instead? -> no; criterion 21's proof names this path, and
+    the operator directed that all 27 criteria stay unchanged.
+    Settled by lookup: does the census-precheck reader honour the marker? -> yes; its tree reader parses
+    the same header @not-a-rule-suite marker and requires a reason (scripts/census-precheck.mjs).
+    Settled by lookup: does any other canary prerequisite name a census, ratchet or baseline test? -> no;
+    only this shard does (grep of W1-T11119, W1-T11120 and W1-T11597 to W1-T11599).
   design: >-
     Add pure private post-processing helpers over immutable manifests and existing canary and
     field-trial evidence contracts. Preserve observational versus registered randomized
@@ -56,6 +142,52 @@
     existing proposal/experiment contract only where compatible; otherwise return unavailable.
     Add bounded private analysis and proposal-export modes to the existing offline command that
     call all three helpers directly. Serialize these command edits after W1-T11118.
+    OWNER EVIDENCE (criteria 15-17): the analysis evidence adapter reads only EXISTING
+    CanarySlotOwner terminal receipts, read-only. It never imports or fabricates rows and never
+    creates, claims or terminates a slot. It binds receipts to one digest-verified ModelCanaryMatrixPlanV1
+    shard by schedule digest and slotMappings. The expected set is every slotMapping of that shard.
+    Every absent cell is an explicit named missing block, exactly one of never-claimed,
+    started-not-terminal, unavailable-grade, coding-native-profile-unavailable, binding-conflict
+    or shard-absent. The output reports expected, observed and missing denominators, and
+    uncertainty is withheld for every comparison a missing block touches. Receipts with no
+    slotMapping are extras: excluded and named, never counted.
+    FIELD PROVENANCE (criteria 18, 26, 27): projectFlowRow whitelists only the pre-execution
+    worker_assignment.routing.experiment fields id, assignedArm, assignedProbability, servedArm and
+    crossover, and nothing else from that object. servedTrialCohorts carries them into a bounded,
+    private, assignment-keyed cohort output, and the native field evidence reader consumes that output.
+    The recorded assignedProbability is preserved exactly. Nothing calls experimentIntentionToTreat
+    or experimentArmForTask, or recomputes an arm or probability. Malformed or absent provenance
+    stays observational or unavailable and is never inferred as randomized. A recorded
+    registered-epoch receipt is an alternate randomized source only when it is actually
+    verifiable (the loadPaidPilotProtocol version, pilotId and revisions match). Otherwise the
+    randomized comparison is unavailable.
+    GRADER FAILURES (criterion 19): proposal failure signatures map only from recorded terminal
+    grader reasons that carry owner-receipt provenance. A missing trace, scorer error or
+    unavailable grade is a named evidence gap, never a failure.
+    FROZEN ROUTER DECISIONS (criteria 20, 22, 24): at prepare time, freezeCanaryRouterDecisions
+    (src/lib/model-canary-router-decision-receipt.ts) decides from a CLOSED pre-outcome feature
+    schema. Any non-schema or outcome-bearing field is refused. It writes exclusive-create
+    receipts in the private canary directory, bound to manifest, policy and feature digests.
+    evaluateCanaryRouterValue replays only those durable receipts plus owner outcomes. It
+    validates the digests and refuses missing, altered or overwritten receipts, and it never
+    re-decides after outcomes exist.
+    STATIC BASELINE (criteria 21, 23): qualifyCanaryStaticBaseline
+    (src/lib/model-canary-static-baseline.ts) qualifies a static baseline from development-split
+    owner receipts only and records the manifest digest, family digest and selection rule. It
+    rejects any overlap between the development and evaluation splits. With no qualified
+    baseline it returns unavailable. The per-case empirical oracle is never a fallback and stays
+    labelled an optimistic diagnostic.
+    LIMITS: every existing privacy and no-side-effect limit holds. The only new write is the
+    private exclusive-create decision receipt. No ledger, task, schedule, policy, promotion,
+    budget or provider-call side effects. Adapter integration tests stay in scope.
+    RULE-SUITE NAME (criterion 21's file): test/routing/model-canary-static-baseline.test.ts matches
+    RULE_SUITE_NAME_RE only through the word baseline in its legacy basename. It is a plain unit test of
+    qualifyCanaryStaticBaseline over private fixtures, not a tree census. Its leading header comment
+    therefore carries this exact marker line (W1-T5785, W1-T9877), which leaves it out of listRuleSuites
+    and so out of the PRECHECK_PARITY population while the coverage shards still run it. Add no
+    PRECHECK_PARITY row, no census-precheck-parity-baseline.json row and no edit to
+    scripts/census-precheck.mjs.
+    // @not-a-rule-suite: unit test of qualifyCanaryStaticBaseline over private fixtures; it walks no tree and asserts no tree-wide count
   note: >-
     The operator approved coordinated implementation on 2026-11-02. Proposal export is an
     inert artifact, not an approval, autonomous self-modification or new allowance. Native source
@@ -66,19 +198,19 @@
     schedule, routing promotion or duplicate full Linux qualification.
   acceptance:
     - claim: Paired uncertainty uses independent source families rather than treating repeats as new cases
-      proof: 'unit test: cluster paired analysis keeps repeated attempts within independent task families'
+      proof: 'unit test: test/routing/model-canary-cluster-analysis.test.ts'
     - claim: Incomplete or insufficient evidence withholds confirmatory uncertainty
-      proof: 'unit test: cluster paired analysis withholds uncertainty for incomplete or undersized evidence'
+      proof: 'grep: W1-T11119 criterion 2: cluster paired analysis withholds uncertainty for incomplete or undersized evidence in test/routing/model-canary-cluster-analysis.test.ts'
     - claim: Synthetic outcomes never increase observed field-trial completion counts
-      proof: 'unit test: private field comparison separates benchmark and field trial denominators'
+      proof: 'unit test: test/routing/model-canary-field-comparison.test.ts'
     - claim: Serving or scaffold mismatches prevent model-attribution claims
-      proof: 'unit test: field comparison withholds attribution for mismatched serving identity or scaffold'
+      proof: 'grep: W1-T11119 criterion 4: field comparison withholds attribution for mismatched serving identity or scaffold in test/routing/model-canary-field-comparison.test.ts'
     - claim: Improvement drafts remain unmeasured and have no promotion or policy side effects
-      proof: 'unit test: experiment proposal export stays unmeasured and writes no promotion event'
+      proof: 'unit test: test/routing/model-canary-proposal-export.test.ts'
     - claim: Field-trial experiment designs and assignment provenance are not conflated
-      proof: 'unit test: field comparison preserves observational and randomized design provenance'
+      proof: 'grep: W1-T11119 criterion 6: field comparison preserves observational and randomized design provenance in test/routing/model-canary-field-comparison.test.ts'
     - claim: Improvement export invokes no ledger task schedule routing or activation writers
-      proof: 'unit test: improvement proposal export is pure and invokes no writer or activation effects'
+      proof: 'grep: W1-T11119 criterion 7: improvement proposal export is pure and invokes no writer or activation effects in test/routing/model-canary-proposal-export.test.ts'
     - claim: Native offline analysis actually consumes clustered paired evidence
       proof: 'grep: analyzeClusterPairedCanaries( in src/lib/model-canary-command.ts'
     - claim: Native offline comparison actually consumes separate field-trial evidence
@@ -93,8 +225,47 @@
       proof: 'grep: createNativeFieldEvidenceReader( in src/lib/model-canary-command.ts'
     - claim: Native CLI consumes the frozen router replay helper
       proof: 'grep: evaluateCanaryRouterValue( in src/lib/model-canary-command.ts'
+    - claim: Analysis evidence comes only from existing owner terminal receipts, with no imported or fabricated rows and no slot creation or claims
+      proof: 'grep: W1-T11119 criterion 15: analysis evidence reads only existing owner terminal receipts and creates or claims no slot in test/routing/model-canary-analysis-evidence-adapter.test.ts'
+    - claim: Owner receipts join a digest-verified matrix shard exactly by schedule digest and slotMappings
+      proof: 'grep: W1-T11119 criterion 16: owner receipts join a digest-verified matrix shard by schedule digest and slot mapping exactly in test/routing/model-canary-analysis-evidence-adapter.test.ts'
+    - claim: Every expected slotMapping is observed or a named missing block, with denominators, withheld uncertainty and named excluded extras
+      proof: 'grep: W1-T11119 criterion 17: every expected slot mapping is observed or a named missing block with withheld uncertainty and named excluded extras in test/routing/model-canary-analysis-evidence-adapter.test.ts'
+    - claim: Native field evidence carries the truthful recorded worker assignment experiment provenance
+      proof: 'grep: W1-T11119 criterion 18: native field evidence carries recorded worker assignment experiment provenance without recomputation in test/routing/model-canary-native-field-evidence.test.ts'
+    - claim: Proposal failures come only from recorded terminal grader reasons, and evidence gaps are not failures
+      proof: 'grep: W1-T11119 criterion 19: proposal failures come only from recorded terminal grader reasons and evidence gaps are not failures in test/routing/model-canary-proposal-export.test.ts'
+    - claim: Router decisions freeze into exclusive-create digest-bound receipts that replay validates
+      proof: 'grep: W1-T11119 criterion 20: frozen router decision receipts are exclusive-create and replay refuses missing altered or overwritten receipts in test/routing/model-canary-router-decision-receipt.test.ts'
+    - claim: Static baselines qualify only from development-split owner receipts and are unavailable otherwise
+      proof: 'grep: W1-T11119 criterion 21: static baseline qualifies from development-split owner receipts only and is unavailable without one in test/routing/model-canary-static-baseline.test.ts'
+    - claim: Native prepare persists frozen router decisions
+      proof: 'grep: freezeCanaryRouterDecisions( in src/lib/model-canary-command.ts'
+    - claim: Native analysis qualifies the static baseline
+      proof: 'grep: qualifyCanaryStaticBaseline( in src/lib/model-canary-command.ts'
+    - claim: Router value replay consumes only durable decision receipts plus outcomes
+      proof: 'grep: W1-T11119 criterion 24: router value replay consumes only durable decision receipts plus owner outcomes in test/routing/model-canary-router-value.test.ts'
+    - claim: An end-to-end proof over a real owner makes zero provider calls and has no side effects
+      proof: 'grep: W1-T11119 criterion 25: whole pipeline over a real manifest and owner makes zero provider calls and each removed or corrupted receipt fails its named criterion in test/routing/model-canary-whole-pipeline-clustered-analysis.test.ts'
+    - claim: Field flow keeps only the recorded pre-execution assignment provenance and recomputes nothing
+      proof: 'grep: W1-T11119 criterion 26: field flow projects only recorded pre-execution routing experiment assignment provenance without recomputation in test/field-trials-flow.test.ts'
+    - claim: A randomized comparison is unavailable without a joinable assignment or a registered-epoch receipt
+      proof: 'grep: W1-T11119 criterion 27: randomized comparison is unavailable without a joinable assignment or registered-epoch receipt in test/routing/model-canary-field-comparison.test.ts'
   falsifier: >-
     Use paired positive controls and known missing/mismatched inputs. Duplicate repeats within
     each family and require the independent-family count to stay fixed. Remove identity/split
     guards or replace family resampling with attempt resampling and require named controls to
     fail. Remove the inert-proposal guard and require the no-side-effects control to fail.
+    Whole pipeline: build a real manifest and a real CanarySlotOwner in a private temp dir. Use an
+    injected transport that asserts zero real provider calls. Prepare, run, analyse and export,
+    then do each of the following one at a time on a fresh copy, and require the named criterion
+    to fail or return the named unavailable state:
+      delete a terminal receipt (15/17 never-claimed or started-not-terminal block);
+      alter the shard schedule digest (16 shard-absent/binding-conflict);
+      add an unmapped receipt (17 named excluded extra);
+      corrupt or drop routing.experiment, or change assignedProbability (18/26/27 observational or unavailable, probability never recomputed);
+      replace a grader reason with a missing trace or scorer error (19 evidence gap);
+      delete, alter or overwrite a decision receipt (20/24 refused);
+      drop the development split or overlap the splits (21/23 unavailable, no oracle fallback).
+    Every run asserts no ledger, task, schedule, policy, promotion, budget or provider-call
+    effects, and removes its temp dir afterwards.

@@ -9,6 +9,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute } from "node:path";
+import { loopAvailableDeadline, systemClock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { SELECTED_INSTANCE_REGISTRY_FIELDS, parseInstanceRegistry, projectRegistry, type RegistryInstance, type RegistryProjection } from "./instance-registry.js";
 
@@ -169,17 +170,19 @@ async function readBounded(path: string, maxBytes: number, signal: AbortSignal, 
 async function readWithDeadline(path: string, maxBytes: number, timeoutMs: number, external: AbortSignal | undefined, io: RegistryFileIO, physicalIdentity: boolean): Promise<RegistryBytes | Unknown> {
   if (external?.aborted) return { kind: "unknown", reason: "cancelled" };
   const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout>;
+  let disarmDeadline: () => void;
   let onAbort: () => void;
   const stopped = new Promise<Unknown>((resolve) => {
     onAbort = () => { controller.abort(); resolve({ kind: "unknown", reason: "cancelled" }); };
-    timer = setTimeout(() => { controller.abort(); resolve({ kind: "unknown", reason: "timeout" }); }, timeoutMs);
+    disarmDeadline = loopAvailableDeadline(systemClock, timeoutMs, () => {
+      controller.abort(); resolve({ kind: "unknown", reason: "timeout" });
+    });
     external?.addEventListener("abort", onAbort, { once: true });
   });
   try {
     return await Promise.race([readBounded(path, maxBytes, controller.signal, io, physicalIdentity), stopped]);
   } finally {
-    clearTimeout(timer!); external?.removeEventListener("abort", onAbort!);
+    disarmDeadline!(); external?.removeEventListener("abort", onAbort!);
   }
 }
 
@@ -290,6 +293,11 @@ export class InstanceRegistryRuntimeError extends RmdError {
   constructor(reason: string) { super("registry", 2, `selected instance registry unavailable (${reason})`, { reason }); }
 }
 
+/** New active selection wins when present, including an invalid empty value; the legacy name is fallback only. */
+export function selectedInstanceRegistryEnvPath(env: Readonly<Record<string, string | undefined>> = process.env): string | undefined {
+  return env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined ? env.RMD_SELECTED_INSTANCE_REGISTRY : env.RMD_INSTANCE_REGISTRY;
+}
+
 function selectedRuntime(): InstanceRegistryRuntime | undefined {
   const current = runtimeRegistry.getStore();
   if (current?.binding === undefined) return undefined;
@@ -300,7 +308,7 @@ function selectedRuntime(): InstanceRegistryRuntime | undefined {
 /** Trusted invocation scope only. No private path or raw lifecycle bytes are serialized on a binding. */
 export async function withInstanceRegistryRuntime<T>(
   operation: () => T | Promise<T>,
-  input: InstanceRegistryRuntimeInput = { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME,
+  input: InstanceRegistryRuntimeInput = { envPath: selectedInstanceRegistryEnvPath(), instanceName: process.env.RMD_INSTANCE_NAME,
     expectedDigest: process.env.RMD_INSTANCE_REGISTRY_DIGEST, expectedFileBinding: process.env.RMD_INSTANCE_REGISTRY_FILE_BINDING },
   io: RegistryFileIO = registryFileIO,
 ): Promise<T> {
@@ -349,7 +357,7 @@ export function assertInstanceRegistryWorkerEnvironment(env: Readonly<Record<str
   const selected = runtimeInstanceRegistryPrivateFile();
   if (selected === undefined || env === undefined) return;
   if (Object.entries(env).some(([key, value]) => typeof value !== "string"
-    || key.startsWith("RMD_INSTANCE_REGISTRY") || value.includes(selected))) {
+    || key.startsWith("RMD_INSTANCE_REGISTRY") || key === "RMD_SELECTED_INSTANCE_REGISTRY" || value.includes(selected))) {
     throw new InstanceRegistryRuntimeError("worker_environment_private_source");
   }
 }

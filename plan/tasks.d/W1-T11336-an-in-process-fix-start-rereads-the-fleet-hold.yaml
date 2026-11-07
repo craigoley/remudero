@@ -16,12 +16,12 @@
     - W1-T11321
   files:
     - src/lib/worker.ts
-    - test/memory/an-in-process-fix-start-rereads-the-fleet-hold.test.ts
+    - test/worker/spawn/an-in-process-fix-start-rereads-the-fleet-hold.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: For an in-process start (no run-child reservation) of worker class fix, spawnWorker reads the fleet STOP/PAUSE hold after awaitMemoryAdmission and before claiming occupancy; under a hold it releases any reservation, spawns nothing and returns notStarted admission-abandoned; with no hold, and for every other worker class, it starts exactly as before
-      proof: "unit test: test/memory/an-in-process-fix-start-rereads-the-fleet-hold.test.ts"
+      proof: "unit test: test/worker/spawn/an-in-process-fix-start-rereads-the-fleet-hold.test.ts"
     - claim: The spawn-time fleet-hold re-read names this task
       proof: "grep: W1-T11336 in src/lib/worker.ts"
   rationale: |

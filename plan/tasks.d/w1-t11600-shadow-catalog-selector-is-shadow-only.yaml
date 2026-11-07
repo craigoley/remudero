@@ -1,0 +1,66 @@
+- id: W1-T11600
+  title: "A second task catalog can be compared in shadow without changing the public daemon's dispatch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved Remudero-ops migration bootstrap, 2026-11-07"
+  plan_refs: [W1-T1062]
+  priority: 1
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/daemon.ts
+    - test/daemon.test.ts
+  rationale: |
+    The migration design puts future plans in the private remudero-ops repository while the public
+    daemon continues to own task selection and execution. Today the daemon calls
+    `runnableCandidates` with one parsed `Plan`; the private ops repository currently contains
+    deployment-instance data, not a task catalog. A source adapter and a janitor are later migration
+    stages. They cannot safely rely on a selector that has never compared a second catalog.
+
+    This is the one-time public-core bootstrap task authorized for the migration. It adds an
+    optional, already-parsed secondary Plan input to a daemon-only shadow comparison, composing it
+    with the existing Plan and reusing the current eligibility and priority rules. It does not read
+    the private repository, change plan filing, dispatch secondary work, add credentials or paths,
+    or alter the ordinary selector output. Those remain separate normal-gate tasks after this
+    contract exists.
+  design: |
+    1. Add an optional secondary Plan snapshot to the daemon's existing injected dependencies. The
+       source must be a parsed value supplied by its caller; do not add filesystem, Git, GitHub,
+       network, credential, registry, or configuration reads.
+    2. For shadow comparison only, compose primary and secondary task sets into one Plan and call
+       the existing `runnableCandidates` once so dependencies are resolved across both and the
+       existing global priority, target-repo, release, and overlap rules remain authoritative.
+       `Task.repo` continues to mean execution target, never plan-source repository.
+    3. An absent secondary snapshot preserves today's single-plan behavior exactly. An explicitly
+       unavailable/malformed snapshot or any duplicate task ID rejects the secondary snapshot
+       atomically; valid primary candidates remain intact. Emit only bounded aggregate counts and
+       a stable outcome code, never task titles, plan contents, or private paths.
+    4. Shadow comparison must not replace the dispatch set, create claims, start workers, write
+       PRs, or change configuration. The feature remains opt-in and shadow-only. Keep all current
+       behavior byte-for-byte when no secondary snapshot is supplied.
+    5. Add the four criterion-bound regressions to the existing `test/daemon.test.ts`. Remove the
+       shadow-composition behavior and demonstrate the corresponding assertions fail, then restore
+       it and demonstrate they pass.
+  acceptance:
+    - claim: "With no secondary snapshot, the daemon retains the existing primary-plan candidate result and eligibility behavior"
+      proof: "unit test: W1-T11600 criterion 1: absent secondary snapshot preserves single-plan candidates"
+    - claim: "Two catalogs share cross-catalog dependency resolution and the existing global priority order without changing task execution targets"
+      proof: "unit test: W1-T11600 criterion 2: composed catalogs use shared eligibility and priority"
+    - claim: "An unavailable, malformed or duplicate-ID secondary snapshot is rejected atomically and cannot remove or partially add primary candidates"
+      proof: "unit test: W1-T11600 criterion 3: invalid secondary snapshot is rejected atomically"
+    - claim: "The daemon records a bounded shadow comparison but never lets secondary candidates alter dispatch or disclose titles, contents or paths"
+      proof: "unit test: W1-T11600 criterion 4: secondary catalog shadow cannot alter dispatch"
+  falsifier: |
+    Remove the composition or each refusal guard independently. Criterion 1 must detect a changed
+    primary result when the source is absent; criterion 2 must detect a missed cross-catalog
+    dependency or priority inversion; criterion 3 must detect partial admission or loss of primary
+    work after invalid secondary input; criterion 4 must detect a changed dispatch set, any writer or
+    worker call, or private title/path in shadow output. Restore the implementation and require all
+    four to pass. Do not activate the source provider or treat shadow agreement as permission to
+    dispatch.

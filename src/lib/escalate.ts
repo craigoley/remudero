@@ -1,14 +1,14 @@
-import { ghExec, ghTextAsync } from "./github-transport.js";
+import { ghExec, ghTextAsync, withSynchronousGhDelivery } from "./github-transport.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createOrReadExclusive, createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
-import { clockFromMillisFn } from "./clock.js";
+import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import {
   checkOperatorMessage,
   operatorMessageFooter,
@@ -35,7 +35,7 @@ import {
   type TriagePass,
 } from "./escalation-triage.js";
 import { escalationClassSignal } from "./escalation-precision.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
 
 /**
  * Human stops (W1-T8, MASTER-PLAN §4): exhausted post-diagnose strikes (BLOCKED), human-only acts
@@ -372,6 +372,236 @@ export function maintenanceOperatorChannel(issues: AsyncIssueGateway): {
       const url = issueUrl ?? (await findOpen(repo))?.url;
       if (url !== undefined) await issues.closeWithComment?.(url, comment);
     },
+  };
+}
+
+export interface PrimaryShadowSelection {
+  instance: string;
+  sourcePath: string;
+  digest: string;
+  mode: "shadow" | "live";
+}
+
+const primaryShadowOperations = new Map<string, Promise<void>>();
+
+/** One instance owns one durable episode; selection digests scope acknowledgements, not issue identity.
+ * Unknown selection or an unreadable history never establishes recovery or permission to create. */
+export function primaryShadowOperatorChannel(opts: {
+  owner: string; repo: string; ledgerPath: string; runId: string;
+  selection(): PrimaryShadowSelection | undefined;
+  issues?: AsyncIssueGateway;
+  clock?: Clock;
+  readPrState?(url: string): Promise<{ ok: boolean; state?: string }>;
+}): {
+  refuse(pr: { prNumber: number; prUrl: string }): Promise<void>;
+  reconcile(): Promise<void>;
+  resolved(pr: { prNumber: number; prUrl: string }): Promise<void>;
+} {
+  const issues = opts.issues ?? ghIssueGatewayAsync(opts.owner, opts.repo);
+  const clock = opts.clock ?? systemClock;
+  type State = { revision: number; first: string; prs: number[]; handledDigests: string[];
+    digest: string; sourcePath: string;
+    pendingRecovery?: string; publishedTaskId?: string; publishedIssueUrl?: string };
+  const states = new Map<string, State>();
+  const historyMemo = createLedgerRotationMemo(rows => rows.filter(row =>
+    row.step === "primary_shadow.observation" || row.step === "panel.escalation_marked_handled" || row.step === "panel.manual_approved"
+    || ((row.step === "escalation.issue_opened" || row.step === "primary_shadow.issue_published")
+      && typeof row.task_id === "string" && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(row.task_id))), {
+    holder: "primary-shadow-notice", durableDigest: { reducerVersion: "primary-shadow-notice-v4" },
+    pattern: /primary_shadow\.(observation|issue_published)|panel\.(escalation_marked_handled|manual_approved)|PRIMARY-SHADOW-/, requireObjects: true,
+  });
+  const identity = (s: PrimaryShadowSelection) => `<!-- primary-shadow ${JSON.stringify([opts.owner, opts.repo, s.instance])} -->`;
+  const key = (s: PrimaryShadowSelection) => `PRIMARY-SHADOW-${s.digest}`;
+  const list = async () => {
+    if (!issues.listOpen) throw new Error("primary shadow alert cannot read open issues");
+    return await issues.listOpen(NEEDS_HUMAN_LABEL);
+  };
+  const state = async (s: PrimaryShadowSelection): Promise<State> => {
+    const id = key(s), instanceKey = identity(s), known = states.get(instanceKey);
+    if (known) return known;
+    let damaged = false;
+    const history = await readLedgerUnionRecordsMemoized(dirname(opts.ledgerPath), historyMemo, {
+      step: ["primary_shadow.observation", "panel.escalation_marked_handled", "panel.manual_approved", "escalation.issue_opened", "primary_shadow.issue_published"], refuseIncomplete: true,
+      onTorn: raw => { if (raw.includes("primary_shadow.observation") || raw.includes("primary_shadow.issue_published")
+        || (raw.includes("escalation.issue_opened") && raw.includes("PRIMARY-SHADOW-"))
+        || raw.includes("panel.escalation_marked_handled") || raw.includes("panel.manual_approved")) damaged = true; },
+    });
+    if (!history.ok || damaged) throw new Error("primary shadow alert history is unreadable");
+    const current: State = { revision: 0, first: "", prs: [], handledDigests: [], digest: s.digest, sourcePath: s.sourcePath };
+    const ownTaskIds = new Set([id, ...history.rows.filter(row => row.instance_key === instanceKey).map(row => row.task_id)]);
+    const delivered = new Map<string, string>();
+    for (const row of history.rows) {
+      if (row.step === "escalation.issue_opened" || row.step === "primary_shadow.issue_published") {
+        if (typeof row.issue_url === "string" && typeof row.task_id === "string" && ownTaskIds.has(row.task_id)) {
+          delivered.set(row.issue_url, row.task_id);
+          current.publishedTaskId = row.task_id; current.publishedIssueUrl = row.issue_url;
+        }
+        continue;
+      }
+      if (row.step === "panel.escalation_marked_handled" || row.step === "panel.manual_approved") {
+        if (typeof row.task_id === "string" && ownTaskIds.has(row.task_id) && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(row.task_id)
+          && typeof row.issue_url === "string" && delivered.get(row.issue_url) === row.task_id) {
+          const handled = row.task_id.slice("PRIMARY-SHADOW-".length);
+          if (!current.handledDigests.includes(handled)) current.handledDigests.push(handled);
+        }
+        continue;
+      }
+      if (row.instance_key !== instanceKey && !(row.instance_key === undefined && row.task_id === id)) continue;
+      if (!Number.isSafeInteger(row.revision) || Number(row.revision) <= 0 || typeof row.first_refusal_at !== "string"
+        || !Array.isArray(row.refused_prs) || row.refused_prs.some(n => !Number.isSafeInteger(n) || n <= 0)
+        || (row.pending_recovery !== undefined && (typeof row.pending_recovery !== "string" || !row.pending_recovery))
+        || (row.selection_digest !== undefined && (typeof row.selection_digest !== "string" || !/^[a-f0-9]{64}$/.test(row.selection_digest)))) {
+        throw new Error("primary shadow alert observation is malformed");
+      }
+      if (Number(row.revision) >= current.revision) {
+        current.revision = Number(row.revision); current.first = row.first_refusal_at; current.prs = [...row.refused_prs];
+        current.pendingRecovery = row.pending_recovery as string | undefined;
+        current.digest = typeof row.selection_digest === "string" ? row.selection_digest : s.digest;
+        current.sourcePath = typeof row.selection_path === "string" ? row.selection_path : s.sourcePath;
+      }
+    }
+    states.set(instanceKey, current);
+    return current;
+  };
+  const save = (s: PrimaryShadowSelection, proposed: State): State => {
+    const next = { ...proposed, revision: proposed.revision + 1 };
+    appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: key(s), step: "primary_shadow.observation",
+      revision: next.revision, first_refusal_at: next.first, refused_prs: [...next.prs],
+      instance_key: identity(s), selection_digest: next.digest, selection_path: next.sourcePath,
+      ...(next.pendingRecovery === undefined ? {} : { pending_recovery: next.pendingRecovery }) });
+    states.set(identity(s), next);
+    return next;
+  };
+  const close = async (s: PrimaryShadowSelection, open: OpenIssue[], reason: string) => {
+    const matching = open.filter(i => i.body?.includes(identity(s))
+      && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(TASK_LINE_RE.exec(normalizeCandidateBody(i.body))?.[1] ?? ""));
+    if (matching.length && !issues.closeWithComment) throw new Error("primary shadow alert cannot close with a recovery citation");
+    // Record the positively observed recovery before its transport effect; a failed close retries.
+    const current = await state(s);
+    if (current.prs.length || current.first || current.pendingRecovery !== reason)
+      save(s, { ...current, prs: [], first: "", pendingRecovery: reason });
+    for (const issue of matching) {
+      await issues.closeWithComment!(issue.url, reason);
+      appendLedger(opts.ledgerPath, { run_id: opts.runId,
+        task_id: TASK_LINE_RE.exec(normalizeCandidateBody(issue.body!))![1],
+        step: "primary_shadow.issue_closed", issue_url: issue.url, reason });
+    }
+    const recovered = await state(s);
+    if (recovered.pendingRecovery) save(s, { ...recovered, pendingRecovery: undefined });
+  };
+  const publish = async (selected: PrimaryShadowSelection, current: State, boundary: boolean, firstNotice = false): Promise<void> => {
+    const open = await list();
+    const existing = open.find(i => i.body?.includes(identity(selected))
+      && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(TASK_LINE_RE.exec(normalizeCandidateBody(i.body))?.[1] ?? ""));
+    const begin = "<!-- primary-shadow-observation:start -->", end = "<!-- primary-shadow-observation:end -->";
+    const observation = [begin, identity(selected), `Instance: ${selected.instance}`,
+      `Selection path: ${JSON.stringify(selected.sourcePath)}`, `Selection digest: ${selected.digest}`,
+      `Refusals began: ${current.first}`, `${current.prs.length} refused PRs:`,
+      ...current.prs.map(n => `- https://github.com/${opts.owner}/${opts.repo}/pull/${n}`), end].join("\n");
+    if (existing) {
+      const body = existing.body ?? "", start = body.indexOf(begin), stop = body.indexOf(end, start);
+      if (start < 0 || stop < start) throw new Error("primary shadow alert observation section is unavailable");
+      const updated = (body.slice(0, start) + observation + body.slice(stop + end.length))
+        .replace(/^(\*\*Task:\*\*[ \t]*)\S+/m, `$1${key(selected)}`);
+      if (updated !== body) {
+        if (!boundary) return;
+        // Only the ordinary pass boundary flushes pending edits, through the existing awaited gateway.
+        if (!issues.editBody) throw new Error("primary shadow alert cannot update its issue");
+        await issues.editBody(existing.url, updated);
+      }
+      if (boundary && (current.publishedTaskId !== key(selected) || current.publishedIssueUrl !== existing.url)) {
+        // An observed matching body also repairs an interrupted edit's missing delivery receipt.
+        appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: key(selected),
+          step: "primary_shadow.issue_published", issue_url: existing.url, class: "MANUAL",
+          instance_key: identity(selected), reason: "primary shadow alert selection delivered in place" });
+      }
+    } else if (boundary || firstNotice) {
+      const escalation: Escalation = { class: "MANUAL", taskId: key(selected),
+        summary: `Primary instance ${selected.instance} refuses merges in shadow mode`, detail: observation,
+        consequence: "Reviewed PRs remain unmerged while the primary instance refuses them.",
+        options: [
+          { label: "Restore intended live mode", detail: "Review the named selection and use the normal qualified deployment path.", kind: { type: "operator-only" } },
+          { label: "Acknowledge this selection", detail: "Use the notice's existing mark-handled action to silence only this selection digest.", kind: { type: "operator-only" } },
+        ], recommendation: "Restore intended live mode" };
+      await escalateAsync(escalation, { issues: { ...issues, listOpen: async () => open }, ledgerPath: opts.ledgerPath, runId: opts.runId });
+    }
+  };
+  const operationKey = JSON.stringify([resolve(opts.ledgerPath), opts.owner, opts.repo]);
+  const serial = (body: () => Promise<void>): Promise<void> => {
+    const previous = primaryShadowOperations.get(operationKey) ?? Promise.resolve();
+    const next = previous.then(async () => { states.clear(); await body(); });
+    let tail: Promise<void>;
+    const finish = () => {
+      // Release readiness only; next retains the operation's rejection for its caller.
+      if (primaryShadowOperations.get(operationKey) === tail) primaryShadowOperations.delete(operationKey);
+    };
+    tail = next.then(finish, finish);
+    primaryShadowOperations.set(operationKey, tail);
+    return next;
+  };
+  const resolvePr = async (selected: PrimaryShadowSelection, pr: { prNumber: number; prUrl: string }) => {
+    const current = await state(selected);
+    if (current.handledDigests.includes(current.digest) || !current.prs.includes(pr.prNumber)) return;
+    const remaining = current.prs.filter(n => n !== pr.prNumber);
+    if (remaining.length) save(selected, { ...current, prs: remaining });
+    else await close(selected, await list(), `Every recorded refused PR has a fresh MERGED observation, including ${pr.prUrl}.`);
+  };
+  return {
+    refuse: pr => serial(async () => {
+      const selected = opts.selection();
+      if (!selected || selected.mode !== "shadow") return;
+      if (!/^[a-f0-9]{64}$/.test(selected.digest) || !Number.isSafeInteger(pr.prNumber) || pr.prNumber <= 0
+        || pr.prUrl.toLowerCase() !== `https://github.com/${opts.owner}/${opts.repo}/pull/${pr.prNumber}`.toLowerCase()) {
+        throw new Error("primary shadow alert target is not qualified");
+      }
+      let current = await state(selected);
+      if (current.handledDigests.includes(selected.digest)) return;
+      const firstNotice = !current.first || (current.publishedTaskId !== undefined
+        && current.handledDigests.includes(current.publishedTaskId.slice("PRIMARY-SHADOW-".length)));
+      if (!current.prs.includes(pr.prNumber) || current.digest !== selected.digest) current = save(selected, { ...current,
+        digest: selected.digest, sourcePath: selected.sourcePath,
+        first: current.first || clock.iso(), prs: [...new Set([...current.prs, pr.prNumber])].sort((a, b) => a - b), pendingRecovery: undefined });
+      await publish(selected, current, false, firstNotice);
+    }),
+    reconcile: () => serial(async () => {
+      const selected = opts.selection();
+      if (!selected) return;
+      const open = await list();
+      if (selected.mode === "live") {
+        const current = await state(selected);
+        if (current.prs.length || current.pendingRecovery || open.some(i => i.body?.includes(identity(selected))))
+          await close(selected, open, `Primary instance ${selected.instance} is live again; the selected source is readable.`);
+        return;
+      }
+      const current = await state(selected);
+      if (current.pendingRecovery) {
+        await close(selected, open, current.pendingRecovery);
+        return;
+      }
+      if (current.handledDigests.includes(selected.digest)) return;
+      // Production's open-PR population cannot contain a candidate another lane just merged.
+      for (const prNumber of current.prs) {
+        const prUrl = `https://github.com/${opts.owner}/${opts.repo}/pull/${prNumber}`;
+        const observed = await opts.readPrState?.(prUrl);
+        if (observed?.ok && observed.state?.toUpperCase() === "MERGED") await resolvePr(selected, { prNumber, prUrl });
+      }
+      const pending = await state(selected);
+      if (pending.prs.length && pending.digest === selected.digest) await publish(selected, pending, true);
+    }),
+    resolved: pr => serial(async () => {
+      const selected = opts.selection();
+      if (!selected) return;
+      if (!Number.isSafeInteger(pr.prNumber) || pr.prNumber <= 0
+        || pr.prUrl.toLowerCase() !== `https://github.com/${opts.owner}/${opts.repo}/pull/${pr.prNumber}`.toLowerCase()) {
+        throw new Error("primary shadow alert recovery target is not qualified");
+      }
+      if (selected.mode === "live") {
+        await close(selected, await list(), `Primary instance ${selected.instance} is live again; the selected source is readable.`);
+        return;
+      }
+      await resolvePr(selected, pr);
+      // A remaining PR set is durable; its changed body belongs to the next ordinary boundary.
+    }),
   };
 }
 
@@ -1521,7 +1751,15 @@ function recordThreadMessage(e: Escalation, deps: Pick<EscalateDeps, "threadStor
  *  observer context. Missing listOpen permits creation; throwing listOpen refuses it (W1-T2912).
  *  Why: docs/forensics/escalate.md. */
 export function escalate(e: Escalation, deps: EscalateDeps): string {
-  return runStepsSync(escalateSteps(e, deps));
+  return driveSynchronousEscalation(() => runStepsSync(escalateSteps(e, deps)));
+}
+
+const asyncIssueTwins = new WeakMap<IssueGateway, AsyncIssueGateway>();
+
+function driveSynchronousEscalation<T>(drive: () => T): T {
+  // Latched producers and SRE feedback can consume an incident after this call. Preserve
+  // synchronous delivery for default and custom routes until their durable async handoff.
+  return withSynchronousGhDelivery(drive);
 }
 
 /** W1-T5283 — {@link escalate} with every gateway call awaited, for the main-health rung on the
@@ -1656,6 +1894,10 @@ function* triageRoute(
 }
 
 function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, allowAsyncJudge = false): Steps<string> {
+  if (allowAsyncJudge) {
+    const asyncIssues = asyncIssueTwins.get(deps.issues as IssueGateway);
+    if (asyncIssues) deps = { ...deps, issues: asyncIssues };
+  }
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
@@ -1720,7 +1962,7 @@ export async function escalateWithJudge(
  *  (W1-T2912), so `!== null` delivery callers cannot report phantom success. */
 // Why: the 2026-07-21 daemon boot loop this wrapper ended (W1-T197's sibling) — docs/forensics/escalate.md.
 export function tryEscalate(e: Escalation, deps: EscalateDeps): string | null {
-  return runStepsSync(tryEscalateSteps(e, deps));
+  return driveSynchronousEscalation(() => runStepsSync(tryEscalateSteps(e, deps)));
 }
 
 /** W1-T5283 — {@link tryEscalate} over {@link escalateAsync}: never rejects, and ledgers the same
@@ -1795,7 +2037,9 @@ export function ghIssueGateway(
   const run =
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
-  return issueGatewaySteps(`${owner}/${repo}`, run, runStepsSync) as IssueGateway;
+  const gateway = issueGatewaySteps(`${owner}/${repo}`, run, runStepsSync) as IssueGateway;
+  if (opts.exec === undefined) asyncIssueTwins.set(gateway, ghIssueGatewayAsync(owner, repo));
+  return gateway;
 }
 
 /** W1-T5283 — {@link ghIssueGateway} for the main-health rung on the daemon loop: the same argv and

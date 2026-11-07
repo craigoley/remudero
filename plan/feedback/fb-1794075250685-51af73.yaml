@@ -1,0 +1,23 @@
+id: fb-1794075250685-51af73
+ts: 2026-11-07T18:14:10.685Z
+raw: "Plan PR preflight collides with the Azure post-checkout dependency hook.
+  hooks/post-checkout primes node_modules in every new linked worktree when the
+  checkout has core.hooksPath=hooks; planPrPreflightAtCommitAsync then calls
+  borrowNodeModules unconditionally and symlinkSync gets EEXIST when the hook
+  already created node_modules. Reproduced by rmd feedback-reconcile --apply:
+  preflight refused before push with EEXIST at the temporary plan-pr-preflight
+  tree, nothing landed. Add an idempotent, fail-closed borrow step that
+  recognizes a valid hook-provisioned destination and only creates the link when
+  the destination is absent; do not overwrite, remove, or accept an invalid
+  dependency tree. Add tests for absent destination, valid hook-seeded
+  destination, dangling/invalid destination refusal, and exact cleanup. This
+  blocks every ordinary plan/feedback landing on this Azure checkout."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

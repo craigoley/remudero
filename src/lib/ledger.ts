@@ -629,6 +629,21 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T215: `escalateCrashLoop`'s (run-task.ts) dedup marker, read per boot; dropping it re-opens
   // one duplicate needs-human issue per boot, roughly one a minute while the storm lasts.
   "daemon.crashloop.escalated",
+  // W1-T11421: the crash sentinel learns each instance's clean lifetime from these per-process rows, and finds an open
+  // incident from the cleared marker. The live tail keeps only the newest boot, so losing them relearns from nothing.
+  "daemon.crash.abnormal_exit",
+  "daemon.clean_exit.observed",
+  "daemon.crashloop.cleared",
+  // …and DAEMON_CLEAN_EXIT_STEPS (daemon.ts), one row per process: a rotation between a clean exit and the next boot
+  // would otherwise archive the row, and the next boot would judge a clean end a crash.
+  "daemon.summary",
+  "daemon.stop",
+  "daemon.stop_drain.completed",
+  "daemon.freshness_exit",
+  "daemon.freshness_drain.completed",
+  "daemon.memory_exit",
+  "daemon.memory_drain.completed",
+  "daemon.signal_exit",
   "daemon.headroom_reserve.escalated",
   // `escalateHeadroomParkCeiling` (run-task.ts) compares this row against the newest
   // `daemon.headroom`; dropping it re-pages once per daemon boot while the probe stays broken.
@@ -662,6 +677,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "verdict.merged",
   PR_TERMINAL_STEP, // W1-T5318: pruneCarriedRows' terminal fact, and runPrTerminalReconcile's live dedup
   "correction.provenance",
+  // W1-T11445: cadence derives start-to-start intervals from completed light-pass pairs. Losing
+  // either side makes measured history disappear during rotation and resets the safe one-plan bound.
+  "sweep.pass",
+  "sweep.summary",
   "sweep.disposed",
   "sweep.merge_probe", // W1-T9578: exact head/main conflict evidence selects the regeneration route.
   "sweep.conflict_regenerated", // W1-T9578: retain the once-per-(head, main) attempt receipt.
@@ -695,6 +714,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.fix.prepare_timing", // The scanner fold reads the latest preparation owner across rotation.
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
   "escalation.issue_opened",
+  // The primary-shadow channel and board acknowledge only the selection delivered to this issue.
+  "primary_shadow.issue_published",
   // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and
   // W1-T3167's re-judge rung, which must not re-ask a settled question. "escalation.demoted" was
   // ALREADY absent here: a demotion is the one outcome invisible on the needs-human board, so
@@ -1961,6 +1982,28 @@ function rotateLedgerLocked(
     if (!withinWindow) archivedLineCount++;
     return withinWindow;
   });
+
+  // Keep the evidence of each surviving boot's own lifetime. Restart downtime is not uptime;
+  // dropping its final row or heap sample would make the next boot judge a different process.
+  const bootRuns = new Set(candidates.filter((p) => p.step === "daemon.boot").map((p) => p.json?.run_id)
+    .filter((run): run is string => typeof run === "string" && run.startsWith("DAEMON-")));
+  const lifetimeEvidence = new Map<string, Map<string, ParsedLedgerLine>>();
+  for (const p of originalOrder) {
+    const run = p.json?.run_id;
+    if (typeof run !== "string" || !bootRuns.has(run) || p.tsMs === undefined) continue;
+    const evidence = lifetimeEvidence.get(run) ?? new Map<string, ParsedLedgerLine>();
+    for (const key of ["last", ...(p.step === "daemon.memory" || p.step === "daemon.memory_policy" ? [p.step] : [])]) {
+      if ((evidence.get(key)?.tsMs ?? -Infinity) <= p.tsMs) evidence.set(key, p);
+    }
+    lifetimeEvidence.set(run, evidence);
+  }
+  const preserved = new Set([...lifetimeEvidence.values()].flatMap((e) => [...e.values()]));
+  const included = new Set(candidates);
+  for (const p of preserved) {
+    if (included.has(p)) continue;
+    candidates.push(p);
+    archivedLineCount--;
+  }
 
   const carried = dropSupersededReviews(pruneCarriedRows(candidates));
   const reviewMarkers = planOnlyReviewMarkers(candidates, carried);
