@@ -22,11 +22,11 @@
   attempts: 0
   acceptance:
     - claim: "When the fix-progress judge routes a PR to rebuild, the sweep takes the PR's per-branch fix claim (fixBranchClaimKey, without reclaim), reads the live PR again after the judgment, and closes only if it is still OPEN at the head the judge was given. If the head moved, the claim is held or the read fails, the sweep stands down, closes nothing, writes no requeue row, and ledgers sweep.strike_ladder.held with the judged head and the head it read"
-      proof: "unit test: test/sweep/a-rebuild-close-is-fenced-at-the-judged-head.test.ts"
+      proof: "unit test: W1-T11611: a moved head stands the judged rebuild down"
     - claim: "The rebuild's durable failure note for the PR's task (closed PR URL, judged head, failing checks, unmet claims, strike history) is written before the close. If the note cannot be written, the PR is not closed. If the close is not confirmed CLOSED at the judged head afterwards, the sweep writes no sweep.strike_ladder.requeued row and ledgers sweep.strike_ladder.close_unconfirmed with task_id, pr_number, expected_head_sha and observed_head_sha"
-      proof: "unit test: test/sweep/a-rebuild-close-is-fenced-at-the-judged-head.test.ts"
+      proof: "unit test: W1-T11611: the rebuild note is written before the close"
     - claim: "A rebuild decided without a progress judge, the refresh and digest rungs, and the stale, stale-proof, empty-diff and dependency closes keep their current behaviour, and the per-day and lifetime rebuild caps count only confirmed sweep.strike_ladder.requeued rows, as they do today"
-      proof: "unit test: test/sweep/a-rebuild-close-is-fenced-at-the-judged-head.test.ts"
+      proof: "unit test: W1-T11611: an unjudged rebuild keeps its current behaviour"
     - claim: The rebuild arm closes through a fenced close seam
       proof: "grep: withRebuildCloseFence( in src/lib/sweep.ts"
   rationale: |
