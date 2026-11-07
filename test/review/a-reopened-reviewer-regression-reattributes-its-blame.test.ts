@@ -65,7 +65,7 @@ function healthHarness(root: string, daemon: GitRepo) {
   const logs: Array<{ step: string; extra: Row }> = [];
   const issues = { create: async () => "https://github.com/acme/remudero/issues/1", listOpen: async () => [], ensureLabel: async () => true,
     comment: async () => {}, closeWithComment: async () => {} };
-  const lane = { openFixPr: async () => undefined, openRevertPr: async () => undefined };
+  const lane = { openFixPr: async () => undefined, openRevertPr: async () => ({ refused: "not exercised" }) };
   const evaluate = (originMainSha: string) => health.evaluateReviewerHealthNow(
     { originMainSha }, statePath, async () => ({ rows: queue.splice(0), cursor: { liveOffset: 0 } }),
     async (args) => daemon.git(...args), { issues, ledgerPath: join(root, "ledger.ndjson"), runId: "reviewer-health-test" }, lane,
