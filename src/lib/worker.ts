@@ -2141,6 +2141,14 @@ function workerClassOf(args: Pick<SpawnWorkerArgs, "workerClass" | "sandboxInten
   return args.ruleLookup ? "implement" : "unclassified";
 }
 
+/** Read the fleet hold at a worker's final in-process start boundary, matching run-child admission. */
+function workerAdmissionHold(root: string): { control: "STOP" | "PAUSE"; detail: string } | undefined {
+  const stop = stopDetail(root);
+  if (stop !== undefined) return { control: "STOP", detail: stop };
+  const pause = pauseDetail(root);
+  return pause === undefined ? undefined : { control: "PAUSE", detail: pause };
+}
+
 /** The contained spawn, wrapped so each process it starts is bound to the claim's reservation as (pid, start time). */
 function reservationBoundContainment(
   containment: SpawnWorkerArgs["containment"],

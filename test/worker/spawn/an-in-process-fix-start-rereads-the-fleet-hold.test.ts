@@ -5,6 +5,7 @@ import test, { type TestContext } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import type { AdmissionPorts } from "#src/lib/host-memory-admission.js";
 import { openLearnedReservation } from "#src/lib/host-memory-learning.js";
+import { requestPause, requestStop } from "#src/lib/fleet-control.js";
 import { activeWorkerCount, createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -116,3 +117,56 @@ test("W1-T11336 criterion 1: a non-fix worker is unchanged and does not read the
 });
 
 
+
+
+test("W1-T11336 default hold reader: a real STOP flag withholds an in-process fix", async t => {
+  const f = fixture(t, "fix");
+  delete f.args.readWorkerAdmissionHold;
+  requestStop(f.root, "operator stop");
+
+  const result = await spawnWorker(f.args);
+
+  assert.equal(f.spawns(), 0);
+  assert.equal(result.notStarted, "admission-abandoned");
+  assert.equal(f.rows[0]?.hold, "fleet STOP hold: STOP requested: operator stop");
+});
+
+test("W1-T11336 default hold reader: a real PAUSE flag withholds an in-process fix", async t => {
+  const f = fixture(t, "fix");
+  delete f.args.readWorkerAdmissionHold;
+  requestPause(f.root, "recycle requested");
+
+  const result = await spawnWorker(f.args);
+
+  assert.equal(f.spawns(), 0);
+  assert.equal(result.notStarted, "admission-abandoned");
+  assert.match(String(f.rows[0]?.hold), /^fleet PAUSE hold: PAUSE requested: recycle requested/);
+});
+
+test("W1-T11336 catch path: a failed diagnostic logger falls back to stderr", async t => {
+  const f = fixture(t, "fix");
+  f.setHold({ control: "PAUSE", detail: "recycle requested" });
+  f.args.logWorkerSpawnWithheld = () => { throw new Error("logger unavailable"); };
+  let writes = 0;
+  t.mock.method(process.stderr, "write", () => { writes++; return true; });
+
+  const result = await spawnWorker(f.args);
+
+  assert.equal(writes, 1);
+  assert.equal(f.spawns(), 0);
+  assert.equal(result.notStarted, "admission-abandoned");
+});
+
+test("W1-T11336 nested catch path: a failed stderr fallback cannot reopen a refused start", async t => {
+  const f = fixture(t, "fix");
+  f.setHold({ control: "PAUSE", detail: "recycle requested" });
+  delete f.args.logWorkerSpawnWithheld;
+  let writes = 0;
+  t.mock.method(process.stderr, "write", () => { writes++; throw new Error("stderr unavailable"); });
+
+  const result = await spawnWorker(f.args);
+
+  assert.equal(writes, 2);
+  assert.equal(f.spawns(), 0);
+  assert.equal(result.notStarted, "admission-abandoned");
+});
