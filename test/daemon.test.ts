@@ -4171,12 +4171,17 @@ test("W1-T11600 criterion 3: invalid secondary snapshot is rejected atomically",
   const malformed = { tasks: [validSecondary], byId: new Map() } as unknown as Plan;
   const invalidStatus = shadowPlanOf([{ ...validSecondary, status: "in_progress" as unknown as Task["status"] }]);
   const invalidTaskType = shadowPlanOf([{ ...validSecondary, type: "unknown" as unknown as Task["type"] }]);
+  const invalidNotBefore = shadowPlanOf([
+    validSecondary,
+    { ...validSecondary, id: "W1-T11600-INVALID-DATE", not_before: "2026-13-01" },
+  ]);
   const duplicate = shadowPlanOf([{ ...primary.byId.get("A")! }]);
   const cases: Array<[Plan | null, string]> = [
     [null, "unavailable"],
     [malformed, "malformed"],
     [invalidStatus, "malformed"],
     [invalidTaskType, "malformed"],
+    [invalidNotBefore, "malformed"],
     [duplicate, "duplicate_task_id"],
   ];
   for (const [secondary, outcome] of cases) {
@@ -4211,6 +4216,15 @@ test("W1-T11600 criterion 3: invalid secondary snapshot is rejected atomically",
     { readPrecondition: () => { throw new Error("shadow must not repeat a precondition read"); } },
   );
   assert.equal(deferred?.outcome, "comparison_deferred", "shadow never adds a precondition subprocess");
+  for (const predicate of ["isIndeterminate", "isCircuitTripped"] as const) {
+    let breakerCalls = 0;
+    const breakerDeferred = compareSecondaryCatalogShadow(
+      primary, shadowPlanOf([validSecondary]), primaryCandidates, NONE_MERGED, 1,
+      { [predicate]: () => { breakerCalls++; return true; } },
+    );
+    assert.equal(breakerDeferred?.outcome, "comparison_deferred", `${predicate} is not evaluated without a snapshot-backed answer`);
+    assert.equal(breakerCalls, 0, `${predicate} cannot trigger lazy external reads during shadow comparison`);
+  }
   assert.equal(primaryCandidates[0], primary.byId.get("A"), "refusal never mutates the primary dispatch candidates");
 });
 
@@ -4252,6 +4266,28 @@ test("W1-T11600 criterion 4: secondary catalog shadow cannot alter dispatch", as
   assert.equal(JSON.stringify(shadowExtra).includes("PRIVATE_TITLE_SENTINEL"), false);
   assert.equal(JSON.stringify(shadowExtra).includes("PRIVATE_PATH_SENTINEL"), false);
   assert.equal(JSON.stringify(shadowExtra).includes("W1-T11600-PRIVATE-CANDIDATE"), false);
+
+  const breakerMerged = new Set<string>();
+  const breakerRan: string[] = [];
+  let secondaryBreakerReads = 0;
+  let deferredShadow: Record<string, unknown> | undefined;
+  await runDaemon(plan, {
+    refreshMerged: () => (id) => breakerMerged.has(id),
+    secondaryPlanForShadow: secondaryPlan,
+    isIndeterminate: (id) => {
+      if (id === sensitiveTask.id) { secondaryBreakerReads++; return true; }
+      return false;
+    },
+    targetRepo: "remudero",
+    runOne: async (id) => { breakerRan.push(id); breakerMerged.add(id); return okResult(id); },
+    sleep: fakeClock().sleep,
+    log: (step, extra = {}) => {
+      if (step === "dispatch.secondary_catalog_shadow") deferredShadow = extra;
+    },
+  }, { max: 1 });
+  assert.deepEqual(breakerRan, ["A"], "deferred shadow work never changes primary dispatch");
+  assert.equal(deferredShadow?.outcome, "comparison_deferred");
+  assert.equal(secondaryBreakerReads, 0, "a secondary-only task never invokes the breaker-backed read predicate");
 
   let branchProbeCalls = 0;
   const branchOpts = {

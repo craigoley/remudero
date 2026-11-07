@@ -134,7 +134,7 @@ import {
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
-import { assertRunnable, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { assertRunnable, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
@@ -2067,6 +2067,10 @@ function isParsedPlanSnapshot(value: unknown): value is Plan {
     if (value === null || typeof value !== "object") return false;
     const plan = value as Plan;
     if (!Array.isArray(plan.tasks) || !(plan.byId instanceof Map) || plan.byId.size !== plan.tasks.length) return false;
+    // A manually constructed snapshot can bypass parse-time constraints such as not_before and precondition.
+    // Revalidate a detached serialization through the canonical plan parser before trusting any task.
+    const serializedTasks = JSON.stringify(plan.tasks);
+    if (typeof serializedTasks !== "string" || parseTasksFromYaml(serializedTasks, "secondary catalog shadow snapshot").length !== plan.tasks.length) return false;
     const seen = new Set<string>();
     for (const value of plan.tasks) {
       if (!isParsedPlanTask(value)) return false;
@@ -2114,6 +2118,9 @@ export function compareSecondaryCatalogShadow(
     if (secondary.tasks.some((task) => primaryIds.has(task.id))) return result("duplicate_task_id");
     // Precondition evaluation may spawn an rmd reader. Do not repeat or add that read in a shadow pass.
     if ([...primary.tasks, ...secondary.tasks].some((task) => task.precondition !== undefined)) return result("comparison_deferred");
+    // Breaker-backed predicates can lazily read every open GitHub head when a catalog-only task is tripped.
+    // Without a snapshot-backed breaker answer, defer rather than add a remote read or guess eligibility.
+    if (opts.isIndeterminate !== undefined || opts.isCircuitTripped !== undefined) return result("comparison_deferred");
     // The live run-branch predicate lazily reads closed-unmerged PRs and can log an exception. Only
     // compare through the selector when its existing snapshot proves no catalog task has such a ref.
     if (opts.hasPushedRunBranch) {
