@@ -25,7 +25,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
+import { daemonCrashSentinel, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
 import { resolveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
@@ -102,7 +102,7 @@ import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from
 import { acquireDrainLock, DrainLockError } from "../../lib/drain-lock.js";
 import { testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
 import { withLiveEditLadders } from "../../lib/live-edit-ladder.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, consumeRestartInPlace, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
 import { wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "../../lib/github-app.js";
 import { LEDGER_REQUEST_STEP, realScopedMint, startDaemonGitCredentialSocket, type ScopedTokenMint } from "../../lib/secret-boundary.js";
@@ -842,7 +842,7 @@ export async function daemonCommand(
   }
   const target = resolved.target;
 
-  const runId = `DAEMON-${Date.now()}`;
+  const runId = process.env.REMUDERO_RUN_ID ?? `DAEMON-${Date.now()}`;
   let lastReadPlaneStep: string | undefined;
   let onMainEntryStep: ((step: string) => void) | undefined;
   const log = (step: string, extra: Record<string, unknown> = {}) => {
@@ -1292,6 +1292,8 @@ export async function daemonCommand(
   cleanup.push({ resource: "github_event_wake", close: () => githubEventWake.close() });
   const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const onSignal = (sig: NodeJS.Signals) => {
+    // W1-T11421: a signalled stop is a deliberate end, so the next boot's crash sentinel reads it as clean.
+    log("daemon.signal_exit", { signal: sig });
     archivedLifetime.history?.close?.();
     githubEventWake.close();
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
@@ -1498,6 +1500,10 @@ export async function daemonCommand(
       priorBoots: () => priorDaemonBootTs,
       onBreach: (verdict: CrashLoopVerdict) =>
         escalateCrashLoop(verdict, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+      // W1-T11421: the same pre-boot snapshot, judged against this instance's learned clean lifetime.
+      sentinel: daemonCrashSentinel(bootLedgerLines, { owner: target.owner, repo: target.repo, ledgerPath, runId }, {
+        onArmed: (cancel) => cleanup.push({ resource: "crashloop_clear_timer", close: cancel }),
+      }),
     },
     // W1-T357: wire the SAME resolver/cache spawnWorker uses (worker.ts's
     // resolveClaudeExecutable against its shared, per-process
@@ -2045,6 +2051,11 @@ export async function daemonCommand(
           }),
         } : {}),
         consumeDrainNow: () => consumeDrainNow(config.root),
+        // W1-T11327: the progress watchdog's restart-in-place request, exited on with this process's own boot sha.
+        consumeRestartRequest: () => {
+          const request = consumeRestartInPlace(config.root);
+          return request && { ...request, ...(daemonLoadedCodeSha ? { codeSha: daemonLoadedCodeSha } : {}) };
+        },
         // Selected-repository PR controls (W1-T3989). The HTTP surface only writes a bounded
         // marker; this is the sole point that reaches the established selected-repository CLI
         // commands. Their own disposition, strike, worktree and review-lock gates remain the

@@ -9,6 +9,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute } from "node:path";
+import { loopAvailableDeadline, systemClock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { SELECTED_INSTANCE_REGISTRY_FIELDS, parseInstanceRegistry, projectRegistry, type RegistryInstance, type RegistryProjection } from "./instance-registry.js";
 
@@ -169,17 +170,19 @@ async function readBounded(path: string, maxBytes: number, signal: AbortSignal, 
 async function readWithDeadline(path: string, maxBytes: number, timeoutMs: number, external: AbortSignal | undefined, io: RegistryFileIO, physicalIdentity: boolean): Promise<RegistryBytes | Unknown> {
   if (external?.aborted) return { kind: "unknown", reason: "cancelled" };
   const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout>;
+  let disarmDeadline: () => void;
   let onAbort: () => void;
   const stopped = new Promise<Unknown>((resolve) => {
     onAbort = () => { controller.abort(); resolve({ kind: "unknown", reason: "cancelled" }); };
-    timer = setTimeout(() => { controller.abort(); resolve({ kind: "unknown", reason: "timeout" }); }, timeoutMs);
+    disarmDeadline = loopAvailableDeadline(systemClock, timeoutMs, () => {
+      controller.abort(); resolve({ kind: "unknown", reason: "timeout" });
+    });
     external?.addEventListener("abort", onAbort, { once: true });
   });
   try {
     return await Promise.race([readBounded(path, maxBytes, controller.signal, io, physicalIdentity), stopped]);
   } finally {
-    clearTimeout(timer!); external?.removeEventListener("abort", onAbort!);
+    disarmDeadline!(); external?.removeEventListener("abort", onAbort!);
   }
 }
 

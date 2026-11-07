@@ -23,33 +23,37 @@
     - src/lib/config-schema.ts
     - deploy/recycle-container.sh
     - deploy/runtime-env-vars.sh
+    - deploy/host-update.sh
     - deploy/serve-container.sh
     - test/deployer.test.ts
+    - test/deploy/selected-registry-contract-discriminates.test.ts
     - test/shadow-instance-safety.test.ts
     - test/recycle-container.test.ts
     - test/serve-launch-uniformity.test.ts
     - test/env-var-registry.test.ts
     - docs/instance-registry-selection-contract.md
-  priority: 4
+  priority: 2
   status: queued
-  # backlog gardener: band=4 evidence=ca641a32e0c4b9f3
-  # backlog gardener: placed=2026-11-05T23:00:35.430Z
+  # backlog gardener: band=2 evidence=92d23f3556e9ef27
+  # backlog gardener: placed=2026-11-06T23:38:48.735Z
   attempts: 0
   acceptance:
     - claim: "Private registry selection reaches the real host and daemon readers through their existing bounded selection seams."
-      proof: "unit test: private registry selection reaches real host and daemon readers"
+      proof: "grep: RMD_SELECTED_INSTANCE_REGISTRY in test/shadow-instance-safety.test.ts"
     - claim: "Absent selection preserves legacy behavior, while invalid, unreadable, malformed, unsupported, stale or revised selected inputs remain explicit failures or unknown and never fall back as though no selection existed."
-      proof: "unit test: private registry selection preserves legacy and refuses unknown selected inputs"
+      proof: "grep: explicit selected registry leaves a distinct legacy catalog in test/recycle-container.test.ts"
     - claim: "Owner STOP/PAUSE and override behavior, shadow policy, worker environment allowlists and private-safe boundaries remain independent and unchanged; the three registry transport names are declared only for guarded carry-through."
-      proof: "unit test: private registry selection preserves owner holds and private-safe boundaries"
+      proof: "grep: selected-registry-env in test/shadow-instance-safety.test.ts"
     - claim: "The daemon runtime name list declares RMD_INSTANCE_REGISTRY, RMD_INSTANCE_REGISTRY_DIGEST and RMD_INSTANCE_REGISTRY_FILE_BINDING for guarded carry-through; unknown names still refuse and no values are logged or persisted."
-      proof: "unit test: W1-T1069: both scripts read the same declared name list"
+      proof: "grep: RMD_INSTANCE_REGISTRY_FILE_BINDING in deploy/runtime-env-vars.sh"
+    - claim: "A bare recycle of a container that mounts a selected registry refuses before anything is touched, names the selection remedy, and never launches a replacement without that mount; the printed daemon launch passes the three names only when they are set"
+      proof: "grep: a bare recycle of a selected container in test/recycle-container.test.ts"
     - claim: "Defaults and deletion/restoration falsifiers demonstrate that this task cannot install or select a private registry, release a baked image, recycle workers or cut over live behavior."
-      proof: "unit test: private registry selection defaults and falsifiers forbid live effects"
+      proof: "grep: an unselected launch never passes an empty registry name in test/recycle-container.test.ts"
   rationale: |
     W1-T10573 (#15532) is already merged and introduced explicit private-registry selection through the existing host, serve, recycle and daemon paths. The merged code still overloads RMD_INSTANCE_REGISTRY: the recon in W1-T11276 found that heartbeat, host-update, installer enumeration and resource-policy readers consume that same variable as a legacy catalog path. This task fixes that distinct compatibility defect: retain RMD_INSTANCE_REGISTRY for legacy catalog consumers and use RMD_SELECTED_INSTANCE_REGISTRY for active selection. During transition, selected readers accept the old variable only when the new variable is absent; when the new variable is present but invalid, they fail closed instead of falling back. If both are set, each reader uses the variable matching its meaning. W1-T10573 built the selection behavior; this task separates the two meanings and preserves mixed-version compatibility.
 
-    The implementation is limited to exactly nineteen paths: the eighteen previously approved paths plus deploy/runtime-env-vars.sh, approved 2026-11-06. The six reader paths added by PR #16930 carry explicit selection through the real task, CLI, daemon, sweep and SRE paths. This separate one-path amendment adds src/lib/worker.ts so child environments strip RMD_SELECTED_INSTANCE_REGISTRY alongside the legacy registry variable, preventing explicit worker environment overrides from exposing the private registry path. Reuse the existing selected-reader, bounded file-read and binding contracts; do not add another loader, scanner, daemon, scheduler or private-data channel. Keep absent-configuration behavior byte-compatible. Invalid, unreadable, malformed, unsupported, stale or revised selected inputs remain explicit failure/unknown. Selection confers no actor, publication, deployment or release authority. Existing owner STOP/PAUSE/override, SHADOW policy, trusted paths, environment allowlisting, and private-safe prompts/argv/logs/public projections remain unchanged. Add only a synthetic setup example to the existing contract documentation; retain the complete public Apache implementation and existing public registry data.
+    The implementation is limited to exactly twenty-one paths: the eighteen previously approved paths, deploy/runtime-env-vars.sh (approved 2026-11-06) and deploy/host-update.sh (operator-directed takeover 2026-11-06, because the W1-T1069 proof requires its fallback list and printed launch to carry the same names), and test/deploy/selected-registry-contract-discriminates.test.ts (approved 2026-11-06 because proof-discrimination runs only newly added test files against merge-base source). Declaring the names alone would let a bare recycle replace a selected container and drop its private mount: test/recycle-container.test.ts showed status 0 with no refusal on the 2026-11-06 patch, and the daemon would then point at a missing registry file. The bare recycle therefore refuses until W1-T11454 inherits the selection. The six reader paths added by PR #16930 carry explicit selection through the real task, CLI, daemon, sweep and SRE paths. This separate one-path amendment adds src/lib/worker.ts so child environments strip RMD_SELECTED_INSTANCE_REGISTRY alongside the legacy registry variable, preventing explicit worker environment overrides from exposing the private registry path. Reuse the existing selected-reader, bounded file-read and binding contracts; do not add another loader, scanner, daemon, scheduler or private-data channel. Keep absent-configuration behavior byte-compatible. Invalid, unreadable, malformed, unsupported, stale or revised selected inputs remain explicit failure/unknown. Selection confers no actor, publication, deployment or release authority. Existing owner STOP/PAUSE/override, SHADOW policy, trusted paths, environment allowlisting, and private-safe prompts/argv/logs/public projections remain unchanged. Add only a synthetic setup example to the existing contract documentation; retain the complete public Apache implementation and existing public registry data.
 
     The deploy supervisor recently refused the guarded recycle because the daemon carried RMD_INSTANCE_REGISTRY_FILE_BINDING, RMD_INSTANCE_REGISTRY and RMD_INSTANCE_REGISTRY_DIGEST while deploy/runtime-env-vars.sh omitted those names. This approved one-path amendment declares those names only, so the existing recycler preserves the live bindings; it does not install or select private configuration. Extend the already-listed test/recycle-container.test.ts to assert all three names are carried, an unknown runtime name still refuses, and no values are logged or persisted.
 
