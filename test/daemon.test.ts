@@ -4183,6 +4183,20 @@ test("W1-T11600 criterion 3: invalid secondary snapshot is rejected atomically",
     assert.equal(result?.secondary_candidate_count, 0);
     assert.equal(result?.displaced_primary_count, 0);
   }
+  const hostileSnapshot = new Proxy({}, {
+    get() { throw new Error("PRIVATE_SNAPSHOT_ERROR"); },
+  }) as Plan;
+  const hostile = compareSecondaryCatalogShadow(
+    primary, hostileSnapshot, primaryCandidates, NONE_MERGED, 1, {},
+  );
+  assert.equal(hostile?.outcome, "malformed", "a throwing snapshot accessor fails closed");
+  assert.equal(JSON.stringify(hostile).includes("PRIVATE_SNAPSHOT_ERROR"), false);
+  const throwingSelector = compareSecondaryCatalogShadow(
+    primary, shadowPlanOf([validSecondary]), primaryCandidates,
+    () => { throw new Error("PRIVATE_SELECTOR_ERROR"); }, 1, {},
+  );
+  assert.equal(throwingSelector?.outcome, "comparison_failed", "a failed selector is never reported as compared");
+  assert.equal(JSON.stringify(throwingSelector).includes("PRIVATE_SELECTOR_ERROR"), false);
   const guardedTask: Task = {
     ...validSecondary,
     id: "W1-T11600-PRECONDITION",

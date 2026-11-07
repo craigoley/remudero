@@ -2064,7 +2064,9 @@ function isParsedPlanSnapshot(value: unknown): value is Plan {
       if (typeof id !== "string" || !seen.has(id) || task?.id !== id) return false;
     }
     return true;
-  } catch {
+  } catch (error: unknown) {
+    // A hostile snapshot getter/proxy is malformed; never expose its value or partially trust it.
+    void error;
     return false;
   }
 }
@@ -2143,8 +2145,9 @@ export function compareSecondaryCatalogShadow(
     const primarySelected = new Set(primaryCandidates.map((task) => task.id));
     return result("compared", selected.length, selected.filter((task) => secondaryIds.has(task.id)).length,
       [...primarySelected].filter((id) => !selected.some((task) => task.id === id)).length);
-  } catch {
-    // Never serialize exception text: an invalid private snapshot could put content or paths in it.
+  } catch (error: unknown) {
+    // Keep comparison failures distinct and aggregate-only; thrown values may contain private task data.
+    void error;
     return {
       outcome: "comparison_failed", basis: "cached_projection", primary_candidate_count: primaryCandidates.length,
       combined_candidate_count: null, secondary_candidate_count: null, displaced_primary_count: null,
