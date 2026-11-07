@@ -3015,7 +3015,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             attemptError = result.error;
             const preflight = result.directMergePreflight;
             if (result.outcome === "plan-pr-held" && preflight?.reason === "plan_pr_refresh_bound") {
-              tryEscalate(
+              await tryEscalateAsync(
                 {
                   class: "MANUAL",
                   taskId: escalationTaskIdFor(pr),

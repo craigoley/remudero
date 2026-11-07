@@ -173,6 +173,7 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
           ghJsonImpl: () => ({ headRefName: "codex/foreign", headRefOid: pr.headSha, body: "", files: [] }),
           spawnImpl: async () => { throw new Error("fixture must not spawn a repair worker"); },
           createFixRungWorktreeImpl: () => { throw new Error("fixture must not create a repair worktree"); },
+          armImpl: async () => ({ outcome: "plan-pr-held", directMergePreflight: { reason: "plan_pr_refresh_bound", remedy: "operator", planMergeUnsafe: "fixture" } }),
         });
         const rows = (): Array<Record<string, unknown>> => readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
         const cancelBefore = shim.events().length;
@@ -194,6 +195,14 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
         for (const event of infraCommands) {
           assertRoute(event.args);
           assert.ok(during.has(event.id), `infrastructure escalation must yield to the loop timer during ${event.args.join(" ")}`);
+        }
+        const armBefore = shim.events().length;
+        await withLiveWritesAllowed(() => transport.withDaemonGhTransportFloor(() => effects.arm(pr)));
+        const armCommands = shim.events().slice(armBefore).filter((event) => event.phase === "start");
+        assert.ok(armCommands.some((event) => event.args.slice(0, 2).join(" ") === "issue create"), "the production plan-refresh-bound arm route must deliver through the real default gateway");
+        for (const event of armCommands) {
+          assertRoute(event.args);
+          assert.ok(during.has(event.id), `arm escalation must yield to the loop timer during ${event.args.join(" ")}`);
         }
         const beforeEvents = shim.events().length;
         try {
