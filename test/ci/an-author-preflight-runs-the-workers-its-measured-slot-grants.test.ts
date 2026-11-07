@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
+// @ts-expect-error This JavaScript CLI module has no declaration file; the test covers its runtime exports.
 import { main, AUTHOR_MAX_WORKERS } from "#scripts/preflight-author.mjs";
+// @ts-expect-error This JavaScript CLI module has no declaration file; refusal behavior is asserted below.
 import { MacAuthorCapacityRefusal } from "#scripts/lib/mac-author-admission.mjs";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
