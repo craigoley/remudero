@@ -680,6 +680,56 @@ test("W1-T11454 criterion 1: a bare recycle of a selected container keeps its qu
   } finally { fixture.cleanup(); }
 });
 
+test("W1-T11617 criterion 1: normal inheritance gets selection values from the mount and file reader, not Config.Env", () => {
+  const source = readFileSync(join(REPO_ROOT, "deploy", "recycle-container.sh"), "utf8");
+  const selectionStart = source.indexOf('if [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ]; then');
+  const leaveStart = source.indexOf('if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then', selectionStart);
+  const selectionEnd = source.indexOf("  # W1-T2553: FALL BACK TO THE SHELL", selectionStart);
+  assert.ok(selectionStart >= 0 && leaveStart > selectionStart && selectionEnd > leaveStart);
+  const normalInheritance = source.slice(selectionStart, leaveStart);
+  assert.doesNotMatch(normalInheritance, /(?:selected_env|digest_env|binding_env)="\$\{line#\*=\}"/);
+
+  const fixture = bareSelectedInstall();
+  try {
+    const control = fixture.bare("private-good");
+    assert.equal(control.status, 0, control.stderr);
+    const controlLaunch = control.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
+    const controlPacket = controlLaunch.argv.filter(a => /^RMD_(?:SELECTED_INSTANCE_REGISTRY|INSTANCE_REGISTRY_DIGEST|INSTANCE_REGISTRY_FILE_BINDING)=/.test(a));
+    const envPath = join(fixture.root, "previous-env-with-untrusted-selection");
+    const untrustedPath = join(fixture.root, "must-not-be-read-as-selection.yaml");
+    writeFileSync(envPath, [
+      ...containerEnvLines(),
+      `RMD_SELECTED_INSTANCE_REGISTRY=${untrustedPath}`,
+      `RMD_INSTANCE_REGISTRY_DIGEST=${"c".repeat(64)}`,
+      `RMD_INSTANCE_REGISTRY_FILE_BINDING=${"d".repeat(64)}`,
+    ].join("\n") + "\n");
+    const inherited = fixture.bare("private-good", [], { STUB_PREVIOUS_ENV: envPath });
+    assert.equal(inherited.status, 0, inherited.stderr);
+    const launch = inherited.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
+    assert.deepEqual(launch.argv.filter(a => /^RMD_(?:SELECTED_INSTANCE_REGISTRY|INSTANCE_REGISTRY_DIGEST|INSTANCE_REGISTRY_FILE_BINDING)=/.test(a)), controlPacket);
+    assert.ok(launch.argv.includes(`type=bind,src=${fixture.selected},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`));
+    assert.equal(`${inherited.stdout}${inherited.stderr}`.includes(untrustedPath), false);
+  } finally { fixture.cleanup(); }
+});
+
+test("W1-T11617 criterion 2: mixed orphan selection and unrelated runtime drift keeps the drift refusal and remedy", () => {
+  const fixture = bareSelectedInstall();
+  try {
+    const envPath = join(fixture.root, "previous-env-with-mixed-drift");
+    writeFileSync(envPath, `GH_TOKEN=fixture-not-a-token\nRMD_INSTANCE_REGISTRY_DIGEST=${"a".repeat(64)}\nSOME_UNKNOWN_VAR=surprise\n`);
+    const refused = fixture.bare("good", [], { STUB_PREVIOUS_ENV: envPath });
+    assert.notEqual(refused.status, 0, "mixed selection and undeclared runtime state must refuse");
+    assert.match(refused.stderr, /carries a runtime variable this recycle does not declare:.*SOME_UNKNOWN_VAR/);
+    assert.match(refused.stderr, /Add it to RMD_DAEMON_RUNTIME_ENV_VARS in deploy\/runtime-env-vars\.sh/);
+    assert.doesNotMatch(refused.stderr, /Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path>/);
+    assert.equal(refused.calls.some(isStop), false);
+    assert.equal(refused.calls.some(isRm), false);
+    assert.equal(refused.calls.some(c => isRun(c) && c.argv.includes("-d")), false);
+    const ledger = join(fixture.root, "state", "state", "ledger.ndjson");
+    assert.equal(existsSync(ledger) && readFileSync(ledger, "utf8").includes('"recycle.selection_left"'), false);
+  } finally { fixture.cleanup(); }
+});
+
 test("W1-T11454 criterion 2: the leave flag removes only a qualified selection, refuses catalog fallback, and ledgers only a successful replacement", () => {
   const fixture = bareSelectedInstall();
   try {
