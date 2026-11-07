@@ -55,9 +55,13 @@ async function startDaemon(t: TestContext, opts: { primary: boolean; sreEnv?: st
   writeFileSync(registryPath, registryText(root, opts.primary));
   const planPath = join(home, "tasks.yaml");
   writeFileSync(planPath, "[]\n");
-  const old = { HOME: process.env.HOME, RMD_SRE_LANE: process.env.RMD_SRE_LANE, RMD_INSTANCE_REGISTRY: process.env.RMD_INSTANCE_REGISTRY };
+  const old = { HOME: process.env.HOME, RMD_SRE_LANE: process.env.RMD_SRE_LANE, RMD_INSTANCE_REGISTRY: process.env.RMD_INSTANCE_REGISTRY,
+    RMD_SELECTED_INSTANCE_REGISTRY: process.env.RMD_SELECTED_INSTANCE_REGISTRY };
   process.env.HOME = home;
-  process.env.RMD_INSTANCE_REGISTRY = registryPath;
+  const catalogPath = join(home, "legacy-catalog.yaml");
+  writeFileSync(catalogPath, registryText(root, !opts.primary));
+  process.env.RMD_INSTANCE_REGISTRY = catalogPath;
+  process.env.RMD_SELECTED_INSTANCE_REGISTRY = registryPath;
   if (opts.sreEnv === undefined) delete process.env.RMD_SRE_LANE;
   else process.env.RMD_SRE_LANE = opts.sreEnv;
   t.after(() => {
@@ -80,6 +84,9 @@ async function startDaemon(t: TestContext, opts: { primary: boolean; sreEnv?: st
     .filter((line) => line.trim() !== "")
     .map((line) => JSON.parse(line) as Record<string, unknown>)
     .filter((row) => typeof row.step === "string" && row.step.startsWith("sre_lane."));
+  for (const [name, value] of Object.entries(old)) {
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
   return { gardens, laneRows };
 }
 
@@ -124,16 +131,16 @@ test("W1-T8232: the lane ledgers whether it started", async (t) => {
   assert.match(String(off.laneRows[0].reason), /not the registry's primary instance/);
   // An unresolvable instance is off AND the row says why.
   // W1-T9500: `env: {}` — a fleet container carries RMD_INSTANCE_NAME=core, which would resolve it.
-  const unresolved = resolveSreLaneInstance({ stateRoot: "/nowhere", registryPath: "/nowhere/daemon-instances.yaml", readText: () => registryText("/elsewhere", true), env: {} });
+  const unresolved = await resolveSreLaneInstance({ stateRoot: "/nowhere", registryPath: "/nowhere/daemon-instances.yaml", readText: () => registryText("/elsewhere", true), env: {} });
   assert.equal(unresolved.resolved, false);
   const row = sreLaneStartRow({ instance: unresolved, env: {} });
   assert.equal(row.step, "sre_lane.disabled");
   assert.match(String(row.fields.reason), /state root \/nowhere is not exactly one instance's state_dir/);
 });
 
-test("W1-T8232: an unreadable registry disables the lane with the read error", () => {
+test("W1-T8232: an unreadable registry disables the lane with the read error", async () => {
   const registryPath = "/fixture/daemon-instances.yaml";
-  const instance = resolveSreLaneInstance({
+  const instance = await resolveSreLaneInstance({
     stateRoot: "/fixture/core",
     registryPath,
     readText: (path) => {
@@ -150,13 +157,13 @@ test("W1-T8232: an unreadable registry disables the lane with the read error", (
   });
 });
 
-test("W1-T8232: a refused registry disables the lane with the parser error", (t) => {
+test("W1-T8232: a refused registry disables the lane with the parser error", async (t) => {
   const home = mkdtempSync(join(tmpdir(), "rmd-w1t8232-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const root = join(home, "core");
   const registryPath = join(home, "daemon-instances.yaml");
   writeFileSync(registryPath, registryText(root, true).replace("primary: true", "primary: invalid"));
-  const instance = resolveSreLaneInstance({ stateRoot: root, registryPath });
+  const instance = await resolveSreLaneInstance({ stateRoot: root, registryPath });
   const reason = `the instance registry ${registryPath} is refused: ` +
     "instance registry invalid_primary: instance 'core' primary must be true or false";
   assert.deepEqual(instance, { resolved: false, why: reason });

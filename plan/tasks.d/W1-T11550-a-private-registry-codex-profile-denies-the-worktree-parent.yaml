@@ -23,7 +23,7 @@
       proof: "grep: W1-T11550 criterion 1 in test/deploy/a-private-registry-codex-profile-can-start-its-own-sandbox.test.ts"
     - claim: When a granted path lies under the worktree's parent but outside the worktree, the parent is not denied, because a parent deny hides a nested grant, and that grant keeps its read
       proof: "grep: W1-T11550 criterion 2 in test/deploy/a-private-registry-codex-profile-can-start-its-own-sandbox.test.ts"
-    - claim: Under the real codex sandbox, a write beside the worktree fails with a read-only file system error and creates no host file, while a write inside the worktree succeeds
+    - claim: The suite carries a real-binary regression, skipped where codex is not on PATH, that asserts a write beside the worktree fails with a read-only file system error and a write inside it succeeds. Review judges that this test states those assertions; the reviewer is not asked to run a nested sandbox, and the recorded real-binary run is in the PR's Checks
       proof: "grep: W1-T11550 criterion 3 in test/deploy/a-private-registry-codex-profile-can-start-its-own-sandbox.test.ts"
   rationale: |
     OBSERVED 2026-11-06:
@@ -42,6 +42,7 @@
     - the grandparent, where a write can still exit 0 and vanish;
     - the roughly 11 percent of probes where the model declines the write.
   note: |
+    Criterion 3 was reworded on 2026-11-07: a sandboxed Codex reviewer cannot start bubblewrap inside its own sandbox, so #17117's review reported UNABLE and escalated #17120 although nothing in the change was in doubt.
     Read containment.probe rows after this reaches the daemon; a healthy result is contained true on Codex-served probes.
     reservation hand-off: run-unfiled-1794002639754 -> run-unfiled-1794002639754
     Reserved with rmd next-task-id (W1-T11550 on run-unfiled-1794002639754). From the operator session's 2026-11-06 containment diagnosis, under the operator's "can you fix all of this?". W1-T11437's rationale names this symptom as out of scope and wanting its own task.

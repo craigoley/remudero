@@ -9,13 +9,20 @@
   band_meaning: span
   origin: "2026-11-05 incident: core, the primary instance, ran as shadow from 16:58Z to about 21:07Z and refused every arm and merge with only a quiet ledger row"
   plan_refs: [W1-T11431, W1-T11434, W1-T3596]
-  files: [src/lib/sweep.ts, src/lib/escalate.ts, src/lib/status.ts, src/lib/now-decisions.ts, src/lib/board-projection.ts, test/deploy/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts, test/console-api/a-primary-shadow-alert-closes-on-live-mode.test.ts]
+  files: [src/lib/sweep.ts, src/lib/escalate.ts, src/lib/status.ts, src/lib/now-decisions.ts, src/lib/board-projection.ts, test/deploy/a-primary-instance-in-shadow-mode-raises-one-alert.test.ts, test/console-api/a-primary-shadow-alert-closes-on-live-mode.test.ts, src/lib/ledger.ts, src/lib/ledger-projector.ts]
   priority: 2
   status: queued
-  # backlog gardener: band=2 evidence=503e76eaca988e51
-  # backlog gardener: placed=2026-11-06T03:53:33.122Z
+  # backlog gardener: band=3 evidence=975251ebf2128ff5
+  # backlog gardener: placed=2026-11-07T04:56:37.317Z
   attempts: 0
   rationale: |
+    Delivery-fact scope: src/lib/ledger-projector.ts:isFactStep accepts only the owning ledger
+    step sets, worker/model attribution and real panel actions. A truthful primary-shadow delivery
+    binding is a distinct event, not another issue_opened or a fabricated operator action. Include
+    src/lib/ledger.ts to retain that decision-relevant published binding, and src/lib/ledger-projector.ts
+    to advance FACT_SET_VERSION so already-open read models replay prior unclassified delivery rows.
+    Keep the owned functional test as the acceptance proof; exercise the real fact-store and retained
+    board path, including an existing store's replay. No census allowlist is used as a unit proof.
     On 2026-11-05 the host registry, which is both the recycle catalog and (once a recycle passes
     RMD_INSTANCE_REGISTRY) the active selection, marked core `mode: shadow` (remudero-ops #3). A
     16:58Z recycle selected it, and so did later ones. From then until the 21:07Z live recycle,
@@ -46,7 +53,7 @@
     module has no pre-existing body-edit timer to reuse. Define the intended mutation bound using
     the existing sweep pass lifecycle instead: immediate first notice, durable pending PR sets,
     one coalesced changed-body flush per pass, with failed work retried on the next ordinary pass.
-    The acceptance claims, four-file scope, budget and recovery/acknowledgement semantics stay intact.
+    The acceptance claims, budget and recovery/acknowledgement semantics stay intact; scope follows its merged amendments.
   design: |
     When the primary instance (registry `primary: true`) refuses an arm or merge because of shadow
     mode, open ONE escalation through the existing escalate.ts / Remudero Issues channel. It names
