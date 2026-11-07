@@ -530,7 +530,9 @@ case "$RESTART_THROTTLE_S" in
     ;;
 esac
 
-if [ "$RESTART_THROTTLE_S" -eq 0 ]; then
+supervise_daemon=0
+if [ "${1:-}" = "./bin/rmd" ] && [ "${2:-}" = "daemon" ]; then supervise_daemon=1; fi
+if [ "$RESTART_THROTTLE_S" -eq 0 ] && [ "$supervise_daemon" -eq 0 ]; then
   exec "$@"
 fi
 
@@ -754,13 +756,48 @@ while :; do
       daemon_engine_observer="$CONFIG_ROOT/daemon-install"
     fi
   fi
-  "$@" &
+  if [ "$supervise_daemon" -eq 1 ]; then
+    export REMUDERO_RUN_ID="DAEMON-$(date +%s%3N)-$$"
+    mkdir -p "$CONFIG_ROOT/state"
+    heap_line_path="$CONFIG_ROOT/state/.daemon-heap-line-$$"
+    : > "$heap_line_path"
+    stderr_end="RMD-STDERR-END-${REMUDERO_RUN_ID}-$$"
+    exec 19> >(awk -v evidence="$heap_line_path" -v stop="$stderr_end" '
+      $0 == stop { exit }
+      { if (tolower($0) ~ /heap limit/) { print substr($0, 1, 240) > evidence; close(evidence) }
+        print; fflush() }
+    ' >&2)
+    daemon_stderr_pid=$!
+    "$@" 2>&19 &
+  else
+    "$@" &
+  fi
   child_pid=$!
   wait "$child_pid" || rc=$?
   if [ -n "$child_rc" ]; then
     rc=$child_rc
   fi
   child_pid=""
+
+  if [ "$supervise_daemon" -eq 1 ]; then
+    # End the observer explicitly: orphaned workers may still hold their inherited stderr open.
+    printf '\n%s\n' "$stderr_end" >&19 || log "stderr observer already exited"
+    exec 19>&-
+    wait "$daemon_stderr_pid" || log "stderr observer failed; exit status is still recorded"
+    if ! node --input-type=commonjs - "$CONFIG_ROOT/state/ledger.ndjson" "$REMUDERO_RUN_ID" "$rc" "$heap_line_path" "$signal_forwarded" <<'DAEMON_EXIT_EVIDENCE'
+const fs = require('node:fs');
+const [ledger, runId, code, heapPath, forwarded] = process.argv.slice(2);
+const heapLine = fs.readFileSync(heapPath, 'utf8').trim();
+fs.appendFileSync(ledger, JSON.stringify({
+  ts: new Date().toISOString(), run_id: runId, task_id: 'DAEMON', step: 'daemon.process.exit',
+  exit_code: Number(code), clean_exit: Boolean(forwarded) || Number(code) === 0 || Number(code) === 75,
+  heap_limit_line: heapLine || null,
+}) + '\n');
+DAEMON_EXIT_EVIDENCE
+    then log "could not persist daemon exit evidence (exit $rc)"; fi
+    rm -f -- "$heap_line_path"
+    unset REMUDERO_RUN_ID
+  fi
 
   # W1-T2586: A SIGNAL THIS SHELL ITSELF FORWARDED OUTRANKS EVERY OTHER CLASSIFICATION BELOW.
   # `signal_forwarded` is set ONLY inside `forward_signal`, ONLY after TERM/INT was actually sent

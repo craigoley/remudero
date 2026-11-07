@@ -629,6 +629,21 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T215: `escalateCrashLoop`'s (run-task.ts) dedup marker, read per boot; dropping it re-opens
   // one duplicate needs-human issue per boot, roughly one a minute while the storm lasts.
   "daemon.crashloop.escalated",
+  // W1-T11421: the crash sentinel learns each instance's clean lifetime from these per-process rows, and finds an open
+  // incident from the cleared marker. The live tail keeps only the newest boot, so losing them relearns from nothing.
+  "daemon.crash.abnormal_exit",
+  "daemon.clean_exit.observed",
+  "daemon.crashloop.cleared",
+  // …and DAEMON_CLEAN_EXIT_STEPS (daemon.ts), one row per process: a rotation between a clean exit and the next boot
+  // would otherwise archive the row, and the next boot would judge a clean end a crash.
+  "daemon.summary",
+  "daemon.stop",
+  "daemon.stop_drain.completed",
+  "daemon.freshness_exit",
+  "daemon.freshness_drain.completed",
+  "daemon.memory_exit",
+  "daemon.memory_drain.completed",
+  "daemon.signal_exit",
   "daemon.headroom_reserve.escalated",
   // `escalateHeadroomParkCeiling` (run-task.ts) compares this row against the newest
   // `daemon.headroom`; dropping it re-pages once per daemon boot while the probe stays broken.
@@ -1961,6 +1976,28 @@ function rotateLedgerLocked(
     if (!withinWindow) archivedLineCount++;
     return withinWindow;
   });
+
+  // Keep the evidence of each surviving boot's own lifetime. Restart downtime is not uptime;
+  // dropping its final row or heap sample would make the next boot judge a different process.
+  const bootRuns = new Set(candidates.filter((p) => p.step === "daemon.boot").map((p) => p.json?.run_id)
+    .filter((run): run is string => typeof run === "string" && run.startsWith("DAEMON-")));
+  const lifetimeEvidence = new Map<string, Map<string, ParsedLedgerLine>>();
+  for (const p of originalOrder) {
+    const run = p.json?.run_id;
+    if (typeof run !== "string" || !bootRuns.has(run) || p.tsMs === undefined) continue;
+    const evidence = lifetimeEvidence.get(run) ?? new Map<string, ParsedLedgerLine>();
+    for (const key of ["last", ...(p.step === "daemon.memory" || p.step === "daemon.memory_policy" ? [p.step] : [])]) {
+      if ((evidence.get(key)?.tsMs ?? -Infinity) <= p.tsMs) evidence.set(key, p);
+    }
+    lifetimeEvidence.set(run, evidence);
+  }
+  const preserved = new Set([...lifetimeEvidence.values()].flatMap((e) => [...e.values()]));
+  const included = new Set(candidates);
+  for (const p of preserved) {
+    if (included.has(p)) continue;
+    candidates.push(p);
+    archivedLineCount--;
+  }
 
   const carried = dropSupersededReviews(pruneCarriedRows(candidates));
   const reviewMarkers = planOnlyReviewMarkers(candidates, carried);

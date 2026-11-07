@@ -1,0 +1,93 @@
+- id: W1-T11544
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/env-var-registry.test.ts cost 4.4 PR minute(s) across 9 round(s) on 6 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.45
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/env-var-registry.test.ts"
+  files:
+    - src/lib/config-schema.ts
+    - test/infra/check-test-test-env-var-registry-test-ts.test.ts
+  acceptance:
+    - claim: "a recorded check:test:test/env-var-registry.test.ts round, replayed through the real code path in src/lib/config-schema.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11544: check:test:test/env-var-registry.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/env-var-registry.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/env-var-registry.test.ts cost 4.4 PR minute(s) (seven-day half-life) across 9 fix round(s) on 6 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/config-schema.ts: test/env-var-registry.test.ts imports it
+    - test/env-var-registry.test.ts: named by the failing check
+    - the rounds name a failing test: test/env-var-registry.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #16971 (https://github.com/craigoley/remudero/pull/16971) at 2026-11-06T12:16:56.778Z: ci-log round — rule-checks: test/env-var-registry.test.ts
+        failing tests: every RMD_ or REMUDERO_ env-name literal or dot read in src is registered once
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/env-var-registry.test.ts:1:1407
+          | ✖ every RMD_ or REMUDERO_ env-name literal or dot read in src is registered once (480.827246ms)
+          |   AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+          |   + actual - expected
+          |   ... Skipped lines
+          | 
+          |     [
+          |       'REMUDERO_CLAUDE_BIN',
+          |       'REMUDERO_DAEMON_PID',
+          |       'REMUDERO_DAEMON_PROCESS',
+          |       'REMUDERO_DAILY_COST_CEILING_SHARE_USD',
+    - PR #14683 (https://github.com/craigoley/remudero/pull/14683) at 2026-10-27T04:18:05.841Z: ci-log round — rule-checks: test/env-var-registry.test.ts; coverage-shard (7/8): test/no-daemon-loop-path-arms-a-wall-clock-child-timeout.test.ts; coverage-shard (4/8): every RMD_ or REMUDERO_ env-nam
+        failing tests: every RMD_ or REMUDERO_ env-name literal or dot read in src is registered once; W1-T9703: the census names an AbortController-plus-timer kill of a daemon-reachable child; W1-T9651: the census names a daemon-reachable async child call that arms a wall-clock timeout, a row above its real count is refused and names the row to delete, W1-T9703: the census names an AbortController-plus-timer kill of a daemon-reachable child; test/every-env-name-a-source-file-reads-is-registered.test.ts: dot reads and all nine names join the registry census
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/env-var-registry.test.ts:1:1407
+          | ✖ every RMD_ or REMUDERO_ env-name literal or dot read in src is registered once (298.137267ms)
+          |   AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+          |   + actual - expected
+          |   ... Skipped lines
+          | 
+          |     [
+          |       'REMUDERO_CLAUDE_BIN',
+          |       'REMUDERO_DAEMON_PID',
+          |       'REMUDERO_DAEMON_PROCESS',
+          |       'REMUDERO_DAILY_COST_CEILING_SHARE_USD',
+    - PR #13505 (https://github.com/craigoley/remudero/pull/13505) at 2026-10-22T04:40:51.710Z: ci-log round — ci-shard (1/8): test/github/codex-reads-as-the-same-github-user-around-the-broker.test.ts; rule-checks: test/env-var-registry.test.ts; coverage-shard (8/8): pool defect: test/b.test.ts
+        failing tests: W1-T10302: the default client read sends the client to the broker and returns gh's answer; every RMD_ or REMUDERO_ env-name literal or dot read in src is registered once; test/every-env-name-a-source-file-reads-is-registered.test.ts: dot reads and all nine names join the registry census; every RMD_ or REMUDERO_ env-name literal or dot read in src is registered once, test/every-env-name-a-source-file-reads-is-registered.test.ts: dot reads and all nine names join the registry census
+        log excerpt:
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-1.log" || : > "$FLAKE_RETRY_DIR/shard-1.log"
+          | not ok 12 - W1-T10302: the default client read sends the client to the broker and returns gh's answer
+          |   ---
+          |   duration_ms: 23.202301
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/github/codex-reads-as-the-same-github-user-around-the-broker.test.ts:7:7194'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     Expected values to be strictly equal:
+          |     + actual - expected
+          | 
+          |     + '\r\n{"n":1}'
+          |     - '{"n":1}'
+    - PR #10835 at 2026-10-11T10:52:09.670Z: ci-log round — rule-checks: test/env-var-registry.test.ts; coverage-shard (6/8): test/a-held-green-pr-names-its-hold-not-arming.test.ts; coverage-shard (2/8): test/every-env-name-a-source-file-reads-i
+    - PR #10154 at 2026-10-08T18:07:31.301Z: ci-log round — rule-checks: test/env-var-registry.test.ts; coverage-shard (3/8): test/every-env-name-a-source-file-reads-is-registered.test.ts; coverage-shard (2/8)
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 1 occurrence(s) across 7 day(s), last seen 2026-11-06T12:16:56.778Z, and the record declares no privileged path"
+    judged_at: "2026-11-06T18:34:48.395Z"
+    pin: "ceac73e905f1dc7803a5a249e7863db5c11f9c6dbadba88dd004f2896b252e62"

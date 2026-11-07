@@ -16,6 +16,23 @@ the identical layout under an alternate absolute root for testing.
 
 Run `~/bin/remudero-janitor.sh --dry-run` before `--apply`.
 
+The agent account's hourly `:17` job uses
+`/Users/craigoleyagent/Library/Application Support/remudero/tmp-reclaim.sh`.
+The 2026-11-06 read-only comparison found that installed helper behind the maintained
+source, including inherited keep-name safeguards. Updating the default `HOME/bin`
+layout alone leaves that scheduled copy unchanged. After the source merges, its owner
+can converge the existing destination with the code-only installer, as `craigoleyagent`:
+
+```sh
+REMUDERO_JANITOR_INSTALL_DIR="/Users/craigoleyagent/Library/Application Support/remudero" \
+  bash deploy/mac/install-janitor.sh
+```
+
+This copies the maintained helper and its guards without changing schedules.
+`install-tmp-reclaim.sh` is the separate schedule installer. Source tests and a merge
+establish source behavior; installation convergence and live cache reclamation need
+separate observations from the installed helper.
+
 The temporary cleaner appends `/usr/sbin:/sbin` to the caller's PATH so cron can
 find macOS `lsof`; it never changes caller precedence or adds user package bins.
 Dependency-health diagnostics use Python's standard library, already required by
@@ -163,6 +180,18 @@ unrecognized contents stay protected. Each file needs six hours of both mtime
 and ctime inactivity, with fresh process/CWD/open-file checks before removal.
 Cache roots and sibling fixtures/source/state stay in place. Delegated cache
 counts are logged separately from workspace-removal counts.
+
+Cache-only mode also visits the resolved per-user temporary root (`TMPDIR`, or
+`DARWIN_USER_TEMP_DIR` on macOS). Numeric cache names and the same recognition,
+ownership, age and activity guards apply there. The per-user loop adds no second
+scan when its resolved root matches the main root. Node compile-cache and
+session-scratch cleanup remain in the regular mode.
+
+A `/tmp` alias belongs only to a candidate physically under `/private/tmp`.
+The whole suffix is retained: `/private/tmp/rt/nested/tsx-502` maps to
+`/tmp/rt/nested/tsx-502`, for both command and CWD checks. A cache in the per-user
+root elsewhere has no invented `/tmp/<basename>` alias, regardless of the main
+scan root. Unknown process or descriptor scans still retain the cache.
 Owned numeric `<pid>.pipe` Unix sockets are recognized as TSX IPC endpoints and
 retained, not deleted or treated as cache files. Their mere presence does not
 hide otherwise eligible old regular cache entries. The existing whole-cache

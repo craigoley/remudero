@@ -1,0 +1,30 @@
+id: incident-363c05ca56fc99db
+ts: 2026-11-07T08:04:30.539Z
+raw: >-
+  Incident 363c05ca56fc: flow pr-stage-stall:own-red:required checks red —
+  ci-log fix, fix round <n> — judge: continue (first fix round: no round, strike
+  or parked wait yet, so there is no progress...)
+
+  First seen: 2026-11-07T07:58:31.984Z
+
+  Last seen: 2026-11-07T07:58:31.984Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=17144 own-red: repeat: "required checks red — ci-log fix, fix round <n> — judge: continue (first fix round: no round, strike or parked wait yet, so there is no progress...)" x11
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#363c05ca56fc99db2cfe3feae31ae0c0a45857b3ca2252bcab1fe01e41433ddd
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
