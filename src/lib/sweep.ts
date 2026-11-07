@@ -3481,7 +3481,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     // W1-T5909: the same gateway dedup as the two check escalations — one issue per task/head/cause.
     escalateRearmExhausted: (pr, rearms, bound, judgedReason) => {
-      return tryEscalate(
+      return tryEscalateAsync(
         {
           class: "BLOCKED",
           taskId: escalationTaskIdFor(pr),
