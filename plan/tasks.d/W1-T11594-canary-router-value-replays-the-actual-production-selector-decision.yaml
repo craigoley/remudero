@@ -1,0 +1,89 @@
+- id: W1-T11594
+  title: Canary router evidence freezes and replays the actual production worker selector decision
+  repo: remudero
+  depends_on: [W1-T11593, W1-T11117, W1-T11118]
+  plan_refs: [W1-T11119, W1-T11593, W1-T5535, W1-T11432]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: architect
+  files:
+    - src/lib/model-canary-router-decision.ts
+    - src/lib/worker.ts
+    - test/routing/model-canary-router-decision-replay.test.ts
+  rationale: >-
+    W1-T11119 criterion 14 was refused because "no durable producer joins frozen pre-outcome router
+    decisions ... to canary outcomes". RouteLLM (ICLR 2025,
+    https://proceedings.iclr.cc/paper_files/paper/2025/hash/5503a7c69d48a2f86fc00b3dc09de686-Abstract-Conference.html)
+    and RouterEval (Findings of EMNLP 2025, https://aclanthology.org/2025.findings-emnlp.208/) both
+    judge a router by the decision it makes from pre-outcome inputs, compared against fixed
+    single-model choices. That estimand is only honest when the decision evaluated is the one
+    production actually made.
+    Settled by lookup: is this already filed or already decided? -> no. No plan task captures
+    replayable worker selector inputs. W1-T11119 only consumes a frozen decision through
+    evaluateCanaryRouterValue (plan/tasks.d).
+    Settled by lookup: which selector is the production router? -> the real decision site is
+    src/lib/worker.ts ~:2640-2677. It calls `selectWorkerProviderForPolicy(capacities, policy, draw)`,
+    or, when the fix learner applies, `selectWorkerProvider(filtered, reservePercent, draw, mixing)`.
+    `selectWorkerProvider` lives in src/lib/worker-provider.ts:579. `selectWorkerProviderForPolicy`
+    lives in src/lib/provider-routing-policy.ts:472, not in worker-provider.ts as the brief stated.
+    Both are imported unchanged (src).
+    Settled by lookup: is the routing pool production? -> no. `routingPool` and
+    `selectFromRoutingPool` (src/lib/worker-provider.ts:2042, src/lib/model-pool.ts:363) are
+    optional dependencies that production worker composition does not wire.
+    Settled by lookup: where is the draw seed fixed? -> auctionDrawSeed and routingDrawValue are
+    read before the learner (src/lib/worker.ts ~:2642, W1-T5535).
+    Settled by lookup: ordering? -> this task follows W1-T11593 so the worker.ts edits are serialised
+    behind W1-T11432's live claim. It follows W1-T11117 and W1-T11118 for matrix and case identity.
+    It depends on no consumer task.
+  design: >-
+    At the real decision site in worker.ts, call `captureRouterDecision(` after the learner has
+    run and before execution. The capture freezes the effective capacities offered to the selector,
+    the auction policy and its preference, the reserve, the requested capability, candidate and
+    model identity, the draw unit and seed, any learned mixing and weights, the selector branch that
+    actually ran (policy or learned), its selection and preference-bypass outcome, and the
+    downstream routed model choice where one applies. The capture is bound to the worker-spawn
+    attemptId and to W1-T11593's run and canary binding.
+    The new module also exports a pure replay. It calls the same selector function the captured
+    branch used, using only the frozen inputs, and reads no live capacity, health, credential or
+    clock. It returns verified only when the replayed selection equals the captured one. An
+    unrepresentable branch (a blocked-auction cash fallback, an error path, or an unknown
+    preference), any input that cannot be serialised or verified, or a replay mismatch makes
+    router evidence unavailable, never estimated.
+    The deterministic production decision is the primary estimand. Propensity weighting stays a
+    preregistered diagnostic and is emitted only when the selector genuinely reported its draw
+    probabilities. A pool replay through selectFromRoutingPool may be emitted only as a separately
+    labelled non-production counterfactual whose state is unavailable. It never substitutes for the
+    actual route. The capture makes no provider call, and offline tests use zero transport and zero
+    spend.
+  note: >-
+    Plan-only replacement for the router-replay slice of closed PR #17181, with fresh reserved IDs.
+    This record grants no routing-policy change, promotion, schedule, consent, admission or spend
+    release. The first-live-pilot cap remains USD 25 total, with no retries or top-ups. W1-T11119's
+    live claim and branch are untouched.
+  acceptance:
+    - claim: Replay from frozen inputs reproduces the exact selector branch and selection the production decision site ran, including any learned mixing and downstream model choice
+      proof: 'unit test: test/routing/model-canary-router-decision-replay.test.ts'
+    - claim: Replay reads no live capacity, health, credential or clock state
+      proof: 'grep: W1-T11594 criterion 2: replay reads no live capacity health or clock in test/routing/model-canary-router-decision-replay.test.ts'
+    - claim: An unrepresentable branch, an unverifiable effective input or a replay mismatch makes router evidence unavailable
+      proof: 'grep: W1-T11594 criterion 3: unrepresentable branch or unverifiable input yields unavailable router evidence in test/routing/model-canary-router-decision-replay.test.ts'
+    - claim: A routing-pool counterfactual is labelled non-production and unavailable, and never substitutes for the actual route
+      proof: 'grep: W1-T11594 criterion 4: pool counterfactual is labelled non-production and never substitutes for the actual route in test/routing/model-canary-router-decision-replay.test.ts'
+    - claim: Propensity weighting is emitted only as a diagnostic and only from genuinely captured selector probabilities
+      proof: 'grep: W1-T11594 criterion 5: propensity diagnostic requires genuinely captured probabilities in test/routing/model-canary-router-decision-replay.test.ts'
+    - claim: The production worker decision site captures the frozen decision before execution
+      proof: 'grep: captureRouterDecision( in src/lib/worker.ts'
+  falsifier: >-
+    Capture decisions from both the policy branch and the learned-mixing branch at the real site,
+    then replay them. Mutate any single frozen input (capacity, reserve, draw seed or mixing), or
+    replay through the other branch, and the criterion 1 control must report a mismatch. Inject a
+    live capacity, health or clock read into replay and the criterion 2 control must fail. Present a
+    pool decision as the route and the criterion 4 control must fail. Remove the probability guard
+    and the criterion 5 control must fail.

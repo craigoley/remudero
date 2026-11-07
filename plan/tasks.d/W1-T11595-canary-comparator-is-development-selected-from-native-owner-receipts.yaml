@@ -1,0 +1,78 @@
+- id: W1-T11595
+  title: Canary single-model comparator is selected on development cases from native owner receipts and bound to the holdout
+  repo: remudero
+  depends_on: [W1-T11593, W1-T11594, W1-T10957, W1-T11117, W1-T11118]
+  plan_refs: [W1-T11119, W1-T11593, W1-T11594, W1-T11117, W1-T11118, W1-T10957]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: architect
+  files:
+    - src/lib/model-canary-dev-selected-comparator.ts
+    - src/lib/model-canary-command.ts
+    - test/routing/model-canary-dev-selected-comparator.test.ts
+  rationale: >-
+    W1-T11119 compares frozen router decisions with "development-selected qualified static
+    baselines", but its worker found no producer of that comparator (refusal on criterion 14).
+    RouterEval (Findings of EMNLP 2025, https://aclanthology.org/2025.findings-emnlp.208/) and
+    RouteLLM (ICLR 2025,
+    https://proceedings.iclr.cc/paper_files/paper/2025/hash/5503a7c69d48a2f86fc00b3dc09de686-Abstract-Conference.html)
+    measure a router against the best single model. If that model is picked on the evaluation cases
+    themselves, the comparison inherits an optimistic selection bias, so the pick must come from
+    disjoint development cases. Efron 1986 (Statistical Science 1(1):54-75,
+    https://doi.org/10.1214/ss/1177013815) bootstraps paired statistics by resampling the same
+    independent units on both arms. The comparator must therefore be bound to exactly the router's
+    holdout cases, never to a different or overlapping case set.
+    Settled by lookup: is this already filed or already decided? -> no. Only W1-T11119's design
+    names the comparator; no task produces it (plan/tasks.d).
+    Settled by lookup: is "baseline" usable in the test basename? -> no. isRuleSuitePath reads a
+    census, ratchet or baseline basename as a CI rule suite, and new-shard-rule-suite blocks it
+    (src/lib/task-linter.ts:1779-1812). The test is therefore named dev-selected-comparator.
+    Settled by lookup: who owns the case split and owner receipts? -> W1-T11118 owns the
+    development and holdout split, family provenance and corpus or scorer hashes. W1-T10957 owns
+    first-class cases and the native owner. W1-T11117 owns the matrix digests (plan/tasks.d).
+    Settled by lookup: ordering? -> this task follows W1-T11593 (provider exchange) and W1-T11594
+    (router capture). It depends on no consumer task.
+  design: >-
+    Add a pure `selectDevelopmentComparator(` that reads native owner receipts through the existing
+    owner reader and chooses one fixed configuration using development-split cases only. It never
+    reads holdout outcomes during selection. It then binds the chosen comparator to the same holdout
+    case set, corpus digest, scorer digest, feature digest, source digest and matrix digest as the
+    router decisions under evaluation. It attaches the native owner outcomes of that comparator on
+    those holdout cases.
+    The result is unavailable on any digest mismatch, any development and holdout family overlap,
+    a missing receipt, a non-native receipt, or caller-authored or imported JSON. A self-reported
+    trusted flag, or a comparator a caller supplies directly, gets no authority.
+    The existing offline model-canary command calls it on its bounded private preparation path and
+    emits a private sealed comparator artifact for W1-T11119's evaluateCanaryRouterValue. It adds
+    no new schedule, store, mode authority or provider call. Offline tests use zero transport and
+    zero spend.
+  note: >-
+    Plan-only replacement for the static-comparator slice of closed PR #17181, with fresh reserved
+    IDs. This record grants no consent, private-owner, source-qualification, admission or spend
+    release. The first-live-pilot cap remains USD 25 total, with no retries or top-ups.
+    model-canary-command.ts is also declared by W1-T11119, and W1-T11119 now depends on this task.
+    W1-T11119's live claim and branch are untouched.
+  acceptance:
+    - claim: The comparator is selected from native owner receipts using development cases only and never reads holdout outcomes during selection
+      proof: 'unit test: test/routing/model-canary-dev-selected-comparator.test.ts'
+    - claim: The selected comparator is bound to the same holdout case, corpus, scorer, feature, source and matrix digests, plus its native owner outcomes
+      proof: 'grep: W1-T11595 criterion 2: comparator binds the same holdout digests and native owner outcomes in test/routing/model-canary-dev-selected-comparator.test.ts'
+    - claim: Any digest mismatch, development and holdout overlap, or missing, non-native or caller-authored evidence returns unavailable
+      proof: 'grep: W1-T11595 criterion 3: mismatch overlap missing non-native or caller-authored evidence returns unavailable in test/routing/model-canary-dev-selected-comparator.test.ts'
+    - claim: Comparator preparation makes zero provider calls and zero spend
+      proof: 'grep: W1-T11595 criterion 4: comparator preparation uses zero transport and zero spend in test/routing/model-canary-dev-selected-comparator.test.ts'
+    - claim: The native offline command actually produces the development-selected comparator
+      proof: 'grep: selectDevelopmentComparator( in src/lib/model-canary-command.ts'
+  falsifier: >-
+    Seed owner receipts in which the best development configuration differs from the best holdout
+    configuration. Make selection read holdout outcomes and the criterion 1 control must fail.
+    Alter one digest, or overlap one source family across the splits, and the criterion 3 control
+    must read unavailable. Supply a caller-authored receipt marked trusted and the criterion 3
+    control must read unavailable. Any transport stub call fails criterion 4.

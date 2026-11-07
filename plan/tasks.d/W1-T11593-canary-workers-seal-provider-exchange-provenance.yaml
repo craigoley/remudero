@@ -1,0 +1,101 @@
+- id: W1-T11593
+  title: Canary worker spawns seal provider-exchange provenance only after a genuine provider-originated response
+  repo: remudero
+  depends_on: [W1-T10957, W1-T11118, W1-T11432]
+  plan_refs: [W1-T11119, W1-T10957, W1-T11118, W1-T11432]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: architect
+  files:
+    - src/lib/worker.ts
+    - src/lib/model-canary-coding-adapter.ts
+    - src/lib/model-canary-runner.ts
+    - test/worker/spawn/model-canary-provider-exchange-provenance.test.ts
+  rationale: >-
+    W1-T11119's worker refused criteria 8, 10 and 14 because no production native receipt producer
+    reaches the clustered analysis path. One missing producer is proof that a canary attempt
+    actually exchanged a request with a provider. Today `workerExecutionEvidence()`
+    (src/lib/worker-execution-evidence.ts:160) observes providerInvoked only as false for
+    admission-abandoned and leaves it unavailable otherwise, and `codingWorkerRequestPorts()`
+    (src/lib/model-canary-coding-adapter.ts:55) only forwards that value. The official Claude Agent
+    SDK TypeScript reference (https://code.claude.com/docs/en/agent-sdk/typescript, SDKAssistantMessage
+    and SDKAssistantMessageError) lists the assistant-message error values. It says
+    `cloud_credential_error` means Claude Code "couldn't obtain usable AWS or Google Cloud credentials
+    ... so no request reached the cloud provider", so that value cannot prove a provider exchange.
+    The router-evaluation framing of RouteLLM (ICLR 2025,
+    https://proceedings.iclr.cc/paper_files/paper/2025/hash/5503a7c69d48a2f86fc00b3dc09de686-Abstract-Conference.html)
+    and RouterEval (Findings of EMNLP 2025, https://aclanthology.org/2025.findings-emnlp.208/)
+    scores a route by the outcome of the model it actually reached. An attempt that never reached a
+    provider is therefore missing data, not a model outcome.
+    Settled by lookup: is this already filed or already decided? -> no. No task in plan/ declares
+    provider-exchange provenance. PR #17178 and #17181 are closed unmerged, and their IDs
+    W1-T11565..W1-T11574 are not reused (grep plan/; harness reservation).
+    Settled by lookup: where is the served-model signal read? -> collectWorkerResult in
+    src/lib/worker.ts (~:3932). It already skips the `<synthetic>` model and flags isApiErrorMessage
+    (~:4038-4042) (src/lib/worker.ts).
+    Settled by lookup: does the runner already join canary and worker attempts? -> yes.
+    model-canary-runner.ts:163-191 passes runId and canaryAttemptId in the coding request context
+    and builds canary-worker-execution-join-v1 from executionEvidence.attemptId
+    (src/lib/model-canary-runner.ts).
+    Settled by lookup: where do new worker tests go? -> test/worker/spawn/, as computed by
+    `rmd test-place test/worker.test.ts`. The root legacy worker test takes no new tests (operator
+    finding; W1-T11432 precedent).
+    Settled by lookup: ordering? -> W1-T10957 owns the coding adapter and runner contract.
+    W1-T11118 owns the runner trace seam and already follows W1-T11117. W1-T11432 holds the live
+    worker.ts auction edit and depends only on W1-T11428. None of them depends on W1-T11119,
+    W1-T11120, W1-T11213, W1-T11264 or W1-T11265 (plan/tasks.d).
+  design: >-
+    Leave `workerExecutionEvidence()` and its providerInvoked contract byte-for-byte unchanged.
+    In `collectWorkerResult()`, a module-private (not exported) `sealProviderExchange(` issues one
+    opaque provider-exchange evidence value. It does so only after one of two things is observed on
+    the live stream. The first is an assistant message whose `message.model` is a real non-empty
+    model string, not `<synthetic>`, with no SDK error field. The second is an assistant message
+    whose SDK `error` is on an explicit allowlist of provider-response errors (rate_limit, overloaded,
+    server_error, invalid_request, model_not_found, max_output_tokens). The allowlist is closed:
+    new or unknown values stay excluded. Explicitly exclude cloud_credential_error, a bare
+    isApiErrorMessage flag, `<synthetic>` messages, empty streams, a started query with no assistant
+    message, aborts, timeouts and local spawn or transport failures. Each of these issues no
+    evidence; it never issues a false or negative value.
+    The evidence is opaque to callers. It binds runId, the canary attemptId and the worker-spawn
+    attemptId, and a consumer that sees any binding mismatch reads it as unavailable. The coding
+    request port passes the existing context's canaryAttemptId into the spawn args. It forwards the
+    sealed value beside executionEvidence without decoding it. The runner carries it through its
+    existing resources assignment and adds no new owner store.
+    Offline tests drive collectWorkerResult with scripted message streams only. They use zero
+    provider transport and zero spend.
+  note: >-
+    Plan-only replacement for the provider-exchange slice of closed PR #17178 and #17181, with fresh
+    reserved IDs. This record grants no consent, private-owner, source-qualification, admission or
+    spend release. The first live pilot keeps its separate cap of USD 25 total, with no retries and
+    no top-ups. This code and its offline tests make no provider call. W1-T11119's live claim and
+    branch are untouched.
+  acceptance:
+    - claim: Only a provider-originated assistant message with a real non-synthetic model, or an allowlisted provider response error, issues sealed provider-exchange evidence
+      proof: 'unit test: test/worker/spawn/model-canary-provider-exchange-provenance.test.ts'
+    - claim: cloud_credential_error, bare API-error flags, synthetic messages, empty streams, query-start-only, aborts, timeouts and local failures issue no provider-exchange evidence
+      proof: 'grep: W1-T11593 criterion 2: excluded signals issue no provider exchange evidence in test/worker/spawn/model-canary-provider-exchange-provenance.test.ts'
+    - claim: workerExecutionEvidence providerInvoked stays unavailable for ordinary results and observed false only for admission-abandoned
+      proof: 'grep: W1-T11593 criterion 3: workerExecutionEvidence providerInvoked contract is unchanged in test/worker/spawn/model-canary-provider-exchange-provenance.test.ts'
+    - claim: The sealed evidence is opaque and binds runId, canaryAttemptId and the worker-spawn attempt, so any mismatch reads unavailable
+      proof: 'grep: W1-T11593 criterion 4: sealed evidence binds run canary attempt and worker spawn attempt in test/worker/spawn/model-canary-provider-exchange-provenance.test.ts'
+    - claim: Offline tests perform zero provider transport and zero spend
+      proof: 'grep: W1-T11593 criterion 5: offline provider exchange controls use zero transport and zero spend in test/worker/spawn/model-canary-provider-exchange-provenance.test.ts'
+    - claim: The real stream reducer issues the seal
+      proof: 'grep: sealProviderExchange( in src/lib/worker.ts'
+    - claim: The coding request port forwards the sealed value without decoding it
+      proof: 'grep: providerExchange: result.providerExchange in src/lib/model-canary-coding-adapter.ts'
+  falsifier: >-
+    Replay scripted streams through collectWorkerResult. Use a real-model assistant message and one
+    allowlisted error message as positives. Use cloud_credential_error, an isApiErrorMessage flag
+    alone, `<synthetic>`, empty, query-start-only, abort, timeout and local-failure streams as
+    negatives. Widen the allowlist to include cloud_credential_error, or accept the bare flag, and
+    the criterion 2 control must fail. Change providerInvoked in workerExecutionEvidence and the
+    criterion 3 control must fail. Swap the canaryAttemptId and the criterion 4 control must read
+    unavailable. Any transport stub call, or any nonzero spend, fails criterion 5.

@@ -1,8 +1,8 @@
 - id: W1-T11119
   title: Controlled canaries compare clustered evidence with field trials and export unmeasured improvement proposals
   repo: remudero
-  depends_on: [W1-T11117, W1-T11118, W1-T10957]
-  plan_refs: [W1-T10956, W1-T10957, W1-T100001]
+  depends_on: [W1-T11117, W1-T11118, W1-T10957, W1-T11593, W1-T11594, W1-T11595]
+  plan_refs: [W1-T10956, W1-T10957, W1-T100001, W1-T11593, W1-T11594, W1-T11595]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -45,6 +45,22 @@
     rates as a randomized comparison. Existing paired analysis is descriptive and supplies no
     uncertainty estimate. Repeated attempts are not independent cases. Failure patterns can
     inform a bounded improvement proposal without executing that proposal.
+    2026-11-07 Architect rewiring (plan-only): the worker's refusals on criteria 8, 10 and 14 name
+    missing production producers, not files this task should widen into. They are filed as three
+    separate prerequisites. W1-T11593 seals provider-exchange provenance in collectWorkerResult,
+    grounded in the Claude Agent SDK TypeScript message reference
+    (https://code.claude.com/docs/en/agent-sdk/typescript). W1-T11594 freezes and replays the actual
+    production worker selector decision. W1-T11595 produces the development-selected comparator
+    bound to the holdout, grounded in RouterEval (https://aclanthology.org/2025.findings-emnlp.208/),
+    RouteLLM
+    (https://proceedings.iclr.cc/paper_files/paper/2025/hash/5503a7c69d48a2f86fc00b3dc09de686-Abstract-Conference.html)
+    and Efron 1986 (https://doi.org/10.1214/ss/1177013815).
+    Settled by lookup: is this already filed or already decided? -> no. Closed unmerged PRs #17178
+    and #17181 declared W1-T11565..W1-T11574, and none of those IDs is reused.
+    Settled by lookup: does this rewiring change acceptance, files, owner or status? -> no. Only
+    depends_on and plan_refs change, and the live claim and branch are untouched.
+    Settled by lookup: is the new graph cycle-free? -> yes. None of W1-T11593, W1-T11594 or
+    W1-T11595 depends on W1-T11119, W1-T11120, W1-T11213, W1-T11264 or W1-T11265 (plan/tasks.d).
   design: >-
     Add pure private post-processing helpers over immutable manifests and existing canary and
     field-trial evidence contracts. Preserve observational versus registered randomized
