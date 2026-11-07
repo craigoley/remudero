@@ -229,56 +229,87 @@ test("W1-T11459 criterion 2: a plan round awaits materialization and removal bef
   }
 });
 
-test("W1-T11459 criterion 2: command review reuse awaits readiness and teardown before its fallback", async () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-review-reuse-order-")), tree = join(root, "head");
-  const ledgerPath = join(root, "ledger.ndjson"), taskId = "W1-T11459";
-  const url = "https://github.com/fixture/loop/pull/9001", priorHead = "d".repeat(40), head = "a".repeat(40);
-  const claim = "the private fixture proof is present", proof = "grep: private-fixture in src/fixture.ts";
-  const prior = judgeReview([{ claim, proof }], { diff: "diff --git a/src/fixture.ts b/src/fixture.ts\n+private-fixture\n",
-    report: claim, headCheckoutDir: tree, execProof: () => "pass" });
-  appendLedger(ledgerPath, { run_id: "prior", task_id: taskId, step: "review.posted",
-    state: prior.state, head_sha: priorHead, pr_url: url, decision_verdict: prior });
-  let entered!: () => void, ready!: (value: unknown) => void, removing!: () => void, finish!: () => void;
-  const called = new Promise<void>(resolve => { entered = resolve; });
-  const materialized = new Promise<unknown>(resolve => { ready = resolve; });
-  const removalStarted = new Promise<void>(resolve => { removing = resolve; });
-  const removalGate = new Promise<void>(resolve => { finish = resolve; });
-  const events: string[] = []; let returned = false, heldAtRemovalEnd = false;
-  const effects = task.buildSweepEffects({
-    owner: "fixture", repo: "loop", localRepoName: "not-loop", config: { root } as Config,
-    ledgerPath, runId: "reuse-order", plan: { tasks: [], byId: new Map([[taskId, { id: taskId, files: [] }]]) } as never,
-    log: () => {}, reviewRunner: async () => { events.push("fallback"); return 0; },
-    materializeReviewWorktreeImpl: () => { events.push("materialize"); entered(); return materialized; },
-    buildBaseProofDirImpl: (_criteria: unknown, path: string) => {
-      assert.equal(path, tree); assert.equal(readFileSync(join(tree, "ready"), "utf8"), "ready");
-      events.push("base"); return {};
-    },
-    reviewWorktreeRemoveImpl: async (_repo: string, path: string) => {
-      assert.equal(path, tree); events.push("removing"); removing(); await removalGate;
-      heldAtRemovalEnd = reclaim.reviewWorktreeIsHeld(tree);
-      rmSync(tree, { recursive: true, force: true }); events.push("removed");
-    },
-    worktreeRemoveImpl: () => { throw new Error("review reuse must select its async review removal port"); },
-  } as never);
-  const pr = { prNumber: 9001, prUrl: url, taskId, headSha: head, reviewState: "none", checksState: "green",
-    unmetCriteria: [], priorStrikes: 0, lastActivityAt: new Date().toISOString(), autoMergeArmed: false,
-    body: claim, currentOwnDiffDigest: "sha256:current", currentMergeBaseSha: "base-current" } as never;
-  const work = Promise.resolve(withLiveWritesAllowed(() => effects.postReview!(pr, { kind: "discriminate-only", judgedHeadSha: priorHead })))
-    .then(value => { returned = true; events.push("caller"); return value; });
-  try {
-    await reached(called, work, "materialization"); await delay(0);
-    assert.equal(returned, false, "review reuse must await readiness rather than falling back on a Promise");
-    assert.deepEqual(events, ["materialize"]);
-    mkdirSync(tree); writeFileSync(join(tree, "ready"), "ready"); reclaim.holdReviewWorktree(tree);
-    ready({ worktreePath: tree }); await removalStarted;
-    assert.equal(returned, false); assert.equal(events.includes("fallback"), false, "fallback waits for teardown");
-    finish(); await work;
-    assert.deepEqual(events, ["materialize", "base", "removing", "removed", "fallback", "caller"]);
-    assert.equal(heldAtRemovalEnd, true, "reuse retains ownership through removal");
-    assert.equal(reclaim.reviewWorktreeIsHeld(tree), false);
-  } finally {
-    ready({ failure: { message: "fixture released" } }); finish(); await work;
-    reclaim.releaseReviewWorktree(tree); rmSync(root, { recursive: true, force: true });
+test("W1-T11459 criterion 2: command review reuse awaits readiness and teardown before its fallback", async (t) => {
+  const errors: string[] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args.map(String).join(" ")); });
+  for (const baseRemovalFails of [false, true]) {
+    errors.length = 0;
+    const root = mkdtempSync(join(tmpdir(), "rmd-review-reuse-order-")), tree = join(root, "head"), baseTree = join(root, "base");
+    const ledgerPath = join(root, "ledger.ndjson"), taskId = "W1-T11459";
+    const bin = join(root, "bin"), ghCalls = join(root, "gh-calls");
+    const savedPath = process.env.PATH;
+    mkdirSync(bin); writeFileSync(ghCalls, "");
+    writeFileSync(join(bin, "gh"), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${quote(ghCalls)}\necho "private diff refusal" >&2\nexit 1\n`, { mode: 0o755 });
+    const url = "https://github.com/fixture/loop/pull/9001", priorHead = "d".repeat(40), head = "a".repeat(40);
+    const claim = "the private fixture proof is present", proof = "grep: private-fixture in src/fixture.ts";
+    const prior = judgeReview([{ claim, proof }], { diff: "diff --git a/src/fixture.ts b/src/fixture.ts\n+private-fixture\n",
+      report: claim, headCheckoutDir: tree, execProof: () => "pass" });
+    appendLedger(ledgerPath, { run_id: "prior", task_id: taskId, step: "review.posted",
+      state: prior.state, head_sha: priorHead, pr_url: url, decision_verdict: prior });
+    let entered!: () => void, ready!: (value: unknown) => void, removing!: () => void, finish!: () => void;
+    const called = new Promise<void>(resolve => { entered = resolve; });
+    const materialized = new Promise<unknown>(resolve => { ready = resolve; });
+    const removalStarted = new Promise<void>(resolve => { removing = resolve; });
+    const removalGate = new Promise<void>(resolve => { finish = resolve; });
+    let removingBase!: () => void, finishBase!: () => void;
+    const baseRemovalStarted = new Promise<void>(resolve => { removingBase = resolve; });
+    const baseRemovalGate = new Promise<void>(resolve => { finishBase = resolve; });
+    const events: string[] = []; let returned = false, heldAtRemovalEnd = false;
+    const effects = task.buildSweepEffects({
+      owner: "fixture", repo: "loop", localRepoName: "not-loop", config: { root } as Config,
+      ledgerPath, runId: "reuse-order", plan: { tasks: [], byId: new Map([[taskId, { id: taskId, files: [] }]]) } as never,
+      log: () => {}, reviewRunner: async () => { events.push("fallback"); return 0; },
+      materializeReviewWorktreeImpl: () => { events.push("materialize"); entered(); return materialized; },
+      buildBaseProofDirImpl: (_criteria: unknown, path: string) => {
+        assert.equal(path, tree); assert.equal(readFileSync(join(tree, "ready"), "utf8"), "ready");
+        events.push("base"); mkdirSync(baseTree);
+        return { baseCheckoutDir: baseTree, baseIsCheckout: true };
+      },
+      reviewWorktreeRemoveImpl: async (_repo: string, path: string) => {
+        if (path === baseTree) {
+          events.push("base-removing"); removingBase(); await baseRemovalGate;
+          events.push("base-settled");
+          if (baseRemovalFails) throw new Error("private base teardown rejection");
+          rmSync(baseTree, { recursive: true, force: true }); return;
+        }
+        assert.equal(path, tree); events.push("removing"); removing(); await removalGate;
+        heldAtRemovalEnd = reclaim.reviewWorktreeIsHeld(tree);
+        rmSync(tree, { recursive: true, force: true }); events.push("removed");
+      },
+      worktreeRemoveImpl: () => { throw new Error("review reuse must select its async review removal port"); },
+    } as never);
+    const pr = { prNumber: 9001, prUrl: url, taskId, headSha: head, reviewState: "none", checksState: "green",
+      unmetCriteria: [], priorStrikes: 0, lastActivityAt: new Date().toISOString(), autoMergeArmed: false,
+      body: claim, currentOwnDiffDigest: "sha256:current", currentMergeBaseSha: "base-current" } as never;
+    process.env.PATH = `${bin}:${savedPath}`;
+    const work = Promise.resolve(withLiveWritesAllowed(() => effects.postReview!(pr, { kind: "discriminate-only", judgedHeadSha: priorHead })))
+      .then(value => { returned = true; events.push("caller"); return value; });
+    try {
+      await reached(called, work, "materialization"); await delay(0);
+      assert.equal(returned, false, "review reuse must await readiness rather than falling back on a Promise");
+      assert.deepEqual(events, ["materialize"]);
+      mkdirSync(tree); writeFileSync(join(tree, "ready"), "ready"); reclaim.holdReviewWorktree(tree);
+      ready({ worktreePath: tree }); await baseRemovalStarted; await delay(0);
+      assert.equal(returned, false, "the caller waits for base teardown");
+      assert.deepEqual(readFileSync(ghCalls, "utf8").trim().split("\n"), [`pr diff ${url}`], "positive control: the real default diff child reached only this private shim");
+      assert.equal(events.includes("removing"), false, "head teardown must await base removal");
+      assert.equal(reclaim.reviewWorktreeIsHeld(tree), true, "head ownership survives awaited base cleanup");
+      finishBase(); await removalStarted;
+      assert.equal(existsSync(baseTree), baseRemovalFails, "base removal either finished or retained its named failure");
+      assert.deepEqual(errors, baseRemovalFails ? ["(base worktree teardown failed: private base teardown rejection)"] : []);
+      assert.equal(returned, false); assert.equal(events.includes("fallback"), false, "fallback waits for teardown");
+      finish(); await work;
+      assert.deepEqual(events, ["materialize", "base", "base-removing", "base-settled", "removing", "removed", "fallback", "caller"]);
+      assert.equal(heldAtRemovalEnd, true, "reuse retains ownership through removal");
+      assert.equal(reclaim.reviewWorktreeIsHeld(tree), false);
+    } finally {
+      ready({ failure: { message: "fixture released" } }); finishBase(); finish();
+      try { await work; }
+      finally {
+        process.env.PATH = savedPath;
+        reclaim.releaseReviewWorktree(tree); rmSync(root, { recursive: true, force: true });
+      }
+    }
   }
 });
 
