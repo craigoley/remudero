@@ -5,6 +5,7 @@ import { createSelectedModeQualification, observeSelectedMode, readInstanceRegis
 import { instanceRegistryRuntimePresent, runtimeInstanceRegistryText, runtimeInstanceRegistryInstanceName,
   runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryDigest, type RegistryFileIO } from "./instance-registry-selection.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
+import { selectedInstanceRegistryEnvPath } from "./instance-registry-selection.js";
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown,
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
@@ -2689,7 +2690,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
   const selectedModeQualification = createSelectedModeQualification(config.selectedRegistryMode, `${owner}/${repo}`,
-    { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME }, log, deps.selectedModeFileIO);
+    { envPath: selectedInstanceRegistryEnvPath(), instanceName: process.env.RMD_INSTANCE_NAME }, log, deps.selectedModeFileIO);
   // Defaults to the LIVE `plan/policy.yaml` flag (`loadDefaultPolicy`, the same memoized-per-
   // process reader every other W1-T253 consumer site uses) so production wiring picks up an
   // operator's edit with no code change; a test overrides `armSessionPrsOverride` directly to

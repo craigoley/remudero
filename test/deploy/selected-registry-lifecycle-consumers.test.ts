@@ -47,7 +47,7 @@ test("selected lifecycle shadow reaches actual deploy pause and daemon consumers
     deps.kickstart();
     deps.restartBackends!()[1]!.restart();
     assert.equal(resolvePauseTarget({ configRoot: f.stateRoot, registryText: f.text(), registryPath: f.registry }).ok, true);
-    const lane = daemonSreLaneInput({ root: f.root, stateDir: join(f.stateRoot, "state"),
+    const lane = await daemonSreLaneInput({ root: f.root, stateDir: join(f.stateRoot, "state"),
       ledgerPath: f.opts.ledgerPath, owner: "fixture", repo: "owner", mergedLastDay: () => 0, log: () => {} });
     assert.equal(lane.stateDir, join(f.stateRoot, "state"));
     const serve = realServePolicyDeps(f.opts, (cmd, args) => { f.effects.push([cmd, ...args]); return ""; });

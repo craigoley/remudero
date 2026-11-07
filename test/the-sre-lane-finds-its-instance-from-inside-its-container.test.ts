@@ -99,12 +99,12 @@ async function startContainerisedDaemon(t: TestContext, instanceName: string, on
 
 test("W1-T9500: a containerised core daemon resolves its instance by name and starts the lane", async (t) => {
   // The defect, as measured: the container's root against the repo registry resolves nothing.
-  const byRoot = resolveSreLaneInstance({ stateRoot: CONTAINER_ROOT, registryPath: REPO_REGISTRY, env: {} });
+  const byRoot = await resolveSreLaneInstance({ stateRoot: CONTAINER_ROOT, registryPath: REPO_REGISTRY, env: {} });
   assert.equal(byRoot.resolved, false, "control: the container root is no registry state_dir");
   assert.equal(sreLaneStartRow({ instance: byRoot, env: {} }).fields.resolved_by, "state_root");
 
   // The creator named it: the same root now resolves core, the live primary, and the lane starts.
-  const byName = resolveSreLaneInstance({ stateRoot: CONTAINER_ROOT, registryPath: REPO_REGISTRY, env: { RMD_INSTANCE_NAME: "core" } });
+  const byName = await resolveSreLaneInstance({ stateRoot: CONTAINER_ROOT, registryPath: REPO_REGISTRY, env: { RMD_INSTANCE_NAME: "core" } });
   assert.deepEqual(byName, { resolved: true, name: "core", live: true, primary: true, resolvedBy: "env" });
   assert.deepEqual(sreLaneStartRow({ instance: byName, env: {} }), {
     step: "sre_lane.started",
@@ -114,7 +114,7 @@ test("W1-T9500: a containerised core daemon resolves its instance by name and st
   // A host-side caller with no variable (or a blank one) still matches its state root, unchanged.
   for (const env of [{}, { RMD_INSTANCE_NAME: "  " }]) {
     assert.deepEqual(
-      resolveSreLaneInstance({ stateRoot: "/home/craigoleyagent/rmd-state2", registryPath: REPO_REGISTRY, env }),
+      await resolveSreLaneInstance({ stateRoot: "/home/craigoleyagent/rmd-state2", registryPath: REPO_REGISTRY, env }),
       { resolved: true, name: "core", live: true, primary: true, resolvedBy: "state_root" },
     );
   }
@@ -129,14 +129,14 @@ test("W1-T9500: a containerised core daemon resolves its instance by name and st
 });
 
 test("W1-T9500: an unknown instance name disables the lane by name", async (t) => {
-  const instance = resolveSreLaneInstance({ stateRoot: CONTAINER_ROOT, registryPath: REPO_REGISTRY, env: { RMD_INSTANCE_NAME: "nonesuch" } });
+  const instance = await resolveSreLaneInstance({ stateRoot: CONTAINER_ROOT, registryPath: REPO_REGISTRY, env: { RMD_INSTANCE_NAME: "nonesuch" } });
   assert.equal(instance.resolved, false);
   const row = sreLaneStartRow({ instance, env: {} });
   assert.equal(row.step, "sre_lane.disabled");
   assert.equal(row.fields.resolved_by, "env");
   assert.equal(row.fields.reason, `RMD_INSTANCE_NAME 'nonesuch' names no instance in ${REPO_REGISTRY}`);
   // The name is never silently dropped for the state-root match, even when the root WOULD match.
-  const hostRoot = resolveSreLaneInstance({ stateRoot: "/home/craigoleyagent/rmd-state2", registryPath: REPO_REGISTRY, env: { RMD_INSTANCE_NAME: "nonesuch" } });
+  const hostRoot = await resolveSreLaneInstance({ stateRoot: "/home/craigoleyagent/rmd-state2", registryPath: REPO_REGISTRY, env: { RMD_INSTANCE_NAME: "nonesuch" } });
   assert.equal(hostRoot.resolved, false, "a wrong name is a misconfiguration to surface, not a reason to guess");
   // Explicit selection refuses the unknown binding before the daemon or any lane can run.
   let daemonRuns = 0;

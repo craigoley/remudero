@@ -13,6 +13,7 @@ import { type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detect
 import { evaluateForeignPauseDetectors, FOREIGN_PAUSE_DETECTOR_ID, foreignPauseDetector } from "./foreign-pause-detector.js";
 import { evaluateIdleCapacityDetectors, idleCapacityDetector } from "./idle-capacity-detector.js";
 import { evaluateStrandedTaskDetectors, STRANDED_TASK_DETECTOR_ID, strandedTaskDetector } from "./stranded-task-detector.js";
+import { assertInstanceRegistryRuntimeCurrent, runtimeInstanceRegistryText, runtimeInstanceRegistryInstanceName, InstanceRegistryRuntimeError } from "./instance-registry-selection.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import { observeSelectedRegistrySync, selectedRegistryObserverInContext } from "./selected-registry-consumers.js";
 import {
@@ -445,12 +446,14 @@ export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { 
 /** The daemon's lane input (src/run-task.ts): `readEvents` reads only this daemon's own ledger and
  *  `hasOpenTask`/`framesFor` answer nothing yet — the module doc's TRAP. W1-T9615: a filing is staged in the landing
  *  queue of the daemon's state root (the parent of `stateDir` unless named), never landed on the loop. */
-export function daemonSreLaneInput(
+export async function daemonSreLaneInput(
   input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string; landingStateRoot?: string },
-): SreLaneInput {
-  const instance = resolveSreLaneInstance({
+): Promise<SreLaneInput> {
+  const instance = await resolveSreLaneInstance({
     stateRoot: dirname(input.stateDir),
-    registryPath: process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(input.root),
+    registryPath: process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
+      ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
+      : process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(input.root),
   });
   const name = instance.resolved ? instance.name : "unknown";
   return {
@@ -559,13 +562,24 @@ export function sreLaneStartRow(input: SreLaneStartInput): { step: "sre_lane.sta
  * host-side caller), the root match runs as before. `env` defaults to `process.env`: the daemon's callers (src/run-task.ts and
  * {@link daemonSreLaneInput}) read it from the container's own environment.
  */
-export function resolveSreLaneInstance(input: {
+export async function resolveSreLaneInstance(input: {
   stateRoot: string;
   registryPath: string;
   readText?: (path: string) => string;
   env?: { RMD_INSTANCE_NAME?: string };
-}): SreLaneInstance {
-  const result = resolveLegacySreLaneInstance(input);
+}): Promise<SreLaneInstance> {
+  await assertInstanceRegistryRuntimeCurrent();
+  const selectedText = runtimeInstanceRegistryText();
+  if (selectedText === undefined && process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined) {
+    throw new InstanceRegistryRuntimeError("selection_missing");
+  }
+  const result = resolveLegacySreLaneInstance(selectedText === undefined ? input : {
+    ...input, registryPath: "selected registry", readText: () => selectedText,
+    env: { RMD_INSTANCE_NAME: runtimeInstanceRegistryInstanceName() },
+  });
+  if (selectedText !== undefined && !result.resolved) {
+    throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
+  }
   return observeSelectedRegistrySync(selectedRegistryObserverInContext(), "sre-target", {
     instanceName: result.resolved ? result.name : undefined, stateRoot: input.stateRoot,
     namespace: result.resolvedBy === "env" ? "container" : "host",
