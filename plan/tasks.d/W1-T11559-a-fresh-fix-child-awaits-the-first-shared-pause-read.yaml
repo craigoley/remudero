@@ -22,9 +22,9 @@
   attempts: 0
   acceptance:
     - claim: A fresh detached fix child awaits the first asynchronous shared-PAUSE read before treating an absent ref as permission to continue; after absence it performs the live PR and task rechecks and reaches the normal dispatcher
-      proof: "unit test: test/reviews-and-detached-actions-run-as-run-children.test.ts"
+      proof: "grep: W1-T11559 criterion 1 in test/reviews-and-detached-actions-run-as-run-children.test.ts"
     - claim: A held or genuinely unreachable shared-PAUSE ref still refuses before dispatch, while a local STOP short-circuits the remote read
-      proof: "unit test: test/reviews-and-detached-actions-run-as-run-children.test.ts"
+      proof: "grep: W1-T11559 criterion 2 in test/reviews-and-detached-actions-run-as-run-children.test.ts"
   rationale: |
     Operator-approved integration, 2026-11-07: use the existing owning detached-child
     fixture, which already exercises runDetachedWork and real local STOP/PAUSE refusals.
@@ -32,11 +32,11 @@
     assertions, timeouts or skips. This creates no new Root importer or census allowance.
     The same two-file repair was specifically approved at a $5 ceiling; record that budget
     explicitly for this already-filed task rather than creating another repair task.
-    The unit proofs run that complete owning fixture. Its planned new title substrings
-    cannot resolve during a plan-only amendment while the existing suite already exists;
-    file-targeted unit execution retains the behavior checks. The source PR must add the
-    two named regressions and prove head-pass/base-fail and removal falsifiers; a passing
-    unchanged fixture is not acceptance evidence for this repair.
+    Bind each proof to its distinct new criterion marker in the owning fixture, following
+    the repository's plan-filing contract for new behavior in an existing test file.
+    Source qualification must execute both new behavioral regressions and the complete
+    fixture, prove the intended base failures and removal falsifiers, and retain all
+    existing assertions. Marker presence alone is not behavioral validation.
 
     OBSERVED 2026-11-07 during queue recovery: the native fix children for #17144, #17132 and #17081 each ended at recheckFixDispatch with `worker admission is held: PAUSE: cannot reach origin to read refs/rmd-pause/hold`. A direct `git ls-remote` from the exact engine root inside the daemon container returned success with no matching ref, so this was not an observed fleet hold.
 
