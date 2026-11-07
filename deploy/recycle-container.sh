@@ -12,14 +12,14 @@ selected_registry_refuse() {
 }
 selected_registry_packet() (
   cd "${SELECTED_REGISTRY_READER_ROOT}" || exit 2
-  export RMD_INSTANCE_REGISTRY="${SELECTED_REGISTRY_INPUT}"
+  export RMD_SELECTED_INSTANCE_REGISTRY="${SELECTED_REGISTRY_INPUT}"
   if [ -n "${SELECTED_REGISTRY_DIGEST}" ]; then export RMD_INSTANCE_REGISTRY_DIGEST="${SELECTED_REGISTRY_DIGEST}"; fi
   node --import tsx --input-type=module -e '
     const {pathToFileURL}=await import("node:url");
     try {
       const m=await import(pathToFileURL(process.argv[1]).href);
       await m.withInstanceRegistryRuntime(()=>process.stdout.write(m.trustedInstanceRegistryLaunchPacket()),
-        {envPath:process.env.RMD_INSTANCE_REGISTRY,instanceName:process.argv[2],expectedDigest:process.env.RMD_INSTANCE_REGISTRY_DIGEST});
+        {envPath:process.env.RMD_SELECTED_INSTANCE_REGISTRY,instanceName:process.argv[2],expectedDigest:process.env.RMD_INSTANCE_REGISTRY_DIGEST});
     } catch(error) {
       const reason=error?.details?.reason;
       process.stdout.write(typeof reason==="string" && /^[a-z_]+$/.test(reason) ? reason : "reader_unavailable");
@@ -40,14 +40,14 @@ selected_registry_init() {
   SELECTED_REGISTRY_NAME="$2"
   SELECTED_REGISTRY_CALLER="$3"
   SELECTED_REGISTRY_ACTIVE=0
-  SELECTED_REGISTRY_INPUT="${RMD_INSTANCE_REGISTRY-}"
+  SELECTED_REGISTRY_INPUT="${RMD_SELECTED_INSTANCE_REGISTRY-${RMD_INSTANCE_REGISTRY-}}"
   SELECTED_REGISTRY_DIGEST="${RMD_INSTANCE_REGISTRY_DIGEST-}"
   SELECTED_REGISTRY_PACKET=""
   SELECTED_REGISTRY_TEXT=""
   SELECTED_REGISTRY_HOST_FILE=""
   SELECTED_REGISTRY_CONTAINER_FILE="/home/node/.config/remudero/selected-registry.yaml"
   SELECTED_REGISTRY_LAUNCH_ARGS=()
-  if [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
+  if [ "${RMD_SELECTED_INSTANCE_REGISTRY+x}" = x ] || [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
     SELECTED_REGISTRY_ACTIVE=1
     [ -n "${SELECTED_REGISTRY_NAME}" ] || { selected_registry_refuse instance_missing; return 2; }
     if [ "${RMD_INSTANCE_REGISTRY_DIGEST+x}" = x ] && { [ "${#SELECTED_REGISTRY_DIGEST}" -ne 64 ] || [[ "${SELECTED_REGISTRY_DIGEST}" == *[!a-f0-9]* ]]; }; then
@@ -66,9 +66,14 @@ selected_registry_init() {
       selected_registry_refuse packet_unreadable; return 2
     fi
     SELECTED_REGISTRY_LAUNCH_ARGS=(--mount "type=bind,src=${SELECTED_REGISTRY_HOST_FILE},dst=${SELECTED_REGISTRY_CONTAINER_FILE},readonly"
-      -e "RMD_INSTANCE_REGISTRY=${SELECTED_REGISTRY_CONTAINER_FILE}" -e "RMD_INSTANCE_REGISTRY_DIGEST=${SELECTED_REGISTRY_DIGEST}"
+      -e "RMD_SELECTED_INSTANCE_REGISTRY=${SELECTED_REGISTRY_CONTAINER_FILE}" -e "RMD_INSTANCE_REGISTRY_DIGEST=${SELECTED_REGISTRY_DIGEST}"
       -e "RMD_INSTANCE_REGISTRY_FILE_BINDING=$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '5p')"
       -e "RMD_INSTANCE_NAME=${SELECTED_REGISTRY_NAME}")
+    if [ "${RMD_SELECTED_INSTANCE_REGISTRY+x}" != x ]; then
+      SELECTED_REGISTRY_LAUNCH_ARGS+=(-e "RMD_INSTANCE_REGISTRY=${SELECTED_REGISTRY_CONTAINER_FILE}")
+    elif [ -n "${RMD_INSTANCE_REGISTRY-}" ]; then
+      SELECTED_REGISTRY_LAUNCH_ARGS+=(-e "RMD_INSTANCE_REGISTRY=${RMD_INSTANCE_REGISTRY}")
+    fi
   fi
 }
 selected_registry_docker_read() {
@@ -434,7 +439,7 @@ fi
 # purpose, to drive a single script in isolation); test/recycle-container.test.ts asserts this
 # fallback, host-update.sh's own fallback, and deploy/runtime-env-vars.sh's real array never
 # disagree, so the fallback cannot silently go stale either.
-RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_CASH_EASTUS_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)
+RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_CASH_EASTUS_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY RMD_INSTANCE_REGISTRY RMD_INSTANCE_REGISTRY_DIGEST RMD_INSTANCE_REGISTRY_FILE_BINDING)
 RMD_DERIVED_RUNTIME_ENV_VARS=(RMD_READ_MODEL_DB_DIR RMD_WORKER_HOME_DIR RMD_TEST_SLOT_DIR)
 RUNTIME_ENV_VARS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/runtime-env-vars.sh" || true
 if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; then
@@ -703,7 +708,7 @@ list_instance_names() {
 if [ -n "$INSTANCE_NAME" ]; then
   validate_instance_name "$INSTANCE_NAME"
   COMMISSION_TARGET="$INSTANCE_NAME"
-  INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY-$DEFAULT_INSTANCE_REGISTRY}"
+  INSTANCE_REGISTRY="${RMD_SELECTED_INSTANCE_REGISTRY-${RMD_INSTANCE_REGISTRY-$DEFAULT_INSTANCE_REGISTRY}}"
   if [ ! -r "$INSTANCE_REGISTRY" ]; then
     recycle_reason "recycle-container: REFUSING -- instance registry '${INSTANCE_REGISTRY}' is not readable." >&2
     exit 2
@@ -1348,7 +1353,7 @@ CAPTURED_SOURCE_get() { local ref="CAPTURED_SOURCE__$1"; printf '%s' "${!ref-}";
 is_declared_runtime_var() {
   local needle="$1" candidate
   if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
-    case "$needle" in RMD_INSTANCE_REGISTRY|RMD_INSTANCE_REGISTRY_DIGEST|RMD_INSTANCE_REGISTRY_FILE_BINDING) return 0 ;; esac
+    case "$needle" in RMD_INSTANCE_REGISTRY|RMD_INSTANCE_REGISTRY_DIGEST|RMD_INSTANCE_REGISTRY_FILE_BINDING|RMD_SELECTED_INSTANCE_REGISTRY) return 0 ;; esac
   fi
   for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}" RMD_INSTANCE_NAME GLIBC_TUNABLES; do
     [ "${candidate}" = "${needle}" ] && return 0
@@ -1385,6 +1390,22 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   fi
 
   # ── THE DRIFT CHECK: a runtime NAME this recycle does not declare REFUSES, and names it ────────
+  # W1-T11431: declaring the selection names only carries them, and a carried name without its mount points the
+  # daemon at a file that is gone. Only an explicit selection re-creates that mount, so a bare recycle of a selected
+  # container refuses here, before anything is touched, until W1-T11454 inherits the selection. Prints no source path.
+  if [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ]; then
+    if ! live_registry_mounts="$(docker inspect --format '{{range .Mounts}}{{printf "%s\t%s\t%t\n" .Source .Destination .RW}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null)"; then
+      recycle_reason "recycle-container: REFUSING -- selected registry mounts of ${CONTAINER_NAME} are unreadable; NOTHING has been touched." >&2
+      exit 1
+    fi
+    case "${live_registry_mounts}" in
+      *$'\t'"${SELECTED_REGISTRY_CONTAINER_FILE:-/home/node/.config/remudero/selected-registry.yaml}"$'\t'*)
+        recycle_reason "recycle-container: REFUSING -- ${CONTAINER_NAME} runs a selected registry and this recycle names none, so its private mount would be dropped." >&2
+        echo "  Recycle it with RMD_SELECTED_INSTANCE_REGISTRY set to its host registry path and --instance. NOTHING has been touched." >&2
+        exit 1 ;;
+    esac
+  fi
+
   # A variable is RUNTIME-SET when its NAME is absent from the image env, OR its VALUE differs from
   # the image's own — a runtime value that SHADOWS an image name (e.g. `-e HOME=/other`) is still
   # runtime-set even though the name matches, and a name-only diff would miss it. Comparing values
@@ -1743,6 +1764,12 @@ for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
   elif [ "${name}" = "RMD_CASH_EASTUS_API_KEY" ]; then
     export RMD_CASH_EASTUS_API_KEY="$(CAPTURED_get "${name}")"
     RUN_ENV_ARGS+=(-e "${name}")
+  elif [ "${name}" = "RMD_INSTANCE_REGISTRY" ] || [ "${name}" = "RMD_INSTANCE_REGISTRY_DIGEST" ] || [ "${name}" = "RMD_INSTANCE_REGISTRY_FILE_BINDING" ]; then
+    # W1-T11431: an empty value here reads as an invalid selection, so these three are never passed empty, and an
+    # active selection is their one source (SELECTED_REGISTRY_LAUNCH_ARGS, shared with serve).
+    if [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ] && [ -n "$(CAPTURED_get "${name}")" ]; then
+      RUN_ENV_ARGS+=(-e "${name}=$(CAPTURED_get "${name}")")
+    fi
   else
     RUN_ENV_ARGS+=(-e "${name}=$(CAPTURED_get "${name}")")
   fi
