@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildSweepEffects } from "#src/lib/sweep.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweepLightPass, type SweepDeps } from "#src/lib/sweep.js";
 import { withInstanceRegistryRuntime } from "#src/lib/instance-registry-selection.js";
 import { ghIssueGatewayAsync, type AsyncIssueGateway, type IssueGateway, type OpenIssue } from "#src/lib/escalate.js";
 import * as escalation from "#src/lib/escalate.js";
@@ -82,6 +82,39 @@ test("W1-T11444 criterion 1: pass boundaries coalesce durable changes through th
     assert.match(all[0]!.body!, /4 refused PRs:/);
     assert.equal(all.length, 1);
     assert.equal(/Refusals began: ([^\n]+)/.exec(all[0]!.body!)![1], first);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T11444 criterion 1: one light pass flushes once and retries only on the next pass", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-primary-shadow-light-pass-"));
+  try {
+    const ledgerPath = join(root, "ledger.ndjson");
+    writeFileSync(ledgerPath, "");
+    let attempts = 0;
+    const views = [11, 12, 13].map(prNumber => ({
+      prNumber, prUrl: `https://github.com/owner/repo/pull/${prNumber}`, taskId: `W1-T${prNumber}`,
+      headSha: `${prNumber}`.repeat(40).slice(0, 40), checksState: "green" as const, reviewState: "success" as const,
+      unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false, mergeState: "clean" as const,
+      createdAt: new Date(1_800_000_000_000 - prNumber * 1000).toISOString(),
+      lastActivityAt: new Date(1_800_000_000_000 - prNumber * 1000).toISOString(),
+    }));
+    const deps: SweepDeps = {
+      ledgerPath, runId: "primary-shadow-light-pass",
+      arm: () => assert.fail("the fixture does not arm PRs"),
+      close: () => assert.fail("the fixture does not close PRs"),
+      escalate: () => assert.fail("the fixture does not escalate PRs"),
+      dispatchFix: () => assert.fail("the fixture does not dispatch fixes"),
+      actionable: () => false,
+      reconcilePrimaryShadowAlert: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("fixture delivery failure");
+      },
+    };
+    const policy = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 3 };
+    await assert.rejects(runSweepLightPass(views, deps, policy), /fixture delivery failure/);
+    assert.equal(attempts, 1, "three per-PR sweeps share one pass-boundary delivery attempt");
+    await runSweepLightPass(views, deps, policy);
+    assert.equal(attempts, 2, "a failed delivery retries on the next light pass");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -18590,7 +18590,9 @@ export async function runSweep(
   sweepDeps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
-  if (!sweepDeps.dryRun) await sweepDeps.reconcilePrimaryShadowAlert?.();
+  if (!sweepDeps.dryRun && sweepDeps.repairAdmissionSurface !== "light") {
+    await sweepDeps.reconcilePrimaryShadowAlert?.();
+  }
   const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
   const memoryHeldSummaries = memoryHeld.map((pr) =>
     lightPassMemoryWaitSummary(pr, sweepDeps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
@@ -25398,6 +25400,7 @@ export async function runSweepLightPass(
   refillArmed = true;
   // W1-T9904: a review may have settled before its release callback could reach this controller.
   if (unsettledSpawning < spawning.length) setImmediate(() => { void refillFreedLanes(); });
+  if (!deps.dryRun) await deps.reconcilePrimaryShadowAlert?.();
   return summaries;
   } finally {
     releasePlanMerge();
