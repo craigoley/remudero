@@ -1,0 +1,80 @@
+- id: W1-T11583
+  title: "AN AUTHOR PREFLIGHT RUNS THE WORKERS ITS MEASURED SLOT GRANTS, NOT ONE — scripts/preflight-author.mjs fixes `AUTHOR_SLOT_CEILING = 1` and passes it as `maxConcurrency` to the host-wide test slot, so every author run gets `--test-concurrency=1` however much CPU and memory test-slot.ts measured. Drop the fixed per-run ceiling. Ask the slot for at most AUTHOR_MAX_WORKERS and let the measured slot grant and hostBudget decide the rest"
+  repo: remudero
+  depends_on: []  # every queued task that also lists scripts/preflight-author.mjs (W1-T9951, W1-T10947, W1-T10948, W1-T10961, W1-T11099, W1-T11101, W1-T11135, W1-T10133, W1-T10223) edits other hunks; none touches the slot ceiling. They share one file, so dispatch still serializes them by files overlap. W1-T9952 sizes the NUMBER of runs in src/lib/test-slot.ts, not this file
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium  # Rule 19: one concern — the per-run worker ceiling the author asks the slot for; the admission gates are untouched
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T7809, W1-T9951, W1-T9952, W1-T9953]
+  files:
+    - scripts/preflight-author.mjs
+    - test/ci/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts
+  status: queued
+  priority: 2  # every author preflight runs its affected suites one file at a time on a host that measured room for up to four
+  attempts: 0
+  rationale: |
+    READ in this worktree, scripts/preflight-author.mjs:
+    - line 32 `AUTHOR_MAX_WORKERS = 4` and line 34 `AUTHOR_SLOT_CEILING = 1`, whose comment says "The author's suite slot
+      asks for one worker".
+    - line 587 `enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: AUTHOR_SLOT_CEILING })`.
+      src/lib/test-slot.ts documents `maxConcurrency` as an "Explicit ceiling; it only lowers CPU/memory-derived
+      capacity" (TestSlotOptions, ~line 945). So the slot's own measured grant is clamped to 1 before it returns.
+    - line 663 `hostBudget(..., { slotConcurrency: slot?.concurrency ?? AUTHOR_SLOT_CEILING })`. hostBudget (W1-T7809)
+      already takes min(AUTHOR_MAX_WORKERS, cpuWorkers, memoryWorkers, slotConcurrency). Its capacity-derived workers
+      are then clamped by a slot that can only ever say 1.
+    - line 669 `executionWorkers = runtimeProfile ? budget.workers : Math.min(AUTHOR_MAX_WORKERS, slot?.concurrency ?? AUTHOR_SLOT_CEILING)`,
+      then line 739 `testRunArgv(..., executionWorkers)`, which writes `--test-concurrency=<n>`. Both arms come out at 1.
+    This cap applies to each run. It is not a fleet-wide pool of one slot: the shared FIFO queue (W1-T9950/W1-T9951)
+    and the pool size (W1-T9952) are separate. The effect is that a capable host runs each author selection one
+    file at a time, and the selection is also priced at a one-worker budget (budgetMs = workers × wallMs), so
+    capacityVerdict sends more selections to the over-capacity / full-fallback arm than the host requires.
+    PLATFORM FACT: Node's `--test-concurrency` is "the maximum number of test files that the test runner CLI will
+    execute concurrently ... concurrency defaults to os.availableParallelism() - 1" (https://nodejs.org/api/cli.html#--test-concurrency).
+    The author run does not pass `--experimental-test-isolation=none` (that flag is added only by the tier pool in
+    scripts/test-tier-manifest.mjs), so a value above 1 really does run files in parallel.
+    Settled by lookup: is this already filed or already decided? -> no. No plan task, MASTER-PLAN, LEARNINGS or DECISIONS
+      entry names AUTHOR_SLOT_CEILING or removes the per-run ceiling. W1-T9952's rationale only cites run-unfiled-1792161817235's
+      `maxConcurrency: 1` as one reason the pool closes early (plan/tasks.d/W1-T9952-the-test-slot-pool-is-sized-by-measured-capacity.yaml).
+    Settled by lookup: does the slot already size workers by measured CPU and memory? -> yes; maxConcurrency only
+      lowers it (src/lib/test-slot.ts TestSlotOptions; testSlotPolls `maximum = opts.maxConcurrency ?? Number.MAX_SAFE_INTEGER`).
+    Settled by lookup: is there already a cap on author workers? -> yes, AUTHOR_MAX_WORKERS = 4, and
+      deadlineHostBudget refuses workers above it (scripts/preflight-author.mjs lines 32, 78).
+    Settled by lookup: does the census step share this ceiling? -> no. Census runs its own `--test-concurrency=1`
+      (line 555) and is W1-T11099's scope, so it is out of scope here.
+    Settled by lookup: do the static stage's workers change? -> no. `admitHost('static-preflight', { workers: 1 })` and
+      admitStaticWork are their own admission and stay as they are.
+  design: |
+    ONE CONSTANT, THREE CALL SITES. Nothing else moves.
+    1. Delete `AUTHOR_SLOT_CEILING`. At line 587, pass `maxConcurrency: AUTHOR_MAX_WORKERS` to enqueueTestSlot. The slot
+       still grants whatever its measured CPU/memory derivation gives, and never more than 4.
+    2. Before admission (line 607 `admitRuntime` default, stage 'before-static'), no slot is held yet. Price the suites
+       at `hostBudget((host ?? readHostCapacityInputs)()).workers`, the capacity-derived count the slot is being asked
+       for, instead of a constant 1. After admission, use `slot.concurrency` exactly as today.
+    3. At lines 663 and 669, replace the `?? AUTHOR_SLOT_CEILING` fallbacks so both arms take
+       `min(AUTHOR_MAX_WORKERS, budget.workers)`. hostBudget already folds in slot.concurrency, cpuWorkers and
+       memoryWorkers, so the non-profile arm stops ignoring measured CPU/memory. An admitted slot with no concurrency
+       field is a refusal (testSlotExecutionAllowed already covers this). It is never a silent 1 or 4.
+    UNCHANGED, AND THE TEST PROVES IT: the shared FIFO queue and its cancel path; active-owner/owner-nonce protection
+    (requireNativeContext); Mac pressure admission and the disk reserve (admitHost / guardedAuthorEntry /
+    MacAuthorCapacityRefusal); memory and CPU headroom inside test-slot.ts; the static stage's one-worker admission;
+    and the exact-head author and hosted gates.
+    TESTS go in the new file and drive `main` through its existing seams (`host`, `admitHost`, `testSlot`, `spawn`).
+    They inject load, memory headroom and a temp slot dir, and read `--test-concurrency=` from the captured
+    affected-tests argv and `receipt.executionWorkers`.
+  acceptance:
+    - claim: "on an injected idle 8-core host with ample memory headroom, the affected-tests child is spawned with --test-concurrency greater than 1 and never above AUTHOR_MAX_WORKERS, and receipt.executionWorkers matches it"
+      proof: "unit test: W1-T11583 criterion 1: an idle eight-core host uses more than one author test worker"
+    - claim: "capacity still limits concurrency: with injected load or memory headroom that leaves room for exactly one test file, the child gets --test-concurrency=1 and the selection is priced at a one-worker budget"
+      proof: "unit test: W1-T11583 criterion 2: measured CPU and memory capacity still cap author test concurrency"
+    - claim: "a Mac pressure refusal or a disk-reserve refusal from admitHost still ends the run NOT_RUN / over-capacity, and the affected-tests child is never spawned"
+      proof: "unit test: W1-T11583 criterion 3: pressure or disk refusal does not spawn affected tests"
+    - claim: "the author suite ticket asks the shared slot for the AUTHOR_MAX_WORKERS ceiling"
+      proof: "grep: maxConcurrency: AUTHOR_MAX_WORKERS in scripts/preflight-author.mjs"
+  falsifier: |
+    In this worktree, call main() with an injected host {cores: 8, load1: 0, headroomBytes: 32 GiB} and a temp slot dir.
+    The captured affected-tests argv carries `--test-concurrency=1` and receipt.executionWorkers is 1, because line 587
+    clamps the slot to AUTHOR_SLOT_CEILING = 1. If either is already above 1 before the change, this task is moot.

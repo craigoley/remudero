@@ -1,8 +1,11 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
 import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
-import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
-import { selectedInstanceRegistryEnvPath, type RegistryFileIO } from "./instance-registry-selection.js";
+import { createSelectedModeQualification, observeSelectedMode, readInstanceRegistryText } from "./instance-mode.js";
+import { instanceRegistryRuntimePresent, runtimeInstanceRegistryText, runtimeInstanceRegistryInstanceName,
+  runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryDigest, type RegistryFileIO } from "./instance-registry-selection.js";
+import { parseInstanceRegistry } from "./instance-registry.js";
+import { selectedInstanceRegistryEnvPath } from "./instance-registry-selection.js";
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown,
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
@@ -21,7 +24,7 @@ import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, readDeployFactsAsync, realDeploySensorsAsync, type AsyncDeploySensors, type DeployFacts } from "./deployer.js";
+import { daemonInstanceRegistryPath, deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, readDeployFactsAsync, realDeploySensorsAsync, type AsyncDeploySensors, type DeployFacts } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
 import { probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
 import {
@@ -281,6 +284,7 @@ import {
   escalateAsync,
   ghIssueGateway,
   ghIssueGatewayAsync,
+  primaryShadowOperatorChannel,
   isEscalationJudgeExempt,
   taskContractRevision,
   taskSemanticRevision,
@@ -2298,6 +2302,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readTaskSemanticRevision",
   "readMergedRatchets", // W1-T9962
   "readOpenEscalations",
+  "reconcilePrimaryShadowAlert",
 ] as const;
 
 export function productionFixProgressJudge(opts: {
@@ -2464,6 +2469,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readTaskSemanticRevision"
   | "readMergedRatchets"
   | "readOpenEscalations"
+  | "reconcilePrimaryShadowAlert"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -2606,6 +2612,29 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // than a second lock location.
   const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
+  const primaryShadowAlerts = primaryShadowOperatorChannel({ owner, repo, ledgerPath, runId, issues: issuesImpl,
+    clock: clockFromMillisFn(nowMsImpl), readPrState: ghLiveState,
+    selection: () => {
+      try {
+        const selected = instanceRegistryRuntimePresent();
+        const text = selected ? runtimeInstanceRegistryText() : readInstanceRegistryText(repoRoot);
+        if (text === undefined) return undefined;
+        const name = selected ? runtimeInstanceRegistryInstanceName() : undefined;
+        const sourcePath = selected ? runtimeInstanceRegistryPrivateFile() : daemonInstanceRegistryPath(repoRoot);
+        const digest = selected ? runtimeInstanceRegistryDigest() : createHash("sha256").update(text).digest("hex");
+        if (selected && (sourcePath === undefined || digest === undefined)) return undefined;
+        const primary = parseInstanceRegistry(text).instances.find(row => row.live && row.primary === true
+          && row.repo.toLowerCase() === `${owner}/${repo}`.toLowerCase() && (name === undefined || row.name === name));
+        if (!primary || sourcePath === undefined || digest === undefined) return undefined;
+        return { instance: primary.name, sourcePath, digest, mode: repoMode };
+      } catch (error) {
+        log("primary_shadow.selection_unknown", { error_class: error instanceof Error ? error.name : "unknown" });
+        return undefined;
+      }
+    } });
+  const primaryShadowAlertFailed = (error: unknown): void => {
+    log("primary_shadow.alert_failed", { error_class: error instanceof Error ? error.name : "unknown" });
+  };
   const terminalHeads = terminalUncreditableHeads(ledgerPath);
   const escalateTerminalHead = (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): void => {
     if (terminal.escalated) return;
@@ -2903,6 +2932,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
+    reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
     readOpenEscalations: () => issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
     readHostedProofResults: (headSha, proofs) => readHostedFixProofResults({ owner, repo, headSha, proofs },
@@ -2979,6 +3009,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           task_id: pr.taskId,
           reason: "shadow instance cannot arm or merge",
         });
+        await primaryShadowAlerts.refuse(pr).catch(primaryShadowAlertFailed);
         return "shadow-refused";
       }
       // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
@@ -4821,7 +4852,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T177 SITE (iii): consulted by `runSweep` immediately before a
     // blocked-fixable disposition actually spends a fix-rung strike — see
     // `SweepDeps.readLiveState`'s own doc for the fail-open contract.
-    readLiveState: (pr) => ghLiveState(pr.prUrl),
+    readLiveState: async (pr) => {
+      const observed = await ghLiveState(pr.prUrl);
+      if (observed.ok && observed.state?.toUpperCase() === "MERGED") await primaryShadowAlerts.resolved(pr).catch(primaryShadowAlertFailed);
+      return observed;
+    },
 
     // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
     // dispatch surface invokes `dispatchFix`. Reads the SAME process-lifetime `terminalHeads`
@@ -14247,6 +14282,8 @@ export function reviewOnlyStandDownReason(scope: LightPassScopeName): string {
 }
 
 export interface SweepDeps {
+  /** Awaited once per effects instance; unknown selection never closes a shadow notice. */
+  reconcilePrimaryShadowAlert?: () => Promise<void>;
   /** One shared open needs-human snapshot per pass; missing or unreadable fails toward fixing. */
   readOpenEscalations?: () => OpenIssue[] | Promise<OpenIssue[]>;
   fixProgressJudge?: FixProgressJudge;
@@ -18553,6 +18590,9 @@ export async function runSweep(
   sweepDeps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
+  if (!sweepDeps.dryRun && sweepDeps.repairAdmissionSurface !== "light") {
+    await sweepDeps.reconcilePrimaryShadowAlert?.();
+  }
   const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
   const memoryHeldSummaries = memoryHeld.map((pr) =>
     lightPassMemoryWaitSummary(pr, sweepDeps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
@@ -25360,6 +25400,7 @@ export async function runSweepLightPass(
   refillArmed = true;
   // W1-T9904: a review may have settled before its release callback could reach this controller.
   if (unsettledSpawning < spawning.length) setImmediate(() => { void refillFreedLanes(); });
+  if (!deps.dryRun) await deps.reconcilePrimaryShadowAlert?.();
   return summaries;
   } finally {
     releasePlanMerge();
@@ -26945,6 +26986,11 @@ export async function runEscalationReconcile(
     // NOR a confident "still live" — it simply waits for a readable pass.
     if (c.derived.indeterminate) {
       results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "left-indeterminate" });
+      continue;
+    }
+    // An instance episode owns a set of refusals; a single terminal PR cannot establish its recovery.
+    if (/^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(c.taskId)) {
+      results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "left-live" });
       continue;
     }
     // STILL LIVE: the referent is neither merged nor closed-without-merging — leave the

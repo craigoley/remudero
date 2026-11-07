@@ -710,6 +710,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.fix.prepare_timing", // The scanner fold reads the latest preparation owner across rotation.
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
   "escalation.issue_opened",
+  // The primary-shadow channel and board acknowledge only the selection delivered to this issue.
+  "primary_shadow.issue_published",
   // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and
   // W1-T3167's re-judge rung, which must not re-ask a settled question. "escalation.demoted" was
   // ALREADY absent here: a demotion is the one outcome invisible on the needs-human board, so

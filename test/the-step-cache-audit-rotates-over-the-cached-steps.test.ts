@@ -10,7 +10,7 @@ import { makeTempDir } from "#src/lib/tmp.js";
 
 const STEPS = Array.from({ length: 24 }, (_, i) => `panel.cache.step.${i}`);
 // Even an empty plan asks this empty bucket while projecting; count it in audit telemetry separately.
-const CACHED_STEPS = [...STEPS, "escalation.issue_opened"];
+const CACHED_STEPS = [...STEPS, "escalation.issue_opened", "primary_shadow.issue_published"];
 const FILING = "https://github.com/o/r/pull/1";
 
 interface Audit {
@@ -73,7 +73,10 @@ function rig(t: { after(fn: () => void): void }, slices: number, planOnly = true
   board.update();
   const warm = () => {
     const index = board.index(board.rows());
-    for (const step of CACHED_STEPS) assert.equal(index.byStep.get(step)?.length, step === "escalation.issue_opened" ? 0 : 3);
+    for (const step of CACHED_STEPS) {
+      const empty = step === "escalation.issue_opened" || step === "primary_shadow.issue_published";
+      assert.equal(index.byStep.get(step)?.length, empty ? 0 : 3);
+    }
     if (planOnly) {
       assert.ok(index.planOnlyFilingPrUrls.has(FILING));
       assert.ok(index.planOnlyReviewedHeads.get(FILING)?.has("h1"));
@@ -89,7 +92,11 @@ function rig(t: { after(fn: () => void): void }, slices: number, planOnly = true
     const read = logged!.read as { rows: number; bytes: number };
     assert.equal(read.rows, bodyRows, "the oracle's read includes every audit fact row");
     assert.equal(read.bytes, bodyBytes, "the oracle's read includes every audit body byte");
-    return { ...cache, asked: asked.filter((step) => step !== "escalation.issue_opened").sort(), read };
+    return {
+      ...cache,
+      asked: asked.filter((step) => step !== "escalation.issue_opened" && step !== "primary_shadow.issue_published").sort(),
+      read,
+    };
   };
   return { board, warm, pass };
 }
