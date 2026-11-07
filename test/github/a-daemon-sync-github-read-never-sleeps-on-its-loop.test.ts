@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import * as transport from "#src/lib/github-transport.js";
 import { configureEscalationTriage, escalate, escalateAsync, ghIssueGateway } from "#src/lib/escalate.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
+import { ARTIFACT_FINALIZE_INTERMEDIARY_403, buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
@@ -183,6 +183,17 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
         for (const event of cancelCommands) {
           assertRoute(event.args);
           assert.ok(during.has(event.id), `cancellation escalation must yield to the loop timer during ${event.args.join(" ")}`);
+        }
+        const infraBefore = shim.events().length;
+        const infraPr = { ...pr, prNumber: pr.prNumber + 100, headSha: `${pr.headSha}-infra` };
+        await withLiveWritesAllowed(() => transport.withDaemonGhTransportFloor(() =>
+          effects.escalateInfrastructureCheck!(infraPr, { name: "infrastructure-check", logTail: "fixture failure" },
+            "bounded retry refused", ARTIFACT_FINALIZE_INTERMEDIARY_403)));
+        const infraCommands = shim.events().slice(infraBefore).filter((event) => event.phase === "start");
+        assert.ok(infraCommands.some((event) => event.args.slice(0, 2).join(" ") === "issue create"), "the production infrastructure callback must deliver through the real default gateway");
+        for (const event of infraCommands) {
+          assertRoute(event.args);
+          assert.ok(during.has(event.id), `infrastructure escalation must yield to the loop timer during ${event.args.join(" ")}`);
         }
         const beforeEvents = shim.events().length;
         try {

@@ -3504,8 +3504,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       );
     },
 
-    escalateInfrastructureCheck: (pr, check, reason, signature) => {
-      tryEscalate(
+    escalateInfrastructureCheck: async (pr, check, reason, signature) => {
+      await tryEscalateAsync(
         {
           class: "BLOCKED",
           taskId: escalationTaskIdFor(pr),
