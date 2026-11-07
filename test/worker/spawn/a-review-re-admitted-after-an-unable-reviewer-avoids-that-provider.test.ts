@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +11,7 @@ import type { ProviderCapacity } from "#src/lib/worker-provider.js";
 import type { EffectiveProviderRoutingPolicy } from "#src/lib/provider-routing-policy.js";
 import { reviewerUnavailableProvidersForReadmission, type OpenPrView } from "#src/lib/sweep.js";
 import { selectWorkerProviderWithExclusions, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { runReview } from "#test/helpers/run-task-test.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
@@ -103,19 +103,17 @@ test("W1-T11432 criterion 2: the CLI sweep fallback carries exclusions into revi
 });
 
 test("W1-T11432 criterion 2: review spawn receives and records the unavailable provider exclusion", async (t) => {
-  const repo = mkdtempSync(join(tmpdir(), "rmd-t11432-review-exclusion-"));
+  const repoFixture = gitRepo({ seedCommit: false, kind: "t11432-review-exclusion" });
+  t.after(() => repoFixture.cleanup());
+  const repo = repoFixture.dir;
   const previousPath = process.env.PATH;
   const ledgerPath = join(repo, "ledger.ndjson");
   mkdirSync(join(repo, "src"), { recursive: true });
   writeFileSync(join(repo, "src", "marker.ts"), "export const READY = true;\n");
   writeFileSync(join(repo, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
-  const sterileGitEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
-  execFileSync("git", ["init", "--quiet", repo], { env: sterileGitEnv });
-  execFileSync("git", ["-C", repo, "config", "user.name", "T11432 fixture"], { env: sterileGitEnv });
-  execFileSync("git", ["-C", repo, "config", "user.email", "t11432-fixture@example.invalid"], { env: sterileGitEnv });
-  execFileSync("git", ["-C", repo, "add", "src/marker.ts", "settings.json"], { env: sterileGitEnv });
-  execFileSync("git", ["-C", repo, "commit", "--quiet", "-m", "review fixture"], { env: sterileGitEnv });
-  const headSha = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8", env: sterileGitEnv }).trim();
+  repoFixture.git("add", "src/marker.ts", "settings.json");
+  repoFixture.git("commit", "--quiet", "-m", "review fixture");
+  const headSha = repoFixture.git("rev-parse", "HEAD");
   const shim = ghShim([{ when: "pulls/16758", stdout: JSON.stringify({ number: 16758, state: "open", body: "review body",
     head: { ref: "run-W1-T9716-1", sha: headSha }, html_url: "https://github.com/acme/remudero/pull/16758" }) },
     { when: "pr diff", stdout: "" }, { when: "pr view", stdout: JSON.stringify({ state: "OPEN" }) }, { when: "", stdout: "{}" }]);
@@ -149,6 +147,5 @@ test("W1-T11432 criterion 2: review spawn receives and records the unavailable p
   } finally {
     process.env.PATH = previousPath;
     rmSync(shim.dir, { recursive: true, force: true });
-    rmSync(repo, { recursive: true, force: true });
   }
 });
