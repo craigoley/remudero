@@ -1,0 +1,36 @@
+- id: W1-T11552
+  title: The containment probe counts an OS denial only from the outside-write report line, so an unrelated mention of a sandbox cannot pass the gate
+  repo: remudero
+  depends_on: []
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # narrows what passes a safety gate; a wrong anchor would block every build
+  band_meaning: blast-radius
+  origin: operator-session#containment-probe-2026-11-06
+  plan_refs:
+    - W1-T11550
+    - W1-T1281
+  files:
+    - src/lib/containment.ts
+    - test/containment/a-probe-denial-is-read-from-the-outside-write-line.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A transcript that names the probe token and mentions a sandbox only in another arm's text is not contained, and a transcript whose outside-write report carries an OS denial still is
+      proof: "grep: W1-T11552 criterion 1 in test/containment/a-probe-denial-is-read-from-the-outside-write-line.test.ts"
+    - claim: Real denial texts from before the regression, such as "Read-only file system" and "Operation not permitted", still pass on their outside-write line
+      proof: "grep: W1-T11552 criterion 2 in test/containment/a-probe-denial-is-read-from-the-outside-write-line.test.ts"
+  rationale: |
+    OBSERVED 2026-11-06:
+    - OS_DENIAL_RE in src/lib/containment.ts matches a bare "sandbox" and a bare "denied".
+    - 5 of 603 Codex-served Azure probes after onset passed while the sandbox could not deny the write (W1-T11550).
+    INFERRED: the egress arm's error text, which says "current sandbox mode", is not stripped, so a model echoing the token could pass without a real denial. Pass rows carry no excerpt, so those 5 passes are unconfirmed.
+    Those runs were allowed to proceed, so this tightens a real gate. Measure the anchor against retained transcripts before shipping, so it does not fire on healthy runs.
+  design: |
+    Match the denial on the line that reports the outside write, using the probe's own report format, rather than anywhere in the transcript. Keep failing closed. Build after W1-T11550 so healthy passes exist to test against.
+  note: |
+    reservation hand-off: run-unfiled-1794002639754 -> run-unfiled-1794002639754
+    Reserved with rmd next-task-id (W1-T11552 on run-unfiled-1794002639754). From the operator session's 2026-11-06 containment diagnosis.

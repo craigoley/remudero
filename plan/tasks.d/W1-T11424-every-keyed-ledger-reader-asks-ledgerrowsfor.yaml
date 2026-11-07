@@ -28,12 +28,12 @@
     - src/lib/benchmark-cohort.ts
     - src/lib/impossible-canary.ts
     - test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts
-    - test/review/keyed-ledger-readers-ask-ledgerrowsfor.test.ts
+    - test/ledger/keyed-ledger-readers-ask-ledgerrowsfor.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: Dep-review proposalProgress, the review prior-verdict lookup, the human-gate measurement, field-trials' controlled read, and impossibleCanaryCommand's step-keyed cadence state answer task, PR or step questions through ledgerRowsFor, opening only the archives that hold their keys
-      proof: "unit test: test/review/keyed-ledger-readers-ask-ledgerrowsfor.test.ts"
+      proof: "unit test: test/ledger/keyed-ledger-readers-ask-ledgerrowsfor.test.ts"
     - claim: The whole-ledger census allowlist holds no keyed reader; each remaining whole-history reader passes a rotationRecords digest, so a repeat pass decompresses no archive it has already reduced
       proof: "grep: W1-T11424 criterion 2 in test/ledger/no-long-lived-code-reads-the-whole-ledger-union.test.ts"
   rationale: |
