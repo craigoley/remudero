@@ -4,7 +4,7 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `containment`, field `servedModel`.
 
-  Coverage: 49/979 joined worker calls (5.0%) in the trailing 7-day window;
+  Coverage: 49/1134 joined worker calls (4.3%) in the trailing 7-day window;
   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
   First seen: 2026-09-28T05:55:37.084Z.
@@ -26,7 +26,7 @@ thread_id: null
 answered_by: fb-1792030218433-dd1b77
 evidence_coverage_revision:
   version: 1
-  mainSha: 15e26bb965c42530215254ba80439493830deb45
+  mainSha: 0ea4d3fe2d57a897a42c34bb7ff08829f09dd2bf
   expectedRecord: >
     id: evidence-coverage-containment-served-model
 
@@ -36,7 +36,7 @@ evidence_coverage_revision:
       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
       `containment`, field `servedModel`.
 
-      Coverage: 48/518 joined worker calls (9.3%) in the trailing 7-day window;
+      Coverage: 49/979 joined worker calls (5.0%) in the trailing 7-day window;
       below the field's 90.0% floor — a chronic gap no baseline excuses.
 
       First seen: 2026-09-28T05:55:37.084Z.
@@ -68,7 +68,7 @@ evidence_coverage_revision:
 
     evidence_coverage_revision:
       version: 1
-      mainSha: 02104c2005bf5154c14daaad5b77e386ffa0149e
+      mainSha: 15e26bb965c42530215254ba80439493830deb45
       expectedRecord: >
         id: evidence-coverage-containment-served-model
 
@@ -78,7 +78,7 @@ evidence_coverage_revision:
           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
           `containment`, field `servedModel`.
 
-          Coverage: 35/229 joined worker calls (15.3%) in the trailing 7-day window;
+          Coverage: 48/518 joined worker calls (9.3%) in the trailing 7-day window;
           below the field's 90.0% floor — a chronic gap no baseline excuses.
 
           First seen: 2026-09-28T05:55:37.084Z.
@@ -110,7 +110,7 @@ evidence_coverage_revision:
 
         evidence_coverage_revision:
           version: 1
-          mainSha: ed891be856eda042208e38f621e56ef0971c5dca
+          mainSha: 02104c2005bf5154c14daaad5b77e386ffa0149e
           expectedRecord: >
             id: evidence-coverage-containment-served-model
 
@@ -120,7 +120,7 @@ evidence_coverage_revision:
               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
               `containment`, field `servedModel`.
 
-              Coverage: 85/276 joined worker calls (30.8%) in the trailing 7-day window;
+              Coverage: 35/229 joined worker calls (15.3%) in the trailing 7-day window;
               below the field's 90.0% floor — a chronic gap no baseline excuses.
 
               First seen: 2026-09-28T05:55:37.084Z.
@@ -152,7 +152,7 @@ evidence_coverage_revision:
 
             evidence_coverage_revision:
               version: 1
-              mainSha: 4edd4e93757d2cc3ab53143c6bccdb21ba5fdf84
+              mainSha: ed891be856eda042208e38f621e56ef0971c5dca
               expectedRecord: >
                 id: evidence-coverage-containment-served-model
 
@@ -162,7 +162,7 @@ evidence_coverage_revision:
                   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                   `containment`, field `servedModel`.
 
-                  Coverage: 93/297 joined worker calls (31.3%) in the trailing 7-day window;
+                  Coverage: 85/276 joined worker calls (30.8%) in the trailing 7-day window;
                   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                   First seen: 2026-09-28T05:55:37.084Z.
@@ -194,7 +194,7 @@ evidence_coverage_revision:
 
                 evidence_coverage_revision:
                   version: 1
-                  mainSha: a83d8acb75d195a3008e690f423ebbe04015ad48
+                  mainSha: 4edd4e93757d2cc3ab53143c6bccdb21ba5fdf84
                   expectedRecord: >
                     id: evidence-coverage-containment-served-model
 
@@ -204,7 +204,7 @@ evidence_coverage_revision:
                       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                       `containment`, field `servedModel`.
 
-                      Coverage: 156/420 joined worker calls (37.1%) in the trailing 7-day window;
+                      Coverage: 93/297 joined worker calls (31.3%) in the trailing 7-day window;
                       below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                       First seen: 2026-09-28T05:55:37.084Z.
@@ -236,7 +236,7 @@ evidence_coverage_revision:
 
                     evidence_coverage_revision:
                       version: 1
-                      mainSha: 648b3a6030b468e42ee875bce17a60281cc1a368
+                      mainSha: a83d8acb75d195a3008e690f423ebbe04015ad48
                       expectedRecord: >
                         id: evidence-coverage-containment-served-model
 
@@ -246,7 +246,7 @@ evidence_coverage_revision:
                           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                           `containment`, field `servedModel`.
 
-                          Coverage: 156/433 joined worker calls (36.0%) in the trailing 7-day window;
+                          Coverage: 156/420 joined worker calls (37.1%) in the trailing 7-day window;
                           below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                           First seen: 2026-09-28T05:55:37.084Z.
@@ -278,7 +278,7 @@ evidence_coverage_revision:
 
                         evidence_coverage_revision:
                           version: 1
-                          mainSha: 693cc1991c68d3339d88f613958e4e869b1f7d53
+                          mainSha: 648b3a6030b468e42ee875bce17a60281cc1a368
                           expectedRecord: >
                             id: evidence-coverage-containment-served-model
 
@@ -288,7 +288,7 @@ evidence_coverage_revision:
                               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                               `containment`, field `servedModel`.
 
-                              Coverage: 184/648 joined worker calls (28.4%) in the trailing 7-day window;
+                              Coverage: 156/433 joined worker calls (36.0%) in the trailing 7-day window;
                               below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                               First seen: 2026-09-28T05:55:37.084Z.
@@ -320,7 +320,7 @@ evidence_coverage_revision:
 
                             evidence_coverage_revision:
                               version: 1
-                              mainSha: e90d4b09f15ddeaa740249e249461a0a5c4cda13
+                              mainSha: 693cc1991c68d3339d88f613958e4e869b1f7d53
                               expectedRecord: >
                                 id: evidence-coverage-containment-served-model
 
@@ -330,7 +330,7 @@ evidence_coverage_revision:
                                   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                   `containment`, field `servedModel`.
 
-                                  Coverage: 215/843 joined worker calls (25.5%) in the trailing 7-day window;
+                                  Coverage: 184/648 joined worker calls (28.4%) in the trailing 7-day window;
                                   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                   First seen: 2026-09-28T05:55:37.084Z.
@@ -362,7 +362,7 @@ evidence_coverage_revision:
 
                                 evidence_coverage_revision:
                                   version: 1
-                                  mainSha: cfa32ee06fa43b109da3f8e49f5de664990a38c5
+                                  mainSha: e90d4b09f15ddeaa740249e249461a0a5c4cda13
                                   expectedRecord: >
                                     id: evidence-coverage-containment-served-model
 
@@ -372,7 +372,7 @@ evidence_coverage_revision:
                                       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                       `containment`, field `servedModel`.
 
-                                      Coverage: 49/61 joined worker calls (80.3%) in the trailing 7-day window;
+                                      Coverage: 215/843 joined worker calls (25.5%) in the trailing 7-day window;
                                       below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                       First seen: 2026-09-28T05:55:37.084Z.
@@ -401,18 +401,77 @@ evidence_coverage_revision:
                                     thread_id: null
 
                                     answered_by: fb-1792030218433-dd1b77
+
+                                    evidence_coverage_revision:
+                                      version: 1
+                                      mainSha: cfa32ee06fa43b109da3f8e49f5de664990a38c5
+                                      expectedRecord: >
+                                        id: evidence-coverage-containment-served-model
+
+                                        ts: 2026-09-28T05:55:41.183Z
+
+                                        raw: >-
+                                          Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+                                          `containment`, field `servedModel`.
+
+                                          Coverage: 49/61 joined worker calls (80.3%) in the trailing 7-day window;
+                                          below the field's 90.0% floor — a chronic gap no baseline excuses.
+
+                                          First seen: 2026-09-28T05:55:37.084Z.
+
+
+                                          This follow-up never gates a PR or blocks work. Restore the field at the
+                                          lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+                                          reads), or record why this lane legitimately lacks it. The evidence-coverage
+                                          gardener updates this entry in place while the gap persists.
+                                        attachments: []
+
+                                        origin: cli
+
+                                        status: answered
+
+                                        reply_to: null
+
+                                        proposal_pr: null
+
+                                        summary: null
+
+                                        expansion: null
+
+                                        submission_key: null
+
+                                        thread_id: null
+
+                                        answered_by: fb-1792030218433-dd1b77
+                                      expectedPlan:
+                                        plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+                                        plan/tasks.d: e3c8eaa6813cf0e890d1f94323ce0d0b87be8a05
+                                      measurement:
+                                        lane: containment
+                                        field: servedModel
+                                        observed: 215
+                                        denominator: 843
+                                        floor: 0.9
+                                        at: 2026-10-29T17:59:07.863Z
+                                        since: 2026-10-22T17:59:07.863Z
+                                        line: "Coverage: 215/843 joined worker calls (25.5%) in the trailing 7-day
+                                          window; below the field's 90.0% floor — a chronic gap no baseline
+                                          excuses."
+                                      closure:
+                                        eligible: false
+                                        reason: task W1-T4800 is unknown
                                   expectedPlan:
                                     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                    plan/tasks.d: e3c8eaa6813cf0e890d1f94323ce0d0b87be8a05
+                                    plan/tasks.d: 391aef7817cbca835d4bde7824a85e4f2e36ee08
                                   measurement:
                                     lane: containment
                                     field: servedModel
-                                    observed: 215
-                                    denominator: 843
+                                    observed: 184
+                                    denominator: 648
                                     floor: 0.9
-                                    at: 2026-10-29T17:59:07.863Z
-                                    since: 2026-10-22T17:59:07.863Z
-                                    line: "Coverage: 215/843 joined worker calls (25.5%) in the trailing 7-day
+                                    at: 2026-10-30T07:35:31.215Z
+                                    since: 2026-10-23T07:35:31.215Z
+                                    line: "Coverage: 184/648 joined worker calls (28.4%) in the trailing 7-day
                                       window; below the field's 90.0% floor — a chronic gap no baseline
                                       excuses."
                                   closure:
@@ -420,16 +479,16 @@ evidence_coverage_revision:
                                     reason: task W1-T4800 is unknown
                               expectedPlan:
                                 plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                plan/tasks.d: 391aef7817cbca835d4bde7824a85e4f2e36ee08
+                                plan/tasks.d: aca553155ad25a92ff5c4c44170ca314c305b8ea
                               measurement:
                                 lane: containment
                                 field: servedModel
-                                observed: 184
-                                denominator: 648
+                                observed: 156
+                                denominator: 433
                                 floor: 0.9
-                                at: 2026-10-30T07:35:31.215Z
-                                since: 2026-10-23T07:35:31.215Z
-                                line: "Coverage: 184/648 joined worker calls (28.4%) in the trailing 7-day
+                                at: 2026-10-31T04:44:46.001Z
+                                since: 2026-10-24T04:44:46.001Z
+                                line: "Coverage: 156/433 joined worker calls (36.0%) in the trailing 7-day
                                   window; below the field's 90.0% floor — a chronic gap no baseline
                                   excuses."
                               closure:
@@ -437,16 +496,16 @@ evidence_coverage_revision:
                                 reason: task W1-T4800 is unknown
                           expectedPlan:
                             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                            plan/tasks.d: aca553155ad25a92ff5c4c44170ca314c305b8ea
+                            plan/tasks.d: dfa3d2d48298daddc5077700195fef9420ffc109
                           measurement:
                             lane: containment
                             field: servedModel
                             observed: 156
-                            denominator: 433
+                            denominator: 420
                             floor: 0.9
-                            at: 2026-10-31T04:44:46.001Z
-                            since: 2026-10-24T04:44:46.001Z
-                            line: "Coverage: 156/433 joined worker calls (36.0%) in the trailing 7-day
+                            at: 2026-10-31T11:12:26.962Z
+                            since: 2026-10-24T11:12:26.962Z
+                            line: "Coverage: 156/420 joined worker calls (37.1%) in the trailing 7-day
                               window; below the field's 90.0% floor — a chronic gap no baseline
                               excuses."
                           closure:
@@ -454,16 +513,16 @@ evidence_coverage_revision:
                             reason: task W1-T4800 is unknown
                       expectedPlan:
                         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                        plan/tasks.d: dfa3d2d48298daddc5077700195fef9420ffc109
+                        plan/tasks.d: 0fa93a69660b55ce08511aee469d7087b9d119de
                       measurement:
                         lane: containment
                         field: servedModel
-                        observed: 156
-                        denominator: 420
+                        observed: 93
+                        denominator: 297
                         floor: 0.9
-                        at: 2026-10-31T11:12:26.962Z
-                        since: 2026-10-24T11:12:26.962Z
-                        line: "Coverage: 156/420 joined worker calls (37.1%) in the trailing 7-day
+                        at: 2026-11-02T07:24:22.683Z
+                        since: 2026-10-26T07:24:22.683Z
+                        line: "Coverage: 93/297 joined worker calls (31.3%) in the trailing 7-day
                           window; below the field's 90.0% floor — a chronic gap no baseline
                           excuses."
                       closure:
@@ -471,16 +530,16 @@ evidence_coverage_revision:
                         reason: task W1-T4800 is unknown
                   expectedPlan:
                     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                    plan/tasks.d: 0fa93a69660b55ce08511aee469d7087b9d119de
+                    plan/tasks.d: e8a21f4c24e90469bb3292ed2765b40762e07d78
                   measurement:
                     lane: containment
                     field: servedModel
-                    observed: 93
-                    denominator: 297
+                    observed: 85
+                    denominator: 276
                     floor: 0.9
-                    at: 2026-11-02T07:24:22.683Z
-                    since: 2026-10-26T07:24:22.683Z
-                    line: "Coverage: 93/297 joined worker calls (31.3%) in the trailing 7-day
+                    at: 2026-11-02T14:35:23.804Z
+                    since: 2026-10-26T14:35:23.804Z
+                    line: "Coverage: 85/276 joined worker calls (30.8%) in the trailing 7-day
                       window; below the field's 90.0% floor — a chronic gap no baseline
                       excuses."
                   closure:
@@ -488,16 +547,16 @@ evidence_coverage_revision:
                     reason: task W1-T4800 is unknown
               expectedPlan:
                 plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                plan/tasks.d: e8a21f4c24e90469bb3292ed2765b40762e07d78
+                plan/tasks.d: 7ba9e997aed4efb7e7835fc86ce46579e3b749e8
               measurement:
                 lane: containment
                 field: servedModel
-                observed: 85
-                denominator: 276
+                observed: 35
+                denominator: 229
                 floor: 0.9
-                at: 2026-11-02T14:35:23.804Z
-                since: 2026-10-26T14:35:23.804Z
-                line: "Coverage: 85/276 joined worker calls (30.8%) in the trailing 7-day
+                at: 2026-11-04T06:10:33.408Z
+                since: 2026-10-28T06:10:33.408Z
+                line: "Coverage: 35/229 joined worker calls (15.3%) in the trailing 7-day
                   window; below the field's 90.0% floor — a chronic gap no baseline
                   excuses."
               closure:
@@ -505,50 +564,50 @@ evidence_coverage_revision:
                 reason: task W1-T4800 is unknown
           expectedPlan:
             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-            plan/tasks.d: 7ba9e997aed4efb7e7835fc86ce46579e3b749e8
+            plan/tasks.d: 2239627b1dd86605f1e1d4e08f3e5283bb2ccec5
           measurement:
             lane: containment
             field: servedModel
-            observed: 35
-            denominator: 229
+            observed: 48
+            denominator: 518
             floor: 0.9
-            at: 2026-11-04T06:10:33.408Z
-            since: 2026-10-28T06:10:33.408Z
-            line: "Coverage: 35/229 joined worker calls (15.3%) in the trailing 7-day
-              window; below the field's 90.0% floor — a chronic gap no baseline
-              excuses."
+            at: 2026-11-06T08:46:53.885Z
+            since: 2026-10-30T08:46:53.885Z
+            line: "Coverage: 48/518 joined worker calls (9.3%) in the trailing 7-day window;
+              below the field's 90.0% floor — a chronic gap no baseline excuses."
           closure:
             eligible: false
             reason: task W1-T4800 is unknown
       expectedPlan:
         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-        plan/tasks.d: 2239627b1dd86605f1e1d4e08f3e5283bb2ccec5
+        plan/tasks.d: 999fe5226704a6099311f7dbd67d397ed2e13f3f
       measurement:
         lane: containment
         field: servedModel
-        observed: 48
-        denominator: 518
+        observed: 49
+        denominator: 979
         floor: 0.9
-        at: 2026-11-06T08:46:53.885Z
-        since: 2026-10-30T08:46:53.885Z
-        line: "Coverage: 48/518 joined worker calls (9.3%) in the trailing 7-day window;
+        at: 2026-11-07T06:10:59.966Z
+        since: 2026-10-31T06:10:59.966Z
+        line: "Coverage: 49/979 joined worker calls (5.0%) in the trailing 7-day window;
           below the field's 90.0% floor — a chronic gap no baseline excuses."
       closure:
         eligible: false
         reason: task W1-T4800 is unknown
   expectedPlan:
     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-    plan/tasks.d: 999fe5226704a6099311f7dbd67d397ed2e13f3f
+    plan/tasks.d: 8414346dcfa3464c122d7cec7688b74ec2b1d516
   measurement:
     lane: containment
     field: servedModel
     observed: 49
-    denominator: 979
+    denominator: 1134
     floor: 0.9
-    at: 2026-11-07T06:10:59.966Z
-    since: 2026-10-31T06:10:59.966Z
-    line: "Coverage: 49/979 joined worker calls (5.0%) in the trailing 7-day window;
-      below the field's 90.0% floor — a chronic gap no baseline excuses."
+    at: 2026-11-07T12:25:59.947Z
+    since: 2026-10-31T12:25:59.947Z
+    line: "Coverage: 49/1134 joined worker calls (4.3%) in the trailing 7-day
+      window; below the field's 90.0% floor — a chronic gap no baseline
+      excuses."
   closure:
     eligible: false
     reason: task W1-T4800 is unknown
