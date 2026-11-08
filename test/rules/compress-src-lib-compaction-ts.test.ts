@@ -58,7 +58,18 @@ test("W1-T11298: comment compression preserves executable code", () => {
   assert.ok(source.length < before.length, "compression removes prose rather than merely rewrapping it");
 });
 
-test("compaction compression fingerprint preserves literals and newline-sensitive behavior", () => {
+test("outputContractLines: comment compression keeps the rendered contract intact", async () => {
+  const { outputContractLines } = await import("#src/lib/compaction.js");
+  const lines = outputContractLines("W1-T11298");
+  assert.ok(lines.length > 0);
+  assert.ok(lines.every((line) => typeof line === "string"));
+  const text = lines.join("\n");
+  assert.match(text, /ALREADY_SATISFIED:/);
+  assert.match(text, /PR_URL:/);
+  assert.notEqual(outputContractLines("W1-T11298", true).join("\n"), text);
+});
+
+test("compaction compression fingerprintpreserves literals and newline-sensitive behavior", () => {
   const fixture = 'const re = /https?:\\/\\//; const s = "// kept"; const t = `/* ${`// ${1}`} */`;';
   const tokens = executableTokens(fixture);
   assert.deepEqual(executableTokens(fixture + " /* extra comment */"), tokens);
