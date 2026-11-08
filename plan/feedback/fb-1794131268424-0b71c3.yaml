@@ -17,10 +17,11 @@ raw: 'W1-T11665 plan clarification: Codex CLI 0.166.0 root --search is parsed
   config overrides but no search flag).'
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/17380
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
