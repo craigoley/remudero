@@ -26,6 +26,7 @@ import {
   reconstructOrphan,
   resolveHeadroomLimitPct,
   runDaemon,
+  compareSecondaryCatalogShadow,
   type DaemonDeps,
   type DaemonStopReason,
   type DaemonSummary,
@@ -35,7 +36,7 @@ import {
 import { resolveHeadroomEnabled, type Config } from "../src/lib/config.js";
 import { runSweep, DEFAULT_SWEEP_POLICY } from "./helpers/sweep-test.js";
 import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
-import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
+import { runnableCandidates, type MergedSet, type OpenPrCheck } from "#src/lib/drain.js";
 import { deriveStatus, readLedgerLines, type GitHub, type PrRef } from "../src/lib/status.js";
 import {
   RUN_ID_ENV,
@@ -4107,4 +4108,201 @@ test("an old kick cannot bypass an existing PR or unreadable ownership", async (
       assert.ok(lines.some(row => row.step === (unknown ? "console.kick_held" : "console.kick_refused")));
     } finally { rmSync(home, { recursive: true, force: true }); }
   }
+});
+
+function shadowPlanOf(tasks: Task[]): Plan {
+  return { tasks, byId: new Map(tasks.map((task) => [task.id, task])) };
+}
+
+test("W1-T11600 criterion 1: absent secondary snapshot preserves single-plan candidates", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const summary = await runDaemon(plan, {
+    refreshMerged: () => (id) => merged.has(id),
+    runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); },
+    sleep: fakeClock().sleep,
+    log: (step, extra = {}) => lines.push({ step, extra }),
+  }, { max: 1 });
+  assert.deepEqual(ran, ["A"]);
+  assert.deepEqual(summary.merged, ["A"]);
+  assert.equal(lines.some((line) => line.step === "dispatch.secondary_catalog_shadow"), false);
+});
+
+test("W1-T11600 criterion 2: composed catalogs use shared eligibility and priority", () => {
+  const primary = fixturePlan();
+  const child: Task = {
+    ...primary.byId.get("D")!,
+    id: "W1-T11600-CHILD",
+    title: "secondary child",
+    repo: "remudero",
+    depends_on: ["A"],
+    priority: 0,
+  };
+  const secondary = shadowPlanOf([child]);
+  const opts = { targetRepo: "remudero" };
+  const notMerged: MergedSet = () => false;
+  const blockedPrimary = runnableCandidates(primary, notMerged, 1, opts);
+  const blocked = compareSecondaryCatalogShadow(primary, secondary, blockedPrimary, notMerged, 1, opts);
+  assert.equal(blocked?.outcome, "compared");
+  assert.equal(blocked?.secondary_candidate_count, 0, "a cross-catalog dependency blocks while its primary task is unmerged");
+
+  const isMerged: MergedSet = (id) => id === "A";
+  const primaryCandidates = runnableCandidates(primary, isMerged, 1, opts);
+  let observationCallbacks = 0;
+  const compared = compareSecondaryCatalogShadow(primary, secondary, primaryCandidates, isMerged, 1, {
+    ...opts,
+    onFiltered: () => { observationCallbacks++; },
+    onEligibleOrdered: () => { observationCallbacks++; },
+    onCircuitBreak: () => { observationCallbacks++; },
+  });
+  assert.equal(compared?.outcome, "compared");
+  assert.equal(observationCallbacks, 0, "shadow selection cannot emit the ordinary selector's side-effect callbacks");
+  assert.equal(compared?.secondary_candidate_count, 1, "the dependency resolves against the primary catalog");
+  assert.equal(compared?.displaced_primary_count, 1, "the existing priority comparator ranks both catalogs together");
+  assert.equal(child.repo, "remudero", "catalog provenance never rewrites the task's execution target");
+});
+
+test("W1-T11600 criterion 3: invalid secondary snapshot is rejected atomically", () => {
+  const primary = fixturePlan();
+  const primaryCandidates = [primary.byId.get("A")!];
+  const validSecondary: Task = { ...primary.byId.get("D")!, id: "W1-T11600-SECONDARY", title: "secondary" };
+  const malformed = { tasks: [validSecondary], byId: new Map() } as unknown as Plan;
+  const invalidStatus = shadowPlanOf([{ ...validSecondary, status: "in_progress" as unknown as Task["status"] }]);
+  const invalidTaskType = shadowPlanOf([{ ...validSecondary, type: "unknown" as unknown as Task["type"] }]);
+  const invalidNotBefore = shadowPlanOf([
+    validSecondary,
+    { ...validSecondary, id: "W1-T11600-INVALID-DATE", not_before: "2026-13-01" },
+  ]);
+  const duplicate = shadowPlanOf([{ ...primary.byId.get("A")! }]);
+  const cases: Array<[Plan | null, string]> = [
+    [null, "unavailable"],
+    [malformed, "malformed"],
+    [invalidStatus, "malformed"],
+    [invalidTaskType, "malformed"],
+    [invalidNotBefore, "malformed"],
+    [duplicate, "duplicate_task_id"],
+  ];
+  for (const [secondary, outcome] of cases) {
+    const result = compareSecondaryCatalogShadow(primary, secondary, primaryCandidates, NONE_MERGED, 1, {});
+    assert.equal(result?.outcome, outcome);
+    assert.equal(result?.primary_candidate_count, 1);
+    assert.equal(result?.combined_candidate_count, 1);
+    assert.equal(result?.secondary_candidate_count, 0);
+    assert.equal(result?.displaced_primary_count, 0);
+  }
+  const hostileSnapshot = new Proxy({}, {
+    get() { throw new Error("PRIVATE_SNAPSHOT_ERROR"); },
+  }) as Plan;
+  const hostile = compareSecondaryCatalogShadow(
+    primary, hostileSnapshot, primaryCandidates, NONE_MERGED, 1, {},
+  );
+  assert.equal(hostile?.outcome, "malformed", "a throwing snapshot accessor fails closed");
+  assert.equal(JSON.stringify(hostile).includes("PRIVATE_SNAPSHOT_ERROR"), false);
+  const throwingSelector = compareSecondaryCatalogShadow(
+    primary, shadowPlanOf([validSecondary]), primaryCandidates,
+    () => { throw new Error("PRIVATE_SELECTOR_ERROR"); }, 1, {},
+  );
+  assert.equal(throwingSelector?.outcome, "comparison_failed", "a failed selector is never reported as compared");
+  assert.equal(JSON.stringify(throwingSelector).includes("PRIVATE_SELECTOR_ERROR"), false);
+  const guardedTask: Task = {
+    ...validSecondary,
+    id: "W1-T11600-PRECONDITION",
+    precondition: { read: ["status"], expect: "clean" },
+  };
+  const deferred = compareSecondaryCatalogShadow(
+    primary, shadowPlanOf([guardedTask]), primaryCandidates, NONE_MERGED, 1,
+    { readPrecondition: () => { throw new Error("shadow must not repeat a precondition read"); } },
+  );
+  assert.equal(deferred?.outcome, "comparison_deferred", "shadow never adds a precondition subprocess");
+  for (const predicate of ["isIndeterminate", "isCircuitTripped"] as const) {
+    let breakerCalls = 0;
+    const breakerDeferred = compareSecondaryCatalogShadow(
+      primary, shadowPlanOf([validSecondary]), primaryCandidates, NONE_MERGED, 1,
+      { [predicate]: () => { breakerCalls++; return true; } },
+    );
+    assert.equal(breakerDeferred?.outcome, "comparison_deferred", `${predicate} is not evaluated without a snapshot-backed answer`);
+    assert.equal(breakerCalls, 0, `${predicate} cannot trigger lazy external reads during shadow comparison`);
+  }
+  assert.equal(primaryCandidates[0], primary.byId.get("A"), "refusal never mutates the primary dispatch candidates");
+});
+
+test("W1-T11600 criterion 4: secondary catalog shadow cannot alter dispatch", async () => {
+  const plan = fixturePlan();
+  const sensitiveTask: Task = {
+    ...plan.byId.get("D")!,
+    id: "W1-T11600-PRIVATE-CANDIDATE",
+    title: "PRIVATE_TITLE_SENTINEL",
+    repo: "remudero",
+    depends_on: [],
+    priority: 0,
+    files: ["private/PRIVATE_PATH_SENTINEL"],
+  };
+  const secondaryPlan = shadowPlanOf([sensitiveTask]);
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let shadowExtra: Record<string, unknown> | undefined;
+  const summary = await runDaemon(plan, {
+    refreshMerged: () => (id) => merged.has(id),
+    secondaryPlanForShadow: secondaryPlan,
+    targetRepo: "remudero",
+    runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); },
+    sleep: fakeClock().sleep,
+    log: (step, extra = {}) => {
+      if (step === "dispatch.secondary_catalog_shadow") {
+        shadowExtra = extra;
+        throw new Error("shadow telemetry unavailable");
+      }
+      lines.push({ step, extra });
+    },
+  }, { max: 1 });
+  assert.deepEqual(ran, ["A"], "the normal primary candidate remains the only worker invocation");
+  assert.deepEqual(summary.merged, ["A"]);
+  assert.ok(shadowExtra, "the comparison is reported as an aggregate shadow observation");
+  assert.equal(shadowExtra?.outcome, "compared");
+  assert.equal(shadowExtra?.secondary_candidate_count, 1);
+  assert.equal(JSON.stringify(shadowExtra).includes("PRIVATE_TITLE_SENTINEL"), false);
+  assert.equal(JSON.stringify(shadowExtra).includes("PRIVATE_PATH_SENTINEL"), false);
+  assert.equal(JSON.stringify(shadowExtra).includes("W1-T11600-PRIVATE-CANDIDATE"), false);
+
+  const breakerMerged = new Set<string>();
+  const breakerRan: string[] = [];
+  let secondaryBreakerReads = 0;
+  let deferredShadow: Record<string, unknown> | undefined;
+  await runDaemon(plan, {
+    refreshMerged: () => (id) => breakerMerged.has(id),
+    secondaryPlanForShadow: secondaryPlan,
+    isIndeterminate: (id) => {
+      if (id === sensitiveTask.id) { secondaryBreakerReads++; return true; }
+      return false;
+    },
+    targetRepo: "remudero",
+    runOne: async (id) => { breakerRan.push(id); breakerMerged.add(id); return okResult(id); },
+    sleep: fakeClock().sleep,
+    log: (step, extra = {}) => {
+      if (step === "dispatch.secondary_catalog_shadow") deferredShadow = extra;
+    },
+  }, { max: 1 });
+  assert.deepEqual(breakerRan, ["A"], "deferred shadow work never changes primary dispatch");
+  assert.equal(deferredShadow?.outcome, "comparison_deferred");
+  assert.equal(secondaryBreakerReads, 0, "a secondary-only task never invokes the breaker-backed read predicate");
+
+  let branchProbeCalls = 0;
+  const branchOpts = {
+    targetRepo: "remudero",
+    hasPushedRunBranch: () => { branchProbeCalls++; throw new Error("shadow must not run the lazy branch reader"); },
+  };
+  const primaryCandidates = runnableCandidates(plan, NONE_MERGED, 1, { targetRepo: "remudero" });
+  const noBranch = compareSecondaryCatalogShadow(
+    plan, secondaryPlan, primaryCandidates, NONE_MERGED, 1, branchOpts, new Set(),
+  );
+  assert.equal(noBranch?.outcome, "compared", "an empty branch snapshot keeps the cached comparison usable");
+  assert.equal(branchProbeCalls, 0, "shadow never invokes the lazy branch reader");
+  const matchingBranch = compareSecondaryCatalogShadow(
+    plan, secondaryPlan, primaryCandidates, NONE_MERGED, 1, branchOpts, new Set([sensitiveTask.id]),
+  );
+  assert.equal(matchingBranch?.outcome, "comparison_deferred", "a catalog task with a run branch is deferred safely");
+  assert.equal(branchProbeCalls, 0);
 });

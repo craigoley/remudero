@@ -680,6 +680,95 @@ test("W1-T11454 criterion 1: a bare recycle of a selected container keeps its qu
   } finally { fixture.cleanup(); }
 });
 
+test("W1-T11617 criterion 1: normal inheritance gets selection values from the mount and file reader, not Config.Env", () => {
+  const source = readFileSync(join(REPO_ROOT, "deploy", "recycle-container.sh"), "utf8");
+  const fixture = bareSelectedInstall();
+  try {
+    const control = fixture.bare("private-good");
+    assert.equal(control.status, 0, control.stderr);
+    const controlLaunch = control.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
+    const controlPacket = controlLaunch.argv.filter(a => /^RMD_(?:SELECTED_INSTANCE_REGISTRY|INSTANCE_REGISTRY_DIGEST|INSTANCE_REGISTRY_FILE_BINDING)=/.test(a));
+    const envPath = join(fixture.root, "previous-env-with-untrusted-selection");
+    const untrustedPath = join(fixture.root, "must-not-be-read-as-selection.yaml");
+    const readMarker = join(fixture.root, "selection-env-read-marker");
+    const bashEnv = join(fixture.root, "selection-env-read-probe.sh");
+    const probe = [
+      "selection_read_probe() {",
+      '  case "${BASH_COMMAND}" in',
+      `    'value="\${line#*=}"') case "\${name-}" in RMD_SELECTED_INSTANCE_REGISTRY|RMD_INSTANCE_REGISTRY_DIGEST|RMD_INSTANCE_REGISTRY_FILE_BINDING) printf v >> "\${RMD_SELECTION_ENV_READ_MARKER}";; esac ;;`,
+      `    'val="\${line#*=}"') case "\${name-}" in RMD_SELECTED_INSTANCE_REGISTRY|RMD_INSTANCE_REGISTRY_DIGEST|RMD_INSTANCE_REGISTRY_FILE_BINDING) printf l >> "\${RMD_SELECTION_ENV_READ_MARKER}";; esac ;;`,
+      "  esac",
+      "}",
+      "trap selection_read_probe DEBUG",
+    ].join("\n") + "\n";
+    writeFileSync(bashEnv, probe);
+    const probeScript = join(fixture.root, "recycle-container.sh");
+    writeFileSync(probeScript, [
+      "name=RMD_SELECTED_INSTANCE_REGISTRY", "line=RMD_SELECTED_INSTANCE_REGISTRY=fixture", 'value="${line#*=}"',
+      "name=RMD_INSTANCE_REGISTRY_DIGEST", "line=RMD_INSTANCE_REGISTRY_DIGEST=fixture", 'value="${line#*=}"',
+      "name=RMD_INSTANCE_REGISTRY_FILE_BINDING", "line=RMD_INSTANCE_REGISTRY_FILE_BINDING=fixture", 'value="${line#*=}"',
+      "name=RMD_INSTANCE_REGISTRY_DIGEST", "line=RMD_INSTANCE_REGISTRY_DIGEST=fixture", 'val="${line#*=}"',
+      "name=RMD_INSTANCE_REGISTRY_FILE_BINDING", "line=RMD_INSTANCE_REGISTRY_FILE_BINDING=fixture", 'val="${line#*=}"',
+    ].join("\n") + "\n");
+    const probeRun = spawnSync("bash", [probeScript], {
+      encoding: "utf8", env: { ...process.env, BASH_ENV: bashEnv, RMD_SELECTION_ENV_READ_MARKER: readMarker },
+    });
+    assert.equal(probeRun.status, 0, probeRun.stderr);
+    assert.equal(readFileSync(readMarker, "utf8"), "vvvll", "the DEBUG probe must detect every selected-value assignment shape");
+    rmSync(readMarker, { force: true });
+    writeFileSync(envPath, [
+      ...containerEnvLines(),
+      `RMD_SELECTED_INSTANCE_REGISTRY=${untrustedPath}`,
+      `RMD_INSTANCE_REGISTRY_DIGEST=${"c".repeat(64)}`,
+      `RMD_INSTANCE_REGISTRY_FILE_BINDING=${"d".repeat(64)}`,
+    ].join("\n") + "\n");
+    const inherited = fixture.bare("private-good", [], {
+      STUB_PREVIOUS_ENV: envPath, BASH_ENV: bashEnv, RMD_SELECTION_ENV_READ_MARKER: readMarker,
+    });
+    assert.equal(inherited.status, 0, inherited.stderr);
+    assert.equal(existsSync(readMarker), false, "normal inheritance must not assign selected values from Config.Env");
+    const selectionStart = source.indexOf('if [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ]; then');
+    const leaveStart = source.indexOf('if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then', selectionStart);
+    const selectionEnd = source.indexOf("  # W1-T2553: FALL BACK TO THE SHELL", selectionStart);
+    assert.ok(selectionStart >= 0 && leaveStart > selectionStart && selectionEnd > leaveStart);
+    const normalInheritance = source.slice(selectionStart, leaveStart);
+    assert.doesNotMatch(normalInheritance, /(?:selected_env|digest_env|binding_env)="\$\{line#\*=\}"/);
+    const driftStart = source.indexOf("  # ── THE DRIFT CHECK:");
+    const driftCheck = source.slice(driftStart, selectionStart);
+    const declaredNameSkip = driftCheck.indexOf('if is_declared_runtime_var "${name}"; then continue; fi');
+    assert.ok(driftStart >= 0 && declaredNameSkip >= 0 && declaredNameSkip < driftCheck.indexOf('value="${line#*=}"'),
+      "runtime drift must skip declared names before generic Config.Env value extraction");
+    const captureStart = source.indexOf("  # W1-T2553: FALL BACK TO THE SHELL");
+    const captureEnd = source.indexOf("\nelse", captureStart);
+    const captureLoop = source.slice(captureStart, captureEnd);
+    const selectedCaptureSkip = captureLoop.indexOf('if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then');
+    assert.ok(captureStart >= 0 && selectedCaptureSkip >= 0 && selectedCaptureSkip < captureLoop.indexOf('val="${line#*=}"'),
+      "active selection must skip generic Config.Env value capture");
+    const launch = inherited.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
+    assert.deepEqual(launch.argv.filter(a => /^RMD_(?:SELECTED_INSTANCE_REGISTRY|INSTANCE_REGISTRY_DIGEST|INSTANCE_REGISTRY_FILE_BINDING)=/.test(a)), controlPacket);
+    assert.ok(launch.argv.includes(`type=bind,src=${fixture.selected},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`));
+    assert.equal(`${inherited.stdout}${inherited.stderr}`.includes(untrustedPath), false);
+  } finally { fixture.cleanup(); }
+});
+
+test("W1-T11617 criterion 2: mixed orphan selection and unrelated runtime drift keeps the drift refusal and remedy", () => {
+  const fixture = bareSelectedInstall();
+  try {
+    const envPath = join(fixture.root, "previous-env-with-mixed-drift");
+    writeFileSync(envPath, `GH_TOKEN=fixture-not-a-token\nRMD_INSTANCE_REGISTRY_DIGEST=${"a".repeat(64)}\nSOME_UNKNOWN_VAR=surprise\n`);
+    const refused = fixture.bare("good", [], { STUB_PREVIOUS_ENV: envPath });
+    assert.notEqual(refused.status, 0, "mixed selection and undeclared runtime state must refuse");
+    assert.match(refused.stderr, /carries a runtime variable this recycle does not declare:.*SOME_UNKNOWN_VAR/);
+    assert.match(refused.stderr, /Add it to RMD_DAEMON_RUNTIME_ENV_VARS in deploy\/runtime-env-vars\.sh/);
+    assert.doesNotMatch(refused.stderr, /Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path>/);
+    assert.equal(refused.calls.some(isStop), false);
+    assert.equal(refused.calls.some(isRm), false);
+    assert.equal(refused.calls.some(c => isRun(c) && c.argv.includes("-d")), false);
+    const ledger = join(fixture.root, "state", "state", "ledger.ndjson");
+    assert.equal(existsSync(ledger) && readFileSync(ledger, "utf8").includes('"recycle.selection_left"'), false);
+  } finally { fixture.cleanup(); }
+});
+
 test("W1-T11454 criterion 2: the leave flag removes only a qualified selection, refuses catalog fallback, and ledgers only a successful replacement", () => {
   const fixture = bareSelectedInstall();
   try {

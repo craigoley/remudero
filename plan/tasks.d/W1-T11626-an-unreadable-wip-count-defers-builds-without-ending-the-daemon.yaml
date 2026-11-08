@@ -1,0 +1,85 @@
+- id: W1-T11626
+  title: A cached managed-target WIP count never admits work after an unreadable read
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved three-path cached-WIP admission follow-up, 2026-11-07"
+  plan_refs: [W1-T11458, W1-T3144, W1-T5046]
+  depends_on: [W1-T11458]
+  files: [src/lib/target-wip-ownership.ts, test/infra/a-refused-target-wip-read-never-ends-the-daemon.test.ts, test/parallel-dispatch.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=2044f0a47efc2d7f
+  # backlog gardener: placed=2026-11-08T05:25:55.294Z
+  attempts: 0
+  rationale: |
+    PR #17233 merged as b6a1855751 on 2026-11-07 at 22:03:34Z and repaired the
+    managed-target WIP exception that had ended Core. Its createTargetWipMemory helper
+    still returns a previous finite count after an unreadable observation. The daemon
+    command logs the degraded source, then adds reading.counts.owned into its admission
+    count without using freshness. A cached zero therefore remains admission-shaped.
+    At b6a1855751, an isolated native control couples the real helper and runDaemon with
+    the inspected CLI count projection: cached zero followed by unreadable reads admits
+    W1-AUDIT and reaches max_reached; the same unreadable input with no cached count
+    holds dispatch. The single native diagnostic passes because it asserts the defect;
+    it is not a repair PASS, the full daemonCommand closure, or live unauthorized-work
+    evidence. Receipts: Remudero-notes/sol/core-wip-cached-count-diagnostic.tap.log and
+    core-wip-pr17233-review-comment.md. The helper, CLI consumer, daemon and existing
+    helper-test blobs are identical at checked main 6ebe53b5; no transitive-graph claim.
+    Root held this reservation instead of competing with the then-active crash hotfix.
+    The new task addresses cached admission after that merged repair, not the crash
+    repair again. Refresh main and every open PR head's full subject corpus before
+    publication; preserve any active owner. W1-T11629 separately concerns typed lane
+    exceptions; W1-T11631 concerns initial review reads, neither this helper contract.
+  design: |
+    1. An unreadable observation, whether undefined or throwing, must hold managed-target
+       admission even after a previously safe zero or finite positive count. Reuse the
+       helper's existing unbounded-owned unknown sentinel and source=unreadable rather
+       than inventing a fresh count, grace period, governor bypass or retry loop.
+       Preserve useful cached counts only in explicitly historical diagnostic metadata
+       such as lastKnownCounts, never in the admission counts. A genuinely fresh later
+       observation restores normal admission under all existing governors.
+    2. Preserve target identity normalization and isolation, STOP/PAUSE and ownership
+       checks, explicit forced-dispatch authority, existing children, and ordinary
+       review/sweep maintenance. The production consumer must receive the conservative
+       result through its existing counts projection; no CLI or daemon source expansion.
+    3. The operator explicitly approved replacing only the existing helper test's two
+       cached-count expectations for undefined and throwing reads with conservative
+       unreadable admission expectations plus historical diagnostics. Preserve their
+       target-specific and throwing-read coverage and all other existing test inputs,
+       assertions, expected values, timeouts and skips. Clarify the helper documentation.
+       Append regressions for cached zero, a formerly safe positive count, fresh recovery
+       and target isolation. Extend the existing parallel-dispatch test with real
+       helper/daemon coupling and maintenance, sibling and live-child preservation
+       controls. Use repository import aliases and controlled clocks; no real dispatch.
+  acceptance:
+    - claim: "Unreadable managed-target WIP after a cached zero or formerly safe count withholds new daemon builds, while maintenance and existing children continue"
+      proof: "grep: W1-T11626 criterion 1 in test/parallel-dispatch.test.ts"
+    - claim: "Historical WIP counts remain diagnostic and target-isolated, and a genuinely fresh observation restores admission under unchanged governors"
+      proof: "grep: W1-T11626 criterion 2 in test/parallel-dispatch.test.ts"
+  note: |
+    The direct human approval call_bd1afb87b99a4331a9a8db09ffd49581 replaces the earlier
+    two-path proposal with exactly these three paths at the same $5/high/span limit,
+    including the two existing cached-count expectation corrections. All other existing
+    test restrictions remain. Filing and source PRs are separate; implementation waits
+    for normal plan merge and fresh ownership, claims, merged-credit, history and the
+    repository's runnable selector. Preserve a due/in-flight fleet fix round.
+    Reproduce the acceptance failure on unchanged current base, then prove removal
+    falsifiers and restored controls. Verify physical related/census lists and TAP
+    summaries, source-mapped instrumentation/diff coverage, typecheck, literal default
+    preflight and the actual ordinary first-push author invocation. Report every capacity
+    refusal, baseline failure or unexecuted phase honestly. Keep hosted and native gates.
+    Record Decisions and luna/REPORTS.md. No manual merge, arm, approval or remudero-review
+    status. No deployment, restart, recycle, provider, service or registry action. Core
+    and Azure remain read-only; source merge alone is not live recovery or activation.
+  falsifier: |
+    Return a cached zero or safe positive in admission counts after unreadability:
+    criterion 1 must observe the forbidden new daemon dispatch. Restore the hold and
+    require PASS. Keep counts unbounded after a genuinely fresh read: criterion 2 must
+    fail recovery. Mix target keys or present stale counts as fresh: criterion 2 must
+    fail isolation/freshness. Maintenance and existing-child controls must discriminate
+    a daemon-wide stop or child cancellation from withholding only new build admission.
