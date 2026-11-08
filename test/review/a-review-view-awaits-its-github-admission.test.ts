@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { reviewCommand, type ReviewCommandHost } from "#src/cli/commands/review.js";
@@ -16,6 +16,12 @@ const CLOSED = { number: 7, state: "closed", html_url: "https://github.com/audit
 const BRANCH = { number: 7, headRefOid: SHA, headRefName: "fixture-branch", body: "",
   url: "https://github.com/audit/fixture-target/pull/7" };
 const HTTP = (row: unknown) => `HTTP/2.0 200 OK\n\n${JSON.stringify(row)}`;
+function numericRoutes(row: unknown): GhShimRoute[] {
+  return [
+    { when: "api repos/audit/fixture-target/pulls/7 -i", stdout: HTTP(row) },
+    { when: "api repos/audit/fixture-target/pulls/7", stdout: JSON.stringify(row) },
+  ];
+}
 type Deps = NonNullable<Parameters<typeof reviewCommand>[3]>;
 
 async function fixture<T>(routes: GhShimRoute[], body: (f: {
@@ -63,9 +69,14 @@ function noDownstream(counts: Record<string, number>) {
 }
 
 test("W1-T11631 criterion 1: real initial view waits for shared admission with a heartbeat and one qualified CLI child", async () => {
-  await fixture([{ when: "api repos/audit/fixture-target/pulls/7", stdout: HTTP(CLOSED) }], async (f) => {
+  await fixture(numericRoutes(CLOSED), async (f) => {
     process.env.RMD_GH_SHARED_READ_GAP_MS = "25";
-    stampGhRead(ghReadCadenceStampPath(process.env)!, "advisory\n", Date.now() + 250);
+    const stamp = ghReadCadenceStampPath(process.env)!;
+    // Positive control: the private cache really contains a foreign, pending stamp.
+    // A small offset can disappear on the bounded volume's coarser file clock.
+    stampGhRead(stamp, "advisory\n", Date.now() + 20000);
+    assert.equal(readFileSync(stamp, "utf8"), "advisory\n");
+    assert.ok(statSync(stamp).mtimeMs > Date.now(), "the cadence observation is still pending");
     let beat = false;
     let callsAtBeat: number | undefined;
     const timer = setTimeout(() => { beat = true; callsAtBeat = f.shim.calls().length; }, 0);
