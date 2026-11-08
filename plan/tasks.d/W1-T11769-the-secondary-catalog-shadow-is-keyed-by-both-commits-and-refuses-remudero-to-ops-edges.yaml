@@ -1,0 +1,74 @@
+- id: W1-T11769
+  title: "The secondary-catalog shadow is keyed by the public-main SHA plus the ops SHA, re-reads its source each tick, and refuses remudero-to-ops dependency edges"
+  repo: remudero
+  depends_on: [W1-T11768]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T11600, W1-T11768, W1-T9763, W1-T9993]
+  priority: 1
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/daemon.ts
+    - test/ops-catalog-shadow-composer.test.ts
+  rationale: |
+    W1-T11600 is merged and stays as it is. Its composer reads `DaemonDeps.secondaryPlanForShadow`, a value
+    fixed for the life of `runDaemon`, so a new ops commit cannot be observed without a restart. Its signature
+    dedupe (`lastSecondaryCatalogShadowSignature`) hashes only the aggregate counts, so two different revision
+    pairs with equal counts collapse into one row. It also resolves dependencies in both directions. That
+    is fine for ops-to-remudero, but it lets a public task's `depends_on` name an ops task, which the
+    migration forbids.
+
+    Settled by lookup: is this W1-T11600 again? -> no. W1-T11600's four criteria (absent snapshot, shared eligibility, atomic rejection, no dispatch effect) stay as written and its tests stay green. This task adds a per-tick source seam, a composite revision key and an edge-direction rule (src/lib/daemon.ts compareSecondaryCatalogShadow; test/daemon.test.ts "W1-T11600 criterion").
+    Settled by lookup: which edge direction does W1-T11600 already exercise? -> ops-to-remudero only. Criterion 2's fixture has a secondary task depending on primary "A" and expects it to block until "A" merges (test/daemon.test.ts). That stays allowed and now gets its own explicit test. remudero-to-ops is the new refusal.
+    Settled by lookup: what is the public half of the composite key? -> the origin/main commit of the primary plan's PlanRevision (`revisions.revisionOf(plan)?.commit`, src/lib/tick-read-worker.ts PlanRevision, src/run-task.ts readPlanRevisionAsync). A disk-loaded non-self or --plan plan has no revision until W1-T9993 lands, so an unknown primary commit is a named deferral, not a guessed key.
+  design: |
+    1. Add an optional per-tick seam beside the existing field: `secondaryCatalogShadowSource?: () =>
+       OpsCatalogShadowInput | undefined` (type imported, unchanged, from src/lib/ops-catalog-source.ts), plus `primaryPlanCommit?: () => string | undefined`. Read both once per
+       tick, synchronously, from already-completed state. The seam never awaits, fetches or blocks the tick.
+       If both the seam and `secondaryPlanForShadow` are absent, behavior is byte-identical to today. If only
+       the legacy field is set, W1-T11600's behavior is unchanged.
+    2. Composite key. Export `compositeCatalogRevisionKey(publicCommit, opsCommit)` and key the shadow row and
+       its dedupe signature on it. A change in either commit emits a fresh row even when the counts are equal.
+       A comparison computed under one key is never reported under another. An unknown public commit yields
+       `primary_revision_unknown`. A non-`ok` source outcome passes through as the row's outcome with null
+       counts.
+    3. Edge rule, checked before composition and refusing the whole snapshot atomically:
+       a primary task whose `depends_on` names a secondary ID gives `invalid_cross_catalog_dependency`
+       (remudero-to-ops is forbidden). A secondary dependency naming an ID in neither catalog gives the same
+       code. A secondary dependency on a primary ID stays allowed and resolves through the primary merged
+       set, exactly as W1-T11600 criterion 2 already does. Duplicate IDs across catalogs keep their existing
+       `duplicate_task_id`.
+    4. Row shape stays aggregate-only on the existing `dispatch.secondary_catalog_shadow` step. Add
+       `revision_key_digest` (sha256 of the composite key) and the outcome. Do not add the ops commit, repo
+       slug, titles, paths or bodies. The public commit may appear because it is already public.
+    5. Tests in test/ops-catalog-shadow-composer.test.ts drive `runDaemon` with fake seams across several
+       ticks. Cover: the ops commit changing mid-run being observed on the next tick with no restart; a
+       composite-key change emitting a new row at equal counts; a primary-to-ops edge refused; an ops-to-primary
+       edge allowed and blocking until merge; a dangling ops edge refused; duplicate IDs across catalogs; a
+       pass-through of each source outcome; and a redaction sweep of every emitted row. Every case also
+       asserts the actual dispatch set, claims and worker spawns are identical to a run with no seam. Remove
+       the edge rule, the key-in-signature and the per-tick read one at a time, show the matching assertion
+       fails, then restore them.
+  acceptance:
+    - claim: "An ops-commit change is observed on the next tick without restarting the daemon, and either commit changing emits a new row under a new composite key"
+      proof: "unit test: test/ops-catalog-shadow-composer.test.ts"
+    - claim: "A remudero-to-ops dependency and a dangling ops dependency are refused atomically, while an ops-to-remudero dependency resolves through the public merged set"
+      proof: "unit test: test/ops-catalog-shadow-composer.test.ts"
+    - claim: "Every source outcome and composer outcome leaves the dispatch set, claims and worker spawns byte-identical to a run without the seam, and rows carry no private title, path or body"
+      proof: "unit test: test/ops-catalog-shadow-composer.test.ts"
+    - claim: "The composite revision key is a named export the shadow row is keyed on"
+      proof: "grep: compositeCatalogRevisionKey( in src/lib/daemon.ts"
+    - claim: "The remudero-to-ops refusal has a stable outcome code"
+      proof: "grep: invalid_cross_catalog_dependency in src/lib/daemon.ts"
+  falsifier: |
+    Read the seam once at `runDaemon` entry instead of per tick and the mid-run ops-commit test sees the old
+    key. Drop the composite key from the dedupe signature and two revision pairs with equal counts emit one
+    row. Remove the edge rule and a public task depending on an ops task is compared, not refused. Refuse both
+    directions and the ops-to-remudero case (and W1-T11600 criterion 2) fails. Let any secondary candidate
+    reach `candidates` and the byte-identical dispatch assertion fails.

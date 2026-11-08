@@ -1,0 +1,63 @@
+- id: W1-T11770
+  title: "An explicit opt-in daemon flag feeds the pinned ops catalog to the shadow comparison off the tick loop, and absence is byte-identical"
+  repo: remudero
+  depends_on: [W1-T11768, W1-T11769]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T11600, W1-T11768, W1-T11769, W1-T7744, W1-T10573]
+  priority: 1
+  status: queued
+  attempts: 0
+  files:
+    - src/cli/commands/daemon.ts
+    - test/ops-catalog-shadow-daemon-wiring.test.ts
+  rationale: |
+    This is the last source stage before any live decision. It connects W1-T11768's source to W1-T11769's
+    per-tick seam in `daemonCommand`, behind an explicit flag. It does not change launchers, config, images or
+    the instance registry, so merging it turns nothing on anywhere. Adding the flag to a running instance's
+    launcher is a separate operator rollout decision. It falls under the DRAIN ONE INSTANCE class in
+    docs/instance-registry-selection-contract.md and is not authorized here.
+
+    Settled by lookup: how is opt-in expressed without touching config? -> a daemon flag. `daemonCommand` validates flags through `unknownArgError("daemon", rest, ["--max","--poll-ms","--repo","--plan"], ...)` (src/cli/commands/daemon.ts). A new value flag there needs no config-schema.ts or env-var registry change. Those files sit on the acr-build.yml image-build path list and would turn this into an image release.
+    Settled by lookup: where is the public commit available? -> self targets sync through `planReaders.boot`/`reload`, both backed by `daemonPlanReaders(...).revisions` (src/run-task.ts). `revisions.revisionOf(activePlanRef.current)?.commit` is the public-main SHA. Non-self and --plan targets have none until W1-T9993 and get W1-T11769's `primary_revision_unknown`.
+    Settled by lookup: how do async reads stay off the loop? -> follow W1-T7744's pattern (`dispatchFilingPrefetch.refresh` is awaited before the loop and behind each selection, never on it; src/cli/commands/daemon.ts). The tick only reads the source's synchronous `current()`.
+    Settled by lookup: does anything else consume secondaryPlanForShadow today? -> no. Only src/lib/daemon.ts and test/daemon.test.ts reference it, so this is its first production producer.
+  design: |
+    1. Add value flag `--shadow-ops-catalog <owner>/<name>` to `daemonCommand`'s accepted flags and USAGE. Validate
+       the slug strictly: one slash, GitHub name charset, no path, URL or `..`. An invalid value exits 2 before
+       any spawn, as other bad flags do. If the flag is absent, construct nothing, make no read and pass neither
+       seam. A test pins this byte-identical: same `runDaemon` deps keys, same ledger rows, same gh calls.
+    2. If the flag is present, build `createOpsCatalogShadowSource` with its default GET-only `ghJsonAsync` transport
+       (the host's existing gh identity; no token, env var, mount or credential is added). Refresh it before the
+       loop and behind each selection on the same cadence as the plan reload. Never await it on the tick. Pass
+       `secondaryCatalogShadowSource: source.current` and `primaryPlanCommit` from the plan revision store to
+       `runDaemon`. Refresh failures become source outcome codes. They never escalate, page, file a task or
+       stop the daemon.
+    3. Keep all of this away from workers. Never forward the slug or any ops bytes into worker env, argv, prompts,
+       worktrees, PR bodies, the status board or serve projections. The ops catalog is never written to disk.
+    4. Tests in test/ops-catalog-shadow-daemon-wiring.test.ts drive `daemonCommand` with injected deps and a
+       recording fake GitHub. Cover: absent flag byte-identical; invalid slug exits 2 with no spawn; source
+       absent, unreadable and auth missing are each observed as rows while dispatch continues; an ops commit
+       advancing mid-run is observed with no restart; a slow or hung refresh never delays a tick; and a
+       forbidden-effect sweep. That sweep asserts the dispatch set, claims, worker spawns, review routing,
+       config writes, registry reads and image/deploy calls are identical with and without the flag, and that
+       no worker env, argv or prompt contains the slug. Remove the wiring, show the observation assertions
+       fail while the byte-identical ones still pass, then restore it.
+  acceptance:
+    - claim: "Without the flag the daemon makes no ops read and its deps, ledger rows and GitHub calls are byte-identical; an invalid slug exits 2 before any spawn"
+      proof: "unit test: test/ops-catalog-shadow-daemon-wiring.test.ts"
+    - claim: "With the flag, source absent, unavailable and revision change are observed as shadow rows off the tick loop without restart, and the dispatch, claim, worker, review, config, registry and image effects are unchanged"
+      proof: "unit test: test/ops-catalog-shadow-daemon-wiring.test.ts"
+    - claim: "The daemon command constructs the ops catalog shadow source"
+      proof: "grep: createOpsCatalogShadowSource( in src/cli/commands/daemon.ts"
+  falsifier: |
+    Construct the source unconditionally and the absent-flag test sees an extra gh call. Await `refresh()` on the
+    tick and the hung-refresh case delays a tick past its bound. Pass `source.current()`'s value once instead of
+    the accessor and the mid-run commit change is missed. Feed the composed candidates to dispatch, or leak
+    the slug into worker env, and the forbidden-effect sweep fails. Deleting the wiring leaves only the
+    byte-identical assertions passing.
