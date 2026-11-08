@@ -11,7 +11,7 @@ import { test, type TestContext } from "node:test";
 import { appendLedger } from "#src/lib/ledger.js";
 import { judgeReview, type ReviewVerdict } from "#src/lib/review.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
-import { buildSweepEffects } from "#src/run-task.js";
+import { buildSweepEffects as commandEffects, type SweepCommandHost } from "#src/cli/commands/sweep.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import {
@@ -130,7 +130,17 @@ function adapterFixture(t: TestContext, postStatus: "ok" | "fail") {
   appendLedger(ledgerPath, { run_id: "review-original", task_id: "W1-T11596", step: "review.posted", state: "success", pr_url: URL,
     head_sha: HEAD, review_input_digest: DIGEST, decision_verdict: verdict() });
   const calls: string[] = [];
-  const effects = buildSweepEffects({
+  const unexpected = (): never => { throw new Error("the restore path made an unexpected host call"); };
+  const host = {
+    freshTreeGit: unexpected,
+    realDeps: () => ({ reviewWorktree: { addWorktree: unexpected } }),
+    buildFreshTreeReviewRunner: () => unexpected,
+    buildReviewerCodeFreshnessGate: () => ({ call: unexpected, staleThisPass: () => undefined }),
+    buildBaseReproductionProbe: () => unexpected, buildImportClosureRead: () => unexpected,
+    buildRequiredFixReviewRunner: () => unexpected, readyDraftViaGh: () => unexpected,
+    reviewPostedDescription: (verdict: { summary: string }) => verdict.summary,
+  } as unknown as SweepCommandHost & Required<Pick<SweepCommandHost, "freshTreeGit">>;
+  const effects = commandEffects(host, {
     owner: "acme", repo: "scratch", localRepoName: "not-scratch", config: { root } as never, ledgerPath, runId: "restore-adapter",
     plan: { tasks: [], byId: new Map() } as never, log: step => calls.push(step),
     reviewRunner: async () => { calls.push("full-review"); return 0; },
