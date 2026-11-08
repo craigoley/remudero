@@ -1872,7 +1872,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // returns the `gh --json` shape and passes through untouched. Both arms yield the SAME five
   // fields, so nothing downstream of `body` can tell which transport served it.
   const args = reviewViewArgs(owner, repo, prArg);
-  const raw = fetchView(args);
+  const raw = await (deps.fetchView ?? ghJsonAsync)(args);
   // The sweep's open-PR snapshot can age while earlier reviews run. The numeric arm already
   // fetched the live REST row, so decline a closed PR before fetching its head or building a
   // worktree. The guarded poster still makes the final lifecycle check for an in-flight close.
