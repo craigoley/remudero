@@ -116,13 +116,18 @@ test("W1-T11631 criterion 2: settled numeric and branch views preserve qualifica
   });
 
   const reached = new Error("private normalized-view boundary");
-  for (const injected of [false, true]) {
-    await fixture([{ when: "pr view fixture-branch --repo audit/fixture-target", stdout: JSON.stringify(BRANCH) }], async (f) => {
+  for (const pr of ["7", "fixture-branch"]) for (const injected of [false, true]) {
+    const numeric = pr === "7";
+    const row = numeric ? { ...CLOSED, state: "open", body: "" } : BRANCH;
+    const routes = numeric ? numericRoutes(row)
+      : [{ when: "pr view fixture-branch --repo audit/fixture-target", stdout: JSON.stringify(row) }];
+    await fixture(routes, async (f) => {
       const reader: NonNullable<Deps["fetchView"]> = async (args) => {
-        assert.match(args.join(" "), /^pr view fixture-branch --repo audit\/fixture-target(?:\s|$)/);
-        await Promise.resolve(); return BRANCH;
+        assert.match(args.join(" "), numeric ? /^api repos\/audit\/fixture-target\/pulls\/7(?:\s|$)/
+          : /^pr view fixture-branch --repo audit\/fixture-target(?:\s|$)/);
+        await Promise.resolve(); return row;
       };
-      await assert.rejects(f.run("fixture-branch", {
+      await assert.rejects(f.run(pr, {
         ...(injected ? { fetchView: reader } : {}),
         contributorAdmission: async (target) => { assert.deepEqual(target, TARGET); throw reached; },
       }), (error) => error === reached);
