@@ -13,9 +13,7 @@
   priority: 1
   status: queued
   attempts: 0
-  files:
-    - src/cli/commands/daemon.ts
-    - test/ops-catalog-shadow-daemon-wiring.test.ts
+  files: [src/cli/commands/daemon.ts, test/daemon/ops-catalog-shadow-disabled.test.ts, test/daemon/ops-catalog-shadow-enabled.test.ts]
   rationale: |
     This is the last source stage before any live decision. It connects W1-T11768's source to W1-T11769's
     per-tick seam in `daemonCommand`, behind an explicit flag. It does not change launchers, config, images or
@@ -40,7 +38,7 @@
        stop the daemon.
     3. Keep all of this away from workers. Never forward the slug or any ops bytes into worker env, argv, prompts,
        worktrees, PR bodies, the status board or serve projections. The ops catalog is never written to disk.
-    4. Tests in test/ops-catalog-shadow-daemon-wiring.test.ts drive `daemonCommand` with injected deps and a
+    4. Tests in test/daemon/ops-catalog-shadow-disabled.test.ts and test/daemon/ops-catalog-shadow-enabled.test.ts drive `daemonCommand` with injected deps and a
        recording fake GitHub. Cover: absent flag byte-identical; invalid slug exits 2 with no spawn; source
        absent, unreadable and auth missing are each observed as rows while dispatch continues; an ops commit
        advancing mid-run is observed with no restart; a slow or hung refresh never delays a tick; and a
@@ -50,9 +48,9 @@
        fail while the byte-identical ones still pass, then restore it.
   acceptance:
     - claim: "Without the flag the daemon makes no ops read and its deps, ledger rows and GitHub calls are byte-identical; an invalid slug exits 2 before any spawn"
-      proof: "unit test: test/ops-catalog-shadow-daemon-wiring.test.ts"
+      proof: "unit test: test/daemon/ops-catalog-shadow-disabled.test.ts"
     - claim: "With the flag, source absent, unavailable and revision change are observed as shadow rows off the tick loop without restart, and the dispatch, claim, worker, review, config, registry and image effects are unchanged"
-      proof: "unit test: test/ops-catalog-shadow-daemon-wiring.test.ts"
+      proof: "unit test: test/daemon/ops-catalog-shadow-enabled.test.ts"
     - claim: "The daemon command constructs the ops catalog shadow source"
       proof: "grep: createOpsCatalogShadowSource( in src/cli/commands/daemon.ts"
   falsifier: |

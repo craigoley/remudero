@@ -13,9 +13,7 @@
   priority: 1
   status: queued
   attempts: 0
-  files:
-    - src/lib/daemon.ts
-    - test/ops-catalog-shadow-composer.test.ts
+  files: [src/lib/daemon.ts, test/daemon/ops-catalog-shadow-revision.test.ts, test/daemon/ops-catalog-shadow-dependencies.test.ts, test/daemon/ops-catalog-shadow-effects.test.ts]
   rationale: |
     W1-T11600 is merged and stays as it is. Its composer reads `DaemonDeps.secondaryPlanForShadow`, a value
     fixed for the life of `runDaemon`, so a new ops commit cannot be observed without a restart. Its signature
@@ -47,7 +45,7 @@
     4. Row shape stays aggregate-only on the existing `dispatch.secondary_catalog_shadow` step. Add
        `revision_key_digest` (sha256 of the composite key) and the outcome. Do not add the ops commit, repo
        slug, titles, paths or bodies. The public commit may appear because it is already public.
-    5. Tests in test/ops-catalog-shadow-composer.test.ts drive `runDaemon` with fake seams across several
+    5. Tests split across test/daemon/ops-catalog-shadow-revision.test.ts, test/daemon/ops-catalog-shadow-dependencies.test.ts, and test/daemon/ops-catalog-shadow-effects.test.ts drive `runDaemon` with fake seams across several
        ticks. Cover: the ops commit changing mid-run being observed on the next tick with no restart; a
        composite-key change emitting a new row at equal counts; a primary-to-ops edge refused; an ops-to-primary
        edge allowed and blocking until merge; a dangling ops edge refused; duplicate IDs across catalogs; a
@@ -57,11 +55,11 @@
        fails, then restore them.
   acceptance:
     - claim: "An ops-commit change is observed on the next tick without restarting the daemon, and either commit changing emits a new row under a new composite key"
-      proof: "unit test: test/ops-catalog-shadow-composer.test.ts"
+      proof: "unit test: test/daemon/ops-catalog-shadow-revision.test.ts"
     - claim: "A remudero-to-ops dependency and a dangling ops dependency are refused atomically, while an ops-to-remudero dependency resolves through the public merged set"
-      proof: "unit test: test/ops-catalog-shadow-composer.test.ts"
+      proof: "unit test: test/daemon/ops-catalog-shadow-dependencies.test.ts"
     - claim: "Every source outcome and composer outcome leaves the dispatch set, claims and worker spawns byte-identical to a run without the seam, and rows carry no private title, path or body"
-      proof: "unit test: test/ops-catalog-shadow-composer.test.ts"
+      proof: "unit test: test/daemon/ops-catalog-shadow-effects.test.ts"
     - claim: "The composite revision key is a named export the shadow row is keyed on"
       proof: "grep: compositeCatalogRevisionKey( in src/lib/daemon.ts"
     - claim: "The remudero-to-ops refusal has a stable outcome code"
