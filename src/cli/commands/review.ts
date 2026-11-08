@@ -7,7 +7,7 @@ import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheld
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
-import { loadConfig, type Config } from "../../lib/config.js";
+import { isWorkerProviderId, loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
@@ -76,15 +76,17 @@ export interface ReviewCommandHost {
   reviewSubjectGit(repoDir: string, argv: string[]): string;
 }
 
-export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId"> {
+export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders"> {
   const { JUDGE_AT_OWN_START_FLAG, acceptedReviewAttemptId } = host;
   const mode = flagValue(rest, "--execution-mode");
   const reviewAttemptId = acceptedReviewAttemptId(flagValue(rest, "--review-attempt-id"));
+  const excludeProviders = [...new Set((flagValue(rest, "--exclude-providers") ?? "").split(",").filter(isWorkerProviderId))];
   return {
     ...(rest.includes(JUDGE_AT_OWN_START_FLAG) ? { judgeAtOwnStart: true } : {}),
     ...(rest.includes("--plan-only-filing") ? { planOnlyFiling: true } : rest.includes("--not-plan-only-filing") ? { planOnlyFiling: false } : {}),
     ...(mode === "semantic" || mode === "deterministic" ? { executionMode: mode } : {}),
     ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
+    ...(excludeProviders.length ? { excludeProviders } : {}),
   };
 }
 
@@ -491,6 +493,8 @@ export async function runReview(host: ReviewCommandHost, args: {
    * site and drive the Codex adapter without a live subscription call.
    */
   reviewerSpawnWorker?: typeof spawnWorker;
+  /** Providers to avoid when this review is re-admitted after its reviewer was unable to inspect. */
+  excludeProviders?: SpawnWorkerArgs["excludeProviders"];
   /** Reuses the parent run's bounded sensor so advisory review workers are visible in the same
    *  task lane instead of disappearing behind the final `review.reviewer` ledger row. */
   workerTelemetry?: WorkerStateSensor;
@@ -869,6 +873,7 @@ export async function runReview(host: ReviewCommandHost, args: {
                 // as a completed review (P10-a; reviewerOutcome below makes it legible).
                 model: reviewerSpawnMount!.model,
                 mountProvider: reviewerSpawnMount!.provider,
+                excludeProviders: args.excludeProviders,
                 effort: reviewerSpawnMount!.effort,
                 maxTurns: reviewerSpawnMount!.maxTurns,
                 maxBudgetUsd: args.budgetUsd,
@@ -930,6 +935,9 @@ export async function runReview(host: ReviewCommandHost, args: {
           downgrades: semantic.filter((s) => s === false).length,
           // W1-T11428: criteria this reviewer could not inspect; W1-T11432 reads the provider beside it.
           unable: reviewerUnable.filter((u) => u !== undefined).length,
+          ...(args.excludeProviders?.length ? { exclude_providers: [...args.excludeProviders] } : {}),
+          ...(reviewerAssignment?.routing.exclusion_unhonoured
+            ? { exclusion_unhonoured: reviewerAssignment.routing.exclusion_unhonoured } : {}),
           // W1-T6: the advisory reviewer is a BRAIN-PLANE call — same telemetry
           // shape as a worker call, so ledger lines are queryable uniformly.
           ...reviewerFields,
@@ -1618,6 +1626,8 @@ export interface ReviewCommandDeps {
   fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => void;
   /** Operator CLI remains deterministic; only internal unattended callers opt in. */
   executionMode?: "deterministic" | "semantic";
+  /** Providers to avoid on a re-admitted review after a reviewer-unavailable result. */
+  excludeProviders?: SpawnWorkerArgs["excludeProviders"];
   /** W1-T3115: the sweep already proved this from GitHub's complete material file list. Carry
    *  that fact across the process boundary instead of making reviewCommand reclassify with the
    *  narrower emitter-ledger evidence available here. Undefined preserves the operator CLI. */
@@ -1821,6 +1831,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     fetchHead,
     executionMode,
     planOnlyFiling,
+    excludeProviders,
   } = {
     fetchView: ghJson,
     loadConfig,
@@ -2244,6 +2255,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           spawnReviewer,
           requireSemanticReview: executionMode === "semantic",
           reviewerMount,
+          excludeProviders,
           // W1-T185 (Gap 2): the materialized worktree above when available — the
           // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
           // proofs execute here too. `undefined` (materialization unavailable)
