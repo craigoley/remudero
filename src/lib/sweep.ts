@@ -95,7 +95,7 @@ import {
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
-import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync } from "./git-push.js";
+import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync, type GhJsonReadOptions } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
@@ -253,6 +253,7 @@ import {
   worktreeAdd,
   worktreeRemove,
   worktreeRemoveAsync,
+  releaseReviewWorktree,
   worktreesDir,
   type QuestionEntry,
   type SpawnWorkerArgs,
@@ -1332,6 +1333,14 @@ export interface RegisteredFixOwnerRecoveryDeps {
   clearStaleDirty?: SweepRuntimeFn;
 }
 
+/** Preserve sync injected callers; async rejection has the existing kept-owner disposition. */
+function mapRecoveryPreservation<T>(value: T | Promise<T>, consume: (value: T) => boolean): boolean | Promise<boolean> {
+  return value instanceof Promise ? value.then(consume).catch((error) => {
+    console.error("owner recovery failed; retaining its checkout hold:", String((error as Error)?.message ?? error));
+    return false;
+  }) : consume(value);
+}
+
 export interface FixOwnerResidue {
   markerKind: "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD" | null;
   markerSha: string | null;
@@ -1680,6 +1689,8 @@ export interface BuildSweepEffectsDeps {
   readBaselineRatchetWorktreeStateImpl?: typeof readBaselineRatchetWorktreeState;
   dispatchFixCatchOutcomeImpl?: typeof dispatchFixCatchOutcome;
   worktreeRemoveImpl?: typeof worktreeRemove;
+  /** Review cleanup is awaited; general repair callers retain their synchronous port. */
+  reviewWorktreeRemoveImpl?: (repoDir: string, worktreePath: string) => void | Promise<void>;
   /** W1-T3390 coverage seam — the plan-only shard-repair rung's own raw `git` spawns (branch -D,
    *  add, commit, rev-parse). A bare inline `execFileSync` would leave every one of those lines
    *  uncoverable without a real external git process on every test run; this seam defaults to
@@ -3745,15 +3756,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         if (failed.helper === "preserveStaleDirty") {
           // The helper re-reads every file it saves byte for byte; its result is the directory it made.
           const saved = registeredOwnerRecovery.preserveStaleDirty?.(config.root, repoDir, ownerPath, branch, localSha);
+          return mapRecoveryPreservation(saved, (saved) => {
           if (typeof saved !== "string" || dirname(saved) !== join(config.root, "recovery", "fix-owner", branch) ||
               !basename(saved).startsWith(`${localSha}-`)) return false;
           log("sweep.fix.checkout_owner_stale_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
             worktree_path: snapshot.path, local_sha_prefix: localSha.slice(0, 12), head_sha: pr.headSha,
             at_current_head: localSha === snapshot.remoteSha, preserved_path: saved, from_backstop_revalidation: true });
           return true;
+          });
         }
         // Both ref helpers prove parent and exact-tree identity before returning this immutable ref.
-        const ref = registeredOwnerRecovery[failed.helper]?.(repoDir, ownerPath, branch, localSha);
+        const preserved = registeredOwnerRecovery[failed.helper]?.(repoDir, ownerPath, branch, localSha);
+        return mapRecoveryPreservation(preserved, (ref) => {
         const prefix = `refs/rmd-recovery/fix-dirty/${branch}/${localSha}/`;
         if (typeof ref !== "string" || !ref.startsWith(prefix) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref.slice(prefix.length))) return false;
         if (failed.helper === "preserveTrackedDirty") {
@@ -3767,6 +3781,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           pr_number: pr.prNumber, task_id: taskId, branch, head_sha: pr.headSha, local_sha_prefix: localSha.slice(0, 12),
           recovery_ref: ref.slice(0, 512), staged_only: true, from_backstop_revalidation: true });
         return true;
+        });
       } catch {
         // An unreadable owner has the remedy a kept one has: the hold and its single escalation stand.
         return false;
@@ -3892,7 +3907,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           ...(filedCandidate ? { taskId: pr.taskId } : {}) }, live.body, live.head.ref, paths);
         let task = { ...resolved.task, id: escalationTaskIdFor(pr), files: resolved.task.files.filter(isInPlanScope) };
         claim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, live.head.ref), { run_id: runId });
-        const materialized = materializePlanRoundWorktree(config, repoDir, pr.prNumber, pr.headSha);
+        const materialized = await materializePlanRoundWorktree(config, repoDir, pr.prNumber, pr.headSha);
         if (!materialized.worktreePath) return { outcome: "refused", reason: materialized.failure?.message ?? "the plan head could not be materialized" };
         worktreePath = materialized.worktreePath;
         if (filedCandidate) {
@@ -3950,8 +3965,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return { outcome: "refused", reason: String((error as Error)?.message ?? error) };
       } finally {
         try {
-          if (worktreePath) worktreeRemoveForBuild(repoDir, worktreePath);
+          if (worktreePath) await (deps.reviewWorktreeRemoveImpl ?? worktreeRemoveForBuild)(repoDir, worktreePath);
         } finally {
+          if (worktreePath) releaseReviewWorktree(worktreePath);
           claim?.release();
         }
       }
@@ -4202,7 +4218,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               at_current_head: localSha === snapshot.remoteSha,
             };
             try {
-              preservedPath = (registeredOwnerRecovery.preserveStaleDirty ?? requiredSweepRuntime("registeredOwnerRecovery.preserveStaleDirty"))(
+              preservedPath = await (registeredOwnerRecovery.preserveStaleDirty ?? requiredSweepRuntime("registeredOwnerRecovery.preserveStaleDirty"))(
                 config.root, repoDir, registeredOwner, realBranch, localSha,
               );
               if (typeof preservedPath !== "string" || !preservedPath) throw new Error("preserved path is missing");
@@ -4213,7 +4229,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             }
             log("sweep.fix.checkout_owner_stale_dirty_preserved", { ...fields, preserved_path: preservedPath });
             try {
-              (registeredOwnerRecovery.clearStaleDirty ?? requiredSweepRuntime("registeredOwnerRecovery.clearStaleDirty"))(registeredOwner, localSha);
+              await (registeredOwnerRecovery.clearStaleDirty ?? requiredSweepRuntime("registeredOwnerRecovery.clearStaleDirty"))(registeredOwner, localSha);
             } catch (e) {
               return declineClaim({ ...fields, reason: "registered_worktree_owner",
                 owner_recovery_reason: "owner_stale_dirty_reset_failed", preserved_path: preservedPath,
@@ -4232,7 +4248,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               });
             }
             try {
-              const preserved: unknown = (registeredOwnerRecovery.preserveTrackedDirty ?? requiredSweepRuntime("registeredOwnerRecovery.preserveTrackedDirty"))(
+              const preserved: unknown = await (registeredOwnerRecovery.preserveTrackedDirty ?? requiredSweepRuntime("registeredOwnerRecovery.preserveTrackedDirty"))(
                 repoDir,
                 registeredOwner,
                 realBranch,
@@ -4274,7 +4290,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             if (residue?.refusal) {
               const superseded = snapshot.remoteSha !== null && snapshot.remoteSha !== localSha && snapshot.historyState === "contained";
               try {
-                preservedRecoveryRef = String((registeredOwnerRecovery.preserveStagedResidue ?? requiredSweepRuntime("registeredOwnerRecovery.preserveStagedResidue"))(
+                preservedRecoveryRef = String(await (registeredOwnerRecovery.preserveStagedResidue ?? requiredSweepRuntime("registeredOwnerRecovery.preserveStagedResidue"))(
                   repoDir,
                   registeredOwner,
                   realBranch,
@@ -4341,7 +4357,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             // modifications (already safe in the recovery ref) are reset away here -- never
             // force-removing the worktree itself, only resetting the tree the ref already covers.
             try {
-              (registeredOwnerRecovery.resetTrackedDirty ?? requiredSweepRuntime("registeredOwnerRecovery.resetTrackedDirty"))(
+              await (registeredOwnerRecovery.resetTrackedDirty ?? requiredSweepRuntime("registeredOwnerRecovery.resetTrackedDirty"))(
                 repoDir,
                 registeredOwner,
                 realBranch,
@@ -4375,7 +4391,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               });
             }
             try {
-              preservedRecoveryRef = String((registeredOwnerRecovery.preserveUntracked ?? requiredSweepRuntime("registeredOwnerRecovery.preserveUntracked"))(
+              preservedRecoveryRef = String(await (registeredOwnerRecovery.preserveUntracked ?? requiredSweepRuntime("registeredOwnerRecovery.preserveUntracked"))(
                 repoDir,
                 registeredOwner,
                 realBranch,
@@ -4460,7 +4476,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             }
           }
           try {
-            registeredOwnerRecovery.remove(repoDir, registeredOwner);
+            await registeredOwnerRecovery.remove(repoDir, registeredOwner);
           } catch (e) {
             return declineClaim({
               reason: "registered_worktree_owner",
@@ -14183,11 +14199,27 @@ export function ownEscalationAtHead(
  *  kept is re-asked through `ownerReclaimable`; once it admits recovery the hold lifts this pass.
  *  A failed recovery in {@link REVALIDATED_OWNER_PRESERVATIONS} lifts only on a re-verified preservation. */
 export function fixDispatchHoldAtHead(
+  pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>,
+  ownerWorktreeExists: (path: string) => boolean = existsSync,
+  ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
+): FixDispatchHold | undefined {
+  return runStepsSync(fixDispatchHoldAtHeadSteps(pr, lines, ownerWorktreeExists, ownerReclaimable));
+}
+
+export function fixDispatchHoldAtHeadAsync(
+  pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>,
+  ownerWorktreeExists: (path: string) => boolean = existsSync,
+  ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
+): Promise<FixDispatchHold | undefined> {
+  return runStepsAsync(fixDispatchHoldAtHeadSteps(pr, lines, ownerWorktreeExists, ownerReclaimable));
+}
+
+function* fixDispatchHoldAtHeadSteps(
   pr: OpenPrView,
   lines: ReadonlyArray<Record<string, unknown>>,
   ownerWorktreeExists: (path: string) => boolean = existsSync,
   ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
-): FixDispatchHold | undefined {
+): Steps<FixDispatchHold | undefined> {
   const declines = lines.filter((l) => isOwnerClaimDecline(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
   const last = declines[declines.length - 1];
   const ownerPath = typeof last?.worktree_path === "string" ? last.worktree_path : undefined;
@@ -14199,7 +14231,7 @@ export function fixDispatchHoldAtHead(
       l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
   if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath)) &&
       !(ownerPath !== undefined && !resetRelifted && (last.owner_recovery_decision === "keep" ||
-        revalidatedOwnerPreservation(last.owner_recovery_reason) !== undefined) && ownerReclaimable?.(pr, last) === true)) {
+        revalidatedOwnerPreservation(last.owner_recovery_reason) !== undefined) && (yield* step(() => ownerReclaimable?.(pr, last))) === true)) {
     const why = String(last.owner_recovery_reason);
     // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.
     const staged = Array.isArray(last.staged_paths) && last.staged_paths.length > 0
@@ -14241,7 +14273,7 @@ async function holdRepeatedFixClaimDecline(
   escalate: SweepDeps["escalate"],
   ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
 ): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
-  const hold = fixDispatchHoldAtHead(pr, lines, existsSync, ownerReclaimable);
+  const hold = await fixDispatchHoldAtHeadAsync(pr, lines, existsSync, ownerReclaimable);
   if (hold === undefined) return undefined;
   if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
   return { reason: hold.reason, fields: hold.fields };
@@ -14498,7 +14530,7 @@ export interface SweepDeps {
    *  as the notification transport, carrying the same two resolutions as its options. */
   escalate: (pr: OpenPrView, reason: string, question: ClarificationQuestion) => void | Promise<void>;
   /** W1-T7998: re-asks the claim path's local owner decision for a held decline; true = recoverable now. */
-  fixOwnerReclaimableAtHold?: (pr: OpenPrView, decline: Record<string, unknown>) => boolean;
+  fixOwnerReclaimableAtHold?: (pr: OpenPrView, decline: Record<string, unknown>) => boolean | Promise<boolean>;
   /** W1-T1223 — re-queue ONE cancelled required check's JOB
    *  (`POST .../actions/jobs/{job_id}/rerun`), NEVER the workflow run: a whole-run re-run would
    *  re-spend an already-green sibling sharing that run. AT MOST ONCE per `${headSha}@${checkName}`.
@@ -21297,7 +21329,7 @@ export async function runSweep(
     let heldEscalationDedup: string | undefined;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
-        !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
+        !await fixDispatchHoldAtHeadAsync(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
       const handoff = terminalFixDesignHandoff(pr, ledgerLines, () => readFixRoundArchiveRows(deps.ledgerPath));
       if (handoff.kind === "handoff") {
         const held = handoff.producer;
@@ -21357,7 +21389,7 @@ export async function runSweep(
     if ((disposition === "conflicted" || disposition === "blocked-fixable") && terminalDesignHold === undefined &&
         !designReleasedByBody && prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
-        !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
+        !await fixDispatchHoldAtHeadAsync(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
       let contractRevision: string | undefined;
       let readable = true;
       // A run-unfiled PR's task is synthetic (`PR-<n>`): its body, not a plan record, is the contract it read.
