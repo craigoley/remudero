@@ -85,6 +85,7 @@ test("W1-T11149 criterion 1: a real review reports setup, proofs, judge and post
     chmodSync(fakeClaude, 0o755);
     process.env[CLAUDE_BIN_ENV_OVERRIDE] = fakeClaude;
     shim = ghShim([
+      { when: "/statuses?", stdout: "[[]]" },
       { when: "/commits/", stdout: '{"statuses":[]}' },
       { when: "/pulls/", stdout: JSON.stringify({ number: 1, html_url: "https://github.com/o/r/pull/1", updated_at: "t", body: "", head: { ref: "b", sha: HEAD } }) },
       { when: "headRefOid", stdout: JSON.stringify({ headRefOid: HEAD }) },

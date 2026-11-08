@@ -39,10 +39,11 @@ raw: >-
   the system should reconstruct.
 attachments: []
 origin: issue
-status: new
+status: rejected
 reply_to: incident-dccf9e2a4a76538b
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: issue#13345:comment:6386508628
 thread_id: null
+answered_by: null

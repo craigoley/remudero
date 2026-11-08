@@ -594,6 +594,14 @@ function namedByLiveRuns(stateRoot: string, probe: RunChildProbe): { hashes: Set
   for (const entry of dirs) {
     if (!entry.isDirectory()) continue;
     const dir = join(stateRoot, "runs", entry.name);
+    let contents: string[];
+    try {
+      contents = readdirSync(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+      throw err;
+    }
+    if (contents.length === 0) continue;
     const classified = classifyRunDir(dir, probe);
     if (classified.kind === "terminal") continue;
     const spec = readSpec(dir);
@@ -623,11 +631,29 @@ export async function pruneEngineTrees(stateRoot: string, deps: PruneEngineOptio
   const roots = deps.worktreeRoots ?? workerWritableRoots(stateRoot);
   const newest = engines[0] && !modulesUnsafe(engineModules(engines[0].root, engines[0].nodeModulesTarget, roots)) ? engines[0].sourceHash : undefined;
   const removed: string[] = [];
+  const deferred: Record<string, string> = {};
   for (const engine of engines) {
     if (engine.sourceHash === newest || engine.sourceHash === deps.keep) continue;
     if (named.hashes.has(engine.sourceHash) || named.shas.has(engine.sha)) continue;
-    await removeEngineDir(engine.root, deps.repoDir, git);
-    removed.push(engine.sourceHash);
+    const pin = tryAcquirePin(stateRoot, engine.sourceHash, `prune-${process.pid}`);
+    if (pin instanceof InflightLockError) {
+      deferred[engine.sourceHash] = `engine pin held: ${pin.message}`;
+      continue;
+    }
+    try {
+      // A run writes the spec while holding this same pin. Re-read the census under it so
+      // a spec cannot appear between the initial census and removal.
+      const current = namedByLiveRuns(stateRoot, deps.probe ?? realRunChildProbe);
+      if ("undecidable" in current) {
+        deferred[engine.sourceHash] = current.undecidable;
+        continue;
+      }
+      if (current.hashes.has(engine.sourceHash) || current.shas.has(engine.sha)) continue;
+      await removeEngineDir(engine.root, deps.repoDir, git);
+      removed.push(engine.sourceHash);
+    } finally {
+      pin.release();
+    }
   }
   const building = new Set([...inFlight.keys()].map((k) => k.split("\0")[1]));
   const present = existsSync(enginesRoot(stateRoot)) ? readdirSync(enginesRoot(stateRoot), { withFileTypes: true }) : [];
@@ -636,7 +662,8 @@ export async function pruneEngineTrees(stateRoot: string, deps: PruneEngineOptio
       || (SHA256_HEX.test(name) && !building.has(name) && readRecord(join(enginesRoot(stateRoot), name)) === undefined);
     if (orphan) await removeEngineDir(join(enginesRoot(stateRoot), name), deps.repoDir, git);
   }
-  if (removed.length) log("engine.pruned", { removed });
+  if (removed.length) log("engine.pruned", { removed, ...(Object.keys(deferred).length ? { deferred } : {}) });
+  if (Object.keys(deferred).length) log("engine.prune_deferred", { engines: deferred });
   return removed;
 }
 

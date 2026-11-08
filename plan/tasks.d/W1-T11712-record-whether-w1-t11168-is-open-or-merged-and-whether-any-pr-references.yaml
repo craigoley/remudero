@@ -1,0 +1,24 @@
+- id: W1-T11712
+  title: Record whether W1-T11168 is open or merged and whether any PR references W1-T11169, before either is built
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T11169-a-dead-daemons-fix-seed-stays-settled-across-later-boots.yaml
+  acceptance:
+    - claim: The W1-T11169 shard note records the observed state of W1-T11168 at origin/main (queued, open PR, or merged, with the PR number and merge sha if any), so a builder can see at filing time whether the two edits to src/lib/sweep.ts can overlap
+      proof: "grep: build-order check W1-T11168 in plan/tasks.d/W1-T11169-a-dead-daemons-fix-seed-stays-settled-across-later-boots.yaml"
+    - claim: The same note lists every open or merged PR whose title, body, head ref or Remudero-Task trailer names W1-T11169, or states that none exists, and says which check found it
+      proof: "grep: PRs naming W1-T11169 in plan/tasks.d/W1-T11169-a-dead-daemons-fix-seed-stays-settled-across-later-boots.yaml"
+  origin: followup:W1-T11169-1794120655199:2026-11-08T06:57:06.245Z:1
+  rationale: >-
+    From the 2026-11-08 follow-up on W1-T11169-1794120655199, ratified via rmd approve:
+  
+    follow-up harvest [research]: Check whether W1-T11168 (the count backstop, also editing
+    `src/lib/sweep.ts`) is open or merged, and whether any PR already references W1-T11169. The
+    task note forbids parallel builds and the checkpoint may duplicate work. — from W1-T11169 (run
+    W1-T11169-1794120655199)

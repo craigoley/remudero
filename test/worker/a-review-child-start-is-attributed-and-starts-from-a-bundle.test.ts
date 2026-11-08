@@ -8,10 +8,10 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
-import { spawnRunChild } from "#src/lib/run-child.js";
+import { createDetachedWorkHost, runDetachedReview, spawnRunChild, type DetachedWorkSpec } from "#src/lib/run-child.js";
 import { materializeMainEntryFromStore } from "#src/lib/child-entry-store.js";
 import { RUN_CHILD_SCHEMA, writeStatus } from "#src/lib/run-child-contract.js";
-import { buildFreshTreeReviewRunner, buildReviewerCodeFreshnessGate, spawnRmdReviewForFreshTree } from "#src/run-task.js";
+import { buildFreshTreeReviewRunner, buildReviewerCodeFreshnessGate, reviewOptionFlags, reviewOptionsFromFlags, spawnRmdReviewForFreshTree } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const build = createRequire(import.meta.url)("#scripts/build-child-entries.mjs");
@@ -213,4 +213,54 @@ test("W1-T11152 criterion 2: a missing, unreadable or corrupt store preserves ts
       assert.equal(existsSync(join(f.tree, "dist")), false, "a miss must not build in the reviewer tree");
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   }
+});
+
+
+test("W1-T11432 criterion 2: detached and fresh-tree reviews preserve provider exclusions", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-t11432-child-exclusion-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const spawned: DetachedWorkSpec[] = [];
+  const host = createDetachedWorkHost({
+    stateRoot: root, repoDir: root, root, repo: "fixture", log: () => {}, readMode: () => "on",
+    readLedger: () => [{ step: "daemon.freshness_drain.completed", duration_ms: 9_000,
+      in_flight_reviews: 1, waited_on: [{ what: "review", kind: "review", settled_after_ms: 4_000 }] }],
+    spawn: (async (input: { work?: DetachedWorkSpec }) => {
+      assert.ok(input.work);
+      spawned.push(input.work);
+      return { started: true, runId: "detached-review-T11432", dir: root, pid: 1,
+        settled: Promise.resolve({}), abort: async () => ({}) };
+    }) as never,
+  });
+  const reviewAttemptId = "review-PR16758-12345678-1234-1234-1234-123456789012";
+  const exclusion = ["claude"] as const;
+  await host.spawnReview({
+    pr: { prNumber: 16758, headSha: "a".repeat(40), taskId: "W1-T9716", excludeProviders: exclusion },
+    reviewKey: "review-key-16758", reviewAttemptId,
+  });
+  assert.deepEqual(spawned[0]?.inputs, { repo: "fixture", reviewAttemptId, excludeProviders: ["claude"] });
+
+  let detachedOptions: { executionMode?: string; reviewAttemptId?: string; excludeProviders?: readonly string[] } | undefined;
+  await runDetachedReview(spawned[0]!, { runId: "detached-review-T11432", taskId: "W1-T9716" },
+    async (_pr, _rest, options) => { detachedOptions = options; return 0; });
+  assert.deepEqual(detachedOptions?.excludeProviders, ["claude"]);
+
+  const stale = {
+    status: "stale" as const,
+    codeSha: "c0de000000000000000000000000000000000000",
+    originMainSha: "fe94423b595a72b77bdb2ea7bf72daba603e3db7",
+    changedPaths: ["src/run-task.ts"],
+  };
+  let freshTreeArgs: string[] = [];
+  const gate = buildReviewerCodeFreshnessGate(
+    () => stale, () => {}, async () => assert.fail("stale review must run from a fresh tree"),
+    async (_pr, rest) => { freshTreeArgs = rest; return 0; },
+  );
+  const reviewOptions = { executionMode: "semantic" as const, reviewAttemptId, excludeProviders: [...exclusion] };
+  await gate.call("16758", ["--repo", "fixture"], reviewOptions as never);
+  assert.deepEqual(freshTreeArgs, [
+    "--repo", "fixture", "--execution-mode", "semantic", "--review-attempt-id", reviewAttemptId,
+    "--exclude-providers", "claude", "--judge-at-own-start",
+  ]);
+  assert.deepEqual(reviewOptionsFromFlags(freshTreeArgs), { ...reviewOptions, judgeAtOwnStart: true });
+  assert.deepEqual(reviewOptionFlags({ excludeProviders: ["claude", "claude"] }), ["--exclude-providers", "claude"]);
 });

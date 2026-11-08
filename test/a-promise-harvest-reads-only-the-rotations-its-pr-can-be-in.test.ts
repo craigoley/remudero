@@ -406,6 +406,8 @@ test("a legacy harvest hold recovers from its archive and the next sweep arms th
         taskId, prUrl, reviewInputDigest, ledgerPath: args.ledgerPath, runId: "harvest-recovered",
         state: verdict.state, description: verdict.summary, evidence: "executed",
         fetchLifecycle: () => ({ merged: false, closed: false }), post: status => { pr.reviewState = status.state; },
+        // W1-T11443: a SUCCESS reads the head's status history first; this head has no prior FAILURE.
+        readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       });
       assert.equal(posted.posted, true);
       writeFileSync(args.ledgerPath, readFileSync(args.ledgerPath, "utf8") + line({ step: "review.posted",

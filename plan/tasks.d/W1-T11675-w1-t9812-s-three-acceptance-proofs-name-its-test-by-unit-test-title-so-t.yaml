@@ -1,0 +1,30 @@
+- id: W1-T11675
+  title: W1-T9812's three acceptance proofs name its test by unit test title, so they resolve before the test file exists
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=214b1752757a8ef8
+  # backlog gardener: placed=2026-11-08T11:45:12.759Z
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T9812-the-pre-exit-pass-runs-beside-the-restart-drain.yaml
+  acceptance:
+    - claim: the restart-drain criterion of W1-T9812 is proved by a unit test title instead of a grep into a not-yet-written test file
+      proof: "grep: unit test: W1-T9812: the restart drain starts before the pre-exit pass settles in plan/tasks.d/W1-T9812-the-pre-exit-pass-runs-beside-the-restart-drain.yaml"
+    - claim: the exit-returns-after-the-pass criterion of W1-T9812 is proved by a unit test title
+      proof: "grep: unit test: W1-T9812: the restart still waits for the pre-exit pass to settle in plan/tasks.d/W1-T9812-the-pre-exit-pass-runs-beside-the-restart-drain.yaml"
+    - claim: the remaining-bound criterion of W1-T9812 is proved by a unit test title
+      proof: "grep: unit test: W1-T9812: what the pre-exit pass admits keeps the latch bound in plan/tasks.d/W1-T9812-the-pre-exit-pass-runs-beside-the-restart-drain.yaml"
+  origin: proof-debt:W1-T9812
+  rationale: >-
+    From the 2026-11-08 proposal on proof-debt:W1-T9812, ratified via rmd approve:
+  
+    proof-debt: W1-T9812 has 3 criterion(s) whose proof cannot resolve against the checkout (rmd
+    proof-queue-audit): criterion 0 (grep-path-absent) — "the restart drain waits on in-flight
+    work while the pre-exit pass is still running"; criterion 1 (grep-path-absent) — "the exit
+    still returns only after the pre-exit pass settles"; criterion 2 (grep-path-absent) — "work
+    the pre-exit pass admits is drained within the latch's remaining bound".

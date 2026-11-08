@@ -1,0 +1,218 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { test, type TestContext } from "node:test";
+
+// @ts-expect-error This JavaScript CLI module has no declaration file; the test covers its runtime exports.
+import { main, AUTHOR_MAX_WORKERS } from "#scripts/preflight-author.mjs";
+// @ts-expect-error This JavaScript CLI module has no declaration file; refusal behavior is asserted below.
+import { MacAuthorCapacityRefusal } from "#scripts/lib/mac-author-admission.mjs";
+import { testSlotQueueDir } from "#src/lib/test-slot-queue.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+type Selection = { fullRun: false; suites: string[]; narrow: string[]; reasons: string[] };
+
+function authorFixture(t: TestContext) {
+  const repo = gitRepo({ kind: "w1-t11583-author", seedCommit: false });
+  t.after(() => repo.cleanup());
+  const root = repo.dir;
+  for (const path of ["test/setup", "src", "scripts", "coverage"]) mkdirSync(join(root, path), { recursive: true });
+  writeFileSync(join(root, ".nvmrc"), `${process.versions.node}\n`);
+  writeFileSync(join(root, ".gitignore"), "node_modules\ncoverage\n");
+  const tsxTool = realpathSync(join(REPO_ROOT, "node_modules/.bin/tsx"));
+  const dependencyDonor = dirname(dirname(dirname(tsxTool)));
+  symlinkSync(dependencyDonor, join(root, "node_modules"));
+  writeFileSync(join(root, "package-lock.json"), readFileSync(join(REPO_ROOT, "package-lock.json")));
+  writeFileSync(join(root, "scripts/census-precheck.mjs"), "console.log('fixture census precheck passed');\n");
+  writeFileSync(join(root, "scripts/lint-plan-offline.mjs"), "console.log('fixture plan lint passed');\n");
+  writeFileSync(join(root, "test/setup/tmp-hygiene.ts"), "export {};\n");
+  writeFileSync(join(root, "src/run-task.ts"), "console.log('baseline');\n");
+  writeFileSync(join(root, "test/leaf.test.ts"), "import { test } from 'node:test'; test('leaf', () => {});\n");
+  repo.git("add", ".");
+  repo.git("commit", "-m", "test: baseline");
+  repo.addRemote("origin", root);
+  repo.git("checkout", "-b", "run-unfiled-w1-t11583-fixture");
+  const staticSource = `
+    import { mkdirSync, writeFileSync } from 'node:fs';
+    mkdirSync('coverage', {recursive: true});
+    writeFileSync('coverage/static-ran.json', JSON.stringify({static: true}));
+  `;
+  writeFileSync(join(root, "src/run-task.ts"), staticSource);
+  repo.git("add", ".");
+  repo.git("commit", "-m", "fix: exercise author validation");
+  return {
+    root,
+    receipt: () => JSON.parse(readFileSync(join(root, "coverage/preflight-author.json"), "utf8")),
+  };
+}
+
+const selection = (): Selection => ({
+  fullRun: false,
+  suites: ["test/leaf.test.ts"],
+  narrow: ["test/leaf.test.ts"],
+  reasons: ["W1-T11583 fixture"],
+});
+
+function slotEnvironment(t: TestContext): string {
+  const dir = join(mkdtempSync(join(tmpdir(), "rmd-w1-t11583-")), "slots");
+  mkdirSync(dir);
+  const keys = ["RMD_TEST_SLOT_DIR", "RMD_TEST_SLOTS", "RMD_TEST_SLOT_PARENT"] as const;
+  const saved = keys.map(key => [key, process.env[key]] as const);
+  process.env.RMD_TEST_SLOT_DIR = dir;
+  process.env.RMD_TEST_SLOTS = "4";
+  delete process.env.RMD_TEST_SLOT_PARENT;
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(join(dir, ".."), { recursive: true, force: true });
+  });
+  return dir;
+}
+
+function runAuthor(t: TestContext, input: {
+  cores: number;
+  load1: number;
+  headroomBytes: number;
+  refuse?: "pressure" | "disk";
+  emptySelection?: "plan-only" | "full-fallback";
+}) {
+  const f = authorFixture(t);
+  const dir = slotEnvironment(t);
+  const affectedArgs: string[][] = [];
+  const host = { cores: input.cores, load1: input.load1, headroomBytes: input.headroomBytes };
+  const spawn = (file: string, args: string[], options: Parameters<typeof spawnSync>[2]) => {
+    if (args.includes("test/leaf.test.ts")) affectedArgs.push(args);
+    return spawnSync(file, args, options);
+  };
+  const exitCode = main([], {
+    root: f.root,
+    select: input.emptySelection ? () => ({
+      fullRun: input.emptySelection === "full-fallback",
+      planOnly: input.emptySelection === "plan-only",
+      suites: [],
+      reasons: ["W1-T11583 empty selection fixture"],
+    }) : selection,
+    host: () => host,
+    spawn,
+    testSlot: {
+      dir,
+      queue: true,
+      slots: 4,
+      waitBoundMs: 0,
+      pollMs: 5,
+      load: () => ({ cores: input.cores, load1: input.load1 }),
+      memoryHeadroom: () => input.headroomBytes,
+      log: () => {},
+    },
+    admitHost: (stage: string) => {
+      if (stage === "affected-tests" && input.refuse) {
+        throw new MacAuthorCapacityRefusal(stage, {
+          state: "refused",
+          reason: input.refuse === "pressure" ? "host memory pressure" : "disk reserve unavailable",
+        });
+      }
+      return undefined;
+    },
+  });
+  return { exitCode, affectedArgs, receipt: f.receipt(), dir };
+}
+
+test("W1-T11583: empty selections cancel their ticket without requiring a suite slot", async (t) => {
+  for (const emptySelection of ["plan-only", "full-fallback"] as const) {
+    await t.test(emptySelection, (t) => {
+      const { exitCode, affectedArgs, receipt, dir } = runAuthor(t, {
+        cores: 8, load1: 0, headroomBytes: 32 * 1024 ** 3, emptySelection,
+      });
+      assert.equal(exitCode, emptySelection === "plan-only" ? 0 : 3);
+      assert.equal(receipt.verdict, emptySelection === "plan-only" ? "passed" : "over-capacity");
+      assert.equal(receipt.suiteQueue.ticketed, true);
+      assert.equal(receipt.suiteQueue.outcome, "cancelled");
+      assert.equal(receipt.suiteQueue.reason, "the selection names no suite");
+      assert.equal(receipt.testSlot, undefined);
+      assert.equal(existsSync(testSlotQueueDir(dir)), false, "cancellation removes the last ticket and its empty queue");
+      assert.deepEqual(readdirSync(dir).filter(name => /^slot-[0-9]+\.json$/.test(name)), []);
+      assert.deepEqual(affectedArgs, []);
+      assert.deepEqual(receipt.steps.map((step: { name: string }) => step.name), [
+        "census-precheck", "static-preflight", ...(emptySelection === "plan-only" ? ["lint-plan-fast"] : []),
+      ]);
+      if (emptySelection === "plan-only") {
+        assert.match(receipt.affectedTestsNotRunReason, /plan lint is its check/);
+      } else {
+        assert.deepEqual(receipt.partial.ran, []);
+        assert.equal(receipt.partial.leftToCi, 1);
+        assert.match(receipt.affectedTestsNotRunReason, /full-fallback: PARTIAL — ran 0 of 1 suite/);
+      }
+    });
+  }
+});
+
+test("W1-T11583 criterion 1: an idle eight-core host uses more than one author test worker", (t) => {
+  const { exitCode, affectedArgs, receipt } = runAuthor(t, {
+    cores: 8,
+    load1: 0,
+    headroomBytes: 32 * 1024 ** 3,
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(receipt.verdict, "passed");
+  assert.ok(receipt.executionWorkers > 1, "the measured idle host should grant more than one worker");
+  assert.ok(receipt.executionWorkers <= AUTHOR_MAX_WORKERS);
+  const argv = affectedArgs.find(args => args.includes("test/leaf.test.ts"));
+  assert.ok(argv, "the selected affected suite must run");
+  assert.ok(argv.includes(`--test-concurrency=${receipt.executionWorkers}`));
+  assert.equal(receipt.capacity.workers, receipt.executionWorkers);
+  assert.equal(receipt.testSlot.concurrency, receipt.executionWorkers);
+});
+
+test("W1-T11583 criterion 2: measured CPU and memory capacity still cap author test concurrency", async (t) => {
+  // Keep a positive control in this proof: the base must fail this task's removed
+  // one-worker ceiling, while the constrained cases below prove the new width
+  // still comes from measured CPU and memory capacity.
+  const idle = runAuthor(t, { cores: 8, load1: 0, headroomBytes: 32 * 1024 ** 3 });
+  assert.equal(idle.exitCode, 0);
+  assert.ok(idle.receipt.executionWorkers > 1, "the capacity path must use more than the removed fixed one-worker ceiling");
+  assert.ok(idle.receipt.executionWorkers <= AUTHOR_MAX_WORKERS);
+
+  for (const [name, input] of [
+    ["CPU", { cores: 3, load1: 0, headroomBytes: 32 * 1024 ** 3 }],
+    ["memory", { cores: 8, load1: 0, headroomBytes: 512 * 1024 ** 2 }],
+  ] as const) {
+    await t.test(name, (t) => {
+      const { exitCode, affectedArgs, receipt } = runAuthor(t, input);
+      assert.equal(exitCode, 0);
+      assert.equal(receipt.verdict, "passed");
+      assert.equal(receipt.capacity.workers, 1);
+      assert.equal(receipt.executionWorkers, 1);
+      const argv = affectedArgs.find(args => args.includes("test/leaf.test.ts"));
+      assert.ok(argv, "the selected affected suite must run");
+      assert.ok(argv.includes("--test-concurrency=1"));
+    });
+  }
+});
+
+test("W1-T11583 criterion 3: pressure or disk refusal does not spawn affected tests", async (t) => {
+  // A base control makes the proof discriminating: refusal stays safe after this
+  // change, and an otherwise idle host can now use more than one worker.
+  const idle = runAuthor(t, { cores: 8, load1: 0, headroomBytes: 32 * 1024 ** 3 });
+  assert.equal(idle.exitCode, 0);
+  assert.ok(idle.receipt.executionWorkers > 1, "the refusal path must coexist with measured multi-worker capacity");
+  assert.ok(idle.receipt.executionWorkers <= AUTHOR_MAX_WORKERS);
+
+  for (const refusal of ["pressure", "disk"] as const) {
+    await t.test(refusal, (t) => {
+      const { exitCode, affectedArgs, receipt } = runAuthor(t, {
+        cores: 8,
+        load1: 0,
+        headroomBytes: 32 * 1024 ** 3,
+        refuse: refusal,
+      });
+      assert.equal(exitCode, 3);
+      assert.equal(receipt.verdict, "over-capacity");
+      assert.equal(affectedArgs.length, 0, "a refused host admission must never start affected tests");
+    });
+  }
+});

@@ -7,6 +7,11 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
 import type { UsageSnapshot } from "../src/lib/headroom.js";
 import { laneDispatchBudget, runDrain } from "../src/lib/drain.js";
+import { runDaemon as runDaemonForTargetWip } from "#src/lib/daemon.js";
+import { createTargetWipMemory as createTargetWipMemoryForDispatch } from "#src/lib/target-wip-ownership.js";
+import { setImmediate as drainTargetWipMicrotasks } from "node:timers/promises";
+import { rmSync as rmTargetWipScratch } from "node:fs";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /**
  * W1-T172 PARALLEL DISPATCH — N concurrent lanes bounded by the queue
@@ -459,4 +464,144 @@ test("W1-T172: an indeterminate task is skipped with dispatch.indeterminate and 
   );
   assert.ok(lines.some((l) => l.step === "dispatch.indeterminate" && l.extra.task === "A"), "A's indeterminate skip is ledgered");
   assert.ok(indeterminate.includes("A"), "the caller's onIndeterminate hook fired for A");
+});
+
+// W1-T11626: drive the helper's actual counts through the daemon's existing CLI-shaped projection.
+function targetWipPlan(ids = ["A", "B", "C"]): Plan {
+  const tasks: Plan["tasks"] = ids.map((id) => ({ id, title: `private WIP ${id}`, repo: "remudero",
+    type: "implement", risk: "low", verify: "auto", attempts: 0, depends_on: [], status: "queued",
+    files: [`src/private-wip-${id}.ts`] }));
+  return { tasks, byId: new Map(tasks.map((task) => [task.id, task])) };
+}
+
+async function observeTargetWipDaemon(openPrCount: () => number, isOpenPr?: (id: string) => number | undefined) {
+  const started: string[] = [];
+  let sleeps = 0;
+  let sweeps = 0;
+  let now = Date.now();
+  const summary = await runDaemonForTargetWip(targetWipPlan(), {
+    refreshMerged: () => () => false,
+    openPrCount,
+    ...(isOpenPr ? { isOpenPr } : {}),
+    runOne: async (id) => { started.push(id); return okResult(id); },
+    sweep: async () => { sweeps++; },
+    sleep: async (ms) => { sleeps++; now += ms; },
+    now: () => new Date(now),
+    checkStop: () => sleeps >= 2 ? "private WIP control completed two held ticks" : undefined,
+  }, { max: 1, laneCount: 2, wipLimit: 2 });
+  return { summary, started, sleeps, sweeps };
+}
+
+function targetWipDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("W1-T11626 criterion 1: unreadable WIP after cached zero or safe positive holds new builds while maintenance continues", async () => {
+  const held = [];
+  for (const owned of [0, 1]) {
+    const read = createTargetWipMemoryForDispatch();
+    assert.equal(read("audit/managed", () => ({ owned, foreign: 4 })).source, "fresh");
+    const observations: Array<{ source: string; owned: number }> = [];
+    const result = await observeTargetWipDaemon(() => {
+      const reading = read("AUDIT/MANAGED", () => undefined);
+      observations.push({ source: reading.source, owned: reading.counts.owned });
+      return reading.counts.owned; // The production CLI's admission projection; history is not consulted here.
+    });
+    held.push({ cached: owned, ...result, observations });
+  }
+  assert.deepEqual(held.map((result) => result.started), [[], []], "neither cached zero nor a formerly safe positive may admit a new build");
+  for (const result of held) {
+    assert.equal(result.summary.stopReason, "stopped");
+    assert.equal(result.sleeps, 2, "the daemon remains alive through its controlled idle ticks");
+    assert.ok(result.sweeps >= 2, "review/sweep maintenance continues on its ordinary per-iteration path");
+    assert.ok(result.observations.length >= 2, "the real consumer re-observes WIP instead of ending the daemon");
+    assert.ok(result.observations.every((row) => row.source === "unreadable" && row.owned === Infinity));
+  }
+});
+
+test("W1-T11626 criterion 1: an unreadable refill preserves already-admitted child handles", async () => {
+  const read = createTargetWipMemoryForDispatch();
+  const first = targetWipDeferred<RunResult>();
+  const second = targetWipDeferred<RunResult>();
+  const both = targetWipDeferred<void>();
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}private-wip-children-`));
+  const started: string[] = [];
+  let unreadable = false;
+  let stopped = false;
+  let firstSettled = false;
+  let aborts = 0;
+  let detaches = 0;
+  const run = runDaemonForTargetWip(targetWipPlan(), {
+    refreshMerged: () => () => false,
+    openPrCount: () => read("audit/managed", () => unreadable ? undefined : { owned: 0, foreign: 0 }).counts.owned,
+    checkStop: () => stopped && firstSettled ? "private child control cleanup" : undefined,
+    sleep: async () => { throw new Error("the healthy child control must start before an idle wait"); },
+    runOne: (id, options) => {
+      started.push(id);
+      const settled = id === "A" ? first.promise.then((result) => { firstSettled = true; return result; })
+        : id === "B" ? second.promise : Promise.resolve(okResult(id));
+      options!.onChild!({ started: true, runId: `private-${id}`, dir, pid: process.pid, settled,
+        readPhase: () => "running",
+        abort: async () => { aborts++; return { signalled: false, reason: "private child is never signalled" }; },
+        detach: () => { detaches++; },
+      });
+      if (started.includes("A") && started.includes("B")) both.resolve();
+      return settled;
+    },
+  }, { max: 3, laneCount: 2, wipLimit: 3 });
+  try {
+    await Promise.race([both.promise, run.then(() => { throw new Error("daemon ended before admitting the healthy child controls"); })]);
+    unreadable = true;
+    second.resolve(okResult("B"));
+    await drainTargetWipMicrotasks();
+    assert.deepEqual(started, ["A", "B"], "unknown WIP refuses C on the freed lane while A remains live");
+    assert.equal(firstSettled, false, "already-admitted child A remains running");
+    assert.equal(aborts, 0, "withholding a new build never aborts a live child");
+    assert.equal(detaches, 0, "unknown WIP alone does not abandon existing child observation");
+  } finally {
+    stopped = true;
+    first.resolve(okResult("A"));
+    second.resolve(okResult("B"));
+    await run;
+    rmTargetWipScratch(dir, { recursive: true, force: true });
+  }
+  assert.equal(firstSettled, true, "the original child settles through the normal completion path");
+  assert.equal(aborts, 0);
+});
+
+test("W1-T11626 criterion 2: historical counts stay diagnostic and target-isolated; fresh recovery obeys the normal WIP and ownership guards", async () => {
+  const read = createTargetWipMemoryForDispatch();
+  read("audit/alpha", () => ({ owned: 0, foreign: 4 }));
+  read("audit/beta", () => ({ owned: 7, foreign: 2 }));
+  const unknown = read("AUDIT/ALPHA", () => undefined);
+  assert.deepEqual(unknown, { counts: { owned: Infinity, foreign: 0 }, source: "unreadable", lastKnownCounts: { owned: 0, foreign: 4 } });
+  assert.deepEqual(read("audit/beta", () => { throw new Error("private refused observation"); }),
+    { counts: { owned: Infinity, foreign: 0 }, source: "unreadable", lastKnownCounts: { owned: 7, foreign: 2 } });
+  assert.deepEqual(read("audit/alpha", () => ({ owned: 1, foreign: 3 })), { counts: { owned: 1, foreign: 3 }, source: "fresh" });
+  const recovered = await observeTargetWipDaemon(() => read("audit/alpha", () => ({ owned: 1, foreign: 3 })).counts.owned,
+    (id) => id === "A" ? 99 : undefined);
+  assert.deepEqual(recovered.started, ["B"], "genuine recovery admits under the unchanged bound and still excludes the owned-PR task");
+  assert.equal(recovered.summary.stopReason, "max_reached");
+  const atLimit = await observeTargetWipDaemon(() => read("audit/alpha", () => ({ owned: 2, foreign: 3 })).counts.owned);
+  assert.deepEqual(atLimit.started, [], "a fresh count at the original WIP limit still holds dispatch");
+  assert.equal(atLimit.summary.stopReason, "stopped");
+  const sibling = await observeTargetWipDaemon(() => read("AUDIT/BETA", () => ({ owned: 0, foreign: 2 })).counts.owned);
+  assert.deepEqual(sibling.started, ["A", "B"], "another target's healthy zero fills its two ordinary lanes without alpha's hold");
+  assert.deepEqual(read("audit/alpha", () => undefined),
+    { counts: { owned: Infinity, foreign: 0 }, source: "unreadable", lastKnownCounts: { owned: 2, foreign: 3 } },
+    "the next refusal retains only alpha's latest genuine reading as history");
+  let stopped = false;
+  const paused: string[] = [];
+  const pauseResult = await runDaemonForTargetWip(targetWipPlan(), {
+    refreshMerged: () => () => false,
+    openPrCount: () => read("audit/beta", () => ({ owned: 0, foreign: 0 })).counts.owned,
+    runOne: async (id) => { paused.push(id); return okResult(id); },
+    checkPause: () => "private unchanged operator pause",
+    checkStop: () => stopped ? "private paused control cleanup" : undefined,
+    sleep: async () => { stopped = true; },
+  }, { max: 1, laneCount: 2, wipLimit: 2 });
+  assert.deepEqual(paused, [], "a fresh count never bypasses PAUSE");
+  assert.equal(pauseResult.stopReason, "stopped");
 });

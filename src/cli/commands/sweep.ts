@@ -296,11 +296,13 @@ export function buildSweepEffects(
     reviewerHealthRoute ? reviewerHealthRoute(prArg, rest, opts, () => reviewerCodeGate.call(prArg, rest, opts)) : reviewerCodeGate.call(prArg, rest, opts);
   const reviewFallbackRunner =
     deps.reviewRunner ??
-    ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void) => {
+    ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void,
+      excludeProviders?: ReviewCommandDeps["excludeProviders"]) => {
       const args = ["--repo", deps.repo];
       const opts = { executionMode: "semantic" as const, planOnlyFiling: isPlanFiling,
         ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
-        ...(onPhase === undefined ? {} : { onPhase }) };
+        ...(onPhase === undefined ? {} : { onPhase }),
+        ...(excludeProviders?.length ? { excludeProviders: [...excludeProviders] } : {}) };
       return deps.reviewCommandImpl
         ? deps.reviewCommandImpl(String(_prNumber), args, opts)
         : reviewGateCall(String(_prNumber), args, opts);
@@ -329,7 +331,7 @@ export function buildSweepEffects(
         fallback_reason: reason,
         ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase, pr.excludeProviders);
     };
 
     if (mode.kind === "discriminate-only") {
@@ -375,7 +377,7 @@ export function buildSweepEffects(
             if (!discriminated.ok) {
               fallbackReason = discriminated.reason;
             } else {
-              const verdict: ReviewVerdict = {
+              let verdict: ReviewVerdict = {
                 ...discriminated.verdict,
                 reviewContractDigest: prior.reviewContractDigest,
                 ownDiffDigest: reuseInputs.currentOwnDiffDigest,
@@ -388,6 +390,7 @@ export function buildSweepEffects(
                 repo: deps.repo,
                 sha: pr.headSha,
                 state: verdict.state,
+                verdict,
                 description: reviewPostedDescription(verdict),
                 taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
                 evidence: reviewEvidenceStrength(verdict.criteria),
@@ -400,6 +403,7 @@ export function buildSweepEffects(
                 readRequiredContexts: readRequiredStatusCheckContextsAsync,
                 cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(deps.owner, deps.repo), ledgerPath: deps.ledgerPath, runId: reuseRunId }),
               });
+              if (discriminationPosted.effectiveVerdict) verdict = { ...discriminationPosted.effectiveVerdict, state: discriminationPosted.effectiveState ?? discriminationPosted.effectiveVerdict.state };
               if (!poster.failed()) onPhase?.("posted");
               if (!discriminationPosted.posted && !discriminationPosted.replayed) {
                 exitCode = 1;
@@ -425,7 +429,7 @@ export function buildSweepEffects(
                   proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
                   ...reviewLedgerLegibilityFields(verdict),
                 });
-                exitCode = 0;
+                exitCode = verdict.state === "success" ? 0 : 1;
               }
             }
           }
@@ -457,10 +461,10 @@ export function buildSweepEffects(
     if (mode.kind !== "reuse") {
       return fallbackToFullReview("unknown review reuse mode");
     }
-    const verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt }))?.decision_verdict as ReviewVerdict | undefined;
+    let verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt }))?.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase, pr.excludeProviders);
     }
     const poster = failureRecordingPoster();
     const reusedStatus = await postReviewStatusGuarded({
@@ -469,6 +473,7 @@ export function buildSweepEffects(
       repo: deps.repo,
       sha: pr.headSha,
       state: verdict.state,
+      verdict,
       description: reviewPostedDescription(verdict),
       taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
       evidence: reviewEvidenceStrength(verdict.criteria ?? []),
@@ -481,6 +486,7 @@ export function buildSweepEffects(
       readRequiredContexts: readRequiredStatusCheckContextsAsync,
       cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(deps.owner, deps.repo), ledgerPath: deps.ledgerPath, runId: reuseRunId }),
     });
+    if (reusedStatus.effectiveVerdict) verdict = { ...reusedStatus.effectiveVerdict, state: reusedStatus.effectiveState ?? reusedStatus.effectiveVerdict.state };
     if (!poster.failed()) onPhase?.("posted");
     if (!reusedStatus.posted && !reusedStatus.replayed) return 1;
     appendLedger(deps.ledgerPath, {
@@ -501,7 +507,7 @@ export function buildSweepEffects(
       proof_exec: verdict.criteria?.map((criterion) => criterion.proof_exec) ?? [],
       ...reviewLedgerLegibilityFields(verdict),
     });
-    return 0;
+    return verdict.state === "success" ? 0 : 1;
   };
   const effects = buildSweepEffectsFromLib({
     reproduceFailingTestsOnMainImpl: buildBaseReproductionProbe(deps.config, reviewRepoDir, deps.ledgerPath, deps.log),

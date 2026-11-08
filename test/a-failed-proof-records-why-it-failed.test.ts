@@ -67,6 +67,7 @@ test("W1-T6179: review.posted records the failure tail only for failed criteria"
   const root = mkdtempSync(join(tmpdir(), "rmd-failed-proof-"));
   const sha = "abc1234def5678abc1234def5678abc1234def56";
   const gh = ghShim([
+    { when: "/statuses?", stdout: "[[]]" },
     { when: "reviews?", stdout: "[]" },
     { when: "-X POST", stdout: "{}" },
     { when: "pulls/1", stdout: JSON.stringify({ number: 1, state: "open", body: "",

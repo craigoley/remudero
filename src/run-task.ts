@@ -539,6 +539,7 @@ import {
   newMonolithIdsAgainstBase,
   relintRefusalMessage,
   runRelintLoop,
+  type RelintViolation,
 } from "./lib/relint.js";
 import type { RunResult } from "./lib/run-result.js";
 import { dropTierRowsBeforePush, prePushGateRefusal } from "./lib/pre-push-refusal.js";
@@ -2152,19 +2153,20 @@ function acceptedReviewAttemptId(value: unknown, prNumber?: number): string | un
     (prNumber === undefined || value.startsWith(`review-PR${prNumber}-`)) ? value : undefined;
 }
 
-export function reviewOptionFlags(opts: Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "reviewAttemptId">): string[] {
+export function reviewOptionFlags(opts: Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "reviewAttemptId" | "excludeProviders">): string[] {
   const attemptId = acceptedReviewAttemptId(opts.reviewAttemptId);
   return [
     ...(opts.planOnlyFiling === undefined ? [] : [opts.planOnlyFiling ? "--plan-only-filing" : "--not-plan-only-filing"]),
     ...(opts.executionMode === undefined ? [] : ["--execution-mode", opts.executionMode]),
     ...(attemptId === undefined ? [] : ["--review-attempt-id", attemptId]),
+    ...(opts.excludeProviders?.length ? ["--exclude-providers", [...new Set(opts.excludeProviders)].join(",")] : []),
   ];
 }
 
 /** W1-T9727 — a fresh-tree review child is handed no start reading, so it takes its own (see {@link reviewCommand}). */
 export const JUDGE_AT_OWN_START_FLAG = "--judge-at-own-start";
 
-export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId"> {
+export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders"> {
   return reviewOptionsFromFlagsFromModule(reviewCommandHost(), rest);
 }
 
@@ -2925,7 +2927,7 @@ import {
   liveWritesExempt,
   LIVE_WRITE_OVERRIDE_ENV,
 } from "./lib/live-write-guard.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail } from "./lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, requestKick, consumeStop, isQuietHours, requestFleetPause, requestPause, requestStop, restartInPlaceVerb, resumeFleet, resumeFleetWide, sharedPauseRef, stopDetail, type SharedPauseGitDeps } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import { parseInstanceRegistry } from "./lib/instance-registry.js";
 import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type InboxCausalScope, type InboxInputReference } from "./lib/inbox-thread.js";
@@ -2944,7 +2946,7 @@ import { resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
 import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
-import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
+import { asOwnerRepoUnresolvable, resolveOwnerRepoAt, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
 let composedRealGraph: ComposedRealGraph | undefined;
@@ -12563,6 +12565,13 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       console.log(`no remudero-review posted (refused: ${posted.reason}): ${view.url}`);
       return 1;
     }
+    if (posted.effectiveState !== undefined && posted.effectiveState !== "success") {
+      log("review.posted", { context: REVIEW_CONTEXT, state: posted.effectiveState, head_sha: view.headRefOid,
+        pr_url: view.url, review_input_digest: inputDigest, review_engine_revision: DEP_REVIEW_ENGINE_REVISION,
+        dep_review: true, proof_exec: [], decision_verdict: posted.effectiveVerdict });
+      console.log(`remudero-review=${posted.effectiveState}: ${posted.effectiveVerdict?.summary ?? posted.reason}: ${view.url}`);
+      return 1;
+    }
     // W1-T230: armAutoMerge no longer trusts the live status just posted above
     // (display/branch-protection only from here on) — it keys off this
     // orchestrator's OWN ledgered `review.posted` verdict. This second judge
@@ -18668,6 +18677,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true || rest.includes("--offline");
   const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
+  let localRepoName: string | undefined;
+  try { localRepoName = resolveOwnerRepoAt(checkoutRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
@@ -19037,6 +19048,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
     opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
+    opts.localRepoName = localRepoName;
     opts.knownRepos = knownRepos;
     // W1-T9292: an unminted id BLOCKS only on a task this diff adds; one already on the base, every one in a whole-plan
     // pass, and every one when the base plan does not load (`newTaskIds` undefined) only WARNS.
@@ -34195,7 +34207,7 @@ export const TRIAGE_MAX_NEW_TASKS = 3;
 
 export async function triageCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
 ): Promise<number> {
   const cfg = opts.config ?? loadConfig();
   const lockPath = triageLockPath(cfg.root);
@@ -34227,7 +34239,7 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
 
 async function triageCommandLocked(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
 ): Promise<number> {
   const parsed = parseTriageArgs(rest);
   if ("error" in parsed) {
@@ -34467,6 +34479,7 @@ async function triageCommandLocked(
         { name: "feedback_raw", value: triageFeedbackBlock, external: true },
       ]),
     });
+    let changedTaskLint: PlanLintOutcome | undefined;
     const loop = await runRelintLoop<{ decision: ReturnType<typeof decideTriage>; changedFiles: string[] }>({
       lane: "triage",
       filedIds: reservedIds,
@@ -34502,19 +34515,27 @@ async function triageCommandLocked(
         const citation = verdict?.kind === "already_decided" ? unresolvedCitationReferents(verdict.citation, worktreeCitationEvidence(worktreePath)) : undefined;
         const decision = decideTriage({ verdict, changedFiles, citation });
         // A verdictless repair may retain only the proposal whose complete file scope it preserves.
-        if (decision.action === "error" && decision.cause === "unparseable_verdict" &&
-            previous?.decision.action === "propose" && changedFiles.length === previous.changedFiles.length &&
-            changedFiles.every(file => previous.changedFiles.includes(file))) {
-          return { decision: { ...previous.decision, files: changedFiles }, changedFiles };
+        const result = decision.action === "error" && decision.cause === "unparseable_verdict" &&
+          previous?.decision.action === "propose" && changedFiles.length === previous.changedFiles.length &&
+          changedFiles.every(file => previous.changedFiles.includes(file))
+          ? { decision: { ...previous.decision, files: changedFiles }, changedFiles }
+          : { decision, changedFiles };
+        changedTaskLint = result.decision.action === "propose"
+          ? await (opts.lintPlanForReviewFn ?? lintPlanForReview)(worktreePath)
+          : undefined;
+        if (changedTaskLint && !changedTaskLint.ran) {
+          log("triage.relint_plan_lint_unavailable", { attempt, reason: changedTaskLint.reason });
         }
-        return { decision, changedFiles };
+        return result;
       },
       filed: (r) => r.decision.action === "propose",
-      lint: () =>
-        lintFiledTasks(worktreePath, reservedIds, {
+      lint: () => [
+        ...lintFiledTasks(worktreePath, reservedIds, {
           taskRepoOwner: owner,
           newMonolithIds: newMonolithIdsAgainstBase(worktreePath),
         }),
+        ...(changedTaskLint ? planLintRelintViolations(changedTaskLint, reservedIds) : []),
+      ],
     });
     const { decision, changedFiles } = loop.decision;
     triageEnding = `verdict ${decision.action}`;
@@ -34882,7 +34903,7 @@ export const PLAN_MAX_NEW_TASKS = 5;
 
 export async function planCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
 ): Promise<number> {
   const parsed = parsePlanArgs(rest);
   if ("error" in parsed) {
@@ -34985,6 +35006,7 @@ export async function planCommand(
     // prompt drifted from `monolith-filing` for a fortnight, and the next drift will be found the
     // same way unless the linter itself is in the loop. `decidePlanArchitect` is UNCHANGED.
     let worker!: WorkerResult;
+    let changedTaskLint: PlanLintOutcome | undefined;
     const loop = await runRelintLoop({
       lane: "plan",
       filedIds: reservedIds,
@@ -35011,11 +35033,21 @@ export async function planCommand(
           ...workerLedgerFields(worker),
         });
         const changed = worktreeChangedFiles(worktreePath);
-        return { decision: decidePlanArchitect({ verdict: parsePlanVerdict(workerTranscript(worker)), changedFiles: changed }), changedFiles: changed };
+        const result = { decision: decidePlanArchitect({ verdict: parsePlanVerdict(workerTranscript(worker)), changedFiles: changed }), changedFiles: changed };
+        changedTaskLint = result.decision.action === "propose"
+          ? await (opts.lintPlanForReviewFn ?? lintPlanForReview)(worktreePath)
+          : undefined;
+        if (changedTaskLint && !changedTaskLint.ran) {
+          log("plan.relint_plan_lint_unavailable", { attempt, reason: changedTaskLint.reason });
+        }
+        return result;
       },
       filed: (r) => r.decision.action === "propose",
       // Only the ids THIS run reserved — the plan carries 193 tasks that already fail the linter.
-      lint: () => lintFiledTasks(worktreePath, reservedIds, { newMonolithIds: newMonolithIdsAgainstBase(worktreePath) }),
+      lint: () => [
+        ...lintFiledTasks(worktreePath, reservedIds, { newMonolithIds: newMonolithIdsAgainstBase(worktreePath) }),
+        ...(changedTaskLint ? planLintRelintViolations(changedTaskLint, reservedIds) : []),
+      ],
     });
 
     // Ground truth: what did the worker ACTUALLY touch, INCLUDING files it CREATED (impl-ER).
@@ -43224,6 +43256,7 @@ type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log
   config?: Config;
   github?: GitHub;
   readPr?: (args: string[]) => Promise<unknown>;
+  sharedPauseGit?: SharedPauseGitDeps;
   runRetroSubprocess?: typeof runAutomatedRetroSubprocess;
   reviewCommand?: typeof reviewCommand;
 };
@@ -43282,6 +43315,11 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     return planMemo = synced.plan;
   };
   let projection: Map<string, StatusProjection> | undefined;
+  let childPauseGit: SharedPauseGitDeps | undefined;
+  if (envelope !== undefined && !ports.hold && stopDetail(cfg().root) === undefined) {
+    childPauseGit = ports.sharedPauseGit ?? realDeps().sharedPauseGit;
+    await prepareSharedPause(cfg().root, childPauseGit);
+  }
   await runFixDispatchChild(inputs, {
     log: ports.log ?? log,
     claimFixAdmission: ports.claimFixAdmission ?? ((pr) => createSweepFixAdmissionController({
@@ -43295,7 +43333,7 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     hold: ports.hold ?? (() => {
       const stopped = stopDetail(cfg().root);
       if (stopped !== undefined) return `STOP: ${stopped}`;
-      const paused = checkSharedPause(cfg().root, realDeps().sharedPauseGit);
+      const paused = checkSharedPause(cfg().root, childPauseGit ??= ports.sharedPauseGit ?? realDeps().sharedPauseGit);
       return paused === undefined ? undefined : `PAUSE: ${paused}`;
     }),
     readLivePr: async (prUrl) => {
@@ -43319,6 +43357,8 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     dispatcher: () => ports.dispatcher ? ports.dispatcher(planNow()) : (ports.buildEffects ?? buildSweepEffects)({ productionProgressJudge: true,
         owner: ownerName(), repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
         plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY }),
+  }).finally(() => {
+    if (childPauseGit) disposeSharedPauseRefresh(childPauseGit);
   });
   return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
 }
@@ -43744,4 +43784,14 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     reviewOnlyLightPassDeps,
     createLightPassCompareReader,
   };
+}
+/** W1-T11254: feed the review's changed-task lint back into a lane only for ids it reserved. */
+function planLintRelintViolations(outcome: PlanLintOutcome, filedIds: readonly string[]): RelintViolation[] {
+  if (!outcome.ran) return [];
+  const filed = new Set(filedIds);
+  return outcome.violations.flatMap((violation) => {
+    const row = /^(\S+) \[([^\]]+)\] (.*)$/.exec(violation);
+    if (!row || !filed.has(row[1])) return [];
+    return [{ check: row[2], severity: "block" as const, message: row[1] + ": " + row[3] }];
+  });
 }

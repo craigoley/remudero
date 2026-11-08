@@ -19,6 +19,7 @@ import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type GitRunner } from "./git-fetch-retry.js";
 import { ensureWorktreeConfigEnabledAsync } from "./worktree-config.js";
 import { createHash, randomUUID } from "node:crypto";
+import type { SDKAssistantMessageError } from "@anthropic-ai/claude-agent-sdk";
 import {
   appendFileSync,
   closeSync,
@@ -220,6 +221,7 @@ import {
   resolveProviderRoutingPolicy,
   policyForCapability,
   selectWorkerProviderForPolicy,
+  type EffectiveProviderRoutingPolicy,
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
 import { cashDeploymentEndpoint } from "./config-schema.js";
@@ -274,6 +276,8 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  /** Internal producer receipt for W1-T11119; created only from a terminal provider stream. */
+  providerExchange?: ProviderExchangeReceiptV1;
   outputRetention?: {
     text: Omit<FileTail, "text">;
     blocks: Omit<FileTail, "text">;
@@ -451,6 +455,49 @@ export interface WorkerResult {
 export const DEFAULT_MODEL_LABEL = "default";
 export const DEFAULT_EFFORT_LABEL = "default";
 
+interface ProviderExclusionCandidateResult {
+  capacities: ProviderCapacity[];
+  excludeProviders: WorkerProviderId[];
+  exclusion_unhonoured?: { reason: "no-eligible-alternative"; excludedProviders: WorkerProviderId[] };
+}
+
+function providerExclusionCandidates(
+  capacities: ProviderCapacity[],
+  reservePercent: number,
+  excludeProviders: readonly WorkerProviderId[] | undefined,
+  routableProviders?: readonly WorkerProviderId[],
+): ProviderExclusionCandidateResult {
+  const excluded = [...new Set(excludeProviders ?? [])];
+  if (excluded.length === 0) return { capacities, excludeProviders: [] };
+  const considered = routableProviders === undefined ? capacities
+    : capacities.filter((capacity) => routableProviders.includes(capacity.provider));
+  const eligibleAlternative = considered.some((capacity) => !excluded.includes(capacity.provider) &&
+    providerEligibility(capacity, reservePercent).eligible);
+  if (eligibleAlternative) {
+    return { capacities: capacities.filter((capacity) => !excluded.includes(capacity.provider)), excludeProviders: excluded };
+  }
+  const eligibleExcluded = considered.some((capacity) => excluded.includes(capacity.provider) &&
+    providerEligibility(capacity, reservePercent).eligible);
+  return {
+    capacities,
+    excludeProviders: excluded,
+    ...(eligibleExcluded ? { exclusion_unhonoured: { reason: "no-eligible-alternative", excludedProviders: excluded } } : {}),
+  };
+}
+
+/** Apply the same exclusion rule as spawnWorker's auction so the no-alternative fallback stays testable. */
+export function selectWorkerProviderWithExclusions(
+  capacities: ProviderCapacity[],
+  policy: EffectiveProviderRoutingPolicy,
+  draw: number | RoutingDrawSeed,
+  excludeProviders: readonly WorkerProviderId[] = [],
+): ReturnType<typeof selectWorkerProviderForPolicy> & Omit<ProviderExclusionCandidateResult, "capacities"> {
+  const candidates = providerExclusionCandidates(capacities, policy.reservePercent, excludeProviders, policy.routableProviders);
+  return { ...selectWorkerProviderForPolicy(candidates.capacities, policy, draw),
+    excludeProviders: candidates.excludeProviders,
+    ...(candidates.exclusion_unhonoured ? { exclusion_unhonoured: candidates.exclusion_unhonoured } : {}) };
+}
+
 /** The routing decision recorded just before a worker call: an assignment, not a provider receipt
  * ({@link WorkerResult.servedModel} alone says what was served). Its bounded capacity snapshot makes a
  * later policy proposal reproducible without keeping a prompt, credential, reset-credit id or raw response. */
@@ -480,6 +527,8 @@ export interface WorkerSelectionAssignment {
       reservePercent: number;
       provenance: "default" | "overridden";
     };
+    excludeProviders?: WorkerProviderId[];
+    exclusion_unhonoured?: { reason: "no-eligible-alternative"; excludedProviders: WorkerProviderId[] };
     tightestRemainingPercent?: number;
     allocationSharePercent?: number;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
@@ -1150,6 +1199,9 @@ export interface SpawnWorkerArgs {
    * invented capacity telemetry.
    */
   mountProvider?: WorkerProviderId;
+  /** Providers to skip when an alternative subscription candidate is eligible. If no eligible alternative remains,
+   *  the existing route is preserved and the assignment names the unhonoured exclusion. */
+  excludeProviders?: readonly WorkerProviderId[];
   /** this spawn reached cash ONLY because the capacity auction found no subscription with
    *  readable headroom (the W1-T3692 fallback). Selects `dailyCapUsd.squeezed` over `.normal`. Set
    *  by that fallback alone -- routine mount-affinity cash work must never carry it, or the raised
@@ -1251,6 +1303,10 @@ export interface SpawnWorkerArgs {
    * inherits them and the orphan sweep attributes a stray survivor back to its run and task. Optional: omitting them still
    * gets process-group containment, but a survivor cannot be re-attributed if teardown itself never ran (W1-T117). */
   runId?: string;
+  /** Internal coding-canary identity; never included in the worker prompt. */
+  canaryAttemptId?: string;
+  /** Internal worker-spawn identity, assigned by spawnWorker before the reducer runs. */
+  workerSpawnAttemptId?: string;
   taskId?: string;
   /** Synchronous, durable sink for the pre-execution provider/model assignment. The worker
    * catches a sink failure and does not start attributing terminal rows to an event it could not
@@ -1661,6 +1717,7 @@ export function workerSelectionAssignment(
       reservePercent: number;
       provenance: "default" | "overridden";
     };
+    exclusion_unhonoured?: { reason: "no-eligible-alternative"; excludedProviders: WorkerProviderId[] };
     selection?: ProviderSelection;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
     capabilityPreference?: { capability: string; provider: WorkerProviderId };
@@ -1700,6 +1757,8 @@ export function workerSelectionAssignment(
         reservePercent: input.policy.reservePercent,
         provenance: input.policy.provenance,
       },
+      ...(args.excludeProviders?.length ? { excludeProviders: [...new Set(args.excludeProviders)] } : {}),
+      ...(input.exclusion_unhonoured ? { exclusion_unhonoured: input.exclusion_unhonoured } : {}),
       ...(input.selection ? { tightestRemainingPercent: input.selection.tightestRemainingPercent } : {}),
       ...(input.selection?.allocationSharePercent !== undefined
         ? { allocationSharePercent: input.selection.allocationSharePercent }
@@ -2424,7 +2483,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       assignment = snapshot;
     },
   } : args;
-  const result = await spawnWorkerImpl(spawnArgs);
+  const result = await spawnWorkerImpl({ ...spawnArgs, workerSpawnAttemptId: attemptId });
   result.executionEvidence = workerExecutionEvidence(attemptId, result, assignment);
   return result;
 }
@@ -2550,6 +2609,14 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   if (args.mountProvider !== undefined) {
     args.mountProvider = canonicalWorkerProviderId(args.mountProvider) as WorkerProviderId;
   }
+  if (args.excludeProviders?.length) {
+    args.excludeProviders = [...new Set(args.excludeProviders.map((provider) => canonicalWorkerProviderId(provider) as WorkerProviderId))];
+  }
+  // A reviewer mount normally pins its provider. A re-admission exclusion takes precedence only when it names that provider.
+  // Overflow is reached only after the auction has no eligible alternative; keep its explicit Claude mount so the
+  // API-credit last resort runs once instead of re-entering the same excluded-provider auction.
+  if (args.mountProvider && args.excludeProviders?.includes(args.mountProvider) &&
+      args.routingFallback?.rule !== "overflow-fallback") args.mountProvider = undefined;
   if (args.mountProvider && !enabledWorkerProviders(config).includes(args.mountProvider)) {
     throw new Error(`mount provider '${args.mountProvider}' is not enabled by the committed host config`);
   }
@@ -2575,6 +2642,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const claudeHealthRoute = providers.includes("claude")
     ? await resolveWorkerClaudeHealth(args, capabilities)
     : undefined;
+  let assignmentExclusionUnhonoured: WorkerSelectionAssignment["routing"]["exclusion_unhonoured"];
+  if (providers.length === 1 && providers[0] === "claude" && args.excludeProviders?.includes("claude") &&
+      claudeHealthRoute?.eligible) {
+    assignmentExclusionUnhonoured = { reason: "no-eligible-alternative", excludedProviders: [...args.excludeProviders] };
+  }
   if (claudeHealthRoute) {
     console.error(JSON.stringify({
       event: "worker.model_health.resolved",
@@ -2671,9 +2743,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         capabilities?.providerPreference,
       );
       routedCapabilityPreference = auction.capabilityPreference;
+      const initialCandidates = providerExclusionCandidates(
+        capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders,
+      );
       // W1-T5535: the draw key is read BEFORE the learner may re-read a Codex model, so a task's experiment enrolment
       // is judged on the arms the auction would have drawn without the learner.
-      const keyed = auctionDrawSeed(args, auction.policy, capacities, requestedCapability);
+      const keyed = auctionDrawSeed(args, auction.policy, initialCandidates.capacities, requestedCapability);
       const draw = args.providerRouting?.draw ?? keyed;
       const learned = args.providerRouting?.learnedArms;
       let fixLearning: { mixing: ProviderMixing; weights: FixRoutingWeights } | undefined;
@@ -2690,17 +2765,22 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           fixLearning = { mixing: learning.mixing, weights: learning.weights };
         }
       }
+      const finalCandidates = providerExclusionCandidates(
+        capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders,
+      );
       const routed = fixLearning
         ? {
           selection: selectWorkerProvider(
-            capacities.filter((capacity) => auction.policy.routableProviders.includes(capacity.provider)),
+            finalCandidates.capacities.filter((capacity) => auction.policy.routableProviders.includes(capacity.provider)),
             auction.policy.reservePercent, draw, fixLearning.mixing,
           ),
           preferenceBypass: undefined,
+          exclusion_unhonoured: finalCandidates.exclusion_unhonoured,
         }
-        : selectWorkerProviderForPolicy(capacities, auction.policy, draw);
+        : selectWorkerProviderWithExclusions(capacities, auction.policy, draw, args.excludeProviders);
       selection = routed.selection;
       preferenceBypass = routed.preferenceBypass;
+      assignmentExclusionUnhonoured = routed.exclusion_unhonoured;
       const learnedProbabilities = selection.draw?.learned?.probabilities;
       if (fixLearning && learned && learnedProbabilities) {
         emitFixRoutingDecision(learned, fixRoutingDecisionFields({
@@ -2904,6 +2984,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         preferenceBypass,
         capabilityPreference: routedCapabilityPreference,
         capability: requestedCapability,
+        exclusion_unhonoured: assignmentExclusionUnhonoured,
       });
       let measurement: ProviderWindowMeasurement | undefined;
       try {
@@ -3428,6 +3509,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       preferenceBypass: routedClaudePreferenceBypass,
       capabilityPreference: routedCapabilityPreference,
       capability: requestedCapability,
+      exclusion_unhonoured: assignmentExclusionUnhonoured,
     });
 
     let unregisterRunningWorker: (() => void) | undefined;
@@ -3508,6 +3590,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             root: config.root,
             runId: args.runId,
             taskId: args.taskId,
+            ...(args.runId && args.canaryAttemptId && args.workerSpawnAttemptId ? { providerExchangeBinding: {
+              runId: args.runId, canaryAttemptId: args.canaryAttemptId, workerSpawnAttemptId: args.workerSpawnAttemptId,
+            } } : {}),
             // The SAME injected clock the watchdog polls against. Invariant: every `tsMs` this observer sees comes from ONE
             // clock, never a real `Date.now()` racing the watchdog's synthetic one. `undefined` falls back to
             // collectWorkerResult's own `Date.now` (W1-T1045).
@@ -3957,6 +4042,27 @@ function detectSafeguardRefusal(raw: unknown): WorkerResult["safeguardRefusal"] 
   };
 }
 
+/** Positive-only coding-canary exchange receipt. W1-T11119 validates these bindings before analysis. */
+export interface ProviderExchangeBindingV1 { runId: string; canaryAttemptId: string; workerSpawnAttemptId: string }
+export interface ProviderExchangeReceiptV1 extends ProviderExchangeBindingV1 {
+  version: "canary-provider-exchange-v1";
+  outcome: "assistant-model" | "provider-response-error";
+  model?: string;
+  error?: string;
+}
+const PROVIDER_RESPONSE_ERRORS = new Set<SDKAssistantMessageError>([
+  "authentication_failed", "oauth_org_not_allowed", "account_on_hold", "verification_required",
+  "billing_error", "rate_limit", "overloaded", "invalid_request", "model_not_found", "server_error",
+  "max_output_tokens",
+]);
+function isProviderResponseError(error: unknown): error is SDKAssistantMessageError {
+  return typeof error === "string" && PROVIDER_RESPONSE_ERRORS.has(error as SDKAssistantMessageError);
+}
+function sealProviderExchange(binding: ProviderExchangeBindingV1, detail: Omit<ProviderExchangeReceiptV1,
+  "version" | keyof ProviderExchangeBindingV1>): ProviderExchangeReceiptV1 {
+  return Object.freeze({ version: "canary-provider-exchange-v1", ...binding, ...detail });
+}
+
 /** Reduce the SDK message stream into a {@link WorkerResult}. Split out of spawnWorker so the error-envelope behaviour is
  * unit-testable without a real worker. TRAP (SDK 0.3.209, the WS-1 root cause): the SDK YIELDS the `type:"result"` envelope
  * for an error subtype — carrying `num_turns` and `total_cost_usd` — and only THEN throws, so letting that throw escape loses
@@ -3967,6 +4073,7 @@ export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
     childEnvKeys: string[];
+    providerExchangeBinding?: ProviderExchangeBindingV1;
     root?: string;
     runId?: string;
     taskId?: string;
@@ -4040,6 +4147,7 @@ export async function collectWorkerResult(
   // WorkerResult.servedModel}. `undefined` until a genuine value is observed, so a stream carrying none falls through to the
   // explicit-unknown branch below, never a guess (W1-T2572).
   let servedModel: string | undefined;
+  let providerExchangeDetail: Omit<ProviderExchangeReceiptV1, "version" | keyof ProviderExchangeBindingV1> | undefined;
   let initSummary: WorkerInitSummary | undefined;
   const compactionEvents: CompactionEvent[] = [];
   const compactionFailures: CompactionFailure[] = [];
@@ -4073,7 +4181,18 @@ export async function collectWorkerResult(
         // Read verbatim off the SAME per-message field `apiError` reads — the ONE place the live stream names what generated
         // this turn. Never `modelUsage`, a post-hoc cost breakdown, and never `<synthetic>`, an error placeholder. Last real
         // value wins (W1-T2572).
+        const normalizedModel = typeof model === "string" ? model.trim() : "";
+        const hasRealModel = normalizedModel.length > 0 && normalizedModel !== "<synthetic>";
+        // Preserve the existing servedModel evidence verbatim; normalization is only for this new receipt.
         if (typeof model === "string" && model.length > 0 && model !== "<synthetic>") servedModel = model;
+        if (rawAny.error === "cloud_credential_error" || rawAny.error === "unknown") {
+          // Credential errors are local; unknown has no provider-response guarantee.
+        } else if (hasRealModel) {
+          providerExchangeDetail = { outcome: "assistant-model", model: normalizedModel };
+        } else if (isProviderResponseError(rawAny.error)) {
+          // This exact SDK response-error field proves a provider reply; cloud_credential_error is excluded.
+          providerExchangeDetail = { outcome: "provider-response-error", error: rawAny.error };
+        }
         // A streamed block carries `stop_reason: null`, so only a real string replaces an earlier one.
         const messageStopReason = (msg.message as { stop_reason?: unknown })?.stop_reason;
         if (typeof messageStopReason === "string" && messageStopReason.length > 0) assistantStopReason = messageStopReason;
@@ -4245,7 +4364,7 @@ export async function collectWorkerResult(
   const firstTextOffsetMs = firstTextAtMs === undefined ? undefined : firstTextAtMs - startedAtMs;
   const firstTextInvalidAtEnd = firstTextOffsetMs !== undefined
     && (!Number.isFinite(workerDurationMs) || workerDurationMs < 0 || workerDurationMs < firstTextOffsetMs);
-  return {
+  const result: WorkerResult = {
     ...(opts.lostGrants?.length ? { lostGrants: opts.lostGrants } : {}),
     ...(opts.credentialHelperUnwired ? { credentialHelperUnwired: opts.credentialHelperUnwired } : {}),
     sessionId,
@@ -4293,6 +4412,9 @@ export async function collectWorkerResult(
       ? { workerFirstTextReason: "first-text-clock-nonmonotonic" }
       : {}),
   };
+  if (sawResult && providerExchangeDetail && opts.providerExchangeBinding)
+    result.providerExchange = sealProviderExchange(opts.providerExchangeBinding, providerExchangeDetail);
+  return result;
 }
 
 // ── Deny-floor containment probe: the dontAsk fallback state machine ───────

@@ -55,6 +55,7 @@ test("the two causes carry different ledger reasons", async () => {
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *"/statuses?"*) echo '[[]]' ;;
       *pulls/*) echo '{"number":1,"html_url":"${PR_URL}","updated_at":"t","body":"","head":{"ref":"run-W1-T3365-1790054788234","sha":"${HEAD_SHA}"}}' ;;
       *) echo '{}' ;;
     esac ;;

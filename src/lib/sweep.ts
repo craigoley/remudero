@@ -94,7 +94,7 @@ import {
   securityArmRefusalAtHead, securityHoldReason, securityPolicyCause, type SecurityArmRefusal,
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
-import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
+import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync, type GhJsonReadOptions } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
@@ -1574,10 +1574,11 @@ export interface BuildSweepEffectsDeps {
   plan: Plan;
   log: (step: string, extra?: Record<string, unknown>) => void;
   policy?: SweepPolicy;
-  reviewRunner?: (prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void) => Promise<number>;
+  reviewRunner?: (prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void,
+    excludeProviders?: readonly WorkerProviderId[]) => Promise<number>;
   /** W1-T3798 — reuse/discrimination is an explicit mode, so the adapter can run the cheap
    *  deterministic path instead of silently treating both dispositions as a full review. */
-  reviewReuseRunner?: (pr: OpenPrView, mode: ReviewDispatchMode, reviewAttemptId?: string, onPhase?: (phase: string) => void) => Promise<number>;
+  reviewReuseRunner?: (pr: ReviewDispatchPr, mode: ReviewDispatchMode, reviewAttemptId?: string, onPhase?: (phase: string) => void) => Promise<number>;
   /** The command the DEFAULT `reviewRunner` above calls. Separate from `reviewRunner` on purpose:
    *  overriding `reviewRunner` replaces the default outright and leaves its opt-in untested, while
    *  this seam keeps the default arm itself — the one that names `executionMode: "semantic"` — as
@@ -1591,7 +1592,8 @@ export interface BuildSweepEffectsDeps {
   reviewCommandImpl?: (
     pr: string,
     args: string[],
-    opts: { executionMode: "semantic"; planOnlyFiling?: boolean; reviewAttemptId?: string; onPhase?: (phase: string) => void },
+    opts: { executionMode: "semantic"; planOnlyFiling?: boolean; reviewAttemptId?: string; onPhase?: (phase: string) => void;
+      excludeProviders?: readonly WorkerProviderId[] },
   ) => Promise<number>;
   spawnImpl?: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
   pushEmptyCommit?: typeof gitPushEmptyCommit;
@@ -1717,6 +1719,11 @@ export type ReviewDispatchMode =
   | { kind: "full-review" }
   | { kind: "reuse"; judgedHeadSha: string }
   | { kind: "discriminate-only"; judgedHeadSha: string };
+
+/** Options derived when admitting this review, rather than facts read by the PR-view producer. */
+export interface ReviewDispatchPr extends OpenPrView {
+  excludeProviders?: readonly WorkerProviderId[];
+}
 
 /**
  * The default `gh` invocation for {@link buildSweepEffects}' `ghRunImpl` seam — a NAMED function
@@ -2566,12 +2573,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // survives the positional-parameters-to-one-deps-object collapse verbatim — the sweep's
   // post-review lane still routes through reviewCommand, and nothing but `deps.reviewRunner`
   // can override it.
-  let reviewRunner: NonNullable<BuildSweepEffectsDeps["reviewRunner"]> = (prNumber, isPlanFiling, reviewAttemptId, onPhase) =>
+  let reviewRunner: NonNullable<BuildSweepEffectsDeps["reviewRunner"]> = (prNumber, isPlanFiling, reviewAttemptId, onPhase, excludeProviders) =>
     reviewCommandImpl(String(prNumber), ["--repo", repo], {
       executionMode: "semantic",
       planOnlyFiling: isPlanFiling,
       ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
       ...(onPhase === undefined ? {} : { onPhase }),
+      ...(excludeProviders === undefined ? {} : { excludeProviders: [...excludeProviders] }),
     });
   if (deps.reviewRunner) reviewRunner = deps.reviewRunner;
 
@@ -3250,7 +3258,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         const exit = await reviewPhaseObserver.run(phase, async () =>
           mode.kind === "full-review" || !deps.reviewReuseRunner
-            ? await reviewRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, phase)
+            ? await reviewRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, phase, pr.excludeProviders)
             : await deps.reviewReuseRunner(pr, mode, reviewAttemptId, phase));
         log("sweep.post_review.done", {
           ...(postedAtMs === undefined ? {} : { post_to_settle_ms: Math.max(0, systemClock.now() - postedAtMs) }),
@@ -14380,7 +14388,7 @@ export interface SweepDeps {
    *  per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
    *  W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
    *  with each review-input key claimed synchronously before scheduling. */
-  postReview?: (pr: OpenPrView, mode?: ReviewDispatchMode, reviewAttemptId?: string, onPhase?: (phase: string) => void) => void | Promise<void>;
+  postReview?: (pr: ReviewDispatchPr, mode?: ReviewDispatchMode, reviewAttemptId?: string, onPhase?: (phase: string) => void) => void | Promise<void>;
   /** W1-T3581 — provenance of the module graph THIS daemon process loaded at boot. A stale
    * reviewer-code refusal may bypass its ordinary time backoff only when this narrow predicate
    * proves the loaded code is at or after the refusal's recorded origin/main target. Omitted
@@ -14876,6 +14884,28 @@ function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray
   const observation = verdict?.promisedFollowUpObservation;
   return observation?.state === "unknown" && (observation.cause === "promise-harvest-incomplete" ||
     /^promise harvest (?:unavailable:|corpus is unreadable)/.test(observation.reason));
+}
+
+/** Carry the reviewer-unavailable provider from the exact pending review that is about to be re-admitted. */
+export function reviewerUnavailableProvidersForReadmission(
+  pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha" | "taskId" | "reviewState" | "reviewPendingSince" | "reviewInputDigest">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): WorkerProviderId[] | undefined {
+  if (pr.reviewState !== "pending") return undefined;
+  const taskId = reviewOutcomeTaskIdFor(pr);
+  const pending = lines.findLast((row) => row.task_id === taskId && row.pr_url === pr.prUrl && row.head_sha === pr.headSha &&
+    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+  if (pending?.step !== "review.posted" || pending.state !== "pending") return undefined;
+  if (pending.review_input_digest !== undefined && pr.reviewInputDigest !== undefined &&
+      pending.review_input_digest !== pr.reviewInputDigest) return undefined;
+  if (pr.reviewPendingSince && typeof pending.ts === "string" && Date.parse(pr.reviewPendingSince) > Date.parse(pending.ts)) return undefined;
+  const verdict = pending.decision_verdict as ReviewVerdict | undefined;
+  if (verdict?.cannotEvaluate !== true) return undefined;
+  const criteria = verdict.criteria;
+  if (!Array.isArray(criteria) || !criteria.some((criterion) => criterion.reviewerUnavailable !== undefined)) return undefined;
+  const reviewer = lines.findLast((row) => row.step === "review.reviewer" && row.run_id === pending.run_id);
+  if (typeof reviewer?.unable !== "number" || reviewer.unable <= 0 || !isWorkerProviderId(reviewer.provider)) return undefined;
+  return [reviewer.provider];
 }
 
 /** W1-T11132 criterion 2. True when the head's latest review is pending for NO cause but `inconclusive_load` proofs and
@@ -17216,7 +17246,7 @@ export interface DetachedWorkHost {
   mode: () => "off" | "shadow" | "on";
   /** Starts one review as a child, or `undefined` when it stays in process (the mode, the placement, no engine, no admission). */
   spawnReview: (input: {
-    pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean };
+    pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean; excludeProviders?: readonly WorkerProviderId[] };
     reviewKey: string;
     reviewAttemptId: string | undefined;
   }) => Promise<ReviewChildLaunch | undefined>;
@@ -20245,7 +20275,7 @@ export async function runSweep(
     // each other, bounded by `reviewLanes` after the loop.
   const pendingReviews: Array<{
     index: number;
-    pr: OpenPrView;
+    pr: ReviewDispatchPr;
     reason: string;
     question: ClarificationQuestion | undefined;
     // W1-T513: carried alongside the job so both release sites release the SAME key they claimed;
@@ -23767,14 +23797,16 @@ export async function runSweep(
       // W1-T2771: discovery is not execution and therefore owns no mutex. Carry the stable key into
       // the pool, where `claimReview` atomically claims it immediately before the attempt.
       const reviewKey = reviewOutcomeKeyForPr(pr);
+      const excludedProviders = reviewerUnavailableProvidersForReadmission(pr, ledgerLines);
+      const dispatchPr: ReviewDispatchPr = excludedProviders?.length ? { ...pr, excludeProviders: excludedProviders } : pr;
       // W1-T9047: discriminate-only is then decided by main's reach.
       const requested = reviewDispatchModeFor(pr, disposition);
-      const mode = await reviewModeWithReach(pr, requested);
+      const mode = await reviewModeWithReach(dispatchPr, requested);
       const jobReason = mode.kind === "full-review" || disposition !== "post-review"
         ? reason
         : `${reason} — the head only took main since the verdict on ${mode.judgedHeadSha.slice(0, 7)}; ` +
           `${mode.kind === "reuse" ? "reusing that verdict" : "re-running discrimination alone"} (W1-T9047)`;
-      pendingReviews.push({ index: prIndex, pr, reason: jobReason, question, reviewKey, mode });
+      pendingReviews.push({ index: prIndex, pr: dispatchPr, reason: jobReason, question, reviewKey, mode });
       continue;
     }
 

@@ -1,0 +1,75 @@
+- id: W1-T11617
+  title: A recycle keeps inherited selection reads mount-only and preserves mixed drift refusals
+  repo: remudero
+  depends_on: [W1-T11454, W1-T11431]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "Operator-approved bounded follow-up to merged PR #17160, 2026-11-07"
+  plan_refs: [W1-T11454, W1-T11431, W1-T1069, W1-T3596, W1-T10573]
+  files: [deploy/recycle-container.sh, test/recycle-container.test.ts]
+  priority: 2
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T11454 source d35ad6af0491494dd03a0e4dbb62ad6804aee8a0 merged in
+    8176705d0e64e98a0d2ebdc45133071209381d10 through PR #17160 on 2026-11-07.
+    Its same-head review at 16:25:42Z named normal-inheritance Config.Env value
+    extraction and an early orphan-selection refusal hiding unrelated runtime drift.
+    The existing repair owner reproduced both on unchanged source. Formal pinned
+    Node/native-runner TAP controls at 18:01Z report three tests, one pass and two
+    assertion failures; the retained-catalog safe-leave control passes. The earlier
+    spec-reporter observation is diagnostic only. Temporary probes were reverted.
+    Original task credit is complete; this is a separate approved two-path repair.
+    Main and ten captured open PR head trees contain the original W1-T11454 contract
+    as a positive control, with no distinct specific follow-up task found. Generic
+    unknown/refusal matches were unrelated and do not establish duplication.
+    Public status reversal does not diagnose reviewer causation: internal finding
+    acknowledgments have not been audited. This task repairs the two source defects.
+  design: |
+    For normal inheritance, derive the host source and qualified launch packet only
+    from the bounded Mounts reader and existing selected-registry file reader. Separate
+    detection of selection variable presence from extraction of selection path, digest
+    and file-binding values, which is needed only for explicit leave qualification.
+    Preserve unrelated runtime environment retention and existing captured identity
+    checks. Never derive the inherited host source from container environment values.
+    Preserve invalid explicit selection and invalid/unreadable mount refusal before
+    mutation. Do not print private paths, file bytes or variable values.
+    Preserve or classify unrelated runtime drift before a selection-specific early
+    refusal can hide it. Orphan/malformed selection plus an undeclared unrelated
+    runtime variable retains the existing unrelated refusal and its remedy; only
+    selection-only drift receives the selection-specific remedy. No refusal permits
+    stop, replacement or a selection-success effect. Keep existing lock, STOP, PAUSE,
+    drain, image qualification, identity recheck and rollback guards unchanged.
+    Preserve PR #17180's approved leave contract: never discard a possible catalog,
+    infer an alias from path equality, add an empty-value/off sentinel, or change the
+    selector. A retained catalog that would reactivate selection still refuses.
+    Add regression cases in the existing contained real-script Docker fixture. Keep
+    every existing test input, assertion, expected value, timeout and skip unchanged.
+    Before production edits, retain formal unchanged-source TAP showing the two
+    failures and the passing catalog control. Show deletion falsifiers, the full
+    affected fixture, source instrumentation and diff coverage, census membership,
+    literal preflight PASS, actual author receipt and required hosted CI/review.
+    Build only after this separate plan merges and fresh ownership, duplicate,
+    dependency, merge-credit, selector and fleet checks permit the existing S4 owner.
+  acceptance:
+    - claim: "Normal selected-container inheritance derives its host source and qualified packet from Mounts and the file reader without extracting selected path, digest or file-binding values from captured Config.Env; invalid inputs refuse before mutation"
+      proof: "grep: W1-T11617 criterion 1 in test/recycle-container.test.ts"
+    - claim: "Mixed orphan or malformed selection and unrelated undeclared runtime drift preserves the unrelated refusal and remedy; only selection-only drift gets the scoped selection remedy, and all refusals prevent replacement and selection-success effects"
+      proof: "grep: W1-T11617 criterion 2 in test/recycle-container.test.ts"
+  note: |
+    Human approved the exact two paths and $5/high/span follow-up on 2026-11-07.
+    The existing S4 repair chat remains the intended implementation owner after plan
+    merge and fresh fences. Record decisions and exact evidence under Decisions in
+    each PR and in luna/REPORTS.md. No additional path, existing-input change, gate
+    allowance, retry/spend expansion, provider action or runtime authority is granted.
+    Source-only holds remain: no real Docker replacement, Azure write, private registry
+    change, image build, recycle, release or live configuration operation.
+  falsifier: |
+    Restore unconditional selection value extraction outside explicit leave: criterion
+    1 fails. Restore the selection-specific early exit before unrelated drift handling:
+    criterion 2's mixed-drift refusal/remedy control fails. Keep the passing catalog
+    control to prove that fixing these defects does not discard the approved contract.
