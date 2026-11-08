@@ -498,7 +498,7 @@ function targetWipDeferred<T>() {
   return { promise, resolve };
 }
 
-test("W1-T11626 criterion 1: unreadable WIP after cached zero or safe positive holds new builds while maintenance and live children continue", async () => {
+test("W1-T11626 criterion 1: unreadable WIP after cached zero or safe positive holds new builds while maintenance continues", async () => {
   const held = [];
   for (const owned of [0, 1]) {
     const read = createTargetWipMemoryForDispatch();
@@ -519,7 +519,9 @@ test("W1-T11626 criterion 1: unreadable WIP after cached zero or safe positive h
     assert.ok(result.observations.length >= 2, "the real consumer re-observes WIP instead of ending the daemon");
     assert.ok(result.observations.every((row) => row.source === "unreadable" && row.owned === Infinity));
   }
+});
 
+test("W1-T11626 criterion 1: an unreadable refill preserves already-admitted child handles", async () => {
   const read = createTargetWipMemoryForDispatch();
   const first = targetWipDeferred<RunResult>();
   const second = targetWipDeferred<RunResult>();
@@ -534,7 +536,7 @@ test("W1-T11626 criterion 1: unreadable WIP after cached zero or safe positive h
   const run = runDaemonForTargetWip(targetWipPlan(), {
     refreshMerged: () => () => false,
     openPrCount: () => read("audit/managed", () => unreadable ? undefined : { owned: 0, foreign: 0 }).counts.owned,
-    checkStop: () => stopped ? "private child control cleanup" : undefined,
+    checkStop: () => stopped && firstSettled ? "private child control cleanup" : undefined,
     sleep: async () => { throw new Error("the healthy child control must start before an idle wait"); },
     runOne: (id, options) => {
       started.push(id);
