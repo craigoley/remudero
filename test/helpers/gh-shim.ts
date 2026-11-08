@@ -28,8 +28,6 @@ export interface GhShimRoute {
   when: string;
   /** stdout to print. Omitted ⇒ no stdout. */
   stdout?: string;
-  /** Print current contents of this file at invocation time. */
-  stdoutFile?: string;
   /** stderr to print — e.g. simulating a `gh` failure message. Omitted ⇒ no stderr. */
   stderr?: string;
   /** Print the value of this environment variable the shim process received (plus a newline) —
@@ -111,7 +109,6 @@ function renderScript(routes: GhShimRoute[], callsPath: string, eventsPath: stri
         ...[r.writes ?? []].flat().map((w, n) => writeStep(join(dir, `route-${i}-${n}.write`), w)),
         r.stderr !== undefined ? verbatim(join(dir, `route-${i}.err`), r.stderr, " 1>&2") : "",
         r.stdout !== undefined ? verbatim(join(dir, `route-${i}.out`), r.stdout, "") : "",
-        r.stdoutFile !== undefined ? `cat ${shQuote(r.stdoutFile)}` : "",
         r.stdoutEnv !== undefined ? `printf '%s\\n' "\${${r.stdoutEnv}}"` : "",
         `exit ${r.exit ?? 0}`,
       ]

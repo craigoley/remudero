@@ -57,8 +57,6 @@
       proof: "unit test: W1-T963: a non-empty diff still passes in the same run"
     - claim: "The existing no_task/grill terminalizer remains limited to those actions and does not classify a proposal from its feedback-file diff alone"
       proof: "unit test: W1-T963: an empty-diff PR is refused"
-    - claim: "The shared ghShim can return a response file's updated contents at invocation time"
-      proof: "unit test: test/helpers/gh-shim.test.ts"
   falsifier: |
     Place the live-scope terminalizer after the CI early return: the red-CI empty-scope case must
     fail by leaving the PR open. Treat a fetch or PR-state refusal as an empty scope: the incomplete
