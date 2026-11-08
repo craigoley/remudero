@@ -1,7 +1,7 @@
 - id: W1-T11665
   title: "TRIAGE-ONLY PROVIDER RECOVERY — a classified Claude subscription weekly-limit refusal reauctions once to an enabled Codex subscription provider, with native WebSearch on the triage research profile only"
   repo: remudero
-  depends_on: []
+  depends_on: ["W1-T11692"]
   type: implement
   verify: auto
   principles: {tdd: strict}
