@@ -17,10 +17,35 @@ raw: "Follow-up to feedback fb-1794083152653-a10df6: native triage exhausted
   provider calls or spend; use synthetic fixtures."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/17334
+summary:
+  headline: Approve a narrow classifier fix for weekly-limit refusals, blocking
+    the dependent task until it lands
+  what_happened: Automated triage failed three times on a linter rejection caused
+    by a mismatched test module ID, so the weekly usage-limit refusal is still
+    unclassified. The proposed fix is a single-concern change to the existing
+    classifier and its existing test file, with no new test path, no live model
+    calls, and no spend.
+  decision: Choose whether to approve the medium-risk classifier correction
+    limited to src/lib/classify.ts and test/classify.test.ts, and keep triage
+    reauction, WebSearch, and WebFetch out of it.
+  options:
+    - label: Approve the classifier correction
+      consequence: Triage files the narrow fix, adds synthetic positive and negative
+        test cases to the existing suite, and W1-T11665 waits on it through the
+        normal plan dependency.
+      intent: approve
+    - label: Decline and leave as is
+      consequence: The weekly refusal stays unclassified, the linter block persists,
+        and W1-T11665 cannot proceed.
+      intent: decline
+    - label: Reframe the scope
+      consequence: Send it back to triage with a different scope or risk level before
+        any classifier work starts.
+      intent: reframe
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
