@@ -76,6 +76,10 @@ test("W1-T11169 criterion 3: own adopted or uncertain children, incomplete censu
     assert.equal(fixSeedRead([...original, ...bootRows(), child, pass, { ...boot, run_id: LATER }], pr, LATER)?.kind,
       "live", `later evidence of ${step} vetoes derivation`);
   }
+  const anonymous = { step: "run_child.adoption_misidentified", run_id: "unnamed-child" };
+  assert.equal(fixSeedRead([...original, anonymous, { step: "run_child.adoption_pass", run_id: CURRENT, live: 1,
+    adopted: 0, unreadable: 0, misidentified: 1 }, { step: "daemon.boot", run_id: CURRENT }], pr, CURRENT)?.kind,
+  "live", "a child naming no task never proves another task owns it");
   for (const field of ["live", "adopted", "unreadable", "misidentified"]) {
     for (const value of [undefined, -1, "0", Number.NaN, 1]) {
       const rows = bootRows();
