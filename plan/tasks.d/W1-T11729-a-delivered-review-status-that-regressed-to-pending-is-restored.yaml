@@ -1,0 +1,43 @@
+- id: W1-T11729
+  title: A delivered review verdict whose remudero-review status regressed to pending on the same head and input is restored from the ledger, not deduped as already delivered, so auto-merge stops waiting on a status that never comes back
+  repo: remudero
+  depends_on: []
+  priority: 0.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # touches the sweep's review claim and a status post; it only re-posts the delivered state, never a review, and every gate is unchanged
+  band_meaning: blast-radius
+  origin: operator-session#merge-latency-2026-11-08
+  plan_refs:
+    - W1-T2771
+    - W1-T5813
+    - W1-T3704
+  files:
+    - src/lib/sweep.ts
+    - src/cli/commands/sweep.ts
+    - test/console-api/board/a-status-regressed-to-pending-on-a-delivered-head-is-restored.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the latest review row of a PR's exact head and review input digest is a delivered full success or failure verdict and GitHub's remudero-review status is pending, the sweep's review claim restores that verdict's status instead of deduping it, runs no review, and posts only the delivered state
+      proof: "grep: W1-T11729 criterion 1 in test/console-api/board/a-status-regressed-to-pending-on-a-delivered-head-is-restored.test.ts"
+    - claim: A delivered verdict that is not a full success or failure (cannot-evaluate, a later pending row, an unread digest) or whose head or input digest differs from the PR's current one is not restored; the dedup or the ordinary review is unchanged
+      proof: "grep: W1-T11729 criterion 2 in test/console-api/board/a-status-regressed-to-pending-on-a-delivered-head-is-restored.test.ts"
+    - claim: One restore is spent per observed regression, identified by the pending status's own timestamp; the same regression is deduped on the next pass and a new one earns its own restore
+      proof: "grep: W1-T11729 criterion 3 in test/console-api/board/a-status-regressed-to-pending-on-a-delivered-head-is-restored.test.ts"
+    - claim: The review.status_restored row is written only after the status post succeeded; a failed post writes no row and falls back to no review
+      proof: "grep: W1-T11729 criterion 4 in test/console-api/board/a-status-regressed-to-pending-on-a-delivered-head-is-restored.test.ts"
+  rationale: |
+    OBSERVED 2026-11-08 on PR 17354 (W1-T11596, head d552219678ee): review.posted state success at 12:17:59Z, automerge.armed at 12:18:16Z, then GitHub's remudero-review status read pending from 12:43:17Z with no ledger row at that time (an unrecorded writer). From 13:01Z the sweep disposed it post-review/awaiting-review ("owner proven dead, re-running the review lane") with acted false and stand_down_reason "a verdict was already DELIVERED for input:[...] — the action-time re-read deduped the re-post". It never re-posted, so auto-merge waited indefinitely.
+    - Scale: 29 such dedup rows over 14 PRs in 9 hours; 17322, 17339, 17354 and 17367 were stuck for hours.
+    - Mechanism: deliveredVerdictDedupsPostReview (W1-T6047) already lets a pending status past the arm-level dedup, but claimReview (W1-T2771) answers fresh.reviewDelivered.has(reviewKey) from the ledger alone, without asking whether GitHub's status still matches the delivered verdict. Only the incomplete-promise-harvest, inconclusive-load and failure-overtaken cases release the key.
+  design: |
+    claimReview, when the key is delivered and not refused or backed off, calls restorableDeliveredVerdict(pr, ledger, key). It returns the delivered row only when reviewState is pending, the review input digest is read, the latest review.posted/pending_posted/post_refused row of that head and digest is a review.posted of state success or failure whose decision_verdict agrees and is not cannotEvaluate, and no review.status_restored row carries this regression key (reviewKey plus reviewPendingSince). The claim then returns a restore, runReview dispatches mode { kind: restore } through the existing reviewReuseRunner seam, and no sweep.review_admitted row is written.
+    The adapter re-derives the same row, re-posts it through postReviewStatusGuarded, and writes review.status_restored (old_state, new_state, delivered_run_id, regression_key) only after the post succeeded. Without the runner the effect does nothing; a failed post writes nothing and is retried the next pass. No timeout is added.
+    NOT IN SCOPE: the unrecorded writer of the regression; a delivered key under reviewState none (the arm-level dedup still holds it).
+  note: |
+    Proof that counts: review.status_restored rows, and no already-DELIVERED dedup row for a pending PR whose delivered verdict is a full one.
+    reservation hand-off: run-unfiled-1794143829331 -> run-unfiled-1794143829331
+    Reserved with rmd next-task-id (W1-T11729 on run-unfiled-1794143829331).
