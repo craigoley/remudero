@@ -465,12 +465,30 @@ function fakeWorker(text: string): WorkerResult {
 
 // ── (8) THE PLAN LANE — injection only; this lane has never executed ──────────
 
-test("PLAN LANE: a dirty filing is relinted, and the clean redraft proceeds", async () => {
+test("PLAN LANE: changed-task lint relints clean filings", async () => {
   let attempts = 0;
+  let planLintCalls = 0;
+  let filedId = "";
   const prompts: string[] = [];
   const ledger = await withLane(undefined, async () => {
-    const { planCommand } = await import("../src/run-task.js");
+    const { planCommand } = await import("#src/run-task.js");
     await planCommand(["--mode=create", "a", "fixture", "brief"], {
+      lintPlanForReviewFn: async () => {
+        const call = planLintCalls++;
+        if (call === 0) return { ran: false, reason: "fixture changed-task lint unavailable" };
+        return {
+          ran: true,
+          label: "fixture changed-task lint",
+          checked: 1,
+          violations: call === 1
+            ? [
+                `${filedId} [shared-proof] fixture push lint refuses this otherwise-clean filing`,
+                `${filedId} [call-site] fixture push lint requires a caller criterion`,
+                `${filedId} [new-shard-rule-suite] fixture push lint rejects the suite basename`,
+              ]
+            : [],
+        };
+      },
       spawn: async (args: { cwd: string; prompt: string }) => {
         attempts++;
         prompts.push(args.prompt);
@@ -478,18 +496,32 @@ test("PLAN LANE: a dirty filing is relinted, and the clean redraft proceeds", as
         mkdirSync(dir, { recursive: true });
         // File under a RESERVED id — the loop lints exactly the ids this run reserved, so a fixture
         // filing an arbitrary id would be linted as nothing and pass vacuously.
-        const id = reservedFromPrompt(args.prompt);
+        filedId = reservedFromPrompt(args.prompt, filedId || undefined);
+        const id = filedId;
         // Attempt 1 files a PROSE proof; attempt 2 (the relint) files the executable dialect.
-        writeFileSync(join(dir, `${id}-x.yaml`), attempts === 1 ? DIRTY_TASK(id) : CLEAN_TASK(id));
+        const yaml = attempts === 1 ? DIRTY_TASK(id) : CLEAN_TASK(id);
+        writeFileSync(join(dir, `${id}-x.yaml`), yaml);
+        if (attempts > 1) {
+          const task = parseTasksFromYaml(yaml, "plan changed-task fixture")[0];
+          assert.ok(task);
+          assert.deepEqual(lintTask(task).violations.filter((violation) => violation.severity === "block"), [],
+            "the changed-task lint refuses a filing that the local task linter accepts");
+        }
         return fakeWorker(`PROPOSED: file ${id}`);
       },
     } as never).catch(() => undefined); // the push/PR steps have no network in this fixture
   });
 
-  assert.equal(attempts, 2, "one redraft, then done");
-  assert.match(prompts[1], /FAILED the plan's own linter/, "attempt 2 got the relint prompt");
+  assert.equal(attempts, 3, "the lane relints local and changed-task failures, then proceeds");
+  assert.equal(planLintCalls, 3, "changed-task lint runs after each proposed filing");
+  assert.equal(ledger.find((row) => row.step === "plan.relint_plan_lint_unavailable")?.reason,
+    "fixture changed-task lint unavailable", "an unreadable changed-task lint is named and the local finding still relints");
+  assert.match(prompts[1], /FAILED the plan's own linter/, "attempt 2 got the local-lint finding");
   assert.match(prompts[1], /\[proof-dialect\]/, "carrying the REAL check name from the REAL linter");
-  assert.equal(ledger.filter((l) => l.step === "plan.relint").length, 1, "and the redraft is on the ledger");
+  for (const check of ["shared-proof", "call-site", "new-shard-rule-suite"]) {
+    assert.match(prompts[2], new RegExp(`\\[${check}\\]`), `attempt 3 got changed-task ${check}`);
+  }
+  assert.equal(ledger.filter((l) => l.step === "plan.relint").length, 2, "both redrafts are on the ledger");
   assert.equal(ledger.filter((l) => l.step === "plan.relint_refused").length, 0, "a converged run refuses nothing");
 });
 
@@ -538,28 +570,60 @@ const seedFeedback = (seed: string): void => {
   );
 };
 
-test("TRIAGE LANE: a dirty filing is relinted with the real violations, and the clean redraft proceeds", async () => {
+test("TRIAGE LANE: changed-task lint relints clean filings", async () => {
   let attempts = 0;
+  let triageLintCalls = 0;
+  let filedId = "";
   const prompts: string[] = [];
   const ledger = await withLane(seedFeedback, async () => {
-    const { triageCommand } = await import("../src/run-task.js");
+    const { triageCommand } = await import("#src/run-task.js");
     await triageCommand([FEEDBACK_ID], {
+      lintPlanForReviewFn: async () => {
+        const call = triageLintCalls++;
+        if (call === 0) return { ran: false, reason: "fixture changed-task lint unavailable" };
+        return {
+          ran: true,
+          label: "fixture changed-task lint",
+          checked: 1,
+          violations: call === 1
+            ? [
+                `${filedId} [shared-proof] fixture push lint refuses this otherwise-clean filing`,
+                `${filedId} [call-site] fixture push lint requires a caller criterion`,
+                `${filedId} [new-shard-rule-suite] fixture push lint rejects the suite basename`,
+              ]
+            : [],
+        };
+      },
       spawn: async (args: { cwd: string; prompt: string }) => {
         attempts++;
         prompts.push(args.prompt);
         const dir = join(args.cwd, "plan", "tasks.d");
         mkdirSync(dir, { recursive: true });
-        const id = reservedFromPrompt(args.prompt);
-        writeFileSync(join(dir, `${id}-x.yaml`), attempts === 1 ? DIRTY_TASK(id) : CLEAN_TASK(id));
+        filedId = reservedFromPrompt(args.prompt, filedId || undefined);
+        const id = filedId;
+        const yaml = attempts === 1 ? DIRTY_TASK(id) : CLEAN_TASK(id);
+        writeFileSync(join(dir, `${id}-x.yaml`), yaml);
+        if (attempts > 1) {
+          const task = parseTasksFromYaml(yaml, "triage changed-task fixture")[0];
+          assert.ok(task);
+          assert.deepEqual(lintTask(task).violations.filter((violation) => violation.severity === "block"), [],
+            "the changed-task lint refuses a filing that the local task linter accepts");
+        }
         return fakeWorker(`PROPOSED: file ${id}`);
       },
     } as never).catch(() => undefined);
   });
 
-  assert.equal(attempts, 2, "the dirty filing bought exactly one redraft");
+  assert.equal(attempts, 3, "triage relints local and changed-task failures, then proceeds");
+  assert.equal(triageLintCalls, 3, "changed-task lint runs after each proposed filing");
+  assert.equal(ledger.find((row) => row.step === "triage.relint_plan_lint_unavailable")?.reason,
+    "fixture changed-task lint unavailable", "an unreadable changed-task lint is named and the local finding still relints");
   assert.match(prompts[1], /FAILED the plan's own linter/);
-  assert.match(prompts[1], /\[proof-dialect\]/, "the worker is handed the linter's own finding");
-  assert.equal(ledger.filter((l) => l.step === "triage.relint").length, 1);
+  assert.match(prompts[1], /\[proof-dialect\]/, "the worker is handed the local linter's finding");
+  for (const check of ["shared-proof", "call-site", "new-shard-rule-suite"]) {
+    assert.match(prompts[2], new RegExp(`\\[${check}\\]`), `attempt 3 got changed-task ${check}`);
+  }
+  assert.equal(ledger.filter((l) => l.step === "triage.relint").length, 2);
   assert.equal(ledger.filter((l) => l.step === "triage.relint_refused").length, 0);
 });
 
@@ -659,4 +723,50 @@ test("relint preserves one original contract and only the current findings at ev
   assert.ok(prompts[1].includes("FIRST_FINDING"));
   assert.ok(prompts[2].includes("SECOND_FINDING"));
   assert.ok(!prompts[2].includes("FIRST_FINDING"), "superseded findings do not accumulate");
+});
+
+test("lintPlanForReview runs its real offline child against changed tasks", async () => {
+  let outcome: { ran: true; checked: number; violations: string[] } | { ran: false; reason: string } | undefined;
+  await withLane(undefined, async (configRoot) => {
+    const repoDir = join(configRoot, "repos", "remudero");
+    const taskId = "W1-T90000";
+    const shardDir = join(repoDir, "plan", "tasks.d");
+    mkdirSync(shardDir, { recursive: true });
+    const marker = "relint_real_child_fixture_discriminates_head";
+    const fixture = [
+      `- id: ${taskId}`,
+      `  title: "a guard with a head-only proof line"`,
+      "  repo: remudero",
+      "  origin: architect",
+      "  depends_on: []",
+      "  type: implement",
+      "  verify: auto",
+      "  status: queued",
+      "  attempts: 0",
+      "  files: [test/relint-loop.test.ts]",
+      "  acceptance:",
+      '    - claim: "the new fixture line distinguishes the head from base"',
+      "      kind: guard",
+      '      proof: "grep: relint_real_child_fixture_discriminates_head in test/relint-loop.test.ts"',
+      "",
+    ].join("\n");
+    writeFileSync(join(shardDir, `${taskId}-fixture.yaml`), fixture);
+    mkdirSync(join(repoDir, "test"), { recursive: true });
+    writeFileSync(join(repoDir, "test", "relint-loop.test.ts"), `const ${marker} = true;\n`);
+    const proofHit = execFileSync("grep", ["-arn", "--", marker, "test/relint-loop.test.ts"], { cwd: repoDir, encoding: "utf8" });
+    assert.match(proofHit, /relint_real_child_fixture_discriminates_head/);
+    execFileSync("git", ["-C", repoDir, "add", "plan/tasks.d", "test/relint-loop.test.ts"], { encoding: "utf8", env: GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "commit", "--quiet", "-m", "test: add a clean changed-task fixture"], {
+      encoding: "utf8",
+      env: GIT_ENV,
+    });
+
+    const { lintPlanForReview } = await import("#src/run-task.js");
+    outcome = await lintPlanForReview(repoDir);
+  });
+
+  assert.equal(outcome?.ran, true, "the default path launched and parsed the real lint-plan child");
+  if (!outcome?.ran) return;
+  assert.equal(outcome.checked, 1, "positive control: lint-plan observed the one changed task");
+  assert.deepEqual(outcome.violations, [], "the changed task passes the real changed-task lint");
 });
