@@ -1,0 +1,74 @@
+- id: W1-T11624
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:acceptance-author-gate cost 6.7 PR minute(s) across 10 round(s) on 7 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.25
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:acceptance-author-gate"
+  files:
+    - .github/workflows/acceptance-author-gate.yml
+    - test/gardeners/check-acceptance-author-gate.test.ts
+  acceptance:
+    - claim: "a recorded check:acceptance-author-gate round, replayed through the real code path in .github/workflows/acceptance-author-gate.yml, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11624: check:acceptance-author-gate is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:acceptance-author-gate's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:acceptance-author-gate cost 6.7 PR minute(s) across 10 red run(s) within the measured window on 7 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/acceptance-author-gate.yml: declares job acceptance-author-gate for acceptance-author-gate
+
+    RECENT ROUNDS (newest first):
+    - PR #17132 (https://github.com/craigoley/remudero/pull/17132) at 2026-11-07T17:07:14.356Z: ci-log round — acceptance-author-gate
+        log excerpt:
+          | acceptance-author-gate: REFUSED (credited-test-path) — task W1-T11119 is credited as a build, but its test path test/routing/model-canary-router-decision-receipt.test.ts is absent from the PR head. The task record's declared test suite and every path-form test proof must name a file that really shipped; add the file or repoint the task's proofs to the suite that did. Plan-only filings are exempt because their test paths are forward references. task W1-T11119 is credited as a build, but its test path test/routing/model-canary-static-baseline.test.ts is absent from the PR head. The task record's
+    - PR #17090 (https://github.com/craigoley/remudero/pull/17090) at 2026-11-07T02:55:51.517Z: ci-log round — acceptance-author-gate
+        log excerpt:
+          | acceptance-author-gate: REFUSED (credited-test-path) — task W1-T11431 is credited as a build, but its test path test/deploy/selected-registry-contract-discriminates.test.ts is absent from the PR head. The task record's declared test suite and every path-form test proof must name a file that really shipped; add the file or repoint the task's proofs to the suite that did. Plan-only filings are exempt because their test paths are forward references.
+          | ##[error]Process completed with exit code 1.
+    - PR #16652 (https://github.com/craigoley/remudero/pull/16652) at 2026-11-05T06:18:30.698Z: ci-log round — acceptance-author-gate
+        log excerpt:
+          | acceptance-author-gate: REFUSED (trailer-body-proof-divergence) — Remudero-Task: W1-T11190 trailer present AND this pull request carries its own `## Acceptance` block, but the two name DIFFERENT proofs — review resolves criteria from W1-T11190's plan record, so a proof only in this PR's body is never executed, and a proof only in W1-T11190's declared acceptance is never seen by a human reading this PR's body (the CONSOLE-T12 shape). Proof(s) only in this PR's own block: "unit test: test/plan/compress-src-lib-plan-ts.test.ts". Proof(s) only in W1-T11190's declared acceptance: "grep: \"// commen
+    - PR #16606 (https://github.com/craigoley/remudero/pull/16606) at 2026-11-04T02:20:53.699Z: ci-log round — coverage-ratchet: ##[error]diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for ; acceptance-author-gate
+        log excerpt:
+          | (Use `node --trace-warnings ...` to show where the warning was created)
+          | ##[error]diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/lib/model-canary-host-bridge.ts:404
+          |   - src/lib/model-canary-host-bridge.ts:440
+          |   - src/lib/model-canary-host-bridge.ts:441
+          |   - src/lib/model-canary-host-bridge.ts:442
+          |   - src/lib/model-canary-host-bridge.ts:443
+          |   - src/lib/model-canary-metrics.ts:435
+          |   - src/lib/model-canar
+    - PR #16312 (https://github.com/craigoley/remudero/pull/16312) at 2026-11-03T16:00:37.580Z: ci-log round — mutation-ratchet; acceptance-author-gate
+        log excerpt:
+          | at ModuleLoader.resolveSync (node:internal/modules/esm/loader:763:56)
+          |     at #resolve (node:internal/modules/esm/loader:687:17)
+          |     at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:607:35)
+          |     at ModuleJob.syncLink (node:internal/modules/esm/module_job:276:33) {
+          |   code: 'ERR_MODULE_NOT_FOUND'
+          | }
+          | 
+          | Node.js v24.22.0
+          | ##[error]Process completed with exit code 1.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/acceptance-author-gate.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-08T02:26:22.088Z"
+    pin: "8237e4135526abfc9f1b421d94235f668bdf02727085dbaad25a589e6234cf7f"

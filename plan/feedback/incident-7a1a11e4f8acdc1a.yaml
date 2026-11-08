@@ -1,0 +1,33 @@
+id: incident-7a1a11e4f8acdc1a
+ts: 2026-11-08T02:32:42.523Z
+raw: >-
+  Incident 7a1a11e4f8ac: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round
+  work-fix-dispatch-W1-T11600-<sha>-a61f:<n>:<sha>) — The review requires
+  activating a production source that the authoritative task design explicitly
+  defers.
+
+  First seen: 2026-11-08T01:45:43.336Z
+
+  Last seen: 2026-11-08T01:45:43.336Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=17221 escalated: already escalated (reason unreadable: no escalation of this PR at head a020a0d is in the ledger); this pass: fix needs design at this exact head (round work-fix-dispatch-W1-T11600-1794099216974-a61f:1:1794101291993) — The review requires activating a production source that the authoritative task design explicitly defers.
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#7a1a11e4f8acdc1a63fa48a4229576e0f575dba1222a3822860a9624355786cc
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

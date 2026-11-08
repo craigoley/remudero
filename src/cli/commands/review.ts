@@ -7,7 +7,7 @@ import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheld
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
-import { loadConfig, type Config } from "../../lib/config.js";
+import { isWorkerProviderId, loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
@@ -38,7 +38,7 @@ import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib
 import { isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
-import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemove } from "../../lib/worker.js";
+import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemoveAsync } from "../../lib/worker.js";
 import { hostWorktreeGit } from "../../lib/worktree-git.js";
 import { releaseReviewWorktree } from "../../lib/review-worktree-reclaim.js";
 import { step } from "../../lib/git-push.js";
@@ -66,7 +66,8 @@ export interface ReviewCommandHost {
     options?: { signal?: AbortSignal; log?: (step: string, extra?: Record<string, unknown>) => void },
   ): Promise<PlanLintOutcome>;
   readonly liveWorkerRunIds: Set<string>;
-  materializeReviewWorktree(config: Config, repoDir: string, prNumber: number, headSha: string, deps?: ReviewWorktreeDeps): MaterializeReviewWorktreeResult;
+  materializeReviewWorktree(config: Config, repoDir: string, prNumber: number, headSha: string, deps?: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>): MaterializeReviewWorktreeResult | Promise<MaterializeReviewWorktreeResult>;
+  readonly reviewWorktreeAsync?: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>;
   readHeadShaRest(prUrl: string, fetch?: GhApiFetcher): string;
   readMainPlanTreeSha(repoDir: string): string;
   realDeps(): ComposedRealGraph;
@@ -76,15 +77,17 @@ export interface ReviewCommandHost {
   reviewSubjectGit(repoDir: string, argv: string[]): string;
 }
 
-export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId"> {
+export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders"> {
   const { JUDGE_AT_OWN_START_FLAG, acceptedReviewAttemptId } = host;
   const mode = flagValue(rest, "--execution-mode");
   const reviewAttemptId = acceptedReviewAttemptId(flagValue(rest, "--review-attempt-id"));
+  const excludeProviders = [...new Set((flagValue(rest, "--exclude-providers") ?? "").split(",").filter(isWorkerProviderId))];
   return {
     ...(rest.includes(JUDGE_AT_OWN_START_FLAG) ? { judgeAtOwnStart: true } : {}),
     ...(rest.includes("--plan-only-filing") ? { planOnlyFiling: true } : rest.includes("--not-plan-only-filing") ? { planOnlyFiling: false } : {}),
     ...(mode === "semantic" || mode === "deterministic" ? { executionMode: mode } : {}),
     ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
+    ...(excludeProviders.length ? { excludeProviders } : {}),
   };
 }
 
@@ -491,6 +494,8 @@ export async function runReview(host: ReviewCommandHost, args: {
    * site and drive the Codex adapter without a live subscription call.
    */
   reviewerSpawnWorker?: typeof spawnWorker;
+  /** Providers to avoid when this review is re-admitted after its reviewer was unable to inspect. */
+  excludeProviders?: SpawnWorkerArgs["excludeProviders"];
   /** Reuses the parent run's bounded sensor so advisory review workers are visible in the same
    *  task lane instead of disappearing behind the final `review.reviewer` ledger row. */
   workerTelemetry?: WorkerStateSensor;
@@ -869,6 +874,7 @@ export async function runReview(host: ReviewCommandHost, args: {
                 // as a completed review (P10-a; reviewerOutcome below makes it legible).
                 model: reviewerSpawnMount!.model,
                 mountProvider: reviewerSpawnMount!.provider,
+                excludeProviders: args.excludeProviders,
                 effort: reviewerSpawnMount!.effort,
                 maxTurns: reviewerSpawnMount!.maxTurns,
                 maxBudgetUsd: args.budgetUsd,
@@ -930,6 +936,9 @@ export async function runReview(host: ReviewCommandHost, args: {
           downgrades: semantic.filter((s) => s === false).length,
           // W1-T11428: criteria this reviewer could not inspect; W1-T11432 reads the provider beside it.
           unable: reviewerUnable.filter((u) => u !== undefined).length,
+          ...(args.excludeProviders?.length ? { exclude_providers: [...args.excludeProviders] } : {}),
+          ...(reviewerAssignment?.routing.exclusion_unhonoured
+            ? { exclusion_unhonoured: reviewerAssignment.routing.exclusion_unhonoured } : {}),
           // W1-T6: the advisory reviewer is a BRAIN-PLANE call — same telemetry
           // shape as a worker call, so ledger lines are queryable uniformly.
           ...reviewerFields,
@@ -1615,9 +1624,11 @@ export interface ReviewCommandDeps {
    *  still runs its own, and a second fetch of an already-fetched ref is a no-op, so this adds an
    *  ordering guarantee rather than a second network cost. Injectable so a test can drive the
    *  unfetched-sha case without a network. */
-  fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => void;
+  fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => unknown;
   /** Operator CLI remains deterministic; only internal unattended callers opt in. */
   executionMode?: "deterministic" | "semantic";
+  /** Providers to avoid on a re-admitted review after a reviewer-unavailable result. */
+  excludeProviders?: SpawnWorkerArgs["excludeProviders"];
   /** W1-T3115: the sweep already proved this from GitHub's complete material file list. Carry
    *  that fact across the process boundary instead of making reviewCommand reclassify with the
    *  narrower emitter-ledger evidence available here. Undefined preserves the operator CLI. */
@@ -1784,14 +1795,14 @@ export async function withMaterializedWorktree<T>(
   worktreePath: string | undefined,
   repoDir: string,
   body: () => Promise<T>,
-  remove: (repoDir: string, worktreePath: string) => void = worktreeRemove,
+  remove: (repoDir: string, worktreePath: string) => void | Promise<void> = worktreeRemoveAsync,
 ): Promise<T> {
   try {
     return await body();
   } finally {
     if (worktreePath) {
       try {
-        remove(repoDir, worktreePath);
+        await remove(repoDir, worktreePath);
       } catch (e) {
         // Best-effort teardown: a removal failure must never mask `body`'s own
         // result or throw — the ledger/console already carry the review's
@@ -1821,6 +1832,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     fetchHead,
     executionMode,
     planOnlyFiling,
+    excludeProviders,
   } = {
     fetchView: ghJson,
     loadConfig,
@@ -1831,7 +1843,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     postStatus: postReviewStatusGuarded,
     reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
     postReviewPending,
-    fetchHead: realDeps().reviewWorktree.fetch,
+    fetchHead: host.reviewWorktreeAsync?.fetch ?? realDeps().reviewWorktree.fetch,
     executionMode: "deterministic" as const,
     ...deps,
   };
@@ -1992,7 +2004,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // outage through its own `fetch-failure` class, which is the degradation path this command
   // already has. Failing here instead would invent a second one for the same condition.
   try {
-    fetchHead(subjectRepoDir, view.number, view.headRefOid);
+    await fetchHead(subjectRepoDir, view.number, view.headRefOid);
   } catch (e) {
     void e;
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
@@ -2187,7 +2199,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // never silently, and (W1-T233) the console line below now NAMES why,
   // instead of a bare "unavailable" with the real reason thrown away.
   const materializeStartedMs = systemClock.now();
-  const materialized = materialize(config, subjectRepoDir, view.number, view.headRefOid);
+  const materialized = await materialize(config, subjectRepoDir, view.number, view.headRefOid);
   if (materialized.worktreePath === undefined) {
     console.log(
       `(worktree materialization failed [${materialized.failure.errorClass}]: ` +
@@ -2244,6 +2256,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           spawnReviewer,
           requireSemanticReview: executionMode === "semantic",
           reviewerMount,
+          excludeProviders,
           // W1-T185 (Gap 2): the materialized worktree above when available — the
           // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
           // proofs execute here too. `undefined` (materialization unavailable)

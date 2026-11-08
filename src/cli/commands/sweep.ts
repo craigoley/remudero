@@ -12,7 +12,7 @@ import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../..
 import { ghJsonAsync } from "../../lib/github-transport.js";
 import { readLedgerLines, buildBatchedGithub, readRequiredStatusCheckContextsAsync, type GitHub } from "../../lib/status.js";
 import { liveInflightRuns } from "../../lib/report-commands.js";
-import { worktreeRemove, runWorktreeReapRung, type WorktreeReapSummary } from "../../lib/worker.js";
+import { worktreeRemove, worktreeRemoveAsync, releaseReviewWorktree, runWorktreeReapRung, type WorktreeReapSummary } from "../../lib/worker.js";
 import { automaticBranchReapStateFileName, readAutomaticBranchReapState, writeAutomaticBranchReapState, type AutomaticBranchReapState } from "../../lib/branch-reaper.js";
 import { withMainHealthOnLightPass } from "../../lib/main-health-rung.js";
 import { lightPassFixAdmitted, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
@@ -296,11 +296,13 @@ export function buildSweepEffects(
     reviewerHealthRoute ? reviewerHealthRoute(prArg, rest, opts, () => reviewerCodeGate.call(prArg, rest, opts)) : reviewerCodeGate.call(prArg, rest, opts);
   const reviewFallbackRunner =
     deps.reviewRunner ??
-    ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void) => {
+    ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void,
+      excludeProviders?: ReviewCommandDeps["excludeProviders"]) => {
       const args = ["--repo", deps.repo];
       const opts = { executionMode: "semantic" as const, planOnlyFiling: isPlanFiling,
         ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
-        ...(onPhase === undefined ? {} : { onPhase }) };
+        ...(onPhase === undefined ? {} : { onPhase }),
+        ...(excludeProviders?.length ? { excludeProviders: [...excludeProviders] } : {}) };
       return deps.reviewCommandImpl
         ? deps.reviewCommandImpl(String(_prNumber), args, opts)
         : reviewGateCall(String(_prNumber), args, opts);
@@ -312,6 +314,7 @@ export function buildSweepEffects(
   const buildBaseProofReuse =
     (deps.buildBaseProofDirImpl as typeof buildBaseProofDir | undefined) ?? buildBaseProofDir;
   const reviewReuseExecProof = deps.reviewReuseExecProofImpl as ProofExecutor | undefined;
+  const removeReviewWorktree = deps.reviewWorktreeRemoveImpl ?? deps.worktreeRemoveImpl ?? worktreeRemoveAsync;
   const reviewReuseRunner: NonNullable<BuildSweepEffectsDeps["reviewReuseRunner"]> = async (pr, mode, reviewAttemptId, onPhase): Promise<number> => {
     const reuseRunId = reviewAttemptId === undefined ? deps.runId : `review-PR${pr.prNumber}-${systemClock.now()}`;
     if (reviewAttemptId !== undefined) {
@@ -329,7 +332,7 @@ export function buildSweepEffects(
         fallback_reason: reason,
         ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase, pr.excludeProviders);
     };
 
     if (mode.kind === "discriminate-only") {
@@ -344,7 +347,7 @@ export function buildSweepEffects(
       let fallbackReason: string | undefined;
       let exitCode: number | undefined;
       try {
-        const materialized = materializeReviewReuse(deps.config, reviewRepoDir, pr.prNumber, pr.headSha);
+        const materialized = await materializeReviewReuse(deps.config, reviewRepoDir, pr.prNumber, pr.headSha);
         if (materialized.worktreePath === undefined) {
           fallbackReason =
             `PR-head worktree unavailable (${materialized.failure.errorClass}): ${materialized.failure.message}`;
@@ -435,16 +438,26 @@ export function buildSweepEffects(
         deps.log("sweep.review_reuse_discrimination_error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
         fallbackReason = reason;
       } finally {
-        releaseBaseProofDir(reviewRepoDir, baseProof, deps.worktreeRemoveImpl);
+        let baseRemoval: Promise<void> | undefined;
+        releaseBaseProofDir(reviewRepoDir, baseProof, (dir, path) => {
+          baseRemoval = Promise.resolve(removeReviewWorktree(dir, path));
+        });
+        try {
+          await baseRemoval;
+        } catch (error) {
+          console.error("(base worktree teardown failed: " + String((error as Error)?.message ?? error) + ")");
+        }
         if (worktreePath !== undefined) {
           try {
-            (deps.worktreeRemoveImpl ?? worktreeRemove)(reviewRepoDir, worktreePath);
+            await removeReviewWorktree(reviewRepoDir, worktreePath);
           } catch (error) {
             deps.log("sweep.review_reuse_discrimination_cleanup_error", {
               pr_number: pr.prNumber,
               head_sha: pr.headSha,
               error: String((error as Error)?.message ?? error),
             });
+          } finally {
+            releaseReviewWorktree(worktreePath);
           }
         }
       }
@@ -460,7 +473,7 @@ export function buildSweepEffects(
     const verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt }))?.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase, pr.excludeProviders);
     }
     const poster = failureRecordingPoster();
     const reusedStatus = await postReviewStatusGuarded({
@@ -572,6 +585,7 @@ export function buildSweepEffects(
     readPackageScriptsImpl: readPackageScriptsFor,
     dispatchFixCatchOutcomeImpl: dispatchFixCatchOutcome,
     worktreeRemoveImpl: worktreeRemove,
+    reviewWorktreeRemoveImpl: worktreeRemoveAsync,
     fixBranchClaimKeyImpl: fixBranchClaimKey,
     boundedWorktreeOwnerPathImpl: boundedWorktreeOwnerPath,
     decideRegisteredFixOwnerRecoveryImpl: decideRegisteredFixOwnerRecovery,

@@ -76,11 +76,12 @@ test("W1-T9649: a finding no later head raises is not re-raised and repairs are 
   const outcome = (id: string) => report.findings.find((item) => item.findingId === id)?.outcome;
   assert.equal(outcome("gone"), "not-re-raised");
   assert.equal(outcome("repaired"), "confirmed-repair", "evidence-based outcomes win over lineage");
-  assert.equal(outcome("legacy"), "unknown", "a receipt without a lineage key cannot be told apart");
+  assert.equal(outcome("legacy"), "legacy-superseded", "legacy receipts retain their old superseded bucket");
   assert.equal(outcome("latest"), "unknown", "no later reviewed head exists yet");
   const cell = report.cells[0]!;
   assert.equal(cell.notReRaised, 1, "only the finding that no later head raised");
   assert.equal(cell.persisted, 0);
   assert.equal(cell.confirmedUseful, 1);
-  assert.equal(cell.unknown, 3);
+  assert.equal(cell.unknown, 2);
+  assert.equal(cell.legacySuperseded, 1);
 });
