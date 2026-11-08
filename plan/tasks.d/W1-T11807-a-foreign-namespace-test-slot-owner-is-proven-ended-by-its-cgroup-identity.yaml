@@ -1,0 +1,86 @@
+- id: W1-T11807
+  title: "A test-slot owner in another PID namespace is proven ended by a pinned cgroup identity, never by its heartbeat — the reservation records a namespace-independent owner-tree identity (cgroup v2 path, cgroup directory dev/ino, cgroup namespace, boot id) and a waiter in any PID namespace frees capacity only on a positive `populated 0` read of that exact cgroup, under an identity-checked mutation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, when a foreign-namespace reservation counts as ended; too eager double-books live work (W1-T9928 amendment)
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T9928, W1-T10251, W1-T10870, W1-T10433, W1-T9950]
+  files:
+    - src/lib/test-slot.ts
+    - test/ci/suites/a-foreign-namespace-test-slot-owner-is-proven-ended-by-its-cgroup-identity.test.ts
+  status: queued
+  priority: 1  # a foreign-namespace owner today has no positive end proof, so author preflights wait behind it to the wait bound
+  attempts: 0
+  rationale: |
+    READ at this worktree's HEAD (src/lib/test-slot.ts, symbols, not lines):
+    - `testSlotAcquisition` reclaim `isStale`: `local` is false for a same-host record whose `pidNs` differs, and a
+      non-local record returns `testSlotHolderStale` at once, BEFORE any tree probe. `testSlotHolderStale` ages such a
+      record by boot id, then by `now - heartbeatAt > TEST_SLOT_LEASE_MS` (90 min). So a foreign-namespace owner is
+      either held with no evidence path at all or freed by heartbeat age alone; nothing ever observes its tree.
+    - `probeReservedTree` returns unknown "pid namespace differs or is unrecorded" before `probeCgroupScope` runs, so
+      even a recorded dedicated scope (W1-T10251) is never consulted across a PID-namespace boundary.
+    - `probeCgroupScope` treats an ABSENT scope directory (ENOENT) as `ended`. W1-T10433's operator ruling
+      ("A dead PID, an empty immediate cgroup.procs, or ENOENT alone must not be upgraded into proof of whole-run
+      closure") is why this task's new cross-namespace basis must not do the same.
+    - src/lib/owned-run-cgroup.ts already pins a cgroup by directory dev/ino (`OwnedRunCgroupIdentity`), reads
+      `cgroup.events` with a bounded read, and calls an unobserved empty group "empty-unqualified", not terminal.
+      This task reuses that identity shape for the waiter side; it does not wire or enable `createOwnedRunCgroup`.
+    Settled by lookup: is this already filed or decided? -> no. W1-T10251 (merged) and W1-T10870 cover same-namespace
+      dedicated scopes; W1-T9928 (merged) gates new reclaim on exact-tree evidence but routes foreign records to the
+      lease; W1-T10433 (queued, human, priority 99) only specifies a default-off pinned-receipt contract. None
+      observes a foreign-namespace owner's tree (plan/tasks.d sweep for test-slot, pidNs, cgroup, foreign namespace).
+    Settled by lookup: does a positive cgroup end signal exist? -> yes, cgroup v2 `cgroup.events` `populated` is 0
+      only when the cgroup AND its descendants hold no live process (https://docs.kernel.org/admin-guide/cgroup-v2.html,
+      cited by W1-T9928 and W1-T10433; already read by `probeCgroupScope`).
+    Settled by lookup: how is a replaced reservation or a reused cgroup path told apart? -> a generation the holder
+      cannot forge after the fact, checked again at mutation time, as Chubby's lock sequencers do
+      (https://research.google.com/archive/chubby-osdi06.pdf); here the generation is (bootId, cgroup dev/ino) plus
+      the existing ownerNonce, and the mutation is the existing `unlinkObservedTestSlot` under `acquireSlotMutation`.
+    Settled by lookup: may this task create systemd units or a delegated supervisor? -> no. docs/heavy-new-build-reservation.md
+      says "No user-manager unit is created by this library" and keeps `createOwnedRunCgroup` OFF pending separate
+      qualification. The owner records an identity only when it already runs in a dedicated cgroup.
+  design: |
+    1. THE OWNER RECORDS A TREE IDENTITY. When `readTestSlotCgroup` judges the owner's cgroup dedicated (W1-T10251's
+       rule, W1-T10870's login-session exclusion kept), the record's `cgroupScope` also gains `dev`, `ino` (fstat of the
+       opened `/sys/fs/cgroup<path>` directory, O_DIRECTORY|O_NOFOLLOW, cgroup2 statfs magic, as owned-run-cgroup.ts
+       `verifyCgroupDescriptor` does) and `cgroupNs` (readlink `/proc/self/ns/cgroup`). The owner writes these only
+       after seeing its own pid in that cgroup's `cgroup.procs`, so the record itself attests "observed populated".
+       A record without all of them is a legacy record and keeps today's judgment exactly.
+    2. A WAITER OBSERVES IT FROM ANY PID NAMESPACE. In `isStale`, a same-host record with a different `pidNs` but the
+       same boot id, owner uid and `cgroupNs` as the waiter, and a complete tree identity, is probed through a new
+       `probeCgroupIdentity` (seams for open/fstat/statfs/read like `ReservedTreeProbeHost`):
+       - directory opens, dev/ino match, `populated 0` -> `ended`, complete, coverage `cgroup-identity`;
+       - `populated 1` -> `live` (a silent heartbeat never changes this);
+       - ENOENT, dev/ino mismatch, unreadable or unparsable `cgroup.events`, cgroup namespace or uid mismatch ->
+         `unknown`, with a reason naming the missing evidence. ENOENT is NOT ended on this basis (W1-T10433 ruling).
+       It never reads another process's environ, /proc/<pid> of the foreign owner, or sends a signal.
+       For a record WITH a complete tree identity, `live` and `unknown` both retain the slot: the lease rung is
+       not consulted, so heartbeat age never frees it. A record without one still reaches today's
+       `testSlotHolderStale` unchanged here; W1-T11809 retires that lease rung.
+    3. IDENTITY-CHECKED RELEASE. An `ended` result reclaims only through the existing path: re-read the record under
+       the slot mutation guard, require byte-identical ownerNonce/pid/processStart/cgroupScope, then
+       `unlinkObservedTestSlot`. A record replaced between probe and unlink is held for re-observation. The
+       `test_slot.reclaimed_quiescent` row names coverage `cgroup-identity`, dev/ino and cgroupNs.
+    4. FIFO IS UNCHANGED. Capacity freed this way is taken through the existing W1-T9950 queue rules; this task does
+       not touch src/lib/test-slot-queue.ts or ticket reaping.
+    5. NOT IN THIS TASK: the lease rung (W1-T11809), the owner-lane command (W1-T11808), doctor surfacing (W1-T11810),
+       creating cgroups or units, and any change to same-namespace or macOS judgment.
+    6. TESTS in the new file: live-but-silent owner (heartbeat past every bound, populated 1) keeps its slot;
+       positively ended tree (matching dev/ino, populated 0) is reclaimed and logged `cgroup-identity`; populated,
+       unreadable and ENOENT trees stay held; cgroup-namespace and uid mismatch stay unknown; a reservation replaced
+       between probe and unlink is held and the replacement survives; with two queued tickets the freed slot goes to
+       the head ticket. One test reads the real `/proc/self/ns/cgroup` and `/proc/self/cgroup` so the default seam runs.
+  acceptance:
+    - claim: "a foreign-namespace owner is reclaimed only on a populated-0 read of its exact pinned cgroup; populated, unreadable, absent, mismatched or replaced reservations are held, and FIFO order survives the reclaim"
+      proof: "unit test: test/ci/suites/a-foreign-namespace-test-slot-owner-is-proven-ended-by-its-cgroup-identity.test.ts"
+    - claim: "the cross-namespace probe is a named function in the test-slot module"
+      proof: "grep: probeCgroupIdentity( in src/lib/test-slot.ts"
+  falsifier: |
+    At HEAD a foreign-namespace record never reaches a tree probe: the positively-ended fixture stays held until
+    TEST_SLOT_LEASE_MS, and the live-but-silent fixture is FREED once its heartbeat passes TEST_SLOT_LEASE_MS, so both
+    tests fail. Treat ENOENT as ended, or drop the dev/ino comparison, and the absent-tree and reused-path tests fail.
