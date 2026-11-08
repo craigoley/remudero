@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -18,7 +18,7 @@ import { Worker } from "node:worker_threads";
 
 import { createReadModelWorker, runReadModelWorker } from "../src/lib/read-model-worker.js";
 import * as memory from "../src/lib/serve-memory.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type HolderReading = memory.HolderReading;
 type Book = ReturnType<typeof memory.trackWorkerThreads>;
@@ -41,13 +41,13 @@ const LEDGER_ROW = `${JSON.stringify({ ts: "2026-10-03T19:17:20.000Z", step: "ru
  * a coverage shard open.
  */
 function scratch(t: TestContext, kind: string, book: Book): { dir: string; stopsFirst: (stop: () => void) => void } {
-  const dir = makeTempDir(kind);
+  const dir = readModelFixtureDir(t, kind).dir;
   const stops: Array<() => void> = [];
-  t.after(async () => {
+  onReadModelClose(t, async () => {
     for (const stop of stops) stop();
-    await Promise.all(book.live().map(({ thread }) => (thread as Worker).terminate()));
+    // The shared transaction publisher is not this test's thread: terminating it would fail every later flush in the process.
+    await Promise.all(book.live().filter(({ kind }) => !kind.startsWith("read-model-db:")).map(({ thread }) => (thread as Worker).terminate()));
     book.stop();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
   });
   writeFileSync(join(dir, "ledger.ndjson"), LEDGER_ROW);
   return { dir, stopsFirst: (stop) => void stops.push(stop) };
@@ -237,7 +237,7 @@ function nativeHeapProbe(t: TestContext, threadId = 801) {
     threadId,
     getHeapStatistics: () => new Promise<NativeHeap>((resolve, reject) => requests.push({ resolve, reject })),
   });
-  t.after(() => { for (const request of requests) request.resolve(NATIVE_HEAP); });
+  onReadModelClose(t, () => { for (const request of requests) request.resolve(NATIVE_HEAP); });
   return {
     thread, requests,
     sample: (timeoutMs = 50) => memory.readWorkerHeaps([{ kind: "probe:native", thread: thread as unknown as memory.WorkerThread }], timeoutMs),
@@ -374,7 +374,7 @@ test("native heap request ownership uses Worker identity rather than its numeric
 
 test("native heap timely positive control reads the real default Worker implementation", async (t) => {
   const thread = new Worker("setInterval(() => {}, 1000);", { eval: true });
-  t.after(async () => { await thread.terminate(); });
+  onReadModelClose(t, async () => { await thread.terminate(); });
   await new Promise<void>((resolve, reject) => { thread.once("online", resolve); thread.once("error", reject); });
   assert.equal(typeof thread.getHeapStatistics, "function", "control: the real runtime exposes heap statistics");
   for (let sample = 0; sample < 2; sample++) {

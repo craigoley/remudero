@@ -5,7 +5,7 @@
  * them with a full read of the same store at the same seq: a fresh projection's first index, which reads in full.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -22,7 +22,7 @@ import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } f
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelStatement } from "#src/lib/read-model-db.js";
 import type { GitHub, LedgerIndex, PrRef } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 
@@ -122,14 +122,13 @@ interface World {
 }
 
 function world(t: TestCtx, rows: Row[]): World {
-  const root = makeTempDir("board-step-buckets");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "board-step-buckets").dir;
   let ms = T0 + 3_600_000;
   const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
   const ledgerDir = join(root, "core", "state");
   mkdirSync(ledgerDir, { recursive: true });
   const db = openProjectorReadModel(join(root, "home"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: got.lease, clock });

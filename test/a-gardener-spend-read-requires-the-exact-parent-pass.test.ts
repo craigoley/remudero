@@ -15,6 +15,7 @@ import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
 import { fixedClock } from "#src/lib/clock.js";
 import { captureGardenerSpendSource, foldGardenerSpend } from "#src/lib/gardener-spend.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const repository = "fixture/repo";
 const at = new Date().toISOString();
@@ -40,8 +41,7 @@ const child = { ts: at, step: "implement.done", run_id: "child", task_id: "task"
 
 async function captured(t: { after(fn: () => void): void }, rows: unknown[], scope = "repository") {
   const { captureGardenerSpendSource, foldGardenerSpend } = await loadSpend();
-  const dir = makeTempDir("gardener-spend-receipts");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "gardener-spend-receipts").dir;
   const inventory = runtime(true, scope);
   Object.assign(inventory.gardens[0]!, { attempts: 1, completions: 1 });
   writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(inventory));
@@ -116,8 +116,7 @@ test("W1-T10160: owned machine-judge receipts preserve partial money and reporte
 });
 
 test("W1-T10287: exact-parent collector counts issue revalidation money once and preserves unknowns", async t => {
-  const dir = makeTempDir("issue-revalidation-spend");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "issue-revalidation-spend").dir;
   const inventory = runtime();Object.assign(inventory.gardens[0]!, { name: "issue-revalidation", attempts: 1, completions: 1 });
   writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(inventory));
   const owned = { ...parent, name: "issue-revalidation" }, producer = { ...child,
@@ -277,8 +276,7 @@ test("W1-T8484: incomplete gardener spend remains unknown rather than zero", asy
     assert.equal(result.totalUsd, null);
     assert.equal(result.gardens[0]!.scope, scope);
   }
-  const dir = makeTempDir("gardener-spend-source");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "gardener-spend-source").dir;
   assert.deepEqual(await captureGardenerSpendSource(dir), { reason: "missing_registry" });
   const path = join(dir, "gardener-runtime.json");
   writeFileSync(path, "not json");
@@ -417,8 +415,7 @@ test("W1-T8667: genuine compact overflow preserves independent Analytics", async
 
 test("W1-T8667: real worker materializes many gardener receipts before cached reads", async t => {
   await loadSpend();
-  const stateDir = makeTempDir("gardener-spend-worker");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "gardener-spend-worker").dir;
   const ledgerDir = join(stateDir, "core");
   mkdirSync(ledgerDir);
   mkdirSync(join(stateDir, "read-model"));
@@ -432,7 +429,7 @@ test("W1-T8667: real worker materializes many gardener receipts before cached re
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { analytics: "serve" } }));
   const posted: ReadModelWorkerMessage[] = [];
   let onMessage: ((msg: { type?: string }) => void) | undefined;
-  t.after(() => onMessage?.({ type: "stop" }));
+  onReadModelClose(t, () => onMessage?.({ type: "stop" }));
   const body = () => posted.findLast(m => m.type === "body" && m.entry.view === "analytics");
   const refresh = async (expected: number) => {
     runReadModelWorker({ on: (_event, run) => onMessage = run, postMessage: m => posted.push(m as ReadModelWorkerMessage), close() {} },
@@ -483,7 +480,7 @@ test("W1-T8667: real worker materializes many gardener receipts before cached re
   const server = createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModelViews: ["analytics"],
     readModel: restarted }) });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => { server.closeAllConnections(); server.close(); });
+  onReadModelClose(t, () => { server.closeAllConnections(); server.close(); });
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/analytics`;
   for (let i = 0; i < 2; i++) {
     const response = await fetch(url, { headers: { authorization: "Bearer r" } });
@@ -851,8 +848,7 @@ test("W1-T9658: cached gardener usage survives the real materialization boundary
     }
   });
   await t.test("real worker refresh persists usage for authenticated reads after ledger removal", async t => {
-    const stateDir = makeTempDir("gardener-worker-call-cache");
-    t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+    const stateDir = readModelFixtureDir(t, "gardener-worker-call-cache").dir;
     const ledgerDir = join(stateDir, "core");
     mkdirSync(ledgerDir);
     mkdirSync(join(stateDir, "read-model"));
@@ -869,7 +865,7 @@ test("W1-T9658: cached gardener usage survives the real materialization boundary
     writeFileSync(join(ledgerDir, archive(1000)), replay);
     const posted: ReadModelWorkerMessage[] = [];
     let onMessage: ((msg: { type?: string }) => void) | undefined;
-    t.after(() => onMessage?.({ type: "stop" }));
+    onReadModelClose(t, () => onMessage?.({ type: "stop" }));
     const refresh = async (expectedMatched: number) => {
       const start = posted.length;
       runReadModelWorker({ on: (_event, run) => onMessage = run,
@@ -921,7 +917,7 @@ test("W1-T9658: cached gardener usage survives the real materialization boundary
     const server = createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [],
       readModelViews: ["analytics"], readModel: restarted }) });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    t.after(() => { server.closeAllConnections(); server.close(); });
+    onReadModelClose(t, () => { server.closeAllConnections(); server.close(); });
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/analytics`;
     assert.equal((await fetch(url)).status, 401);
     for (let read = 0; read < 2; read++) {
@@ -935,8 +931,7 @@ test("W1-T9658: cached gardener usage survives the real materialization boundary
     }
   });
   await t.test("fleet usage cannot crowd out independently valid repository money", async t => {
-    const stateDir = makeTempDir("gardener-calls-fleet-budget");
-    t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+    const stateDir = readModelFixtureDir(t, "gardener-calls-fleet-budget").dir;
     const names = Array.from({ length: 12 }, (_, i) => `repo-${i}`);
     const { captureGardenerSpendSource } = await loadSpend();
     const sources: Awaited<ReturnType<typeof captureGardenerSpendSource>>[] = [];

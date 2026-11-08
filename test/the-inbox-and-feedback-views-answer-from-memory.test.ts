@@ -3,7 +3,7 @@
 // Measured before: GET /v1/inbox/threads 15.2 s cold, /v1/inbox?section=needsYou 3.7 s and stale on
 // every read, bare /v1/inbox 1.96 MB, /v1/feedback 462 KB.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -15,10 +15,10 @@ import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, feedbackLegacyView, feedback
 import { INBOX_VIEW_NAME, INBOX_VIEW_SECTIONS, INBOX_VIEW_VERSION, inboxLegacyView, inboxViewBodies, refreshInboxClassification } from "#src/lib/inbox-view.js";
 import { buildInboxRoute, inboxLanes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { createReadModelTicker, createReadModelWorker, loadCommittedViewBodies, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { buildReadModelViewRoutes, renderView, viewKey, type ViewSource } from "#src/lib/views.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { allowGhRefusals } from "#test/setup/tmp-hygiene.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 allowGhRefusals("the real slow lane thread re-runs test setup, which puts the refusal stub ahead on that thread's PATH; an empty plan classifies the same with its board read refused");
 
@@ -28,8 +28,7 @@ const T0 = Date.parse("2026-10-01T04:00:00.000Z");
 const SOURCE: ViewSource = { name: "inbox-store:core", asOf: new Date(T0).toISOString(), state: "fresh" };
 
 function root(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -92,7 +91,7 @@ test("the legacy inbox view pages the last classification without classifying", 
   const route = buildInboxRoute(deps);
   const server = createServer((req, res) => void route.handler(req, res, { params: {} } as never));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => server.close());
+  onReadModelClose(t, () => server.close());
   assert.equal((await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/inbox`)).status, 200);
   // W1-T8825: the slow lane records when it first saw each item, so it has run before the legacy side is compared with it.
   const view = (await refreshInboxClassification(deps, {}, fixedClock(T0))).bodies.find((b) => b.key === "section=needsYou")!;
@@ -154,7 +153,7 @@ function tickerFor(t: TestCtx, mode: string | undefined): { posted: ReadModelWor
   if (mode) writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: mode } }));
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], holder: "accept", oracle: "off", views: [], post: (m) => void posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   return { posted, ticker, stateDir };
@@ -211,7 +210,7 @@ setTimeout(() => parentPort.postMessage({ type: "drop", view: "inbox", key: "sec
 setInterval(() => {}, 1000);
 `);
   const handle = createReadModelWorker({ stateDir: dir, instances: [{ name: "core", ledgerDir: dir }], workerUrl: pathToFileURL(path), every: () => () => {} });
-  t.after(() => void handle.stop());
+  onReadModelClose(t, () => void handle.stop());
   handle.start();
   const deadline = Date.now() + 10_000;
   while (!handle.body("inbox", "section=ready") && Date.now() < deadline) await sleep(5);
@@ -233,7 +232,7 @@ test("the inbox view is materialized by a real slow lane with no reader and serv
     stateDir, instances: [{ name: "core", ledgerDir }], log: (step) => logs.push(step), every: () => () => {},
     slowLane: { intervalMs: 60_000, inbox: { root: deps.root, planPath: deps.planPath, ledgerPath: deps.ledgerPath, inboxRoot: deps.inboxRoot, repository: "o/r" } },
   });
-  t.after(() => void handle.stop());
+  onReadModelClose(t, () => void handle.stop());
   handle.start();
   const deadline = Date.now() + 60_000;
   while ((!handle.body(INBOX_VIEW_NAME, "section=needsYou") || !handle.body(FEEDBACK_VIEW_NAME, "")) && Date.now() < deadline) await sleep(20);
@@ -244,7 +243,7 @@ test("the inbox view is materialized by a real slow lane with no reader and serv
   const [route] = buildReadModelViewRoutes({ legacy: [], readModel: handle, readModelViews: [INBOX_VIEW_NAME], requiredParams: { [INBOX_VIEW_NAME]: ["section"] } });
   const server = createServer((req, res) => void route!.handler(req, res, { params: {} } as never));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => server.close());
+  onReadModelClose(t, () => server.close());
   const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/inbox?section=needsYou`);
   assert.equal(res.status, 200);
   const body = (await res.json()) as { data: { items: Array<{ proposalId: string }>; counts: { needsYou: { notReady: number } } }; sources: ViewSource[] };

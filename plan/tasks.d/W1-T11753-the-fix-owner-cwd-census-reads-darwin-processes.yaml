@@ -1,0 +1,86 @@
+- id: W1-T11753
+  title: "THE FIX-OWNER PROCESS CWD CENSUS READS DARWIN PROCESSES THROUGH APPLE-SHIPPED TOOLS WITH A SELF-CONTROL, STAYING FAIL-CLOSED — readBoundedProcessCwdCensus opens /proc, and on macOS opendirSync('/proc') throws, so every census answers unknown/proc_unavailable and decideRegisteredFixOwnerRecovery keeps every dead fix round's worktree as process_cwd_probe_unreadable on the Mac host"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern; it feeds the fail-closed owner-recovery guard, so a false clear would reclaim a live worker's worktree
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T2952, W1-T10389, W1-T11659, W1-T5689, W1-T9310]
+  files:
+    - src/lib/process-cwd-census.ts
+    - test/fix-lane/the-fix-owner-cwd-probe-reads-darwin-processes.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  acceptance:
+    - claim: "On darwin the census enumerates pids, ppids and uids with ps and same-uid cwds with lsof, answers clear only when the lsof output includes the census's own pid at its own realpath cwd (the positive control) and every same-uid pid still alive has a cwd; a pid at or below the owner path's realpath is occupied; a missing tool, non-zero exit, failed control, unparseable field, same-uid pid with no cwd, or overrun bound answers unknown with a named darwin reason; foreign-uid pids are skipped and counted under W1-T10389's rule; linux /proc behaviour is unchanged"
+      proof: "unit test: test/fix-lane/the-fix-owner-cwd-probe-reads-darwin-processes.test.ts"
+    - claim: "the darwin reader is a named seam in the census module"
+      proof: "grep: readDarwinProcessCwdTable( in src/lib/process-cwd-census.ts"
+  rationale: |
+    ORIGIN: the operator's 2026-11-08 PR-flow request, item (3). The operator reports the /proc-only census fails
+    closed with process_cwd_probe_unreadable on macOS. The recovery report (reports/Remudero PR flow recovery.md)
+    could not be opened from this worktree (confinement hook), so no report figures are restated.
+    READ in this worktree (src/lib/process-cwd-census.ts, src/run-task.ts):
+    - readBoundedProcessCwdCensus calls opendirSync("/proc") and returns {state: "unknown", reason:
+      "proc_unavailable"} when it throws. Darwin has no /proc.
+    - The fix-owner snapshot reader in src/run-task.ts sets processState from it, and decideRegisteredFixOwnerRecovery
+      maps any non-clear state to keep / process_cwd_probe_unreadable. So on the Mac host, no dead round's worktree
+      is ever reclaimed by the stale-dirty, untracked or contained paths (W1-T7998, W1-T6355, W1-T7719).
+    - That snapshot reader already runs synchronous git (hostWorktreeGit), so a bounded synchronous tool spawn has
+      precedent at this call site. The builder still runs W1-T5689's sync-spawn census, and stops and reports if it
+      refuses the new spawn on a daemon-loop path.
+    PLATFORM FACTS (researched 2026-11-08):
+    - Apple's libproc.h (proc_pidinfo, proc_pidpath; the cwd comes from the PROC_PIDVNODEPATHINFO flavor in
+      sys/proc_info.h) describes itself as "private interfaces to obtain process information. These interfaces are
+      subject to change in future releases" (https://opensource.apple.com/source/xnu/xnu-7195.81.3/libsyscall/wrappers/libproc/libproc.h.auto.html).
+      Node has no binding to it, and binding it means a native addon over an interface Apple marks private. NOT USED.
+    - /usr/sbin/lsof ships with macOS, lists Apple Darwin / macOS among its supported systems, selects the cwd
+      descriptor with `-d cwd` and prints parseable fields with `-F` (https://lsof.readthedocs.io/en/latest/manpage/,
+      https://www.mankier.com/1/lsof). /bin/ps -axo is the system process lister. Both are Apple-shipped
+      command-line tools with man pages, the supported surface.
+    - DOCUMENTED RISK: lsof is itself built on libproc, so an OS update that changes libproc can change lsof's
+      output. The self-control (the census's own pid must appear at its own cwd) turns that drift into unknown
+      (fail closed), never into a false clear. macOS also resolves /var as /private/var and /tmp as /private/tmp,
+      so both the owner path and every lsof cwd are compared by realpath.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T10389 (foreign and sandboxed same-uid pids)
+    and W1-T11659 (the systemd --user manager) are both /proc-only, on Linux. W1-T10257 and W1-T9541 are other
+    Darwin concerns. No shard names a Darwin cwd census (grep of plan/tasks.d for lsof, proc_pidinfo, libproc and
+    darwin census; plan/tasks.d/W1-T10389-*, W1-T11659-*).
+    Settled by lookup: does an open PR touch the census? -> No (the 10 open PRs on 2026-11-08,
+    https://github.com/craigoley/remudero/pulls).
+    Settled by lookup: may a fleet worker run as another uid? -> W1-T10389 design 2 requires the builder to confirm
+    that fleet workers run as the daemon's uid. The same confirmation is required for the Mac spawn path here.
+  design: |
+    1. readDarwinProcessCwdTable(deps) in src/lib/process-cwd-census.ts, used only when process.platform is
+       "darwin" and no readNextPid seam is injected. It runs `ps -axo pid=,ppid=,uid=` and
+       `lsof -a -u <ownUid> -d cwd -n -P -F pn` (absolute paths /bin/ps and /usr/sbin/lsof) through an injectable
+       runner. Each run has a timeout and a minimal LC_ALL=C environment. The builder confirms the -F field letters
+       against `lsof -F?` on the Mac host and records them in the PR.
+    2. CONTROL. The lsof table must contain process.pid with cwd equal to realpath(process.cwd()); otherwise unknown,
+       reason darwin_control_failed.
+    3. JUDGE. A foreign uid is skipped and counted (skippedForeign), as W1-T10389 rules. Every same-uid pid other
+       than the census's own must have an lsof cwd. A pid present in ps but absent from lsof is re-checked with
+       `ps -p <pid>`: if it exited, skip it; if it is alive, return unknown cwd_unreadable with that pid, reported
+       through onUnreadable. A realpath cwd at or below realpath(ownerPath) is occupied (pathIsAtOrBelow). No
+       ancestor attribution on Darwin in this task: an unexplained same-uid pid stays unknown.
+    4. BOUND. Darwin gets its own wall bound, because a tool spawn cannot meet the 100 ms /proc bound. The builder
+       measures lsof plus ps wall time on the Mac host over at least 20 runs and sets the bound from that sample,
+       recording it in the PR. An overrun is unknown wall_bound. maxEntries applies to the ps table.
+    5. NO PRIVATE API, NO ROOT, NO NEW DEPENDENCY. No sudo, no native addon, no libproc FFI. The Linux path is unchanged.
+    6. Tests (new file test/fix-lane/the-fix-owner-cwd-probe-reads-darwin-processes.test.ts; its basename avoids
+       the word census so listRuleSuites does not read it as a CI rule suite — it is a behaviour test, not a
+       census/ratchet) over an injected runner: clear with the control; occupied below the owner path through a
+       /private/var alias; control missing gives unknown; lsof exit 1 gives unknown; a live same-uid pid with no cwd
+       gives unknown; an exited one is skipped; a foreign uid is skipped and counted; an overrun gives unknown. Plus
+       one real pass on a darwin host through the W1-T9310 host helper, skipped elsewhere: it must read clear or
+       occupied for a fresh temp dir, and never proc_unavailable.
+  falsifier: |
+    On a Mac, at origin/main, readBoundedProcessCwdCensus on any path returns unknown/proc_unavailable, so the
+    real darwin pass fails. Remove the self-control and feed an lsof table with no rows: the census reads clear,
+    and the "control missing gives unknown" case fails. If lsof on the Mac host cannot report a same-uid
+    process's cwd without elevated privileges, the task stops and reports rather than reading clear.

@@ -1,0 +1,117 @@
+- id: W1-T11763
+  title: "A PLAN DIFF IS LINTED BY TRUSTED CODE WHERE THE PROOF SANDBOX CANNOT START, OR IT STAYS UNPUBLISHED — on Darwin the host-path pre-push lint reads the bwrap sandbox as unavailable and exits 2 (not blocking), so PR #17406 (2026-11-08) was published with two deterministic proof errors in its plan shards that hosted remudero-review then found, and the corrected head cost another CI cycle"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — what the host-path plan-lint gate does when the proof sandbox cannot start; high for blast radius: every harness plan publication from a Darwin host passes through it
+  band_meaning: blast-radius
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: architect
+  plan_refs: [W1-T4901, W1-T5348, W1-T6120, W1-T6124, W1-T6138, W1-T9619, W1-T10223]
+  files:
+    - hooks/pre-push
+    - src/lib/git-push.ts
+    - src/lib/plan-pr-emitter.ts
+    - test/a-plan-diff-is-linted-by-trusted-code-where-the-sandbox-cannot-start.test.ts
+  rationale: |
+    MEASURED 2026-11-08 while PR #17406 was being fixed. The source report is an untracked local artifact and may not be in
+    a worker checkout, so the evidence is restated here in full:
+      - The protected pre-push / plan-emitter lint route needs Linux bwrap. On the Darwin host the sandbox probe failed,
+        the lint-plan precheck read "could not run the lint — not blocking on an unreadable check", and publication went
+        ahead.
+      - Hosted remudero-review then found two deterministic proof errors in the PR's plan shards. These are the offline
+        lint's own proof rules, so a lint run before the push would have reported them.
+      - The corrected head needed one more full hosted CI cycle. That is the round trip this task removes: one CI cycle
+        per plan publication from a Darwin host whose shards carry a lint finding.
+    READ on this checkout (symbols, not lines):
+      - hooks/pre-push: when gate_root differs from tree_root, own_tree=0 (the harness's hook pushing a worker or
+        architect worktree, as PLAN-create runs do under /Users/.../worktrees). The lint-plan block then runs the
+        tree's package.json `lint-plan:fast` argv through `createPrePushSandboxRunner` (src/lib/git-push.ts).
+        `createPrePushSandboxRunner` throws `ProofSandboxUnavailableError` unless `probeProofSandbox`
+        (src/lib/review.ts) reads mode `bwrap`. The catch prints "skipped, NOT passed (CI runs it)" and exits 2, and
+        rc 2 is "not blocking". W1-T6138's design (3) chose exactly that: never run unsandboxed, never pass.
+      - The same arm runs the BRANCH's lint argv. For a plan-only candidate this is not needed. The lint
+        implementation is harness code, and the candidate's plan files are data to it. `lintPlanCommand`
+        (src/run-task.ts) already accepts `--repo-root` / `--plan` / `--base` / `--offline`, and `lintPlanForReview`
+        already launches the HARNESS's run-task entry (`childEntryArgv(repoRoot, "run-task", ...)`, cwd repoRoot) against
+        a PR-head checkout as `--repo-root`. That is the trusted-installed-lint-over-data pattern this task reuses.
+      - src/lib/plan-pr-emitter.ts: `runInTree` runs the TREE's scripts/lint-plan-precheck.mjs with `inTreeEnv()`, which is
+        `process.env` wholesale, and `planPrPreflightAllows` logs `plan_pr.preflight_unreadable` and still allows the
+        push when a check could not run (W1-T5348 design 3, which this task does not revisit for non-lint checks).
+    Settled by lookup: is this already filed or already decided? -> no. W1-T4901 (merged) put the lint in the hook with
+      exit 2 not blocking. W1-T5348 (merged) made an unreadable preflight check report without refusing. W1-T6138
+      (merged) sandboxed branch-owned checks and kept a named skip when bwrap is unavailable. W1-T9619 (merged) moved
+      the pre-open gate to trusted code, not the plan lint. W1-T10223 (queued) only precompiles the lint entry. None
+      lints a plan diff with trusted code when the sandbox cannot start, and none holds the publication
+      (plan/tasks.d/W1-T4901-*, W1-T5348-*, W1-T6138-*, W1-T9619-*, W1-T10223-*).
+    Settled by lookup: does open PR #17406 already carry it? -> no. W1-T11750 to W1-T11754 cover the open-PR inventory,
+      the PR recovery record, recovery escalation, the Darwin fix-owner cwd census and replayed-branch survival. None
+      covers plan lint, the sandbox or the preflight (https://github.com/craigoley/remudero/pull/17406/files).
+    Settled by lookup: does another open PR cover it? -> not by title. There were 11 open PRs on 2026-11-08 (#17412, #17411
+      W1-T11756 S1 scope reconciliation, #17408, #17406, #17394, #17386, #17367, #17354, #17348, #17322, #17229), and
+      none is titled for plan lint, Darwin, bwrap or the sandbox. This architect has no git or gh, so it read titles,
+      not every head's shards. The builder re-sweeps the open heads before starting
+      (https://github.com/craigoley/remudero/pulls?q=is%3Apr+is%3Aopen).
+    Settled by lookup: may the fix run branch-owned code unsandboxed on Darwin? -> no. W1-T6120, W1-T6138 and W1-T9619 all
+      rule it out, and DECISIONS.md 2026-09-22 (W1-T3103) records the credential exposure that makes it unsafe.
+    Settled by lookup: is there a capable host where the sandbox starts? -> yes. Per W1-T6138's rationale, bwrap is
+      present and starts in the remudero-daemon container (deploy/Dockerfile REQ 8). It is absent on Darwin.
+    Settled by lookup: who keeps authority over scope and merge? -> unchanged. Hosted required checks (ci.yml lint-plan,
+      remudero-review) and operator merge and scope authority stay as they are. This gate only adds a refusal before
+      publication.
+  design: |
+    The builder designs the mechanism. These are the requirements:
+    1. TRUSTED LINT OVER DATA. On the host path (own_tree=0) with the proof sandbox unavailable, a candidate diff whose
+       changed paths are all plan data (plan/** and MASTER-PLAN.md) is linted by the GATE ROOT's own lint
+       (`lintPlanCommand` through the gate root's run-task entry, as `lintPlanForReview` launches it) with
+       `--repo-root <candidate tree> --base <merge base> --offline`. The env is `prePushGateEnv`'s allowlist with a
+       throwaway HOME. The entry, the cwd and every module loaded come from the gate root. Nothing under the candidate
+       tree is executed, and the lint only reads it. A new exported `trustedPlanLintOverCandidate(` in
+       src/lib/git-push.ts owns this route. hooks/pre-push calls it, and so does the lint-plan step of the machine
+       plan-PR preflight in src/lib/plan-pr-emitter.ts, in place of `runInTree` running the tree's own
+       scripts/lint-plan-precheck.mjs when the sandbox reads unavailable.
+    2. THE RESULT MATCHES WHAT CI WOULD SAY, OR IT IS NOT A RESULT. The trusted result counts only when the lint
+       implementation is the same in the gate root and at the candidate's merge base. That means
+       src/lib/task-linter.ts, the lint-plan path of src/run-task.ts, scripts/lint-plan-*.mjs and package.json's
+       `lint-plan:fast`, compared with git (tree hashes, read as data) and never by running them. A candidate that
+       changes any non-plan path, or a gate root whose lint differs from the base's, gets no trusted result and goes
+       to step 3. Exit semantics are then lint-plan-precheck's: a finding blocks, and a finding made only of
+       machine-filing-admission is reported (W1-T4901 (iv)).
+    3. ROUTE OR HOLD, NEVER PUBLISH UNLINTED. When neither the sandbox nor the trusted route can produce a result, the
+       candidate goes either (a) by exact base sha and candidate tree to an authenticated worker on a host where
+       `probeProofSandbox` reads bwrap (for example the daemon's existing plan-PR or feedback-landing queue), or
+       (b) nowhere: it is held unpublished. A held candidate is refused at the hook with a named exit distinct from 1
+       (violation) and 2 (unreadable). It writes one ledger row, `plan_pr.lint_held`, naming the owner (the lane or
+       run that produced the draft), the base sha, the candidate head sha, the reason, and the wake condition: the
+       sandbox probe reads bwrap, or the gate root's lint matches the base's. `planPrPreflightAllows` treats a held
+       lint-plan check as not allowed. Every other check keeps W1-T5348's report-only rule for unreadable checks.
+    4. EVIDENCE IS BOUND TO THE TREE. Every lint verdict this route produces (pass, finding or held) records the base
+       sha, the candidate head sha (or tree sha for a commit-tree push), the gate-root sha and the route
+       (sandbox, trusted, routed, held). A verdict is never reused for a different candidate or base.
+    5. UNCHANGED: the own_tree=1 path (an operator pushing their own checkout), the Linux bwrap path, the other host-path
+       checks (census, ci-control-plane), hosted required checks, review, and operator scope and merge authority.
+  acceptance:
+    - claim: "on the host path with the sandbox reading unavailable, a plan-only candidate whose shard carries two deterministic proof errors (the #17406 shape) is linted by gate-root code with the candidate tree as --repo-root, a fixture candidate bin/rmd, scripts/lint-plan-offline.mjs and package.json that record execution are never run, the child env holds no GH_TOKEN or GH_APP name, and the push is refused naming both errors; a clean plan-only candidate pushes; a candidate touching src/ or a gate root whose lint differs from the merge base's gets no trusted result and, with no capable route, is held unpublished with one plan_pr.lint_held row naming owner, base sha, candidate head sha and wake condition; and the verdict row carries the base, candidate and gate-root shas"
+      proof: "unit test: test/a-plan-diff-is-linted-by-trusted-code-where-the-sandbox-cannot-start.test.ts"
+    - claim: "the machine plan-PR preflight's lint-plan step calls the trusted route instead of the tree's own precheck script when the sandbox reads unavailable (the hook's call is proven by the unit test above, which drives hooks/pre-push end to end)"
+      proof: "grep: trustedPlanLintOverCandidate( in src/lib/plan-pr-emitter.ts"
+    - claim: "the machine plan-PR preflight ledgers a held lint check under its own step and refuses the push"
+      proof: "grep: plan_pr.lint_held in src/lib/plan-pr-emitter.ts"
+  falsifier: |
+    Restore the hook's catch arm that exits 2 for every sandbox failure. The #17406-shaped fixture then pushes with its
+    two proof errors and the first test fails. Point the trusted route at the candidate tree's own lint script, and the
+    fixture's execution recorder fires and the test fails. Let a src/-touching candidate take the trusted result, and the
+    held-row case fails. CLOSE the task without building if, in a fresh sample, Darwin host-path plan publications
+    show no lint-plan "could not run" lines alongside hosted lint-plan or review proof reds, because the gap then costs
+    nothing.
+  notes: |
+    FIXTURES ONLY: a gitRepo() fixture with a bare origin, a candidate worktree, and a gate root distinct from the
+    candidate. The sandbox probe is injected as unavailable (darwin), so the suite runs on any OS. The candidate's
+    executable files are tmp scripts that record whether they ran. Nothing runs against a real worktree, the host or
+    origin. PLAN-ONLY FILING: this record starts no source work. Re-read `createPrePushSandboxRunner`, the hook's
+    own_tree arms and `planPrPreflightAllows` at origin/main before building.
