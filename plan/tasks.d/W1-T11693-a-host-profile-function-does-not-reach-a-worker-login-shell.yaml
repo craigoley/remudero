@@ -76,7 +76,9 @@
     5. Update the module header comment and the materializeWorkerHome doc comment, which say "empty rc files". State
        the new invariant: user rc files are blank, and the login profile clears host-profile aliases and functions.
        Cite both GNU URLs in that comment.
-    REGRESSION (test/worker-home.test.ts). Spawn a REAL bash, resolved by name as the W1-T2850 note in
+    REGRESSION (test/worker-home.test.ts). Add a test with this exact title:
+      W1-T11693: login startup removes host-profile aliases and functions, but preserves functions defined later
+    Spawn a REAL bash, resolved by name as the W1-T2850 note in
     test/codex-worker-home-redirection.test.ts requires. Inject host-profile state without touching /etc:
       - FUNCTION through real login startup: a parent `bash -c` defines a function with a non-gawk name, `export -f`s
         it (the encoding matches that bash), then execs `bash --login -c '<report>'` with HOME set to a
@@ -101,7 +103,7 @@
     zsh startup cleanup; any grant, credential, keychain or .claude behaviour; and docs/forensics/worker-home.md.
   acceptance:
     - claim: "a real bash login startup over the generated worker profile reports none of the injected host-profile aliases or functions, while the same injection survives an empty profile (red control) and a function defined after startup stays available"
-      proof: "unit test: test/worker-home.test.ts"
+      proof: "unit test: W1-T11693: login startup removes host-profile aliases and functions, but preserves functions defined later"
     - claim: "the worker login profile is a named export distinct from the blank rc files"
       proof: "grep: WORKER_HOME_LOGIN_PROFILE_SCRIPT in src/lib/worker-home.ts"
     - claim: "the worker home's own comment cites the GNU Bash startup-file order that makes an empty profile insufficient"
