@@ -1,5 +1,5 @@
 - id: W1-T11787
-  title: The gh read broker's boot loads at most its cache budget, evicting the oldest entries before parsing any, so a cache that outgrew its heap cannot crash-loop the broker
+  title: The gh read broker's boot parses at most a declared heap-sized byte bound of its cache, newest first, and evicts the rest unparsed, so a cache that outgrew its heap cannot crash-loop the broker
   repo: remudero
   depends_on: []
   priority: 0.3
@@ -19,7 +19,7 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: When the cache directory holds more bytes than its budget, boot evicts the oldest entries by modification time until the rest fit, before parsing any entry
+    - claim: When the cache directory holds more bytes than the declared boot parse bound, boot keeps the newest entries by modification time that fit the bound and evicts the rest, before parsing any entry, whatever the disk-share budget says
       proof: "grep: W1-T11787 criterion 1 in test/github/every-mac-session-reads-github-through-one-broker.test.ts"
     - claim: A cache within its budget boots with every entry loaded, exactly as today
       proof: "grep: W1-T11787 criterion 2 in test/github/every-mac-session-reads-github-through-one-broker.test.ts"
@@ -32,10 +32,11 @@
     - Mechanism: the GhReadBroker constructor reads every file under cache/ through readEntry and statSync and keeps its subjects, with no bound. The eviction budget (cacheShareOfFree * freeBytes) only runs when a new entry is stored, never at boot, so a cache that grew while the broker was down is loaded whole.
     - Effect: with the broker down, deny-floor falls back to the 180 s floor and every session's GitHub read slows; an operator renamed the cache aside by hand to recover.
   design: |
-    In the constructor, before parsing, list the cache directory with sizes and mtimes (one statSync per entry, no reads). If the total exceeds the same budget the store path already uses, remove the oldest entries (by mtime) until the remainder fits, using the existing eviction routine so subjects and invalidations stay consistent. Then parse the remaining entries one at a time, keeping only key, bytes and subjects. When anything was evicted, append one broker log row with the count and bytes. No change to request keys, TTLs or served results.
+    MEASURED 2026-11-08 (second crash, the correction to this task's first draft): after an operator moved the cache aside the broker ran about two hours and then crash-looped again, 93 starts in the 23:00Z hour, with only 264 entries and 80 MB (21 entries of 1 to 5 MB, none over 4 MB). Boot parsing amplifies bytes several times in the V8 heap, so the failing threshold is roughly 60 to 80 MB of cache against a heap of about 250 MB under MemoryMax=640M. The disk-share budget the store path uses is gigabytes, so a boot cap at that budget would never fire; the bound must be sized to the heap.
+    In the constructor, before parsing, list the cache directory with sizes and mtimes (one statSync per entry, no reads). Keep the newest entries by mtime whose cumulative bytes fit BROKER_BOOT_PARSE_BYTES (a declared constant, 24 MiB, a third of the measured failing size), and evict the rest unparsed using the existing eviction routine so subjects and invalidations stay consistent. Then parse the kept entries one at a time, keeping only key, bytes and subjects. When anything was evicted, append one broker log row with the count and bytes. The broker's running cache still grows to its disk-share budget; only boot is bounded. No change to request keys, TTLs or served results.
     NOT IN SCOPE: the unit's restart policy (host config), the self-sync refusal (W1-T11788), serving without an identity (W1-T11789).
   falsifier: |
-    Remove the boot-time eviction and criterion 1 must fail (the entry count stays above the budget). Make boot retain bodies and criterion 3 must fail. Restore both and require all four to pass.
+    Remove the boot-time bound and criterion 1 must fail (the kept bytes stay above the bound); set the bound to the disk-share budget and criterion 1 must fail on a cache between the two. Make boot retain bodies and criterion 3 must fail. Restore both and require all four to pass.
   note: |
     reservation hand-off: run-unfiled-1794173043382 -> run-unfiled-1794173043382
     Reserved with rmd next-task-id (W1-T11787 on run-unfiled-1794173043382). Build before W1-T11789, which edits the same file.
