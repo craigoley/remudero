@@ -1523,7 +1523,7 @@ export interface DaemonDeps {
    *  closure so the caller binds `config` and its own ledger `log`, matching `readDiskHeadroom`
    *  above. Best-effort: a throw is caught and logged, never allowed to take the tick down.
    *  Optional — omitted, this tick performs no sweep, unchanged behaviour for every existing caller. */
-  sweepStrandedReviewWorktrees?: () => void;
+  sweepStrandedReviewWorktrees?: () => void | Promise<void>;
   /** Reclaim regenerable build output inside checkouts that must be KEPT — see {@link
    *  import("./disk-artifact-reclaim.js").sweepReclaimableArtifacts} (W1-T3528). Every shipped
    *  reclaim rung's unit is a whole tree, so none can free a `coverage/` or `node_modules` inside
@@ -2905,7 +2905,7 @@ function startInFlightTicker(
           // effort — a thrown sweep is caught and logged, never allowed to take the tick down.
           if (deps.sweepStrandedReviewWorktrees) {
             try {
-              deps.sweepStrandedReviewWorktrees();
+              await deps.sweepStrandedReviewWorktrees();
             } catch (e) {
               log("daemon.review_worktree_sweep.error", { error: String((e as Error)?.message ?? e) });
             }
