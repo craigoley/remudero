@@ -21,6 +21,7 @@
     - src/lib/run-child.ts
     - src/run-task.ts
     - test/worker/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
+    - test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts
   status: queued
   attempts: 0
   acceptance:
