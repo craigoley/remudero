@@ -1,0 +1,109 @@
+- id: W1-T11795
+  title: The bundled sync-spawn caller identifies the shared hostWorktreeGit and vetPinnedConfig leaves by function name
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # caller and leaf attribution on diagnostic rows only; no execution, admission or scheduling decision reads them
+  origin: architect
+  plan_refs:
+    - W1-T7745
+    - W1-T11268
+    - W1-T11410
+  files:
+    - src/lib/read-plane.ts
+    - test/console-api/read-model/a-bundled-worktree-git-spawn-names-its-real-caller.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: An esbuild single-file fixture (outfile run-task.mjs) that calls production hostWorktreeGit on a temporary git repository from actualCaller records actualCaller as the caller and hostWorktreeGit as the leaf for both of that call's synchronous spawns, including vetPinnedConfig's config read, and never charges hostWorktreeGit or vetPinnedConfig as a caller
+      proof: "unit test: test/console-api/read-model/a-bundled-worktree-git-spawn-names-its-real-caller.test.ts"
+    - claim: An unbundled spawn through hostWorktreeGit still records the calling function as caller and hostWorktreeGit as leaf through the existing worktree-git path matcher
+      proof: "unit test: test/a-loop-lag-row-names-the-caller-behind-the-leaf.test.ts"
+    - claim: SYNC_SPAWN_LEAF_FRAME_NAMES names hostWorktreeGit as a shared spawn leaf
+      proof: 'grep: "hostWorktreeGit" in src/lib/read-plane.ts'
+    - claim: SYNC_SPAWN_LEAF_FRAME_NAMES names vetPinnedConfig as a shared spawn leaf
+      proof: 'grep: "vetPinnedConfig" in src/lib/read-plane.ts'
+  rationale: |
+    OBSERVED on the live daemon at 2026-11-08T20:36:23.463Z: daemon.loop_stall_profile reports
+    sync_spawn_ms=34284, with 55 calls charged to hostWorktreeGit (24691 ms) and 55 charged to
+    vetPinnedConfig (9099 ms). The daemon runs the single-file bundle run-task.mjs, so every frame's
+    file is run-task.mjs and the path matcher /[/\\]worktree-git\.[cm]?[jt]s/ in SYNC_SPAWN_LEAF_FRAMES
+    never fires. hostWorktreeGit (src/lib/worktree-git.ts:468) calls pinWorktreeGit (no spawn), then
+    vetPinnedConfig (:409, one execFileSync config list), then its own execFileSync. So each call makes
+    two spawns: today one is charged to vetPinnedConfig and the other to hostWorktreeGit. The 55/55
+    split matches that. The code that actually called hostWorktreeGit is invisible on the daemon.
+    Settled by lookup: is this already filed or already decided? -> no. W1-T11410 recognizes only
+    ghExecFile by name (its claims and design name ghExecFile alone). W1-T11268 skips read-plane's own
+    frames by name, not the leaves. W1-T7745 set the unbundled caller-behind-hostWorktreeGit contract
+    through the path matcher. W1-T9720 covers source-map-free caller text. W1-T11459 moves
+    review-worktree git to hostWorktreeGitAsync, which is an execution change, not attribution. No shard
+    in plan/tasks.d or plan/tasks.yaml mentions hostWorktreeGit or vetPinnedConfig together with bundle,
+    run-task.mjs or a leaf-name set, and LEARNINGS.md, DECISIONS.md and MASTER-PLAN.md hold no ruling on
+    SYNC_SPAWN_LEAF names (plan/tasks.d/W1-T11410-*, W1-T11268-*, W1-T7745-*, W1-T9720-*, W1-T11459-*).
+    Settled by lookup: does origin/main already name these leaves? -> no. src/lib/read-plane.ts:38 is
+    new Set(["ghExecFile"]), and callerFrame (:116) already consults that set before the path matchers,
+    so adding two names is the whole source change (src/lib/read-plane.ts).
+    Settled by lookup: is vetPinnedConfig a shared leaf or a real caller? -> a leaf. Its only caller in
+    src/ is hostWorktreeGit (src/lib/worktree-git.ts:470). Because it is the INNER frame, the outermost
+    leaf the caller called stays hostWorktreeGit (src/lib/worktree-git.ts, src/lib/read-plane.ts callerFrame).
+    Settled by lookup: does the existing bundled test's placement fit? -> yes, its FOLDER does.
+    test/console-api/read-model/ holds read-plane's esbuild-bundle fixture
+    a-bundled-sync-spawn-names-its-real-caller.test.ts (buildSync, outfile run-task.mjs, keepNames,
+    packages "external"). No new folder is needed, so rmd test-place is not consulted.
+    Settled by lookup: should this task prove through that existing FILE? -> no. That suite is
+    W1-T11410's and W1-T11268's own falsifier for ghExecFile and read-plane's own frames, not this
+    task's. Proving through it would make the shard span two concerns (Rule 19), and renaming this
+    shard to that slug would game the rule. So this task gets its OWN falsifier suite in the same
+    folder, named to match this shard's slug:
+    test/console-api/read-model/a-bundled-worktree-git-spawn-names-its-real-caller.test.ts. It copies
+    the existing file's esbuild options, so the placement and fixture pattern are reused unchanged.
+    Rule 19 merits test: one concern (read-plane leaf-name attribution). The new suite is this task's
+    own falsifier, so W1-T2525's own-falsifier discount applies and risk stays low.
+    Settled by lookup: is there an unbundled guard to keep? -> yes. W1-T7745's
+    test/a-loop-lag-row-names-the-caller-behind-the-leaf.test.ts asserts that a spawn through
+    hostWorktreeGit records the caller and the hostWorktreeGit leaf on source paths
+    (plan/tasks.d/W1-T7745-a-loop-lag-row-names-the-caller-behind-the-leaf.yaml).
+    Open-PR head sweep: this architect run has no git or gh access. The plan tree and origin/main
+    source at this worktree show no implementation. The reviewer should confirm that no open head
+    already adds these names before dispatch.
+  design: |
+    - In src/lib/read-plane.ts, add "hostWorktreeGit" and "vetPinnedConfig" to
+      SYNC_SPAWN_LEAF_FRAME_NAMES next to "ghExecFile". Update the comment above it to say the
+      name set covers bundles, where the module path is lost, and cite W1-T11795.
+    - Keep SYNC_SPAWN_LEAF_FRAMES and its worktree-git path matcher unchanged, so unbundled
+      stacks match as they do today.
+    - Create the NEW suite
+      test/console-api/read-model/a-bundled-worktree-git-spawn-names-its-real-caller.test.ts with a
+      test titled with the marker "W1-T11795 criterion 1". It builds its own esbuild buildSync bundle
+      with the same options as the sibling a-bundled-sync-spawn-names-its-real-caller.test.ts
+      (outfile run-task.mjs, bundle, platform node, format esm, keepNames: true, packages: "external"). The fixture runs `git init`
+      on a temporary directory outside read-plane's meter (before startReadPlaneTelemetry, or with
+      the async API) and defines function actualCaller() { return hostWorktreeGit(dir, ["rev-parse", "--git-dir"]); }.
+      It calls actualCaller once and prints telemetry.sample().
+    - Assert the following. Exactly one sync_spawn_by_caller row matches
+      /^at actualCaller \(.*[/\\]run-task\.mjs:\d+:\d+\)$/ with leaf "hostWorktreeGit" and calls 2.
+      No row's caller starts with "at hostWorktreeGit" or "at vetPinnedConfig". Every
+      sync_spawn_top row for actualCaller has leaf "hostWorktreeGit".
+    - Do not edit a-bundled-sync-spawn-names-its-real-caller.test.ts. W1-T11410's and W1-T11268's
+      fixture and exact counts stay as they are.
+    NOT IN SCOPE:
+    - any change to Git execution: hostWorktreeGit, vetPinnedConfig, pinWorktreeGit, the
+      hardened argv/env, or the sync-to-async conversion (W1-T11459 owns that);
+    - admission, review policy, capacity, timeouts, scheduling, or the stall/lag thresholds;
+    - other leaf names (ghExec, ghJson, plan.ts runGit), which a later observation can file
+      on its own evidence;
+    - weakening or rewriting W1-T11410's or W1-T11268's acceptance criteria.
+  falsifier: |
+    Remove "hostWorktreeGit" from SYNC_SPAWN_LEAF_FRAME_NAMES. The bundled test must then fail,
+    because the git spawn is charged to "at hostWorktreeGit (...run-task.mjs...)".
+    Remove only "vetPinnedConfig". The test must then fail, because the config-read spawn is charged
+    to vetPinnedConfig and actualCaller's row shows calls 1, not 2.
+    Restore both names and the test is green. Through all of this, W1-T7745's unbundled test stays green.
+  note: |
+    Filed by architect run PLAN-create-1794173553065 with reserved id W1-T11795.
+    verify:auto: the whole change is two set members plus one bundle fixture, and both are machine-checkable.
+    risk:low: the rows are diagnostic, and no decision path reads caller or leaf.
