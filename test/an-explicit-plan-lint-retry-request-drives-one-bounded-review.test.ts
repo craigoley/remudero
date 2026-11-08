@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test, type TestContext } from "node:test";
 import * as reviewCli from "#src/cli/commands/review.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { refreshReviewPublisherToken, type PlanLintOutcome } from "#src/lib/review.js";
 import { readLedgerLines } from "#src/lib/status.js";
-import { reviewOptionFlags, reviewOptionsFromFlags, runReview } from "#src/run-task.js";
+import { reviewOptionFlags, reviewOptionsFromFlags, runReview } from "#test/helpers/run-task-test.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
@@ -46,46 +47,33 @@ async function fixture(t: TestContext) {
   const diff = repo.git("diff", mergeBaseSha, "HEAD");
   const root = ownedFixtureDir(t, "plan-lint-cli-retry").dir;
   const ledgerPath = join(root, "ledger.ndjson");
-  const wirePath = join(root, "wire.json");
-  const callsPath = join(root, "calls.ndjson");
   const wire = { headSha, mergeBaseSha, baseRef: "release/fixture", compareReadable: true,
     check: "success", required: ["ci", "remudero-review"], pinned: true };
-  const sync = () => writeFileSync(wirePath, JSON.stringify(wire));
-  sync();
-  writeFileSync(callsPath, "");
-  writeFileSync(join(root, "gh"), `#!/usr/bin/env node
-const fs = require('node:fs');
-const w = JSON.parse(fs.readFileSync(${JSON.stringify(wirePath)}, 'utf8'));
-const a = process.argv.slice(2);
-fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(a) + '\\n');
-const route = a.find(value => value.startsWith('repos/')) || a[1] || '';
-let result;
-if (a[0] === 'pr' && a[1] === 'diff') {
-  process.stdout.write(${JSON.stringify(diff)}); process.exit(0);
-} else if (a[0] === 'pr' && a[1] === 'review') {
-  result = {};
-} else if (a[0] === 'api' && route.endsWith('/pulls/133')) {
-  result = { number: 133, html_url: ${JSON.stringify(PR)}, state: 'open', merged: false, body: 'the filing names its revision',
-    head: { sha: w.headSha, ref: 'filing' }, base: { ref: w.baseRef } };
-} else if (a[0] === 'api' && route.includes('/reviews')) {
-  result = a.includes('POST') ? {} : [];
-} else if (a[0] === 'api' && route.includes('/compare/')) {
-  if (!w.compareReadable) { process.stderr.write('fixture compare unreadable'); process.exit(1); }
-  result = { merge_base_commit: { sha: w.mergeBaseSha }, files: [] };
-} else if (a[0] === 'api' && route.endsWith('/required_status_checks')) {
-  result = { contexts: w.required, checks: w.required.map(context => ({ context, app_id: context === 'remudero-review' && w.pinned ? 42 : null })) };
-} else if (a[0] === 'api' && route.includes('/check-runs')) {
-  result = { check_runs: w.check === 'missing' ? [] : [{ name: 'ci', status: w.check === 'pending' ? 'in_progress' : 'completed',
-    conclusion: w.check === 'pending' ? null : w.check }] };
-  result.check_runs.push({ name: 'remudero-review', status: 'completed', conclusion: 'failure' });
-} else if (a[0] === 'api' && route.endsWith('/status')) {
-  result = { statuses: [] };
-} else if (a[0] === 'api' && route.includes('/statuses/')) {
-  result = {};
-} else { process.stderr.write('unexpected fixture gh: ' + JSON.stringify(a)); process.exit(1); }
-process.stdout.write(JSON.stringify(result));
-`, { mode: 0o755 });
-  process.env.PATH = `${root}:${process.env.PATH}`;
+  // The scripted GitHub, answered by the shared PATH shim: first match wins, so the most specific
+  // substring leads. Rebuilt from `wire` on every `sync`, the newest table shadowing the older one.
+  const routesFor = (): GhShimRoute[] => [
+    { when: "POST", stdout: "{}" },
+    { when: "pr diff", stdout: diff },
+    { when: "pr review", stdout: "{}" },
+    { when: "/reviews", stdout: "[]" },
+    { when: "/pulls/133", stdout: JSON.stringify({ number: 133, html_url: PR, state: "open", merged: false,
+      body: "the filing names its revision", head: { sha: wire.headSha, ref: "filing" }, base: { ref: wire.baseRef } }) },
+    { when: "/compare/", ...(wire.compareReadable
+      ? { stdout: JSON.stringify({ merge_base_commit: { sha: wire.mergeBaseSha }, files: [] }) }
+      : { stderr: "fixture compare unreadable", exit: 1 }) },
+    { when: "/required_status_checks", stdout: JSON.stringify({ contexts: wire.required,
+      checks: wire.required.map(context => ({ context, app_id: context === "remudero-review" && wire.pinned ? 42 : null })) }) },
+    { when: "/check-runs", stdout: JSON.stringify({ check_runs: [
+      ...(wire.check === "missing" ? [] : [{ name: "ci", status: wire.check === "pending" ? "in_progress" : "completed",
+        conclusion: wire.check === "pending" ? null : wire.check }]),
+      { name: "remudero-review", status: "completed", conclusion: "failure" }] }) },
+    { when: "/statuses/", stdout: "{}" },
+    { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
+  ];
+  const shim = ghShim(routesFor(), { kind: "plan-lint-cli-retry-gh" });
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
+  const sync = () => { for (const route of routesFor().reverse()) shim.addRoute(route); };
+  process.env.PATH = `${shim.dir}:${process.env.PATH}`;
   let lintRuns = 0;
   let lint: PlanLintOutcome = INCOMPLETE;
   let sequence = 0;
@@ -103,15 +91,17 @@ process.stdout.write(JSON.stringify(result));
   const seeded = await invoke();
   assert.deepEqual([seeded.state, seeded.planOnly, seeded.capped, seeded.keywordOnly], ["failure", true, false, false]);
   const seedRow = readFileSync(ledgerPath, "utf8").split("\n").find(line => line && JSON.parse(line).step === "review.posted")!;
-  assert.ok(seedRow, JSON.stringify({ seeded, rows: readLedgerLines(ledgerPath), calls: readFileSync(callsPath, "utf8") }));
+  assert.ok(seedRow, JSON.stringify({ seeded, rows: readLedgerLines(ledgerPath), calls: shim.calls() }));
   const seed = seedRow;
   assert.equal(JSON.parse(seed).merge_base_sha, mergeBaseSha);
-  const reset = () => { writeFileSync(ledgerPath, seed + "\n"); writeFileSync(callsPath, ""); lintRuns = 0; lint = CLEAN; };
+  // The shim records calls as raw joined argv lines; a reset forgets those taken so far.
+  let callsSeen = 0;
+  const calls = (): string[] => shim.calls().slice(callsSeen);
+  const reset = () => { writeFileSync(ledgerPath, seed + "\n"); callsSeen = shim.calls().length; lintRuns = 0; lint = CLEAN; };
   reset();
   const rows = () => readLedgerLines(ledgerPath);
   const retries = () => rows().filter(row => row.step === "review.plan_lint_retry");
-  const calls = (): string[][] => readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
-  const posts = () => calls().filter(a => a.some(v => /^state=(success|failure)$/.test(v)));
+  const posts = () => calls().filter(line => /(^| )state=(success|failure)( |$)/.test(line));
   return { headSha, mergeBaseSha, wire, sync, invoke, reset, rows, retries, calls, posts, seed,
     lintRuns: () => lintRuns, setLint: (value: PlanLintOutcome) => { lint = value; },
     assertSeed: () => assert.ok(readFileSync(ledgerPath, "utf8").split("\n").includes(seed)) };
@@ -158,9 +148,9 @@ describe("test/an-explicit-plan-lint-retry-request-drives-one-bounded-review.tes
     assert.equal(new Set(f.retries().map(row => row.attempt_id)).size, 1);
     assert.equal(f.retries()[0].head_sha, f.headSha);
     assert.equal(f.retries()[0].merge_base_sha, f.mergeBaseSha);
-    assert.equal(f.calls().filter(a => a[1]?.includes("/compare/")).length, 3,
+    assert.equal(f.calls().filter(line => line.includes("/compare/")).length, 3,
       "one capture, then fresh reads at admission and publication");
-    assert.ok(f.calls().some(a => a[1]?.includes("release%2Ffixture")), "capture uses the PR base branch");
+    assert.ok(f.calls().some(line => line.includes("release%2Ffixture")), "capture uses the PR base branch");
     const repeats = await f.invoke([FLAG, f.headSha]);
     assert.equal(repeats.decisionDisposition, "replayed");
     assert.equal(f.lintRuns(), 1);
