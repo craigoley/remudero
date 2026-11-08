@@ -11,7 +11,10 @@
   plan_refs: [W1-T11458, W1-T11162, W1-T4970, W1-T11459]
   depends_on: [W1-T11458]
   files: [src/cli/commands/review.ts, test/review/a-review-view-awaits-its-github-admission.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=12847d1012e5040c
+  # backlog gardener: placed=2026-11-08T01:30:50.207Z
   attempts: 0
   rationale: |
     At b6a1855751aed8fdfb8f52d755574e6b94216079, reviewCommand defaults fetchView
