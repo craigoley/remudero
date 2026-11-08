@@ -58,7 +58,7 @@ import { daemonInstanceRegistryPath } from "../../lib/deployer.js";
 import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
-import { instanceRegistryRuntimePresent, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
+import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
 import { createGhCallPacer } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
@@ -885,6 +885,8 @@ export async function daemonCommand(
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
     onMainEntryStep?.(step);
   };
+  // W1-T11605: a timed-out selected-registry read ledgers its pending hop, hop times and loop split.
+  ledgerSelectedRegistryReadTimeouts(log);
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
   // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
