@@ -22,9 +22,9 @@
     - claim: "an out-of-scope fallback diff, or a task whose precondition or not_before reads unmet at publication, is neither pushed nor opened as a PR; its head is kept at a local recovery ref that survives worktree teardown, and one durable receipt names the paths or the unmet precondition, the owner, the wake condition and the restore command; an in-scope diff with a met precondition pushes and opens exactly as today"
       proof: "unit test: test/an-out-of-scope-or-unmet-precondition-run-is-held-unpublished.test.ts"
     - claim: "the W1-T434 overrun suite now asserts hold-not-push, with detection and its exact-match comparison unchanged"
-      proof: "unit test: test/scope-guard-overrun.test.ts"
+      proof: "unit test: W1-T11775 criterion 2 the overrun suite holds instead of pushing"
     - claim: "the publication hold is one named ledger step at the push site"
-      proof: "grep: run.publication_held in src/cli/commands/run-task-verb.ts"
+      proof: 'grep: run\.publication_held in src/cli/commands/run-task-verb.ts'
   rationale: |
     ORIGIN: the operator's 2026-11-08 follow-up from the PR #17211 recovery and run W1-T11750, item (2). The
     operator asked for this gate and asked that scope policy not be weakened.
@@ -87,8 +87,9 @@
        ref after worktree removal, and one run.publication_held row naming both paths; an unmet `precondition:`
        gives the same hold with unmet_precondition; an unmet not_before gives the same; a failed ref write keeps the
        worktree and reports it; an in-scope diff with a met precondition pushes and opens one PR with no
-       publication_held row. Update test/scope-guard-overrun.test.ts's push-and-flag assertions to hold-not-push,
-       keeping its detection cases byte-identical.
+       publication_held row. Update test/scope-guard-overrun.test.ts's push-and-flag assertions in
+       `test("W1-T11775 criterion 2 the overrun suite holds instead of pushing", ...)` to hold-not-push, keeping
+       its detection cases byte-identical.
   falsifier: |
     At origin/main, the W1-T11750 fixture shape reaches the injected push recorder and the PR-create seam, so the
     first test fails. Restore the old push after the gate: the recorder sees a push and the test fails again.

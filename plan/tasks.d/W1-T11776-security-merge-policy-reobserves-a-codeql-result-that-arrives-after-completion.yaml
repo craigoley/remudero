@@ -1,7 +1,7 @@
 - id: W1-T11776
   title: "SECURITY-MERGE-POLICY RE-EVALUATES WHEN THE TRUSTED EXACT-HEAD CODEQL CHECK ARRIVES AFTER ITS WORKFLOW COMPLETED, AND STAYS FAIL-CLOSED UNTIL THEN — the producer reobserves only `security-analysis-pending` with trustedCodeqlCount > 0. A completion that sees no trusted CodeQL check yet (trusted-exact-head-codeql-result-missing, PR #17416: checkCount 48, trustedCodeqlCount 0) publishes error once, and nothing re-runs the policy when the check later passes"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T10976]
   type: implement
   verify: human
   principles: {tdd: strict}
@@ -25,7 +25,7 @@
     - claim: "a completed check_run event re-runs the policy only for a CodeQL check from the trusted github-advanced-security identity at an open PR's exact head, and every other check_run is refused without a read or a status write"
       proof: "unit test: W1-T11776: a trusted CodeQL check_run publishes only for its exact head"
     - claim: "the observation receipt counts CodeQL-named checks of any identity apart from trusted ones, and a complete corpus with none reads 0 while a foreign-app CodeQL check reads 1"
-      proof: "unit test: test/code-scanning-merge-adapter.test.ts"
+      proof: "unit test: W1-T11776 criterion 3 counts untrusted CodeQL names separately"
     - claim: "the trusted producer workflow subscribes to completed check runs"
       proof: "grep: check_run: in .github/workflows/security-merge-policy.yml"
     - claim: "the exhausted absent-result case has its own named reason"
@@ -63,9 +63,9 @@
     (https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#check_run).
     The producer's own Actions checks therefore cannot recurse. Whether the github-advanced-security CodeQL check
     delivers for a PR head is the falsifier's post-merge observation, not an assumption.
-    OVERLAP: W1-T10976 declares the same producer, adapter, workflow and both test files, so the overlap check
-    runs the two one after the other. Either may land first. Whichever lands
-    second keeps both admissions inside ONE shared three-wait budget, as W1-T10976's design step 1 already requires.
+    OVERLAP: W1-T10976 declares the same producer, adapter, workflow and both test files. This task depends on
+    W1-T10976 so the dispatcher cannot start a conflicting worker: W1-T10976 lands first, then this task adds the
+    absent-result wake while preserving its single shared three-wait budget.
   design: |
     1. ADMIT THE ABSENT RESULT. In the CodeQL workflow_run completed/success branch, also reobserve a published
        result whose reason is `trusted-exact-head-codeql-result-missing` when the observation has checksComplete
@@ -91,7 +91,9 @@
        CodeQL-named check still never waits. Drift during a wait writes no success.
        `test("W1-T11776: a trusted CodeQL check_run publishes only for its exact head", ...)` covers a trusted
        completed check_run publishing success at its head. A check_run from another app, another name, a
-       non-completed status or a malformed sha is refused with zero reads and zero writes. The workflow test asserts the check_run
+       non-completed status or a malformed sha is refused with zero reads and zero writes. In
+       `test/code-scanning-merge-adapter.test.ts`, add
+       `test("W1-T11776 criterion 3 counts untrusted CodeQL names separately", ...)` for the diagnostic count. The workflow test asserts the check_run
        trigger and that the permissions block is unchanged.
     NOT IN SCOPE: the classifier's safe/blocked rules, W1-T10976's neutral-configuration recovery, merge_group
     handling, required-check settings, and any status write outside the exact head.
