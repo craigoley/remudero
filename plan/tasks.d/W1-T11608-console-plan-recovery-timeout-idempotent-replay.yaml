@@ -3,7 +3,7 @@
   repo: remudero-console
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 60.00
   rationale: "Reported in feedback fb-1794064519788-9bda6c against Console main 71cf77c141c7ee0584fd5e0704fe44184bf2231f.
@@ -43,6 +43,4 @@
   files: [src/lib/client-request.ts, lib/rmd-control.ts, tests/plan-recovery-timeout.test.ts]
   status: queued
   attempts: 0
-  note: "verify:auto — assertable with a fake Core that delays its response past 5 s and counts admissions.
-    Diagnosis caveat: the production source was only described in the feedback, not inspected here; the implementer
-    must confirm the timeouts at the cited sha before editing."
+  note: "verify: human — these acceptance tests live in the remudero-console repository; run them from that checkout and review their results because this repository cannot resolve external test paths."
