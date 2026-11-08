@@ -14,8 +14,31 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/17313
+summary:
+  headline: Approve building a separate private consent path for offline model evaluation
+  what_happened: Engineers want a new, separate consent receipt for private
+    offline model evaluation, leaving the existing public field-trials consent
+    unchanged. The user has authorized secondary use, but no receipt or resolver
+    contract exists yet, so the real field-trials matrix stays NOT_RUN until an
+    owner-provisioned receipt and actual data exist.
+  decision: Choose whether to approve building the separate private consent path
+    using synthetic fixtures only, and do not create any substitute private
+    data.
+  options:
+    - label: Approve the build with synthetic fixtures only
+      consequence: A native receipt and resolver are built and qualified on synthetic
+        data; the real matrix stays NOT_RUN until an owner provides a receipt
+        and real snapshot.
+      intent: approve
+    - label: Decline until the owner provisions a receipt first
+      consequence: No new consent path is built now; work waits until the owner
+        supplies the receipt and real inputs.
+      intent: decline
+    - label: Reframe the scope to reuse the existing consent path
+      consequence: Private evaluation runs under the current public consent semantics,
+        which may not cover the revocation and privacy boundaries required.
+      intent: reframe
 expansion: null
 submission_key: null
 thread_id: null
