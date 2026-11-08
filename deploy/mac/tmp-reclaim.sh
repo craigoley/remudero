@@ -313,7 +313,7 @@ fixture_git_risk() {
     line=$(GIT_CEILING_DIRECTORIES="${repo%/*}" git -C "$repo" rev-parse --absolute-git-dir 2>/dev/null) || { printf '%s' "$marker"; return 0; }
     line=$(cd "$line" 2>/dev/null && pwd -P) || { printf '%s' "$marker"; return 0; }
     [ "$line" = "$gitdir" ] || { printf '%s' "$marker"; return 0; }
-    line=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$repo" config --get-regexp '^remote\..*\.url$' 2>/dev/null); status=$?
+    line=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$repo" config --get-regexp '^remote\..*\.(url|pushurl)$' 2>/dev/null); status=$?
     [ "$status" -le 1 ] || { printf '%s' "$marker"; return 0; }
     while read -r _ url; do
       [ -n "$url" ] || continue

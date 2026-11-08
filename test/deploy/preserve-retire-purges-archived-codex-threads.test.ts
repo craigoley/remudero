@@ -38,10 +38,10 @@ exit 0
   return { root, home, bin, db, calls };
 }
 
-function threads(fx: Fx, rows: [string, number, number | null, number][]) {
+function threads(fx: Fx, rows: [string, number, number | null, number, string?][]) {
   execFileSync("python3", ["-c", `import sqlite3,sys,json
-c=sqlite3.connect(sys.argv[1]); c.execute("create table threads(id text primary key, archived integer, archived_at integer, is_pinned integer)")
-c.executemany("insert into threads values(?,?,?,?)", json.loads(sys.argv[2])); c.commit()`, fx.db, JSON.stringify(rows)]);
+c=sqlite3.connect(sys.argv[1]); c.execute("create table threads(id text primary key, archived integer, archived_at integer, is_pinned integer, rollout_path text)")
+c.executemany("insert into threads values(?,?,?,?,?)", [list(row)+[None]*(5-len(row)) for row in json.loads(sys.argv[2])]); c.commit()`, fx.db, JSON.stringify(rows)]);
 }
 function remaining(fx: Fx): string[] {
   return execFileSync("python3", ["-c", "import sqlite3,sys; print('\\n'.join(r[0] for r in sqlite3.connect(sys.argv[1]).execute('select id from threads order by id')))", fx.db], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
@@ -55,29 +55,46 @@ function helper(fx: Fx, apply: boolean, now = NOW) {
 test("archived, unpinned Codex threads archived a day ago are deleted through the Codex CLI; recent, pinned and live threads stay", () => {
   const fx = setup({});
   try {
+    const archived = join(fx.home, ".codex/archived_sessions");
+    const live = join(fx.home, ".codex/sessions/2026/11/01");
+    mkdirSync(archived, { recursive: true }); mkdirSync(live, { recursive: true });
+    const rollout = (dir: string, id: string) => join(dir, `rollout-2026-11-01T10-00-00-${id}.jsonl`);
+    const oldRollout = rollout(archived, "old"), pinnedRollout = rollout(archived, "pinned");
+    const recentRollout = rollout(archived, "recent"), liveRollout = rollout(live, "live");
+    for (const p of [oldRollout, pinnedRollout, recentRollout, liveRollout]) writeFileSync(p, `${p}\n`);
+    // The clock shift ages ctime as well as mtime without relying on filesystem time travel.
+    const later = NOW + 2 * DAY;
+    utimesSync(recentRollout, new Date(later * 1000), new Date(later * 1000));
     threads(fx, [["old", 1, NOW - 2 * DAY, 0], ["cascade", 1, NOW - 3 * DAY, 0], ["stuck", 1, NOW - 3 * DAY, 0],
-      ["recent", 1, NOW - 3600, 0], ["pinned", 1, NOW - 9 * DAY, 1], ["live", 0, null, 0]]);
+      ["recent", 1, later - 3600, 0, recentRollout], ["pinned", 1, NOW - 9 * DAY, 1, pinnedRollout],
+      ["live", 0, null, 0, liveRollout]]);
     const keep = join(fx.home, ".codex/.rmd-janitor-keep");
     writeFileSync(keep, "operator work\n");
     const before = readFileSync(fx.db);
     for (const apply of [false, true]) {
-      const kept = helper(fx, apply);
+      const kept = helper(fx, apply, later);
       assert.equal(kept.status, 0, kept.stderr + kept.stdout);
       assert.match(kept.stdout, /codex-threads-removed=0/);
       assert.equal(existsSync(fx.calls), false, "a kept Codex home never calls the CLI");
       assert.deepEqual(readFileSync(fx.db), before, "the kept database stays byte-for-byte intact");
     }
     rmSync(keep);
-    const dry = helper(fx, false);
+    const dry = helper(fx, false, later);
     assert.equal(dry.status, 0, dry.stderr + dry.stdout);
     assert.match(dry.stdout, /codex-threads-removed=3 apply=0/);
     assert.equal(existsSync(fx.calls), false, "a dry run never calls the CLI");
-    const r = helper(fx, true);
+    assert.equal(readFileSync(oldRollout, "utf8"), `${oldRollout}\n`);
+    assert.equal(readFileSync(pinnedRollout, "utf8"), `${pinnedRollout}\n`);
+    const r = helper(fx, true, later);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.deepEqual(remaining(fx), ["live", "pinned", "recent", "stuck"]);
     assert.match(r.stdout, /codex-threads-removed=2 apply=1/);
     assert.match(r.stdout, /HOLD.*codex-thread delete-failed.*stuck/);
     assert.match(readFileSync(fx.calls, "utf8"), new RegExp(`delete --force old ${join(fx.home, ".codex")}`));
+    assert.equal(existsSync(oldRollout), false, "an old unpinned rollout expires");
+    for (const p of [pinnedRollout, recentRollout, liveRollout]) {
+      assert.equal(readFileSync(p, "utf8"), `${p}\n`, `${p} must retain its contents`);
+    }
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 

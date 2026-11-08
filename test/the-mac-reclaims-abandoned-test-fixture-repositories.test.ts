@@ -62,6 +62,14 @@ test("an idle temp tree of remote-less fixture repositories is removed while net
     const real = join(root, "remudero-pr-1");
     fixtureRepo(real);
     git(real, "remote", "add", "origin", "https://github.com/craigoley/remudero.git");
+    const push = join(root, "rmd-s2-push-network.abc123");
+    const pushRepo = join(push, "repo");
+    const pushLender = join(push, "lender");
+    fixtureRepo(pushLender);
+    fixtureRepo(pushRepo);
+    git(pushRepo, "remote", "add", "origin", pushLender);
+    git(pushRepo, "config", "remote.origin.pushurl", "ssh://git@github.com/craigoley/remudero.git");
+    const pushBefore = fileContents(push);
     const outside = join(base, "elsewhere.git");
     git(base, "init", "-q", "--bare", outside);
     const borrower = join(root, "rmd-s3-borrower.def456");
@@ -72,7 +80,7 @@ test("an idle temp tree of remote-less fixture repositories is removed while net
     writeFileSync(join(cash, "openweight-allowance.json"), '{"reservations":{"r1":{"settledUsd":null}}}\n');
     const young = join(root, "rmd-s4-running.ghi789");
     fixtureRepo(join(young, "repo"));
-    for (const e of [shard, real, borrower, cash]) age(e, 8);
+    for (const e of [shard, real, push, borrower, cash]) age(e, 8);
     age(young, 8);
     // Recent work holds the tree while older working files and Git metadata remain intact.
     age(join(young, "repo/dirty.txt"), 2);
@@ -87,10 +95,12 @@ test("an idle temp tree of remote-less fixture repositories is removed while net
     assert.equal(r.status, 0, r.stderr + r.stdout);
     const kept = existsSync(report) ? readFileSync(report, "utf8") : "";
     assert.equal(existsSync(shard), false, kept + r.stdout);
-    for (const p of [real, borrower, cash, young]) assert.ok(existsSync(p), p + kept);
+    for (const p of [real, push, borrower, cash, young]) assert.ok(existsSync(p), p + kept);
+    assert.deepEqual(fileContents(push), pushBefore, "network push destination preserves every repository file");
     assert.deepEqual(fileContents(young), youngBefore, "a mixed-age repository keeps every file");
     git(join(young, "repo"), "fsck", "--no-dangling");
     assert.match(kept, /Git checkout\/worktree: .*remudero-pr-1/);
+    assert.match(kept, /Git checkout\/worktree: .*rmd-s2-push-network/);
     assert.match(kept, /Git checkout\/worktree: .*rmd-s3-borrower/);
   } finally {
     rmSync(base, { recursive: true, force: true });

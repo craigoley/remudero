@@ -1104,10 +1104,14 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
     if cfg["codex_archived_days"]:
         counts["codex-threads-removed"] += purge_archived_threads(cfg, now, apply, verb)
     archived_dir = os.path.join(cfg["home"], CODEX_ARCHIVED_DIR) + "/"
+    pinned_rollouts = pinned_codex_rollouts(cfg["home"])
     for p in codex_sessions(cfg["home"]):
         # Archiving renames the log, which resets its ctime: the archive clock starts there.
         days = cfg["codex_archived_days"] if p.startswith(archived_dir) else cfg["codex_session_days"]
         if not days or not os.path.lexists(p):
+            continue
+        if p.startswith(archived_dir) and (pinned_rollouts is None or p in pinned_rollouts):
+            say("HOLD", "pinned-or-unreadable-codex-thread", p)
             continue
         st = os.lstat(p)
         if max(st.st_mtime, st.st_ctime) >= now - days * 86400 or in_use(p, snap) or keep_scope(p, below=False):
@@ -1118,6 +1122,25 @@ def housekeeping(cfg, protected, repos, snap, now, apply):
         counts["codex-sessions-removed"] += 1
         say(verb("REMOVED"), f"codex session idle {days}d+", p)
     return counts
+
+
+def pinned_codex_rollouts(home):
+    """Rollouts owned by pinned threads; unreadable state holds archived logs conservatively."""
+    import sqlite3
+    db = os.path.join(home, CODEX_STATE_DB)
+    if not os.path.isfile(db):
+        return set()
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
+        try:
+            return {path for (path,) in con.execute(
+                "SELECT rollout_path FROM threads WHERE COALESCE(is_pinned, 0) != 0"
+                " AND rollout_path IS NOT NULL")}
+        finally:
+            con.close()
+    except sqlite3.Error as error:
+        say("HOLD", f"codex-rollouts (state unreadable: {error.__class__.__name__})", db)
+        return None
 
 
 def archived_thread_ids(db, before):
