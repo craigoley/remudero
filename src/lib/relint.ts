@@ -5,7 +5,6 @@ import { join } from "node:path";
 
 import { loadPlan, parseTasksFromYaml } from "./plan.js";
 import { lintTask, type LintOpts } from "./task-linter.js";
-import { resolveOwnerRepoAt } from "./owner-repo.js";
 
 /**
  * THE RELINT LOOP, shared by every lane that files plan tasks with a paid worker.
@@ -148,11 +147,6 @@ export function lintFiledTasks(
   }
   const wanted = new Set(filedIds);
   const out: RelintViolation[] = [];
-  let localRepoName = opts.localRepoName;
-  if (!localRepoName) {
-    try { localRepoName = resolveOwnerRepoAt(worktreeRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
-  }
-  const taskLintOpts: LintOpts = { ...opts, localRepoName };
   const admissionOpts: LintOpts = opts.machineFilingAdmission
     ? opts
     : {
@@ -165,7 +159,7 @@ export function lintFiledTasks(
       };
   for (const task of plan.tasks) {
     if (!wanted.has(task.id)) continue;
-    for (const v of lintTask(task, { ...taskLintOpts, ...admissionOpts, localRepoName }).violations) if (v.severity === "block") out.push(v);
+    for (const v of lintTask(task, admissionOpts).violations) if (v.severity === "block") out.push(v);
   }
   return out;
 }
