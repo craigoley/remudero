@@ -1015,7 +1015,9 @@ export async function runReview(host: ReviewCommandHost, args: {
         reviewerFindingText = workerTranscript(reviewer);
         semanticClauses = parseReviewerVerdictClauses(reviewerFindingText, criteria.length);
         reviewerUnable = parseReviewerUnable(reviewerFindingText, criteria.length);
-        reviewerSubtype = reviewer.subtype;
+        // A success envelope can precede a terminal SDK error; preserve that failure evidence.
+        const terminalError = reviewer.apiError ? "api_error" : reviewer.isError ? "worker_error" : undefined;
+        reviewerSubtype = reviewer.subtype === "success" && terminalError ? terminalError : reviewer.subtype;
         reviewerExit = reviewer.exit;
         const reviewerFields = workerLedgerFields(reviewer);
         evaluatorProvenance = {
