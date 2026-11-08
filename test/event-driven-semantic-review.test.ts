@@ -159,6 +159,7 @@ for (const required of [false, true]) test(required
       join(bin, "gh"),
       `#!/bin/sh
 case "$1 $2" in
+  "api --paginate") case "$*" in *commits/*/statuses[?]*) echo '[[]]' ;; *) echo '{}' ;; esac ;;
   "api repos/"*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"},"state":"open"}' ;;
   "pr diff") cat ${JSON.stringify(diffPath)} ;;
   "pr view") echo '{"state":"OPEN"}' ;;
@@ -253,6 +254,7 @@ test("direct semantic review withholds unreadable task narrative before publicat
       join(bin, "gh"),
       `#!/bin/sh
 case "$1 $2" in
+  "api --paginate") case "$*" in *commits/*/statuses[?]*) echo '[[]]' ;; *) echo '{}' ;; esac ;;
   "api repos/"*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"},"state":"open"}' ;;
   "pr diff") cat ${JSON.stringify(diffPath)} ;;
   "pr view") echo '{"state":"OPEN"}' ;;

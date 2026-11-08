@@ -3,7 +3,7 @@
 // `ledger:` was re-judged, `plan:` and `host-probe:` were hard-coded fresh, and the console parsed the
 // normal post-boot catch-up's prose as stale.
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -11,10 +11,10 @@ import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { gitPlanBehind, planSource } from "#src/lib/now-view.js";
 import { createReadModelTicker, createReadModelWorker, ledgerSource, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { describeSource, HOST_PROBE_BUDGET_MS, judgeSource, PLAN_BUDGET_MS, sourceKindOf } from "#src/lib/view-freshness.js";
 import type { ViewSource } from "#src/lib/views.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 
@@ -22,8 +22,7 @@ const T0 = Date.parse("2026-10-01T03:00:00.000Z");
 const iso = (ms: number): string => new Date(ms).toISOString();
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -52,7 +51,7 @@ test("the projector posts its catch-up in its state and clears it once caught up
   writeFileSync(join(ledgerDir, "ledger.ndjson"), "");
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], holder: "vf", oracle: "off", tickBudgetMs: 1, views: [], post: (m) => void posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   const states = (): Array<Extract<ReadModelWorkerMessage, { type: "state" }>> => posted.filter((m): m is Extract<ReadModelWorkerMessage, { type: "state" }> => m.type === "state");
@@ -65,7 +64,7 @@ test("the projector posts its catch-up in its state and clears it once caught up
 
 test("a plan source turns stale when the checkout is behind a plan commit", (t) => {
   const repo = gitRepo({ kind: "vf-plan" });
-  t.after(() => repo.cleanup());
+  onReadModelClose(t, () => repo.cleanup());
   mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(repo.dir, "plan", "tasks.yaml"), "[]\n");
   repo.git("add", "plan");
@@ -150,7 +149,7 @@ test("a body whose data did not move still posts its newer source readings once"
     stateDir, instances: [{ name: "core", ledgerDir }], holder: "vf-clock", oracle: "off", views: [clockView(asOf)],
     clock: { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() }, post: (m) => void posted.push(m),
   });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   const kinds = (): string[] => posted.map((m) => m.type).filter((type) => type === "body" || type === "sources");
   ticker.tick();
@@ -174,7 +173,7 @@ parentPort.postMessage({ type: "sources", sources: [{ name: "host-probe:core", a
 setInterval(() => {}, 1000);
 `);
   const handle = createReadModelWorker({ stateDir: dir, instances: [{ name: "core", ledgerDir: dir }], workerUrl: pathToFileURL(path), every: () => () => {} });
-  t.after(() => void handle.stop());
+  onReadModelClose(t, () => void handle.stop());
   const frozen: ViewSource = { name: "host-probe:core", asOf: iso(T0), state: "fresh" };
   assert.equal(handle.judge([frozen], T0 + 700_000)[0]!.state, "stale", "before any reading, the body's own frozen time ages out");
   handle.start();

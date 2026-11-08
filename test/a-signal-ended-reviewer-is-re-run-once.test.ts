@@ -62,6 +62,7 @@ async function fixture(
       { when: "pulls/1", stdout: JSON.stringify({ number: 1, state: "open", body: report,
         head: { ref: "fixture", sha: headSha }, html_url: prUrl }) },
       { when: "pr diff", stdout: diff.trim() },
+      { when: "/statuses?", stdout: "[[]]" },
       { when: "api", stdout: "{}" },
     ]);
     process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;

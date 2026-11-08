@@ -1,0 +1,25 @@
+id: fb-1794161732516-e72ed9
+ts: 2026-11-08T18:15:32.516Z
+raw: "Observed 2026-11-08 during the single authorized triage of
+  fb-1794159828278-e81fb6: `claude auth status` reported first-party Claude Max
+  logged in, but worker spawn then failed before any model call with
+  WorkerKeychainError because `security find-generic-password` could not read
+  Claude Code-credentials from the craigoleyagent login keychain. The triage
+  lane had already created a temporary worktree and reserved W1-T11779; both
+  were cleaned/released (no worktree or refs/rmd-id/W1-T11779 remain). Please
+  triage a bounded observation proposal: should an explicit, secret-free
+  worker-keychain readiness preflight run before ID reservation and lane
+  creation, or is interactive keychain unlock the intended precondition that
+  should be surfaced earlier? Treat this as one Mac triage-lane occurrence only.
+  Do not infer a fleet-wide credential defect, bypass WorkerKeychainError,
+  change credential strategy, reopen withdrawn W1-T235, or weaken task
+  risk/verification gates."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -90,6 +90,8 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
           head_sha: "prior-head", pr_url: subject.prUrl,
           decision_verdict: publication.endsWith("fallback") ? { ...prior, state: "pending" } : prior });
         const shim = ghShim([
+          // W1-T11443: a SUCCESS reads the head's status history first; this head has no prior FAILURE.
+          { when: "/statuses?", stdout: "[[]]" },
           { when: "pr diff", stdout: diff },
           { when: "pulls/", stdout: JSON.stringify({ state: publication === "refused" ? "closed" : "open", merged: false }) },
           ...(publication === "failed" ? [{ when: "statuses/", stderr: "HTTP 422: invalid status", exit: 1 }] : []),
@@ -427,6 +429,7 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
       const sha = "a".repeat(40);
       const prUrl = "https://github.com/o/r/pull/1";
       const shim = ghShim([
+        { when: "/statuses?", stdout: "[[]]" },
         ...(publication === "failed" ? [{ when: "statuses/", stderr: "HTTP 422: Validation Failed", exit: 1 }] : []),
         { when: "headRefOid", stdout: JSON.stringify({ headRefOid: sha }) },
         { when: "pr diff", stdout: publication === "withheld"

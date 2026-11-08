@@ -137,6 +137,7 @@ printf '%s\\n' "$*" >> ${JSON.stringify(ghLog)}
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *"/statuses?"*) echo '[[]]' ;;
       *commits/*/status*) echo '{"statuses":[]}' ;;
       *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"}}' ;;
       *) echo '{}' ;;
@@ -285,7 +286,7 @@ test("W1-T913 criterion 1 (rmd review's own start): reviewCommand posts remudero
   const body = reviewSrc.slice(start, end);
 
   const pendingIdx = body.indexOf("await postReviewPendingDep({");
-  const materializeIdx = body.indexOf("const materialized = materialize(");
+  const materializeIdx = body.indexOf("const materialized = await materialize(");
   const runReviewIdx = body.indexOf("runReviewDep({");
 
   assert.ok(pendingIdx > -1, "reviewCommand must call postReviewPendingDep");
@@ -635,6 +636,7 @@ test("W1-T913: the terminal state REPLACES the pending on completion — postRev
     assert.equal(pending.posted, true);
 
     const terminal = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o",
       repo: "r",
       sha: "deadbeef",

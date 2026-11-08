@@ -86,7 +86,8 @@ test("repaired reservation posts success without a verdict conflict", async () =
   const posts: string[] = [];
   try {
     appendLedger(ledgerPath, { run_id: "old", task_id: ID, pr_url: PR, step: "review.posted", head_sha: "same-head", review_decision_digest: before, state: "failure", decision_verdict: { state: "failure", criteria: [], capped: false, keywordOnly: false } });
-    const result = await postReviewStatusGuarded({ owner: "acme", repo: "remudero", sha: "same-head", state: "success", taskId: ID, evidence: "executed", ledgerPath, runId: "repaired", prUrl: PR, reviewDecisionDigest: after, fetchLifecycle: () => ({ merged: false, closed: false }), post: ({ state }) => void posts.push(state) });
+    const result = await postReviewStatusGuarded({
+    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }), owner: "acme", repo: "remudero", sha: "same-head", state: "success", taskId: ID, evidence: "executed", ledgerPath, runId: "repaired", prUrl: PR, reviewDecisionDigest: after, fetchLifecycle: () => ({ merged: false, closed: false }), post: ({ state }) => void posts.push(state) });
     assert.deepEqual(result, { posted: true });
     assert.deepEqual(posts, ["success"]);
   } finally {
@@ -105,6 +106,7 @@ test("production review refreshes ownership before replay", async () => {
   mkdirSync(join(root, "state"), { recursive: true });
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const gh = ghShim([
+    { when: "/statuses?", stdout: "[[]]" },
     { when: "api repos/", stdout: JSON.stringify({ number: 4561, html_url: PR, updated_at: "t", body: REPORT, head: { ref: BRANCH, sha }, state: "open" }) },
     { when: "pr diff", stdout: DIFF },
     { when: "pr view", stdout: '{"state":"OPEN"}' },

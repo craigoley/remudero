@@ -12,7 +12,7 @@ import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../..
 import { ghJsonAsync } from "../../lib/github-transport.js";
 import { readLedgerLines, buildBatchedGithub, readRequiredStatusCheckContextsAsync, type GitHub } from "../../lib/status.js";
 import { liveInflightRuns } from "../../lib/report-commands.js";
-import { worktreeRemove, runWorktreeReapRung, type WorktreeReapSummary } from "../../lib/worker.js";
+import { worktreeRemove, worktreeRemoveAsync, releaseReviewWorktree, runWorktreeReapRung, type WorktreeReapSummary } from "../../lib/worker.js";
 import { automaticBranchReapStateFileName, readAutomaticBranchReapState, writeAutomaticBranchReapState, type AutomaticBranchReapState } from "../../lib/branch-reaper.js";
 import { withMainHealthOnLightPass } from "../../lib/main-health-rung.js";
 import { lightPassFixAdmitted, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
@@ -314,6 +314,7 @@ export function buildSweepEffects(
   const buildBaseProofReuse =
     (deps.buildBaseProofDirImpl as typeof buildBaseProofDir | undefined) ?? buildBaseProofDir;
   const reviewReuseExecProof = deps.reviewReuseExecProofImpl as ProofExecutor | undefined;
+  const removeReviewWorktree = deps.reviewWorktreeRemoveImpl ?? deps.worktreeRemoveImpl ?? worktreeRemoveAsync;
   const reviewReuseRunner: NonNullable<BuildSweepEffectsDeps["reviewReuseRunner"]> = async (pr, mode, reviewAttemptId, onPhase): Promise<number> => {
     const reuseRunId = reviewAttemptId === undefined ? deps.runId : `review-PR${pr.prNumber}-${systemClock.now()}`;
     if (reviewAttemptId !== undefined) {
@@ -346,7 +347,7 @@ export function buildSweepEffects(
       let fallbackReason: string | undefined;
       let exitCode: number | undefined;
       try {
-        const materialized = materializeReviewReuse(deps.config, reviewRepoDir, pr.prNumber, pr.headSha);
+        const materialized = await materializeReviewReuse(deps.config, reviewRepoDir, pr.prNumber, pr.headSha);
         if (materialized.worktreePath === undefined) {
           fallbackReason =
             `PR-head worktree unavailable (${materialized.failure.errorClass}): ${materialized.failure.message}`;
@@ -377,7 +378,7 @@ export function buildSweepEffects(
             if (!discriminated.ok) {
               fallbackReason = discriminated.reason;
             } else {
-              const verdict: ReviewVerdict = {
+              let verdict: ReviewVerdict = {
                 ...discriminated.verdict,
                 reviewContractDigest: prior.reviewContractDigest,
                 ownDiffDigest: reuseInputs.currentOwnDiffDigest,
@@ -390,6 +391,7 @@ export function buildSweepEffects(
                 repo: deps.repo,
                 sha: pr.headSha,
                 state: verdict.state,
+                verdict,
                 description: reviewPostedDescription(verdict),
                 taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
                 evidence: reviewEvidenceStrength(verdict.criteria),
@@ -402,6 +404,7 @@ export function buildSweepEffects(
                 readRequiredContexts: readRequiredStatusCheckContextsAsync,
                 cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(deps.owner, deps.repo), ledgerPath: deps.ledgerPath, runId: reuseRunId }),
               });
+              if (discriminationPosted.effectiveVerdict) verdict = { ...discriminationPosted.effectiveVerdict, state: discriminationPosted.effectiveState ?? discriminationPosted.effectiveVerdict.state };
               if (!poster.failed()) onPhase?.("posted");
               if (!discriminationPosted.posted && !discriminationPosted.replayed) {
                 exitCode = 1;
@@ -427,7 +430,7 @@ export function buildSweepEffects(
                   proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
                   ...reviewLedgerLegibilityFields(verdict),
                 });
-                exitCode = 0;
+                exitCode = verdict.state === "success" ? 0 : 1;
               }
             }
           }
@@ -437,16 +440,26 @@ export function buildSweepEffects(
         deps.log("sweep.review_reuse_discrimination_error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
         fallbackReason = reason;
       } finally {
-        releaseBaseProofDir(reviewRepoDir, baseProof, deps.worktreeRemoveImpl);
+        let baseRemoval: Promise<void> | undefined;
+        releaseBaseProofDir(reviewRepoDir, baseProof, (dir, path) => {
+          baseRemoval = Promise.resolve(removeReviewWorktree(dir, path));
+        });
+        try {
+          await baseRemoval;
+        } catch (error) {
+          console.error("(base worktree teardown failed: " + String((error as Error)?.message ?? error) + ")");
+        }
         if (worktreePath !== undefined) {
           try {
-            (deps.worktreeRemoveImpl ?? worktreeRemove)(reviewRepoDir, worktreePath);
+            await removeReviewWorktree(reviewRepoDir, worktreePath);
           } catch (error) {
             deps.log("sweep.review_reuse_discrimination_cleanup_error", {
               pr_number: pr.prNumber,
               head_sha: pr.headSha,
               error: String((error as Error)?.message ?? error),
             });
+          } finally {
+            releaseReviewWorktree(worktreePath);
           }
         }
       }
@@ -459,7 +472,7 @@ export function buildSweepEffects(
     if (mode.kind !== "reuse") {
       return fallbackToFullReview("unknown review reuse mode");
     }
-    const verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt }))?.decision_verdict as ReviewVerdict | undefined;
+    let verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt }))?.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
       return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase, pr.excludeProviders);
@@ -471,6 +484,7 @@ export function buildSweepEffects(
       repo: deps.repo,
       sha: pr.headSha,
       state: verdict.state,
+      verdict,
       description: reviewPostedDescription(verdict),
       taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
       evidence: reviewEvidenceStrength(verdict.criteria ?? []),
@@ -483,6 +497,7 @@ export function buildSweepEffects(
       readRequiredContexts: readRequiredStatusCheckContextsAsync,
       cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(deps.owner, deps.repo), ledgerPath: deps.ledgerPath, runId: reuseRunId }),
     });
+    if (reusedStatus.effectiveVerdict) verdict = { ...reusedStatus.effectiveVerdict, state: reusedStatus.effectiveState ?? reusedStatus.effectiveVerdict.state };
     if (!poster.failed()) onPhase?.("posted");
     if (!reusedStatus.posted && !reusedStatus.replayed) return 1;
     appendLedger(deps.ledgerPath, {
@@ -503,7 +518,7 @@ export function buildSweepEffects(
       proof_exec: verdict.criteria?.map((criterion) => criterion.proof_exec) ?? [],
       ...reviewLedgerLegibilityFields(verdict),
     });
-    return 0;
+    return verdict.state === "success" ? 0 : 1;
   };
   const effects = buildSweepEffectsFromLib({
     reproduceFailingTestsOnMainImpl: buildBaseReproductionProbe(deps.config, reviewRepoDir, deps.ledgerPath, deps.log),
@@ -574,6 +589,7 @@ export function buildSweepEffects(
     readPackageScriptsImpl: readPackageScriptsFor,
     dispatchFixCatchOutcomeImpl: dispatchFixCatchOutcome,
     worktreeRemoveImpl: worktreeRemove,
+    reviewWorktreeRemoveImpl: worktreeRemoveAsync,
     fixBranchClaimKeyImpl: fixBranchClaimKey,
     boundedWorktreeOwnerPathImpl: boundedWorktreeOwnerPath,
     decideRegisteredFixOwnerRecoveryImpl: decideRegisteredFixOwnerRecovery,

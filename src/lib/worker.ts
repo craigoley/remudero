@@ -58,6 +58,7 @@ import { detectUsageLimitRefusal } from "./classify.js";
 import {
   loadConfig,
   canonicalWorkerProviderId,
+  WORKER_PROVIDER_IDS,
   enabledWorkerProviders,
   overflowFallbackRefusal,
   workerCacheDir,
@@ -2429,7 +2430,8 @@ export function withWorkerPidReport<A extends unknown[], R extends { pid: number
 
 export interface WorkerContinuationReceipt {
   mode: "resumed" | "fresh-handoff";
-  reason: "same-provider" | "provider-changed" | "origin-unavailable" | "provider-fresh-only" | "session-unavailable";
+  reason: "same-provider" | "provider-changed" | "origin-unavailable" | "provider-fresh-only" | "session-unavailable"
+    | "private-registry-fresh-only";
   from?: WorkerProviderId;
   to: WorkerProviderId;
 }
@@ -2446,6 +2448,11 @@ export function workerContinuation(previous: Pick<WorkerResult, "provider" | "te
   ].join("\n\n") };
 }
 
+function hasFreshHandoff(args: Pick<SpawnWorkerArgs, "continuation">): boolean {
+  const contextPrompt = args.continuation?.contextPrompt;
+  return contextPrompt !== undefined && contextPrompt.trim() !== "";
+}
+
 /** Resolve only after routing. A session id has a provider namespace; cash never resumes,
  * and Codex's unchanged adapter predicate decides which sessions retain its sandbox. */
 export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
@@ -2455,7 +2462,9 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
   const from = args.continuation?.provider === undefined ? undefined :
     canonicalWorkerProviderId(args.continuation.provider) as WorkerProviderId;
   const to = canonicalWorkerProviderId(provider) as WorkerProviderId;
-  if (args.resumeSessionId && from === to && (to === "claude" || to === "codex" && codexReadOnly(args))) {
+  // W1-T11596: the selected-registry Codex adapter refuses every resume, so a handoff is the only way on.
+  const privateFreshOnly = to === "codex" && hasFreshHandoff(args) && runtimeInstanceRegistryPrivateFile() !== undefined;
+  if (args.resumeSessionId && from === to && !privateFreshOnly && (to === "claude" || to === "codex" && codexReadOnly(args))) {
     return { prompt: args.prompt, resumeSessionId: args.resumeSessionId,
       receipt: { mode: "resumed", reason: "same-provider", from, to } };
   }
@@ -2467,7 +2476,8 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
   return { prompt: `${contextPrompt}\n\nPending action:\n${args.prompt}`,
     receipt: { mode: "fresh-handoff",
       reason: !args.resumeSessionId ? "session-unavailable" : from === undefined ? "origin-unavailable"
-        : from !== to ? "provider-changed" : "provider-fresh-only",
+        : from !== to ? "provider-changed" : to === "codex" && codexReadOnly(args) && privateFreshOnly
+          ? "private-registry-fresh-only" : "provider-fresh-only",
       ...(from === undefined ? {} : { from }), to } };
 }
 
@@ -2504,7 +2514,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const selectedPolicy = privateRegistry === undefined ? undefined : await captureInstanceRegistryRuntimeFile(args.settingsFile);
   const privateSettings = selectedPolicy === undefined ? undefined
     : privateRegistryWorkerSettings(selectedPolicy.text, privateRegistry!, selectedPolicy.canonicalPath);
-  if (selectedPolicy && args.resumeSessionId) throw new InstanceRegistryRuntimeError("worker_resume_not_qualified");
+  // Refuse before routing any resume some provider would still receive; a handoff every route takes goes on.
+  if (selectedPolicy && args.resumeSessionId && (!hasFreshHandoff(args)
+    || WORKER_PROVIDER_IDS.some(provider => workerExecutionForProvider(args, provider).resumeSessionId !== undefined))) {
+    throw new InstanceRegistryRuntimeError("worker_resume_not_qualified");
+  }
   validateWorkerMcpIsolation(args);
   if (args.promptFor) {
     const promptFor = args.promptFor;

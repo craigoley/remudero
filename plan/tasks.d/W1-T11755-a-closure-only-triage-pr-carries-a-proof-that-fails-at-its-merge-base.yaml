@@ -1,0 +1,31 @@
+- id: W1-T11755
+  title: A closure-only triage PR carries a proof that fails at its merge base
+  repo: remudero
+  depends_on:
+    - W1-T963
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/triage.ts
+    - test/triage/a-closure-only-triage-pr-carries-a-proof-that-fails-at-its-merge-base.test.ts
+  acceptance:
+    - claim: triageAcceptanceProof names a line that only the status flip adds, so the proof fails on the entry as it reads at the merge base
+      proof: "unit test: triageAcceptanceProof fails at the merge base for a closure-only diff"
+    - claim: the same proof passes once the status flip is applied to the entry
+      proof: "unit test: triageAcceptanceProof passes after the status flip is applied"
+    - claim: a closure-only commit message still carries an Acceptance block that parseAcceptanceBlock parses with an executable proof
+      proof: "unit test: a closure-only triage commit message parses to one executable proof"
+  origin: followup:work-fix-dispatch-TRIAGE-fb-1792859760649-99e381-1794134782195-7d48
+  design: "Today triageAcceptanceProof returns `grep: status: <status> in <entry path>`. For a closure-only PR (diff is only the status flip) that grep can already match at base (a quoted or sibling-set `status: <status>` line, or an entry already at that status), so every such PR trips proof-discrimination. Make the proof key on text the flip itself introduces and the base entry cannot hold, derived from decision.status the same way as today. Keep the grep dialect and the 100-char body budget. CREATES: test/triage/a-closure-only-triage-pr-carries-a-proof-that-fails-at-its-merge-base.test.ts"
+  rationale: >-
+    From the 2026-10-24 follow-up on https://github.com/craigoley/remudero/pull/17348, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: make `triageAcceptanceProof` give closure-only PRs, whose diff is
+    only the status flip, a proof that can fail at base. The current grep always passes at base,
+    so every such PR trips proof-discrimination. — from TRIAGE-fb-1792859760649-99e381 (run
+    work-fix-dispatch-TRIAGE-fb-1792859760649-99e381-1794134782195-7d48,
+    https://github.com/craigoley/remudero/pull/17348)
