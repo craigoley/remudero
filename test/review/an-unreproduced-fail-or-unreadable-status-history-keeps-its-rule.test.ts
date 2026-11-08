@@ -13,6 +13,27 @@ const computed = {
   testTheater: false, floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
 };
 
+test("W1-T11443 criterion 2: a check that could not run supplies no reproduced failure", async () => {
+  for (const observation of [
+    "A classifier check produced no result because it could not run; the reviewer was unable to inspect",
+    "A classifier check returned no result because it was not executed",
+    "A classifier check produced no result",
+    "A classifier check couldn't run and returned an incorrect lifetime",
+    "A reproduction produced no result because it could not run",
+    "Six fatal exits became six learned clean samples in a read-only probe that could not run",
+  ]) {
+    const body = `remudero-review=failure\n1. claim\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: ${observation}`;
+    const result = await review.readReviewStatusHistory("acme", "remudero", "https://github.com/acme/remudero/pull/1", SHA,
+      async args => args.at(-1)?.includes("/statuses?")
+        ? [[{ context: "remudero-review", state: "failure" }]] : [[{ commit_id: SHA, body }]]);
+    assert.equal(result.kind, "readable");
+    assert.deepEqual(result.failures, [], observation);
+    const guarded = review.applyReviewStatusHistoryGuard(computed as never, SHA, result, "REVIEW_VERDICT 1: PASS");
+    assert.equal(guarded.kind, "post");
+    assert.equal(guarded.verdict.state, "success", observation);
+  }
+});
+
 test("W1-T11443 criterion 2: a same-head failure without a reproduction keeps today's PASS behavior", () => {
   assert.equal(typeof review.reproducedReviewFailuresFromHistory, "function");
   assert.equal(typeof review.applyReviewStatusHistoryGuard, "function");

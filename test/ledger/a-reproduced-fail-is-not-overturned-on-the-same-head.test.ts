@@ -51,6 +51,28 @@ const computed = {
   testTheater: false, floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
 };
 
+test("W1-T11443 criterion 1: negative reproduction inputs preserve the observed same-head failure", async () => {
+  for (const observation of [
+    "An executed in-memory reproduction with no pre-existing review children throws ReferenceError at daemon.ts:4218",
+    "A classifier check with no pre-existing review children produced ReferenceError at daemon.ts:4218",
+    "Six fatal exits with no clean exits became six learned clean samples in a read-only probe",
+  ]) {
+    const body = `remudero-review=failure\n1. laneTarget's CPU bound is measured\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: ${observation}`;
+    const result = await review.readReviewStatusHistory("acme", "remudero", "https://github.com/acme/remudero/pull/1", SHA,
+      async args => args.at(-1)?.includes("/statuses?") ? [history] : [[{ commit_id: SHA, body }]]);
+    assert.equal(result.kind, "readable");
+    assert.equal(result.failures.length, 1, observation);
+    const guarded = review.applyReviewStatusHistoryGuard(computed as never, SHA, result, "REVIEW_VERDICT 1: PASS");
+    assert.equal(guarded.verdict.state, "failure", observation);
+    assert.ok(guarded.verdict.criteria[0].reason.includes(observation), "the refusal cites the prior finding verbatim");
+    const failure = result.failures[0];
+    const resolved = review.applyReviewStatusHistoryGuard(computed as never, SHA, result,
+      `REVIEW_ADDRESSED_FAILURE 1: ${failure.id}\nREVIEW_VERDICT 1: PASS (re-ran reproduction ${failure.id}; it now passes)`,
+      [], [failure.id]);
+    assert.equal(resolved.verdict.state, "success", "an explicitly addressed observation can still clear");
+  }
+});
+
 test("W1-T11443 criterion 1: a same-head reproduced failure remains sticky after another machine posts PASS", () => {
   assert.equal(typeof review.reproducedReviewFailuresFromHistory, "function");
   assert.equal(typeof review.applyReviewStatusHistoryGuard, "function");

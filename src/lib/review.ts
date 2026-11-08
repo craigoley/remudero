@@ -6816,17 +6816,22 @@ export function reproducedReviewFailuresFromHistory(
     for (const finding of blocks) {
       const executedFailure = /proof executed and FAILED\b/i.test(finding);
       const semanticReason = finding.split(/NOTE: reviewer judged the proof non-responsive/i)[1] ?? "";
-      const unobserved = /\b(?:no|not|never|unable|would|could|should|might|may)\b|(?:didn|doesn|isn|wasn|weren|can|couldn|wouldn|shouldn)['’]t/i;
-      const observedCheck = [...semanticReason.matchAll(/\b(?:a|an|the|my|our)\s+([^\n.]*\b(?:check|probe)\b[^\n.]*)\b(?:produced|returned|yielded|threw|failed)\b/gi)]
-        .some((match) => !unobserved.test(match[1]!));
+      const unobserved = (clause: string): boolean =>
+        /(?:^|[;:])\s*no\s+(?:(?:classifier|read-only|in-process|in-memory)\s+)*(?:check|probe|replay|reproduction|counterexample)\b/i.test(clause) ||
+        /\b(?:no longer|not|never|would|could|should|might|may|unable to)\s+(?:(?:have|be|been|actually|successfully|even)\s+)*(?:run|ran|executed?|performed?|inspected?|observed?|throws?|threw|fails?|failed|shows?|showed|produced?|returned?|yielded?|demonstrates?|demonstrated|became|become)\b/i.test(clause) ||
+        /\b(?:didn|doesn|isn|wasn|weren|can|couldn|wouldn|shouldn)['’]t\s+(?:(?:have|be|been|actually|successfully|even)\s+)*(?:run|ran|execute|executed|perform|performed|inspect|observed?|throw|fail|show|produce|return|yield|demonstrate|become)\b/i.test(clause) ||
+        /\b(?:produced|returned|yielded)\s+no\s+results?\b/i.test(clause);
+      const observedCheck = semanticReason.split(/\r?\n|[.!?]\s+/).some((clause) =>
+        /\b(?:a|an|the|my|our)\s+[^\n.]*\b(?:check|probe)\b[^\n.]*\b(?:produced|returned|yielded|threw|failed)\b/i.test(clause) &&
+        !unobserved(clause));
       const witnessText = semanticReason || finding.split(/\r?\n/).slice(1).join("\n");
       const namedCounterexample = witnessText.split(/\r?\n|[.!?]\s+/).some((clause) => {
         const witness = /\b(?:replay|reproduction|counterexample)\b.*?(?:\b(?:throws?|threw|fails?|failed|shows?|showed|produced|returned|yielded|demonstrates?|demonstrated)\b|:\s*(?:[A-Za-z]+Error|Error)\b)/i.exec(clause);
-        return witness !== null && !unobserved.test(clause.slice(0, witness.index + witness[0].length));
+        return witness !== null && !unobserved(clause);
       });
       const observedProbe = witnessText.split(/\r?\n|[.!?]\s+/).some((clause) =>
         /\b(?:became|produced|returned|yielded)\b[^\n.]*\bin\s+(?:a|an|the|my|our)\s+[^\n.]*\bprobe\b/i.test(clause) &&
-        !unobserved.test(clause));
+        !unobserved(clause));
       const semanticCounterexample = /proof executed\b/i.test(finding) && (namedCounterexample || observedCheck || observedProbe);
       if (!executedFailure && !semanticCounterexample) continue;
       const criterion = Number(/^\s*(\d+)\./.exec(finding)?.[1]);
@@ -11285,16 +11290,11 @@ function ghErrorText(e: unknown): string {
   return [asString(err?.stderr), asString(err?.stdout), message].filter(Boolean).join("\n");
 }
 
-/** Post the `remudero-review` commit status to a PR head sha, with bounded retry. WRITE-scoped to a commit STATUS
- * only; it can never edit code. W1-T203 (i): when {@link REVIEWER_TOKEN_ENV} is set this authenticates as the
- * dedicated reviewer identity, `GH_TOKEN` overriding ambient auth — the one thing that makes {@link
- * resolveReviewProvenance}'s login compare meaningful at arm time; the token reaches this only via the orchestrator's
- * OWN process env. A TRANSIENT error — GitHub 5xx, a network blip, rate-limit backpressure, classified by {@link
- * classifyFailure} over the `gh` error text, the SAME classifier the fix-rung retry loop uses so "is this transient"
- * never drifts — is retried with exponential backoff up to {@link POST_REVIEW_STATUS_MAX_ATTEMPTS}. A PERMANENT error,
- * or any text the classifier does not recognise as transient, throws on the first attempt: fail-closed. Once attempts
- * are exhausted this THROWS the last error; ledger-and-continue is {@link postReviewStatusGuarded}'s job. TRAP: a bare
- * `execFileSync` here let a single transient 503 crash a run mid-fix-rung (#283, W1-T135). */
+/** Post a commit status with bounded retry. W1-T203: {@link REVIEWER_TOKEN_ENV} from the orchestrator's process env
+ * overrides ambient `GH_TOKEN`, binding {@link resolveReviewProvenance}'s login check to the reviewer identity.
+ * {@link classifyFailure} identifies transient errors, shared with fix-rung retries. Retry those with exponential
+ * backoff up to {@link POST_REVIEW_STATUS_MAX_ATTEMPTS}; throw permanent/unknown errors immediately and the last
+ * transient error on exhaustion. {@link postReviewStatusGuarded} owns ledger-and-continue handling (#283, W1-T135). */
 export async function postReviewStatus(
   opts: {
     owner: string;
