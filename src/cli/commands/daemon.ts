@@ -48,7 +48,7 @@ import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type Pr
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
-import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
+import { sweepStrandedReviewWorktrees } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
 import { defaultListCandidates, defaultReadMarkers, killProcessGroup, sweepOrphanWorkers, workerInstallationScope } from "../../lib/worker-containment.js";
@@ -1972,7 +1972,7 @@ export async function daemonCommand(
         // W1-T3378: the daemon core owns the tick; this command owns the real filesystem/git
         // effect. Supplying the closure here makes the reviewed `review-PR*` reclaimer reachable
         // on every live daemon rather than leaving an optional DaemonDeps hook dead.
-        sweepStrandedReviewWorktrees: async () => { await sweepStrandedReviewWorktreesAsync(config, log); },
+        sweepStrandedReviewWorktrees: () => sweepStrandedReviewWorktrees(config, log),
         // W1-T3528: same reasoning, different unit — this one frees regenerable build output
         // inside checkouts that must be kept, which every whole-tree rung is right to refuse.
         sweepReclaimableArtifacts: () => sweepReclaimableArtifacts(config, log),

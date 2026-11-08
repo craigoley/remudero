@@ -21,13 +21,12 @@
  * dirs and any hand-cut lane never match it and are never even considered, let alone touched.
  */
 import { execFileSync } from "node:child_process";
-import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
-import { runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
-import { DEFAULT_WORKTREE_REAP_GRACE_MS, reviewWorktreeHoldState, worktreesDir, worktreeRemove, worktreeRemoveAsync } from "./worker.js";
+import { DEFAULT_WORKTREE_REAP_GRACE_MS, reviewWorktreeHoldState, worktreesDir, worktreeRemove } from "./worker.js";
 export { holdReviewWorktree, releaseReviewWorktree, reviewWorktreeIsHeld } from "./worker.js";
 
 /** Exactly what `materializeReviewWorktree` mints (src/run-task.ts): `review-PR<n>-<epochMs>`.
@@ -113,27 +112,11 @@ export interface ReviewWorktreeSweepOptions {
  * no `finally` is pending for. Called once per daemon tick (src/lib/daemon.ts); see this module's
  * header for the full defect and design.
  */
-export type ReviewWorktreeSweepAsyncOptions = Omit<ReviewWorktreeSweepOptions, "readHeadSha" | "readRemoteHeadSha" | "removeWorktree"> & {
-  readHeadSha?: (worktreePath: string) => string | undefined | Promise<string | undefined>;
-  readRemoteHeadSha?: (repoDir: string, prNumber: number) => string | undefined | Promise<string | undefined>;
-  removeWorktree?: (repoDir: string, worktreePath: string) => void | Promise<void>;
-};
-type ReviewSweepGitPorts = Required<Pick<ReviewWorktreeSweepAsyncOptions, "readHeadSha" | "readRemoteHeadSha" | "removeWorktree">>;
-
-export function sweepStrandedReviewWorktrees(config: Config, log: (step: string, extra?: Record<string, unknown>) => void,
-  opts: ReviewWorktreeSweepOptions = {}): ReviewWorktreeSweepSummary {
-  return runStepsSync(strandedReviewWorktreeSteps(config, log, opts,
-    { readHeadSha: defaultReadHeadSha, readRemoteHeadSha: defaultReadRemoteHeadSha, removeWorktree: worktreeRemove }, false));
-}
-
-export function sweepStrandedReviewWorktreesAsync(config: Config, log: (step: string, extra?: Record<string, unknown>) => void,
-  opts: ReviewWorktreeSweepAsyncOptions = {}): Promise<ReviewWorktreeSweepSummary> {
-  return runStepsAsync(strandedReviewWorktreeSteps(config, log, opts,
-    { readHeadSha: defaultReadHeadShaAsync, readRemoteHeadSha: defaultReadRemoteHeadShaAsync, removeWorktree: worktreeRemoveAsync }, true));
-}
-
-function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?: Record<string, unknown>) => void,
-  opts: ReviewWorktreeSweepAsyncOptions, defaults: ReviewSweepGitPorts, recheckOwnership: boolean): Steps<ReviewWorktreeSweepSummary> {
+export function sweepStrandedReviewWorktrees(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  opts: ReviewWorktreeSweepOptions = {},
+): ReviewWorktreeSweepSummary {
   const root = worktreesDir(config);
   const listEntries = opts.listEntries ?? ((dir: string) => readdirSync(dir));
   const isDirectory =
@@ -151,9 +134,9 @@ function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?
   const clock = opts.clock ?? systemClock;
   const graceMs = opts.graceMs ?? DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS;
   const resolveRepoDir = opts.resolveRepoDir ?? defaultResolveRepoDir;
-  const readHeadSha = opts.readHeadSha ?? defaults.readHeadSha;
-  const readRemoteHeadSha = opts.readRemoteHeadSha ?? defaults.readRemoteHeadSha;
-  const removeWorktree = opts.removeWorktree ?? defaults.removeWorktree;
+  const readHeadSha = opts.readHeadSha ?? defaultReadHeadSha;
+  const readRemoteHeadSha = opts.readRemoteHeadSha ?? defaultReadRemoteHeadSha;
+  const removeWorktree = opts.removeWorktree ?? worktreeRemove;
   const holdState = opts.isLive
     ? (path: string) => opts.isLive!(path) ? "held" : "unheld"
     : reviewWorktreeHoldState;
@@ -195,12 +178,12 @@ function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?
       keep(name, path, "git-unreadable");
       continue;
     }
-    const localHead = yield* step(() => readHeadSha(path));
+    const localHead = readHeadSha(path);
     if (!localHead) {
       keep(name, path, "git-unreadable");
       continue;
     }
-    const remoteHead = yield* step(() => readRemoteHeadSha(repoDir, prNumber));
+    const remoteHead = readRemoteHeadSha(repoDir, prNumber);
     if (remoteHead === undefined) {
       keep(name, path, "remote-unreadable");
       continue;
@@ -210,16 +193,8 @@ function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?
       continue;
     }
 
-    // An awaited Git read lets a review acquire ownership in this process.
-    if (recheckOwnership) {
-      const ownerAfterRead = holdState(path);
-      if (ownerAfterRead !== "unheld") {
-        keep(name, path, ownerAfterRead === "held" ? "live-review" : "review-ownership-unknown");
-        continue;
-      }
-    }
     try {
-      yield* step(() => removeWorktree(repoDir, path));
+      removeWorktree(repoDir, path);
       reclaimed.push(name);
       log("review_worktree.sweep.reclaimed", { name });
     } catch (e) {
@@ -229,25 +204,6 @@ function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?
 
   return { reclaimed, kept };
 }
-
-async function defaultReadHeadShaAsync(worktreePath: string): Promise<string | undefined> {
-  try { return (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "HEAD"])).trim(); }
-  catch (e) {
-    console.error(`review-worktree-reclaim: could not read HEAD at ${worktreePath} (${String((e as Error)?.message ?? e)})`);
-    return undefined;
-  }
-}
-
-async function defaultReadRemoteHeadShaAsync(repoDir: string, prNumber: number): Promise<string | undefined> {
-  try {
-    const out = await hostWorktreeGitAsync(repoDir, ["ls-remote", "origin", `refs/pull/${prNumber}/head`]);
-    return out.split(/\s+/)[0]?.trim() || undefined;
-  } catch (e) {
-    console.error(`review-worktree-reclaim: could not ls-remote origin refs/pull/${prNumber}/head in ${repoDir} (${String((e as Error)?.message ?? e)})`);
-    return undefined;
-  }
-}
-
 
 /** Resolve a linked worktree's parent repoDir from its OWN `.git` gitdir pointer — the same
  *  technique worker.ts's `resolveWorktreeRepoDir` uses, never a fixed/assumed path (the
