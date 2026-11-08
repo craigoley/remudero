@@ -11,7 +11,10 @@
   plan_refs: [W1-T11458, W1-T3144, W1-T5046]
   depends_on: [W1-T11458]
   files: [src/lib/target-wip-ownership.ts, test/infra/a-refused-target-wip-read-never-ends-the-daemon.test.ts, test/parallel-dispatch.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=2044f0a47efc2d7f
+  # backlog gardener: placed=2026-11-08T05:25:55.294Z
   attempts: 0
   rationale: |
     PR #17233 merged as b6a1855751 on 2026-11-07 at 22:03:34Z and repaired the
