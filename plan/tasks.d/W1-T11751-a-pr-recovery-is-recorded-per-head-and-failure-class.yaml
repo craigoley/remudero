@@ -1,0 +1,82 @@
+- id: W1-T11751
+  title: "A PR RECOVERY IS ONE DURABLE RECORD PER (REPO, PR, EXACT HEAD SHA, FAILURE CLASS) WITH OWNER, ACTION, WAKE, DEADLINE AND A TERMINAL RECEIPT, RECONCILED IDEMPOTENTLY, IN SHADOW — #17211 drew four needs-human issues over heads 20c7969, 073855a and 75e6799 (stage-stall, then ci proof-discrimination, then ci acceptance-author-gate), one reading 'owner: none' after own-red for 208 minutes against BACKSTOP 45, and no record said who owned each head's recovery or when it would act next"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern (the recovery record and its reconcile); a new module plus one sweep write site; shadow, no decision reads it
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T5537, W1-T5690, W1-T11168, W1-T11169, W1-T8621, W1-T514]
+  files:
+    - src/lib/pr-recovery-record.ts
+    - src/lib/sweep.ts
+    - test/sweep/a-pr-recovery-is-recorded-per-head-and-failure-class.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  acceptance:
+    - claim: "A pure reconcile over the ledger's pr.recovery rows and the pass's observed PRs opens one record per (repo, PR, head SHA, failure class), names its owner, next action, wake_at and deadline_at, and closes it with exactly one terminal receipt (resolved, superseded_by_head, merged, closed, or escalated_to_human) naming the evidence; reconciling the same inputs twice writes no new row, and a new head supersedes the old head's records rather than editing them"
+      proof: "unit test: test/sweep/a-pr-recovery-is-recorded-per-head-and-failure-class.test.ts"
+    - claim: "runSweep writes the reconcile's transitions at one site, and no disposition, dispatch, escalation or close reads them"
+      proof: "grep: reconcilePrRecoveries( in src/lib/sweep.ts"
+  rationale: |
+    ORIGIN: the operator's 2026-11-08 request to automate PR flow from the PR #17211 recovery report
+    (reports/Remudero PR flow recovery.md), item (2). This architect run could not open that report: the worktree
+    confinement hook refused a Read outside the worktree. The evidence below is from GitHub and the source.
+    OBSERVED on GitHub (read 2026-11-08), PR #17211 (W1-T11254, merged 2026-11-08):
+    - #17236 [MANUAL], cause stage-stall, heads 20c7969 then 073855a: "own-red for 208 minutes (BACKSTOP 45)",
+      "DIAGNOSIS: unknown signature", a later comment "escalated for 0 minutes (owner: none)". Closed as superseded
+      by #17283.
+    - #17259 [BLOCKED], cause ci, head 073855aa23b8: failing coverage-shard (1/8) and proof-discrimination. "PR-body
+      mutation was rejected by automatic approval review ... There is no single actionable unmet criterion".
+      Auto-closed as superseded.
+    - #17283 [BLOCKED], cause ci, head 75e679972d12: acceptance-author-gate metadata-only, "no deterministic
+      acceptance repair". Closed by the reconciler after the merge.
+    - #17286 (merged) then amended W1-T11254's acceptance proofs by hand.
+    INFERRED: each (head, failure class) was re-discovered pass by pass and re-filed per head. No durable record
+    names an owner, a next action, a wake time or a deadline for that key, or a terminal outcome. Sweep rows carry
+    blocker_owner and blocker_since per pass (W1-T5537), which is a per-pass observation, not an ownership record.
+    READ in this worktree: PR_BLOCKERS / PR_BLOCKER_OWNERS (src/lib/pr-blocker.ts) and EscalationCause
+    (src/lib/escalate.ts: review, ci, conflict, stage-stall) are the existing class vocabularies. The record reuses
+    them and adds no taxonomy.
+    SIZING: the operator asked whether this is one high-risk concern or a split. It is split. This task is the
+    record and its reconcile in shadow, an observation no decision reads. W1-T11752 is the cut-over that lets
+    the sweep's escalation path act on it.
+    Settled by lookup: is this already filed or already decided? -> Not as one record. W1-T5537 (merged) stamps a
+    per-pass blocker/owner/since. W1-T5690 (merged) climbs rungs on blocker age. W1-T11168 (queued) holds a fix
+    dispatch per (PR, head, cause) and escalates once on a judge verdict, for the fix-dispatch hold only.
+    W1-T11169 (open PR #17367) writes sweep.fix.seed_orphaned once per (PR, head, seed) for dead fix seeds only.
+    None keeps a durable owner/action/wake/deadline/terminal record across failure classes
+    (plan/tasks.d/W1-T5537-*, W1-T5690-*, W1-T11168-*, W1-T11169-*; https://github.com/craigoley/remudero/pull/17367).
+    Settled by lookup: is one stall question per PR already ruled? -> Yes, operator ruling 2026-11-01 (src/lib/sweep.ts,
+    test/sweep/one-stalled-pr-keeps-one-stall-question-across-heads-and-blockers.test.ts). This record does not
+    change it. A stage-stall question remains the ruling's single per-PR issue.
+    Settled by lookup: must every step a live decision reads survive ledger rotation? -> Yes (W1-T8621). The
+    pr.recovery steps join that retained set when W1-T11752 makes them decision-relevant, not before.
+  design: |
+    1. src/lib/pr-recovery-record.ts (new, pure). Key = repo, pr_number, head_sha (full 40-hex), failure_class
+       (a PR_BLOCKERS member, or an EscalationCause when the source is an escalation). Rows:
+       pr.recovery.opened {key, owner, action, wake_at, deadline_at, evidence},
+       pr.recovery.acted {key, action, outcome},
+       pr.recovery.woke {key, at},
+       pr.recovery.terminal {key, outcome, evidence}.
+       Every row carries a deterministic transition_id hashed from key, kind and its causal input, so a replay is a no-op.
+    2. reconcilePrRecoveries({ priorRows, observed, nowMs }) folds prior rows into open records and returns only new
+       transitions. A blocker seen at a key with no open record opens one, owner from PR_BLOCKER_OWNERS. A PR whose
+       head moved writes superseded_by_head on every open record of the old head. A merged or closed PR writes merged
+       or closed. A blocker no longer observed at the same head writes resolved. wake_at = since + the blocker's
+       existing SLO (W1-T5690's BLOCKER_SLO_MS). deadline_at comes from the same SLO table, so no new constant is
+       added. A missing or unreadable prior row set returns no transitions and a `reconcile_unreadable` reason,
+       never a fresh open that would reset ages.
+    3. runSweep calls it once per pass after dispositions and appends the transitions. Dry runs log the view.
+       Nothing else reads the rows in this task.
+    4. Tests over ledger fixtures shaped like #17211's three heads and three classes: three heads produce
+       superseded_by_head receipts in order, the merge closes the last record, a second reconcile writes nothing,
+       and an unreadable prior set opens nothing.
+  falsifier: |
+    Feed reconcilePrRecoveries the same rows twice: if the second call returns any transition, the idempotence
+    claim fails. Drop the head from the key: #17211's 073855a and 75e6799 records collapse into one and the
+    superseded_by_head receipt is never written.

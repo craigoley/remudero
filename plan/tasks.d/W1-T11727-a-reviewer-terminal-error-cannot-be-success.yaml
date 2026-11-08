@@ -11,7 +11,10 @@
   plan_refs: [W1-T11631, W1-T11428, W1-T2564, W1-T11459]
   depends_on: [W1-T11631]
   files: [src/cli/commands/review.ts, test/review/a-reviewer-api-error-cannot-be-success.test.ts]
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=eb3f8bbbcef71c83
+  # backlog gardener: placed=2026-11-08T15:36:33.922Z
   attempts: 0
   rationale: |
     The Mac run review-PR17299-1794115661039 positively records worker.assignment

@@ -54,6 +54,7 @@ import type { PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
@@ -62,7 +63,7 @@ test("the live Inbox consumer holds mismatched population messages and recovers 
   const stateDir = makeTempDir("inbox-population-messages"), repository = "craigoley/remudero", snapshotKey = "b".repeat(64);
   const population = inboxPopulation(snapshotKey, 1, "population-sibling"), generation = population.population.generation;
   let worker: ReturnType<typeof createReadModelWorker> | undefined;
-  t.after(() => { worker?.stop(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  onReadModelClose(t, () => { worker?.stop(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
   mkdirSync(join(stateDir, "read-model")); writeFileSync(join(stateDir, LIVE), "");
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: "auto" } }));
   const file = join(stateDir, "population-worker.mjs"), scope = { instance: "core", repository };
@@ -120,7 +121,7 @@ test("W1-T9244: default worker and HTTP serve complete cached proposals without 
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { agent: "serve" } }));
   const messages: ReadModelWorkerMessage[] = [];
   const worker = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }], tickMs: 20, observe: (msg) => void messages.push(msg) });
-  t.after(() => worker.stop());
+  onReadModelClose(t, () => worker.stop());
   worker.start();
   const key = agentViewKey("core", "proposals"), deadline = Date.now() + 30_000;
   while (!worker.body("agent", key) && Date.now() < deadline) await sleep(20);
@@ -139,7 +140,7 @@ test("W1-T9244: default worker and HTTP serve complete cached proposals without 
   const source = { body: (view: string, key?: string) => restarted.body(view, key), judge: restarted.judge, switches: restarted.switches };
   const server = createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModelViews: ["agent"], requiredParams: { agent: ["instance", "part"] }, readModel: source }) });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => { server.closeAllConnections(); server.close(); });
+  onReadModelClose(t, () => { server.closeAllConnections(); server.close(); });
   const before = readFileSync(join(stateDir, LIVE), "utf8"), store = openProjectorReadModel(stateDir, "core");
   const digest = readModelDigest(store);
   const originalRead = fs.readFileSync;
@@ -173,7 +174,7 @@ test("W1-T9244: default worker and HTTP serve complete cached proposals without 
 test("default agent worker and warm boot refuse old generation readiness and compare current matched producers", async (t) => {
   const stateDir = makeTempDir("agent-generation-worker");
   let worker: ReturnType<typeof createReadModelWorker> | undefined;
-  t.after(() => { worker?.stop(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  onReadModelClose(t, () => { worker?.stop(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
   const now = Date.now(), day = 24 * 60 * 60_000, asOf = new Date(now - 60_000).toISOString(), repository = "owner/repo";
   writeFileSync(join(stateDir, LIVE), "");
   const db = openProjectorReadModel(stateDir, "core");
@@ -242,7 +243,7 @@ test("default agent worker and warm boot refuse old generation readiness and com
   assert.equal(shownReadiness(qualifiedSource, "agent")?.ready, true, "current ready status is a positive route control, not a runtime receipt");
   const server = createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModelViews: ["agent"], readModel: qualifiedSource }) });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => { server.closeAllConnections(); server.close(); });
+  onReadModelClose(t, () => { server.closeAllConnections(); server.close(); });
   const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/agent?${key}`, { headers: { authorization: "Bearer r" } });
   assert.equal(response.status, 404, "even current ready status cannot serve an unqualified exact body in auto mode");
   assert.match((await response.json() as { reason: string }).reason, /no matched body for current generation/);
@@ -271,8 +272,7 @@ test("default agent worker and warm boot refuse old generation readiness and com
 type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -379,7 +379,7 @@ test("serve's main loop lag stays below its same-run inline control while the wo
 
   const stateDir = scratch(t, "rmw-lag-state");
   const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 50 });
-  t.after(() => handle.stop());
+  onReadModelClose(t, () => handle.stop());
   const probe = loopProbe();
   const started = performance.now();
   handle.start();
@@ -404,7 +404,7 @@ test("the worker writes nothing while the projector switch reads off", (t) => {
   const { clock, advance } = steppedClock();
   const sink = collect();
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, post: sink.post });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.tick();
   const before = { seen: tableCount(stateDir, "core", "seen"), bodies: tableCount(stateDir, "core", "view_body"), generation: lastState(sink.messages).instances[0]?.generation };
   assert.equal(before.seen, 14);
@@ -467,7 +467,7 @@ test("the worker releases its leases when serve stops", async (t) => {
   while (handle.state().instances.get("core")?.lease !== "held" && Date.now() < deadline) await sleep(20);
   assert.equal(handle.state().instances.get("core")?.lease, "held");
   const db = openProjectorReadModel(stateDir, "core");
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   assert.equal(acquireLease(db, { holder: "successor" }).ok, false, "while the worker runs, a successor is refused");
   assert.equal(handle.stop(), true);
   assert.equal(acquireLease(db, { holder: "successor" }).ok, true, "after the stop, a successor takes the lease at once");
@@ -486,7 +486,7 @@ test("a projector error is logged and the instance backs off while the others ke
   const { clock, advance } = steppedClock();
   const sink = collect();
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: good }, { name: "site", ledgerDir: missing }], clock, tickMs: 100, post: sink.post, oracle: "off" });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.tick();
   let state = lastState(sink.messages);
   assert.equal(state.instances[0]?.reason, undefined);
@@ -516,12 +516,12 @@ test("a lease held by another serve keeps this worker from writing and a stolen 
   corpus(ledgerDir, 0, 0, 2);
   const { clock, advance } = steppedClock();
   const other = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => other.close());
+  onReadModelClose(t, () => other.close());
   assert.ok(acquireLease(other, { holder: "other-serve", clock }).ok);
   const sink = collect();
   // The oracle stays out of it: every tick here is a projector write the fence decides.
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, holder: "me", post: sink.post, oracle: "off" });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.tick();
   let state = lastState(sink.messages).instances[0];
   assert.equal(state?.lease, "elsewhere");
@@ -589,7 +589,7 @@ test("after a CLI rebuild swaps the file the worker resumes against the new file
   const { clock, advance } = steppedClock();
   const sink = collect();
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, holder: "worker", tickMs: 100, post: sink.post, oracle: "off" });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.tick();
   assert.equal(tableCount(stateDir, "core", "seen"), 14);
 
@@ -664,7 +664,7 @@ test("the switch file keeps its last good reading and a view switched off is not
   const throws: ReadModelView = { name: "broken", version: 1, materialize: () => { throw new Error("boom"); } };
   const counted: ReadModelView = { name: "counted", version: 1, materialize: () => [{ key: "", data: { n: 1 }, sources: [] }] };
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, views: [throws, counted], post: sink.post });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   // W1-T5896: a view with no switch is not built, so the broken one is switched on to show its failure is logged.
   writeFileSync(path, JSON.stringify({ views: { counted: "off", broken: "shadow" } }));
   ticker.tick();
@@ -826,7 +826,7 @@ test("rmd serve starts the read-model worker for every registry instance and sto
   ]);
   const server = buildServeServer(deps);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => {
+  onReadModelClose(t, () => {
     server.closeAllConnections();
     server.close();
   });
@@ -839,7 +839,7 @@ test("rmd serve starts the read-model worker for every registry instance and sto
   assert.equal(tableCount(stateDir, "site", "seen"), 2, "the site instance was projected into its own DB under core's state");
   // Core's DB also projects the oracle's metric rows, which the worker appends to core's own ledger.
   const core = openProjectorReadModel(stateDir, "core");
-  t.after(() => core.close());
+  onReadModelClose(t, () => core.close());
   assert.equal(Number(core.prepare("SELECT count(*) AS n FROM seen WHERE ts_ms <= ?").get(Date.parse(coreCorpus.newestTs))?.n), 3);
   assert.equal(stopServeReadModel(buildServeServer({ ...deps, readModel: undefined })), false, "no worker runs unless serve asks for one");
 });
@@ -873,12 +873,12 @@ test("a serve that exits for a due restart stops the read-model worker and relea
     readModel: { tickMs: 20 },
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => {
+  onReadModelClose(t, () => {
     server.closeAllConnections();
     if (server.listening) server.close();
   });
   const db = openProjectorReadModel(stateDir, "core");
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const leases = (): number => Number(db.prepare("SELECT count(*) AS n FROM lease").get()?.n);
   const coreDb = join(stateDir, "read-model", "core.v1.sqlite");
   const deadline = Date.now() + 30_000;
@@ -931,7 +931,7 @@ function checkFixture(t: TestCtx, extra: { escalation?: { issues: IssueGateway; 
     ...(extra.escalation ? { escalation: extra.escalation } : {}),
   });
   let ticker = make();
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   return {
     ledgerDir, stateDir, c, clock, advance: stepped.advance,
     get ticker() { return ticker; },
@@ -980,7 +980,7 @@ test("one cycle of row-count slice checks tiles the seven-day window exactly whi
   assert.ok(oracleRows(f.stateDir).every((r) => r.outcome === "agree"));
   const checked = oracleRows(f.stateDir).reduce((sum, r) => sum + Number(r.compared), 0);
   const inWindow = openProjectorReadModel(f.stateDir, "core", f.clock);
-  t.after(() => inWindow.close());
+  onReadModelClose(t, () => inWindow.close());
   assert.equal(checked, Number(inWindow.prepare("SELECT count(*) AS n FROM seen WHERE ts_ms BETWEEN ? AND ?").get(end - 7 * DAY, end)?.n), "every row of the window was compared exactly once");
   const cycle = windows.length;
   for (let i = 0; i < 10; i++) f.ticker.tick();
@@ -1008,7 +1008,7 @@ test("the worker compares only rows ingested before a mark older than the settle
   const titles: string[] = [];
   const issues: IssueGateway = { create: (title) => (titles.push(title), `https://github.com/craigoley/remudero/issues/${9000 + titles.length}`) };
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: c.post, clock, holder: "settle", escalation: { issues, ledgerPath: join(scratch(t, "rmw-settle-esc"), LIVE), runId: "rm" } });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   for (let i = 0; i < 5 && c.logs("read_model.consistency_deferred").length === 0; i++) ticker.tick();
   assert.equal(checkWindows(stateDir).length, 0, "no mark has settled yet: nothing is compared");
   assert.match(String(c.logs("read_model.consistency_deferred")[0]?.reason), /no ingest mark is 600000 ms old yet/);
@@ -1048,7 +1048,7 @@ test("the worker runs a due slice only as the lease holder", (t) => {
   f.ticker.tick();
   f.ticker.tick();
   const other = openProjectorReadModel(f.stateDir, "core", f.clock);
-  t.after(() => other.close());
+  onReadModelClose(t, () => other.close());
   other.prepare("UPDATE lease SET holder = 'serve-b', expires_ms = ?").run(T0 + HOUR);
   f.advance(READ_MODEL_LEASE_RENEW_MS);
   f.ticker.tick();
@@ -1062,7 +1062,7 @@ test("the consistency check never runs while a rebuild holds another generation"
   f.ticker.tick();
   // A CLI rebuild in flight: a new generation beside the live file, holding that file's lease.
   const side = openProjectorReadModel(f.stateDir, "core", f.clock, String(T0));
-  t.after(() => side.close());
+  onReadModelClose(t, () => side.close());
   const got = acquireLease(side, { holder: "rebuild-4242-1", clock: f.clock });
   assert.ok(got.ok);
   f.ticker.tick();
@@ -1091,7 +1091,7 @@ test("a rebuild that fences the worker during its check makes it reopen the file
   f.ticker.tick();
   // The rebuild's fence lands after the projection tick that found a slice due, before the check writes.
   const rebuild = openProjectorReadModel(f.stateDir, "core", f.clock);
-  t.after(() => rebuild.close());
+  onReadModelClose(t, () => rebuild.close());
   rebuild.prepare("UPDATE lease SET holder = 'rebuild-1', expires_ms = ?").run(T0 + 60_000);
   f.ticker.tick();
   assert.match(String(f.c.logs("read_model.tick_failed")[0]?.error), /lease/);
@@ -1105,7 +1105,7 @@ test("a drift the worker's windowed check detects is healed, and the next older 
   const f = checkFixture(t, { escalation: { issues, ledgerPath: join(scratch(t, "rmw-check-esc"), LIVE), runId: "read-model" } });
   f.ticker.tick();
   const tamper = openProjectorReadModel(f.stateDir, "core");
-  t.after(() => tamper.close());
+  onReadModelClose(t, () => tamper.close());
   const corruptBefore = (ms: number) => tamper.prepare("UPDATE fact SET body = body || ' ' WHERE seq = (SELECT max(seq) FROM fact WHERE ts_ms < ?)").run(ms);
   corruptBefore(T0);
   f.ticker.tick();
@@ -1131,7 +1131,7 @@ test("a blind slice is logged and waits out its back-off without failing the pro
   const c = collect();
   const { clock, advance } = steppedClock();
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: c.post, clock, ingestSettleMs: 0 });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.tick();
   ticker.tick();
   assert.match(String(c.logs("read_model.consistency_failed")[0]?.error), /oracle_blind/);
@@ -1154,7 +1154,7 @@ test("a slice that cannot start is a tick failure of its instance and nothing is
   // The lease is due for renewal as the slice starts, and its table is gone: the start throws.
   f.advance(READ_MODEL_LEASE_RENEW_MS);
   const other = openProjectorReadModel(f.stateDir, "core", f.clock);
-  t.after(() => other.close());
+  onReadModelClose(t, () => other.close());
   other.exec("DROP TABLE lease");
   f.ticker.tick();
   assert.match(String(f.c.logs("read_model.tick_failed")[0]?.error), /no such table: lease/);
@@ -1191,7 +1191,7 @@ function scriptedInboxWorker(t: TestContext, script: unknown[][][], populations:
   const stateDir = makeTempDir("inbox-convergence"), scope = { instance: "core", repository: "craigoley/remudero" };
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   let worker: ReturnType<typeof createReadModelWorker> | undefined;
-  t.after(() => { worker?.stop(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  onReadModelClose(t, () => { worker?.stop(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
   mkdirSync(join(stateDir, "read-model")); writeFileSync(join(stateDir, LIVE), "");
   const scriptPath = join(stateDir, "script.json"), counter = join(stateDir, "spawns"), file = join(stateDir, "scripted-inbox-worker.mjs");
   writeFileSync(scriptPath, JSON.stringify(script));
@@ -1430,7 +1430,7 @@ test("a restarted publisher converges cached pages with the committed inbox popu
 async function restartedInboxPublisher(t: TestContext, sourceOnly = false) {
   const root = makeTempDir("inbox-restarted-publisher"), stateDir = join(root, "state"), repository = "craigoley/remudero";
   let worker: ReturnType<typeof createReadModelWorker> | undefined;
-  t.after(() => { worker?.stop(); rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  onReadModelClose(t, () => { worker?.stop(); rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
   mkdirSync(join(stateDir, "read-model"), { recursive: true }); writeFileSync(join(stateDir, LIVE), "");
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: "auto" } }));
   const inbox = await classifiedInbox(root, 180);

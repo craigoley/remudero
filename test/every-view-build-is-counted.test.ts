@@ -1,17 +1,16 @@
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { test, type TestContext } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
 import { createReadModelTicker, readModelSwitchesPath, type ReadModelTickerOptions, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-07T12:00:00Z");
 const WINDOW_MS = 10 * 60_000;
 
 function rig(t: TestContext, makeViews: (spend: (ms: number) => void) => ReadModelView[], options: Partial<ReadModelTickerOptions> = {}) {
-  const stateDir = makeTempDir("view-builds");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "view-builds").dir;
   let at = T0;
   const spend = (ms: number): void => { at += ms; };
   const clock: Clock = { now: () => at, date: () => new Date(at), iso: () => new Date(at).toISOString() };
@@ -20,7 +19,7 @@ function rig(t: TestContext, makeViews: (spend: (ms: number) => void) => ReadMod
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ projector: "off", views: Object.fromEntries(views.map((view) => [view.name, "serve"])) }));
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir, instances: [], views, clock, oracle: "off", passBudgetMs: 100, ...options, post: (message) => void posted.push(message) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   if (options.viewsOnly) ticker.observe([]);
   ticker.start();
   const rows = (step = "read_model.view_builds") => posted.flatMap((message) => message.type === "log" && message.step === step ? [message.extra] : []);

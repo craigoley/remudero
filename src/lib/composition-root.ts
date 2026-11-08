@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { hostWorktreeGit } from "./worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { realArmDeps, type ArmDeps } from "./arm-auto-merge.js";
 import { realDeployDeps, type DeployDeps, type RealDeployOpts } from "./deployer.js";
 import { realSharedPauseGitDeps, type SharedPauseGitDeps } from "./fleet-control.js";
@@ -28,38 +28,58 @@ import {
   type SynthesizeGitGateway,
 } from "./onboard/synthesize.js";
 
-export interface ReviewWorktreeDeps {
-  fetch: (repoDir: string, prNumber: number, headSha?: string) => void;
-  addWorktree: (repoDir: string, worktreePath: string, revision: string) => void;
-  revParseHead: (worktreePath: string) => string;
-  removeWorktree?: (repoDir: string, worktreePath: string) => void;
+export interface ReviewWorktreeDeps<Head = string, Effect = void> {
+  fetch: (repoDir: string, prNumber: number, headSha?: string) => Effect;
+  addWorktree: (repoDir: string, worktreePath: string, revision: string) => Effect;
+  revParseHead: (worktreePath: string) => Head;
+  removeWorktree?: (repoDir: string, worktreePath: string) => Effect;
+}
+
+/** Same creation and exact-head policy, with awaited Git on the daemon's path. */
+export function realReviewWorktreeAsync(): ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>> {
+  return realReviewWorktree(
+    async (_cmd, args) => hostWorktreeGitAsync(args[1], args.slice(2)),
+    async (path) => (await hostWorktreeGitAsync(path, ["rev-parse", "HEAD"])).trim(),
+  );
 }
 
 type ReviewGitExec = (cmd: string, args: string[], options: { stdio: "pipe" }) => string | Buffer;
 
-function realReviewWorktree(exec: ReviewGitExec = execFileSync): ReviewWorktreeDeps {
+type ReviewGitAsyncExec = (cmd: string, args: string[], options: { stdio: "pipe" }) => Promise<string | Buffer>;
+
+function realReviewWorktree(exec?: ReviewGitExec): ReviewWorktreeDeps;
+function realReviewWorktree(exec: ReviewGitAsyncExec, readHead: (path: string) => Promise<string>): ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>;
+function realReviewWorktree(
+  exec: ReviewGitExec | ReviewGitAsyncExec = execFileSync,
+  readHead: (path: string) => string | Promise<string> =
+    (worktreePath) => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim(),
+): ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>> {
   return {
     fetch: (repoDir, prNumber, headSha) => {
       const fetchRef = (ref: string) =>
         exec("git", ["-C", repoDir, "fetch", "--quiet", "--no-write-fetch-head", "origin", ref], { stdio: "pipe" });
-      try {
-        fetchRef(`refs/pull/${prNumber}/head`);
-      } catch (error) {
-        // #11708 (2026-10-14): GitHub served refs/pull/N/merge but never created refs/pull/N/head for a REST-opened PR,
-        // so every review materialized nothing and posted a keyword-only FAIL. The head commit is still fetchable by sha.
+      const recover = (error: unknown): void | Promise<void> => {
+        // GitHub may omit the pull ref while still serving its exact head SHA (#11708).
         if (headSha === undefined || !/couldn't find remote ref/.test(String((error as { stderr?: unknown }).stderr ?? (error as Error)?.message ?? error))) throw error;
         try {
-          fetchRef(headSha);
-        } catch {
-          throw error; // the sha is not served either: the missing pull ref stays the named failure (W1-T2751)
-        }
+          const fallback = fetchRef(headSha);
+          // A failed fallback preserves the original missing-pull-ref failure in both drivers.
+          if (fallback instanceof Promise) return fallback.then(() => {}).catch(() => { throw error; });
+        } catch { throw error; }
+      };
+      try {
+        const fetched = fetchRef(`refs/pull/${prNumber}/head`);
+        if (fetched instanceof Promise) return fetched.then(() => {}).catch(recover);
+      } catch (error) {
+        // Recovery fetches the exact SHA or rethrows the original missing-pull-ref failure.
+        return recover(error);
       }
     },
     addWorktree: (repoDir, worktreePath, revision) => {
-      exec("git", ["-C", repoDir, "worktree", "add", "--detach", worktreePath, revision], { stdio: "pipe" });
+      const added = exec("git", ["-C", repoDir, "worktree", "add", "--detach", worktreePath, revision], { stdio: "pipe" });
+      if (added instanceof Promise) return added.then(() => {});
     },
-    // W1-T6122: the tree is the PR head's, so its read is the leaf's (the seam keeps fetch/add).
-    revParseHead: (worktreePath) => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim(),
+    revParseHead: readHead,
   };
 }
 

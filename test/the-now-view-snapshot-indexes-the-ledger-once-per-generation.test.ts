@@ -15,6 +15,7 @@ import { makeTempDir } from "#src/lib/tmp.js";
 import * as nowView from "#src/lib/now-view.js";
 import * as status from "#src/lib/status.js";
 import * as statusBoard from "#src/lib/status-board.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 /**
  * W1-T6253 — THE NOW VIEW'S SNAPSHOT INDEXES THE LEDGER ONCE PER GENERATION. Every now build's snapshot stage ran
@@ -69,8 +70,7 @@ test("W1-T6253: one status-board build indexes the ledger once", () => {
 
 /** One instance's read model and ledger, the way serve's views worker sees them. */
 function setup(t: TestCtx) {
-  const root = makeTempDir("t6253-now");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "t6253-now").dir;
   let now = T0;
   const clock: Clock & { set(ms: number): void } = {
     now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString(), set: (ms) => { now = ms; },
@@ -79,7 +79,7 @@ function setup(t: TestCtx) {
   const ledgerDir = join(home, "ledger-core");
   mkdirSync(ledgerDir, { recursive: true });
   const db: ReadModelDb = openProjectorReadModel(join(home, "read-model-home"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const acquired = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(acquired.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: acquired.lease, clock });

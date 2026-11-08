@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildActionResultsRoute } from "#src/lib/action-results.js";
@@ -14,14 +14,14 @@ import { acquireLease } from "#src/lib/read-model-db.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import type { Plan } from "#src/lib/plan.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const keys = ["archives", "failedArchives", "holder", "instance", "lane", "rows", "thread", "tornRows"].sort();
 const counts = { archives: 1, rows: 1, tornRows: 1, failedArchives: 0 };
 
 test("test/a-retention-row-names-its-worker-and-holder.test.ts: unchanged counts never suppress a second worker, holder or instance", (t) => {
-  t.after(() => setLedgerMemoRetentionContext(undefined));
+  onReadModelClose(t, () => setLedgerMemoRetentionContext(undefined));
   const messages: ReadModelWorkerMessage[] = [];
   const memo = createLedgerRotationMemo((rows) => rows, { holder: "now.legacy.rows", statKey: () => "fixed" });
   const pass = memo.pass({ parseMissing: true });
@@ -56,9 +56,8 @@ test("test/a-retention-row-names-its-worker-and-holder.test.ts: unchanged counts
 });
 
 test("view-worker entry adds its real lane to forwarded log rows", async (t) => {
-  t.after(() => setLedgerMemoRetentionContext(undefined));
-  const root = makeTempDir("retention-worker");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  onReadModelClose(t, () => setLedgerMemoRetentionContext(undefined));
+  const root = readModelFixtureDir(t, "retention-worker").dir;
   for (const lane of ["fast", "heavy", undefined] as const) {
     const messages: ReadModelWorkerMessage[] = [];
     let send: ((m: ReadModelViewsInput) => void) | undefined;
@@ -78,7 +77,7 @@ test("view-worker entry adds its real lane to forwarded log rows", async (t) => 
 });
 
 test("a different thread with the same holder, instance and absent lane gets its own row", (t) => {
-  t.after(() => setLedgerMemoRetentionContext(undefined));
+  onReadModelClose(t, () => setLedgerMemoRetentionContext(undefined));
   const rows: Record<string, unknown>[] = [];
   const log = (_step: string, extra: Record<string, unknown>) => { rows.push(extra); };
   const memo = createLedgerRotationMemo((r) => r, { holder: "thread-fixture", statKey: () => "fixed" });
@@ -145,12 +144,11 @@ test("an empty first retention sample is silent, while a later transition back t
 
 test("now legacy reports both named memos and preserves the aggregate retention event", (t) => {
   setLedgerMemoRetentionContext(undefined);
-  const root = makeTempDir("retention-now");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "retention-now").dir;
   const clock = fixedClock(Date.parse("2026-10-07T12:00:00.000Z"));
   const fx = writeLedger([], { dir: join(root, "core", "state"), rotations: [{ at: "2026-10-07T11:59:00.000Z", rows: [{ ts: "2026-10-07T11:58:00.000Z", step: "implement.done", cost_usd: 1, payload: "secret" }] }] });
   const db = openProjectorReadModel(join(root, "home"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const lease = acquireLease(db, { clock });
   assert.ok(lease.ok);
   createLedgerProjector({ ledgerDir: fx.dir, db, lease: lease.lease, clock }).tick();
@@ -177,8 +175,7 @@ test("now legacy reports both named memos and preserves the aggregate retention 
 
 test("all async holders emit real ledger rows once per retained count change", async (t) => {
   setLedgerMemoRetentionContext(undefined);
-  const root = makeTempDir("retention-async");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "retention-async").dir;
   const fx = writeLedger([], { dir: join(root, "core", "state"), rotations: [{ at: "2026-10-07T11:00:00.000Z", gz: true, rows: [{ step: "cost.anomaly", run_id: "r1", secret: "private" }, { step: "external_effect.reconciled", secret: "private" }, { step: "measurement_cadence.ran", ts: "2026-10-07T10:00:00.000Z", secret: "private" }] }] });
   const follows = createFollowUpHistoryReader();
   const measurements = createLatestMeasurementReader();

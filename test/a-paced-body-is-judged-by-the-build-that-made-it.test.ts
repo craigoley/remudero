@@ -6,16 +6,16 @@
  * rows past the ledger budget, and its probe aged from the probe that build took.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { builtLedgerSource, createReadModelWorker, READ_MODEL_LEDGER_STALE_MS, type ReadModelInstanceState } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { HOST_PROBE_BUDGET_MS } from "#src/lib/view-freshness.js";
 import { buildReadModelViewRoutes, type ViewBody, type ViewSource } from "#src/lib/views.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-09T08:00:00.000Z");
 const iso = (ms: number): string => new Date(ms).toISOString();
@@ -30,8 +30,7 @@ const projector = (newestMs: number, generation: number): ReadModelInstanceState
 type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -68,7 +67,7 @@ test("a body built at an old generation is served stale with its own lag, and it
   mkdirSync(join(dir, "read-model"), { recursive: true });
   writeFileSync(join(dir, "read-model", "switches.json"), JSON.stringify({ projector: "on", views: { now: "serve" } }));
   const handle = createReadModelWorker({ stateDir: dir, instances: [{ name: "core", ledgerDir: dir }], workerUrl: workerModule(dir), every: () => () => {} });
-  t.after(() => void handle.stop());
+  onReadModelClose(t, () => void handle.stop());
   handle.start();
   const deadline = Date.now() + 10_000;
   while ((handle.body("now", KEY) === undefined || handle.state().instances.get("core")?.generation !== 40) && Date.now() < deadline) await sleep(10);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
@@ -15,8 +15,8 @@ import {
   type ReadModelView,
   type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 /** The work clock's cost of one applied row. */
@@ -26,8 +26,7 @@ const PASS_MS = READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE;
 type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -113,7 +112,7 @@ test("a read-model tick with a large projection batch plus view body builds stay
     stateDir, instances: [{ name: "core", ledgerDir: coreDir }, { name: "console", ledgerDir: consoleDir }], clock: work.clock, holder: "view-budget", oracle: "off", views,
     post: (m) => void messages.push(m),
   });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   work.watch(["core", "console"]);
   const ticks: Array<{ ms: number; built: string[]; projected: boolean }> = [];
@@ -152,7 +151,7 @@ test("a read-model view is not rebuilt before its last cost divided by the view 
     stateDir, instances: [{ name: "core", ledgerDir: coreDir }], clock: work.clock, holder: "view-pace", oracle: "off",
     views: [costly("paced", 200, work.advance, built)], post: () => {},
   });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   const at: number[] = [];
   for (let i = 0; i < 12; i++) {
