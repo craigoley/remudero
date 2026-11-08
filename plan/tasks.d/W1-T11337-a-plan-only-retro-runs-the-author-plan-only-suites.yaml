@@ -7,7 +7,8 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # which suites one local pre-publish gate runs for a plan-only retro diff; the hosted gate, other diff classes and the gate's verdict rules are unchanged
+  risk: high # Rule 19 span: the plan-only selector and two existing regression fixtures are qualified together; hosted CI and verdict rules remain unchanged
+  band_meaning: span
   origin: operator-session#recycle-and-status-2026-11-04
   plan_refs:
     - W1-T10144
@@ -16,6 +17,8 @@
   files:
     - src/lib/retro-preflight.ts
     - test/learning/a-plan-only-retro-runs-the-author-plan-only-suites.test.ts
+    - test/learning/scout-retro-preflight-failed.test.ts
+    - test/deploy-run-freshness-exempt.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -23,6 +26,11 @@
       proof: "unit test: test/learning/a-plan-only-retro-runs-the-author-plan-only-suites.test.ts"
     - claim: The retro preflight asks for the author lane's plan-only selection
       proof: "grep: list-plan-only-suites in src/lib/retro-preflight.ts"
+    - claim: The freshness-exemption test file completes with a test summary and surfaces any unhandled rejection from repeated in-process main calls instead of retaining a per-test process.exit mock in the process-wide rejection guard
+      proof: "unit test: test/deploy-run-freshness-exempt.test.ts"
+      kind: guard
+    - claim: The freshness-exemption regression names this task criterion in its new test title so the proof distinguishes the amended head from base
+      proof: 'grep: test("W1-T11337 criterion 3: freshness-exemption tests surface escaped rejections during teardown" in test/deploy-run-freshness-exempt.test.ts'
   rationale: |
     Operator ruling 2026-11-04: "Use the plan-only set (Recommended)". A plan-only retro diff runs the author lane's plan-only selection, about 34 suites, locally, and hosted CI keeps the full set as the gate.
     OBSERVED 2026-11-04:
@@ -37,6 +45,7 @@
     - Record selection { mode: "plan-only", reason: "diff class PLAN_ONLY (author plan-only selection)", changedPathCount, broadSuiteCount }, where broadSuiteCount is the plan-reading count the old path would have run (one extra listing call, or the previous_count it prints).
     - Widen SuiteSelection.mode with "plan-only".
     - The existing preflight row keeps suite_selection, suite_selection_reason and suite_count, so the saving shows per retro.
+    - Keep the freshness-exemption fixture within this task's accepted regression scope: install a stable test-local unhandled-rejection guard before mocked main calls, record escaped reasons, and fail file teardown if any escaped; do not suppress the runner failure or loosen the production guard.
     - If the plan-only listing fails or prints zero lines, fall back to today's --list-plan-reading-suites call with the same list, naming the fallback in the reason. Never run zero suites.
     - DOCS_ONLY and SOURCE diffs keep today's path.
     NOT IN SCOPE: DOCS_ONLY narrowing (the ruling covers plan-only diffs); hosted CI's plan-reading lane; the silence bound (W1-T2803); the slot heartbeat and start row, which are sibling tasks.
@@ -44,3 +53,5 @@
     Build order: W1-T11335 (the retro preflight beats its slot) and W1-T11326 (retro preflight ledgers its start) also edit src/lib/retro-preflight.ts. Build after whichever of them is still open, or check their hunks first.
     reservation hand-off: run-unfiled-1793808171119 -> run-unfiled-1793808171119
     Reserved with rmd next-task-id (W1-T11337 on run-unfiled-1793808171119). Filed on the operator's 2026-11-04 ruling.
+    Operator-approved regression-scope amendment, 2026-11-07: include test/learning/scout-retro-preflight-failed.test.ts.
+    Operator-approved bounded author-preflight repair, 2026-11-08: include test/deploy-run-freshness-exempt.test.ts to make escaped rejections observable without a stale mocked process.exit handler.
