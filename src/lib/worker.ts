@@ -19,6 +19,7 @@ import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type GitRunner } from "./git-fetch-retry.js";
 import { ensureWorktreeConfigEnabledAsync } from "./worktree-config.js";
 import { createHash, randomUUID } from "node:crypto";
+import type { SDKAssistantMessageError } from "@anthropic-ai/claude-agent-sdk";
 import {
   appendFileSync,
   closeSync,
@@ -275,6 +276,8 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  /** Internal producer receipt for W1-T11119; created only from a terminal provider stream. */
+  providerExchange?: ProviderExchangeReceiptV1;
   outputRetention?: {
     text: Omit<FileTail, "text">;
     blocks: Omit<FileTail, "text">;
@@ -1300,6 +1303,10 @@ export interface SpawnWorkerArgs {
    * inherits them and the orphan sweep attributes a stray survivor back to its run and task. Optional: omitting them still
    * gets process-group containment, but a survivor cannot be re-attributed if teardown itself never ran (W1-T117). */
   runId?: string;
+  /** Internal coding-canary identity; never included in the worker prompt. */
+  canaryAttemptId?: string;
+  /** Internal worker-spawn identity, assigned by spawnWorker before the reducer runs. */
+  workerSpawnAttemptId?: string;
   taskId?: string;
   /** Synchronous, durable sink for the pre-execution provider/model assignment. The worker
    * catches a sink failure and does not start attributing terminal rows to an event it could not
@@ -2476,7 +2483,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       assignment = snapshot;
     },
   } : args;
-  const result = await spawnWorkerImpl(spawnArgs);
+  const result = await spawnWorkerImpl({ ...spawnArgs, workerSpawnAttemptId: attemptId });
   result.executionEvidence = workerExecutionEvidence(attemptId, result, assignment);
   return result;
 }
@@ -3580,6 +3587,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             root: config.root,
             runId: args.runId,
             taskId: args.taskId,
+            ...(args.runId && args.canaryAttemptId && args.workerSpawnAttemptId ? { providerExchangeBinding: {
+              runId: args.runId, canaryAttemptId: args.canaryAttemptId, workerSpawnAttemptId: args.workerSpawnAttemptId,
+            } } : {}),
             // The SAME injected clock the watchdog polls against. Invariant: every `tsMs` this observer sees comes from ONE
             // clock, never a real `Date.now()` racing the watchdog's synthetic one. `undefined` falls back to
             // collectWorkerResult's own `Date.now` (W1-T1045).
@@ -4029,6 +4039,27 @@ function detectSafeguardRefusal(raw: unknown): WorkerResult["safeguardRefusal"] 
   };
 }
 
+/** Positive-only coding-canary exchange receipt. W1-T11119 validates these bindings before analysis. */
+export interface ProviderExchangeBindingV1 { runId: string; canaryAttemptId: string; workerSpawnAttemptId: string }
+export interface ProviderExchangeReceiptV1 extends ProviderExchangeBindingV1 {
+  version: "canary-provider-exchange-v1";
+  outcome: "assistant-model" | "provider-response-error";
+  model?: string;
+  error?: string;
+}
+const PROVIDER_RESPONSE_ERRORS = new Set<SDKAssistantMessageError>([
+  "authentication_failed", "oauth_org_not_allowed", "account_on_hold", "verification_required",
+  "billing_error", "rate_limit", "overloaded", "invalid_request", "model_not_found", "server_error",
+  "max_output_tokens",
+]);
+function isProviderResponseError(error: unknown): error is SDKAssistantMessageError {
+  return typeof error === "string" && PROVIDER_RESPONSE_ERRORS.has(error as SDKAssistantMessageError);
+}
+function sealProviderExchange(binding: ProviderExchangeBindingV1, detail: Omit<ProviderExchangeReceiptV1,
+  "version" | keyof ProviderExchangeBindingV1>): ProviderExchangeReceiptV1 {
+  return Object.freeze({ version: "canary-provider-exchange-v1", ...binding, ...detail });
+}
+
 /** Reduce the SDK message stream into a {@link WorkerResult}. Split out of spawnWorker so the error-envelope behaviour is
  * unit-testable without a real worker. TRAP (SDK 0.3.209, the WS-1 root cause): the SDK YIELDS the `type:"result"` envelope
  * for an error subtype — carrying `num_turns` and `total_cost_usd` — and only THEN throws, so letting that throw escape loses
@@ -4039,6 +4070,7 @@ export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
     childEnvKeys: string[];
+    providerExchangeBinding?: ProviderExchangeBindingV1;
     root?: string;
     runId?: string;
     taskId?: string;
@@ -4112,6 +4144,7 @@ export async function collectWorkerResult(
   // WorkerResult.servedModel}. `undefined` until a genuine value is observed, so a stream carrying none falls through to the
   // explicit-unknown branch below, never a guess (W1-T2572).
   let servedModel: string | undefined;
+  let providerExchangeDetail: Omit<ProviderExchangeReceiptV1, "version" | keyof ProviderExchangeBindingV1> | undefined;
   let initSummary: WorkerInitSummary | undefined;
   const compactionEvents: CompactionEvent[] = [];
   const compactionFailures: CompactionFailure[] = [];
@@ -4145,7 +4178,17 @@ export async function collectWorkerResult(
         // Read verbatim off the SAME per-message field `apiError` reads — the ONE place the live stream names what generated
         // this turn. Never `modelUsage`, a post-hoc cost breakdown, and never `<synthetic>`, an error placeholder. Last real
         // value wins (W1-T2572).
-        if (typeof model === "string" && model.length > 0 && model !== "<synthetic>") servedModel = model;
+        const normalizedModel = typeof model === "string" ? model.trim() : "";
+        const hasRealModel = normalizedModel.length > 0 && normalizedModel !== "<synthetic>";
+        if (hasRealModel) servedModel = normalizedModel;
+        if (rawAny.error === "cloud_credential_error") {
+          // SDK guarantees that this local credential failure reached no provider.
+        } else if (hasRealModel) {
+          providerExchangeDetail = { outcome: "assistant-model", model: normalizedModel };
+        } else if (isProviderResponseError(rawAny.error)) {
+          // This exact SDK response-error field proves a provider reply; cloud_credential_error is excluded.
+          providerExchangeDetail = { outcome: "provider-response-error", error: rawAny.error };
+        }
         // A streamed block carries `stop_reason: null`, so only a real string replaces an earlier one.
         const messageStopReason = (msg.message as { stop_reason?: unknown })?.stop_reason;
         if (typeof messageStopReason === "string" && messageStopReason.length > 0) assistantStopReason = messageStopReason;
@@ -4317,7 +4360,7 @@ export async function collectWorkerResult(
   const firstTextOffsetMs = firstTextAtMs === undefined ? undefined : firstTextAtMs - startedAtMs;
   const firstTextInvalidAtEnd = firstTextOffsetMs !== undefined
     && (!Number.isFinite(workerDurationMs) || workerDurationMs < 0 || workerDurationMs < firstTextOffsetMs);
-  return {
+  const result: WorkerResult = {
     ...(opts.lostGrants?.length ? { lostGrants: opts.lostGrants } : {}),
     ...(opts.credentialHelperUnwired ? { credentialHelperUnwired: opts.credentialHelperUnwired } : {}),
     sessionId,
@@ -4365,6 +4408,9 @@ export async function collectWorkerResult(
       ? { workerFirstTextReason: "first-text-clock-nonmonotonic" }
       : {}),
   };
+  if (sawResult && providerExchangeDetail && opts.providerExchangeBinding)
+    result.providerExchange = sealProviderExchange(opts.providerExchangeBinding, providerExchangeDetail);
+  return result;
 }
 
 // ── Deny-floor containment probe: the dontAsk fallback state machine ───────

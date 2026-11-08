@@ -12,12 +12,15 @@ import { capturedPrivateTraceReceipt, createApplicationTraceRecorder, gradePriva
 import { parseCodingCandidate, refuseCodingBeforeHost, scoreCodingControl,
   type CodingGrade, type CodingRunnerResult } from "./model-canary-coding.js";
 import type { CodingExecutionObservationV1 } from "./model-canary-metrics.js";
+import type { ProviderExchangeReceiptV1 } from "./worker.js";
+
+type CanaryAttemptWithProviderExchange = CanaryAttempt & { providerExchange?: ProviderExchangeReceiptV1 };
 
 export interface CanaryPin { model: string; route: string; effort: string; suiteHash: string; billing: "api" | "subscription" }
 export interface CanaryResponse {
   text: string;
   toolCalls: { name: string; args: unknown }[];
-  resources: Omit<CanaryAttempt, "id">;
+  resources: Omit<CanaryAttempt, "id"> & { providerExchange?: ProviderExchangeReceiptV1 };
 }
 export interface CanaryInternalAttemptContextV1 {
   version: "canary-internal-attempt-context-v1";
@@ -150,7 +153,7 @@ export async function executeCanary(item: CanaryCase, pin: CanaryPin, ports: Can
       if (admission.state === "refused") { reason = admission.reason; break; }
       if (abort.signal.aborted || ports.monotonicMs() - started >= limits.wallMs) { reason = "wall-bound"; break; }
       const requestStarted = ports.monotonicMs();
-      const pending: CanaryAttempt = { id: randomUUID(), durationMs: null, firstTextMs: null, generationMs: null,
+      const pending: CanaryAttemptWithProviderExchange = { id: randomUUID(), durationMs: null, firstTextMs: null, generationMs: null,
         inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null, reasoningTokens: null,
         usageRatedUsd: null, billing: pin.billing, servedModel: null, terminal: "error" };
       run.attempts.push(pending);
