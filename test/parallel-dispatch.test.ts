@@ -588,7 +588,7 @@ test("W1-T11626 criterion 2: historical counts stay diagnostic and target-isolat
   assert.deepEqual(atLimit.started, [], "a fresh count at the original WIP limit still holds dispatch");
   assert.equal(atLimit.summary.stopReason, "stopped");
   const sibling = await observeTargetWipDaemon(() => read("AUDIT/BETA", () => ({ owned: 0, foreign: 2 })).counts.owned);
-  assert.deepEqual(sibling.started, ["A"], "another target's healthy observation is not contaminated by alpha's hold");
+  assert.deepEqual(sibling.started, ["A", "B"], "another target's healthy zero fills its two ordinary lanes without alpha's hold");
   assert.deepEqual(read("audit/alpha", () => undefined),
     { counts: { owned: Infinity, foreign: 0 }, source: "unreadable", lastKnownCounts: { owned: 2, foreign: 3 } },
     "the next refusal retains only alpha's latest genuine reading as history");
