@@ -21,9 +21,9 @@
   attempts: 0
   acceptance:
     - claim: "after a verified CodeQL workflow completion whose observation has zero CodeQL-named checks of any identity at the exact head, the producer reobserves within the existing three 60 s waits and can publish success once the trusted check completes clean; an untrusted CodeQL-named check, a failed or running workflow, head or base drift, and an exhausted window all stay error, and exhaustion publishes the distinct reason trusted-codeql-result-absent-after-completion"
-      proof: "unit test: test/security-merge-producer.test.ts"
+      proof: "unit test: W1-T11776: an absent trusted CodeQL result reobserves until it appears"
     - claim: "a completed check_run event re-runs the policy only for a CodeQL check from the trusted github-advanced-security identity at an open PR's exact head, and every other check_run is refused without a read or a status write"
-      proof: "unit test: test/security-merge-producer.test.ts"
+      proof: "unit test: W1-T11776: a trusted CodeQL check_run publishes only for its exact head"
     - claim: "the observation receipt counts CodeQL-named checks of any identity apart from trusted ones, and a complete corpus with none reads 0 while a foreign-app CodeQL check reads 1"
       proof: "unit test: test/code-scanning-merge-adapter.test.ts"
     - claim: "the trusted producer workflow subscribes to completed check runs"
@@ -85,11 +85,13 @@
        and exact-head filter as workflow_run, and publish through the same classifier. Anything else throws
        'unsupported security producer event' before any read. Permissions, the trusted-main checkout,
        persist-credentials:false and timeout-minutes:5 are unchanged, and no permission is added.
-    4. TESTS (extend the existing file). A zero-trusted-check completion that becomes a clean trusted check on wait 2
-       publishes error then success. One that stays absent waits three times and ends with the named reason. An
-       untrusted CodeQL-named check still never waits. Drift during a wait writes no success. A trusted completed
-       check_run publishes success at its head. A check_run from another app, another name, a non-completed status
-       or a malformed sha is refused with zero reads and zero writes. The workflow test asserts the check_run
+    4. TESTS (extend the existing file). `test("W1-T11776: an absent trusted CodeQL result reobserves until it appears", ...)`
+       covers a zero-trusted-check completion that becomes a clean trusted check on wait 2, publishes error then
+       success, and ends with the named reason if the result stays absent for all three waits. An untrusted
+       CodeQL-named check still never waits. Drift during a wait writes no success.
+       `test("W1-T11776: a trusted CodeQL check_run publishes only for its exact head", ...)` covers a trusted
+       completed check_run publishing success at its head. A check_run from another app, another name, a
+       non-completed status or a malformed sha is refused with zero reads and zero writes. The workflow test asserts the check_run
        trigger and that the permissions block is unchanged.
     NOT IN SCOPE: the classifier's safe/blocked rules, W1-T10976's neutral-configuration recovery, merge_group
     handling, required-check settings, and any status write outside the exact head.
