@@ -34,7 +34,11 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { systemClock, type Clock } from "./clock.js";
 
 /**
- * Isolate worker shells with a scratch HOME and empty rc files (W1-T18).
+ * Isolate worker shells with a scratch HOME, blank user rc files, and a generated login profile that
+ * clears host-profile aliases and functions (W1-T18, W1-T11693). Bash reads /etc/profile before
+ * ~/.bash_profile, so blank rc files alone cannot stop functions added by the host profile. See
+ * https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html and
+ * https://www.gnu.org/software/gawk/manual/html_node/Shell-Startup-Files.html.
  *
  * Only {@link WORKER_HOME_RC_FILES} and named {@link WORKER_HOME_SYMLINKS} grants belong here,
  * never a wholesale HOME copy (env.ts's ANTHROPIC_* discipline).
@@ -51,7 +55,6 @@ import { systemClock, type Clock } from "./clock.js";
 /** Zero-byte bash and zsh rc files; never consult the operator's dotfiles. */
 export const WORKER_HOME_RC_FILES: readonly string[] = [
   ".bashrc",
-  ".bash_profile",
   ".bash_login",
   ".profile",
   ".zshrc",
@@ -59,6 +62,24 @@ export const WORKER_HOME_RC_FILES: readonly string[] = [
   ".zprofile",
   ".zlogin",
 ];
+
+/** Bash reads this user login profile after /etc/profile and before the worker command. */
+export const WORKER_HOME_LOGIN_PROFILE = ".bash_profile";
+
+/** Clear every alias and function inherited from the host's /etc/profile before worker code runs.
+ * Keep this Bash 3.2-compatible: no arrays, namerefs, or non-POSIX shell extensions beyond Bash's
+ * process substitution and function enumeration. The helper removes itself as part of the sweep. */
+export const WORKER_HOME_LOGIN_PROFILE_SCRIPT = [
+  "unalias -a",
+  "_rmd_clear_host_profile_functions() {",
+  "  local function_name",
+  "  while IFS= read -r function_name; do",
+  '    unset -f -- "$function_name"',
+  "  done < <(compgen -A function)",
+  "}",
+  "_rmd_clear_host_profile_functions",
+  "",
+].join("\n");
 
 /** One path a worker needs mirrored back from the real HOME into the redirected scratch HOME,
  *  symlinked rather than copied so it is always current. */
@@ -415,6 +436,8 @@ export const REVOKED_WORKER_HOME_GRANTS: readonly string[] = [join(".config", "g
 export interface WorkerHomePlan {
   workerHome: string;
   rcFiles: string[];
+  /** Populated by workerHomePlan; optional only for hand-built test and recovery fixtures. */
+  loginProfile?: string;
   symlinks: Array<{ from: string; to: string; reason: string }>;
   /** What ACTUALLY happened to each grant: a FAILED grant is not an OPTIONAL one. Populated by
    *  {@link materializeWorkerHome}; absent on the pure {@link workerHomePlan}. */
@@ -481,6 +504,7 @@ export function workerHomePlan(opts: {
   return {
     workerHome: opts.workerHome,
     rcFiles: WORKER_HOME_RC_FILES.map((f) => join(opts.workerHome, f)),
+    loginProfile: join(opts.workerHome, WORKER_HOME_LOGIN_PROFILE),
     symlinks: WORKER_HOME_SYMLINKS.map((s) => {
       let to: string;
       if (opts.workerKeychainPath && s.relPath === LOGIN_KEYCHAIN_REL) {
@@ -628,8 +652,11 @@ export function materializeSpawnWorkerHome(opts: Parameters<typeof materializeWo
   return materializeWorkerHome(opts);
 }
 
-/** Materialize a {@link WorkerHomePlan} on disk: guarantee every rc file exists and is EMPTY, and
- *  symlink each real-HOME path back in.
+/** Materialize a {@link WorkerHomePlan} on disk: keep user rc files blank, write the generated login
+ *  profile that clears host-profile aliases and functions, and symlink each real-HOME path back in.
+ *  Bash reads /etc/profile before ~/.bash_profile; see
+ *  https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html and
+ *  https://www.gnu.org/software/gawk/manual/html_node/Shell-Startup-Files.html.
  *  INVARIANT: a stale rc file is truncated, never preserved — this directory is Remudero-owned, so a
  *  prior run's leftovers are debris and not operator content.
  *  INVARIANT: best-effort per symlink. An absent source is skipped rather than thrown, because
@@ -655,6 +682,8 @@ export function materializeWorkerHome(opts: {
     // Truncate every time; prior emptiness is not trusted.
     writeFileSync(rc, "");
   }
+  // Reassert the cleanup even when a reused worker home carries a stale login profile.
+  writeFileSync(plan.loginProfile ?? join(plan.workerHome, WORKER_HOME_LOGIN_PROFILE), WORKER_HOME_LOGIN_PROFILE_SCRIPT);
 
   const outcomes: WorkerHomeGrantOutcome[] = [];
   for (const link of plan.symlinks) {
