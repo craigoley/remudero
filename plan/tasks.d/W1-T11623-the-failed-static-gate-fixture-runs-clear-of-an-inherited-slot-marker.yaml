@@ -1,0 +1,78 @@
+- id: W1-T11623
+  title: "THE W1-T9951 FAILED-STATIC-GATE FIXTURE FAILS ONLY UNDER A REAL AUTHOR SLOT — test/author-preflight.test.ts 'author static admission takes no suite slot for a failed static gate (W1-T9951)' asserts RMD_TEST_SLOT_PARENT is undefined inside its fixture's static child but never clears the marker it inherits from the enclosing author preflight, so a slotted run reads exitCode 1 where 7 is expected. Isolate that case's slot context the way its sibling case already does; test-only"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: low  # one test file; no production, gate or dispatch code
+  priority: 1  # every author preflight on any diff that selects this file fails, so agents lose their local verdict
+  origin: architect
+  plan_refs: [W1-T9951, W1-T10300]
+  files:
+    - test/author-preflight.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED (initiative evidence, 2026-11-07): two complete author preflights on docs-only SHA
+    c940a31b9a4121294f2d729a9ce1598a8b019d48 each ran 56/56 selected files and 866 tests and failed only
+    "author static admission takes no suite slot for a failed static gate (W1-T9951)" at line 276
+    (`receipt.steps[1].exitCode` expected 7, actual 1). The case passes alone (1/1) and with the preceding
+    W1-T9951 case (2/2). Setting RMD_TEST_SLOT_PARENT explicitly reproduces the child assertion failure.
+    READ test/author-preflight.test.ts on this tree:
+    - line 210, the preceding W1-T9951 case, saves and deletes RMD_TEST_SLOT_PARENT and RMD_TEST_SLOT_DIR and
+      restores them in `t.after` ("This fixture starts its OWN author: the enclosing real author's admission is
+      not the fixture's cheap census or its private test-slot directory").
+    - line 265, the failing case, does NONE of that. Its fixture src/run-task.ts asserts
+      `process.env.RMD_TEST_SLOT_PARENT === undefined` (line 269) and then sets `process.exitCode=7`. Under a real
+      author slot the enclosing preflight hands its children the marker (src/lib/test-slot.ts
+      `TEST_SLOT_PARENT_ENV = "RMD_TEST_SLOT_PARENT"`, line 47), the fixture's static child inherits it, the
+      assertion throws, and the child exits 1 before reaching exitCode 7. Run bare there is no marker, so it passes.
+    - lines 14-21 set RMD_TEST_SLOT_DIR to a file-scoped fixture directory; the line-210 case's restore puts that
+      value back, so the line-265 case sees the fixture dir but the REAL parent marker — the "inherited or
+      restored slot context" the initiative names.
+    Settled by lookup: is this already filed or already decided? -> no. W1-T9951 (status queued) owns the
+      static/suite admission behaviour, not this fixture's env isolation; W1-T10300 (merged) is a retro-container
+      forensics record; W1-T11583 and W1-T9953 touch slot sizing and full-fallback selection. No shard lists
+      test/author-preflight.test.ts in `files:`; LEARNINGS.md and DECISIONS.md do not mention RMD_TEST_SLOT_PARENT
+      (plan/tasks.d grep; LEARNINGS.md; DECISIONS.md).
+    Settled by lookup: is the fault in production code or the fixture? -> the fixture. The sibling case at line 210
+      already proves the isolation pattern works with the same production path; only the line-265 case omits it
+      (test/author-preflight.test.ts:210-220 vs 265-281).
+    Settled by lookup: where does the marker come from? -> TEST_SLOT_PARENT_ENV in src/lib/test-slot.ts:47, set
+      for children of an admitted slot holder; scripts/preflight-author.mjs does not name it literally.
+  design: |
+    TEST-ONLY. Touch test/author-preflight.test.ts and nothing else.
+    1. RED FIRST (the positive control). Before the fix, add a test titled exactly
+       "the failed static gate case runs clear of an inherited slot marker (W1-T11623)". It sets
+       process.env.RMD_TEST_SLOT_PARENT to a syntactically valid but unowned claim (restored in `t.after`), then
+       runs the same failed-static-gate fixture as the line-265 case through the shared isolation helper from
+       step 2, and asserts `receipt.steps[1].exitCode === 7`. Run it against the unfixed line-265 shape (no
+       isolation) and record in the PR body that it fails with exitCode 1 — that is the proof the original failure
+       is observable. Keep this test permanently as the regression guard.
+    2. ISOLATE. Give the line-265 case the same save/delete/restore of RMD_TEST_SLOT_PARENT and RMD_TEST_SLOT_DIR
+       that the line-210 case uses (`t.after` restore). Prefer extracting one small helper used by both W1-T9951
+       cases over a second copy; the helper restores exactly the prior values, including undefined.
+    3. PRESERVE. Do not change any existing assertion, timeout, fixture body, or test title; do not change the
+       file-scoped RMD_TEST_SLOT_DIR setup at lines 14-21 or any unrelated fixture. The isolated fixture's own
+       author must still take and release only its own slot (the line-210 case's ownership assertions stay as
+       they are). The ENCLOSING real author's slot is never released, borrowed or deleted by the test.
+    4. NOT IN SCOPE: scripts/preflight-author.mjs, src/lib/test-slot.ts, any dispatch/PAUSE code, any gate,
+       weakening or skipping a test, or the research report scope.
+    5. EVIDENCE IN THE PR BODY: run the exact affected suite (test/author-preflight.test.ts) inside a real
+       author-preflight slot (i.e. through the author preflight itself, so RMD_TEST_SLOT_PARENT is genuinely
+       inherited) and paste the complete `# tests N # pass N # fail 0` summary; plus the step-1 red run.
+  acceptance:
+    - claim: "the whole author-preflight suite passes, including the failed-static-gate case and the new inherited-marker regression case"
+      proof: "unit test: test/author-preflight.test.ts"
+    - claim: "a regression case proves the failed static gate still reads exitCode 7 when an inherited slot marker is present"
+      proof: "grep: the failed static gate case runs clear of an inherited slot marker (W1-T11623) in test/author-preflight.test.ts"
+  falsifier: |
+    On this tree, setting RMD_TEST_SLOT_PARENT to any value and running test/author-preflight.test.ts fails
+    "author static admission takes no suite slot for a failed static gate (W1-T9951)" with exitCode 1 at line 276,
+    and the grep for the W1-T11623 test title reads 0. If, after the fix, a slotted author preflight still fails
+    that case, the cause is not the inherited marker and this task's diagnosis is wrong.
+  note: "risk:low — one test file, env save/restore already proven by the sibling case. verify:auto — the suite
+    and the grep are both mechanical. The real-slot run is PR-body evidence because a unit-test proof run by the
+    reviewer may or may not itself sit inside an author slot."

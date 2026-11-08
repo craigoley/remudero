@@ -12,7 +12,10 @@
   files:
     - scripts/acceptance-author-gate.mjs
     - test/acceptance-author-gate.test.ts
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=699268ade57c8ce6
+  # backlog gardener: placed=2026-11-08T01:30:50.207Z
   attempts: 0
   rationale: |
     PR #17090 implemented W1-T11431. Its merged plan declared 22 paths; the merged PR changed 25,

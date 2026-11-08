@@ -11,6 +11,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import { configPath, type Config } from "#src/lib/config.js";
+import { disposeSharedPauseRefresh, realSharedPauseGitDeps, type SharedPauseGitDeps } from "#src/lib/fleet-control.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
@@ -1692,4 +1693,150 @@ test("W1-T11162 criterion 1: a plan filing's review is never a run child, in mod
     await shadow.spawnReview({ pr: { prNumber: 16276, headSha: "b".repeat(40) }, reviewKey: "code-key", reviewAttemptId: undefined });
     assert.deepEqual(probed, ["review-PR16276"], "a code review still probes in shadow");
   } finally { f.cleanup(); }
+});
+
+async function freshFixChildFixture() {
+  const f = fixture();
+  const argv = [...process.argv];
+  process.argv.push("--repo-root", REPO_ROOT);
+  let runDetachedWork: typeof import("#src/run-task.js").runDetachedWork;
+  try { ({ runDetachedWork } = await import("#src/run-task.js")); }
+  finally { process.argv.splice(0, process.argv.length, ...argv); }
+  const planPath = join(f.root, "tasks.yaml");
+  writeFileSync(planPath, JSON.stringify([{ id: FIX_TASK, title: "cold fix child", repo: "remudero", type: "implement",
+    verify: "auto", depends_on: [], status: "queued", files: ["src/lib/sweep.ts"], design: "cold child rechecks" }]));
+  const envelope = buildFixDispatchEnvelope(fixPr(), { unmetCriteria: UNMET }, {
+    fixKey: `${FIX_TASK}@${FIX_HEAD}`, decidedAtMs: 1,
+    planContextDigest: riskJudgePlanContextDigestFor(loadPlan(planPath))({ taskId: FIX_TASK }),
+  });
+  const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: envelope.pr.prNumber, headSha: FIX_HEAD, inputs: { envelope } };
+  const events: string[] = [];
+  const ports = {
+    config: { root: f.root, claudeBin: "/bin/true" } as Config, planPath, log: f.log,
+    github: fakeGitHub({ findMergedByTrailer: () => null, listMergedHeadBranches: () => [], listOpenHeadBranches: () => [] }),
+    planSnapshot: () => { events.push("task"); return { plan: loadPlan(planPath), staleDispatch: false }; },
+    readPr: async () => { events.push("pr"); return { state: "OPEN", mergedAt: null, headRefOid: FIX_HEAD }; },
+    claimFixAdmission: () => { events.push("claim"); return { admitted: true as const, release: () => events.push("release") }; },
+    dispatcher: () => { events.push("dispatcher"); return { dispatchFix: async () => { events.push("dispatch"); } }; },
+  };
+  const run = (sharedPauseGit: SharedPauseGitDeps, over: Partial<typeof ports> = {}, child = work) =>
+    runDetachedWork(child, { taskId: FIX_TASK, runId: "cold-fix-child" }, { ...ports, ...over, sharedPauseGit });
+  return { ...f, work, ports, events, run };
+}
+
+test("W1-T11559 criterion 1: a fresh fix child awaits absence before live rechecks and normal dispatch", async () => {
+  const f = await freshFixChildFixture();
+  let complete!: (value: { status: number; stdout: string }) => void;
+  const response = new Promise<{ status: number; stdout: string }>(resolve => { complete = resolve; });
+  const calls: string[][] = [];
+  const git: SharedPauseGitDeps = {
+    run: () => { assert.fail("startup must use the bounded asynchronous reader"); },
+    runAsync: async args => { calls.push(args); return response; },
+    mintAnchor: () => { assert.fail("a read never writes a PAUSE anchor"); },
+  };
+  let settled = false;
+  const pending = f.run(git).then(value => ({ value }), error => ({ error })).finally(() => { settled = true; });
+  try {
+    await flush();
+    assert.deepEqual(calls, [["ls-remote", "origin", "refs/rmd-pause/hold"]]);
+    assert.equal(settled, false, "the child must wait rather than misreport an in-flight read as unreachable");
+    assert.deepEqual(f.events, [], "no live read, admission claim or dispatch before the first verdict");
+    complete({ status: 0, stdout: "" });
+    const outcome = await pending;
+    assert.equal("error" in outcome, false, JSON.stringify(outcome));
+    assert.deepEqual(f.events, ["pr", "task", "claim", "dispatcher", "dispatch", "release"]);
+    assert.equal(calls.length, 1, "prepare and the hold recheck use the same reader identity");
+    await f.run(git);
+    assert.equal(calls.length, 2, "the completed child releases its reader; another child prepares its own first result");
+    assert.deepEqual(f.events.slice(6), ["pr", "task", "claim", "dispatcher", "dispatch", "release"]);
+  } finally {
+    complete({ status: 0, stdout: "" });
+    await pending;
+    disposeSharedPauseRefresh(git);
+    f.cleanup();
+  }
+});
+
+test("W1-T11559 criterion 2: held and unreadable refs refuse; local STOP and late holds retain authority", async () => {
+  for (const mode of ["held", "unreachable", "rejected", "stop", "pause", "late-stop", "late-pause", "invalid", "mismatch"] as const) {
+    const f = await freshFixChildFixture();
+    const calls: string[][] = [];
+    let complete!: (value: { status: number; stdout: string }) => void;
+    const response = new Promise<{ status: number; stdout: string }>(resolve => { complete = resolve; });
+    const git: SharedPauseGitDeps = {
+      run: () => { assert.fail("no synchronous network read"); },
+      runAsync: async args => {
+        calls.push(args);
+        if (mode === "rejected") throw new Error("unreachable fixture origin");
+        if (mode === "unreachable") return { status: 128, stdout: "" };
+        if (mode === "held") return args[0] === "ls-remote"
+          ? { status: 0, stdout: `${"a".repeat(40)}\trefs/rmd-pause/hold\n` }
+          : { status: 1, stdout: "" };
+        return response;
+      },
+      mintAnchor: () => { assert.fail("refusal cannot mutate the shared hold"); },
+    };
+    const localHold = (name: "STOP" | "PAUSE") => {
+      mkdirSync(f.stateRoot, { recursive: true });
+      writeFileSync(join(f.stateRoot, name), JSON.stringify({ requestedAt: new Date().toISOString(), reason: "operator fixture" }));
+    };
+    if (mode === "stop") localHold("STOP");
+    if (mode === "pause") localHold("PAUSE");
+    const child = mode === "invalid" ? { ...f.work, inputs: { envelope: {} } }
+      : mode === "mismatch" ? { ...f.work, prNumber: 7 } : f.work;
+    const pending = f.run(git, {}, child).then(() => undefined, error => error as Error);
+    try {
+      if (mode === "late-stop" || mode === "late-pause") {
+        await flush();
+        assert.equal(calls.length, 1, "the initial read is in flight");
+        assert.deepEqual(f.events, []);
+        localHold(mode === "late-stop" ? "STOP" : "PAUSE");
+        complete({ status: 0, stdout: "" });
+      }
+      const error = await pending;
+      assert.ok(error instanceof Error, `${mode} must refuse`);
+      const pattern = mode === "held" ? /PAUSE held.*UNATTRIBUTABLE/
+        : mode === "stop" || mode === "late-stop" ? /STOP: STOP requested: operator fixture/
+        : mode === "pause" || mode === "late-pause" ? /PAUSE: PAUSE requested: operator fixture/
+        : mode === "invalid" ? /no readable decision envelope/
+        : mode === "mismatch" ? /saved PR target does not match/
+        : /cannot reach origin/;
+      assert.match(error.message, pattern, mode);
+      assert.deepEqual(f.events, [], `${mode} cannot read a PR, claim admission or dispatch`);
+      assert.equal(calls.length, mode === "stop" || mode === "pause" || mode === "invalid" || mode === "mismatch" ? 0 : mode === "held" ? 2 : 1, mode);
+      if (mode !== "invalid" && mode !== "mismatch") assert.equal(f.rows.at(-1)?.step, "sweep.fix.child_refused");
+    } finally {
+      complete({ status: 0, stdout: "" });
+      await pending;
+      disposeSharedPauseRefresh(git);
+      f.cleanup();
+    }
+  }
+});
+
+test("W1-T11559: a cold fix child uses the real bounded Git reader against a private origin", async () => {
+  const f = await freshFixChildFixture();
+  const { gitRepo } = await import("#test/helpers/git-repo.js");
+  const origin = gitRepo({ bare: true });
+  const checkout = gitRepo();
+  checkout.addRemote("origin", origin.dir);
+  checkout.git("push", "origin", "HEAD:refs/heads/main");
+  const beforeRefs = origin.git("for-each-ref", "--format=%(refname)");
+  const git = realSharedPauseGitDeps(checkout.dir);
+  try {
+    const control = await git.runAsync!(["ls-remote", "origin", "HEAD"]);
+    assert.equal(control.status, 0);
+    assert.match(control.stdout, /^[a-f0-9]{40}\tHEAD/m, "positive control: the real read sees this origin's known HEAD");
+    await f.run(git);
+    assert.deepEqual(f.events, ["pr", "task", "claim", "dispatcher", "dispatch", "release"]);
+    assert.equal(origin.git("for-each-ref", "--format=%(refname)"), beforeRefs, "the startup read creates no remote hold or other ref");
+    checkout.git("remote", "set-url", "origin", join(f.root, "missing-origin.git"));
+    await assert.rejects(f.run(git), /cannot reach origin/, "a genuinely failed Git read still refuses");
+    assert.equal(f.events.filter(event => event === "dispatch").length, 1);
+  } finally {
+    disposeSharedPauseRefresh(git);
+    checkout.cleanup();
+    origin.cleanup();
+    f.cleanup();
+  }
 });

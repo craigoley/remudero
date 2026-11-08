@@ -110,3 +110,53 @@ test("the three-form ledger reader retains finding receipts but not finding pros
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+test("W1-T9649: a ledger lineage_key survives projectFlowRow and is classified persisted or not-re-raised", () => {
+  const later = "b".repeat(40);
+  const laterAt = "2026-09-30T01:00:00Z";
+  const reviewed = (sha: string, ts: string, n: number) => projectFlowRow({ step: "review.posted", ts, task_id: "W1-T1", pr_url: pr,
+    head_sha: sha, finding_capture_state: "captured", finding_invalid_count: 0, finding_dropped_count: 0,
+    finding_verified_count: 2, finding_unverified_count: 0, evaluator_provenance: { servedModel: "model-a" } }, `posted-${n}`);
+  const raised = (id: string, sha: string, ts: string, lineage: string | undefined, n: number) => projectFlowRow({
+    step: "review.finding", ts, task_id: "W1-T1", pr_url: pr, head_sha: sha, finding_id: id, category: "wiring",
+    capture_state: "verified", served_model: "model-a", ...(lineage ? { lineage_key: lineage } : {}) }, `finding-${n}`);
+  const rows = [
+    reviewed(head, at, 10), reviewed(later, laterAt, 11),
+    // Same lineage key on a moved line: a different finding id at the later head.
+    raised("moved-r1", head, at, "lineage-moved", 12), raised("moved-r2", later, laterAt, "lineage-moved", 13),
+    // A key no later head carries.
+    raised("gone-r1", head, at, "lineage-gone", 14),
+    // A legacy receipt with no key.
+    raised("legacy-r1", head, at, undefined, 15),
+  ];
+  assert.equal(rows[2]!.lineageKey, "lineage-moved");
+  assert.equal(rows[5]!.lineageKey, null);
+  const outcomes = new Map(deriveReviewFindingOutcomes(rows, []).findings.map((item) => [item.findingId, item.outcome]));
+  assert.equal(outcomes.get("moved-r1"), "persisted");
+  assert.equal(outcomes.get("gone-r1"), "not-re-raised");
+  assert.equal(outcomes.get("legacy-r1"), "legacy-superseded");
+  const cell = deriveReviewFindingOutcomes(rows, []).cells.find((candidate) => candidate.category === "wiring")!;
+  assert.equal(cell.persisted, 1);
+  assert.equal(cell.notReRaised, 1);
+  assert.equal(cell.legacySuperseded, 1);
+});
+test("W1-T11627: legacy superseded receipts keep unknown counts stable", () => {
+  const oldHead = "c".repeat(40);
+  const latestHead = "d".repeat(40);
+  const oldReview = row("review.posted", { head_sha: oldHead, ts: "2026-10-01T00:00:00Z",
+    finding_capture_state: "captured", finding_invalid_count: 0, finding_dropped_count: 0,
+    finding_verified_count: 1, finding_unverified_count: 0, evaluator_provenance: { servedModel: "model-a" } }, 20);
+  const legacy = row("review.finding", { head_sha: oldHead, ts: "2026-10-01T00:00:01Z",
+    finding_id: "legacy-old", category: "wiring", capture_state: "verified" }, 21);
+  const laterReview = row("review.posted", { head_sha: latestHead, ts: "2026-10-01T01:00:00Z",
+    finding_capture_state: "captured", finding_invalid_count: 0, finding_dropped_count: 0,
+    finding_verified_count: 1, finding_unverified_count: 0, evaluator_provenance: { servedModel: "model-a" } }, 22);
+  const latest = row("review.finding", { head_sha: latestHead, ts: "2026-10-01T01:00:01Z",
+    finding_id: "latest", category: "wiring", capture_state: "verified", lineage_key: "latest-key" }, 23);
+  const result = deriveReviewFindingOutcomes([oldReview, legacy, laterReview, latest], []);
+  const cell = result.cells.find((candidate) => candidate.category === "wiring")!;
+  assert.equal(result.findings.find((item) => item.findingId === "legacy-old")?.outcome, "legacy-superseded");
+  assert.equal(result.findings.find((item) => item.findingId === "latest")?.outcome, "unknown");
+  assert.equal(cell.legacySuperseded, 1);
+  assert.equal(cell.unknown, 1);
+});

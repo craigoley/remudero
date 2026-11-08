@@ -1,0 +1,69 @@
+- id: W1-T11629
+  title: A refused synchronous GitHub read ends only its daemon lane instead of the daemon
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "Operator-requested remaining fatal-refusal caller audit after PR #17144, 2026-11-07"
+  plan_refs: [W1-T11458, W1-T3791, W1-T4466, W1-T3165]
+  depends_on: [W1-T11458]
+  files: [src/lib/daemon.ts, test/daemon.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    PR #17144 correctly makes an actual positive synchronous GitHub wait throw
+    GhPaceWouldBlockError on a marked daemon loop. At source
+    4f741eba69e7ec47be75812cc7633394c27ca2a3, src/lib/daemon.ts:1837 recognizes
+    GhJsonUnreadableResponseError and positive transient text, but not this new type.
+    Its generic lane-rejection branch therefore returns terminal error and the actual
+    daemonExitCodeForSummary mapper returns 1.
+    A pinned-Node/native fixture used the real clone transport, a private pending gap,
+    the real runDaemon pool and a private executable. No child started on refusal,
+    the summary was error and its mapper returned 1. Opening only the same private
+    gap executed one fake child and completed max_reached/exit 0. Three diagnostic
+    cases have literal TAP summaries with no failure, skip or cancellation. They
+    reproduce a source defect, not a feature PASS or another live crash. Evidence:
+    Remudero-notes/sol/S5-fatal-audit.probe.4f741eba.tap.log and
+    S5-fatal-audit-main-reconciliation.json. Fresh main b6a1855751aed8fdfb8f52d755574e6b94216079
+    has the identical daemon/transport blobs. #17233 repairs the managed-target count,
+    not this lane boundary. Main plus fifteen open head trees have no distinct task
+    for this typed-pacer lane refusal. W1-T3791 handles unreadable successful JSON
+    bodies and W1-T4466 two actual read endpoints; this refusal is neither.
+    W1-T11628 separately migrates the two cold clone leaves.
+  design: |
+    Recognize actual GhPaceWouldBlockError by qualified type/provenance at the daemon
+    lane rejection boundary and reuse the existing bounded lane/transport deferral.
+    One refused read must not terminate the daemon, abandon children or siblings,
+    fabricate success, erase actual attempts, arm anything, or relax STOP/PAUSE,
+    ownership, dispatch and provider governors. Preserve the reason and let normal
+    admission re-evaluate later. Add no retry loop or fixed bound. Do not broaden
+    the global failure classifier or match vague refusal prose. Preserve unrelated
+    programmer errors, authentication refusals, mutation failures and existing
+    negative-control fatal behavior.
+    Extend the existing daemon fixture with a real transport-generated refusal,
+    healthy sibling/maintenance continuation, genuine later recovery and negative
+    controls. Preserve every existing input, assertion, expected value, timeout and
+    skip. New code uses repository import aliases and shared repo-root helpers.
+  acceptance:
+    - claim: "A real typed pacer refusal in one daemon lane is recorded as a deferral while the daemon, siblings and existing children remain alive with no false success"
+      proof: "grep: W1-T11629 criterion 1 in test/daemon.test.ts"
+    - claim: "A later genuinely admitted read recovers under normal guards, while authentication errors, mutation failures, forged prose and unrelated exceptions retain their existing fatal behavior"
+      proof: "grep: W1-T11629 criterion 2 in test/daemon.test.ts"
+  note: |
+    Operator requested audit and filing. Implementation waits for normal plan merge
+    and fresh ownership, duplicate, merged-credit, history and selector checks. This
+    is one specific typed dispatch refusal boundary, not class-wide error swallowing.
+    Commit before mapped coverage/diff measurement. Verify physical related/census
+    files, actual removal falsifiers, default preflight, actual author receipt and
+    ordinary hosted gates. Record Decisions and luna/REPORTS.md. Source-only: no
+    Azure/Core write, service/provider action, registry change, restart, recycle,
+    release or activation. The original budget remains a ceiling.
+  falsifier: |
+    Remove the typed refusal branch: criterion 1 reproduces terminal error/exit 1 with
+    the real private transport and no child. Match arbitrary prose or swallow all
+    errors: criterion 2's genuine-error/forgery controls fail. Return success for a
+    refusal or permanently park recovery: the corresponding criterion fails. Restore
+    implementation and require all old and new assertions green.
