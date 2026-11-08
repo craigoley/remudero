@@ -2448,6 +2448,11 @@ export function workerContinuation(previous: Pick<WorkerResult, "provider" | "te
   ].join("\n\n") };
 }
 
+function hasFreshHandoff(args: Pick<SpawnWorkerArgs, "continuation">): boolean {
+  const contextPrompt = args.continuation?.contextPrompt;
+  return contextPrompt !== undefined && contextPrompt.trim() !== "";
+}
+
 /** Resolve only after routing. A session id has a provider namespace; cash never resumes,
  * and Codex's unchanged adapter predicate decides which sessions retain its sandbox. */
 export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
@@ -2458,8 +2463,7 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
     canonicalWorkerProviderId(args.continuation.provider) as WorkerProviderId;
   const to = canonicalWorkerProviderId(provider) as WorkerProviderId;
   // W1-T11596: the selected-registry Codex adapter refuses every resume, so a handoff is the only way on.
-  const privateFreshOnly = to === "codex" && !!args.continuation?.contextPrompt?.trim()
-    && runtimeInstanceRegistryPrivateFile() !== undefined;
+  const privateFreshOnly = to === "codex" && hasFreshHandoff(args) && runtimeInstanceRegistryPrivateFile() !== undefined;
   if (args.resumeSessionId && from === to && !privateFreshOnly && (to === "claude" || to === "codex" && codexReadOnly(args))) {
     return { prompt: args.prompt, resumeSessionId: args.resumeSessionId,
       receipt: { mode: "resumed", reason: "same-provider", from, to } };
@@ -2511,7 +2515,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const privateSettings = selectedPolicy === undefined ? undefined
     : privateRegistryWorkerSettings(selectedPolicy.text, privateRegistry!, selectedPolicy.canonicalPath);
   // Refuse before routing any resume some provider would still receive; a handoff every route takes goes on.
-  if (selectedPolicy && args.resumeSessionId && (!args.continuation?.contextPrompt?.trim()
+  if (selectedPolicy && args.resumeSessionId && (!hasFreshHandoff(args)
     || WORKER_PROVIDER_IDS.some(provider => workerExecutionForProvider(args, provider).resumeSessionId !== undefined))) {
     throw new InstanceRegistryRuntimeError("worker_resume_not_qualified");
   }
