@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { appendFileSync, rmSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { boardOracleSliceOf, createBoardProjection, type Row } from "#src/lib/board-projection.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const STEPS = Array.from({ length: 24 }, (_, i) => `panel.cache.step.${i}`);
 // Even an empty plan asks this empty bucket while projecting; count it in audit telemetry separately.
@@ -23,12 +23,11 @@ interface Audit {
 }
 
 function rig(t: { after(fn: () => void): void }, slices: number, planOnly = true) {
-  const dir = makeTempDir("step-audit-rotation");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "step-audit-rotation").dir;
   const ms = Date.now();
   const clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
   const raw = openProjectorReadModel(dir, "core", clock);
-  t.after(() => raw.close());
+  onReadModelClose(t, () => raw.close());
   const got = acquireLease(raw, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   const rows = STEPS.flatMap((step) => [0, 1, 2].map((n) => ({ ts: clock.iso(), step, n })));

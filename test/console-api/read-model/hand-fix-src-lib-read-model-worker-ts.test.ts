@@ -1,16 +1,14 @@
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
 import { test } from "node:test";
 import { acquireLease, withWriteTransaction } from "#src/lib/read-model-db.js";
 import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { createReadModelWorker } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 test("W1-T10237: hand_fix:src/lib/read-model-worker.ts is prevented, not retried", (t) => {
-  const dir = makeTempDir("worker-reload-qualification");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "worker-reload-qualification").dir;
   const db = openProjectorReadModel(dir, "core");
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   db.exec("CREATE TABLE view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL, generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view,key)) WITHOUT ROWID");
   const lease = acquireLease(db);
   assert.ok(lease.ok);
@@ -25,7 +23,7 @@ test("W1-T10237: hand_fix:src/lib/read-model-worker.ts is prevented, not retried
     .run("agent", "", 1, 1, "same-data", JSON.stringify(body)));
   qualify({ etag: "same-data", qualificationGeneration: "old-contract" });
   const standby = createReadModelWorker({ stateDir: dir, instances: [{ name: "core", ledgerDir: dir }] });
-  t.after(() => void standby.stop());
+  onReadModelClose(t, () => void standby.stop());
   assert.equal(standby.body("agent")?.qualificationGeneration, "old-contract");
   assert.equal(standby.reload(), 0, "an identical committed entry needs no replacement");
 

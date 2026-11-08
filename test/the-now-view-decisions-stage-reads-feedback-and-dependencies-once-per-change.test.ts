@@ -11,14 +11,13 @@ import { createNowView, NOW_REFRESH_MS, nowDependencyVerificationGates, type Now
 import type { BoardPrRest } from "#src/lib/open-prs-rest.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const PROPOSAL = "https://github.com/o/r/pull/9";
 
 function fixture(t: TestContext, options: Partial<NowViewOptions> = {}) {
-  const root = makeTempDir("now-decisions-inputs");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "now-decisions-inputs").dir;
   let now = Date.now();
   const clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
   const ledgerDir = join(root, "core", "state");
@@ -26,7 +25,7 @@ function fixture(t: TestContext, options: Partial<NowViewOptions> = {}) {
   const ledger = join(ledgerDir, "ledger.ndjson");
   writeFileSync(ledger, "");
   const db = openProjectorReadModel(join(root, "models"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const lease = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(lease.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: lease.lease, clock });
@@ -200,7 +199,7 @@ test("an unreadable feedback identity reports the failed read instead of reusing
     return Reflect.apply(readDir, fs, args);
   });
   syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  onReadModelClose(t, () => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const unavailable = f.build();
   assert.deepEqual(unavailable.decisions, []);
   assert.match(unavailable.decisionsReasons!.grill!, /feedback access denied/);

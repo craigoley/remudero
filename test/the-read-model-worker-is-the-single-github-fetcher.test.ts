@@ -3,7 +3,7 @@
 // worker that is not live (no lease, silent, stopped) hands the fetch straight back to serve.
 
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -15,7 +15,7 @@ import { READ_MODEL_LEASE_TTL_MS } from "#src/lib/read-model-db.js";
 import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 import { GITHUB_FETCHER_STEP, createReadModelWorker, readModelSwitchesPath, readReadModelSwitches } from "#src/lib/read-model-worker.js";
 import type { ShadowRequest } from "#src/lib/view-shadow.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 const HOUR_MS = 3_600_000;
@@ -62,8 +62,7 @@ setInterval(() => {}, 1000);
 }
 
 function rig(t: TestCtx) {
-  const stateDir = makeTempDir("gh-fetcher");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "gh-fetcher").dir;
   const time = manualTime(T0);
   const calls = { serve: 0, worker: 0 };
   const walks: number[] = [];
@@ -87,7 +86,7 @@ function rig(t: TestCtx) {
     every: (run) => ((tick = run), () => {}),
     github: { serve, ...timers, refresh: () => (calls.worker++, walk()) },
   });
-  t.after(() => {
+  onReadModelClose(t, () => {
     handle.stop();
     serve.stop();
   });
@@ -211,8 +210,7 @@ test("a reader noted by serve speeds the worker github keep-warm", async (t) => 
 });
 
 test("the github switch reads serve or worker and refuses any other mode", (t) => {
-  const dir = makeTempDir("gh-switch");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "gh-switch").dir;
   const path = readModelSwitchesPath(dir);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify({ github: "worker" }));
@@ -223,8 +221,7 @@ test("the github switch reads serve or worker and refuses any other mode", (t) =
 });
 
 test("serve hands its gateway keep-warm to a live worker switched to fetch github", async (t) => {
-  const root = makeTempDir("gh-fetcher-serve");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "gh-fetcher-serve").dir;
   const stateDir = join(root, "state");
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ github: "worker" }));
