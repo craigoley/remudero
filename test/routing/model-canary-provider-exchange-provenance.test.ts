@@ -37,7 +37,7 @@ test("W1-T11597: only a provider-originated assistant message with a real non-sy
   // The reducer receives only scripted in-memory messages; no provider client or transport is constructed here.
 });
 
-test("W1-T11597 criterion 2: excluded signals issue no provider exchange evidence in test/routing/model-canary-provider-exchange-provenance.test.ts", async () => {
+test("W1-T11597 criterion 2: excluded signals including cloud_credential_error and unknown issue no provider exchange evidence in test/routing/model-canary-provider-exchange-provenance.test.ts", async () => {
   const excluded: unknown[][] = [
     [assistant("<synthetic>", { error: "cloud_credential_error" }), terminal],
     [assistant("<synthetic>", { error: "unknown" }), terminal],
@@ -90,7 +90,7 @@ test("W1-T11597 criterion 5: offline provider exchange controls use zero transpo
 });
 
 
-test("W1-T11597: coding adapter forwards the provider receipt and runner preserves it through the JSON owner boundary", async () => {
+test("W1-T11597 criterion 8: provider exchange receipt round-trips through JSON at the owner boundary as a typed attempt subtype in test/routing/model-canary-provider-exchange-provenance.test.ts", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-W1-T11597-provider-exchange-"));
   const item = commonCanarySuite().find(candidate => candidate.family === "coding")!;
   const sha = (value: string) => createHash("sha256").update(value).digest("hex");
