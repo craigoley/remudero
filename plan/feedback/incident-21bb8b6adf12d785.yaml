@@ -1,0 +1,29 @@
+id: incident-21bb8b6adf12d785
+ts: 2026-11-08T06:58:30.719Z
+raw: >-
+  Incident 21bb8b6adf12: anomaly cost.anomaly:triage
+
+  First seen: 2026-11-08T06:52:17.858Z
+
+  Last seen: 2026-11-08T06:52:18.279Z
+
+  Count: 26, burn: 26.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - task TRIAGE-fb-1792859749114-a3eb8e (run TRIAGE-fb-1792859749114-a3eb8e-1794118628681) cost $0.03 against class "triage"'s median $0 (×8, n=5)
+    - task TRIAGE-fb-1792859749114-a3eb8e (run TRIAGE-fb-1792859749114-a3eb8e-1794119569457) cost $0.03 against class "triage"'s median $0 (×8, n=5)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#21bb8b6adf12d7851c2b7d6e311228048d6e0bbf9b0edefe7d17150dee061319
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
