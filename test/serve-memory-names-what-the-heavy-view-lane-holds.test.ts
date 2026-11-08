@@ -31,6 +31,7 @@ import type { GitHub } from "#src/lib/status.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { answerThreadHeaps, readWorkerHeaps, THREAD_HEAPS_ANSWER, THREAD_HEAPS_REQUEST, type WorkerThread } from "#src/lib/worker-heaps.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type Part = { entries: number; bytes: number; used_bytes?: number; holds?: Record<string, { entries: number; bytes: number }>; holds_age_ms?: number };
 type Reading = memory.HolderReading & { used_bytes?: number; parts?: Record<string, Part> };
@@ -65,12 +66,11 @@ function rows(from: number, n: number): Array<Record<string, unknown>> {
 
 /** One instance's projected store over a real ledger, as the views lane's now view reads it. */
 function store(t: TestContext, instance: string) {
-  const dir = makeTempDir("w1-t9403-store");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "w1-t9403-store").dir;
   let ms = T0 + 600_000;
   const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
   const db = openProjectorReadModel(join(dir, "home"), instance, clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   const ledgerDir = join(dir, instance, "state");
@@ -175,7 +175,7 @@ test("W1-T9403: serve.memory names the used heap of each thread and each held bo
     data: { stateDir: dir, instances: [], tickMs: 20, holder: "w1-t9403", fixtureHolds } as Parameters<typeof threadViews>[0]["data"],
     relay: () => {}, log: () => {}, workerUrl: pathToFileURL(fixture), every: () => () => {},
   });
-  t.after(async () => {
+  onReadModelClose(t, async () => {
     views.close();
     await Promise.all(book.live().map(({ thread }) => (thread as Worker).terminate()));
     book.stop();
@@ -231,8 +231,7 @@ test("W1-T9403: a thread's used heap is read beside its committed heap, and an u
 });
 
 test("W1-T9403: a views lane posts each held board projection after each now build", (t) => {
-  const stateDir = makeTempDir("w1-t9403-ticker");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "w1-t9403-ticker").dir;
   const ledgerDir = join(stateDir, "core");
   mkdirSync(ledgerDir);
   writeFileSync(join(ledgerDir, "ledger.ndjson"), "");
@@ -256,7 +255,7 @@ test("W1-T9403: a views lane posts each held board projection after each now bui
   const lane = createReadModelTicker({ stateDir, instances, views: [holding, plain], viewsOnly: true, lane: "fast", oracle: "off", holder: "w1-t9403", clock,
     passBudgetMs: 1_000_000, post: (m) => void posts.push(m) });
   lane.start();
-  t.after(() => { lane.release(); projector.release(); });
+  onReadModelClose(t, () => { lane.release(); projector.release(); });
   const tick = (): void => {
     projector.tick();
     const state = states.findLast((m) => m.type === "state");

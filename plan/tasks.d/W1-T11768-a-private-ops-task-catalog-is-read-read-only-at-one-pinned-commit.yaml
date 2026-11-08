@@ -1,0 +1,85 @@
+- id: W1-T11768
+  title: "A private ops task catalog is read read-only at one pinned commit, or refused with a stable outcome code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T11600, W1-T9763, W1-T9493, W1-T1062]
+  priority: 1
+  status: queued
+  attempts: 0
+  files: [src/lib/ops-catalog-source.ts, src/lib/daemon.ts, test/github/ops-catalog-source-snapshot-identity.test.ts, test/github/ops-catalog-source-fail-closed-outcomes.test.ts, test/github/ops-catalog-source-redaction-read-only.test.ts]
+  rationale: |
+    Stage 2 of the operator-approved remudero-ops migration: the source adapter that W1-T11600 deferred.
+    W1-T11600 merged a daemon-only shadow composer (`compareSecondaryCatalogShadow`, src/lib/daemon.ts) that
+    takes an already-parsed `DaemonDeps.secondaryPlanForShadow`. No production code sets it today; only
+    test/daemon.test.ts does. This task adds the pinned reader plus a dormant daemon call site in src/lib/daemon.ts:
+    only an explicitly injected ops target triggers one snapshot read, and an `ok` Plan feeds the existing
+    shadow composer. No CLI flag or default target is introduced here; W1-T11769 adds the per-tick source
+    refresh and composite revision key, and W1-T11770 supplies the target behind an explicit opt-in flag.
+
+    Settled by lookup: is this already filed? -> no. No shard or monolith task reads a second task catalog; W1-T11600 composes an injected snapshot only and says the source adapter is a later stage (plan/tasks.d/w1-t11600-shadow-catalog-selector-is-shadow-only.yaml).
+    Settled by lookup: does the ops repo hold a task catalog today? -> no. It holds deployment-instance data, not a task catalog (W1-T11600 rationale; W1-T10573 "private data is merged in remudero-ops PR1"). An absent plan is therefore the expected first outcome and must be a named code, never an error-shaped crash and never an empty catalog.
+    Settled by lookup: may daemon-instances.yaml serve as the catalog? -> no. It is the instance registry (src/lib/instance-registry.ts, src/lib/deployer.ts DAEMON_INSTANCE_REGISTRY_BASENAME) and its selection contract is separate (docs/instance-registry-selection-contract.md). The catalog path is fixed at plan/tasks.yaml plus plan/tasks.d/; it is not operator-configurable.
+    Settled by lookup: which identity reads the ops repo? -> the daemon host's existing gh identity, the one that already clones non-self targets (`ghExec(["repo","clone",...])` in src/cli/commands/daemon.ts) and serves `ghJsonAsync` (src/lib/github-transport.ts). No new token, env var, scope, App installation or mount. Whether that identity can read remudero-ops on the host was NOT verified from this plan run (no shell), so missing or insufficient auth is a falsified outcome code rather than an assumption.
+    Settled by lookup: is there a precedent for pinned private-repo reads? -> yes. `readSelectedRegistry` in src/lib/onboarding-golive.ts (W1-T9493) binds numeric repository id, default-branch commit, exact-path trees, regular blob mode and blob SHA, verifies the decoded bytes against the git blob SHA-1, and refuses truncated trees. Reuse that shape; do not add a second permissive reader.
+    Settled by lookup: is there a precedent for one parsed plan per revision? -> yes. `createPlanRevisionStore`/`PlanRevision` in src/lib/tick-read-worker.ts (W1-T9763) freezes one Plan per revision key and reuses unchanged blobs. The ops snapshot uses its own store instance, never the primary plan's.
+    Settled by lookup: which source files trigger an image build? -> the acr-build.yml path list includes config-schema.ts, config.ts and instance-registry*.ts. This task touches none of them, so it adds no config key or env var.
+  design: |
+    1. New module src/lib/ops-catalog-source.ts exports `readOpsCatalogSnapshotAsync(target, api)`, the
+       stateful `createOpsCatalogShadowSource(...)`, and the `OpsCatalogShadowInput` type
+       (`{ outcome, plan?, opsCommit?, identityDigest? }`). `target` is `{ repository: "<owner>/<name>" }` only.
+       `api` is an injected GET-only seam; its default composes `ghJsonAsync` with the existing pacer. No POST,
+       PUT, PATCH or DELETE is reachable, and no `git clone`, worktree, mirror or file write happens. Private
+       bytes stay in memory. In `src/lib/daemon.ts`, an optional internal ops target is absent by default; when
+       explicitly injected, the daemon calls the reader once and passes only an `ok` Plan to the existing
+       shadow composer. This is a real source call site but not a selector: no private candidate enters
+       runnableCandidates, claims, review, config, or workers. W1-T11769 changes this initial snapshot to an
+       async per-tick source and composite revision key; W1-T11770 later supplies the target behind an explicit
+       CLI opt-in. W1-T11769 imports the exported input type; it does not edit this reader module.
+    2. Identity binding. Read the repository metadata (numeric id, full_name, default branch), then the branch
+       ref, the commit, the root tree and the nonrecursive `plan` and `plan/tasks.d` trees. Bind every snapshot
+       to `{ repositoryId, ref, commit, tasksYamlBlob, shardTreeSha, shardBlobs }`. Fetch each blob by SHA and
+       verify git's blob SHA-1 over the decoded bytes. After the blob reads, re-read the ref. If it moved, the
+       result is `ref_moved` and nothing is adopted. Bound everything: tree entries, shard count, bytes per blob
+       (256 KiB, as W1-T9493) and total bytes. A truncated tree or an exceeded bound is `malformed`.
+    3. Parse through the canonical strict plan merge (`mergePlanBlobs`-family, the same parser the primary
+       plan uses) into a frozen Plan held by a dedicated `createPlanRevisionStore()` instance keyed by the ops
+       commit plus blob identities. Do not quarantine: an intra-catalog duplicate ID is `duplicate_task_id` and
+       any parse or schema failure is `malformed`. The whole snapshot is refused atomically and no partial
+       catalog is returned.
+    4. Outcome codes (stable, closed set): `ok`, `auth_missing` (no usable identity), `unreadable`
+       (403/404/transport failure; do not try to distinguish private from absent repos), `source_absent` (repo
+       readable but no plan/tasks.yaml at the commit), `stale` (refresh failed after an earlier success; the
+       earlier snapshot is NOT returned as current), `ref_moved`, `malformed`, `duplicate_task_id`. Every
+       non-`ok` result carries no Plan.
+    5. Redaction. Results, thrown errors and anything loggable carry only outcome code, counts and opaque
+       digests (sha256 of the identity tuple). Never include task titles, bodies, file paths, repository
+       slug, raw API bodies, tokens or diffs. Catch transport errors and replace them with the code. Their
+       messages can contain URLs and bodies.
+    6. Tests use a recording fake `api` with no network, split by acceptance proof: test/github/ops-catalog-source-
+       snapshot-identity.test.ts covers repository/ref/commit/blob bindings, re-read and SHA-1 verification;
+       test/github/ops-catalog-source-fail-closed-outcomes.test.ts covers every named outcome, duplicate refusal,
+       bounds and atomic no-Plan results; test/github/ops-catalog-source-redaction-read-only.test.ts covers the
+       no-write surface and serialized-result/error redaction. Delete the ref re-read, SHA-1 check and duplicate
+       refusal one at a time, show the matching assertion fails, then restore them.
+  acceptance:
+    - claim: "A readable ops catalog yields one frozen Plan bound to its repository id, ref, commit and blob SHAs, verified against the decoded bytes"
+      proof: "unit test: test/github/ops-catalog-source-snapshot-identity.test.ts"
+    - claim: "Missing auth, an unreadable repo, an absent plan, a stale refresh, a moved ref, a malformed plan and duplicate IDs each fail closed with their own outcome code and no Plan"
+      proof: "unit test: test/github/ops-catalog-source-fail-closed-outcomes.test.ts"
+    - claim: "No result, error or log payload carries a private title, path, body, repository slug, credential or diff, and no write verb is reachable"
+      proof: "unit test: test/github/ops-catalog-source-redaction-read-only.test.ts"
+    - claim: "The pinned reader is a named export of the new module"
+      proof: "grep: readOpsCatalogSnapshotAsync( in src/lib/daemon.ts"
+  falsifier: |
+    Replace the post-read ref check with a no-op and the moved-ref fixture adopts a snapshot whose ref no longer
+    names its commit. Skip blob SHA-1 verification and a fixture serving altered bytes under the original SHA
+    is accepted. Switch to the quarantining merge and an intra-catalog duplicate yields a partial catalog
+    instead of `duplicate_task_id`. Return the previous snapshot on refresh failure and the `stale` case reads
+    `ok`. Forward a transport error's message and the redaction sweep finds the fixture's private path.

@@ -4,6 +4,7 @@ import type { GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure, type CensusChildResult } from "./run-task-verb.js";
 import { buildBaseProofDirAsync, hostWorktreeGitAtTopLevel, type BaseProofDir } from "../../lib/check-proof.js";
 import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
@@ -20,7 +21,7 @@ import { systemClock } from "../../lib/clock.js";
 import { reapWorkerScratch } from "../../lib/worker-scratch.js";
 import { resolveInstallRoot } from "../../lib/install-root.js";
 import { escalate, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
-import { combinedStatusRestArgs, mapRestPr, rollupForAsync, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
+import { combinedStatusRestArgs, compareRestArgs, mapRestPr, rollupForAsync, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
 import { ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger } from "../../lib/ledger.js";
 import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
@@ -40,7 +41,7 @@ import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib
 import { isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
-import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemove } from "../../lib/worker.js";
+import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemoveAsync } from "../../lib/worker.js";
 import { hostWorktreeGit } from "../../lib/worktree-git.js";
 import { releaseReviewWorktree } from "../../lib/review-worktree-reclaim.js";
 import { step } from "../../lib/git-push.js";
@@ -68,7 +69,8 @@ export interface ReviewCommandHost {
     options?: { signal?: AbortSignal; log?: (step: string, extra?: Record<string, unknown>) => void },
   ): Promise<PlanLintOutcome>;
   readonly liveWorkerRunIds: Set<string>;
-  materializeReviewWorktree(config: Config, repoDir: string, prNumber: number, headSha: string, deps?: ReviewWorktreeDeps): MaterializeReviewWorktreeResult;
+  materializeReviewWorktree(config: Config, repoDir: string, prNumber: number, headSha: string, deps?: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>): MaterializeReviewWorktreeResult | Promise<MaterializeReviewWorktreeResult>;
+  readonly reviewWorktreeAsync?: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>;
   readHeadShaRest(prUrl: string, fetch?: GhApiFetcher): string;
   readMainPlanTreeSha(repoDir: string): string;
   realDeps(): ComposedRealGraph;
@@ -78,6 +80,8 @@ export interface ReviewCommandHost {
   reviewSubjectGit(repoDir: string, argv: string[]): string;
 }
 
+export const PLAN_LINT_RETRY_FLAG = "--plan-lint-retry";
+
 function repeatedFlagValues(rest: string[], flag: string): string[] {
   const values: string[] = [];
   for (let i = 0; i < rest.length - 1; i++) {
@@ -86,10 +90,11 @@ function repeatedFlagValues(rest: string[], flag: string): string[] {
   return values;
 }
 
-export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders"> {
+export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders" | "planLintRetryHead"> {
   const { JUDGE_AT_OWN_START_FLAG, acceptedReviewAttemptId } = host;
   const mode = flagValue(rest, "--execution-mode");
   const reviewAttemptId = acceptedReviewAttemptId(flagValue(rest, "--review-attempt-id"));
+  const planLintRetryHead = flagValue(rest, PLAN_LINT_RETRY_FLAG);
   const excludeProviders = [...new Set([
     ...repeatedFlagValues(rest, "--exclude-provider"),
     ...(flagValue(rest, "--exclude-providers") ?? "").split(","),
@@ -99,6 +104,7 @@ export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]):
     ...(rest.includes("--plan-only-filing") ? { planOnlyFiling: true } : rest.includes("--not-plan-only-filing") ? { planOnlyFiling: false } : {}),
     ...(mode === "semantic" || mode === "deterministic" ? { executionMode: mode } : {}),
     ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
+    ...(planLintRetryHead !== undefined && /^[a-f0-9]{40}$/i.test(planLintRetryHead) ? { planLintRetryHead } : {}),
     ...(excludeProviders.length ? { excludeProviders } : {}),
   };
 }
@@ -482,6 +488,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   onPhase?: (phase: string) => void;
   /** W1-T10269: judge, then stop before any arm, status or comment — the reviewer-health shadow. */
   shadow?: boolean;
+  planLintRetryHead?: string;
   reviewReplaySetupInput?: ReviewReplayInput;
   /** W1-T9970 test seam: the reviewer's image; `null` is off-container. Default {@link readRuntimeImageSha}. */
   runtimeImageSha?: string | null;
@@ -780,8 +787,57 @@ export async function runReview(host: ReviewCommandHost, args: {
   });
   let decisionDigest = reviewerImageDecisionDigest(requiredSemanticDecisionDigest(preparedDecision.decisionDigest,
     args.requireSemanticReview === true), { headSha, runtimeImageSha, requeues });
+  let planLintRetry: Parameters<typeof claimReviewDecision>[0]["planLintRetry"];
+  let retryReuseFacts: ReviewReuseFacts | undefined;
+  if (args.planLintRetryHead !== undefined && !args.shadow) {
+    try {
+      if (args.planLintRetryHead !== headSha) throw new Error("requested head differs from the PR head");
+      const readView = async () => {
+        const view = await ghJsonAsync(["api", `repos/${owner}/${repo}/pulls/${reviewPrNumber(prUrl)}`]) as { head?: { sha?: string }; base?: { ref?: string } };
+        const liveHead = view.head?.sha;
+        const baseRef = view.base?.ref;
+        if (typeof liveHead !== "string" || liveHead.length === 0 || typeof baseRef !== "string" || baseRef.length === 0) {
+          throw new Error("retry head or base branch is unreadable");
+        }
+        return { headSha: liveHead, baseRef };
+      };
+      const readRetryReuseFacts = async (baseRef: string, head: string) => {
+        const compare = await ghJsonAsync(compareRestArgs(owner, repo, baseRef, head));
+        return tryFetchReviewReuseFacts(owner, repo, baseRef, head, () => compare);
+      };
+      const captured = await readView();
+      if (captured.headSha !== headSha) throw new Error("PR head moved while capturing the retry");
+      retryReuseFacts = await (args.readReviewReuseFacts ?? (() => readRetryReuseFacts(captured.baseRef, headSha)))();
+      if (!retryReuseFacts) throw new Error("retry merge base is unreadable");
+      planLintRetry = {
+        attemptId: `review-PR${reviewPrNumber(prUrl)}-${randomUUID()}`,
+        runId: args.runId, headSha: args.planLintRetryHead, mergeBaseSha: retryReuseFacts.mergeBaseSha,
+        owner, repo, readRequiredContexts: readRequiredStatusCheckContextsAsync,
+        observe: async () => {
+          const live = await readView();
+          const facts = await readRetryReuseFacts(live.baseRef, live.headSha);
+          if (!facts) throw new Error("retry merge base is unreadable");
+          const required = await readRequiredStatusCheckContextsAsync(owner, repo, encodeURIComponent(live.baseRef));
+          const rollup = await rollupForAsync(owner, repo, live.headSha, ghJsonAsync);
+          const complete = required.kind === "contexts" && required.contexts.filter(context => context !== REVIEW_CONTEXT)
+            .every(context => rollup.some(check => check.name === context || check.context === context));
+          return { ...live, mergeBaseSha: facts.mergeBaseSha, checks: {
+            headSha: live.headSha, fresh: live.headSha === headSha, complete,
+            passing: checksStateFromRollup(rollup, required.kind === "contexts" ? required.contexts : undefined) === "green",
+          } };
+        },
+      };
+    } catch (error) {
+      // PR coordinates keep this diagnostic out of gatherRuns' PR-credit fallback.
+      log("review.plan_lint_retry_not_requested", {
+        pr_number: reviewPrNumber(prUrl), owner, repo, head_sha: headSha,
+        requested_head_sha: args.planLintRetryHead, reason: String(error),
+      });
+    }
+  }
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
+    ...(planLintRetry === undefined ? {} : { planLintRetry }),
   });
   phases.decision = systemClock.now();
   if (decisionClaim.kind === "replay") {
@@ -1015,7 +1071,9 @@ export async function runReview(host: ReviewCommandHost, args: {
         reviewerFindingText = workerTranscript(reviewer);
         semanticClauses = parseReviewerVerdictClauses(reviewerFindingText, criteria.length);
         reviewerUnable = parseReviewerUnable(reviewerFindingText, criteria.length);
-        reviewerSubtype = reviewer.subtype;
+        // A success envelope can precede a terminal SDK error; preserve that failure evidence.
+        const terminalError = reviewer.apiError ? "api_error" : reviewer.isError ? "worker_error" : undefined;
+        reviewerSubtype = reviewer.subtype === "success" && terminalError ? terminalError : reviewer.subtype;
         reviewerExit = reviewer.exit;
         const reviewerFields = workerLedgerFields(reviewer);
         evaluatorProvenance = {
@@ -1211,7 +1269,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   // BEST-EFFORT, AND ITS FAILURE DIRECTION IS THE SAFE ONE: an unreadable compare leaves both
   // fields absent, the ledger line omits them, and every reader treats absence as "re-review in
   // full". The reuse path can only ever be *skipped* by a failure here, never wrongly taken.
-  const reuseFacts = (args.readReviewReuseFacts ?? (() => tryFetchReviewReuseFacts(owner, repo, "main", headSha, ghJson)))();
+  const reuseFacts = retryReuseFacts ?? (args.readReviewReuseFacts ?? (() => tryFetchReviewReuseFacts(owner, repo, "main", headSha, ghJson)))();
   if (reuseFacts) verdict = { ...verdict, ...reuseFacts };
 
   let decisionDisposition: "computed" | "conflict" = "computed";
@@ -1304,6 +1362,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     reviewInputDigest: inputDigest,
     reviewDecisionDigest: decisionDigest,
     reopenedDegradedTerminal: decisionClaim.reopenedDegradedTerminal,
+    ...(decisionClaim.reopenedDegradedTerminal && planLintRetry !== undefined
+      ? { planLintRetry: { ...planLintRetry, outcome: planLint } } : {}),
     reviewEngineRevision: REVIEW_ENGINE_REVISION,
     evaluatorProvenance,
     reviewerCodeFreshness,
@@ -1717,6 +1777,7 @@ export function reviewLedgerReasonFields(args: {
 export interface ReviewCommandDeps {
   disarm?: (prUrl: string) => DisarmOutcome | void;
   onPhase?: (phase: string) => void;
+  planLintRetryHead?: string;
   /** Bounded admission identity, separate from the existing worker/run and ownership conventions. */
   reviewAttemptId?: string;
   contributorAdmission?: AdmissionObserver;
@@ -1739,7 +1800,7 @@ export interface ReviewCommandDeps {
    *  still runs its own, and a second fetch of an already-fetched ref is a no-op, so this adds an
    *  ordering guarantee rather than a second network cost. Injectable so a test can drive the
    *  unfetched-sha case without a network. */
-  fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => void;
+  fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => unknown;
   /** Operator CLI remains deterministic; only internal unattended callers opt in. */
   executionMode?: "deterministic" | "semantic";
   /** Providers to avoid on a re-admitted review after a reviewer-unavailable result. */
@@ -1910,14 +1971,14 @@ export async function withMaterializedWorktree<T>(
   worktreePath: string | undefined,
   repoDir: string,
   body: () => Promise<T>,
-  remove: (repoDir: string, worktreePath: string) => void = worktreeRemove,
+  remove: (repoDir: string, worktreePath: string) => void | Promise<void> = worktreeRemoveAsync,
 ): Promise<T> {
   try {
     return await body();
   } finally {
     if (worktreePath) {
       try {
-        remove(repoDir, worktreePath);
+        await remove(repoDir, worktreePath);
       } catch (e) {
         // Best-effort teardown: a removal failure must never mask `body`'s own
         // result or throw — the ledger/console already carry the review's
@@ -1958,7 +2019,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     postStatus: postReviewStatusGuarded,
     reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
     postReviewPending,
-    fetchHead: realDeps().reviewWorktree.fetch,
+    fetchHead: host.reviewWorktreeAsync?.fetch ?? realDeps().reviewWorktree.fetch,
     executionMode: "deterministic" as const,
     ...deps,
   };
@@ -2119,7 +2180,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // outage through its own `fetch-failure` class, which is the degradation path this command
   // already has. Failing here instead would invent a second one for the same condition.
   try {
-    fetchHead(subjectRepoDir, view.number, view.headRefOid);
+    await fetchHead(subjectRepoDir, view.number, view.headRefOid);
   } catch (e) {
     void e;
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
@@ -2314,7 +2375,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // never silently, and (W1-T233) the console line below now NAMES why,
   // instead of a bare "unavailable" with the real reason thrown away.
   const materializeStartedMs = systemClock.now();
-  const materialized = materialize(config, subjectRepoDir, view.number, view.headRefOid);
+  const materialized = await materialize(config, subjectRepoDir, view.number, view.headRefOid);
   if (materialized.worktreePath === undefined) {
     console.log(
       `(worktree materialization failed [${materialized.failure.errorClass}]: ` +
@@ -2347,6 +2408,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       withMaterialized(worktreePath, subjectRepoDir, () => whileWorkerRunLive(host, runId, () =>
         runReviewDep({
           onPhase: deps.onPhase,
+          ...(deps.planLintRetryHead === undefined ? {} : { planLintRetryHead: deps.planLintRetryHead }),
           reviewReplaySetupInput: replaySetupInput,
           owner,
           repo,

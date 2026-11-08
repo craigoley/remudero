@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import fs, { mkdirSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync, type PathOrFileDescriptor } from "node:fs";
+import fs, { mkdirSync, readdirSync, statSync, utimesSync, writeFileSync, type PathOrFileDescriptor } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -13,7 +13,7 @@ import { REPO_ROW_PROJECTION } from "#src/lib/repo-ledger-index.js";
 import { computeRepoTelemetrySync } from "#src/lib/repo-dashboard-route.js";
 import { readRepoRows } from "#src/lib/repositories-view.js";
 import { planFilesIdentity, swapThreadPlanParser, threadPlan, threadStrictPlan } from "#src/lib/thread-plan.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-02T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -24,8 +24,7 @@ function entry(id: string, title: string): string {
 
 /** A plan of a monolith and one shard, stamped at T0 so an edit's move is the test's to make. */
 function planFiles(t: TestCtx, shard = entry("W1-T2", "the shard's task")): { path: string; shardPath: string } {
-  const root = makeTempDir("thread-plan");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "thread-plan").dir;
   const path = join(root, "plan", "tasks.yaml");
   const shardPath = join(root, "plan", "tasks.d", "W1-T2.yaml");
   mkdirSync(dirname(shardPath), { recursive: true });
@@ -38,7 +37,7 @@ function planFiles(t: TestCtx, shard = entry("W1-T2", "the shard's task")): { pa
 function countingParser(t: TestCtx): { parses: () => number } {
   let parses = 0;
   const prior = swapThreadPlanParser((p) => (parses++, loadPlanQuarantiningDuplicates(p)));
-  t.after(() => swapThreadPlanParser(prior));
+  onReadModelClose(t, () => swapThreadPlanParser(prior));
   return { parses: () => parses };
 }
 
@@ -53,7 +52,7 @@ function countingReads(t: TestCtx, path: string): { reads: () => number } {
     return (real as (...args: unknown[]) => unknown)(file, ...rest);
   }) as typeof fs.readFileSync;
   syncBuiltinESMExports();
-  t.after(() => {
+  onReadModelClose(t, () => {
     fs.readFileSync = real;
     syncBuiltinESMExports();
   });

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { classifyShadowDiff, legacyRowIndex, readShadowEvidence } from "#src/lib/view-shadow.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 // Site, 2026-10-14: LIVE-EDITS-daemon-checkout's lastActivityAt read 01:52:47Z on legacy and 04:08:00Z on the view.
 // The 04:08 row is live_edits.escalated, a non-fact step kept only as the run's run_activity row; the 21:18Z full
@@ -17,12 +17,12 @@ const opened = { ts: "2026-10-13T01:52:47.104Z", step: "escalation.issue_opened"
 const pruned = { ts: "2026-10-13T04:08:00.995Z", step: "live_edits.escalated", task_id: TASK, run_id: TASK };
 
 test("W1-T9356: a pruned activity row explains a legacy diff", (t) => {
-  const ledgerDir = makeTempDir("pruned-activity-ledger");
-  const stateDir = makeTempDir("pruned-activity-state");
+  const ledgerDir = readModelFixtureDir(t, "pruned-activity-ledger").dir;
+  const stateDir = readModelFixtureDir(t, "pruned-activity-state").dir;
   const clock = fixedClock(Date.parse("2026-10-14T00:58:00.000Z"));
   writeFileSync(join(ledgerDir, "ledger.ndjson"), [horizon, opened, pruned].map((r) => JSON.stringify(r)).join("\n") + "\n");
   const db = openProjectorReadModel(stateDir, "site", clock);
-  t.after(() => { db.close(); rmSync(ledgerDir, { recursive: true, force: true }); rmSync(stateDir, { recursive: true, force: true }); });
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick();

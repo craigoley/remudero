@@ -1,22 +1,39 @@
 - id: W1-T10976
-  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:security-merge-policy:security-merge-policy-failed-at-this-head-unknown-security-a cost 14.4 PR minute(s) across 4 round(s) on 3 pull request(s)"
+  title: "A missing CodeQL configuration recovers only from complete trusted analyses of the same PR merge commit; unresolved evidence stays UNKNOWN with an owner"
   repo: remudero
   depends_on: []
   type: implement
   verify: human
-  risk: low
+  risk: high  # One security-gate recovery spanning producer, metadata adapter, classifier and unresolved-evidence disposition.
+  band_meaning: span
   priority: 1.26
   status: queued
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:security-merge-policy:security-merge-policy-failed-at-this-head-unknown-security-a"
   files:
+    - scripts/security-merge-producer.mjs
+    - src/lib/code-scanning-merge-adapter.mjs
+    - src/lib/code-scanning-merge-policy.mjs
     - src/lib/sweep.ts
+    - .github/workflows/security-merge-policy.yml
+    - test/security-merge-producer.test.ts
+    - test/code-scanning-merge-adapter.test.ts
+    - test/code-scanning-merge-policy.test.ts
     - test/sweep/check-ci-log-security-merge-policy-security-merge-policy-failed-at-this.test.ts
   acceptance:
-    - claim: "the harness no longer spends a fix round on check:ci-log:security-merge-policy:security-merge-policy-failed-at-this-head-unknown-security-a"
-      proof: "unit test: W1-T10976: CI friction c28886e1588a1dc2 is prevented, not retried"
-  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:security-merge-policy:security-merge-policy-failed-at-this-head-unknown-security-a's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+    - claim: "only trusted successful CodeQL workflow completion admits bounded reobservation; delayed category arrival can recover, while timeout, unrelated events and superseded runs cannot grant permission"
+      proof: "unit test: test/security-merge-producer.test.ts"
+    - claim: "complete paginated analyses and alert instances bind the same open PR head, base, merge SHA, analysis key and configured categories, including immediately before publication; drift, malformed pages, missing analyses and invalid tool.name stay UNKNOWN"
+      proof: "unit test: test/code-scanning-merge-adapter.test.ts"
+    - claim: "only the exact one-configuration-missing warning with complete valid error-free category evidence can reconcile; high/critical alerts remain blocked and every other neutral, warning or failed shape stays UNKNOWN"
+      proof: "unit test: test/code-scanning-merge-policy.test.ts"
+    - claim: "an exhausted or invalid recovery receives a durable owner/task disposition without repeated generic fix rounds, real alerts retain their repair route, and recovered safe heads retain the ordinary merge guards"
+      proof: "unit test: test/sweep/check-ci-log-security-merge-policy-security-merge-policy-failed-at-this.test.ts"
+  note: |
+    Existing rung-1 ci-friction origin is retained for before/after attribution. This clarification is plan-only;
+    verify: human and the recorded high/escalate ruling remain holds. It grants no waiver, server-protection
+    activation or autonomous release. Implementation and its security-policy diff still require human review.
   rationale: |
     MEASURED by the ci-friction gardener: check:ci-log:security-merge-policy:security-merge-policy-failed-at-this-head-unknown-security-a cost 14.4 PR minute(s) (seven-day half-life) across 4 fix round(s) on 3 pull request(s).
 
@@ -40,14 +57,138 @@
           | /github/runner_temp/git-credentials-d7650320-175a-4430-b651-37f9558cefc5.config
           | [comma
 
-    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
-    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
-    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+    PR #17217 EVIDENCE SUPPLIED FOR THIS CLARIFICATION (https://github.com/craigoley/remudero/pull/17217):
+    security-merge-policy was error while the latest trusted CodeQL check was neutral with one configuration
+    missing. A newer CodeQL check succeeded at 03:29:19Z, policy status became success at 03:31:55Z, and the PR
+    merged at 03:58:34Z. This is ordering/correlation, NOT a proven cause: the full event history is unavailable.
+    Do not attribute the earlier three PRs' unknown failures to the same mechanism without per-PR evidence.
+
+    Settled by lookup: is this already filed or already decided? -> amend this existing cause, not a new task;
+    W1-T9926 covers below-threshold summary grammar, W1-T10066 carries known alerts to workers, and the broader
+    W1-T10134/W1-T10248 proposals were retired without granting a security-gate waiver (plan/tasks.d, those task ids).
+    Settled by lookup: what recovery already exists? -> runSecurityMergeProducer reobserves only a trusted pending
+    CodeQL check after successful workflow completion, at most three 60-second waits; a completed neutral missing
+    configuration falls through to UNKNOWN (scripts/security-merge-producer.mjs; src/lib/code-scanning-merge-policy.mjs).
+    Settled by lookup: what exactly is known about the warning? -> the local receipt regression pins the title
+    '1 configuration not found', but its summary is synthetic 'unrecognized comparison state'; that summary cannot
+    authorize reconciliation (test/code-scanning-merge-adapter.test.ts, security decision receipts test).
+    Settled by lookup: which configurations must be present? -> trusted codeql.yml job analyze declares
+    javascript-typescript, actions and python, with categories /language:javascript-typescript, /language:actions,
+    /language:python and analysis key .github/workflows/codeql.yml:analyze; never infer this set from returned rows
+    (.github/workflows/codeql.yml; revalidate against the trusted workflow revision during implementation).
+    Settled by lookup: can upload completion alone prove analysis completion? -> no; upload acceptance and processing
+    are separate, and the CLI explicitly waits for processing. This supports a bounded reobservation hypothesis,
+    not a diagnosis of #17217 (https://docs.github.com/en/rest/code-scanning/code-scanning#upload-an-analysis-as-sarif-data;
+    https://docs.github.com/en/code-security/reference/code-scanning/codeql/codeql-cli-manual/github-upload-results).
+    Settled by lookup: how is analysis identity established without tool_name filtering? -> paginate analyses for
+    the PR merge ref and validate returned tool.name plus commit_sha, analysis_key and category. GitHub deprecates
+    the top-level tool_name response field; the query parameter remains documented, but this remedy must not use it
+    (https://docs.github.com/en/rest/code-scanning/code-scanning#list-code-scanning-analyses-for-a-repository).
+    Settled by lookup: may unresolved failures simply stop producing rounds? -> no; the existing high/escalate
+    ruling requires actionable unresolved evidence, and UNKNOWN is never merge permission (this task's risk_ruling;
+    docs/security-merge-policy.md; doctrine/investigation-discipline/recurrence-is-a-class-signal.md).
+  design: |
+    1. Entry and budget. Extend the existing producer recovery only after a verified repository-local CodeQL
+       workflow_run is completed/success. Validate run identity/attempt, workflow path and trusted execution
+       provenance, and its association with the current open PR head; a workflow name or event payload alone is
+       insufficient. Read metadata only from trusted main code; execute no PR source or uploaded artifacts.
+       Preserve the pending-check recovery and admit the exact missing-configuration shape below. Share at most
+       three 60-second waits with the existing path, not a second retry ladder. Impose a monotonic 240-second total
+       recovery deadline from producer entry, including reads, transport retries and all candidate PRs, reserving
+       the remainder of the existing five-minute job for final publication. Never start work that cannot fit the
+       remaining budget. This is a backstop inherited from existing bounds, not a measured GitHub latency promise.
+
+    2. Freeze the target. Every observation re-reads the same open PR number, head SHA, base SHA and non-null
+       merge_commit_sha, and verifies refs/pull/<n>/merge resolves to that merge SHA with the expected head/base
+       parents. Bind expected analysis key and ALL categories to the trusted workflow configuration, initially
+       the three categories above. Do not shrink the set when a category is absent. Revalidate this tuple during
+       pagination, between observations and immediately before any status write. Head, base, merge, workflow
+       configuration or run-attempt drift invalidates the old recovery; do not retarget it or reset its deadline.
+       A stale observation never posts success to either head. Missing merge-ref identity stays UNKNOWN.
+
+    3. Complete evidence. Through the shared adapter, list code-scanning analyses for refs/pull/<n>/merge with
+       bounded pagination (reuse SECURITY_METADATA_MAX_PAGES); omit tool_name from query arguments and validate
+       each selected row's tool.name === 'CodeQL'. Validate positive unique analysis IDs, exact merge commit_sha,
+       ref, analysis_key, category, typed timestamps/counts, error === '' and warning === ''. Select the latest
+       unambiguous analysis generation for each expected category; an older clean row cannot mask a newer failed
+       row. Foreign-tool/key/ref/commit rows cannot fill a category. Require complete SARIF processing where its
+       status is consulted, and no ignored/truncated-results warning. A successful analysis with findings is not
+       itself a clean security result: results_count neither counts high/critical nor establishes their absence.
+       Prove page termination; a full last page requires a subsequent page, and a page ceiling is incomplete.
+       Reject malformed, duplicate, changing or truncated corpora and API/permission failures rather than using
+       a partial array as an empty result. Add only job-level security-events: read to the trusted producer
+       workflow for the new reads; retain its existing permissions, trusted-main checkout and timeout.
+
+    4. Narrow reconciliation. Always select the newest exact-head check from the existing trusted GitHub Advanced
+       Security app identity. Only completed/neutral with title exactly '1 configuration not found' and a complete,
+       fixture-backed summary of the single configuration-missing warning is eligible. Strictly parse the entire
+       warning and bind its one missing configuration to the expected analysis key/category and PR/base context;
+       title matching, substrings or treating arbitrary neutral checks as safe is forbidden. Capture the verbatim
+       trusted warning as a regression fixture during implementation; the synthetic receipt summary above is a
+       negative control. If that full shape cannot be verified, remain UNKNOWN. Reconcile this warning only when
+       all category analyses for the SAME merge commit satisfy step 3 and complete PR-specific CodeQL alerts and
+       instances establish the existing changed-code/new-alert high/critical policy. Validate returned tool.name
+       on alert evidence too, and exact merge/key/category identity on instances; unreadable severity or inability
+       to establish new-alert semantics is UNKNOWN. Any genuine new high/critical alert remains blocked/failure,
+       retaining alert numbers and its existing repair route. Neither all categories present nor zero API rows
+       alone is a green. Only the shared classifier may grant safe; the adapter, synchronous/async merge guards
+       and producer use the same evidence and rule, never a workflow-only success override. A newer ordinary
+       trusted success still goes through the existing full classifier. Other warnings/failures remain UNKNOWN.
+
+    5. Exhaustion and ownership. While eligible processing/categories are pending, publish UNKNOWN/error for the
+       verified head and reobserve within the one window. Incomplete at the deadline, invalid evidence or an
+       unrecognized warning produces a final explicit UNKNOWN/error with a distinct recovery disposition reason,
+       never indefinite pending or success. If identity drift prevents a current-head write, retain a refused-write
+       receipt and rely on a fresh event's independent observation, never carry old permission forward. Extend
+       producer result/observation receipts with run/attempt, head/base/merge, expected/observed categories,
+       analysis IDs/key, latest check generation, attempt count, elapsed time and terminal reason, without secrets.
+       In sweep.ts consume the exact-head recovery disposition using the existing securityMergePolicy observation
+       and escalation/owner machinery: record the owning PR task (or security-policy owner when absent), evidence
+       link and one durable escalation/disposition per head and reason. Suppress repeated generic ci-log fix
+       dispatch ONLY for this unresolved recovery; do not silently drop the blocker, consume fix strikes, hide a
+       concurrent genuine alert or suppress unrelated reds. Repeated sweeps reuse the disposition; failure to record
+       it stays actionable and visible. A real alert still reaches the existing source-repair/human route.
+       Successful recovery proceeds through ordinary review, SHA-bound admission and merge guards.
+    FALSIFIERS:
+    Add load-bearing regressions to the three existing whole-file suites and the declared test/sweep file:
+    - A verified completion with a neutral exact warning, initially one missing category, then all three valid
+      same-merge analyses and a complete below-threshold alert corpus, changes error to success within the bound.
+      Also cover eventual newer native CodeQL success; prove no success before complete evidence arrives.
+    - A permanently missing category, absent/failed analysis, warning-bearing or unprocessed SARIF, wrong tool.name,
+      foreign key/ref/commit, duplicate generation, malformed page, short/inconsistent corpus and a full final page
+      at the ceiling never produce success. Test pagination beyond page one with matching and foreign-tool controls;
+      assert request argv contains no tool_name filter and does not depend on a legacy top-level response field.
+    - Change head, base or merge SHA independently (including unchanged head with a new merge SHA), close the PR,
+      supersede the workflow attempt, or change configured categories during a wait/read/before publication:
+      no stale success write. Failed/running/foreign/spoofed workflows cannot enter this recovery.
+    - An unknown warning summary, two missing configurations, another neutral title and newer failed evidence
+      stay UNKNOWN despite older clean rows. A genuine new high/critical alert with all categories present posts
+      failure and retains its fix route; low/medium/quality fixtures retain the existing threshold semantics.
+    - Exhaustion stops within the shared wait/deadline budget, posts error and records an owner/task disposition;
+      two more sweep passes dispatch no generic security fix round. Unrelated reds and real-alert repairs remain
+      actionable, and disposition-write failure cannot look handled. Include real CLI-transport coverage via the
+      existing local shim, not live GitHub, as well as injected-read and catch-arm cases.
+    With the implementation removed the delayed-recovery and disposition tests must emit '# fail N'; restored,
+    '# fail 0'. Also delete each identity/completeness/alert guard in turn: its negative control must fail, exposing
+    any false green. Preserve the failing/passing receipts at the tested committed SHA when implementing.
+    POST-MERGE MEASUREMENT:
+    At the IMPLEMENTATION merge SHA/time (not this clarification's merge), retain the original cause key and the
+    gardener's equal before/after windows, each at most four days: report this cause's fix-round numerator and ALL
+    fix rounds denominator, distinct PRs and recurrence. Separately audit every recovery-admitted PR/head/merge/run
+    tuple in that after-window: recovered, still UNKNOWN, blocked, drifted, owner/task disposition and any repeated
+    generic round, with receipts and observation coverage through the window's end. Compare equivalent exposure
+    counts; a lower count or half-life decay alone earns no credit. Require recurrence/share improvement AND
+    false-green=0, where a false green is any recovery success lacking complete stable category/alert evidence or
+    admitting a new high/critical alert. Positive controls must prove the corpus includes a real admitted recovery
+    and a blocked/UNKNOWN case; no admitted recoveries or incomplete receipts is insufficient evidence, not success.
+    Any false green immediately fails qualification and goes to the security owner; do not expand the recognizer.
+    A share that does not fall reopens the cause at rung 2 under existing human/security holds, using the per-PR
+    dispositions to test the hypothesis rather than authorizing repeated blind fix rounds or a broader bypass.
   risk_ruling:
     verdict: "high"
     action: escalate
-    confidence: 0.94
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The cited rounds explicitly report an unknown security-analysis failure and unread alerts; they establish recurrence but do not establish a verified cause or safe remedy.; on the change's description/files alone, no diff was read — The acceptance criterion requires preventing this security-merge-policy fix round, but the filed record does not specify how unresolved security failures remain actionable. Whether the remedy preserves security review policy cannot be verified from the supplied text."
-    judged_at: "2026-10-29T13:45:43.905Z"
-    pin: "ee1ce54bc6d8c915d7218a96381657931bf1ad3eb794fc43db83aa631f7763f7"
+      - "deterministic backstop: it declares .github/workflows/security-merge-policy.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-08T15:02:14.748Z"
+    pin: "c75eee3e41189332690d76de691d51d0499ff038e0eb5a0dfa7b267617fc03eb"

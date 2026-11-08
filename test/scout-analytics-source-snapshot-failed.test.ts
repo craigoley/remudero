@@ -3,7 +3,7 @@
 // budget. The detailed matrix lives in analytics-view.test.ts; this file pins the scout symptom itself — a bounded
 // leg is progress, never a failed or a fresh partial snapshot — against a one-pass positive control.
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -13,7 +13,7 @@ import { ANALYTICS_VIEW_NAME, analyticsSourceBodies } from "#src/lib/analytics-v
 import type { Clock } from "#src/lib/clock.js";
 import type { SourceSnapshotWrite } from "#src/lib/read-model-db.js";
 import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-05T12:00:00.000Z");
 const MINUTE = 60_000;
@@ -21,8 +21,7 @@ const iso = (ms: number): string => new Date(ms).toISOString();
 const row = (verb: string): string => JSON.stringify({ ts: iso(T0 - MINUTE), step: "cli.invoked", verb });
 
 test("W1-T9523: scout symptom — bounded legs never post a failed or partial snapshot and converge on the one-pass fold", async (t) => {
-  const stateDir = makeTempDir("scout-analytics-source-snapshot-failed");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "scout-analytics-source-snapshot-failed").dir;
   writeFileSync(join(stateDir, "ledger.2026-10-05T11-01-00-000Z.ndjson.gz"), gzipSync(row("alpha") + "\n"));
   writeFileSync(join(stateDir, "ledger.2026-10-05T11-02-00-000Z.ndjson"), row("alpha") + "\n" + row("bravo") + "\n");
   writeFileSync(join(stateDir, "ledger.2026-10-05T11-03-00-000Z.ndjson.gz"), gzipSync(row("charlie") + "\n"));
@@ -38,7 +37,7 @@ test("W1-T9523: scout symptom — bounded legs never post a failed or partial sn
     { analytics: { instances: [{ name: "core", stateDir }], intervalMs: MINUTE } },
     { clock, schedule: (run) => ((next = run), () => void (next = undefined)) },
   );
-  t.after(() => handle.stop());
+  onReadModelClose(t, () => handle.stop());
   const snapshots = (): SourceSnapshotWrite[] => posted.flatMap((m) => (m.type === "source_snapshot" ? [m.snapshot] : []));
   const legs = (): number => posted.filter((m) => m.type === "end" && m.work.unit === "analytics" && m.work.instance !== undefined).length;
   const settle = async (want: number): Promise<void> => {

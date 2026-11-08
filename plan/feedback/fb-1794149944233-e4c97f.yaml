@@ -1,0 +1,50 @@
+id: fb-1794149944233-e4c97f
+ts: 2026-11-08T14:59:04.233Z
+raw: "Production broker child-entry loader defect and planner no-verdict
+  fallback. On current origin/main 7cac4f4f4f58d00d9c2a069eae5de6169cb6c9b8,
+  launching src/gh-read-broker-client-main.ts with plain Node and no loader
+  exits 1 with ERR_MODULE_NOT_FOUND for src/lib/gh-read-broker-client.js.
+  ghBrokerClientSpawn in src/lib/gh-read-broker-client.ts forwards loader flags
+  only from process.execArgv, which is empty in the bundled daemon; existing
+  test/github/every-mac-session-reads-github-through-one-broker.test.ts passes
+  only because its parent has tsx. This caused the active Mac fix-lane gardener
+  to emit 12 inventory failures over 11h while the daemon stayed up.
+  Reproduction recorded read-only; no daemon restart. Need a narrow plan task
+  for a bundled/no-loader child entry plus real child-process broker and
+  fallback coverage, without changing policy or gates. Also two `rmd plan
+  --mode=create` attempts from the authorized writable operator checkout
+  produced no recognized verdict and no PR; all reserved IDs were released.
+  Improve durable routing so planner no-verdict outcomes retain evidence, owner,
+  retry/fallback or follow-up route instead of ending with no actor. Keep these
+  as separate task scopes if both warrant work. References: PR #17217 recovery
+  report at
+  /Users/craigoley/.codex/work-artifacts/remudero-pr17217/reports/Remudero PR
+  flow reliability.md; source reproduction and gardener inventory failures
+  confirmed 2026-11-08."
+attachments: []
+origin: cli
+status: accepted
+reply_to: null
+proposal_pr: https://github.com/craigoley/remudero/pull/17397
+summary:
+  headline: Fix broker child-entry loader crash and planner silent no-verdict outcomes
+  what_happened: The Mac fix-lane gardener logged 12 inventory failures over 11
+    hours because the bundled broker child cannot load its module without a
+    loader flag. Two planner create attempts also ended with no verdict or PR,
+    and their reserved IDs were released.
+  decision: Choose one option below to authorize or defer the two separate plan tasks.
+  options:
+    - label: Authorize both as separate narrow tasks
+      consequence: Adds a bundled child-entry fix with real child-process broker and
+        fallback tests, plus durable routing that keeps evidence and an owner
+        when the planner returns no verdict; policy and gates stay unchanged.
+    - label: Authorize the broker loader fix only
+      consequence: Stops the gardener failures; planner no-verdict outcomes keep
+        ending with no actor until a later decision.
+    - label: Defer both pending more evidence
+      consequence: No code changes now; the gardener keeps logging failures while the
+        daemon stays up.
+expansion: null
+submission_key: null
+thread_id: null
+answered_by: null

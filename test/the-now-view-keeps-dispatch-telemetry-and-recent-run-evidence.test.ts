@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
 import { test } from "node:test";
 import { computeBoardSnapshot, computeRecentActivity, createRecentActivityCache } from "#src/lib/board.js";
 import { fixedClock } from "#src/lib/clock.js";
@@ -9,7 +8,7 @@ import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, withWriteTransaction } from "#src/lib/read-model-db.js";
 import { projectRecentEntry, readRecentActivity } from "#src/lib/recent-projection.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const NOW = Date.parse("2026-10-16T12:00:00Z");
 const task: Task = { id: "W1-T1", title: "worker telemetry", repo: "remudero", depends_on: [], type: "implement", risk: "medium", verify: "auto", status: "queued", attempts: 0 };
@@ -81,11 +80,10 @@ test("recent telemetry keeps explicit run evidence and rejects foreign attempts"
   assert.ok(!JSON.stringify(data).includes("secret-"), "raw prompts, arguments and outputs stay out");
   assert.equal(data.recent.entries.length, 3, "a daemon heartbeat does not mint activity");
 
-  const dir = makeTempDir("dispatch-recent-evidence");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "dispatch-recent-evidence").dir;
   const clock = fixedClock(NOW + 1000);
   const db = openProjectorReadModel(dir, "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const lease = acquireLease(db, { clock });
   assert.ok(lease.ok);
   createLedgerProjector({ ledgerDir: dir, db, lease: lease.lease, clock }).tick();
