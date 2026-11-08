@@ -1329,6 +1329,11 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
       "test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts",
     ].includes(p)),
     remedy: "resolve every #src/run-task.js importer to src/run-task.ts through package.json imports (src/lib/affected-suites.ts)" },
+  { testFile: "test/rules/compress-src-lib-compaction-ts.test.ts",
+    trigger: ({ changed }) => changed.some((p) => [
+      "src/lib/compaction.ts", "test/rules/compress-src-lib-compaction-ts.test.ts",
+    ].includes(p)),
+    remedy: "keep compaction.ts executable tokens and emitted JavaScript identical to the PR base" },
   { testFile: "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts", gitFree: true,
     trigger: ({ changed }) => changed.length > 0,
     remedy: "run the approved-skill conformance census over the current tracked-file match domain" },
