@@ -465,7 +465,7 @@ function fakeWorker(text: string): WorkerResult {
 
 // ── (8) THE PLAN LANE — injection only; this lane has never executed ──────────
 
-test("PLAN LANE: a dirty filing is relinted, and the clean redraft proceeds", async () => {
+test("PLAN LANE: changed-task findings relint a locally clean filing before the clean redraft proceeds", async () => {
   let attempts = 0;
   let planLintCalls = 0;
   let filedId = "";
@@ -570,7 +570,7 @@ const seedFeedback = (seed: string): void => {
   );
 };
 
-test("TRIAGE LANE: a dirty filing is relinted with the real violations, and the clean redraft proceeds", async () => {
+test("TRIAGE LANE: changed-task findings relint a locally clean filing with real violations before the clean redraft proceeds", async () => {
   let attempts = 0;
   let triageLintCalls = 0;
   let filedId = "";
