@@ -1,0 +1,27 @@
+- id: W1-T11674
+  title: Repoint W1-T9767's two grep proofs at its not-yet-written test to unit test proofs and move that test into its computed folder
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T9767-a-census-holder-over-threshold-becomes-a-proposal.yaml
+  acceptance:
+    - claim: W1-T9767's first criterion is a unit test proof by its exact title, so it no longer greps a test file that does not exist yet
+      proof: "grep: unit test: W1-T9767: an over-threshold holder becomes one reviewed proposal in plan/tasks.d/W1-T9767-a-census-holder-over-threshold-becomes-a-proposal.yaml"
+    - claim: W1-T9767's second criterion is a unit test proof by its exact title, so it no longer greps a test file that does not exist yet
+      proof: "grep: unit test: W1-T9767: a holder a task already owns is not proposed again in plan/tasks.d/W1-T9767-a-census-holder-over-threshold-becomes-a-proposal.yaml"
+    - claim: W1-T9767 declares its test under test/memory/, the folder placeTest computes for src/lib/memory-census-proposals.ts, not directly under test/
+      proof: "grep: test/memory/a-memory-holder-over-threshold-becomes-a-proposal.test.ts in plan/tasks.d/W1-T9767-a-census-holder-over-threshold-becomes-a-proposal.yaml"
+  origin: proof-debt:W1-T9767
+  rationale: >-
+    From the 2026-11-08 proposal on proof-debt:W1-T9767, ratified via rmd approve:
+  
+    proof-debt: W1-T9767 has 2 criterion(s) whose proof cannot resolve against the checkout (rmd
+    proof-queue-audit): criterion 0 (grep-path-absent) — "an over-threshold holder becomes one
+    proposal for operator review and an under-threshold holder none"; criterion 1
+    (grep-path-absent) — "a holder already named by a queued or merged task is not proposed
+    again".
