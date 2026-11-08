@@ -1,0 +1,71 @@
+- id: W1-T11754
+  title: "A REPLAYED FLEET BRANCH PROVES ITS INTENDED CHANGE AND ANCESTRY SURVIVED BEFORE IT IS FORCE-PUSHED — rebaseDirtyFleetBranchViaGit runs `git rebase origin/main` and then force-pushes the new HEAD with only a lease check, so a replay that silently drops a commit (already-upstream patch, emptied commit) or loses a path's change still publishes, and the PR's head no longer carries the change its task claims"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern (the post-replay invariant); it gates an autonomous force-push of a PR head
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T2999, W1-T3333, W1-T3577, W1-T4914, W1-T6133, W1-T9578]
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-replayed-fleet-branch-proves-its-change-survived-before-push.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  acceptance:
+    - claim: "After a clean rebase and before the push, the new head must contain origin/main as an ancestor, must carry at least one commit above origin/main when the old head's own diff was non-empty, and every path the old head changed that main did not touch since the old merge base must hold the old head's exact blob (or stay deleted); a path main also changed must still differ from main unless main already holds the old head's blob (recorded as absorbed); any violation returns outcome replay-diverged naming the paths, pushes nothing, spends no strike and removes the worktree"
+      proof: "unit test: test/sweep/a-replayed-fleet-branch-proves-its-change-survived-before-push.test.ts"
+    - claim: "the replay invariant runs between the rebase and the force-push through one named check"
+      proof: "grep: proveReplayPreservedChange( in src/lib/sweep.ts"
+  rationale: |
+    ORIGIN: the operator's 2026-11-08 PR-flow request, item (4): a pre-push rebase invariant that proves the
+    intended implementation change and its ancestry survive the replay. The recovery report (reports/Remudero PR
+    flow recovery.md) could not be opened from this worktree (confinement hook), so its incident figures are not
+    restated. The defect below is read from the source.
+    READ in this worktree (src/lib/sweep.ts, rebaseDirtyFleetBranchViaGit):
+    - It fetches main and the branch and checks the branch's lease (observedHead === pr.headSha) and, optionally,
+      main's sha. It adds a detached worktree at the old head and runs `rebase origin/main`. On success it reads
+      HEAD and force-pushes with `--force-with-lease=<ref>:<old head>`, then verifies the remote reads the new head.
+    - Nothing between the rebase and the push compares the replayed change with the old one. git rebase drops a
+      commit whose patch is already upstream and stops or drops one that becomes empty. A clean replay can
+      therefore publish a head whose own diff against main lost a path or is empty. The lease and remote checks
+      only prove the push landed.
+    - This is the only replay-then-force-push site in src/ (grep for `"rebase"` finds only this function). Its
+      callers are the two sweep call sites near the dirty-fleet and stale-base arms. The fix rung's W1-T1095 rebase
+      (src/cli/commands/fix.ts) uses GitHub update-branch, which merges and does not replay, so it is out of scope.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T3333 (a rebase that could not start is
+    not a conflict), W1-T2999 (a stale fleet branch is rebased before escalation), W1-T3577 (stale-red releases
+    must rebase), W1-T4914 (conflict known before GitHub computes it) and W1-T6133 (the git leaf) all route into or
+    harden this function, and none checks the replayed content. W1-T9785 tells workers to merge, never rebase.
+    It is a prompt, not this sweep path (plan/tasks.d/W1-T3333-*, W1-T2999-*, W1-T3577-*, W1-T4914-*, W1-T6133-*,
+    W1-T9785-*).
+    Settled by lookup: does an open PR touch this function? -> No (the 10 open PRs on 2026-11-08; #17367 edits
+    src/lib/sweep.ts for fix-seed settlement only, https://github.com/craigoley/remudero/pull/17367/files).
+  design: |
+    1. proveReplayPreservedChange({ run, worktreePath, oldHead, newHead, mainSha }) next to
+       rebaseDirtyFleetBranchViaGit, using the same run seam (the PR-head tree leaf). Let B = merge-base(oldHead,
+       mainSha) and P = `diff --name-only --no-renames B oldHead`.
+       (a) ANCESTRY: `merge-base --is-ancestor mainSha newHead` must exit 0.
+       (b) NON-EMPTY: when P is non-empty, `rev-list --count mainSha..newHead` must be at least 1 and
+           `diff --name-only mainSha newHead` must be non-empty, unless every path in P is absorbed (see c).
+       (c) PER PATH: for p in P untouched by main since B (not in `diff --name-only B mainSha`), the blob at newHead:p
+           must equal the blob at oldHead:p, both absent counting as equal. For p that main also touched, newHead:p
+           must differ from mainSha:p, unless mainSha:p equals oldHead:p (absorbed).
+       Any git read that fails makes the check fail closed.
+    2. rebaseDirtyFleetBranchViaGit calls it after `rev-parse HEAD` and before assertLiveWriteAllowed / the push. A
+       failure returns a new outcome `{ outcome: "replay-diverged", reason, paths }`: no push, and the finally block
+       still removes the worktree. Both callers treat it like today's error outcome (no strike, no conflict
+       escalation) and ledger the paths.
+    3. No change to the lease, the push or the post-push remote check.
+    4. Tests over real temp repos (git init fixtures, no network): an already-upstream commit dropped by the
+       replay; a commit that became empty; a path silently reverted by an injected rebase stub; an absorbed path
+       (main took the same blob) that passes; a clean replay that passes and pushes; and a failed git read that
+       refuses.
+  falsifier: |
+    At origin/main, a fixture whose only commit main already carries by patch-id rebases cleanly to main's tip,
+    and the function force-pushes a head with no own diff: the dropped-commit case fails. If the absorbed rule
+    refused a legitimately absorbed change, the absorbed-path case fails, and the rule is too strict.

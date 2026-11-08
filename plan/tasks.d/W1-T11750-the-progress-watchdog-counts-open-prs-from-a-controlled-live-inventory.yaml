@@ -1,0 +1,104 @@
+- id: W1-T11750
+  title: "THE PROGRESS WATCHDOG READS A LIVE OPEN-PR INVENTORY WITH A POSITIVE CONTROL, KEPT APART FROM THE LAST FULL PASS'S COUNT — progressWatchdogCommand takes its open-PR count only from ledger sweep.pass rows (openPrCountReadingFromRows), so a wedged or never-run full pass leaves the count as old as the newest full pass, and a 0 there reads IDLE with no live read proving the board is empty"
+  repo: remudero
+  depends_on: [W1-T10913, W1-T11319, W1-T11774]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern (where the watchdog's open-PR truth comes from); it changes when IDLE may be said
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T9702, W1-T5687, W1-T6361, W1-T9669, W1-T10913, W1-T11319, W1-T11324, W1-T11327]
+  files:
+    - src/lib/progress-watchdog.ts
+    - src/run-task.ts
+    - docs/cli-reference.md
+    - test/daemon/the-progress-watchdog-counts-open-prs-from-a-controlled-live-inventory.test.ts
+    - test/a-stalled-sweep-is-named-by-its-progress-not-its-pulse.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  acceptance:
+    - claim: "The watchdog verdict carries a live open-PR inventory (paginated open-PR read plus a same-invocation positive control) separately from the last full pass's ledger count; IDLE is said only when the live inventory reads 0 with its control passing; a failed control, an incomplete page walk or an unreadable read yields UNKNOWN with action none, never IDLE; a live count above 0 beside a ledger count of 0 or undefined is judged by progress age with the live count"
+      proof: "unit test: test/daemon/the-progress-watchdog-counts-open-prs-from-a-controlled-live-inventory.test.ts"
+    - claim: "progressWatchdogCommand reads the live inventory through one named seam"
+      proof: "grep: readLiveOpenPrInventory( in src/run-task.ts"
+    - claim: "the host inventory call uses the credential narrowed for this repository"
+      proof: "grep: hostGithubReadToken( in src/run-task.ts"
+    - claim: "the verdict names the live inventory's control result beside the ledger count's source"
+      proof: "grep: liveOpenPrInventory in src/lib/progress-watchdog.ts"
+  rationale: |
+    ORIGIN: the operator's 2026-11-08 request to automate PR flow and file follow-ups from the PR #17211 recovery
+    report (reports/Remudero PR flow recovery.md), item (1). This architect run could not open that report: the
+    worktree confinement hook refused a Read outside the assigned worktree. Its figures are therefore NOT restated
+    here. The facts below come from the source and from GitHub.
+    READ in this worktree (symbols, not lines):
+    - progressWatchdogCommand (src/run-task.ts) reads 24 h of ledger rows and calls openPrCountReadingFromRows
+      (src/lib/progress-watchdog.ts). That function returns the newest full-surface sweep.pass `enumerated`
+      ("full_pass"), raised by a newer light row ("full_pass_raised"), or the window max ("max_over_window").
+      Every source is a row the daemon itself wrote, so the count says what the last pass saw, not what is open now.
+    - decideProgressWatchdog returns IDLE, action none, as soon as openPrCount === 0. It reads no progress age.
+    - The verb's only outside reads are docker and ps (readLiveRecyclePausePid, the diagnostics bundle). It never
+      reads GitHub, so nothing checks the ledger count against the real board.
+    - src/lib/open-prs-rest.ts already has openPrsRestArgs / fetchOpenPrsRest for the same open-PR list the sweep
+      enumerates.
+    POSITIVE-CONTROL RULE: MASTER-PLAN.md P48 ("no naked zero enters a decision without a positive control") asks
+    for a control proving the reader can see. P48 is marked pending ratification, and this task applies its
+    control shape without recording P48 as ratified. Today IDLE is a naked zero from the ledger.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T9702 (merged) only chose which
+    sweep.pass row the count comes from. W1-T11324 handles future-stamped progress rows, W1-T11319 recycle pause,
+    W1-T11327 restart-in-place, W1-T5687 the progress-not-pulse age. None reads a live inventory
+    (plan/tasks.d/W1-T9702-*, W1-T11319-*, W1-T11324-*, W1-T11327-*, W1-T5687-*).
+    Settled by lookup: does an open PR already do this? -> No. The 10 open PRs on 2026-11-08 (#17404, #17403, #17397,
+    #17394, #17386, #17367, #17354, #17348, #17322, #17229) touch none of progress-watchdog's open-PR count
+    (https://github.com/craigoley/remudero/pulls).
+    Settled by lookup: is there a reader for the open-PR list? -> Yes, fetchOpenPrsRest / openPrsRestArgs
+    (src/lib/open-prs-rest.ts), so the task adds no new GitHub endpoint family.
+    OVERLAP ORDER: W1-T10913 owns the `field-trials` command registry and docs generated from it. It shares
+    `src/run-task.ts` and `docs/cli-reference.md`; this watchdog task only changes the progress-watchdog command
+    surface. W1-T11319 owns the live-recycle PAUSE decision and its daemon test; this task keeps that verdict
+    unchanged, but must update the spawned-verb fixtures because the verb now reads GitHub. The dependency edges
+    serialize both overlapping surfaces, so workers cannot race these files.
+    FILES-CORRECTION PROOF (2026-11-08): on source head eed03417, restoring both omitted test files to their
+    merge-base versions (546a93e7) and running both exact paths with the live-inventory source changed produced
+    `# tests 41, # pass 40, # fail 1`; the old text assertion in
+    test/a-stalled-sweep-is-named-by-its-progress-not-its-pulse.test.ts rejected the newly rendered live and
+    last-full-pass counts. Restoring the branch version produced `# tests 41, # pass 41, # fail 0`, so that test
+    belongs in this task's scope. The other omitted file only added an `allowGhRefusals` opt-in; its merge-base
+    version passed all 25 tests even with GH_TOKEN and GITHUB_TOKEN unset and an empty GH_CONFIG_DIR. Leave it
+    unchanged in the rebuilt implementation rather than widening this task for a non-load-bearing edit.
+  design: |
+    1. LIVE READ. `readLiveOpenPrInventory(owner, repo, fetch)` in src/lib/progress-watchdog.ts walks the open-PR
+       list (openPrsRestArgs, every page to the end) and returns `{ state: "read", count, numbers }` only when the
+       page walk is complete. In the same invocation, a POSITIVE CONTROL reads one closed PR of the same repo
+       (state=closed, per_page=1) and must get back one row with an integer `number`. That proves the credential and
+       route can see PRs, so a 0 is a seen 0. A failed control returns `{ state: "control_failed" }`. A thrown read or
+       an incomplete walk returns `{ state: "unknown", reason }`.
+    2. KEPT APART. The verdict carries `liveOpenPrInventory` ({state, count?, control}) beside the existing
+       `openPrCount` and `openPrCountSource`, which still mean the last full pass. The two are never merged into one
+       number. renderProgressWatchdogVerdict prints both:
+       `open_prs_live=<n|unknown> (control <ok|failed>) open_prs_last_full_pass=<n> (<source>)`.
+    3. DECISION. IDLE requires live state "read" with count 0. A live count > 0 replaces a ledger 0 or undefined for
+       the age-based STALLED judgment, since the board has work the ledger does not show. A non-read live state
+       never yields IDLE: if the ledger also says 0 or undefined, the verdict is UNKNOWN with action none. Otherwise
+       today's ledger path decides. Recycle, restart and diagnostics actions are not widened: a live count can only
+       turn IDLE into UNKNOWN or into the existing age path.
+    4. CREDENTIAL AND COST. The repo comes from the instance config the verb already loads. Use the host credential
+       propagation and `hostGithubReadToken(repo)` seam delivered by W1-T11774; it narrows the existing App grant to
+       pull-request read for this repository. Do not proceed with a host live read unless that prerequisite is
+       merged. Mint no credential and add no write. One list walk plus one control read per tick, and W1-T6361's
+       nothing-changed skip still applies.
+    5. TIME BUDGET. Start one 45 s deadline at verb entry and pass it through token exchange, every list page and
+       the control read, with a 10 s timeout per request. Do not start a request past the deadline; return UNKNOWN
+       with reason `live-read-deadline`. Leave the remaining part of the launcher's 120 s for the ledger read and
+       diagnostics. W1-T6361's nothing-changed skip still applies.
+    6. Tests (new file) over injected fetch: a complete walk of 0 with the control passing is IDLE; a 0 with the
+       control failing is UNKNOWN; a truncated walk is UNKNOWN; live 3 beside ledger 0 is judged by age; ledger 31
+       with live unknown keeps today's path; the rendered line names both counts. A request timeout or exhausted
+       45 s deadline returns UNKNOWN and never IDLE.
+  falsifier: |
+    At origin/main, a ledger whose newest full pass enumerated 0, with the live board holding open PRs, makes
+    decideProgressWatchdog say IDLE without any live read. The first test's "a 0 with the control failing is
+    UNKNOWN" case fails because no control exists. If GitHub's closed-PR read can return 0 rows on a healthy
+    credential for this repo, the control is wrong and must be replaced, not dropped.
