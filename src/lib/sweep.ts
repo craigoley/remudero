@@ -7669,7 +7669,7 @@ export function checksStateFromRollup(
   rollup: RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
 ): OpenPrView["checksState"] {
-  const { all, knownRequired, gate } = requiredCheckGate(rollup, requiredContexts);
+  const { all, knownRequired, gate, missingRequired } = requiredCheckGate(rollup, requiredContexts);
   if (all.length === 0) return "none";
   // Required contexts are configured but none has registered on this head yet
   // (e.g. the workflow hasn't started) — waiting, not "no checks at all".
@@ -7685,7 +7685,10 @@ export function checksStateFromRollup(
     if (REQUIRED_CHECK_FAIL.has(s)) return "red";
     if (!ok.has(s)) anyPending = true;
   }
-  return anyPending ? "pending" : "green";
+  // W1-T11606: a present green member does not settle the gate while another configured context
+  // has not registered on this head yet. Branch protection requires every named context; treating
+  // only the present subset as green let an early status merge a PR before ci-gate appeared.
+  return anyPending || missingRequired ? "pending" : "green";
 }
 
 /** The entries {@link checksStateFromRollup} judges, shared so every reading of a head's checks
@@ -7693,7 +7696,7 @@ export function checksStateFromRollup(
 function requiredCheckGate(
   rollup: RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
-): { all: RollupCheckEntry[]; knownRequired: boolean; gate: RollupCheckEntry[] } {
+): { all: RollupCheckEntry[]; knownRequired: boolean; gate: RollupCheckEntry[]; missingRequired: boolean } {
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const required = new Set(requiredContexts ?? []);
   const knownRequired = required.size > 0;
@@ -7703,7 +7706,9 @@ function requiredCheckGate(
   const gate = dedupeRollupByLatestAttempt(
     knownRequired ? all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")) : all,
   );
-  return { all, knownRequired, gate };
+  const missingRequired = knownRequired && [...required]
+    .some((name) => name !== REVIEW_CONTEXT && !gate.some((entry) => entry.name === name || entry.context === name));
+  return { all, knownRequired, gate, missingRequired };
 }
 
 /** W1-T4054 — earliest pending required start, so PR activity cannot reset the CI clock.

@@ -710,6 +710,12 @@
       "grepHint": "Forensics: src/lib/tick-read-worker.ts"
     },
     {
+      "path": "docs/forensics/triage-incident-901cace1adefcf4b.md",
+      "title": "Triage of incident-901cace1adefcf4b was decided twice: investigation (W1-T11812)",
+      "summary": "Read-only investigation. Hypothesis under test: the first triage (#17389, \"already decided, no task\")",
+      "grepHint": "Triage of incident-901cace1adefcf4b was decided twice: investigation (W1-T11812)"
+    },
+    {
       "path": "docs/forensics/triage.md",
       "title": "Forensics: src/lib/triage.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/triage.ts` used to",

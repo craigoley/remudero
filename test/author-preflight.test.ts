@@ -262,7 +262,24 @@ test('author static preflight runs unslotted and one real slot holds the affecte
   assert.equal(existsSync(claim.path), false, 'the author releases only its own slot at the terminal');
 });
 
-test('author static admission takes no suite slot for a failed static gate (W1-T9951)', () => {
+function withoutInheritedTestSlotContext(
+  t: { after: (fn: () => void) => void },
+  run: () => void,
+  inheritedParent?: string,
+): void {
+  const keys = ['RMD_TEST_SLOT_PARENT', 'RMD_TEST_SLOT_DIR'] as const;
+  const saved = keys.map(key => [key, process.env[key]] as const);
+  if (inheritedParent !== undefined) process.env.RMD_TEST_SLOT_PARENT = inheritedParent;
+  for (const key of keys) delete process.env[key];
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  run();
+}
+
+function failedStaticGateFixture() {
   const f = fixture();
   writeFileSync(join(f.root, 'src/run-task.ts'), `
     import assert from 'node:assert/strict';
@@ -270,14 +287,36 @@ test('author static admission takes no suite slot for a failed static gate (W1-T
     process.exitCode=7;
   `);
   f.git('add', '.'); f.git('commit', '-m', 'test: failed admitted static gate');
-  assert.equal(mod.main([], { root: f.root }), 1);
-  const receipt = f.receipt();
-  assert.equal(receipt.verdict, 'failed');
-  assert.equal(receipt.steps[1].exitCode, 7);
-  assert.equal(receipt.steps.length, 2);
-  assert.match(receipt.affectedTestsNotRunReason, /static-preflight did not succeed/);
-  assert.equal(receipt.testSlot, undefined);
-  assert.equal(receipt.suiteQueue.outcome, 'cancelled');
+  const exitCode = mod.main([], { root: f.root });
+  return { exitCode, receipt: f.receipt() };
+}
+
+test('the failed static gate case runs clear of an inherited slot marker (W1-T11623)', (t) => {
+  const unownedParent = JSON.stringify({ path: join(fixtureSlotDir, `unowned-${process.pid}`) });
+  assert.equal(existsSync(JSON.parse(unownedParent).path), false, 'the inherited marker has no owned slot behind it');
+  withoutInheritedTestSlotContext(t, () => {
+    const { exitCode, receipt } = failedStaticGateFixture();
+    assert.equal(exitCode, 1);
+    assert.equal(receipt.verdict, 'failed');
+    assert.equal(receipt.steps[1].exitCode, 7);
+    assert.equal(receipt.steps.length, 2);
+    assert.match(receipt.affectedTestsNotRunReason, /static-preflight did not succeed/);
+    assert.equal(receipt.testSlot, undefined);
+    assert.equal(receipt.suiteQueue.outcome, 'cancelled');
+  }, unownedParent);
+});
+
+test('author static admission takes no suite slot for a failed static gate (W1-T9951)', (t) => {
+  withoutInheritedTestSlotContext(t, () => {
+    const { exitCode, receipt } = failedStaticGateFixture();
+    assert.equal(exitCode, 1);
+    assert.equal(receipt.verdict, 'failed');
+    assert.equal(receipt.steps[1].exitCode, 7);
+    assert.equal(receipt.steps.length, 2);
+    assert.match(receipt.affectedTestsNotRunReason, /static-preflight did not succeed/);
+    assert.equal(receipt.testSlot, undefined);
+    assert.equal(receipt.suiteQueue.outcome, 'cancelled');
+  });
 });
 
 test('author preflight refuses shared bare configuration before a real split-config migration can poison sibling worktrees', (t) => {
