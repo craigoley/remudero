@@ -1,0 +1,40 @@
+- id: W1-T11789
+  title: A gh read broker whose login cannot be resolved refuses to bind the socket, so an identity-less broker cannot occupy it and answer every read with an auth failure
+  repo: remudero
+  depends_on:
+    - W1-T11787
+  priority: 0.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a refusal at serve start decides whether sessions read through the broker; a refused start falls back to the 180 s floor, never to a wrong identity
+  band_meaning: blast-radius
+  origin: operator-session#broker-down-2026-11-08
+  plan_refs:
+    - W1-T10279
+    - W1-T10302
+  files:
+    - src/lib/gh-read-broker.ts
+    - test/github/every-mac-session-reads-github-through-one-broker.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: serveGhReadBroker resolves the account login once before it binds the socket, and refuses to serve, naming the missing identity, when the login reads unknown
+      proof: "grep: W1-T11789 criterion 1 in test/github/every-mac-session-reads-github-through-one-broker.test.ts"
+    - claim: A refused start leaves no socket and no heartbeat, so the hook keeps its 180 s floor instead of routing to a dead broker
+      proof: "grep: W1-T11789 criterion 2 in test/github/every-mac-session-reads-github-through-one-broker.test.ts"
+    - claim: A broker whose login resolves serves exactly as today
+      proof: "grep: W1-T11789 criterion 3 in test/github/every-mac-session-reads-github-through-one-broker.test.ts"
+  rationale: |
+    OBSERVED 2026-11-08 on the Azure host: a broker started by hand (pid 1200764, up 2 h 50 m) held broker.sock with no GitHub token. The status read reported login "unknown" and 295 upstream-error outcomes, and every brokered read printed "To get started with GitHub CLI, please run: gh auth login". Because it held the socket, the properly configured systemd unit (which loads the token itself) failed to start with "a broker is already serving", so reads stayed down until the stray process was stopped.
+    - Mechanism: login() is lazy and caches "unknown" on failure; serveGhReadBroker never asks for it, so it binds and beats its heartbeat regardless, and the heartbeat tells hooks and clients the broker is live.
+    - Effect: a live-looking broker with no identity is worse than no broker: clients route to it and the 180 s floor is skipped.
+  design: |
+    In serveGhReadBroker, before rmSync of the old socket and before the first heartbeat, await broker.login(). When it resolves to "unknown", throw an error naming the missing identity and the remedy (set GH_TOKEN for the broker process); do not touch the socket or heartbeat. A resolvable login proceeds unchanged. Ledger or log one refusal line.
+    NOT IN SCOPE: the boot cache bound (W1-T11787), the freshness refusal (W1-T11788), and how the token reaches the broker (host config).
+  falsifier: |
+    Remove the pre-bind login check and criterion 1 must fail. Move the check after the heartbeat and criterion 2 must fail. Restore it and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794173043382 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11789 on run-unfiled-1794173043382). Build after W1-T11787 (same file).

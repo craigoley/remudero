@@ -1,0 +1,41 @@
+- id: W1-T11787
+  title: The gh read broker's boot loads at most its cache budget, evicting the oldest entries before parsing any, so a cache that outgrew its heap cannot crash-loop the broker
+  repo: remudero
+  depends_on: []
+  priority: 0.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the broker is every session's GitHub read path; the change only bounds what boot reads, and read results are unchanged
+  band_meaning: blast-radius
+  origin: operator-session#broker-down-2026-11-08
+  plan_refs:
+    - W1-T10279
+    - W1-T10368
+  files:
+    - src/lib/gh-read-broker.ts
+    - test/github/every-mac-session-reads-github-through-one-broker.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the cache directory holds more bytes than its budget, boot evicts the oldest entries by modification time until the rest fit, before parsing any entry
+      proof: "grep: W1-T11787 criterion 1 in test/github/every-mac-session-reads-github-through-one-broker.test.ts"
+    - claim: A cache within its budget boots with every entry loaded, exactly as today
+      proof: "grep: W1-T11787 criterion 2 in test/github/every-mac-session-reads-github-through-one-broker.test.ts"
+    - claim: Boot parses entries one at a time and keeps only each entry's key, size and subjects, never its body
+      proof: "grep: W1-T11787 criterion 3 in test/github/every-mac-session-reads-github-through-one-broker.test.ts"
+    - claim: A boot that evicted writes one bounded broker log row naming the entry count and bytes evicted
+      proof: "grep: W1-T11787 criterion 4 in test/github/every-mac-session-reads-github-through-one-broker.test.ts"
+  rationale: |
+    OBSERVED 2026-11-08 on the Azure host: remudero-gh-read-broker.service restarted 15,000+ times. After the checkout self-sync refusal was cleared (see W1-T11788), every start died 19 s in with "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory" at about 250 MB, exit 134. The cache directory held 2,628 entries (127 MB on disk, newest 2026-11-05). The unit sets MemoryMax=640M.
+    - Mechanism: the GhReadBroker constructor reads every file under cache/ through readEntry and statSync and keeps its subjects, with no bound. The eviction budget (cacheShareOfFree * freeBytes) only runs when a new entry is stored, never at boot, so a cache that grew while the broker was down is loaded whole.
+    - Effect: with the broker down, deny-floor falls back to the 180 s floor and every session's GitHub read slows; an operator renamed the cache aside by hand to recover.
+  design: |
+    In the constructor, before parsing, list the cache directory with sizes and mtimes (one statSync per entry, no reads). If the total exceeds the same budget the store path already uses, remove the oldest entries (by mtime) until the remainder fits, using the existing eviction routine so subjects and invalidations stay consistent. Then parse the remaining entries one at a time, keeping only key, bytes and subjects. When anything was evicted, append one broker log row with the count and bytes. No change to request keys, TTLs or served results.
+    NOT IN SCOPE: the unit's restart policy (host config), the self-sync refusal (W1-T11788), serving without an identity (W1-T11789).
+  falsifier: |
+    Remove the boot-time eviction and criterion 1 must fail (the entry count stays above the budget). Make boot retain bodies and criterion 3 must fail. Restore both and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794173043382 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11787 on run-unfiled-1794173043382). Build before W1-T11789, which edits the same file.

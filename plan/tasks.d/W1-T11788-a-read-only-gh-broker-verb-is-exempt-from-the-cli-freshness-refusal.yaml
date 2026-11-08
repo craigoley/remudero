@@ -1,0 +1,39 @@
+- id: W1-T11788
+  title: The gh-broker verb is exempt from the CLI freshness refusal, so a dirty or behind checkout cannot stop the read broker from starting or answering status
+  repo: remudero
+  depends_on: []
+  priority: 0.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the exempt list is a declared security-relevant set; the broker verb never writes the tree, and the other verbs are unchanged
+  band_meaning: blast-radius
+  origin: operator-session#broker-down-2026-11-08
+  plan_refs:
+    - W1-T10279
+    - W1-T255
+  files:
+    - src/run-task.ts
+    - test/deploy-run-freshness-exempt.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The gh-broker verb, with any subcommand, is in the read-only freshness exempt set and is never refused for a dirty, diverged or off-main checkout
+      proof: "grep: W1-T11788 criterion 1 in test/deploy-run-freshness-exempt.test.ts"
+    - claim: Every verb that was not exempt before, including the gh verb and ledger-grep, is still refused on a dirty checkout
+      proof: "grep: W1-T11788 criterion 2 in test/deploy-run-freshness-exempt.test.ts"
+    - claim: A broker started on a dirty checkout does not move or write the tree and ledgers the exemption once
+      proof: "grep: W1-T11788 criterion 3 in test/deploy-run-freshness-exempt.test.ts"
+  rationale: |
+    OBSERVED 2026-11-08 (ledger self_sync.refused rows, verb gh-broker, reason dirty, count 3, one every 11 s): the user systemd unit that runs the broker serve verb restarted 15,000+ times because the operator checkout was behind origin/main with three untracked plan/feedback files the fast-forward would also write. Every start printed "refusing to auto-sync" and exited 1. rmd ledger-grep refused the same way and returned false zeros.
+    - Mechanism: main() runs the CLI freshness check for every verb except READ_ONLY_FRESHNESS_EXEMPT_VERBS (doctor, status, preflight, pr-owner). The long-running services (daemon, serve) already take the service path where DIRT NEVER BLOCKS A SERVICE (W1-T255), but gh-broker is on neither list.
+    - Effect: a read broker that never touches the tree is down whenever the operator checkout has untracked files, and every session's GitHub read falls back to the 180 s floor.
+  design: |
+    Add "gh-broker" to READ_ONLY_FRESHNESS_EXEMPT_VERBS. The broker neither syncs nor writes the tree, so the exemption moves nothing. When the verb runs exempt on a tree that the check would have refused, ledger one self_sync.exempt row (verb, reason) so the skip is observable. No other verb changes; any census or test that pins the declared set moves in the same PR.
+    NOT IN SCOPE: ledger-grep's own refusal (a read verb that could be exempt; file separately if wanted), the broker's cache boot (W1-T11787).
+  falsifier: |
+    Remove gh-broker from the set and criterion 1 must fail. Add the gh verb to the set and criterion 2 must fail. Restore the set and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794173043382 -> run-unfiled-1794173043382
+    Reserved with rmd next-task-id (W1-T11788 on run-unfiled-1794173043382). src/run-task.ts forces the full suite set (W1-T10740).
