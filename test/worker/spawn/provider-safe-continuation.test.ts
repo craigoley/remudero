@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { canonicalWorkerProviderId, type Config, type WorkerProviderId } from "#src/lib/config.js";
+import { withInstanceRegistryRuntime } from "#src/lib/instance-registry-selection.js";
 import { OpenWeightRequestTooLargeError, openWeightAllowancePath, openWeightReservationUsd } from "#src/lib/worker-provider.js";
 import * as workerApi from "#src/lib/worker.js";
 import { createClaudeExecutableCache, spawnWorker,
@@ -157,4 +158,40 @@ test("ordinary spawns and bounded prior-report handoffs keep their own contracts
   assert.equal(cash.receipt?.reason, "provider-fresh-only");
   assert.throws(() => workerApi.workerExecutionForProvider({ prompt: action, resumeSessionId: "old",
     continuation: { provider: "codex", contextPrompt: " " } }, "claude"), /must not be blank/);
+});
+
+test("W1-T11596 criterion 1: a selected private registry gives a read-only Codex continuation its fresh handoff", async t => {
+  const reader = fixture(t, "codex", "codex");
+  reader.args.tools = ["Read", "Grep", "Glob", "Bash"];
+  const handoff = reader.args.continuation!.contextPrompt;
+  const registry = join(reader.root, "private.yaml");
+  writeFileSync(registry, "instances:\n  worker:\n    github_repo: owner/repo\n    mode: shadow\n");
+  const selected = <T>(operation: () => T | Promise<T>) => withInstanceRegistryRuntime(operation, { envPath: registry });
+  const fresh = await selected(() => workerApi.workerExecutionForProvider(reader.args, "codex"));
+  assert.equal(fresh.resumeSessionId, undefined, "the selected-registry Codex adapter refuses every resume");
+  assert.deepEqual(fresh.receipt, { mode: "fresh-handoff", reason: "private-registry-fresh-only", from: "codex", to: "codex" });
+  assert.ok(fresh.prompt.startsWith(handoff), "the handoff leads the prompt");
+  assert.ok(fresh.prompt.endsWith(`Pending action:\n${action}`), "the pending action is kept");
+  // The pre-routing refusal must not pre-empt it: the call reaches the Codex adapter with no resume.
+  const spawned = await selected(() => spawnWorker(reader.args));
+  assert.equal(reader.captured.length, 1);
+  assert.equal(reader.captured[0].resume, undefined);
+  assert.ok(reader.captured[0].prompt.startsWith(handoff));
+  assert.equal(spawned.continuation?.reason, "private-registry-fresh-only");
+
+  const unselected = workerApi.workerExecutionForProvider(reader.args, "codex");
+  assert.equal(unselected.resumeSessionId, "original-session", "with no selected registry the same call still resumes");
+  assert.deepEqual(unselected.receipt, { mode: "resumed", reason: "same-provider", from: "codex", to: "codex" });
+  const claude = fixture(t, "claude", "claude");
+  const claudeArgs = { ...claude.args, tools: ["Read", "Grep", "Glob", "Bash"] };
+  const claudeSelected = await selected(() => workerApi.workerExecutionForProvider(claudeArgs, "claude"));
+  assert.deepEqual(claudeSelected, workerApi.workerExecutionForProvider(claudeArgs, "claude"), "a Claude resume is unchanged");
+  assert.equal(claudeSelected.resumeSessionId, "original-session");
+  await assert.rejects(selected(() => spawnWorker(claudeArgs)), /worker_resume_not_qualified/);
+  assert.equal(claude.captured.length, 0, "a selected-registry Claude resume is still refused before any call");
+  const bare = fixture(t, "codex", "codex");
+  bare.args.tools = ["Read", "Grep", "Glob", "Bash"];
+  delete bare.args.continuation;
+  await assert.rejects(selected(() => spawnWorker(bare.args)), /worker_resume_not_qualified/);
+  assert.equal(bare.captured.length, 0, "a resume with no handoff keeps the adapter-equivalent refusal");
 });

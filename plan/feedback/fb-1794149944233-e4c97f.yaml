@@ -23,7 +23,7 @@ raw: "Production broker child-entry loader defect and planner no-verdict
   confirmed 2026-11-08."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/17397
 summary:
