@@ -23,10 +23,28 @@ raw: "Production broker child-entry loader defect and planner no-verdict
   confirmed 2026-11-08."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/17397
+summary:
+  headline: Fix broker child-entry loader crash and planner silent no-verdict outcomes
+  what_happened: The Mac fix-lane gardener logged 12 inventory failures over 11
+    hours because the bundled broker child cannot load its module without a
+    loader flag. Two planner create attempts also ended with no verdict or PR,
+    and their reserved IDs were released.
+  decision: Choose one option below to authorize or defer the two separate plan tasks.
+  options:
+    - label: Authorize both as separate narrow tasks
+      consequence: Adds a bundled child-entry fix with real child-process broker and
+        fallback tests, plus durable routing that keeps evidence and an owner
+        when the planner returns no verdict; policy and gates stay unchanged.
+    - label: Authorize the broker loader fix only
+      consequence: Stops the gardener failures; planner no-verdict outcomes keep
+        ending with no actor until a later decision.
+    - label: Defer both pending more evidence
+      consequence: No code changes now; the gardener keeps logging failures while the
+        daemon stays up.
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
