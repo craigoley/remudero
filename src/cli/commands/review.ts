@@ -3,11 +3,12 @@ import type { GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { type WorkerStateSensor, type ReviewRunResult, type MaterializationErrorClass, type MaterializationFailure, type CensusChildResult } from "./run-task-verb.js";
 import { buildBaseProofDirAsync, hostWorktreeGitAtTopLevel, type BaseProofDir } from "../../lib/check-proof.js";
 import { execFileSync, spawn } from "node:child_process";
-import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow } from "../../lib/sweep.js";
+import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
+import { parseWhitelistedProof, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
-import { isWorkerProviderId, loadConfig, type Config } from "../../lib/config.js";
+import { isWorkerProviderId, loadConfig, type Config, type WorkerProviderId } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
@@ -76,11 +77,22 @@ export interface ReviewCommandHost {
   reviewSubjectGit(repoDir: string, argv: string[]): string;
 }
 
+function repeatedFlagValues(rest: string[], flag: string): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < rest.length - 1; i++) {
+    if (rest[i] === flag) values.push(rest[++i]!);
+  }
+  return values;
+}
+
 export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders"> {
   const { JUDGE_AT_OWN_START_FLAG, acceptedReviewAttemptId } = host;
   const mode = flagValue(rest, "--execution-mode");
   const reviewAttemptId = acceptedReviewAttemptId(flagValue(rest, "--review-attempt-id"));
-  const excludeProviders = [...new Set((flagValue(rest, "--exclude-providers") ?? "").split(",").filter(isWorkerProviderId))];
+  const excludeProviders = [...new Set([
+    ...repeatedFlagValues(rest, "--exclude-provider"),
+    ...(flagValue(rest, "--exclude-providers") ?? "").split(","),
+  ].map((provider) => provider.toLowerCase()).filter((provider): provider is WorkerProviderId => isWorkerProviderId(provider)))];
   return {
     ...(rest.includes(JUDGE_AT_OWN_START_FLAG) ? { judgeAtOwnStart: true } : {}),
     ...(rest.includes("--plan-only-filing") ? { planOnlyFiling: true } : rest.includes("--not-plan-only-filing") ? { planOnlyFiling: false } : {}),
@@ -422,6 +434,42 @@ export function failureRecordingPoster(): { post: (o: Parameters<typeof postRevi
     },
     failed: () => threw,
   };
+}
+
+/** W1-T11200: share the fix lane's exact-head, file-receipt reader with the review judge. */
+export async function reviewHostedCiFileEvidence(
+  args: { owner: string; repo: string; headSha: string; criteria: readonly AcceptanceCriterion[];
+    headCheckoutDir?: string; log: (step: string, extra?: Record<string, unknown>) => void },
+  read: HostedFixProofReader = (headSha, proofs) => readHostedFixProofResults({
+    owner: args.owner, repo: args.repo, headSha, proofs,
+  }),
+): Promise<ReadonlyMap<string, "passed" | "failed"> | undefined> {
+  try {
+    const files = new Set<string>();
+    for (const criterion of visibleCriteria([...args.criteria])) {
+      const text = args.headCheckoutDir
+        ? resolveProofTestPath(criterion.proof, args.headCheckoutDir, { target: args }).proof : criterion.proof;
+      const proof = parseWhitelistedProof(text, args);
+      if (proof?.kind !== "test") continue;
+      if (!proof.nameFiltered) files.add(proof.label);
+      else if (args.headCheckoutDir && proof.runner !== "vitest") {
+        const resolution = await resolveNameFilteredCandidatesAsync(args.headCheckoutDir, proof.label);
+        if (resolution.status === "resolved") for (const file of resolution.files) files.add(file);
+      }
+    }
+    if (files.size === 0) return undefined;
+    const results = await read(args.headSha, [...files].map(file => `unit test: ${file}`));
+    const evidence = new Map<string, "passed" | "failed">();
+    for (const result of results) {
+      if (result.headSha !== args.headSha || !files.has(result.testFile)) continue;
+      if (result.result === "fail") evidence.set(result.testFile, "failed");
+      else if (!evidence.has(result.testFile)) evidence.set(result.testFile, "passed");
+    }
+    return evidence.size > 0 ? evidence : undefined;
+  } catch (error) {
+    args.log("review.hosted_ci.unavailable", { head_sha: args.headSha, reason: String(error) });
+    return undefined;
+  }
 }
 
 export async function runReview(host: ReviewCommandHost, args: {
@@ -773,7 +821,10 @@ export async function runReview(host: ReviewCommandHost, args: {
     sessionId: null,
   };
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
+  const hostedCiFilePassed = await reviewHostedCiFileEvidence({ owner, repo, headSha, criteria,
+    headCheckoutDir: args.headCheckoutDir, log });
   const proofEvidence: Parameters<typeof preparedDecision.judge>[0] = {
+    hostedCiFilePassed,
     diff,
     report,
     headRefName: args.headRefName,
@@ -1872,7 +1923,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // returns the `gh --json` shape and passes through untouched. Both arms yield the SAME five
   // fields, so nothing downstream of `body` can tell which transport served it.
   const args = reviewViewArgs(owner, repo, prArg);
-  const raw = fetchView(args);
+  const raw = await (deps.fetchView ?? ghJsonAsync)(args);
   // The sweep's open-PR snapshot can age while earlier reviews run. The numeric arm already
   // fetched the live REST row, so decline a closed PR before fetching its head or building a
   // worktree. The guarded poster still makes the final lifecycle check for an in-flight close.

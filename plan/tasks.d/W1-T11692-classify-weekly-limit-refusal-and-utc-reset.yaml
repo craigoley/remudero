@@ -33,4 +33,4 @@
 
   acceptance:
     - claim: "the weekly-limit refusal text and bare UTC reset suffix are classified, with positive and negative cases in the existing suite"
-      proof: "unit test: test/classify.test.ts"
+      proof: "unit test: classify weekly-limit usage refusal: exact text and bare UTC reset"
