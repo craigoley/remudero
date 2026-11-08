@@ -102,8 +102,6 @@ const HARNESS_SITES: Readonly<Record<string, { count: number; reason: string }>>
   resolveMergeLogReadOptions: { count: 1, reason: OWN },
   creditEvidenceRootFor: { count: 1, reason: OWN },
   registeredFixWorktreeOwner: { count: 2, reason: FIX_CLONE },
-  refCommitMatchesDirtyRecovery: { count: 6, reason: FIX_CLONE },
-  preserveFixHead: { count: 6, reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 2, reason: FIX_CLONE },
   idCitedInSrc: { count: 2, reason: OWN },
   approveCommand: { count: 20, reason: `${APPROVE}, and the clone it ls-remotes` },
@@ -122,13 +120,13 @@ const CONVERTED = [
   "lintPlanCommand", "citationStampPassFor", "headProvenanceFields", "worktreeHasUncommittedChanges",
   "missingCommitLinePrompt", "worktreeChangedFiles", "worktreeMergeBase", "worktreeGitRunner",
   "readRegistrationChanges", "captureRegisteredFixOwnerSnapshot", "temporaryIndexTree",
-  "preserveStagedFixOwnerResidue", "readFixOwnerResidue", "readTrackedDirtyOwnerPatch", "preserveTrackedDirtyPatch",
+  "preserveStagedFixOwnerResidue", "preserveFixHead",
   "resetTrackedDirtyFixOwner", "checkoutFixHeadRef", "createFixRungWorktree", "triageCommandLocked", "planCommand",
   "defaultShardGitRunner", "removeAbandonedFixWorktreeOwner",
 ] as const;
 
 /** Raw git sites and leaf calls per top-level declaration of `text`. */
-function sitesByDeclaration(text: string): { raw: Map<string, number>; leaf: Set<string>; declared: Set<string> } {
+function sitesByDeclaration(text: string): { raw: Map<string, number>; leaf: Set<string>; declared: Set<string>; bodies: Map<string, string> } {
   const owners: string[] = [];
   const declared = new Set<string>();
   let current = "<module>";
@@ -153,7 +151,76 @@ function sitesByDeclaration(text: string): { raw: Map<string, number>; leaf: Set
   for (const m of text.matchAll(RAW_GIT)) raw.set(ownerAt(m.index), (raw.get(ownerAt(m.index)) ?? 0) + 1);
   const leaf = new Set<string>();
   text.split("\n").forEach((line, i) => { if (LEAF_CALL.test(line)) leaf.add(owners[i]!); });
-  return { raw, leaf, declared };
+  const bodies = new Map<string, string>();
+  text.split("\n").forEach((line, i) => bodies.set(owners[i]!, `${bodies.get(owners[i]!) ?? ""}${line}\n`));
+  return { raw, leaf, declared, bodies };
+}
+
+/** Shared recovery steps receive the leaf explicitly; public drivers must bind the matching leaf. */
+const RECOVERY_DRIVERS = [
+  ["readOwnerHasTrackedWork", false],
+  ["temporaryIndexTree", false],
+  ["preserveTrackedDirtyFixOwner", true],
+  ["preserveOrDiscardFixOwnerResidue", true],
+  ["preserveStagedFixOwnerResidue", true],
+  ["resetTrackedDirtyFixOwner", true],
+  ["preserveAndClearUntrackedFixOwner", true],
+  ["preserveStaleDirtyFixOwner", true],
+  ["clearStaleDirtyFixOwner", true],
+  ["preserveFixHead", false],
+] as const;
+
+/** Every direct Git use or shared-step forwarding edge in the recovery implementation. */
+const RECOVERY_STEPS: Readonly<Record<string, readonly string[]>> = {
+  readOwnerHasTrackedWorkSteps: ["git"],
+  temporaryIndexTreeSteps: ["git"],
+  refCommitMatchesDirtyRecoverySteps: ["git"],
+  preserveTrackedDirtyFixOwnerSteps: ["preserveTrackedDirtyPatchSteps", "readTrackedDirtyOwnerPatchSteps"],
+  preserveOrDiscardFixOwnerResidueSteps: ["readTrackedDirtyOwnerPatchSteps", "readFixOwnerResidueSteps", "preserveTrackedDirtyPatchSteps"],
+  preserveStagedFixOwnerResidueSteps: ["git", "readTrackedDirtyOwnerPatchSteps", "preserveTrackedDirtyPatchSteps", "temporaryIndexTreeSteps"],
+  readFixOwnerResidueSteps: ["git"],
+  readTrackedDirtyOwnerPatchSteps: ["git"],
+  preserveTrackedDirtyPatchSteps: ["git", "refCommitMatchesDirtyRecoverySteps", "temporaryIndexTreeSteps"],
+  resetTrackedDirtyFixOwnerSteps: ["git"],
+  preserveAndClearUntrackedFixOwnerSteps: ["git", "readOwnerHasTrackedWorkSteps", "temporaryIndexTreeSteps", "preserveTrackedDirtyPatchSteps"],
+  preserveStaleDirtyFixOwnerSteps: ["git", "temporaryIndexTreeSteps", "preserveFixHeadSteps"],
+  clearStaleDirtyFixOwnerSteps: ["git", "resetTrackedDirtyFixOwnerSteps"],
+  preserveFixHeadSteps: ["git"],
+};
+
+function recoveryBindingFailures(text: string): string[] {
+  const { raw, bodies } = sitesByDeclaration(text);
+  const failures: string[] = [];
+  for (const [name, asynchronous] of RECOVERY_DRIVERS) {
+    for (const suffix of asynchronous ? ["", "Async"] : [""]) {
+      const driver = `${name}${suffix}`;
+      const body = bodies.get(driver) ?? "";
+      const binding = `runSteps${suffix ? "Async" : "Sync"}(${name}Steps(hostWorktreeGit${suffix},`;
+      if (!body.includes(binding)) failures.push(`${driver}: missing ${binding}`);
+      if (raw.has(driver)) failures.push(`${driver}: holds raw git`);
+    }
+  }
+  for (const suffix of ["", "Async"] as const) {
+    const driver = `removeAbandonedFixWorktreeOwner${suffix}`;
+    const body = bodies.get(driver) ?? "";
+    const call = `${suffix ? "await " : ""}hostWorktreeGit${suffix}(repoDir, ["worktree", "remove", worktreePath]);`;
+    if (!body.includes(call)) failures.push(`${driver}: missing ${call}`);
+    if (raw.has(driver)) failures.push(`${driver}: holds raw git`);
+    const gitAt = body.indexOf(call);
+    const lockAt = body.indexOf("removeRunLock(worktreePath);");
+    const baseAt = body.indexOf("removeWorktreeBase(worktreePath);");
+    if (!(gitAt >= 0 && lockAt > gitAt && baseAt > lockAt)) failures.push(`${driver}: metadata cleanup precedes Git completion`);
+  }
+  for (const [name, calls] of Object.entries(RECOVERY_STEPS)) {
+    const body = bodies.get(name) ?? "";
+    if (!body.startsWith(`function* ${name}(git: ReviewRecoveryGit,`)) failures.push(`${name}: missing typed leaf port`);
+    if (raw.has(name)) failures.push(`${name}: holds raw git`);
+    for (const call of calls) {
+      const binding = call === "git" ? "step(() => git(" : `${call}(git,`;
+      if (!body.includes(binding)) failures.push(`${name}: missing ${binding}`);
+    }
+  }
+  return failures;
 }
 
 describe("W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS site", () => {
@@ -188,6 +255,25 @@ describe("W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS
       if (Object.hasOwn(HARNESS_SITES, name)) failures.push(`${name}: is both converted and a harness site`);
     }
     assert.deepEqual(failures, []);
+  });
+
+  it("shared recovery steps keep both drivers bound to the hardened leaf", () => {
+    assert.deepEqual(recoveryBindingFailures(text), []);
+  });
+
+  it("a synchronous leaf substituted into an async recovery driver fails its binding guard", () => {
+    const binding = "runStepsAsync(preserveStagedFixOwnerResidueSteps(hostWorktreeGitAsync,";
+    const mutant = text.replace(binding, "runStepsAsync(preserveStagedFixOwnerResidueSteps(hostWorktreeGit,");
+    assert.notEqual(mutant, text, "the fixture edit applied");
+    assert.deepEqual(recoveryBindingFailures(mutant).map((failure) => failure.split(":")[0]), ["preserveStagedFixOwnerResidueAsync"]);
+  });
+
+  it("a raw git call added inside shared recovery steps fails the complete raw-site walk", () => {
+    const head = "function* readTrackedDirtyOwnerPatchSteps(git: ReviewRecoveryGit, ownerPath: string, localSha: string): Steps<string> {\n";
+    const mutant = text.replace(head, `${head}  execFileSync("git", ["-C", ownerPath, "status"]);\n`);
+    assert.notEqual(mutant, text, "the fixture edit applied");
+    assert.equal(sitesByDeclaration(mutant).raw.get("readTrackedDirtyOwnerPatchSteps"), 2);
+    assert.ok(recoveryBindingFailures(mutant).includes("readTrackedDirtyOwnerPatchSteps: holds raw git"));
   });
 
   it("a raw git -C added to a converted function fails the census naming it", () => {
