@@ -58,6 +58,7 @@ function fixture(t: TestContext) {
     throw new Error(`unexpected read ${args.join(" ")}`);
   };
   const options = {
+    readReviewStatusHistory: async () => ({ kind: "readable" as const, failures: [] }),
     owner: "acme", repo: "portal", sha: HEAD, state: "success" as const, taskId: "PR-8",
     evidence: "executed" as const, ledgerPath, runId: "replay", prUrl: PR,
     reviewInputDigest: INPUT, reviewDecisionDigest: "v2:decision",
@@ -222,6 +223,7 @@ test("W1-T8959: default review CLI retains publisher evidence and refuses unread
     return reviewCommand("8", ["--repo", "acme/portal"], {
       resolveOwnerRepo: () => ({ owner: "acme", repo: "portal" }),
       enforceReviewSubjectCheckout: false,
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       loadConfig: () => ({ root: f.root, installRoot: join(import.meta.dirname, "..") }) as Config,
       fetchHead: () => {}, postReviewPending: async () => ({ posted: false }),
       materialize: () => ({ worktreePath: undefined, failure: { errorClass: "test", message: "fixture" } }) as never,

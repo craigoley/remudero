@@ -120,6 +120,7 @@ test("test/every-lane-records-how-its-worker-ended.test.ts", async (t) => {
           { when: "pulls/1", stdout: JSON.stringify({ number: 1, state: "open", body: report,
             head: { ref: "fixture", sha: headSha }, html_url: "https://github.com/acme/remudero/pull/1" }) },
           { when: "pr diff", stdout: "diff --git a/src/example.ts b/src/example.ts\n+export const fixed = true;" },
+          { when: "/statuses?", stdout: "[[]]" },
           { when: "api", stdout: "{}" },
         ]);
         process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;

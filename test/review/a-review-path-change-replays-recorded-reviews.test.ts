@@ -341,6 +341,7 @@ async function reviewWithReplayProvenance(legacy: string | null, identified: boo
     { when: "state", stdout: '{"state":"OPEN"}' },
     { when: "pulls/", stdout: JSON.stringify({ number: 1, state: "open", html_url: "https://github.com/acme/consumer/pull/1",
       body: "recorded reviewer identity", head: { ref: "topic", sha: head } }) },
+    { when: "/statuses?", stdout: "[[]]" },
     { when: "", stderr: "fixture refuses unexpected GitHub access", exit: 87 },
   ], { kind: "replay-code-provenance" });
   const priorPath = process.env.PATH;

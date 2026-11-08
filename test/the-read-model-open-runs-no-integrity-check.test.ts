@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, openSync, closeSync, fstatSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, openSync, closeSync, fstatSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
@@ -23,7 +23,7 @@ import {
   type IntegrityResult,
   type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const NOW = T0 + 3_600_000;
@@ -33,8 +33,7 @@ const DDL = "CREATE TABLE IF NOT EXISTS item(id INTEGER PRIMARY KEY, label TEXT 
 type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -73,7 +72,7 @@ test("a clean writable open runs no quick_check even over a damaged page", (t) =
   damageLastPage(path);
 
   const db = openReadModel({ stateDir: dir, instance: "core", schemaVersion: 1, ddl: DDL, clock: fixedClock(NOW) });
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   assert.equal(db.recoveredFrom, undefined, "the open never walked the pages, so it never moved the file aside");
   assert.equal(db.uncleanShutdown, undefined, "the previous writer closed cleanly");
   assert.equal(existsSync(`${path}.corrupt-${NOW}`), false);
@@ -120,7 +119,7 @@ test("an unclean open schedules the integrity check in the background without bl
     integrityCheck: (request, done) => void requests.push({ request, done }),
     post: (m) => void messages.push(m),
   });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   assert.equal(requests.length, 1, "the unclean open asked for one check");
@@ -157,7 +156,7 @@ test("a clean open waits the interval before its first integrity check", (t) => 
     integrityCheck: (request) => void requests.push(request),
     post: (m) => void messages.push(m),
   });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   assert.equal(requests.length, 0, "a clean open runs no check at boot");
@@ -185,7 +184,7 @@ test("corruption found in the background rebuilds a new generation and flips the
   assert.equal(!result.ok && result.rebuild?.code, 0, JSON.stringify(result));
   assert.equal(readFileSync(readModelPointerPath(stateDir, "core", 1), "utf8").trim(), `core.v1.g${NOW}.sqlite`, "the pointer names the rebuilt generation");
   const fresh = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => fresh.close());
+  onReadModelClose(t, () => fresh.close());
   assert.notEqual(fresh.path, dbPath, "every reopen lands on the rebuilt file");
   assert.equal(quickCheckReadModel(fresh.path).ok, true);
 });
@@ -211,7 +210,7 @@ test("the integrity check runs on a thread of its own and a thread that dies is 
   const request = { instance: "core", stateDir, ledgerDir: stateDir, dbPath };
   // The thread is unref'd, as serve's worker never waits on it; this test's timer keeps the loop up.
   const keepAlive = setInterval(() => undefined, 1_000);
-  t.after(() => clearInterval(keepAlive));
+  onReadModelClose(t, () => clearInterval(keepAlive));
   const healthy = await new Promise<IntegrityResult>((resolve) => threadIntegrityCheck()(request, resolve));
   assert.equal(healthy.ok, true, JSON.stringify(healthy));
   const died = await new Promise<IntegrityResult>((resolve) => threadIntegrityCheck(new URL("data:text/javascript,throw new Error('boom')"))(request, resolve));

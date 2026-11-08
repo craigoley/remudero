@@ -1,4 +1,5 @@
 import { settledSpansByClass } from "./cost-anomaly.js";
+import { join } from "node:path";
 import type { LedgerRecord } from "./retro.js";
 import type { ReleaseEvidence } from "./operator-release.js";
 /** Scheduler core (W1-T12a): headless loop; launchd lives in lib/launchd.ts (W1-T12b).
@@ -154,6 +155,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 // convert them into a `Clock` at the read site instead of forcing every caller to change; the
 // headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
 import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
+import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry } from "./daemon-heap-near-limit.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
@@ -1318,6 +1320,8 @@ export interface DaemonDeps {
   readMemoryTelemetry?: (() => Record<string, unknown>) & { afterRow?: () => void };
   /** W1-T8883: the heap-ceiling shadow's heap reading and process id; absent, this process's own. A test seam. */
   heapShadowSeams?: Pick<HeapShadowOptions, "snapshot" | "pid">;
+  /** Report-only observer; null disables it. The state directory supplies the production store. */
+  nearLimitHeapTelemetry?: NearLimitHeapTelemetry | null;
   lastStepBeforeBlock?: () => string | undefined;
   /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
   onPlanReload?: (plan: Plan) => void;
@@ -2755,6 +2759,12 @@ let inFlightTickerGenerations = 0;
  * Reuse the disk-headroom ticker; healthy fleets need no extra reads. Forensics: docs/forensics/daemon.md. */
 export const HEADROOM_SAMPLE_MAX_AGE_MS = 300_000;
 
+const nearLimitHeapObservers = new WeakMap<DaemonDeps, (surface: string) => void>();
+
+function recordNearLimitHeapSample(deps: DaemonDeps, surface: string): void {
+  nearLimitHeapObservers.get(deps)?.(surface);
+}
+
 function startInFlightTicker(
   deps: DaemonDeps,
   pollIntervalMs: number,
@@ -2860,6 +2870,7 @@ function startInFlightTicker(
           );
           if (waitResult === "wake") eventWakePending = true;
           if (!owner.active) break;
+          recordNearLimitHeapSample(deps, "in-flight-tick");
           if (owner.onTick) await new Promise<void>((resolve) => setImmediate(resolve));
           if (!owner.active) break;
           const ticked = owner.onTick?.();
@@ -3139,6 +3150,7 @@ async function runGatedSweep(
     const continueReviewAdmissions = ((reviewClass: "review" | "plan-review" = "review") => deps.checkStop?.() === undefined &&
       deps.checkPause?.() === undefined && latchedAdmission?.()?.(reviewClass, "full-sweep") !== false) as ReviewAdmissionGate;
     const workerAdmissionHold = (kind?: "review"): string | undefined => {
+      recordNearLimitHeapSample(deps, "admission:full-sweep");
       const hold = deps.workerAdmissionHold?.() ?? (recyclePause ? resolveFleetControlHold(deps) : undefined);
       if (!hold) return kind === undefined && latchedAdmission?.()?.("fix-dispatch", "full-sweep") === false
         ? "restart latched: a fix round would outlast the time left in the restart's drain" : undefined;
@@ -4501,6 +4513,21 @@ export async function runDaemon(
   // W1-T8883: the heap-ceiling shadow learns from live heap samples kept across boots (7 days) and ledgers the ceiling
   // it would propose, at start and hourly. REPORT ONLY: the ceiling in force is unchanged. Needs the state directory.
   const heapShadowStateDir = deps.fleetLane?.stateDir ?? deps.plainBackfill?.stateDir;
+  let nearLimitHeapTelemetry = deps.nearLimitHeapTelemetry;
+  let nearLimitFailureReported = false;
+  const nearLimitFailure = ({ reason }: { reason: unknown }): void => {
+    if (nearLimitFailureReported) return;
+    nearLimitFailureReported = true;
+    try { emitLog("daemon.heap_near_limit_persist_failed", { reason: String(reason).slice(0, 160) }); }
+    catch (sinkError) { void sinkError; /* The report sink failed; work decisions still proceed. */ }
+  };
+  if (nearLimitHeapTelemetry === undefined && heapShadowStateDir !== undefined) {
+    try {
+      nearLimitHeapTelemetry = createNearLimitHeapTelemetry({
+        path: join(heapShadowStateDir, NEAR_HEAP_FILE), clock: daemonClock, log: emitLog,
+      });
+    } catch (error) { nearLimitFailure({ reason: error }); }
+  }
   const heapShadow = heapShadowStateDir === undefined || !deps.readMemoryTelemetry ? undefined : createHeapShadow({
     path: heapSamplePath(heapShadowStateDir),
     clock: daemonClock,
@@ -4642,6 +4669,8 @@ export async function runDaemon(
       try { heapShadow.flush(); } catch { /* Reason: report-only samples; a failed flush loses at most one persist gap. */ }
       if (installedHeapShadow() === heapShadow) installHeapShadow(undefined);
     }
+    nearLimitHeapObservers.delete(deps);
+    try { nearLimitHeapTelemetry?.close(); } catch (error) { nearLimitFailure({ reason: error }); }
     const failures: unknown[] = [];
     try { if (pauseReview.clock) await stopPauseReviewClock(report); }
     catch (reason) { /* Retained in the cleanup AggregateError, after every other stop is attempted. */ failures.push(reason); }
@@ -4717,6 +4746,21 @@ export async function runDaemon(
   const hasChildTask = (id: string): boolean => childTaskIds().includes(id);
   // W1-T10000: a run waiting for its child's admission is out-of-process work too; the restart abandons it.
   const pendingChildren = new Map<string, RunChildPending & { sinceMs: number }>();
+  if (nearLimitHeapTelemetry) {
+    let sampledAttempts = attempted.length;
+    let lastSample: unknown;
+    nearLimitHeapObservers.set(deps, surface => {
+      try {
+        const tasks = new Set([...laneCpuBuilds, ...childTaskIds(), ...pendingChildren.keys()]).size;
+        const reviews = inFlightReviewCount(), detached = detachedSweepActionCount();
+        const sample = nearLimitHeapTelemetry.recordNearLimitHeapSample(surface, {
+          active: tasks + reviews + detached, admitted: attempted.length - sampledAttempts,
+          in_flight_tasks: tasks, in_flight_reviews: reviews, detached_sweep_actions: detached,
+        });
+        if (sample !== undefined && sample !== lastSample) { sampledAttempts = attempted.length; lastSample = sample; }
+      } catch (error) { nearLimitFailure({ reason: error }); }
+    });
+  }
   const outOfProcess = (id: string): boolean => hasChildTask(id) || pendingChildren.has(id);
   const bootGateBoundMs = opts.bootCadenceGateBoundMs ?? BOOT_CADENCE_GATE_BOUND_MS;
   const bootGateStartedAtMs = daemonClock.now();
@@ -5457,6 +5501,7 @@ export async function runDaemon(
   let activeRetroCrossingKey: string | undefined;
 
   const holdWorkerAdmission = (surface: string): (FleetControlHold & { reason: string }) | undefined => {
+    recordNearLimitHeapSample(deps, `admission:${surface}`);
     const hold = deps.workerAdmissionHold?.();
     if (!hold) return undefined;
     const reason = `fleet ${hold.control} hold: ${hold.detail}`;
@@ -6268,6 +6313,7 @@ export async function runDaemon(
     // of the loop body so no branch below can skip it (W1-T1274). W1-T7126: it carries the memory sample when
     // no row has within one poll interval; a throwing sampler rides it as mem_telemetry, never escapes it.
     log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory) });
+    recordNearLimitHeapSample(deps, "tick");
     if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
     resetIdleLaneTick();

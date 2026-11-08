@@ -53,6 +53,7 @@ async function driveReview(opts: { dropFirstPosted: boolean; runId: string }): P
   mkdirSync(join(root, "state"), { recursive: true });
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const gh = ghShim([
+    { when: "/statuses?", stdout: "[[]]" },
     { when: "headRefOid", stdout: JSON.stringify({ headRefOid: HEAD_SHA }) },
     { when: "pr diff", stdout: DIFF },
     {

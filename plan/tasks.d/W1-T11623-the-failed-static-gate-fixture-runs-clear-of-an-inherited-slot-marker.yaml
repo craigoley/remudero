@@ -65,7 +65,7 @@
        inherited) and paste the complete `# tests N # pass N # fail 0` summary; plus the step-1 red run.
   acceptance:
     - claim: "the whole author-preflight suite passes, including the failed-static-gate case and the new inherited-marker regression case"
-      proof: "unit test: test/author-preflight.test.ts"
+      proof: "unit test: the failed static gate case runs clear of an inherited slot marker (W1-T11623)"
     - claim: "a regression case proves the failed static gate still reads exitCode 7 when an inherited slot marker is present"
       proof: "grep: the failed static gate case runs clear of an inherited slot marker (W1-T11623) in test/author-preflight.test.ts"
   falsifier: |

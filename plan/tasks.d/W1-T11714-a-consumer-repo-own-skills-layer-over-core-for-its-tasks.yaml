@@ -1,0 +1,30 @@
+- id: W1-T11714
+  title: "A task whose target repo differs from the engine checkout is injected the target repo's own applies-to skills layered over the engine's, target winning on a name collision, each skill attributed to its source repo"
+  repo: remudero
+  depends_on: [ "W1-T10135", "W1-T10576" ]
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 30.00
+  priority: 4
+  risk: high
+  status: queued
+  attempts: 0
+  origin: feedback#fb-1792859781609-3d59e3
+  plan_refs: [ "§7B" ]
+  files:
+    - src/lib/skill-workshop.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/a-consumer-repo-skill-layers-over-core-skills.test.ts
+  acceptance:
+    - claim: "A fixture target repo carrying one applies-to: implement skill has that skill in the rendered implement prompt; reverting to the engine-only read makes it absent. Selection uses the same applies-to/when-paths logic and the same DEFAULT_KNOWLEDGE_BUDGET_CHARS budget."
+      kind: guard
+      proof: "unit test: test/a-consumer-repo-skill-layers-over-core-skills.test.ts"
+    - claim: "On a name collision the target repo's skill wins and the skills.selection row says so; skills.selection and skills.injected rows name each skill's source repo."
+      proof: "grep: source_repo in src/lib/skill-workshop.ts"
+    - claim: "The implement path loads target-repo skills in addition to the engine's only when repoDir differs from repoRoot; core tasks are unchanged."
+      proof: "grep: loadLayeredSkills( in src/cli/commands/run-task-verb.ts"
+  note: "Prerequisite-ordered per operator answer fb-1792859781609-3d59e3: must not be dispatched or built until BOTH W1-T10135 (skill-conformance-discovery, submission nanoclaw-2026-10-13/skill-conformance-discovery) and W1-T10576 (injected-skill prompt-surface gate, successor of nanoclaw-2026-10-13/prompt-surface-covers-injected-skills) have merged. Re-verify cited lines at current main: the selection call is src/cli/commands/run-task-verb.ts (loadInjectableSkills(join(repoRoot, \".claude\", \"skills\")) near line 6579), not src/run-task.ts. Does not release any dependency/security hold, change prompt-injection policy, selection budget, withholding, or approval rules."
+  rationale: |
+    Operator ruled 2026-10-13 "Layer per-repo skills" (feedback fb-1791856366580-a47db8, submission nanoclaw-2026-10-13/per-repo-skills). Skills are read from the engine checkout only, while learnings follow the target repo via projectLearningsHome, so a remudero-site or remudero-console task never sees its own repo's skills.
+    Add a layered loader in skill-workshop.ts reusing loadInjectableSkills over both trees, tag each skill with its source repo, resolve collisions to the target repo, and surface both in the skills.selection and skills.injected rows. Fix-rung (fix.ts) layering is out of scope.

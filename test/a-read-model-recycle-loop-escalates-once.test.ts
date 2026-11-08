@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -10,7 +10,7 @@ import {
   type ReadModelIssueAnswer, type ReadModelIssueRequest, type ReadModelWorkerHandle,
 } from "#src/lib/read-model-worker.js";
 import type { ShadowRequest } from "#src/lib/view-shadow.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-01T12:00:00.000Z");
 /** Far past any watchdog bound the tests reach, so every advance recycles a silent worker. */
@@ -61,8 +61,7 @@ function harness(t: TestCtx, issues: IssueGateway, issueRequest?: IssueRunner): 
   logs: Array<{ step: string; extra: Record<string, unknown> }>; ledgerPath: string; watch: () => void; advance: (ms: number) => void;
   recycle: () => Promise<void>; steady: (catchUp?: boolean) => Promise<void>; steps: () => string[]; settled: () => Promise<void>;
 } {
-  const stateDir = makeTempDir("recycle-loop");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "recycle-loop").dir;
   const ledgerPath = join(stateDir, "ledger.ndjson");
   let ms = T0;
   const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
@@ -83,7 +82,7 @@ function harness(t: TestCtx, issues: IssueGateway, issueRequest?: IssueRunner): 
     log: (step, extra = {}) => void logs.push({ step, extra }), every: (run) => ((watch = run), () => undefined),
     observe: (msg) => void (msg.type === "state" && states++),
   });
-  t.after(() => handle.stop());
+  onReadModelClose(t, () => handle.stop());
   const count = (step: string): number => logs.filter((l) => l.step === step).length;
   const until = async (done: () => boolean, what: string): Promise<void> => {
     for (let i = 0; i < 500 && !done(); i++) await sleep(5);
@@ -249,7 +248,7 @@ test("the issue thread answers off the event loop and a dead one answers with wh
   const dying = new URL(`data:text/javascript,${encodeURIComponent(`process.exit(3);`)}`);
   const close = { op: "close", repository: "o/r", url: "https://github.com/o/r/issues/5", comment: "done" } as const;
   const alive = setInterval(() => undefined, 1_000); // the thread is unref'd, as serve's other threads are
-  t.after(() => clearInterval(alive));
+  onReadModelClose(t, () => clearInterval(alive));
   assert.deepEqual(await threadIssueRequest(answering)(close), { url: "https://github.com/o/r/issues/5" });
   assert.deepEqual(await threadIssueRequest(dying)(close), { error: "the issue thread exited with code 3" });
   const closed: string[] = [];
@@ -258,10 +257,9 @@ test("the issue thread answers off the event loop and a dead one answers with wh
 });
 
 test("the real issue thread runs the escalation through tryEscalate and answers", async (t) => {
-  const stateDir = makeTempDir("recycle-loop-thread");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "recycle-loop-thread").dir;
   const alive = setInterval(() => undefined, 1_000);
-  t.after(() => clearInterval(alive));
+  onReadModelClose(t, () => clearInterval(alive));
   const ledgerPath = join(stateDir, "ledger.ndjson");
   // No options: escalate() refuses before any `gh` call, and tryEscalate ledgers the refusal.
   const escalation = { class: "MANUAL", taskId: "READ-MODEL-CORE", summary: "s", detail: "d", options: [], recommendation: "r" } as const;

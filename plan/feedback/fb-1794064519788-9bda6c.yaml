@@ -15,10 +15,34 @@ raw: Console Wreckterra plan recovery aborts with no receipt after verified
   an admitted plan receipt.
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/17209
+summary:
+  headline: Wreckterra plan recovery aborts with no receipt; approve scoped repair
+  what_happened: Console plan recovery times out (8 s browser budget, 5 s upstream
+    write timeout), so the UI shows 'This operation was aborted' with no
+    receipt, even though Core may already have received the write. The saved
+    plan command is still awaiting reconciliation, and Build must stay locked
+    until Core returns an admitted plan receipt.
+  decision: Approve the narrowly scoped Console timeout and idempotent-replay
+    repair through normal review and CI, and keep Build locked until Core
+    returns an admitted plan receipt.
+  options:
+    - label: Approve scoped repair
+      consequence: Files a narrow timeout and idempotent-replay fix through review and
+        CI, keeping the frozen command and request identity, and proves a
+        delayed response is reconciled exactly once.
+      intent: approve
+    - label: Check Core for a receipt first
+      consequence: Asks for a Core-side lookup of the original write before any
+        change; no code or command is touched yet.
+      intent: reply
+    - label: Decline repair
+      consequence: No fix ships; the plan stays awaiting reconciliation and Build
+        stays locked indefinitely.
+      intent: decline
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

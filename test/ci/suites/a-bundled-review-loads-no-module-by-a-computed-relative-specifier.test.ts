@@ -78,6 +78,8 @@ test("a decision replay reads the required publisher through the reader its call
     fetchLifecycle: () => ({ merged: false, closed: false, reviewInputDigest: input, baseRef: "main" }),
     fetchCurrentStatus: () => ({ state: "success", posterLogin: "human", posterType: "User" }) as review.ReviewStatusEntry,
     fetchPublisher: () => binding,
+    // W1-T11443: a SUCCESS reads the head's status history first; this head has no prior FAILURE.
+    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
     readRequiredContexts: async (owner, repo, branch, readText) => {
       branches.push(`${owner}/${repo}@${branch}`);
       await readText(["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`]);

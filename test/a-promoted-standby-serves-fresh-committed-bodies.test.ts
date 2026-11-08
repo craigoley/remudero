@@ -5,7 +5,7 @@
  * one tick of the old generation releasing it.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
@@ -17,13 +17,12 @@ import {
   type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
 import type { ViewSource } from "#src/lib/views.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-01T12:00:00.000Z");
 
 function scratch(t: { after: (fn: () => void) => void }, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -52,7 +51,7 @@ function activeGeneration(t: { after: (fn: () => void) => void }) {
   const instances = [{ name: "core", ledgerDir }];
   const ticker = createReadModelTicker({ stateDir, instances, clock, holder: "active", post: (m) => void messages.push(m), oracle: "off" });
   let released = false;
-  t.after(() => void (released || ticker.release()));
+  onReadModelClose(t, () => void (released || ticker.release()));
   const tickUntilNewBody = (): void => {
     const before = statusBodies(messages).length;
     for (let pass = 0; pass < 8 && statusBodies(messages).length === before; pass++) ticker.tick();
@@ -116,7 +115,7 @@ test("a second worker on the same DB acquires the lease within one tick of the f
   active.tickUntilNewBody();
   const posted: ReadModelWorkerMessage[] = [];
   const next = createReadModelTicker({ stateDir: active.stateDir, instances: active.instances, clock: active.clock, holder: "next", post: (m) => void posted.push(m), oracle: "off" });
-  t.after(() => void next.release());
+  onReadModelClose(t, () => void next.release());
   const lease = (): string | undefined => {
     const states = posted.filter((m) => m.type === "state");
     const last = states[states.length - 1];

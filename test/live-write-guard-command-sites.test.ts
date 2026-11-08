@@ -221,6 +221,7 @@ function writeGhShim(
       "#!/bin/sh",
       "# $* is the full argv; branch name is embedded in --head for create, else derived.",
       'case "$*" in',
+      '  *"/statuses?"*) echo "[[]]" ;;',
       opts.failPrList
         ? '  *"pr list"*) echo "gh: rate limit exceeded" 1>&2; exit 1 ;;'
         : '  *"pr list"*) echo "[]" ;;',

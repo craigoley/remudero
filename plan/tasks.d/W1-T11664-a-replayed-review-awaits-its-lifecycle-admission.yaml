@@ -11,7 +11,10 @@
   plan_refs: [W1-T11458, W1-T9549, W1-T11162, W1-T5726, W1-T11631]
   depends_on: [W1-T11631]
   files: [src/cli/commands/review.ts, test/review/a-replayed-review-awaits-its-lifecycle-read.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=6eddeeb542dacf13
+  # backlog gardener: placed=2026-11-08T11:45:12.759Z
   attempts: 0
   rationale: |
     reviewCommand's replay-restoration options explicitly supply synchronous

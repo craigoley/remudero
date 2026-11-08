@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, statSync, utimesSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BOARD_PROJECTION_DDL } from "#src/lib/board-projection.js";
@@ -10,7 +10,7 @@ import { createNowView, type NowViewContext } from "#src/lib/now-view.js";
 import type { BoardPrRest } from "#src/lib/open-prs-rest.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelLease } from "#src/lib/read-model-db.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-01T08:00:00.000Z");
 const IDS = ["W1-T1", "W1-T2", "W1-T3", "W1-T4", "W1-T5"];
@@ -36,14 +36,13 @@ function openPr(number: number, taskId: string): BoardPrRest {
  * task the board re-derived is a task it wrote, and one it reused is not.
  */
 function world(t: TestCtx) {
-  const root = makeTempDir("now-dirty");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "now-dirty").dir;
   let ms = T0;
   const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
   const ledgerDir = join(root, "core", "state");
   mkdirSync(ledgerDir, { recursive: true });
   const db = openProjectorReadModel(join(root, "home"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   const lease: ReadModelLease = got.lease;

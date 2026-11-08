@@ -7,7 +7,7 @@
  * doubling each unread build, and goes back to its unstretched schedule on the next read.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -31,9 +31,9 @@ import {
   type ReadModelViewsInput,
   type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { createDemandBook } from "#src/lib/view-demand.js";
 import { VIEW_VERSIONS_PATH } from "#src/lib/view-events.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-09T08:00:00.000Z");
 const LIVE = "ledger.ndjson";
@@ -41,8 +41,7 @@ const LIVE = "ledger.ndjson";
 type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -88,7 +87,7 @@ test("a read-paced view nobody reads is rebuilt at most once per stretched inter
   switchOn(stateDir, ["now", "steady"]);
   const hand = handClock(T0 + 1_000);
   const projector = projectorStates(stateDir, ledgerDir, hand.clock);
-  t.after(() => void projector.release());
+  onReadModelClose(t, () => void projector.release());
   const costMs = 400;
   const builds: Array<[string, number]> = [];
   const built = (name: string) => () => {
@@ -103,7 +102,7 @@ test("a read-paced view nobody reads is rebuilt at most once per stretched inter
     { name: "steady", version: 1, materialize: built("steady") },
   ];
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock: hand.clock, holder: "proj-holder", views, viewsOnly: true, oracle: "off", post: () => {} });
-  t.after(() => void ticker.release());
+  onReadModelClose(t, () => void ticker.release());
   ticker.observe(projector.states);
   const tickMs = 250;
   const run = (ms: number): void => {
@@ -182,7 +181,7 @@ setInterval(() => {}, 1000);
 `);
   const hand = handClock(T0);
   const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], workerUrl, clock: hand.clock, every: () => () => undefined, stopWaitMs: 1 });
-  t.after(() => void handle.stop());
+  onReadModelClose(t, () => void handle.stop());
   handle.noteViewRead?.("/v1/views/now");
   handle.start();
   handle.noteViewRead?.("/v1/views/now");
@@ -208,7 +207,7 @@ if (lane === "fast") parentPort.postMessage({ type: "view_lane", view: "now", in
 setInterval(() => {}, 1000);
 `);
   const lanes = threadViews({ data: { stateDir: "/nonexistent", instances: [], tickMs: 5, holder: "h" }, workerUrl, relay: () => {}, log: () => {}, every: () => () => undefined });
-  t.after(() => lanes.close());
+  onReadModelClose(t, () => lanes.close());
   const got = (): string[] => (existsSync(inputs) ? readFileSync(inputs, "utf8").trim().split("\n") : []);
   await until(() => got().includes("heavy:lane:now:true") || got().some((l) => l.startsWith("heavy:lane")), "the heavy lane was spawned");
   lanes.read("/v1/views/nav-badge");
@@ -221,13 +220,13 @@ test("the view thread and the projector thread take a read message without faili
   writeFileSync(join(ledgerDir, LIVE), row(Date.now()));
   switchOn(stateDir, ["extra"]);
   const projector = projectorStates(stateDir, ledgerDir, { now: () => Date.now(), date: () => new Date(), iso: () => new Date().toISOString() });
-  t.after(() => void projector.release());
+  onReadModelClose(t, () => void projector.release());
   const viewsModule = moduleFile(t, "paced-thread-module", `export default [{ name: "extra", version: 1, readPaced: true, materialize: () => [{ key: "", data: { extra: 1 }, sources: [] }] }];\n`).href;
   let onView: ((msg: ReadModelViewsInput) => void) | undefined;
   const viewPosted: ReadModelWorkerMessage[] = [];
   const viewPort = { on: (_e: "message", run: (msg: ReadModelViewsInput) => void) => void (onView = run), postMessage: (m: unknown) => void viewPosted.push(m as ReadModelWorkerMessage), close: () => {} };
   runReadModelViewWorker(viewPort, { stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 5, holder: "proj-holder", viewsModule });
-  t.after(() => onView?.({ type: "stop" }));
+  onReadModelClose(t, () => onView?.({ type: "stop" }));
   onView?.({ type: "read", path: "/v1/views/extra" });
   onView?.({ type: "state", instances: projector.states });
   await until(() => viewPosted.some((m) => m.type === "body" && m.entry.view === "extra"), "the view thread built its body after a queued read");
@@ -240,7 +239,7 @@ test("the view thread and the projector thread take a read message without faili
   let onMessage: ((msg: { type?: string }) => void) | undefined;
   const port = { on: (_event: "message", run: (msg: { type?: string }) => void) => void (onMessage = run), postMessage: (m: unknown) => void posted.push(m as ReadModelWorkerMessage), close: () => {} };
   runReadModelWorker(port, { kind: "remudero-read-model", stateDir: workerState, instances: [{ name: "core", ledgerDir: workerLedger }], tickMs: 5, signal: new SharedArrayBuffer(8) });
-  t.after(() => onMessage?.({ type: "stop" }));
+  onReadModelClose(t, () => onMessage?.({ type: "stop" }));
   onMessage?.({ type: "read", path: "/v1/views/read-model" } as { type: string });
   await until(() => posted.some((m) => m.type === "body" && m.entry.view === "read-model"), "the projector thread kept building after a read");
   assert.deepEqual(posted.filter((m) => m.type === "log" && /views_failed|views_exited|tick_failed/.test(m.step)).map((m) => m.type === "log" && m.step), []);
