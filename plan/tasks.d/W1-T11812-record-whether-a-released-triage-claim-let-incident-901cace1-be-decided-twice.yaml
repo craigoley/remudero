@@ -1,0 +1,94 @@
+- id: W1-T11812
+  title: "Record whether incident-901cace1adefcf4b was decided twice (#17389 'already decided, no task', then #17394 'ambiguous, parked for the grill') because the first triage released refs/rmd-triage/incident-901cace1adefcf4b while its PR was still open and the entry still read status new. This is a read-only investigation: it produces a falsifiable timeline and a verdict of proved, refuted or unknown, and changes nothing"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  origin: architect
+  plan_refs: ["§5B"]
+  files:
+    - docs/forensics/triage-incident-901cace1adefcf4b.md
+  rationale: >-
+    OBSERVED, from the two PR pages (read without auth at filing time): feedback#incident-901cace1adefcf4b got two
+    triage verdicts that disagree, and BOTH merged to main on 2026-11-08. #17389 (head
+    run-TRIAGE-incident-901cace1adefcf4b-1794148822712, assignment 24389313-06c2-434e-bf65-78b754c60f6b, merge commit
+    f4c4af2) set status rejected with "already decided, no task". #17394 (head
+    run-TRIAGE-incident-901cace1adefcf4b-1794149957761, assignment 558f7e87-0437-4259-8601-4eb66c90a844, commits
+    c1788c9 and f530ea9; it was closed and reopened before it merged) parked the entry for the grill and opened
+    needs-human issue #17393. The run-id suffixes are 1,135,049 ms apart, about 18.9 minutes. The entry on main now
+    reads status grilling, so the second verdict silently overwrote the first.
+
+    THE HYPOTHESIS UNDER TEST. decideTriageClaimRelease's holder arm (src/lib/auto-triage.ts) drops the claim
+    "on completion, in a finally, success or not". So once the first lane has published its PR, the claim ref is
+    gone while the PR is still open and main still says status new. After that, the only cross-host guard is the
+    open-PR read (isFeedbackOpenPr / readFeedbackLiveState; W1-T300 and its wiring W1-T1019), and decideAutoTriage's
+    own status-new read cannot see an unmerged verdict. If the second run is auto-triage, the question is whether
+    the open-PR guard missed #17389 and why. If it is a direct triage command, the question is whether that path
+    consults the open-PR guard at all. Either way, a second claim acquire would succeed against a released ref.
+    Both explanations are plausible. The receipts have to pick one, or say they cannot.
+
+    Settled by lookup: is this already filed or decided? -> no. No shard names 901cace1adefcf4b, #17389 or #17394
+    as a duplicate decision. #17394 shows up in W1-T11750 and W1-T11763 only as a row in an open-PR census (grep of
+    plan/tasks.d). Settled by lookup: is the post-claim window already covered? -> no. W1-T1132 closes the window
+    BEFORE publication (pre-Architect claim). W1-T4769 is a dead-holder release. W1-T6117 (queued) keeps the remote
+    claim across a holder CRASH after PR creation. None of them tests a HEALTHY holder that releases on completion
+    while its PR is still open (plan/tasks.d/W1-T1132-*, W1-T4769-*, W1-T6117-triage-post-pr-handoff-crash-safe.yaml).
+    Settled by lookup: what are the receipt names? -> triage.claim and triage.claim_released (ref, arm, dropped,
+    reason) in src/lib/auto-triage.ts. auto_triage.fired, skipped_inflight, stood_down, held and run_failed in
+    src/lib/daemon.ts. pr.opened and run.awaiting_external per W1-T6117. Settled by lookup: who answers #17393? ->
+    nobody in this task. It is the needs-human grill #17394 opened, and only the operator answers it
+    (https://github.com/craigoley/remudero/pull/17394). Settled by lookup: what are the two PRs' heads, assignments
+    and merge state? -> as above (https://github.com/craigoley/remudero/pull/17389,
+    https://github.com/craigoley/remudero/pull/17394).
+  design: |
+    READ-ONLY. Do not modify triage, claims, refs/rmd-triage/*, the feedback record, either PR, or #17393. Do not
+    answer, label, comment on or close #17393. Its needs-human state is evidence and stays as it is. The only
+    write is the new report docs/forensics/triage-incident-901cace1adefcf4b.md, which holds every finding
+    below. Do not edit this shard: Rule 15 refuses criteria edits, and the harness owns status.
+
+    1. POSITIVE CONTROL FIRST. Before reading anything about this incident, confirm that the ledger corpus you will
+       search (live ledger plus every rotation/archive the ledger union opens) contains a KNOWN row from the same
+       window. The control is the pr.opened, or the merge receipt, of #17389 itself, or any triage.claim row
+       timestamped on 2026-11-08 between 14:00Z and 16:00Z. The run-id suffixes decode to about 14:40:22Z and
+       14:59:17Z. Record the corpus paths, their time span, and the
+       control row's ts and seq. If the control is absent, the corpus is blind for this window: say so, and do not
+       treat any missing row below as evidence of absence.
+    2. JOIN BOTH RUNS. For each of TRIAGE-incident-901cace1adefcf4b-1794148822712 and -1794149957761, collect:
+       the task and run id, assignment id, invoking entry point (auto-triage daemon fire versus direct triage
+       command, from the auto_triage.* rows or their absence, and the run's argv/actor), host and pid, the
+       triage.claim row (proceed, stale_released, reason), the triage.claim_released row (arm, dropped), any refusal
+       or skip row (auto_triage.skipped_inflight, stood_down, held), and pr.opened / run.awaiting_external. From
+       GitHub, collect for each PR: opened-at, head sha at open and at merge, base sha, the close/reopen events on
+       #17394, and the merged-at time and merge commit.
+    3. TIMELINE. Put one ordered table (ts, source, event, run) of every receipt above. The hypothesis is PROVED
+       only if the table shows this order: run 1 claim acquired, then #17389 opened, then run 1 claim released
+       (holder arm), then run 2 claim acquired (proceed true, not stale-released), all while #17389 is open and
+       before it merges. It must also show the open-PR guard either not consulted by run 2's entry point, or
+       consulted and answering not-in-flight. The hypothesis is REFUTED if any of these holds: run 2's claim
+       acquire precedes run 1's release; #17389 had merged before run 2 started; or run 2 claimed through the
+       stale/evidence arm. Name the row that refutes it.
+    4. VERDICT. Write `investigation verdict: proved`, `refuted`, or `unknown`. For unknown, name the MINIMUM
+       missing evidence: which receipt, from which run, and which retention or emission gap made it absent. Do not
+       infer past the receipts.
+    5. FOLLOW-UP. Only if proved: file ONE separate implement task, under its own minted id, in a separate filing.
+       Scope it narrowly to the proved gap (for example: the holder keeps or hands off the claim until its PR
+       merges or closes, or direct triage consults the open-PR guard). Choose whichever the timeline proved, and
+       name its overlap with W1-T6117. Record that id in the report. Never implement the fix in this task, and never widen
+       this task into it. If the verdict is refuted or unknown, record `follow-up: none` and the reason.
+  acceptance:
+    - claim: "The report records the ledger/archive corpus searched, its time span, and a named positive-control row from the 2026-11-08 window, or states that the corpus is blind for that window"
+      proof: "grep: corpus positive control: in docs/forensics/triage-incident-901cace1adefcf4b.md"
+    - claim: "The report carries one ordered timeline joining both runs' claim acquire/release/refusal receipts with both PRs' open, head, base, reopen and merge receipts"
+      proof: "grep: investigation timeline: in docs/forensics/triage-incident-901cace1adefcf4b.md"
+    - claim: "The report names a verdict of proved, refuted or unknown, citing the deciding row, or for unknown the minimum missing evidence"
+      proof: "grep: investigation verdict: in docs/forensics/triage-incident-901cace1adefcf4b.md"
+    - claim: "The report records the separately filed follow-up task id when proved, or a follow-up of none with its reason"
+      proof: "grep: follow-up: in docs/forensics/triage-incident-901cace1adefcf4b.md"
+  note: "type:recon, verify:auto, risk:low. The task reads receipts, and its only artifact is a new report file.
+    Every proof greps a line-leading label (corpus positive control:, investigation timeline:, investigation
+    verdict:, follow-up:) in docs/forensics/triage-incident-901cace1adefcf4b.md. That file does not exist at
+    filing, so every proof fails until the investigation writes it. The labels are deliberately kept out of this
+    shard as proof targets: a self-grep would pass on day one. #17393 stays needs-human and untouched."
