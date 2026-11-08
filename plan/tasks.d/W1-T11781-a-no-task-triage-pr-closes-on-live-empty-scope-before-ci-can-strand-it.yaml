@@ -16,6 +16,8 @@
     - src/run-task.ts
     - test/triage/no-task-triage-close-before-ci.test.ts
     - test/empty-diff-merge-gate.test.ts
+    - test/helpers/gh-shim.ts
+    - test/helpers/gh-shim.test.ts
   rationale: |
     PR #17348 was a closed, unmerged triage PR with zero changed files. Its feedback entry already
     had `status: rejected` at the base, head and current main; W1-T10625 already owns the accepted
@@ -40,8 +42,12 @@
     SCOPE AMENDMENT: the existing W1-T963 end-to-end regression fixture must also be updated. Its old fake
     REST response omits `base.sha`, and it injects the sibling landing only during the CI poll; both assumptions
     predate the required exact-head/base safety read. The fixture will model complete PR identity and keep the
-    sibling landing during CI, proving the post-wait scope recheck still catches it. No additional production
-    path is added to this task.
+    sibling landing during CI, proving the post-wait scope recheck still catches it. The new early-close
+    fixture also needs the exact head and base SHAs produced by the triage branch push. The shared `ghShim`
+    currently emits only fixed response text, so add a route that streams the current contents of a response
+    file and verify that capability in its helper suite. The bare-origin post-receive fixture writes the PR
+    identity response when the branch is pushed. This keeps the test on the shared shim and avoids adding
+    another hand-rolled shell fixture to the census.
   acceptance:
     - claim: "A no_task or grill triage PR with a complete empty live declared scope closes before a red CI wait can strand it, after a fresh read confirms the expected open PR head and base"
       proof: "unit test: W1-T963: an already-done triage PR is closed not merged"
@@ -51,6 +57,8 @@
       proof: "unit test: W1-T963: a non-empty diff still passes in the same run"
     - claim: "The existing no_task/grill terminalizer remains limited to those actions and does not classify a proposal from its feedback-file diff alone"
       proof: "unit test: W1-T963: an empty-diff PR is refused"
+    - claim: "The shared ghShim can return a response file's updated contents at invocation time"
+      proof: "unit test: test/helpers/gh-shim.test.ts"
   falsifier: |
     Place the live-scope terminalizer after the CI early return: the red-CI empty-scope case must
     fail by leaving the PR open. Treat a fetch or PR-state refusal as an empty scope: the incomplete
