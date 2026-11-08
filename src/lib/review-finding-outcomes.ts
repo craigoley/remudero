@@ -10,6 +10,8 @@ export interface FindingFlowRow {
   servedModel: string | null;
   reviewModel: string | null;
   findingId: string | null;
+  /** Round-independent finding identity; absent on receipts written before it existed. */
+  lineageKey?: string | null;
   findingCategory: string | null;
   findingAnchorStatus: "verified" | "unsupported" | null;
   findingCaptureState: "unavailable" | "zero" | "captured" | "partial" | null;
@@ -41,7 +43,7 @@ interface HumanVerdictEvidence extends FindingEvidenceBase {
 }
 export type VerifiedFindingEvidence = MechanismFalsifierEvidence | HumanVerdictEvidence;
 
-export type FindingOutcome = "confirmed-repair" | "human-accepted" | "human-rejected" | "conflicting" | "unknown" | "superseded";
+export type FindingOutcome = "confirmed-repair" | "human-accepted" | "human-rejected" | "conflicting" | "unknown" | "persisted" | "not-re-raised" | "legacy-superseded";
 export interface FindingOutcomeCell {
   model: string;
   category: string;
@@ -52,7 +54,9 @@ export interface FindingOutcomeCell {
   humanRejected: number;
   conflicting: number;
   unknown: number;
-  superseded: number;
+  persisted: number;
+  notReRaised: number;
+  legacySuperseded: number;
   captureMissingPrs: number;
   malformedOrDropped: number;
   missingReceiptCount: number;
@@ -122,10 +126,18 @@ export function deriveReviewFindingOutcomes(rows: readonly FindingFlowRow[], evi
     const negative = proof.some((item) => evidencePolarity(item) === "negative");
     const repair = proof.some((item) => item.kind === "mechanism-falsifier" && evidencePolarity(item) === "positive");
     const review = reviews.get(`${prUrl(row)}|${row.headSha}`);
-    const superseded = posted.some((candidate) => prUrl(candidate) === prUrl(row) && candidate.headSha !== row.headSha &&
-      (candidate.ts ?? "") > (row.ts ?? ""));
+    // Flow telemetry only: a later reviewed head either carries the same lineage key or it does not.
+    const laterHeads = new Set(posted.filter((candidate) => prUrl(candidate) === prUrl(row) && candidate.headSha !== row.headSha &&
+      (candidate.ts ?? "") > (row.ts ?? "")).map((candidate) => candidate.headSha));
+    const lineage: "persisted" | "not-re-raised" | null = !row.lineageKey || laterHeads.size === 0 ? null
+      : [...findings.values()].some((other) => other.lineageKey === row.lineageKey && prUrl(other) === prUrl(row) &&
+        other.headSha !== null && laterHeads.has(other.headSha)) ? "persisted" : "not-re-raised";
+    // Historical receipts used to be counted as superseded whenever a later head existed.
+    // Keep those in a separate compatibility bucket because their identity cannot be recovered.
+    const legacySuperseded = !row.lineageKey && laterHeads.size > 0;
     const outcome: FindingOutcome = positive && negative ? "conflicting" : row.findingAnchorStatus !== "verified" ? "unknown"
-      : repair ? "confirmed-repair" : positive ? "human-accepted" : negative ? "human-rejected" : superseded ? "superseded" : "unknown";
+      : repair ? "confirmed-repair" : positive ? "human-accepted" : negative ? "human-rejected"
+        : lineage ?? (legacySuperseded ? "legacy-superseded" : "unknown");
     return { findingId: row.findingId!, prUrl: prUrl(row)!, headSha: row.headSha!, model: row.servedModel ?? row.reviewModel ?? review?.reviewModel ?? "unknown",
       category: row.findingCategory ?? "unknown", outcome, evidenceProvenance: proof.map((item) => item.provenance).sort(),
       observedAt: row.ts, actionAt: proof.map((item) => item.observedAt).sort()[0] ?? null };
@@ -153,7 +165,8 @@ export function deriveReviewFindingOutcomes(rows: readonly FindingFlowRow[], evi
     const labeledCount = count("confirmed-repair") + count("human-accepted") + count("human-rejected");
     cells.push({ model, category, reviewedPrs: modelReviews.length, capturedFindings: units.length,
       confirmedUseful: count("confirmed-repair"), humanAccepted: count("human-accepted"), humanRejected: count("human-rejected"),
-      conflicting: count("conflicting"), unknown: count("unknown"), superseded: count("superseded"),
+      conflicting: count("conflicting"), unknown: count("unknown"), persisted: count("persisted"), notReRaised: count("not-re-raised"),
+      legacySuperseded: count("legacy-superseded"),
       captureMissingPrs: modelReviews.filter((row, index) => row.findingCaptureState === null || row.findingCaptureState === "unavailable" || row.findingCaptureState === "partial" || missingReceipts[index]! > 0).length,
       malformedOrDropped: modelReviews.reduce((sum, row) => sum + (row.findingInvalidCount ?? 0) + (row.findingDroppedCount ?? 0), 0),
       missingReceiptCount: missingReceipts.reduce((sum, count) => sum + count, 0),

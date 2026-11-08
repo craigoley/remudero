@@ -7,7 +7,7 @@
 // it ran as and why. Nothing here touches the run. A probe that fails ledgers why, and `startRunChildProbe` never rejects.
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -41,6 +41,7 @@ import type { RunResult } from "./run-result.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { killProcessGroup } from "./worker-containment.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { isWorkerProviderId, type WorkerProviderId } from "./config.js";
 
 export const RUN_CHILD_SHADOW_STEP = "run_child.shadow";
 export const RUN_CHILD_SHADOW_SKIPPED_STEP = "run_child.shadow_skipped";
@@ -320,6 +321,17 @@ export type RunChildProbeOutcome =
 
 const reasonOf = (error: unknown): string => String((error as Error)?.message ?? error).slice(0, 400);
 
+/** Remove only an empty run directory; a concurrent child that wrote content keeps its contract intact. */
+function removeEmptyRunDir(dir: string): void {
+  try {
+    rmdirSync(dir);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST") return;
+    throw error;
+  }
+}
+
 /**
  * W1-T9906: main's tip as last fetched into `repoDir`, the commit a run child's engine must be reachable from. Never the
  * checkout's HEAD: that moves only at a restart, and every engine is cut at a run worktree's origin/main.
@@ -447,13 +459,20 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
     )))(launch.kind, sampler);
     // The spec names the revision the engine's record holds under the pin, never the one resolved before the wait.
     const probeReservation = reservation;
-    const pinnedProbe = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (pinned) => writeSpec(dir, {
-      schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
-      engine: pinned, planSnapshotPath: snapshot.path,
-      reservationId: probeReservation.id ?? "", options,
-      ...(input.work ? { work: input.work } : {}),
-    } as RunChildSpec), seams.enginePin);
+    let pinnedProbe: Awaited<ReturnType<typeof pinEngineForRun>>;
+    try {
+      pinnedProbe = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (pinned) => writeSpec(dir, {
+        schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
+        engine: pinned, planSnapshotPath: snapshot.path,
+        reservationId: probeReservation.id ?? "", options,
+        ...(input.work ? { work: input.work } : {}),
+      } as RunChildSpec), seams.enginePin);
+    } catch (error) {
+      removeEmptyRunDir(dir);
+      throw error;
+    }
     if ("unavailable" in pinnedProbe) {
+      removeEmptyRunDir(dir);
       reservation.releaseOccupancy();
       reservation = undefined;
       return skip(pinnedProbe.unavailable);
@@ -877,13 +896,24 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     inFlightRunDirs.add(dir);
     // The spec names the revision the engine's record holds under the pin, never the one resolved before the wait.
     const runReservation = reservation;
-    const pinned = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (current) => writeSpec(dir, {
-      schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
-      engine: current, planSnapshotPath: snapshot.path,
-      reservationId: runReservation.id ?? "", options,
-      ...(input.work ? { work: input.work } : {}),
-    } as RunChildSpec), ports.enginePin);
-    if ("unavailable" in pinned) throw new Error(pinned.unavailable);
+    let pinned: Awaited<ReturnType<typeof pinEngineForRun>>;
+    try {
+      pinned = await pinEngineForRun(input.stateRoot, engine.sourceHash, runId, (current) => writeSpec(dir, {
+        schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
+        engine: current, planSnapshotPath: snapshot.path,
+        reservationId: runReservation.id ?? "", options,
+        ...(input.work ? { work: input.work } : {}),
+      } as RunChildSpec), ports.enginePin);
+    } catch (error) {
+      inFlightRunDirs.delete(dir);
+      removeEmptyRunDir(dir);
+      throw error;
+    }
+    if ("unavailable" in pinned) {
+      inFlightRunDirs.delete(dir);
+      removeEmptyRunDir(dir);
+      throw new Error(pinned.unavailable);
+    }
     engineSha = pinned.sha;
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
@@ -1213,7 +1243,7 @@ export interface DetachedWorkChildHost {
   hosts: ReadonlySet<string>;
   mode: () => "off" | "shadow" | "on";
   spawnReview: (input: {
-    pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean };
+    pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean; excludeProviders?: readonly WorkerProviderId[] };
     reviewKey: string;
     reviewAttemptId: string | undefined;
   }) => Promise<{ runId: string; settled: Promise<unknown>; readPhase?: () => string | undefined; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
@@ -1233,16 +1263,19 @@ export type DetachedWorkMode = "off" | "shadow" | "on";
 /** The review a detached child runs: `rmd review`'s options, `onPhase` included so its posted phase reaches status.json. */
 export type DetachedReviewCommand = (prArg: string, rest: string[], opts: {
   executionMode: "semantic"; planOnlyFiling?: boolean; reviewAttemptId?: string; onPhase?: (phase: string) => void;
+  excludeProviders?: readonly WorkerProviderId[];
 }) => Promise<number>;
 
 /** W1-T11151: a review as a run child's work. In a child, `reportReviewPhase` has no observer, so the phase writer is passed down. */
 export async function runDetachedReview(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void },
   review: DetachedReviewCommand): Promise<RunResult> {
   const inputs = work.inputs ?? {};
+  const excludeProviders = Array.isArray(inputs.excludeProviders) ? inputs.excludeProviders.filter(isWorkerProviderId) : [];
   const code = await review(String(work.prNumber), typeof inputs.repo === "string" ? ["--repo", inputs.repo] : [], {
     executionMode: "semantic",
     ...(typeof inputs.planOnlyFiling === "boolean" ? { planOnlyFiling: inputs.planOnlyFiling } : {}),
     ...(typeof inputs.reviewAttemptId === "string" ? { reviewAttemptId: inputs.reviewAttemptId } : {}),
+    ...(excludeProviders.length ? { excludeProviders } : {}),
     ...(ctx.onPhase === undefined ? {} : { onPhase: ctx.onPhase }),
   });
   if (code !== 0) {
@@ -1501,6 +1534,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = {
         kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey,
         inputs: { repo: input.repo, ...(reviewAttemptId !== undefined ? { reviewAttemptId } : {}),
+          ...(pr.excludeProviders?.length ? { excludeProviders: [...pr.excludeProviders] } : {}),
           ...(typeof pr.isPlanFiling === "boolean" ? { planOnlyFiling: pr.isPlanFiling } : {}) },
       };
       if (current === "shadow") {
