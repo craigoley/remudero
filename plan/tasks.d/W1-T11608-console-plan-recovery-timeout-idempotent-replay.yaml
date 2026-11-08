@@ -26,13 +26,13 @@
     NOT IN SCOPE: Core changes, new command types, changing the operator-session check."
   acceptance:
     - claim: "a Core response delayed beyond five seconds is reconciled exactly once with the original receipt"
-      proof: "unit test: tests/plan-recovery-timeout.test.ts"
+      proof: "unit test: a delayed Core response replays the original receipt exactly once"
     - claim: "resume replays the existing frozen command with the same request identity"
-      proof: "unit test: tests/plan-recovery-timeout.test.ts"
+      proof: "unit test: Resume reuses the frozen command and request identity"
     - claim: "Build stays locked until an admitted plan receipt is returned, including after abort or timeout"
-      proof: "unit test: tests/plan-recovery-timeout.test.ts"
+      proof: "unit test: Build remains locked until an admitted receipt after timeout"
     - claim: "an upstream timeout surfaces as an unknown-outcome state rather than a generic abort"
-      proof: "unit test: tests/plan-recovery-timeout.test.ts"
+      proof: "unit test: upstream timeout returns an unknown-outcome state"
   risk: high
   band_meaning: span
   # span rationale (#588 merits test): one cross-file invariant, unsatisfiable piecewise — a delayed Core response
@@ -43,4 +43,4 @@
   files: [src/lib/client-request.ts, lib/rmd-control.ts, tests/plan-recovery-timeout.test.ts]
   status: queued
   attempts: 0
-  note: "verify: human — these acceptance tests live in the remudero-console repository; run them from that checkout and review their results because this repository cannot resolve external test paths."
+  note: "verify: human — acceptance tests are in remudero-console/tests/plan-recovery-timeout.test.ts. These proofs name the exact Console test titles; run and review them from that repository checkout."
