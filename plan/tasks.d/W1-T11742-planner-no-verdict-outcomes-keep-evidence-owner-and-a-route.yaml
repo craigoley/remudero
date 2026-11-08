@@ -25,6 +25,9 @@
   origin: feedback#fb-1794149944233-e4c97f
   plan_refs: ["§7B"]
   files: [src/lib/plan-architect.ts, test/plan/planner-no-verdict-routes-to-an-owner.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=3b73bc8e0efab92c
+  # backlog gardener: placed=2026-11-08T22:31:49.721Z
   attempts: 0
   note: "Separate scope from W1-T11741 per the feedback."

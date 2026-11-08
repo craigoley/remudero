@@ -16,7 +16,10 @@
     - test/two-readers-cannot-disagree-about-one-sha.test.ts
     - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
     - test/gardeners/the-config-gardener-reads-the-same-steps-once-gather-runs-owns-its-list.test.ts
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=cca96b7e366f2fae
+  # backlog gardener: placed=2026-11-08T22:31:49.721Z
   attempts: 0
   rationale: |
     S1 PR-17156 merged head 8dbed01b3051b43ab407eebb96d3f704d3b13127 at
