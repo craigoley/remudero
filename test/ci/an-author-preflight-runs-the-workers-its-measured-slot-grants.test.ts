@@ -132,6 +132,14 @@ test("W1-T11583 criterion 1: an idle eight-core host uses more than one author t
 });
 
 test("W1-T11583 criterion 2: measured CPU and memory capacity still cap author test concurrency", async (t) => {
+  // Keep a positive control in this proof: the base must fail this task's removed
+  // one-worker ceiling, while the constrained cases below prove the new width
+  // still comes from measured CPU and memory capacity.
+  const idle = runAuthor(t, { cores: 8, load1: 0, headroomBytes: 32 * 1024 ** 3 });
+  assert.equal(idle.exitCode, 0);
+  assert.ok(idle.receipt.executionWorkers > 1, "the capacity path must use more than the removed fixed one-worker ceiling");
+  assert.ok(idle.receipt.executionWorkers <= AUTHOR_MAX_WORKERS);
+
   for (const [name, input] of [
     ["CPU", { cores: 3, load1: 0, headroomBytes: 32 * 1024 ** 3 }],
     ["memory", { cores: 8, load1: 0, headroomBytes: 512 * 1024 ** 2 }],
@@ -150,6 +158,13 @@ test("W1-T11583 criterion 2: measured CPU and memory capacity still cap author t
 });
 
 test("W1-T11583 criterion 3: pressure or disk refusal does not spawn affected tests", async (t) => {
+  // A base control makes the proof discriminating: refusal stays safe after this
+  // change, and an otherwise idle host can now use more than one worker.
+  const idle = runAuthor(t, { cores: 8, load1: 0, headroomBytes: 32 * 1024 ** 3 });
+  assert.equal(idle.exitCode, 0);
+  assert.ok(idle.receipt.executionWorkers > 1, "the refusal path must coexist with measured multi-worker capacity");
+  assert.ok(idle.receipt.executionWorkers <= AUTHOR_MAX_WORKERS);
+
   for (const refusal of ["pressure", "disk"] as const) {
     await t.test(refusal, (t) => {
       const { exitCode, affectedArgs, receipt } = runAuthor(t, {
