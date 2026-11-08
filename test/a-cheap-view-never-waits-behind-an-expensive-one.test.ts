@@ -24,6 +24,7 @@ import {
 } from "#src/lib/read-model-worker.js";
 import { trackWorkerThreads } from "#src/lib/worker-heaps.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-05T08:00:00.000Z");
 const LIVE = "ledger.ndjson";
@@ -31,8 +32,7 @@ const LIVE = "ledger.ndjson";
 type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -64,7 +64,7 @@ function switchOn(stateDir: string, views: string[]): void {
 
 test("while a fake view unit whose cost exceeds soloMs is mid-build, a cheap unit whose source moved is published before the heavy unit completes", async (t) => {
   let handle: ReturnType<typeof createReadModelWorker> | undefined;
-  t.after(() => void handle?.stop());
+  onReadModelClose(t, () => void handle?.stop());
   const stateDir = scratch(t, "lanes-state");
   const ledgerDir = scratch(t, "lanes-ledger");
   writeFileSync(join(ledgerDir, LIVE), row(Date.now(), "boot"));
@@ -121,7 +121,7 @@ test("a unit moves lanes when its measured cost crosses soloMs in either directi
   switchOn(stateDir, ["slow", "cheap", "snap"]);
   const hand = handClock(T0 + 1_000);
   const projector = projectorStates(stateDir, ledgerDir, hand.clock);
-  t.after(() => void projector.release());
+  onReadModelClose(t, () => void projector.release());
   let slowMs = 2_000;
   let cheapSource = "v0";
   const builds: string[] = [];
@@ -133,7 +133,7 @@ test("a unit moves lanes when its measured cost crosses soloMs in either directi
   const lane = (name: "fast" | "heavy") => {
     const posted: ReadModelWorkerMessage[] = [];
     const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock: hand.clock, holder: "proj-holder", views, viewsOnly: true, oracle: "off", lane: name, post: (m) => void posted.push(m) });
-    t.after(() => void ticker.release());
+    onReadModelClose(t, () => void ticker.release());
     ticker.observe(projector.states);
     return { ticker, posted, moves: () => posted.flatMap((m) => (m.type === "view_lane" ? [[m.view, m.heavy, m.costMs]] : [])) };
   };
@@ -195,13 +195,13 @@ test("the view thread body takes a lane move and a peer body from its threadView
   writeFileSync(join(ledgerDir, LIVE), row(Date.now(), "r1"));
   switchOn(stateDir, ["extra"]);
   const projector = projectorStates(stateDir, ledgerDir, { now: () => Date.now(), date: () => new Date(), iso: () => new Date().toISOString() });
-  t.after(() => void projector.release());
+  onReadModelClose(t, () => void projector.release());
   const viewsModule = moduleFile(t, "lanes-body-module", `export default [{ name: "extra", version: 1, materialize: () => [{ key: "", data: { extra: 1 }, sources: [] }] }];\n`).href;
   let onMessage: ((msg: ReadModelViewsInput) => void) | undefined;
   const posted: ReadModelWorkerMessage[] = [];
   const port = { on: (_e: "message", run: (msg: ReadModelViewsInput) => void) => void (onMessage = run), postMessage: (m: unknown) => void posted.push(m as ReadModelWorkerMessage), close: () => {} };
   runReadModelViewWorker(port, { stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 5, holder: "proj-holder", viewsModule, lane: "heavy" });
-  t.after(() => onMessage?.({ type: "stop" }));
+  onReadModelClose(t, () => onMessage?.({ type: "stop" }));
   onMessage?.({ type: "state", instances: projector.states });
   await sleep(100);
   assert.ok(!posted.some((m) => m.type === "body"), "a heavy lane builds nothing until a unit is handed to it");
@@ -213,7 +213,7 @@ test("the view thread body takes a lane move and a peer body from its threadView
 
 test("threadViews spawns the heavy lane on the first hand-off, names its thread, routes moves and bodies between the lanes, and watches each lane", async (t) => {
   const book = trackWorkerThreads();
-  t.after(() => book.stop());
+  onReadModelClose(t, () => book.stop());
   const inputs = join(scratch(t, "lanes-thread-inputs"), "inputs.txt");
   const workerUrl = moduleFile(t, "lanes-thread", `import { parentPort, workerData } from "node:worker_threads";
 import { appendFileSync } from "node:fs";
@@ -237,7 +237,7 @@ setInterval(() => {}, 1000);
     data: { stateDir: "/nonexistent", instances: [], tickMs: 5, holder: "h" }, workerUrl, clock: hand.clock,
     relay: (m) => void relayed.push(m), log: (step, extra) => void logs.push({ step, extra }), every: (run) => ((watch = run), () => undefined),
   });
-  t.after(() => lanes.close());
+  onReadModelClose(t, () => lanes.close());
   const got = (): string[] => (existsSync(inputs) ? readFileSync(inputs, "utf8").trim().split("\n") : []);
   await until(() => got().includes("heavy:lane:now:true"), "the fast lane's hand-off reached a heavy lane spawned for it");
   const kinds = book.live().map((w) => w.kind);
@@ -277,7 +277,7 @@ function stagedLanes(t: TestCtx, kind: string) {
   switchOn(stateDir, ["staged"]);
   const hand = handClock(T0 + 1_000);
   const projector = projectorStates(stateDir, ledgerDir, hand.clock);
-  t.after(() => void projector.release());
+  onReadModelClose(t, () => void projector.release());
   const plan = { costs: [2_000, 2_000, 50], due: true, stage: 0 };
   const view: ReadModelView = {
     name: "staged", version: 1,
@@ -298,7 +298,7 @@ function stagedLanes(t: TestCtx, kind: string) {
   const lane = (name: "fast" | "heavy") => {
     const posted: ReadModelWorkerMessage[] = [];
     const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock: hand.clock, holder: "proj-holder", views: [view], viewsOnly: true, oracle: "off", lane: name, post: (m) => void posted.push(m) });
-    t.after(() => void ticker.release());
+    onReadModelClose(t, () => void ticker.release());
     ticker.observe(projector.states);
     const run = (ticks: number): void => {
       for (let i = 0; i < ticks; i++) {

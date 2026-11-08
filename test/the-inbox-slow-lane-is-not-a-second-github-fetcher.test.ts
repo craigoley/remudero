@@ -23,6 +23,7 @@ import type { ShadowRequest } from "#src/lib/view-shadow.js";
 import type { ViewSource } from "#src/lib/views.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void; diagnostic: (message: string) => void };
 const HOUR_MS = 3_600_000;
@@ -79,14 +80,13 @@ function recordGh(t: TestCtx): GhShim {
   const shim = ghShim([{ when: "pulls?", stdout: "[]" }, { when: "issues?", stdout: "[]" }]);
   const path = process.env.PATH;
   process.env.PATH = `${shim.dir}:${path}`;
-  t.after(() => void (process.env.PATH = path));
+  onReadModelClose(t, () => void (process.env.PATH = path));
   return shim;
 }
 
 /** Core's checkout with two proposals. */
 function coreRoot(t: TestCtx): string {
-  const root = makeTempDir("rmd-e27-lane");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "rmd-e27-lane").dir;
   mkdirSync(join(root, "plan"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
@@ -108,7 +108,7 @@ function laneWorld(t: TestCtx, time: ReturnType<typeof manualTime>, root = coreR
     { inbox: { root, planPath, ledgerPath, inboxRoot: root, repository: "o/r" }, intervalMs: PASS_MS },
     { clock: time.clock, schedule: (run) => (pending.push(run), () => void pending.splice(pending.indexOf(run), 1)), inbox: { inboxMainSha: () => "a".repeat(40), inboxGrepAnchor: () => true } },
   );
-  t.after(() => lane.stop());
+  onReadModelClose(t, () => lane.stop());
   const units = (): number => posted.filter((m) => m.type === "unit" && m.unit === "inbox").length;
   /** The github source on the inbox body the lane's newest pass built. */
   const laneSource = (): ViewSource | undefined => {
@@ -164,8 +164,7 @@ test("the inbox notices an atomic snapshot replacement even when its mtime is un
 test("with the slow lane running exactly one fetcher calls github in either switch position", async (t) => {
   const shim = recordGh(t);
   const time = manualTime(T0);
-  const stateDir = makeTempDir("rmd-e27-switch");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "rmd-e27-switch").dir;
   const root = coreRoot(t);
   const board = createBoardSnapshotCache(root, "o", "r");
   const calls = { serve: 0, worker: 0 };
@@ -189,7 +188,7 @@ test("with the slow lane running exactly one fetcher calls github in either swit
     every: (run) => ((recheck = run), () => {}),
     github: { serve, ...timers, refresh: () => (calls.worker++, walk()) },
   });
-  t.after(() => {
+  onReadModelClose(t, () => {
     handle.stop();
     serve.stop();
   });

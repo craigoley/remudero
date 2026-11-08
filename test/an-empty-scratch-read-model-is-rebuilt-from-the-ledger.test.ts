@@ -14,17 +14,17 @@ import { readModelCommand } from "#src/lib/read-model-cli.js";
 import { READ_MODEL_DB_DIR_ENV, readModelDbDir } from "#src/lib/read-model-db.js";
 import { createReadModelTicker, readModelStatusView, readModelSwitchesPath, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 function scratch(t: { after: (fn: () => void) => void }, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
 function withDbDir(t: { after: (fn: () => void) => void }, value: string): void {
   const saved = process.env[READ_MODEL_DB_DIR_ENV];
   process.env[READ_MODEL_DB_DIR_ENV] = value;
-  t.after(() => {
+  onReadModelClose(t, () => {
     if (saved === undefined) delete process.env[READ_MODEL_DB_DIR_ENV];
     else process.env[READ_MODEL_DB_DIR_ENV] = saved;
   });
@@ -57,12 +57,12 @@ test("a missing scratch read-model dir is rebuilt in full from the ledger and th
 
   const messages: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: (m) => void messages.push(m), oracle: "off" });
-  t.after(() => void ticker.release());
+  onReadModelClose(t, () => void ticker.release());
   ticker.tick();
   assert.ok(existsSync(join(dbDir, "core.v1.sqlite")), "the worker created the scratch directory and a fresh DB in it");
   assert.deepEqual(readdirSync(join(stateDir, "read-model")).filter((f) => f.endsWith(".sqlite")), [], "no DB file is written to the state disk");
   const db = openProjectorReadModel(stateDir, "core");
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   assert.equal(Number(db.prepare("SELECT count(*) AS n FROM seen").get()?.n), ROWS, "every ledger row was projected: a full rebuild");
 
   out.length = 0;
@@ -93,7 +93,7 @@ test("shadow readiness counters survive a deallocate that wipes the scratch read
 
   const posted: ReadModelWorkerMessage[] = [];
   const after = tickerOver(posted);
-  t.after(() => void after.release());
+  onReadModelClose(t, () => void after.release());
   after.tick();
   assert.ok(existsSync(join(dbDir, "core.v1.sqlite")), "the wiped DB was rebuilt on scratch");
   assert.deepEqual(shown(posted)?.map((s) => [s.view, s.samples, s.streakSamples]), [["nav-badge", 3, 3]], "the streak outlived the scratch disk");

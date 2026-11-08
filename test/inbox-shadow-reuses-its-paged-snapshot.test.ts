@@ -14,11 +14,12 @@ import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { viewMode } from "#src/lib/views.js";
 import { readShadowCounters } from "#src/lib/view-shadow-store.js";
 import { viewShadowPath } from "#src/lib/view-shadow.js";
+import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
 
 async function world(t: TestContext, count = 180) {
   const root = makeTempDir("inbox-shadow-pages");
   const closers: Array<() => void> = [];
-  t.after(() => { for (const close of closers) close(); rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  onReadModelClose(t, () => { for (const close of closers) close(); rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
   const state = join(root, "state");
   mkdirSync(state);
   mkdirSync(join(root, "plan"));

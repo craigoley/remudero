@@ -16,6 +16,7 @@ import type { Plan, Task } from "../src/lib/plan.js";
 import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 type Row = Record<string, unknown>;
@@ -52,12 +53,11 @@ interface World {
 }
 
 function world(t: TestCtx): World {
-  const dir = makeTempDir("board-cross-task");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "board-cross-task").dir;
   let now = T0;
   const clock: Clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
   const db = openProjectorReadModel(dir, "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   const projector = createLedgerProjector({ ledgerDir: dir, db, lease: got.lease, clock });

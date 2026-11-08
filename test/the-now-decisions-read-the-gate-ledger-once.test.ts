@@ -15,6 +15,7 @@ import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void; mock: { method: (obj: object, name: string, impl: (...args: never[]) => unknown) => unknown; restoreAll: () => void } };
 const T0 = Date.parse("2026-10-06T08:00:00.000Z");
@@ -32,8 +33,7 @@ const SEAMS: Partial<NowViewOptions> = {
 
 /** One core instance whose rotation archive holds a gate row of each reader, and the archive's path. */
 function instanceWithArchive(t: TestCtx) {
-  const root = makeTempDir("now-gate-ledger");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "now-gate-ledger").dir;
   const ledgerDir = join(root, "core", "state");
   mkdirSync(ledgerDir, { recursive: true });
   // One row each reader needs: the reviewer gate reads the boot and its freshness check, the operator items the drift.
@@ -47,7 +47,7 @@ function instanceWithArchive(t: TestCtx) {
   writeFileSync(join(ledgerDir, "DEPLOY_IMAGE_MANUAL"), "");
   appendFileSync(join(ledgerDir, "ledger.ndjson"), `${JSON.stringify({ ts: new Date(T0 - 60_000).toISOString(), step: "worker.assignment", task_id: "W1-T1", run_id: "r1" })}\n`);
   const db = openProjectorReadModel(join(root, "home"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick();
@@ -69,7 +69,7 @@ test("a now decisions build reads each rotation archive once for both gate reade
     return Reflect.apply(read, fs, args);
   });
   syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  onReadModelClose(t, () => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const view = createNowView({ instances: [w.instance], clock, ...SEAMS });
   const [body] = view.materialize(w.ctx);
   assert.ok(body, "the body was built");

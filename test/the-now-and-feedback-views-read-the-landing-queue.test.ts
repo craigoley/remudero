@@ -14,13 +14,13 @@ import type { Plan } from "#src/lib/plan.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-01T04:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx): string {
-  const dir = makeTempDir("landing-queue-views");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "landing-queue-views").dir;
   return dir;
 }
 
@@ -49,7 +49,7 @@ function nowGrills(t: TestCtx, w: { root: string; stateRoot: string }): { data: 
   const ledgerDir = join(w.stateRoot, "state");
   mkdirSync(ledgerDir, { recursive: true });
   const db = openProjectorReadModel(join(w.stateRoot, "read-model-home"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const acquired = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(acquired.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: acquired.lease, clock });

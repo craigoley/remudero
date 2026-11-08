@@ -17,6 +17,7 @@ import { acquireLease } from "#src/lib/read-model-db.js";
 import { buildServeRoutes, buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 import type { GitHub } from "#src/lib/status.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 // The routes stamp rows at real time, and the projector quarantines a row ahead of its clock: so the clock is real.
 const T0 = systemClock.now();
@@ -31,8 +32,7 @@ function planText(ids: string[], repo: string): string {
 
 /** core (the gateway's own root) and site (a mounted instance), each with a ledger and a plan. */
 function fleet(t: { after: (fn: () => void) => void }) {
-  const base = makeTempDir("instance-answer");
-  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const base = readModelFixtureDir(t, "instance-answer").dir;
   const coreRoot = join(base, "core-root");
   const coreCheckout = join(coreRoot, "repos", "remudero");
   mkdirSync(join(coreRoot, "state"), { recursive: true });
@@ -84,7 +84,7 @@ function fleet(t: { after: (fn: () => void) => void }) {
 function nowOf(t: { after: (fn: () => void) => void }, f: ReturnType<typeof fleet>) {
   const clock = systemClock;
   const db = openProjectorReadModel(join(f.base, "read-model-home"), "site", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const acquired = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(acquired.ok);
   const projector = createLedgerProjector({ ledgerDir: f.siteState, db, lease: acquired.lease, clock });

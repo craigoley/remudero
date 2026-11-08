@@ -18,6 +18,7 @@ import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import type { ViewSource } from "#src/lib/views.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-14T12:42:00.000Z");
 const at = (ms: number): string => new Date(T0 + ms).toISOString();
@@ -35,13 +36,12 @@ function gateway(): GitHub {
 }
 
 test("W1-T9458: a now-view body is stamped as of what its board read", (t) => {
-  const root = makeTempDir("now-board-asof");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "now-board-asof").dir;
   const clock: Clock = { now: () => T0, date: () => new Date(T0), iso: () => new Date(T0).toISOString() };
   const ledgerDir = join(root, "core", "state");
   mkdirSync(ledgerDir, { recursive: true });
   const db: ReadModelDb = openProjectorReadModel(join(root, "read-model-home"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: got.lease, clock });

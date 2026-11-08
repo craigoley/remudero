@@ -9,6 +9,7 @@ import { shadowReadiness, viewShadowPath, withViewShadow } from "#src/lib/view-s
 import { readShadowCounters } from "#src/lib/view-shadow-store.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { trackWorkerThreads } from "#src/lib/worker-heaps.js";
+import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
 
 async function until(done: () => boolean, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -45,7 +46,7 @@ parentPort.on("message", (msg) => {
     workerUrl: pathToFileURL(worker), relay: (message) => void events.push(message),
     log: (step, extra) => void logs.push({ step, extra: extra ?? {} }),
   });
-  t.after(async () => {
+  onReadModelClose(t, async () => {
     lanes.close();
     await book.stop();
     rmSync(dir, { recursive: true, force: true });
@@ -113,7 +114,7 @@ test("shadow owner: captured inputs stay paired and failed preparation grants no
       return { data, asOfMs: now };
     } }], post: (message) => void events.push(message),
   });
-  t.after(() => { ticker.release(); rmSync(dir, { recursive: true, force: true }); });
+  onReadModelClose(t, () => { ticker.release(); rmSync(dir, { recursive: true, force: true }); });
   ticker.start();
   ticker.tick();
   const request = { view: "paired", key: "instance=core", requests: 1 };
@@ -168,7 +169,7 @@ export default [{ name: "paired-worker", version: 1, materialize: () => {
     every: (run, ms) => { timers.set(ms, run); return () => void timers.delete(ms); },
   });
   let sent = 0;
-  t.after(async () => {
+  onReadModelClose(t, async () => {
     t.diagnostic(JSON.stringify(logs.filter((row) => row.extra.view === "paired-worker" || /failed|exited/.test(row.step)).slice(-15)));
     t.diagnostic(JSON.stringify({ sent, switches: worker.switches(), body: worker.body("paired-worker")?.body.data, marks: existsSync(marks) ? readFileSync(marks, "utf8").trim().split("\n").slice(-15) : [] }));
     worker.stop(); await book.stop(); rmSync(dir, { recursive: true, force: true });

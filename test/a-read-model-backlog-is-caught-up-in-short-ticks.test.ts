@@ -16,6 +16,7 @@ import {
   type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 /** The work clock's cost of one applied row: time moves only when rows commit. */
@@ -24,8 +25,7 @@ const MS_PER_ROW = 10;
 type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -105,7 +105,7 @@ function catchUp(t: TestCtx, backlog: { archives: number; perArchive: number; li
       if (m.type === "log") order.push({ tick: tickNo, step: m.step });
     },
   });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   work.watch();
   const ticks: Run["ticks"] = [];
@@ -192,7 +192,7 @@ test("the read-model worker holds every instance lease before its first tick", a
 
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir, instances, clock: workClock(stateDir, []).clock, holder: "early", post: (m) => void posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   assert.deepEqual(posted.filter((m) => m.type === "log").map((m) => m.type === "log" && [m.step, m.extra.instance]), [["read_model.lease_acquired", "core"], ["read_model.lease_acquired", "site"]]);
   const [state] = posted.filter((m) => m.type === "state");
@@ -226,7 +226,7 @@ test("a read-model instance that cannot open at start backs off alone while the 
   writeFileSync(join(stateDir, "read-model", `site.v${LEDGER_PROJECTOR_SCHEMA_VERSION}.current`), "not-a-generation\n");
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: coreDir }, { name: "site", ledgerDir: coreDir }], clock: workClock(stateDir, []).clock, post: (m) => void posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   const failed = posted.flatMap((m) => (m.type === "log" && m.step === "read_model.tick_failed" ? [m.extra] : []));
   assert.equal(failed.length, 1);

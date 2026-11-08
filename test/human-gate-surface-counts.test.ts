@@ -27,14 +27,14 @@ import type { GitHub } from "#src/lib/status.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import type { ViewSource } from "#src/lib/views.js";
 import { resolve, violations } from "#test/helpers/openapi-strict.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const AT = "2026-10-04T12:00:00.000Z";
 const NOW = Date.parse(AT);
 const CLOCK = fixedClock(NOW + 2000);
 
 function tempRoot(t: TestContext): string {
-  const root = makeTempDir("human-gate-surface-counts");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "human-gate-surface-counts").dir;
   return root;
 }
 
@@ -56,7 +56,7 @@ function nowEntry(t: TestContext, opts: { escalations: number; githubFails?: boo
   ];
   writeFileSync(join(ledgerDir, "ledger.ndjson"), rows.map((r) => JSON.stringify(r) + "\n").join(""));
   const db = openProjectorReadModel(join(root, "read-model"), "site", CLOCK);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const lease = acquireLease(db, { clock: CLOCK });
   assert.ok(lease.ok);
   createLedgerProjector({ ledgerDir, db, lease: lease.lease, clock: CLOCK }).tick();

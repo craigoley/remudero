@@ -22,13 +22,13 @@ import {
   type OracleSliceResult,
 } from "#src/lib/read-model-worker.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 type Row = { step: string; extra: Record<string, unknown> };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -68,7 +68,7 @@ test("C5: an oracle slice runs in a child process that answers, exits, and names
   writeFileSync(join(ledgerDir, "ledger.ndjson"), `${[0, 1, 2].map(line).join("\n")}\n`);
   const clock = fixedClock(at + 3_600_000);
   const db = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { holder: "c5", clock });
   assert.ok(got.ok);
   createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick();
@@ -79,7 +79,7 @@ test("C5: an oracle slice runs in a child process that answers, exits, and names
   // The real fork, watched: the child the oracle starts must be gone once its slice is answered.
   const oracle = childOracle({ log: (step, extra) => rows.push({ step, extra }),
     fork: (...args) => { const launched = forkWorkerEntry(...args); pids.push(launched.child.pid!); return launched; } });
-  t.after(() => oracle.close());
+  onReadModelClose(t, () => oracle.close());
   const results: OracleSliceResult[] = [];
   oracle.run(request({ stateDir, ledgerDir, dbPath: db.path, lease: { name: got.lease.name, holder: "c5", ttlMs: got.lease.ttlMs },
     window: { t0: at - 1, t1: at + 10_000 }, mark: readIngestMark(db, at) }), (result) => results.push(result));
@@ -103,7 +103,7 @@ test("C5: an oracle child that dies mid-slice fails it as died, and the next sli
   const rows: Row[] = [];
   const oracle = childOracle({ workerUrl: childModule(t, `process.send({ type: "ready" });\nprocess.on("message", () => process.exit(3));\n`),
     log: (step, extra) => rows.push({ step, extra }) });
-  t.after(() => oracle.close());
+  onReadModelClose(t, () => oracle.close());
   const results: OracleSliceResult[] = [];
   for (let n = 1; n <= 2; n++) {
     oracle.run(request(), (result) => results.push(result));

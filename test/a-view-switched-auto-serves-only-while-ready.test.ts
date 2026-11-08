@@ -13,14 +13,14 @@ import { createService } from "#src/lib/service.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { withViewShadow, type ShadowRequest } from "#src/lib/view-shadow.js";
 import { buildReadModelViewRoutes, READ_MODEL_STATUS_VIEW, viewEtag, viewMode, type ViewBodySource, type ViewDefinition } from "#src/lib/views.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 const VIEW = "legacy-view";
 const legacy: ViewDefinition = { name: VIEW, version: 1, compute: () => ({ data: { from: "legacy" }, sources: [] }) };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -38,7 +38,7 @@ async function routes(t: TestCtx, readModel: ViewBodySource): Promise<{ read: ()
   const samples: ShadowRequest[] = [];
   const server = createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes(withViewShadow({ shadow: (request) => void samples.push(request) }, { legacy: [legacy], readModel })) });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => server.close());
+  onReadModelClose(t, () => server.close());
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/${VIEW}`;
   return { samples, read: async () => ((await (await fetch(url, { headers: { authorization: "Bearer r" } })).json()) as { data: unknown }).data };
 }
@@ -97,7 +97,7 @@ test("an auto view losing readiness is demoted once and answers legacy", async (
   let recheck: () => void = () => assert.fail("the switch watch never started");
   const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], workerUrl: echoWorker(t, stateDir), stopWaitMs: 20,
     log: (step, extra) => void rows.push([step, extra]), every: (run) => ((recheck = run), () => undefined) });
-  t.after(() => handle.stop());
+  onReadModelClose(t, () => handle.stop());
   const driven: string[] = [];
   handle.driveShadow((view) => void driven.push(view));
   const { read } = await routes(t, handle);
@@ -140,7 +140,7 @@ async function autoHarness(t: TestCtx, kind: string) {
   let recheck: () => void = () => assert.fail("the switch watch never started");
   const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], workerUrl: echoWorker(t, stateDir), stopWaitMs: 20,
     log: (step, extra) => void rows.push([step, extra]), every: (run) => ((recheck = run), () => undefined) });
-  t.after(() => handle.stop());
+  onReadModelClose(t, () => handle.stop());
   const { read } = await routes(t, handle);
   handle.start();
   await post(handle, entry(VIEW, { from: "read-model" }));
@@ -209,7 +209,7 @@ test("the worker builds an auto view's slow-lane bodies whatever its readiness",
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: "auto" } }));
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], holder: "auto", oracle: "off", views: [], post: (m) => void posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   ticker.accept({ view: "inbox", version: 1, bodies: [{ key: "", data: { lanes: [] }, sources: [] }] });

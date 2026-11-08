@@ -9,6 +9,7 @@ import { acquireLease, openReadModel, openScratchReadModel, withWriteTransaction
 import { projectRecentEntry, readRecentActivity, RECENT_ACTIVITY_HISTORY_CAP, RECENT_ROW_PROJECTION } from "#src/lib/recent-projection.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const NOW = Date.parse("2026-10-04T12:00:00Z");
 const clock = fixedClock(NOW);
@@ -22,10 +23,9 @@ function row(step: string, ms = NOW - 1000, extra: Record<string, unknown> = {})
 }
 
 function fixture(t: { after(fn: () => void): void }) {
-  const dir = makeTempDir("recent-projection");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "recent-projection").dir;
   const db = openProjectorReadModel(dir, "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock });
   assert.ok(got.ok);
   const projector = createLedgerProjector({ ledgerDir: dir, db, lease: got.lease, clock });
@@ -52,7 +52,7 @@ test("W1-T4924: recent history survives a ledger rotation and a serve restart", 
   assert.deepEqual(readRecentActivity(reader, "core", { plan, nowMs: NOW }), expected);
   reader.close();
   const restarted = openReadModel({ stateDir: f.dir, instance: "core", schemaVersion: 1, readOnly: true });
-  t.after(() => restarted.close());
+  onReadModelClose(t, () => restarted.close());
   assert.deepEqual(readRecentActivity(restarted, "core", { plan, nowMs: NOW }), expected);
 });
 
@@ -178,7 +178,7 @@ test("the oracle can replay the recent projection with its copied instance conte
   const merged = row("verdict.merged", NOW - 1, { pr_url: PR });
   f.ingest([merged]);
   const scratch = openScratchReadModel();
-  t.after(() => scratch.close());
+  onReadModelClose(t, () => scratch.close());
   scratch.exec(RECENT_ROW_PROJECTION.ddl);
   scratch.prepare("INSERT INTO recent_instance(k, instance) VALUES(1, ?)").run(f.db.prepare("SELECT instance FROM recent_instance WHERE k = 1").get()!.instance);
   const line = JSON.stringify(merged);

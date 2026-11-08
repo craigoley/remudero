@@ -38,6 +38,7 @@ import {
 import { buildReadModelViewRoutes, viewKey, type ViewBodyEntry, type ViewDefinition } from "#src/lib/views.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 import { SPEC, violations } from "#test/helpers/openapi-strict.js";
+import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const HOUR = 3_600_000;
@@ -63,7 +64,7 @@ function cleanupOf(t: TestCtx): Cleanup {
   if (known) return known;
   const cleanup: Cleanup = { closers: [], dirs: [] };
   cleanups.set(t, cleanup);
-  t.after(() => {
+  onReadModelClose(t, () => {
     for (const [what, close] of cleanup.closers) {
       close();
       t.diagnostic(`${VIEW_SHADOW_CLEANUP_NOTE} ${what}`);
@@ -528,7 +529,7 @@ test("the sampler passes one request per minute per key and counts the rest", ()
 
 function serve(t: TestCtx, handler: Parameters<typeof createServer>[1]): Promise<number> {
   const server: Server = createServer(handler);
-  t.after(() => server.close());
+  onReadModelClose(t, () => server.close());
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve((server.address() as AddressInfo).port)));
 }
 

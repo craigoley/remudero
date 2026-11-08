@@ -7,6 +7,7 @@ import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-p
 import { acquireLease } from "#src/lib/read-model-db.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { classifyShadowDiff, legacyRowIndex, readShadowEvidence } from "#src/lib/view-shadow.js";
+import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
 
 // Site, 2026-10-14: LIVE-EDITS-daemon-checkout's lastActivityAt read 01:52:47Z on legacy and 04:08:00Z on the view.
 // The 04:08 row is live_edits.escalated, a non-fact step kept only as the run's run_activity row; the 21:18Z full
@@ -22,7 +23,7 @@ test("W1-T9356: a pruned activity row explains a legacy diff", (t) => {
   const clock = fixedClock(Date.parse("2026-10-14T00:58:00.000Z"));
   writeFileSync(join(ledgerDir, "ledger.ndjson"), [horizon, opened, pruned].map((r) => JSON.stringify(r)).join("\n") + "\n");
   const db = openProjectorReadModel(stateDir, "site", clock);
-  t.after(() => { db.close(); rmSync(ledgerDir, { recursive: true, force: true }); rmSync(stateDir, { recursive: true, force: true }); });
+  onReadModelClose(t, () => { db.close(); rmSync(ledgerDir, { recursive: true, force: true }); rmSync(stateDir, { recursive: true, force: true }); });
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick();

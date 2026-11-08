@@ -10,6 +10,7 @@ import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelLease } from "#src/lib/read-model-db.js";
 import { buildBatchedGithub, projectPlan, TASK_ID_TRAILER_RE, type BatchedIssue, type BatchedPr, type GitHub } from "#src/lib/status.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-15T03:00:00.000Z");
 const PR = (n: number): string => `https://github.com/o/r/pull/${n}`;
@@ -93,12 +94,11 @@ interface World {
 }
 
 function world(t: TestCtx): World {
-  const dir = makeTempDir("github-dirt");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "github-dirt").dir;
   const now = T0;
   const clock: Clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
   const db = openProjectorReadModel(dir, "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const acquired = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(acquired.ok);
   const lease = acquired.lease;

@@ -18,6 +18,7 @@ import { createReadModelTicker, ledgerSource, type ReadModelInstanceState } from
 import { makeTempDir } from "#src/lib/tmp.js";
 import { viewEtag, type ViewSource } from "#src/lib/views.js";
 import { get, listen } from "#test/helpers/operator-agent-corpus.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type T = { after: (fn: () => void) => void };
 // The projector stamps rows on the real clock, so the fixture's times are real ones too.
@@ -44,8 +45,7 @@ function record(fingerprint: string, lastSeenMs: number): IncidentLifecycleRecor
 
 /** Core's state dir with `rows` in its live ledger, projected by a ticker the test keeps until it ends. */
 function fixture(t: T, rows: Array<Record<string, unknown>>): { stateDir: string; db: ReadModelDb; append(more: Array<Record<string, unknown>>): void } {
-  const stateDir = makeTempDir("incidents-view-");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "incidents-view-").dir;
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, "ledger.ndjson"), rows.map((row) => `${JSON.stringify(row)}\n`).join(""));
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [], holder: "incidents-view-test", post: () => {} });
@@ -54,7 +54,7 @@ function fixture(t: T, rows: Array<Record<string, unknown>>): { stateDir: string
   };
   project();
   const db = openProjectorReadModel(stateDir, "core");
-  t.after(() => {
+  onReadModelClose(t, () => {
     db.close();
     ticker.release();
   });

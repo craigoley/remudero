@@ -26,6 +26,7 @@ import {
   type ReadModelDb,
 } from "#src/lib/read-model-db.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
@@ -35,8 +36,7 @@ const clock = fixedClock(NOW);
 type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -66,7 +66,7 @@ function rowsOf(stateDir: string, step: string): Array<Record<string, unknown>> 
 
 function cleanDigest(t: TestCtx, stateDir: string): string {
   const db = openProjectorReadModel(scratch(t, "read-model-clean"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   createLedgerProjector({ ledgerDir: stateDir, db, lease: got.lease, clock }).tick();
@@ -86,7 +86,7 @@ test("a rebuild publishes a new generation only after its own consistency check 
   const expected = cleanDigest(t, stateDir);
   // A running worker holds the live file's lease, and its copy has drifted.
   const worker = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => worker.close());
+  onReadModelClose(t, () => worker.close());
   const oldPath = worker.path;
   const held = acquireLease(worker, { holder: "worker", clock });
   assert.ok(held.ok);
@@ -103,7 +103,7 @@ test("a rebuild publishes a new generation only after its own consistency check 
   assert.equal(readModelDigest(worker), drifted, "the old file was never renamed over or rewritten");
   assert.deepEqual(sqliteFiles(stateDir), ["core.v1.g" + NOW + ".sqlite", "core.v1.sqlite"]);
   const fresh = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => fresh.close());
+  onReadModelClose(t, () => fresh.close());
   assert.notEqual(fresh.path, oldPath, "a reopen by name resolves the pointer to the new generation");
   assert.equal(readModelDigest(fresh), expected);
   assert.equal(fresh.prepare("SELECT count(*) AS n FROM lease").get()?.n, 0, "the new generation carries no lease, so the worker takes it on reopen");
@@ -118,12 +118,12 @@ test("a reader holding the old generation open while a rebuild flips the pointer
   assert.equal(run(stateDir, ["rebuild"]).code, 0);
   // The worker and a reader both hold the first generation, mid-use, with a WAL of their own.
   const worker = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => worker.close());
+  onReadModelClose(t, () => worker.close());
   const held = acquireLease(worker, { holder: "worker", clock });
   assert.ok(held.ok);
   withWriteTransaction(worker, held.lease, () => worker.exec("INSERT INTO meta(k, v) VALUES('in-wal', 'yes')"));
   const reader = openReadModel({ stateDir, instance: "core", schemaVersion: 1, readOnly: true });
-  t.after(() => reader.close());
+  onReadModelClose(t, () => reader.close());
   reader.exec("BEGIN");
   const seenBefore = reader.prepare("SELECT count(*) AS n FROM seen").get()?.n;
 
@@ -138,7 +138,7 @@ test("a reader holding the old generation open while a rebuild flips the pointer
   assert.throws(() => withWriteTransaction(worker, held.lease, () => undefined), /lease_lost/);
 
   const moved = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => moved.close());
+  onReadModelClose(t, () => moved.close());
   assert.equal(moved.path.endsWith(`core.v1.g${NOW + 1}.sqlite`), true);
   assert.equal(integrity(moved), "ok");
   assert.equal(moved.meta("in-wal"), undefined, "the new generation holds none of the old file's pages");
@@ -171,7 +171,7 @@ test("superseded generations are reaped only after the grace and once no live le
 test("a rebuild whose own check disagrees leaves the live file untouched", (t) => {
   const { stateDir } = coreState(t);
   const live = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => live.close());
+  onReadModelClose(t, () => live.close());
   live.exec("INSERT INTO meta(k, v) VALUES('marker', 'old')");
   // An archive named a month before its own rows: the projector applies them, the window's union
   // read skips an archive rotated before the window, so the store holds a row the ledger read lacks.
@@ -228,7 +228,7 @@ test("status reports lag counts quarantine size lease and the last check per ins
   const { stateDir } = coreState(t);
   assert.match(run(stateDir, ["status"]).out.join(), /no read model under/);
   const db = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const held = acquireLease(db, { holder: "worker", clock });
   assert.ok(held.ok);
   writeFileSync(join(stateDir, LIVE), `${readFileSync(join(stateDir, LIVE), "utf8")}${row(NOW + 3_600_000, "run.start")}\n`);
@@ -262,7 +262,7 @@ test("status reports lag counts quarantine size lease and the last check per ins
 test("status of an empty store with an expired lease says so", (t) => {
   const stateDir = scratch(t, "read-model-cli-empty");
   const db = openProjectorReadModel(stateDir, "site", fixedClock(T0));
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   acquireLease(db, { holder: "gone", clock: fixedClock(T0) });
   const text = run(stateDir, ["status"]).out.join("\n");
   assert.match(text, /lag n\/a \(empty\)/);
@@ -285,7 +285,7 @@ test("with no state dir given the command reads core's from the config", (t) => 
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   const saved = process.env.HOME;
   process.env.HOME = home;
-  t.after(() => {
+  onReadModelClose(t, () => {
     process.env.HOME = saved;
   });
   const out: string[] = [];

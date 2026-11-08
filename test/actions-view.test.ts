@@ -14,6 +14,7 @@ import { makeTempDir } from "#src/lib/tmp.js";
 import type { ViewBodyEntry } from "#src/lib/views.js";
 import { writeLedger, type LedgerFixture } from "#test/helpers/ledger-fixture.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 
@@ -40,8 +41,7 @@ function reconciled(id: string, at: number): Record<string, unknown> {
 
 /** Core's state dir: one reconciled row in a rotated archive, one in the live file, among rows of other steps. */
 function seeded(t: TestCtx): { stateDir: string; instances: Array<{ name: string; ledgerDir: string }>; rows: LedgerFixture } {
-  const root = makeTempDir("actions-view");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "actions-view").dir;
   const stateDir = join(root, "state");
   const rows = writeLedger([reconciled("live-action", NOW - 60_000), { ts: iso(NOW - 30_000), step: "daemon.tick" }], {
     dir: stateDir,
@@ -103,7 +103,7 @@ test("unit test: the actions view rebuilds only when a reconciled fact is applie
   const posted: ReadModelWorkerMessage[] = [];
   switchViewsOn(f.stateDir, [ACTIONS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock, holder: "actions-test", oracle: "off", post: (m) => posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   const datas = (): ActionsData[] => bodiesOf(posted).map((b) => b.body.data as ActionsData);
@@ -132,7 +132,7 @@ test("unit test: the actions shadow side reads the route's ledger union and an i
   const posted: ReadModelWorkerMessage[] = [];
   switchViewsOn(f.stateDir, [ACTIONS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [widened], clock: movingClock(NOW), holder: "actions-test", oracle: "off", post: (m) => posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   const data = bodiesOf(posted)[0]!.body.data as ActionsData;
@@ -148,8 +148,7 @@ test("unit test: the actions shadow side reads the route's ledger union and an i
 });
 
 test("unit test: a reconciled row older than the route's window is in neither the actions view nor the route", async (t) => {
-  const root = makeTempDir("actions-view-window");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "actions-view-window").dir;
   const stateDir = join(root, "state");
   const HOUR = 3_600_000;
   // The floor's newest rotations, one an hour, then one stamped past the window before them: the route leaves it out.
@@ -170,7 +169,7 @@ test("unit test: a reconciled row older than the route's window is in neither th
   ticker.release();
   // POSITIVE CONTROL: the projector holds the expired row as a fact, so only the window can keep it out.
   const db = openProjectorReadModel(stateDir, "core");
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   assert.equal(Number(db.prepare("SELECT count(*) AS n FROM fact WHERE step = ?").get(STEP)?.n), 3);
   const data = bodiesOf(posted).at(-1)!.body.data as ActionsData;
   const route = await routeBody(rows.path);

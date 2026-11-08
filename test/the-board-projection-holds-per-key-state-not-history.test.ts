@@ -28,6 +28,7 @@ import { acquireLease, type ReadModelDb, type ReadModelLease } from "#src/lib/re
 import { computeBoardSnapshot } from "#src/lib/board.js";
 import { projectPlan, type GitHub, type PrRef } from "#src/lib/status.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 
@@ -211,8 +212,7 @@ interface World {
 }
 
 function world(t: TestCtx, rows: Row[] = history()): World {
-  const root = makeTempDir("board-keeps-per-key");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "board-keeps-per-key").dir;
   let ms = NOW0;
   const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
   const ledgerDir = join(root, "core", "state");
@@ -220,7 +220,7 @@ function world(t: TestCtx, rows: Row[] = history()): World {
   const feedbackRoot = join(root, "checkout");
   mkdirSync(join(feedbackRoot, "plan", "feedback"), { recursive: true });
   const db = openProjectorReadModel(join(root, "home"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: got.lease, clock });

@@ -13,6 +13,7 @@ import { ORACLE_AGREE_RUNS_TO_CLEAR, READ_MODEL_CONSISTENCY_CLEARED_STEP, runCon
 import { acquireLease, type ReadModelDb, type ReadModelLease } from "#src/lib/read-model-db.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
 
 const HOUR = 3_600_000;
 const T0 = Date.parse("2026-09-20T00:00:00Z");
@@ -314,12 +315,12 @@ function readModel(t: { after: (fn: () => void) => void }): RmFixture {
   const rowsDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}producer-closes-rows-`));
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}producer-closes-state-`));
   const metricDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}producer-closes-metric-`));
-  t.after(() => { for (const d of [rowsDir, stateDir, metricDir]) rmSync(d, { recursive: true, force: true }); });
+  onReadModelClose(t, () => { for (const d of [rowsDir, stateDir, metricDir]) rmSync(d, { recursive: true, force: true }); });
   const lines = Array.from({ length: 12 }, (_, i) => JSON.stringify({ ts: new Date(R0 + i * 1_000).toISOString(), host: "h1", step: i % 3 === 0 ? "worker.activity" : "run.start", task_id: `W1-T${i}`, run_id: `r${i}` }));
   writeFileSync(join(rowsDir, "ledger.ndjson"), `${lines.join("\n")}\n`);
   const clock = fixedClock(R0 + 60_000);
   const db = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   createLedgerProjector({ ledgerDir: rowsDir, db, lease: got.lease, clock }).tick();

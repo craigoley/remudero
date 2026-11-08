@@ -12,6 +12,7 @@ import { acquireLease } from "../src/lib/read-model-db.js";
 import { trackStaleReviewerSkipRecurrence } from "../src/lib/sweep.js";
 import type { GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const AT = "2026-10-04T12:00:00.000Z";
 const NOW = Date.parse(AT);
@@ -121,8 +122,7 @@ test("malformed pin observations retain uncertainty and instances keep separate 
 });
 
 function nowFixture(t: TestContext) {
-  const root = makeTempDir("human-gate-pin-reviewer");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "human-gate-pin-reviewer").dir;
   const ledgerDir = join(root, "state");
   const planDir = join(root, "plan");
   mkdirSync(ledgerDir, { recursive: true });
@@ -132,7 +132,7 @@ function nowFixture(t: TestContext) {
   writeFileSync(join(planDir, "policy.yaml"), readFileSync(policyPath(process.cwd()), "utf8"));
   const clock = fixedClock(NOW);
   const db = openProjectorReadModel(join(root, "read-model"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const lease = acquireLease(db, { clock });
   assert.ok(lease.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: lease.lease, clock });

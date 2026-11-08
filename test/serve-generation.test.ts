@@ -35,6 +35,7 @@ import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "#src/l
 import type { PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { createReadModelTicker, createReadModelWorker, loadCommittedViewBodies, readModelStatusView, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
 
 function overSocket(socketPath: string, path: string): Promise<{ status?: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -190,7 +191,7 @@ test("a restore request re-warms the generation after an abandoned handoff", () 
 test("a converged population meets the original standby warm-body floor", async (t) => {
   const root = makeTempDir("converged-standby-floor"), active = join(root, "state"), thin = join(root, "thin"), repository = "craigoley/remudero";
   const workers: Array<ReturnType<typeof createReadModelWorker>> = [];
-  t.after(() => { for (const worker of workers) worker.stop(); rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  onReadModelClose(t, () => { for (const worker of workers) worker.stop(); rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
   for (const stateDir of [active, thin]) {
     mkdirSync(join(stateDir, "read-model"), { recursive: true }); writeFileSync(join(stateDir, "ledger.ndjson"), "");
     writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: "auto" } }));

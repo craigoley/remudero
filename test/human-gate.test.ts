@@ -13,6 +13,7 @@ import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import type { GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { resolve, violations } from "./helpers/openapi-strict.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const ASKED = "2026-10-02T12:00:00.000Z";
 
@@ -108,11 +109,10 @@ test("source times sort oldest first with deterministic unknown-time and equal-t
 });
 
 function materialize(t: { after(fn: () => void): void }, opts: { count?: number; root?: boolean; unreadableStore?: boolean; githubUnavailable?: boolean } = {}): NowViewData {
-  const root = makeTempDir("human-gate");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "human-gate").dir;
   const clock = fixedClock(Date.parse(ASKED));
   const db = openProjectorReadModel(root, "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const lease = acquireLease(db, { clock });
   assert.ok(lease.ok);
   const ledgerDir = join(root, "state");

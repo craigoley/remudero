@@ -18,6 +18,7 @@ import { makeTempDir } from "#src/lib/tmp.js";
 import type { ViewBodyEntry } from "#src/lib/views.js";
 import { createWorkstreamsView, readActivityRing, WORKSTREAMS_DEBOUNCE_MS, WORKSTREAMS_VIEW_NAME, type WorkstreamsData } from "#src/lib/workstreams-view.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 
@@ -67,8 +68,7 @@ interface Fixture {
 }
 
 function fixture(t: TestCtx): Fixture {
-  const root = makeTempDir("workstreams-view");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "workstreams-view").dir;
   const stateDir = join(root, "state");
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
@@ -150,7 +150,7 @@ test("W1-T5050: a ring insert re-materializes the workstreams view once inside t
   const posted: ReadModelWorkerMessage[] = [];
   switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock, holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   assert.deepEqual(built, [NOW], "the first body is built at once");
@@ -186,7 +186,7 @@ test("unit test: the workstreams shadow side reads the route's ledger union and 
   const posted: ReadModelWorkerMessage[] = [];
   switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [widened], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   const [body] = bodiesOf(posted);
@@ -224,7 +224,7 @@ test("unit test: same-millisecond rows of different steps and repositories, appe
   const posted: ReadModelWorkerMessage[] = [];
   switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   const [body] = bodiesOf(posted);
@@ -253,7 +253,7 @@ test("unit test: a same-millisecond tie split by a rotation gives the workstream
   const clock = movingClock(NOW);
   switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock, holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   renameSync(f.ledgerPath, join(f.stateDir, "ledger.2026-09-30T11-59-45-000Z.ndjson"));
@@ -305,7 +305,7 @@ function projectedContext(t: TestCtx, f: Fixture): Parameters<ReturnType<typeof 
   const capture = { name: WORKSTREAMS_VIEW_NAME, version: 1, materialize: (ctx: typeof captured) => ((captured = ctx), []) };
   switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [capture as never], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: () => {} });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   assert.ok(captured?.instances[0]?.db, "control: the projector handed the view its store");
@@ -374,7 +374,7 @@ test("unit test: a row appended after the ring was read, with a ts before its ne
   const posted: ReadModelWorkerMessage[] = [];
   switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   const data = bodiesOf(posted).at(-1)!.body.data as WorkstreamsData;
@@ -401,7 +401,7 @@ test("unit test: a row the projector applied but the ring lacks is still a works
   const posted: ReadModelWorkerMessage[] = [];
   switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [lossy], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   const data = bodiesOf(posted).at(-1)!.body.data as WorkstreamsData;
@@ -419,7 +419,7 @@ test("unit test: a live file rotated after the ring was read is read whole by th
   const posted: ReadModelWorkerMessage[] = [];
   switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   const data = bodiesOf(posted).at(-1)!.body.data as WorkstreamsData;
@@ -440,7 +440,7 @@ function frozenCutoffArchive(t: TestCtx, loseAppliedRow = false) {
   const cleanups: Array<() => void> = [];
   const f = fixture({ after: (fn) => cleanups.push(fn) });
   let ticker: ReturnType<typeof createReadModelTicker> | undefined;
-  t.after(() => { try { ticker?.release(); } finally { for (const fn of cleanups) fn(); } });
+  onReadModelClose(t, () => { try { ticker?.release(); } finally { for (const fn of cleanups) fn(); } });
   fullLedger(f);
   const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource, debounceMs: 0 });
   const posted: ReadModelWorkerMessage[] = [];
@@ -502,7 +502,7 @@ test("W1-T10942: a changed cutoff or archive identity requalifies its candidates
     return Reflect.apply(realRead, fsNative, args);
   });
   syncBuiltinESMExports();
-  t.after(() => { reader.mock.restore(); syncBuiltinESMExports(); });
+  onReadModelClose(t, () => { reader.mock.restore(); syncBuiltinESMExports(); });
   const first = f.view.legacy("", NOW + 60_000, f.data);
   assert.ok(first);
   assert.deepEqual(first.data, f.data);

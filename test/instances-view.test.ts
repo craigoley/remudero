@@ -30,6 +30,7 @@ import { INBOX_CONTRACT_OBSERVATION_MAX_BYTES } from "#src/lib/instance-inbox-co
 import { createDemandBook } from "#src/lib/view-demand.js";
 import { createReadModelWorker, readModelLaneViews } from "#src/lib/read-model-worker.js";
 import { INSTANCES_QUALIFICATION_GENERATION } from "#src/lib/instances-view.js";
+import { readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const NOW = Date.parse("2026-10-01T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -53,8 +54,7 @@ interface Fixture {
 
 /** Core and console are mounted with ledgers; site is registered and projected but its state dir was never mounted. */
 function fixture(t: TestCtx, opts: { heartbeatAgoMs?: number } = {}): Fixture {
-  const root = makeTempDir("instances-view");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "instances-view").dir;
   const stateDir = join(root, "state");
   const consoleDir = join(root, "instances", "console", "state");
   for (const dir of [join(stateDir, "read-model"), consoleDir]) mkdirSync(dir, { recursive: true });

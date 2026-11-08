@@ -24,6 +24,7 @@ import { makeTempDir } from "#src/lib/tmp.js";
 import { createWorkstreamsProjectionReuse, fileIdentity, WORKSTREAMS_REUSE_AUDIT_MS } from "#src/lib/workstreams-projection-reuse.js";
 import { createWorkstreamsView, WORKSTREAMS_DEBOUNCE_MS, WORKSTREAMS_VIEW_NAME } from "#src/lib/workstreams-view.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 const NOW = Date.parse("2026-10-07T12:00:00.000Z");
@@ -58,8 +59,7 @@ interface Harness {
 }
 
 function harness(t: TestCtx, opts: { identity?: (path: string) => string; rows?: Array<Record<string, unknown>> } = {}): Harness {
-  const root = makeTempDir("workstreams-projection-reuse");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "workstreams-projection-reuse").dir;
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
   const planPath = join(root, "plan", "tasks.yaml");
@@ -223,8 +223,7 @@ test("an audit pass reuses nothing, names what reuse would have got wrong, and h
 });
 
 test("a file's identity moves on a rewrite and names a missing path or a directory", (t) => {
-  const root = makeTempDir("workstreams-file-identity");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "workstreams-file-identity").dir;
   const path = join(root, "merge-credit.json");
   assert.equal(fileIdentity(path), "!ENOENT");
   writeFileSync(path, "{}");
@@ -244,8 +243,7 @@ function movingClock(start: number): Clock & { set(ms: number): void } {
 }
 
 test("the view counts what each build reused and audits its reuse on a cadence", (t) => {
-  const root = makeTempDir("workstreams-reuse-view");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "workstreams-reuse-view").dir;
   const stateDir = join(root, "state");
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
@@ -259,7 +257,7 @@ test("the view counts what each build reused and audits its reuse on a cadence",
   const view = createWorkstreamsView<ReadModelInstanceState>({ instances, ledgerSource, clock, log: (step, extra) => rows.push([step, extra]) });
   switchViewsOn(stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir, instances, views: [view], clock, holder: "workstreams-reuse-test", oracle: "off", post: () => {} });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.start();
   ticker.tick();
   const insert = (at: number) => {

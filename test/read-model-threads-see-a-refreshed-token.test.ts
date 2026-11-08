@@ -5,6 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { createReadModelWorker, threadOracle, threadViews } from "#src/lib/read-model-worker.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "#src/lib/live-write-guard.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 // 2026-10-04: a worker thread gets a COPY of process.env unless it is spawned with SHARE_ENV, so it
 // keeps the GH_TOKEN it was born with while serve refreshes its own hourly (github-app.ts). The
@@ -24,15 +25,14 @@ async function until(seen: () => boolean, ms = 20_000): Promise<void> {
 
 function restoreToken(t: { after: (fn: () => void) => void }): void {
   const saved = process.env.GH_TOKEN;
-  t.after(() => {
+  onReadModelClose(t, () => {
     if (saved === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = saved;
   });
 }
 
 test("the read-model projector thread reads serve's refreshed GH_TOKEN, not the one it was spawned with", async (t) => {
-  const stateDir = makeTempDir("rmw-token");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "rmw-token").dir;
   restoreToken(t);
   const seen: unknown[] = [];
   const handle = createReadModelWorker({
@@ -41,7 +41,7 @@ test("the read-model projector thread reads serve's refreshed GH_TOKEN, not the 
     log: (step, extra) => void (step === "token" && seen.push(extra?.token)),
   });
   handle.start();
-  t.after(() => void handle.stop());
+  onReadModelClose(t, () => void handle.stop());
   await until(() => seen.length > 0);
   assert.ok(seen.length > 0, "the thread answered before the refresh");
   process.env.GH_TOKEN = REFRESHED;
@@ -55,7 +55,7 @@ test("the read-model oracle thread reads its spawner's refreshed GH_TOKEN, not t
     workerUrl: thread(`parentPort.on("message", (m) => parentPort.postMessage({ type: "done", id: m.id, result: { ok: false, error: process.env.GH_TOKEN ?? "", leaseLost: false } }));`),
     log: () => {},
   });
-  t.after(() => oracle.close());
+  onReadModelClose(t, () => oracle.close());
   const ask = (): Promise<string> => new Promise((resolve) => oracle.run({} as never, (result) => resolve(result.ok ? "" : result.error)));
   await ask();
   process.env.GH_TOKEN = REFRESHED;
@@ -72,7 +72,7 @@ test("the read-model view thread reads its spawner's refreshed GH_TOKEN, not the
     log: () => {},
     every: () => () => {},
   });
-  t.after(() => lane.close());
+  onReadModelClose(t, () => lane.close());
   lane.want("x", "");
   await until(() => seen.length === 1);
   assert.equal(seen.length, 1, "the thread answered before the refresh");
@@ -95,7 +95,7 @@ test("a read-model thread re-running the test setup leaves the parent's HOME and
     workerUrl: thread(`parentPort.on("message", (m) => parentPort.postMessage({ type: "done", id: m.id, result: { ok: true, rows: 0, elapsedMs: 0 } }));`),
     log: () => {},
   });
-  t.after(() => oracle.close());
+  onReadModelClose(t, () => oracle.close());
   await new Promise<void>((resolve) => oracle.run({} as never, () => resolve()));
   // Positive control: the thread ran the setup, and its writes reached this env.
   assert.equal(process.env.GH_TOKEN, LIVE_WRITE_SENTINEL_TOKEN);

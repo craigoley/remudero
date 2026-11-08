@@ -8,6 +8,7 @@ import { childOracle, createReadModelWorker, oracleChildExecArgv, READ_MODEL_ORA
 import { childHeapPolicyArgs, readDaemonMemoryPolicy, recordChildHeapGrowingPercent } from "#src/lib/daemon-memory-policy.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 type Row = { step: string; extra: Record<string, unknown> };
@@ -15,8 +16,7 @@ type Row = { step: string; extra: Record<string, unknown> };
 const GROWTH = "--heap-growing-percent=50";
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -36,7 +36,7 @@ test("W1-T10290: the oracle child starts under the heap growth percent and its r
   writeFileSync(path, `process.send({ type: "ready" });\nprocess.on("message", (m) => process.send({ type: "done", id: m.id, maxRssBytes: 1, result: { ok: false, error: JSON.stringify(process.execArgv), leaseLost: false } }, () => process.exit(0)));\n`);
   const rows: Row[] = [];
   const oracle = childOracle({ workerUrl: pathToFileURL(path), heapArgs: [GROWTH], log: (step, extra) => rows.push({ step, extra }) });
-  t.after(() => oracle.close());
+  onReadModelClose(t, () => oracle.close());
   const results: OracleSliceResult[] = [];
   oracle.run(request(), (result) => results.push(result));
   await until(() => rows.some((r) => r.step === READ_MODEL_ORACLE_CHILD_STEP));
@@ -57,7 +57,7 @@ test("W1-T10290: the read-model worker thread receives the children's heap flags
   const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], stopWaitMs: 20, workerUrl: thread, childHeapArgs: [GROWTH],
     log: (step, extra) => void (step === "probe" && seen.push(extra?.data)) });
   handle.start();
-  t.after(() => void handle.stop());
+  onReadModelClose(t, () => void handle.stop());
   await until(() => seen.length > 0, 20_000);
   assert.deepEqual(seen[0], [GROWTH], "the thread read the flags from its workerData, not from a module variable of its own isolate");
 });

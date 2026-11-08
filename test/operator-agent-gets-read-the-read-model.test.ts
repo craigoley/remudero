@@ -21,6 +21,7 @@ import { createReadModelTicker, ledgerSource, type ReadModelWorkerMessage } from
 import { makeTempDir } from "../src/lib/tmp.js";
 import type { ViewBodyEntry, ViewSource } from "../src/lib/views.js";
 import { clock, corpus, get, listen, NOW, post } from "./helpers/operator-agent-corpus.js";
+import { readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 /** Every GET route, with the query its body is read with. */
 const GETS = [
@@ -199,8 +200,7 @@ test("an operator-agent rows view switched off answers from the ledger", async (
 });
 
 test("the operator-agent rows view folds its facts in bounded steps and republishes only when they move", (t) => {
-  const root = makeTempDir("e17-rows-view");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "e17-rows-view").dir;
   const rows = [1, 2, 3].map((i) => ({ ts: `2026-09-20T10:0${i}:00.000Z`, step: OPERATOR_AGENT_PROPOSAL_STEP, n: i }));
   writeFileSync(join(root, "ledger.ndjson"), rows.map((row) => `${JSON.stringify(row)}\n`).join(""));
   const entry = project(root, 1);

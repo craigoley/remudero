@@ -26,6 +26,7 @@ import {
 } from "#src/lib/read-model-worker.js";
 import { stampReadWith } from "#src/lib/serve.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-09T08:00:00.000Z");
 const LIVE = "ledger.ndjson";
@@ -34,8 +35,7 @@ const NAMES = ["core", "site"] as const;
 type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -59,7 +59,7 @@ function twoInstances(t: TestCtx, clock: Clock) {
   writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ views: { now: "shadow" } }));
   const posted: ReadModelWorkerMessage[] = [];
   const projector = createReadModelTicker({ stateDir, instances, clock, holder: "proj-holder", views: [], oracle: "off", post: (m) => void posted.push(m) });
-  t.after(() => void projector.release());
+  onReadModelClose(t, () => void projector.release());
   projector.start();
   projector.tick();
   const last = posted.findLast((m) => m.type === "state");
@@ -82,7 +82,7 @@ test("a read of one instance's now keeps only that instance's unit on its cadenc
     }) }),
   };
   const ticker = createReadModelTicker({ stateDir, instances, clock: hand.clock, holder: "proj-holder", views: [now], viewsOnly: true, oracle: "off", post: () => {} });
-  t.after(() => void ticker.release());
+  onReadModelClose(t, () => void ticker.release());
   ticker.observe(states);
   const run = (ms: number): void => {
     for (const end = hand.clock.now() + ms; hand.clock.now() < end;) {
@@ -145,7 +145,7 @@ setInterval(() => {}, 1000);
   const hand = handClock(T0);
   const handle = createReadModelWorker({ stateDir, instances: NAMES.map((name) => ({ name, ledgerDir: stateDir })), workerUrl: pathToFileURL(join(dir, "module.mjs")),
     clock: hand.clock, every: () => () => undefined, stopWaitMs: 1 });
-  t.after(() => void handle.stop());
+  onReadModelClose(t, () => void handle.stop());
   handle.start();
   handle.noteViewRead?.("/v1/views/now", "site");
   handle.noteViewRead?.("/v1/views/now", "core");

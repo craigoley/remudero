@@ -13,6 +13,7 @@ import { acquireLease } from "../src/lib/read-model-db.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import type { GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const FROM = "2026-10-02T10:00:00.000Z";
 const THROUGH = "2026-10-02T12:00:00.000Z";
@@ -42,8 +43,7 @@ test("resolved feedback remains a record and an unanswered proposal remains an a
 });
 
 function corpus(t: { after(fn: () => void): void }): FeedbackAgeRoot {
-  const ledgerDir = makeTempDir("feedback-age");
-  t.after(() => rmSync(ledgerDir, { recursive: true, force: true }));
+  const ledgerDir = readModelFixtureDir(t, "feedback-age").dir;
   const rows = (id: string, minutes: number) => JSON.stringify({ ts: at(minutes), step: "triage.start", feedback_id: id, run_id: `TRIAGE-${id}-1`, task_id: `TRIAGE-${id}` }) + "\n";
   writeFileSync(join(ledgerDir, "ledger.2026-10-02T10-30-00-000Z.ndjson"), rows("plain", 10));
   writeFileSync(join(ledgerDir, "ledger.2026-10-02T11-00-00-000Z.ndjson.gz"), gzipSync(rows("gzip", 20) + rows("second-gzip", 30)));
@@ -147,11 +147,10 @@ test("recorded answers expose lifecycle repair rather than repeat a settled ques
 });
 
 test("production now view consumes the feedback adapter and deduplicates evidence follow-ups", (t) => {
-  const root = makeTempDir("feedback-now");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "feedback-now").dir;
   const clock = fixedClock(Date.parse(THROUGH));
   const db = openProjectorReadModel(root, "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const lease = acquireLease(db, { clock });
   assert.ok(lease.ok);
   const ledgerDir = join(root, "state");

@@ -18,6 +18,7 @@ import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 import { createService } from "#src/lib/service.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { buildReadModelViewRoutes, buildViewRoutes, viewEtag, viewKey, type ReadModelViewRoutesOptions, type ViewDefinition, type ViewSource } from "#src/lib/views.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
@@ -26,8 +27,7 @@ const SILENT_WORKER = new URL("data:text/javascript,setInterval(() => {}, 1000)"
 type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -49,7 +49,7 @@ function committedBody(stateDir: string, ledgerDir: string): ReadModelBodyEntry 
 
 async function listen(t: TestCtx, server: Server): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => {
+  onReadModelClose(t, () => {
     server.closeAllConnections();
     server.close();
   });
@@ -151,7 +151,7 @@ test("a view switched off answers with its legacy computation or 404 view_disabl
   committedBody(stateDir, stateDir);
   let refresh: (() => void) | undefined;
   const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], workerUrl: SILENT_WORKER, stopWaitMs: 20, every: (run) => ((refresh = run), () => undefined) });
-  t.after(() => handle.stop());
+  onReadModelClose(t, () => handle.stop());
   handle.start();
   const real = await listen(t, createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModel: handle, readModelViews: ["read-model"], servedByDefault: ["read-model"] }) }));
   assert.equal((await get(real, "/v1/views/read-model")).status, 200);
@@ -185,7 +185,7 @@ test("a stale source makes the view stale and names the source", async (t) => {
   const stateDir = scratch(t, "views-stale");
   seedRows(stateDir, 4);
   const handle: ReadModelWorkerHandle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], tickMs: 20 });
-  t.after(() => handle.stop());
+  onReadModelClose(t, () => handle.stop());
   handle.start();
   const deadline = Date.now() + 30_000;
   // A first tick can publish the body before the projector has applied any row (asOf still null), so wait for a body that has.
@@ -225,7 +225,7 @@ test("a legacy-only view route computes its body per request with no read model 
   const view: ViewDefinition<{ calls: number }> = { name: "legacy-only", version: 2, compute: () => ({ data: { calls: ++calls }, sources: [{ name: "s", asOf: null, state: "fresh" }] }) };
   const server = createService({ tokens: { read: "r", write: "w" }, routes: buildViewRoutes([view], fixedClock(T0)) });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => server.close());
+  onReadModelClose(t, () => server.close());
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/legacy-only`;
   const first = (await (await fetch(url, { headers: { authorization: "Bearer r" } })).json()) as { data: { calls: number }; generatedAt: string };
   const second = (await (await fetch(url, { headers: { authorization: "Bearer r" } })).json()) as { data: { calls: number } };

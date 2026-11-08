@@ -9,6 +9,7 @@ import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-05T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -39,13 +40,12 @@ function gateway(): GitHub {
 }
 
 function rig(t: TestCtx) {
-  const root = makeTempDir("serve-diagnostics");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "serve-diagnostics").dir;
   const clock: Clock = { now: () => T0, date: () => new Date(T0), iso: () => new Date(T0).toISOString() };
   const ledgerDir = join(root, "core", "state");
   mkdirSync(ledgerDir, { recursive: true });
   const db: ReadModelDb = openProjectorReadModel(join(root, "read-model-home"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const got = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: got.lease, clock });

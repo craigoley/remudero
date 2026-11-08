@@ -5,12 +5,12 @@ import type { Clock } from "#src/lib/clock.js";
 import { createReadModelTicker, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";
+import { readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 
 function rig(t: { after: (fn: () => void) => void }, costs: Record<string, number>) {
-  const stateDir = makeTempDir("materialize-budget");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "materialize-budget").dir;
   let at = T0;
   const clock: Clock = { now: () => at, date: () => new Date(at), iso: () => new Date(at).toISOString() };
   let pass: string[] = [];
@@ -63,8 +63,7 @@ test("a measured view that fits the pass has no budget deferral", (t) => {
 });
 
 test("a view with prepare steps spreads a long build over ticks and posts its body only once prepared", (t) => {
-  const stateDir = makeTempDir("materialize-steps");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stateDir = readModelFixtureDir(t, "materialize-steps").dir;
   let at = T0;
   const clock: Clock = { now: () => at, date: () => new Date(at), iso: () => new Date(at).toISOString() };
   let done = 0;

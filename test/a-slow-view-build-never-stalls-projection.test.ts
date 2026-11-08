@@ -19,6 +19,7 @@ import {
   type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-01T08:00:00.000Z");
 const LIVE = "ledger.ndjson";
@@ -26,8 +27,7 @@ const LIVE = "ledger.ndjson";
 type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -68,7 +68,7 @@ function projectorOf(stateDir: string, instances: Array<{ name: string; ledgerDi
 test("a six minute view build neither stalls projection nor silences the read-model worker", async (t) => {
   // Stop the writer before scratch() removes its state directory in the after hooks.
   let handle: ReturnType<typeof createReadModelWorker> | undefined;
-  t.after(() => void handle?.stop());
+  onReadModelClose(t, () => void handle?.stop());
   const stateDir = scratch(t, "slowview-state");
   const ledgerDir = scratch(t, "slowview-ledger");
   writeFileSync(join(ledgerDir, LIVE), row(Date.now(), "boot"));
@@ -129,10 +129,10 @@ test("the view thread writes bodies under the projector lease only while the pro
   writeFileSync(join(ledgerDir, LIVE), row(T0, "r1"));
   const hand = handClock(T0 + 1_000);
   const projector = projectorOf(stateDir, [{ name: "core", ledgerDir }], hand.clock);
-  t.after(() => projector.ticker.release());
+  onReadModelClose(t, () => projector.ticker.release());
   const posted: ReadModelWorkerMessage[] = [];
   const views = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock: hand.clock, holder: "proj-holder", views: [readModelStatusView], viewsOnly: true, oracle: "off", post: (m) => void posted.push(m) });
-  t.after(() => views.release());
+  onReadModelClose(t, () => views.release());
   views.start();
   views.tick();
   assert.equal(posted.length, 0, "nothing is built or posted before the projector's first word");
@@ -170,7 +170,7 @@ test("a views-only ticker reattaches after its file is swapped and logs an unatt
   writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ projector: "off", views: {} }));
   const posted: ReadModelWorkerMessage[] = [];
   const views = createReadModelTicker({ stateDir, instances, clock: hand.clock, holder: "proj-holder", views: [readModelStatusView], viewsOnly: true, oracle: "off", post: (m) => void posted.push(m) });
-  t.after(() => views.release());
+  onReadModelClose(t, () => views.release());
   views.observe(states);
   views.tick();
   const steps = (): string[] => posted.flatMap((m) => (m.type === "log" ? [`${m.step}:${m.extra.instance}`] : []));
@@ -209,7 +209,7 @@ setInterval(() => {}, 1000);
     relay: (m) => void relayed.push(m.type === "log" ? `${m.step}${m.extra.type ? `:${m.extra.type}` : ""}` : m.type),
     log: (step, extra) => void logs.push({ step, extra }), every: (run) => ((watch = run), () => undefined),
   });
-  t.after(() => lane.close());
+  onReadModelClose(t, () => lane.close());
   await until(() => relayed.includes("fake.hello"), "the thread's log was relayed");
   await sleep(50);
   watch?.();
@@ -236,7 +236,7 @@ test("a view thread that dies is respawned with a doubling back-off", async (t) 
     data: { stateDir: "/nonexistent", instances: [], tickMs: 5, holder: "h" }, workerUrl: new URL("data:text/javascript,throw new Error('views boom')"),
     relay: () => {}, log: (step, extra) => void logs.push({ step, extra }),
   });
-  t.after(() => lane.close());
+  onReadModelClose(t, () => lane.close());
   await until(() => logs.filter((l) => l.step === "read_model.views_exited").length >= 2, "two deaths");
   lane.close();
   assert.deepEqual(logs.filter((l) => l.step === "read_model.views_exited").slice(0, 2).map((l) => [l.extra.deaths, l.extra.respawnInMs]), [[1, 10], [2, 20]]);
@@ -262,12 +262,12 @@ test("the view thread body builds the extra views it loads and answers shadow an
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
   writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ views: { inbox: "shadow", extra: "shadow", analytics: "shadow" } }));
   const projector = projectorOf(stateDir, [{ name: "core", ledgerDir }], { now: () => Date.now(), date: () => new Date(), iso: () => new Date().toISOString() });
-  t.after(() => projector.ticker.release());
+  onReadModelClose(t, () => projector.ticker.release());
   const viewsModule = moduleFile(t, "slowview-extra", `export default [{ name: "extra", version: 1, materialize: () => [{ key: "", data: { extra: true }, sources: [] }] }];\n`).href;
   const fake = fakePort();
   runReadModelViewWorker(fake.port, { stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 5, holder: "proj-holder", viewsModule });
   fake.send({ type: "state", instances: projector.states() });
-  t.after(() => fake.send({ type: "stop" }));
+  onReadModelClose(t, () => fake.send({ type: "stop" }));
   await until(() => fake.posted.some((m) => m.type === "body" && m.entry.view === "extra"), "the loaded view was built");
   fake.send({ type: "state", instances: projector.states() });
   fake.send({ type: "shadow", request: { view: "extra", key: "", requests: 1, legacy: { data: { extra: false }, asOfMs: T0 } } });

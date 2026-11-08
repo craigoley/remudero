@@ -9,6 +9,7 @@ import { createReadModelWorker, readModelBodyKey, type ReadModelWorkerHandle } f
 import { readModelWarmProbe } from "#src/lib/serve-generation.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { trackWorkerThreads } from "#src/lib/worker-heaps.js";
+import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
 
 function fixture(t: TestContext) {
   const dir = makeTempDir("retired-standby-body");
@@ -18,7 +19,7 @@ function fixture(t: TestContext) {
   assert.ok(got.ok);
   const handles: ReadModelWorkerHandle[] = [];
   const threads = trackWorkerThreads();
-  t.after(async () => {
+  onReadModelClose(t, async () => {
     for (const handle of handles) handle.stop();
     await threads.stop();
     db.close();

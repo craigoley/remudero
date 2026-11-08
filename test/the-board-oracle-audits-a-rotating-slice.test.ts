@@ -26,6 +26,7 @@ import type { Plan, Task } from "../src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelLease, type ReadModelStatement } from "../src/lib/read-model-db.js";
 import type { GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 
@@ -52,12 +53,11 @@ interface Rig {
 }
 
 function rig(t: TestCtx): Rig {
-  const dir = makeTempDir("board-oracle-slice");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "board-oracle-slice").dir;
   let now = T0;
   const clock: Clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
   const raw = openProjectorReadModel(dir, "core", clock);
-  t.after(() => raw.close());
+  onReadModelClose(t, () => raw.close());
   const got = acquireLease(raw, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   const lease = got.lease;

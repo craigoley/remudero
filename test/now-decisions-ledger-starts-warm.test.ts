@@ -10,14 +10,14 @@ import { createNowView, NOW_REFRESH_MS, type NowViewContext, type NowViewOptions
 import { acquireLease } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-09T08:00:00.000Z");
 const row = (step: string, extra: Record<string, unknown> = {}) => ({ ts: new Date(T0 - 60_000).toISOString(), step, ...extra });
 const ndjson = (rows: Array<Record<string, unknown>>) => rows.map((r) => JSON.stringify(r)).join("\n") + "\n";
 
 function fixture(t: TestContext) {
-  const root = makeTempDir("now-warm-gates");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "now-warm-gates").dir;
   const ledgerDir = join(root, "core", "state");
   mkdirSync(ledgerDir, { recursive: true });
   const archives = [
@@ -34,7 +34,7 @@ function fixture(t: TestContext) {
   writeFileSync(join(ledgerDir, "DEPLOY_IMAGE_MANUAL"), "");
   const clock = fixedClock(T0);
   const db = openProjectorReadModel(join(root, "home"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const leased = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(leased.ok);
   createLedgerProjector({ ledgerDir, db, lease: leased.lease, clock }).tick();
@@ -83,7 +83,7 @@ test("W1-T7391: a fresh now view reads the gate rows from durable rotation diges
     return Reflect.apply(original, fs, args);
   });
   syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  onReadModelClose(t, () => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const fresh = createNowView(f.options);
   const second = f.build(fresh);
   assert.deepEqual(second.humanGates, first.humanGates);

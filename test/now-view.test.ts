@@ -49,6 +49,7 @@ import { isPlanOnlyChangeset } from "#src/lib/status.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { ChildProcess } from "node:child_process";
 import { createTickReadProducer } from "#src/lib/tick-read-worker.js";
+import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -56,7 +57,7 @@ type TestCtx = { after: (fn: () => void) => void };
 function scratch(t: TestCtx): string {
   const dir = makeTempDir("now-view");
   // A late writer (a producer still flushing) can repopulate the tree mid-removal: retry ENOTEMPTY.
-  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+  onReadModelClose(t, () => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   return dir;
 }
 
@@ -105,7 +106,7 @@ function rig(t: TestCtx, root: string, name: string, clock: Stepped): Rig {
   const ledgerDir = join(root, name, "state");
   mkdirSync(ledgerDir, { recursive: true });
   const db = openProjectorReadModel(join(root, "read-model-home"), name, clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const acquired = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(acquired.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: acquired.lease, clock });
@@ -311,7 +312,7 @@ test("snapshot gateway consumes qualified changed file evidence without fetching
   });
   const shim = ghShim([]), previous = process.env.PATH;
   process.env.PATH = `${shim.dir}:${previous ?? ""}`;
-  t.after(() => { process.env.PATH = previous; });
+  onReadModelClose(t, () => { process.env.PATH = previous; });
   const before = readFileSync(fixture.path, "utf8");
   const gateway = snapshotGithub(fixture.root, "o", "r", fixture.clock).github;
   assert.equal(snapshotEvidence(gateway, 901).status, "complete");
@@ -619,7 +620,7 @@ test("a now shadow sample is diffed against the legacy live-file board and each 
   const view = viewOf(clock, [{ name: "core", ledgerDir }], { listGrilling: () => [], hostProbe: { rateLimit: () => 4321, diskFree: () => (free += 7) } });
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir: ledgerDir, instances: [{ name: "core", ledgerDir }], views: [view], clock, holder: "shadow-now", post: (m) => void posted.push(m) });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.tick();
   const body = posted.find((m) => m.type === "body" && m.entry.view === "now");
   assert.ok(body && body.type === "body", "the view materialized under shadow");
@@ -629,7 +630,7 @@ test("a now shadow sample is diffed against the legacy live-file board and each 
   assert.equal(posted.some((m) => m.type === "log" && m.step === VIEW_SHADOW_DIFF_STEP), false, "no real diff, so no view.shadow_diff row (W1-T5362)");
   // The same comparison taken here: its classifications are what `compare` returns, since no row carries them.
   const db = openReadModel({ stateDir: ledgerDir, instance: "core", schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION, readOnly: true });
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const shadow = createViewShadow({ clock, log: () => {}, evidence: (input) => readShadowEvidence([db], input) });
   const { diffs } = shadow.compare({ view: "now", key: "instance=core", requests: 1, legacy: view.legacy("instance=core", clock.now(), body.entry.body.data)!, body: body.entry.body });
   const merged = diffs.find((d) => d.path.startsWith("board.tasks[taskId=W1-T1]"));
@@ -825,7 +826,7 @@ test("a build in flight leaves the legacy side on the plan github snapshot and p
   open = [{ number: 8405, url: "https://github.com/o/r/pull/8405", state: "OPEN", title: "counter storage", headRefName: "run-unfiled-1" }];
   clock.set(T0 + 90_000);
   const reopened = openProjectorReadModel(join(root, "read-model-home"), "core", clock);
-  t.after(() => reopened.close());
+  onReadModelClose(t, () => reopened.close());
   const ctx = ctxOf(clock, [{ ...core, db: reopened }]);
   let budget = 5;
   assert.equal(view.prepare(ctx, () => budget-- > 0), false, "the build stopped after its probe and before it assembled a body");
@@ -1417,7 +1418,7 @@ test("snapshot gateway receives immutable head evidence from the real tick produ
     title: "fix: real producer evidence", body: "Remudero-Task: W1-T7", head: { ref: "fix/read-model-evidence", sha: head }, draft: false };
   const shim = ghShim([{ when: "pulls/901/files", stdout: files.map(f => JSON.stringify(f)).join("\n") }]);
   const previous = process.env.PATH; process.env.PATH = shim.dir + ":" + (previous ?? "");
-  t.after(() => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; });
+  onReadModelClose(t, () => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; });
   const produce = createTickReadProducer({ owner: "o", repo: "r", config: { root, claudeBin: process.execPath }, ledgerPath, checkoutRoot: root }, {
     fetch: (args) => {
       const endpoint = args.find(arg => arg.startsWith("repos/")) ?? "";

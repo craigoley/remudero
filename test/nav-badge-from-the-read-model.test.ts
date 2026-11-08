@@ -40,6 +40,7 @@ import { READ_MODEL_DB_DIR_ENV } from "#src/lib/read-model-db.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { createViewShadow, legacyViewSampler, unreadySources, type ShadowEvidence, type ShadowRequest } from "#src/lib/view-shadow.js";
 import { buildReadModelViewRoutes, renderView, type ViewBody, type ViewSource } from "#src/lib/views.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 // P1-07: the nav badge materialized by the read-model worker must be the Phase 0 (#8042) answer,
 // persisted so a restarted serve answers warm, and dark until the switch file names it `serve`.
@@ -53,8 +54,7 @@ const SILENT_WORKER = new URL("data:text/javascript,setInterval(() => {}, 1000)"
 type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -221,7 +221,7 @@ test("with its DB on the scratch disk the read-model nav badge still reads the s
   const dbDir = join(scratch(t, "nav-badge-nvme"), "read-model");
   const saved = process.env[READ_MODEL_DB_DIR_ENV];
   process.env[READ_MODEL_DB_DIR_ENV] = `${f.stateDir}:${dbDir}`;
-  t.after(() => {
+  onReadModelClose(t, () => {
     if (saved === undefined) delete process.env[READ_MODEL_DB_DIR_ENV];
     else process.env[READ_MODEL_DB_DIR_ENV] = saved;
   });
@@ -347,7 +347,7 @@ function serveDeps(root: string, stateDir: string, every: (run: () => void) => (
 
 async function listen(t: TestCtx, server: Server): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => {
+  onReadModelClose(t, () => {
     server.closeAllConnections();
     server.close();
   });
@@ -398,7 +398,7 @@ test("a fact store that shrank under the fold is folded again from its first row
   createNavBadgeSourcePublisher({ stateDir: f.stateDir, inboxStateDir: join(f.inboxRoot, "state"), scopes: () => f.scopes })();
   tickBodies(f);
   const db = openProjectorReadModel(f.stateDir, "core");
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const view = createNavBadgeReadModelView(ledgerSource);
   const state = { instance: "core", generation: 1, lease: "held" as const, failures: 0, newestTs: null, tickedAt: NOW };
   const count = (): number | undefined => (view.materialize({ now: NOW, instances: [{ state, db }] })[1].data as NavBadgeData).agent.count;
@@ -413,7 +413,7 @@ test("a cold nav-badge fold takes one chunk per step and builds the body an unch
   createNavBadgeSourcePublisher({ stateDir: f.stateDir, inboxStateDir: join(f.inboxRoot, "state"), scopes: () => f.scopes })();
   tickBodies(f);
   const db = openProjectorReadModel(f.stateDir, "core");
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const max = Number(db.prepare("SELECT max(seq) AS m FROM fact").get()?.m);
   assert.ok(max > 2, "the fixture's fact store spans several chunks");
   const instances = [{ state: { instance: "core", generation: 1, lease: "held" as const, failures: 0, newestTs: null, tickedAt: NOW }, db }];

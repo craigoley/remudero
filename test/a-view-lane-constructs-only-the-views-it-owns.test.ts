@@ -6,13 +6,13 @@ import type { Clock } from "#src/lib/clock.js";
 import { createReadModelTicker, readModelLaneViews, type ReadModelView, type ReadModelViewFactory, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { createDemandBook } from "#src/lib/view-demand.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const proof = "test/a-view-lane-constructs-only-the-views-it-owns.test.ts";
 
 /** A lane's ticker over two instances, its views counted as each factory makes one. */
 function laneFixture(t: { after(run: () => void): void }, lane: "fast" | "heavy", costs: Record<string, number | ((builds: number) => number)> = {}, prepare?: () => boolean) {
-  const dir = makeTempDir("lane-owned-views");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "lane-owned-views").dir;
   mkdirSync(join(dir, "read-model"));
   writeFileSync(join(dir, "read-model", "switches.json"), JSON.stringify({ projector: "off", views: { per: "shadow", global: "shadow", odd: "shadow" } }));
   let ms = 0;
@@ -44,7 +44,7 @@ function laneFixture(t: { after(run: () => void): void }, lane: "fast" | "heavy"
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir: dir, instances: ["core", "site"].map((name) => ({ name, ledgerDir: dir })), clock,
     views: [factory("per", true), factory("global", false)], viewsOnly: true, lane, oracle: "off", post: (msg) => void posted.push(msg) });
-  t.after(() => void ticker.release());
+  onReadModelClose(t, () => void ticker.release());
   ticker.observe([]);
   const count = (name: string) => made.filter((view) => view.name === name).length;
   const held = () => posted.flatMap((msg) => msg.type === "log" && msg.step === "read_model.view_lane_held" ? [msg.extra] : []).at(-1);
@@ -103,15 +103,14 @@ test(`${proof}: the shadow asks the view that published the body, and never cons
 });
 
 test(`${proof}: a factory whose view does not match what it declares is refused, and the lane carries on`, (t) => {
-  const dir = makeTempDir("lane-owned-mismatch");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "lane-owned-mismatch").dir;
   mkdirSync(join(dir, "read-model"));
   writeFileSync(join(dir, "read-model", "switches.json"), JSON.stringify({ projector: "off", views: { odd: "shadow" } }));
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir: dir, instances: [], viewsOnly: true, lane: "fast", oracle: "off",
     clock: { now: () => 0, date: () => new Date(0), iso: () => new Date(0).toISOString() },
     views: [{ name: "odd", create: () => ({ name: "odd", version: 1, demand: true, materialize: () => [] }) }], post: (msg) => void posted.push(msg) });
-  t.after(() => void ticker.release());
+  onReadModelClose(t, () => void ticker.release());
   ticker.observe([]);
   ticker.tick();
   const failed = posted.find((msg) => msg.type === "log" && msg.step === "read_model.materialize_failed");
@@ -119,8 +118,7 @@ test(`${proof}: a factory whose view does not match what it declares is refused,
 });
 
 test(`${proof}: every lane factory declares what its view is, in the order the lanes built them before`, (t) => {
-  const dir = makeTempDir("lane-owned-list");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, "lane-owned-list").dir;
   const clock: Clock = { now: () => 0, date: () => new Date(0), iso: () => new Date(0).toISOString() };
   const list = readModelLaneViews({ instances: [{ name: "core", ledgerDir: dir }] }, clock, () => {}, createDemandBook({ clock }));
   assert.deepEqual(list.map((view) => view.name), ["nav-badge", "repositories", "code-health", "analytics", "daily-progress", "read-model", "now", "instances", "task", "inbox-thread",
