@@ -1,0 +1,21 @@
+id: fb-1794082811892-b312d0
+ts: 2026-11-07T20:20:11.892Z
+raw: Add a separate native consent and resolver path for private offline model
+  evaluation; keep field-trials-consent-v1 aggregate/public semantics unchanged.
+  A secondary-use receipt must bind owner, repo/source, purpose, exact snapshot
+  and corpus digests, allowed offline analysis, privacy boundary and revocation.
+  Require it before resolving inputs and emit only private digest-linked
+  aggregate/evaluation metadata. Use synthetic fixtures for qualification; the
+  real field-trials matrix remains NOT_RUN until an owner-provisioned receipt
+  and actual snapshot, analysis input and corpus exist. User authorized
+  secondary use, but no native receipt or resolver contract currently exists. Do
+  not create substitute private data.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
