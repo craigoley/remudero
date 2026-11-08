@@ -67,6 +67,9 @@ async function fixture(t: TestContext) {
       ...(wire.check === "missing" ? [] : [{ name: "ci", status: wire.check === "pending" ? "in_progress" : "completed",
         conclusion: wire.check === "pending" ? null : wire.check }]),
       { name: "remudero-review", status: "completed", conclusion: "failure" }] }) },
+    // The paginated status history is a list; it must lead the combined-status route, whose
+    // substring "/status" would otherwise answer it with an object and read as unreadable history.
+    { when: "/statuses?", stdout: "[]" },
     { when: "/statuses/", stdout: "{}" },
     { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
   ];
