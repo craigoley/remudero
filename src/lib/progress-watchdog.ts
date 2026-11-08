@@ -103,7 +103,7 @@ export interface ProgressWatchdogInput {
   liveOpenPrInventory?: LiveOpenPrInventory;
 }
 
-/** bound kind: physical — pages of 100 one tick walks (1,000 open PRs); a longer walk is unknown, never a count. */
+/** BACKSTOP: pages of 100 one tick walks (1,000 open PRs). A short page ends a healthy walk; one that never ends is unknown, never a count. */
 export const LIVE_OPEN_PR_MAX_PAGES = 10;
 const LIVE_OPEN_PR_PAGE_SIZE = 100;
 
