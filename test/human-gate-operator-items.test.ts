@@ -15,7 +15,6 @@ import { createNowView, NOW_DAEMON_SILENT_MS, type NowViewData } from "../src/li
 import { acquireLease } from "../src/lib/read-model-db.js";
 import type { GitHub, StatusProjection } from "../src/lib/status.js";
 import { costAnomalyUsd, deriveOperatorItems } from "../src/lib/status-board.js";
-import { makeTempDir } from "../src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const AT = "2026-10-04T12:00:00.000Z";

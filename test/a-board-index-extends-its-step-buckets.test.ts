@@ -5,7 +5,7 @@
  * them with a full read of the same store at the same seq: a fresh projection's first index, which reads in full.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -22,7 +22,6 @@ import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } f
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelStatement } from "#src/lib/read-model-db.js";
 import type { GitHub, LedgerIndex, PrRef } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };

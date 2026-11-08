@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
 import { test } from "node:test";
 import { computeBoardSnapshot, computeRecentActivity, createRecentActivityCache } from "#src/lib/board.js";
 import { fixedClock } from "#src/lib/clock.js";
@@ -9,7 +8,6 @@ import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, withWriteTransaction } from "#src/lib/read-model-db.js";
 import { projectRecentEntry, readRecentActivity } from "#src/lib/recent-projection.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const NOW = Date.parse("2026-10-16T12:00:00Z");

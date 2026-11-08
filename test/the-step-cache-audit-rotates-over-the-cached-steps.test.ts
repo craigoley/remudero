@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { appendFileSync, rmSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { boardOracleSliceOf, createBoardProjection, type Row } from "#src/lib/board-projection.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const STEPS = Array.from({ length: 24 }, (_, i) => `panel.cache.step.${i}`);

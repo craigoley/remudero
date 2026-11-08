@@ -5,7 +5,7 @@
  * task at a byte bound. Each test compares the cached bucket with an uncached projection's read of the same store.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createBoardProjection, type BoardProjection, type BoardProjectionOptions, type Row } from "#src/lib/board-projection.js";
@@ -16,7 +16,6 @@ import { createNowView, type NowViewContext, type NowViewData, type NowViewOptio
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelLease, type ReadModelStatement } from "#src/lib/read-model-db.js";
 import type { GitHub, PrRef } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };

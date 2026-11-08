@@ -4,7 +4,6 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { makeTempDir } from "../src/lib/tmp.js";
 import { createBoardSnapshotCache, createBoardSnapshotReader, boardObservationPath, boardSnapshotPath, boardOpenSnapshotPath } from "../src/lib/board-snapshot-cache.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
 import { fixedClock } from "../src/lib/clock.js";

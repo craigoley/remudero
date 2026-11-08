@@ -10,7 +10,6 @@ import {
   createReadModelTicker, createReadModelWorker, readModelSwitchesPath, readReadModelSwitches, VIEW_AUTO_DEMOTED_STEP, VIEW_AUTO_PROMOTED_STEP, type ReadModelBodyEntry, type ReadModelWorkerHandle, type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
 import { createService } from "#src/lib/service.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { withViewShadow, type ShadowRequest } from "#src/lib/view-shadow.js";
 import { buildReadModelViewRoutes, READ_MODEL_STATUS_VIEW, viewEtag, viewMode, type ViewBodySource, type ViewDefinition } from "#src/lib/views.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";

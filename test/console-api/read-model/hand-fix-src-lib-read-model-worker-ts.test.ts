@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
 import { test } from "node:test";
 import { acquireLease, withWriteTransaction } from "#src/lib/read-model-db.js";
 import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { createReadModelWorker } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 test("W1-T10237: hand_fix:src/lib/read-model-worker.ts is prevented, not retried", (t) => {

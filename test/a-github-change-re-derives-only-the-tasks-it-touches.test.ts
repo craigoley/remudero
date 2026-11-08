@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFileSync, rmSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { canonicalProjection, createBoardProjection, githubAnswerOf, githubDigest, githubViewOf, TASK_TOKEN_RE, type BoardDirtRules, type BoardProjection } from "#src/lib/board-projection.js";
@@ -9,7 +9,6 @@ import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-p
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelLease } from "#src/lib/read-model-db.js";
 import { buildBatchedGithub, projectPlan, TASK_ID_TRAILER_RE, type BatchedIssue, type BatchedPr, type GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-15T03:00:00.000Z");

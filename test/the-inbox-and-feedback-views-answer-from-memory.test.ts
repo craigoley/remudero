@@ -3,7 +3,7 @@
 // Measured before: GET /v1/inbox/threads 15.2 s cold, /v1/inbox?section=needsYou 3.7 s and stale on
 // every read, bare /v1/inbox 1.96 MB, /v1/feedback 462 KB.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -15,7 +15,6 @@ import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, feedbackLegacyView, feedback
 import { INBOX_VIEW_NAME, INBOX_VIEW_SECTIONS, INBOX_VIEW_VERSION, inboxLegacyView, inboxViewBodies, refreshInboxClassification } from "#src/lib/inbox-view.js";
 import { buildInboxRoute, inboxLanes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { createReadModelTicker, createReadModelWorker, loadCommittedViewBodies, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { buildReadModelViewRoutes, renderView, viewKey, type ViewSource } from "#src/lib/views.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { allowGhRefusals } from "#test/setup/tmp-hygiene.js";

@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -18,8 +18,7 @@ import { Worker } from "node:worker_threads";
 
 import { createReadModelWorker, runReadModelWorker } from "../src/lib/read-model-worker.js";
 import * as memory from "../src/lib/serve-memory.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type HolderReading = memory.HolderReading;
 type Book = ReturnType<typeof memory.trackWorkerThreads>;
@@ -42,13 +41,12 @@ const LEDGER_ROW = `${JSON.stringify({ ts: "2026-10-03T19:17:20.000Z", step: "ru
  * a coverage shard open.
  */
 function scratch(t: TestContext, kind: string, book: Book): { dir: string; stopsFirst: (stop: () => void) => void } {
-  const dir = makeTempDir(kind);
+  const dir = readModelFixtureDir(t, kind).dir;
   const stops: Array<() => void> = [];
   onReadModelClose(t, async () => {
     for (const stop of stops) stop();
     await Promise.all(book.live().map(({ thread }) => (thread as Worker).terminate()));
     book.stop();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
   });
   writeFileSync(join(dir, "ledger.ndjson"), LEDGER_ROW);
   return { dir, stopsFirst: (stop) => void stops.push(stop) };

@@ -5,7 +5,7 @@
  * one tick of the old generation releasing it.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
@@ -17,7 +17,6 @@ import {
   type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
 import type { ViewSource } from "#src/lib/views.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-01T12:00:00.000Z");

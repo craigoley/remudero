@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -10,7 +10,6 @@ import {
   type ReadModelIssueAnswer, type ReadModelIssueRequest, type ReadModelWorkerHandle,
 } from "#src/lib/read-model-worker.js";
 import type { ShadowRequest } from "#src/lib/view-shadow.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-01T12:00:00.000Z");

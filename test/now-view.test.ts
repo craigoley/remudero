@@ -41,7 +41,6 @@ import { acquireLease, openReadModel, type ReadModelDb } from "#src/lib/read-mod
 import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { HOST_PROBE_BUDGET_MS, PLAN_BUDGET_MS } from "#src/lib/view-freshness.js";
 import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, defaultCreditStorePath, readLedgerLines, saveCreditStore, type BatchedPr, type CreditStore, type GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence } from "#src/lib/view-shadow.js";
 import { viewEtag, type ViewSwitchMode } from "#src/lib/views.js";
 import { changedFilesCachePath, createChangedFilesCache } from "#src/lib/changed-files-cache.js";
@@ -49,16 +48,14 @@ import { isPlanOnlyChangeset } from "#src/lib/status.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { ChildProcess } from "node:child_process";
 import { createTickReadProducer } from "#src/lib/tick-read-worker.js";
-import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
 
 function scratch(t: TestCtx): string {
-  const dir = makeTempDir("now-view");
-  // A late writer (a producer still flushing) can repopulate the tree mid-removal: retry ENOTEMPTY.
-  onReadModelClose(t, () => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
-  return dir;
+  // A late writer (the transaction publisher) is flushed by the shared fixture before it removes the tree.
+  return readModelFixtureDir(t, "now-view").dir;
 }
 
 function task(id: string, over: Partial<Task> = {}): Task {

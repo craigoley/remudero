@@ -5,7 +5,7 @@
  * that board with one keeping every row (today's behaviour), and fail when a reader reads a step no rule keeps.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -27,7 +27,6 @@ import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelLease } from "#src/lib/read-model-db.js";
 import { computeBoardSnapshot } from "#src/lib/board.js";
 import { projectPlan, type GitHub, type PrRef } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };

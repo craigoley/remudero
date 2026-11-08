@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import fs, { appendFileSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { setFlagsFromString } from "node:v8";
@@ -19,7 +19,6 @@ import { createTaskView, taskViewKey, type TaskViewData } from "#src/lib/task-vi
 import { swapThreadPlanParser, threadPlan } from "#src/lib/thread-plan.js";
 import { TASK_VIEW_NAME, createDemandBook } from "#src/lib/view-demand.js";
 import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");

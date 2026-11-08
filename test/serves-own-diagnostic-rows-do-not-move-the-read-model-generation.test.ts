@@ -8,7 +8,6 @@ import { createNowView, type NowViewContext } from "#src/lib/now-view.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-05T12:00:00.000Z");

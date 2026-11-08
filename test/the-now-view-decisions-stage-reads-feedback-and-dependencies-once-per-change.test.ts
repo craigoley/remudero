@@ -11,7 +11,6 @@ import { createNowView, NOW_REFRESH_MS, nowDependencyVerificationGates, type Now
 import type { BoardPrRest } from "#src/lib/open-prs-rest.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 

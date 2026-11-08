@@ -3,7 +3,7 @@
 // `ledger:` was re-judged, `plan:` and `host-probe:` were hard-coded fresh, and the console parsed the
 // normal post-boot catch-up's prose as stale.
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -11,7 +11,6 @@ import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { gitPlanBehind, planSource } from "#src/lib/now-view.js";
 import { createReadModelTicker, createReadModelWorker, ledgerSource, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { describeSource, HOST_PROBE_BUDGET_MS, judgeSource, PLAN_BUDGET_MS, sourceKindOf } from "#src/lib/view-freshness.js";
 import type { ViewSource } from "#src/lib/views.js";
 import { gitRepo } from "#test/helpers/git-repo.js";

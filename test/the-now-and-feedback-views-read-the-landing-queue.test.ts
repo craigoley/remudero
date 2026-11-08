@@ -2,7 +2,7 @@
 // decision read `proposed` (an answered grill still asked) and a console capture W1-T5628 moved into the
 // landing queue was invisible on both until the sweep landed it. Both views now overlay the one queue.
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock, type Clock } from "#src/lib/clock.js";
@@ -12,7 +12,6 @@ import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-p
 import { createNowView, type NowViewData } from "#src/lib/now-view.js";
 import type { Plan } from "#src/lib/plan.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 

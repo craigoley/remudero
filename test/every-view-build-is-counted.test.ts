@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { test, type TestContext } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
 import { createReadModelTicker, readModelSwitchesPath, type ReadModelTickerOptions, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 

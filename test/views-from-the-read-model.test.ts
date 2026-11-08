@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -16,7 +16,6 @@ import {
 } from "#src/lib/read-model-worker.js";
 import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 import { createService } from "#src/lib/service.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { buildReadModelViewRoutes, buildViewRoutes, viewEtag, viewKey, type ReadModelViewRoutesOptions, type ViewDefinition, type ViewSource } from "#src/lib/views.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 

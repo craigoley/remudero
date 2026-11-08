@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
@@ -11,7 +11,6 @@ import type { Plan } from "../src/lib/plan.js";
 import { acquireLease } from "../src/lib/read-model-db.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
 import { resolve, violations } from "./helpers/openapi-strict.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 

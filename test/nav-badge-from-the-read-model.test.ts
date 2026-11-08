@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -37,7 +37,6 @@ import {
 import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { READ_MODEL_DB_DIR_ENV } from "#src/lib/read-model-db.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { createViewShadow, legacyViewSampler, unreadySources, type ShadowEvidence, type ShadowRequest } from "#src/lib/view-shadow.js";
 import { buildReadModelViewRoutes, renderView, type ViewBody, type ViewSource } from "#src/lib/views.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";

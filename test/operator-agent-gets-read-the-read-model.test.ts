@@ -18,7 +18,6 @@ import {
 import { buildOperatorAgentRoutes, OPERATOR_AGENT_PROPOSAL_STEP } from "../src/lib/operator-agent.js";
 import type { ReadModelDb } from "../src/lib/read-model-db.js";
 import { createReadModelTicker, ledgerSource, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
 import type { ViewBodyEntry, ViewSource } from "../src/lib/views.js";
 import { clock, corpus, get, listen, NOW, post } from "./helpers/operator-agent-corpus.js";
 import { readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";

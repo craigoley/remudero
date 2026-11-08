@@ -19,7 +19,6 @@ import type { ReadModelDb } from "#src/lib/read-model-db.js";
 import { createReadModelTicker, ledgerSource, readModelSwitchesPath, type ReadModelInstanceState, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { buildRegistryRoute } from "#src/lib/serve.js";
 import type { Route } from "#src/lib/service.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { diffViewData } from "#src/lib/view-shadow.js";
 import type { ViewBodyEntry } from "#src/lib/views.js";
 import { observeInstanceInboxContract, mountInstanceInboxRoutes } from "#src/lib/instance-inbox-contract.js";

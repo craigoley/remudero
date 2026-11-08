@@ -6,7 +6,7 @@ import { createChangedFilesCache } from "#src/lib/changed-files-cache.js";
 // switch said: a second fetcher. The lane now reads the board snapshot the owner's walks persist, the
 // source the board and the now view read, and says when that snapshot is stale or missing.
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -21,7 +21,6 @@ import { ownerSnapshotGithub, runSlowLaneWorker, slowLaneTraceGithub, type SlowL
 import { createReadModelWorker, readModelSwitchesPath } from "#src/lib/read-model-worker.js";
 import type { ShadowRequest } from "#src/lib/view-shadow.js";
 import type { ViewSource } from "#src/lib/views.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 

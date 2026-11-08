@@ -3,7 +3,7 @@
 // worker that is not live (no lease, silent, stopped) hands the fetch straight back to serve.
 
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -15,7 +15,6 @@ import { READ_MODEL_LEASE_TTL_MS } from "#src/lib/read-model-db.js";
 import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 import { GITHUB_FETCHER_STEP, createReadModelWorker, readModelSwitchesPath, readReadModelSwitches } from "#src/lib/read-model-worker.js";
 import type { ShadowRequest } from "#src/lib/view-shadow.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };

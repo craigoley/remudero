@@ -3,7 +3,7 @@
 // in the instance's own ledger, and the decision leaves that instance's body. Core-level routes write
 // core's ledger, so an answer through them never reached the instance it was about.
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -16,7 +16,6 @@ import { loadPlan } from "#src/lib/plan.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import { buildServeRoutes, buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 // The routes stamp rows at real time, and the projector quarantines a row ahead of its clock: so the clock is real.

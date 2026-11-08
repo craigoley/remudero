@@ -4,7 +4,7 @@
  * kept without them, one core now view held 82 MB less after GC with byte-identical bodies.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BOARD_ROW_UNREAD_FIELDS, canonicalProjection, createBoardProjection, withoutUnreadFields, type BoardProjection, type Row } from "#src/lib/board-projection.js";
@@ -13,7 +13,6 @@ import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-p
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-06T08:00:00.000Z");

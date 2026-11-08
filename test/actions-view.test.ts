@@ -1,7 +1,6 @@
 // W1-T5052 (arch Phase 4 P4-T13): the `actions` view answers GET /v1/action-results's body from the
 // projector's external_effect.reconciled facts, materialized in the read-model worker.
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildActionResultsRoute } from "#src/lib/action-results.js";
@@ -10,7 +9,6 @@ import type { Clock } from "#src/lib/clock.js";
 import { isFactStep, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { createReadModelTicker, ledgerSource, type ReadModelInstanceState, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { STATUS_BOARD_MIN_ROTATIONS, STATUS_BOARD_WINDOW_MS } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import type { ViewBodyEntry } from "#src/lib/views.js";
 import { writeLedger, type LedgerFixture } from "#test/helpers/ledger-fixture.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";

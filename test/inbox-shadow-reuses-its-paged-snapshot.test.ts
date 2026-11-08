@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
@@ -9,17 +9,16 @@ import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { createReadModelTicker, createReadModelWorker, loadCommittedViewBodies, readModelStatusView, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { INBOX_STALE_AFTER_MS } from "#src/lib/nav-badge-view.js";
 import { readSlowLaneInbox, type PanelGraphDeps } from "#src/lib/panel-graph.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { viewMode } from "#src/lib/views.js";
 import { readShadowCounters } from "#src/lib/view-shadow-store.js";
 import { viewShadowPath } from "#src/lib/view-shadow.js";
-import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 async function world(t: TestContext, count = 180) {
-  const root = makeTempDir("inbox-shadow-pages");
+  const root = readModelFixtureDir(t, "inbox-shadow-pages").dir;
   const closers: Array<() => void> = [];
-  onReadModelClose(t, () => { for (const close of closers) close(); rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  onReadModelClose(t, () => { for (const close of closers) close(); });
   const state = join(root, "state");
   mkdirSync(state);
   mkdirSync(join(root, "plan"));

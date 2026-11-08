@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import fs, { mkdirSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync, type PathOrFileDescriptor } from "node:fs";
+import fs, { mkdirSync, readdirSync, statSync, utimesSync, writeFileSync, type PathOrFileDescriptor } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -13,7 +13,6 @@ import { REPO_ROW_PROJECTION } from "#src/lib/repo-ledger-index.js";
 import { computeRepoTelemetrySync } from "#src/lib/repo-dashboard-route.js";
 import { readRepoRows } from "#src/lib/repositories-view.js";
 import { planFilesIdentity, swapThreadPlanParser, threadPlan, threadStrictPlan } from "#src/lib/thread-plan.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-02T12:00:00.000Z");

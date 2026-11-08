@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { childOracle, createReadModelWorker, oracleChildExecArgv, READ_MODEL_ORACLE_CHILD_STEP, type OracleSliceRequest, type OracleSliceResult } from "#src/lib/read-model-worker.js";
 import { childHeapPolicyArgs, readDaemonMemoryPolicy, recordChildHeapGrowingPercent } from "#src/lib/daemon-memory-policy.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 

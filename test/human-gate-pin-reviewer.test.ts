@@ -11,7 +11,6 @@ import { buildRatificationRow, ratificationPinCheck, renderRatificationRow } fro
 import { acquireLease } from "../src/lib/read-model-db.js";
 import { trackStaleReviewerSkipRecurrence } from "../src/lib/sweep.js";
 import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const AT = "2026-10-04T12:00:00.000Z";

@@ -13,7 +13,6 @@ import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { readModelCommand } from "#src/lib/read-model-cli.js";
 import { READ_MODEL_DB_DIR_ENV, readModelDbDir } from "#src/lib/read-model-db.js";
 import { createReadModelTicker, readModelStatusView, readModelSwitchesPath, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 function scratch(t: { after: (fn: () => void) => void }, kind: string): string {

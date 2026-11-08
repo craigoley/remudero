@@ -6,7 +6,7 @@
  * answer it moved. Every test holds the result against the board oracle's no-reuse derive of the same store.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, rmSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BOARD_DERIVE_DEBOUNCE_MS, createBoardProjection, type BoardProjection, type BoardProjectionOptions } from "../src/lib/board-projection.js";
@@ -15,7 +15,6 @@ import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger
 import type { Plan, Task } from "../src/lib/plan.js";
 import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };

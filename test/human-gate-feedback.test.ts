@@ -12,7 +12,6 @@ import type { Plan } from "../src/lib/plan.js";
 import { acquireLease } from "../src/lib/read-model-db.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const FROM = "2026-10-02T10:00:00.000Z";

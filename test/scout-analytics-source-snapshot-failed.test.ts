@@ -3,7 +3,7 @@
 // budget. The detailed matrix lives in analytics-view.test.ts; this file pins the scout symptom itself — a bounded
 // leg is progress, never a failed or a fresh partial snapshot — against a one-pass positive control.
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -13,7 +13,6 @@ import { ANALYTICS_VIEW_NAME, analyticsSourceBodies } from "#src/lib/analytics-v
 import type { Clock } from "#src/lib/clock.js";
 import type { SourceSnapshotWrite } from "#src/lib/read-model-db.js";
 import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-05T12:00:00.000Z");

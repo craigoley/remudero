@@ -3,7 +3,7 @@
 // gates and one for the operator items. Each had its own rotation memo, so a generation's first build parsed
 // every rotation archive (30 days of them) twice.
 import assert from "node:assert/strict";
-import fs, { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,7 +14,6 @@ import { createNowView, type NowViewContext, type NowViewData, type NowViewOptio
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void; mock: { method: (obj: object, name: string, impl: (...args: never[]) => unknown) => unknown; restoreAll: () => void } };

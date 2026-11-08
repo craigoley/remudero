@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -7,9 +7,8 @@ import { pathToFileURL } from "node:url";
 import { createReadModelTicker, createReadModelWorker, READ_MODEL_SWITCH_RECHECK_MS, threadViews, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { shadowReadiness, viewShadowPath, withViewShadow } from "#src/lib/view-shadow.js";
 import { readShadowCounters } from "#src/lib/view-shadow-store.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { trackWorkerThreads } from "#src/lib/worker-heaps.js";
-import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 async function until(done: () => boolean, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -18,7 +17,7 @@ async function until(done: () => boolean, timeoutMs = 10_000): Promise<void> {
 }
 
 function fixture(t: TestContext) {
-  const dir = makeTempDir("shadow-owner");
+  const dir = readModelFixtureDir(t, "shadow-owner").dir;
   const worker = join(dir, "worker.mjs");
   writeFileSync(worker, `import { parentPort, workerData } from "node:worker_threads";
 const lane = workerData.lane;
@@ -49,7 +48,6 @@ parentPort.on("message", (msg) => {
   onReadModelClose(t, async () => {
     lanes.close();
     await book.stop();
-    rmSync(dir, { recursive: true, force: true });
   });
   const rows = (step: string) => events.flatMap((message) => message.type === "log" && message.step === step ? [message.extra] : []);
   const ready = () => rows("fixture.ready").filter((row) => row.lane === "heavy" && row.heavy === true).length === 2;
@@ -100,7 +98,7 @@ test("shadow owner: hand-back and worker death keep single comparator", async (t
 });
 
 test("shadow owner: captured inputs stay paired and failed preparation grants no readiness", (t) => {
-  const dir = makeTempDir("shadow-pair");
+  const dir = readModelFixtureDir(t, "shadow-pair").dir;
   mkdirSync(join(dir, "read-model"));
   writeFileSync(join(dir, "read-model", "switches.json"), JSON.stringify({ projector: "on", views: { paired: "shadow" } }));
   writeFileSync(join(dir, "ledger.ndjson"), JSON.stringify({ ts: new Date().toISOString(), step: "run.start", task_id: "W1-T1", run_id: "fixture" }) + "\n");
@@ -114,7 +112,7 @@ test("shadow owner: captured inputs stay paired and failed preparation grants no
       return { data, asOfMs: now };
     } }], post: (message) => void events.push(message),
   });
-  onReadModelClose(t, () => { ticker.release(); rmSync(dir, { recursive: true, force: true }); });
+  onReadModelClose(t, () => { ticker.release(); });
   ticker.start();
   ticker.tick();
   const request = { view: "paired", key: "instance=core", requests: 1 };
@@ -139,7 +137,7 @@ test("shadow owner: captured inputs stay paired and failed preparation grants no
 });
 
 test("shadow owner: native heavy worker accrues parity for unchanged values without promoting", async (t) => {
-  const dir = makeTempDir("shadow-native-owner");
+  const dir = readModelFixtureDir(t, "shadow-native-owner").dir;
   mkdirSync(join(dir, "read-model"));
   writeFileSync(join(dir, "read-model", "switches.json"), JSON.stringify({ projector: "on", views: { "paired-worker": "auto" } }));
   writeFileSync(join(dir, "ledger.ndjson"), JSON.stringify({ ts: new Date().toISOString(), step: "run.start", task_id: "W1-T1", run_id: "fixture" }) + "\n");
@@ -172,7 +170,7 @@ export default [{ name: "paired-worker", version: 1, materialize: () => {
   onReadModelClose(t, async () => {
     t.diagnostic(JSON.stringify(logs.filter((row) => row.extra.view === "paired-worker" || /failed|exited/.test(row.step)).slice(-15)));
     t.diagnostic(JSON.stringify({ sent, switches: worker.switches(), body: worker.body("paired-worker")?.body.data, marks: existsSync(marks) ? readFileSync(marks, "utf8").trim().split("\n").slice(-15) : [] }));
-    worker.stop(); await book.stop(); rmSync(dir, { recursive: true, force: true });
+    worker.stop(); await book.stop();
   });
   worker.start();
   const state = () => {

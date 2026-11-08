@@ -2,7 +2,7 @@
 // now view and GET /v1/status all report one source-qualified decision count, read through
 // consumeHumanGateCounts from the same projection and counted before any display cap.
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -24,7 +24,6 @@ import type { ReadModelBodyEntry, ReadModelWorkerHandle } from "#src/lib/read-mo
 import type { Route } from "#src/lib/service.js";
 import { withStatusNeedsYou } from "#src/lib/serve.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import type { ViewSource } from "#src/lib/views.js";
 import { resolve, violations } from "#test/helpers/openapi-strict.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";

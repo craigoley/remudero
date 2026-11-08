@@ -2,7 +2,7 @@
 // projector's activity_ring, materialized in the read-model worker and debounced on ring inserts.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import fsNative, { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import fsNative, { appendFileSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { syncBuiltinESMExports } from "node:module";
@@ -14,7 +14,6 @@ import type { ReadModelDb } from "#src/lib/read-model-db.js";
 import { createReadModelTicker, ledgerSource, type ReadModelInstanceState, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { buildBatchedGithub, projectPlan, readLedgerLines, SERVE_KEEPS_CREDITS_IN_MEMORY, type BatchedPr, type GitHub } from "#src/lib/status.js";
 import { threadPlan } from "#src/lib/thread-plan.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import type { ViewBodyEntry } from "#src/lib/views.js";
 import { createWorkstreamsView, readActivityRing, WORKSTREAMS_DEBOUNCE_MS, WORKSTREAMS_VIEW_NAME, type WorkstreamsData } from "#src/lib/workstreams-view.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";

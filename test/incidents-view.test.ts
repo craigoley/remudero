@@ -2,7 +2,7 @@
 // same store, each instance's emergency stops must equal GET /v1/operator-agent/emergency/status over the same
 // ledger (taken from the agent view's panel fold), and the liveness band must hold the ETag still across beats.
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -15,7 +15,6 @@ import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { buildOperatorAgentRoutes } from "#src/lib/operator-agent.js";
 import { createAgentFolds, type ReadModelDb } from "#src/lib/read-model-db.js";
 import { createReadModelTicker, ledgerSource, type ReadModelInstanceState } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { viewEtag, type ViewSource } from "#src/lib/views.js";
 import { get, listen } from "#test/helpers/operator-agent-corpus.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";

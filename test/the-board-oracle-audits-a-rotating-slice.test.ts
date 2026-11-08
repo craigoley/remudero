@@ -7,7 +7,7 @@
  * the oracle's word.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, rmSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -25,7 +25,6 @@ import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger
 import type { Plan, Task } from "../src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelLease, type ReadModelStatement } from "../src/lib/read-model-db.js";
 import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };

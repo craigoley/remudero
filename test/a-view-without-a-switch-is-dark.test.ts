@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath, type ReadModelBodyEntry, type ReadModelSwitches, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { createService } from "#src/lib/service.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { withViewShadow, type ShadowRequest } from "#src/lib/view-shadow.js";
 import { buildReadModelViewRoutes, viewEtag, type ViewBodySource, type ViewDefinition } from "#src/lib/views.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";

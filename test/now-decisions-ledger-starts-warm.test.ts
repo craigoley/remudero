@@ -9,7 +9,6 @@ import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-p
 import { createNowView, NOW_REFRESH_MS, type NowViewContext, type NowViewOptions } from "#src/lib/now-view.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-09T08:00:00.000Z");

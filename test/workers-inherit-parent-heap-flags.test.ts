@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { makeTempDir } from "../src/lib/tmp.js";
 import { readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const exec = promisify(execFile);

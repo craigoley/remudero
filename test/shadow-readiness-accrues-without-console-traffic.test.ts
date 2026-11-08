@@ -5,31 +5,31 @@ import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Clock } from "#src/lib/clock.js";
 import { createReadModelWorker, READ_MODEL_SWITCH_RECHECK_MS, readModelStatusView, readModelSwitchesPath, type ReadModelBodyEntry } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { createShadowSampler, VIEW_SHADOW_DIFF_STEP, VIEW_SHADOW_SAMPLE_MS, withViewShadow } from "#src/lib/view-shadow.js";
 import type { ViewDefinition } from "#src/lib/views.js";
-import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-01T03:00:00.000Z");
 /** The prefix test/the-shadow-readiness-test-stops-its-worker-before-cleanup.test.ts reads the cleanup order by. */
 const SHADOW_CLEANUP_NOTE = "shadow-readiness cleanup:";
 
 /**
- * W1-T5461: ONE after-hook owns the order. node:test runs `t.after` hooks first-registered-first and
+ * W1-T5461: ONE teardown owns the order. node:test runs `t.after` hooks first-registered-first and
  * skips the rest once one throws, so a separate `rmSync` hook ran while the restarted worker still
  * wrote (ENOTEMPTY) and the stop hook behind it never ran; the live thread held the shard open.
- * The retries outlast the view thread's READ_MODEL_STOP_WAIT_MS terminate, which `stop()` does not await.
+ * W1-T11411: the worker stops are closers of the shared read-model fixture, which runs them, flushes the
+ * diagnostic publisher and only then removes the scratch dir.
  */
 function scratch(t: TestContext, kind: string): { dir: string; stopsFirst: (worker: { stop(): boolean }) => void } {
-  const dir = makeTempDir(kind);
+  const dir = readModelFixtureDir(t, kind).dir;
   const workers: Array<{ stop(): boolean }> = [];
+  // Registered first, so it runs after the worker closers; the shared teardown then flushes the diagnostic publisher and removes `dir`.
+  onReadModelClose(t, () => t.diagnostic(`${SHADOW_CLEANUP_NOTE} scratch removed`));
   onReadModelClose(t, () => {
     for (const worker of workers) {
       worker.stop();
       t.diagnostic(`${SHADOW_CLEANUP_NOTE} worker stopped`);
     }
-    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
-    t.diagnostic(`${SHADOW_CLEANUP_NOTE} scratch removed`);
   });
   return { dir, stopsFirst: (worker) => void workers.push(worker) };
 }

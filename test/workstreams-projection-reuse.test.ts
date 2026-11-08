@@ -20,7 +20,6 @@ import {
   type StatusProjection,
 } from "#src/lib/status.js";
 import { threadPlan } from "#src/lib/thread-plan.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { createWorkstreamsProjectionReuse, fileIdentity, WORKSTREAMS_REUSE_AUDIT_MS } from "#src/lib/workstreams-projection-reuse.js";
 import { createWorkstreamsView, WORKSTREAMS_DEBOUNCE_MS, WORKSTREAMS_VIEW_NAME } from "#src/lib/workstreams-view.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";

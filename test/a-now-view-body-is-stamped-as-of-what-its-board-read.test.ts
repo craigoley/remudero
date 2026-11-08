@@ -7,7 +7,7 @@
 // This drives a real projector, store and view, and lands the verdict in that window from the host probe's seam,
 // which runs after the board stage.
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
@@ -16,7 +16,6 @@ import { createNowView, type NowSlotState, type NowViewContext } from "#src/lib/
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import type { ViewSource } from "#src/lib/views.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 

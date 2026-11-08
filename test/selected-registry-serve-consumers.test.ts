@@ -21,6 +21,7 @@ import { trackWorkerThreads } from "../src/lib/worker-heaps.js";
 import { switchViewsOn } from "./helpers/read-model-switches.js";
 import { readSelectedInstanceRegistry, registryFileIO } from "../src/lib/instance-registry-selection.js";
 import { onReadModelClose } from "#test/helpers/read-model-fixture-dir.js";
+import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
 
 interface Row { step: string; fields: Record<string, unknown> }
 function pendingValue<T>(): { promise: Promise<T>; resolve(value: T): void } {
@@ -46,7 +47,8 @@ async function invoke(route: Route, repo = "owner/repo"): Promise<{ code: number
 function fixture(t: { after(fn: () => void): void }, selected = true) {
   const root = makeTempDir("selected-serve-consumer");
   let retained = false;
-  onReadModelClose(t, () => { if (!retained) rmSync(root, { recursive: true, force: true }); });
+  // Kept out of readModelFixtureDir on purpose: a live thread (preserve()) must keep the dir. The closer awaits the publisher itself.
+  onReadModelClose(t, async () => { await flushReadModelTransactions(); if (!retained) rmSync(root, { recursive: true, force: true }); });
   const legacy = join(root, "legacy.yaml"), path = join(root, "selected.yaml");
   writeFileSync(legacy, selectedText("legacy"));
   if (selected) writeFileSync(path, selectedText());

@@ -1,9 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createReadModelWorker, threadOracle, threadViews } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "#src/lib/live-write-guard.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
