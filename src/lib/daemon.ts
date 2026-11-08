@@ -5923,7 +5923,7 @@ export async function runDaemon(
           const hold = holdWorkerAdmission("intake");
           if (hold) {
             log("intake_cadence.held", { rung: decision.rung, reason: hold.reason });
-            return true;
+            return hold.control !== "HEAP";
           }
           log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
           if (decision.rung === "codeqlQuality" && (deps.opportunityOutcomes || deps.knowledgeGardener)) {
@@ -5971,7 +5971,7 @@ export async function runDaemon(
         const hold = holdWorkerAdmission("wipe-test");
         if (hold) {
           log("wipetest.cadence.held", { reason: hold.reason, seq: decision.seq, subject: decision.subject.id, ...wipeTestCadenceEvidenceFields(decision) });
-          return true;
+          return hold.control !== "HEAP";
         }
         log("wipetest.cadence.fired", {
           reason: decision.reason,
@@ -6160,7 +6160,7 @@ export async function runDaemon(
         const hold = holdWorkerAdmission("retro");
         if (hold) {
           log("daemon.retro_trigger.held", { reason: hold.reason });
-          return true;
+          return hold.control !== "HEAP";
         }
         const crossingKey = retroTriggerCrossingKey(decision);
         if (activeRetroCrossingKey === crossingKey) {
@@ -6266,7 +6266,8 @@ export async function runDaemon(
         const hold = holdWorkerAdmission("auto-triage");
         if (hold) {
           log("auto_triage.held", { feedback: decision.feedbackId, reason: hold.reason });
-          return true;
+          // W1-T11383: a heap hold skips the start but not the tick, so the dispatch gate's HEAP arm sleeps it.
+          return hold.control !== "HEAP";
         }
         if (deps.runAutoTriage) {
           const fired = decision;
@@ -7668,7 +7669,7 @@ export async function runDaemon(
       ticks++;
       idleLaneTickCause = "memory";
       idleLaneTickHold = { reason: workerHold.reason };
-      sampleIdleLane(0, false);
+      sampleIdleLane(0, false, dispatchSet.length);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
