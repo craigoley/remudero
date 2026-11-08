@@ -16227,6 +16227,8 @@ function continuationEndedAtEmptyBoot(
       ["run_child.adopted", "run_child.adoption_unreadable", "run_child.adoption_misidentified"].includes(String(line.step)));
 }
 
+/** W1-T11169 — a dead run's continuation ended once ANY later boot by another run has a readable, self-consistent
+ *  adoption pass that adopted no child naming THIS task; other tasks' adopted children never keep it live. */
 function continuationEndedAtTaskBoot(
   lines: ReadonlyArray<Record<string, unknown>>, from: number, ownerRunId: string, taskId: string, runId: string,
 ): boolean {
@@ -16291,6 +16293,7 @@ export function fixSeedRead(
   // exact-head dispatch before reading that identity; absent evidence stays unknown.
   if (pr.taskId === undefined && !window.some(line => line.step === "fix.dispatch" &&
       line.task_id === taskId && line.head_sha === pr.headSha)) return undefined;
+  // W1-T11169: a written settlement for this (PR, head, seed) is read back until a later dispatch starts a new seed.
   const settledAt = fixSeedSettlementAt(lines, pr, seed);
   if (seed.runId !== runId && settledAt > seedAt && !lines.slice(settledAt + 1).some(line => line.step === "fix.dispatch" &&
       line.task_id === taskId && line.head_sha === pr.headSha)) {
