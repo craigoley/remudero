@@ -18,7 +18,7 @@
   attempts: 0
   rationale: |
     The initiative asked for this task under "the reserved W1-T11668 id". The harness reserved
-    W1-T11669..W1-T11673 for this filing run, not W1-T11668, and W1-T11668 appears nowhere in plan/. So this task
+    five IDs for this filing run, not W1-T11668, and W1-T11668 appears nowhere in plan/. So this task
     uses W1-T11669, the first id actually reserved. Its scope is exactly what the initiative described.
     TWO PROOFS THAT CANNOT DISCRIMINATE, READ ON THIS TREE:
     - W1-T11623 criterion 1 is `unit test: test/author-preflight.test.ts`. Its own rationale records that the
