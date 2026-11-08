@@ -408,10 +408,8 @@ import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock 
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { createGateSandboxMetrics } from "./lib/gate-sandbox-metrics.js";
-import { composeRealDeps, realReviewWorktreeAsync, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
+import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
-
-type ReviewRecoveryGit = typeof hostWorktreeGit | typeof hostWorktreeGitAsync;
 import {
   FIX_MODE_RULES,
   deriveFixMode,
@@ -541,6 +539,7 @@ import {
   newMonolithIdsAgainstBase,
   relintRefusalMessage,
   runRelintLoop,
+  type RelintViolation,
 } from "./lib/relint.js";
 import type { RunResult } from "./lib/run-result.js";
 import { dropTierRowsBeforePush, prePushGateRefusal } from "./lib/pre-push-refusal.js";
@@ -611,7 +610,7 @@ import {
 } from "./lib/drain.js";
 import { daemonExitCode, readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProjection, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
-import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
+import { holdReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
@@ -2947,7 +2946,7 @@ import { resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
 import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
-import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
+import { asOwnerRepoUnresolvable, resolveOwnerRepoAt, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
 let composedRealGraph: ComposedRealGraph | undefined;
@@ -10931,10 +10930,10 @@ export async function preserveInheritedCensusWork(root: string, worktreePath: st
   const untracked = (await git(["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
   const mainChanged = new Set((await git(["diff", "--name-only", "-z", context.mergeBase, context.mainSha])).split("\0"));
   if ([...tracked, ...staged, ...untracked].some(path => mainChanged.has(path))) throw new Error("saved work overlaps main migration");
-  if (untracked.length > 0) return { saved_path: await preserveStaleDirtyFixOwnerAsync(root, worktreePath, worktreePath, branch, context.headSha) };
+  if (untracked.length > 0) return { saved_path: preserveStaleDirtyFixOwner(root, worktreePath, worktreePath, branch, context.headSha) };
   return {
-    ...(staged.length > 0 ? { index_recovery_ref: await preserveStagedFixOwnerResidueAsync(worktreePath, worktreePath, branch, context.headSha) } : {}),
-    ...(tracked.length > 0 ? { recovery_ref: await preserveTrackedDirtyFixOwnerAsync(worktreePath, worktreePath, branch, context.headSha) } : {}),
+    ...(staged.length > 0 ? { index_recovery_ref: preserveStagedFixOwnerResidue(worktreePath, worktreePath, branch, context.headSha) } : {}),
+    ...(tracked.length > 0 ? { recovery_ref: preserveTrackedDirtyFixOwner(worktreePath, worktreePath, branch, context.headSha) } : {}),
   };
 }
 
@@ -11401,113 +11400,55 @@ export function reviewLedgerReasonFields(args: {
  * so a throw from `runReview` itself still tears that one down (criterion 6).
  */
 export function materializeReviewWorktree(
-  config: Config, repoDir: string, prNumber: number, headSha: string,
+  config: Config,
+  repoDir: string,
+  prNumber: number,
+  headSha: string,
   deps: ReviewWorktreeDeps = realDeps().reviewWorktree,
 ): MaterializeReviewWorktreeResult {
-  return runStepsSync(materializeReviewWorktreeSteps(config, repoDir, prNumber, headSha, deps, worktreeRemove, false));
-}
+  const worktreePath = join(worktreesDir(config), `review-PR${prNumber}-${Date.now()}`);
+  const removeWorktree = deps.removeWorktree ?? worktreeRemove;
 
-export function materializeReviewWorktreeAsync(
-  config: Config, repoDir: string, prNumber: number, headSha: string,
-  deps: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>> = realReviewWorktreeAsync(),
-): Promise<MaterializeReviewWorktreeResult> {
-  return runStepsAsync(materializeReviewWorktreeSteps(config, repoDir, prNumber, headSha, deps, worktreeRemoveAsync, true));
-}
-
-// Epoch names remain compatible with the reclaimer, including overlapping same-tick calls.
-let lastReviewMaterializationEpochMs = 0;
-
-function* materializeReviewWorktreeSteps(
-  config: Config, repoDir: string, prNumber: number, headSha: string,
-  deps: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>,
-  defaultRemove: (repoDir: string, worktreePath: string) => void | Promise<void>,
-  protectWhileCreating: boolean,
-): Steps<MaterializeReviewWorktreeResult> {
-  const epochMs = Math.max(Date.now(), lastReviewMaterializationEpochMs + 1);
-  lastReviewMaterializationEpochMs = epochMs;
-  const worktreePath = join(worktreesDir(config), `review-PR${prNumber}-${epochMs}`);
-  const removeWorktree = deps.removeWorktree ?? defaultRemove;
-  // An awaited add/HEAD read makes the new path visible before it can be handed to review.
-  let handedOff = false;
-  if (protectWhileCreating) holdReviewWorktree(worktreePath);
   try {
-  try {
-    yield* step(() => deps.fetch(repoDir, prNumber, headSha));
+    deps.fetch(repoDir, prNumber, headSha);
   } catch (e) {
     // Nothing was created yet — no cleanup needed, only a named reason.
-    return { worktreePath: undefined, failure: { errorClass: "fetch-failure", message: String((e as Error)?.message ?? e) } };
+    return {
+      worktreePath: undefined,
+      failure: { errorClass: "fetch-failure", message: String((e as Error)?.message ?? e) },
+    };
   }
+
   let created = false;
   let tip: string;
   try {
-    yield* step(() => deps.addWorktree(repoDir, worktreePath, headSha));
-    created = true;
-    tip = yield* step(() => deps.revParseHead(worktreePath));
+    deps.addWorktree(repoDir, worktreePath, headSha);
+    created = true; // the worktree is now on disk — any exit from here must clean it up.
+    tip = deps.revParseHead(worktreePath);
   } catch (e) {
-    if (created) yield* cleanupMaterializedWorktreeSteps(removeWorktree, repoDir, worktreePath);
+    if (created) cleanupMaterializedWorktree(removeWorktree, repoDir, worktreePath);
     const message = String((e as Error)?.message ?? e);
-    const errorClass: MaterializationErrorClass = /already used by worktree/.test(message) ? "worktree-collision" : "other";
+    const errorClass: MaterializationErrorClass = /already used by worktree/.test(message)
+      ? "worktree-collision"
+      : "other";
     return { worktreePath: undefined, failure: { errorClass, message } };
   }
+
   if (tip !== headSha) {
-    yield* cleanupMaterializedWorktreeSteps(removeWorktree, repoDir, worktreePath);
+    cleanupMaterializedWorktree(removeWorktree, repoDir, worktreePath);
     throw new Error(
       `materialized worktree at ${worktreePath} is at ${tip}, not the PR head ${headSha} — ` +
-      "a stale fetch or a moved ref; refusing to review a possibly-wrong tree rather than posting a false verdict",
+        "a stale fetch or a moved ref; refusing to review a possibly-wrong tree rather than posting a false verdict",
     );
   }
   registerReviewerCheckout(worktreePath);
+  // Held until withMaterializedWorktree's teardown: a review slower than the sweep's grace window is still live.
   holdReviewWorktree(worktreePath);
-  handedOff = true;
   return { worktreePath };
-  } finally {
-    if (protectWhileCreating && !handedOff) releaseReviewWorktree(worktreePath);
-  }
-}
-
-function* cleanupMaterializedWorktreeSteps(
-  remove: (repoDir: string, worktreePath: string) => void | Promise<void>, repoDir: string, worktreePath: string,
-): Steps<void> {
-  try { yield* step(() => remove(repoDir, worktreePath)); }
-  catch (e) {
-    console.error(`(worktree teardown failed for ${worktreePath} after a materialization failure: ${String((e as Error)?.message ?? e)})`);
-  }
-}
-
-export async function materializePlanRoundWorktreeAsync(
-  config: Config, repoDir: string, prNumber: number, headSha: string,
-  deps: Pick<ReviewCommandDeps, "materialize"> & {
-    prepare?: (repoDir: string, worktreePath: string) => boolean | Promise<boolean> } = {},
-): Promise<MaterializeReviewWorktreeResult> {
-  const result = await (deps.materialize ?? materializeReviewWorktreeAsync)(config, repoDir, prNumber, headSha);
-  if (!result.worktreePath) return result;
-  const path = result.worktreePath;
-  try {
-    if (await (deps.prepare ?? prepareWorktreeToolchainAsync)(repoDir, path)) return result;
-  } catch (error) {
-    await runStepsAsync(cleanupMaterializedWorktreeSteps(worktreeRemoveAsync, repoDir, path));
-    releaseReviewWorktree(path);
-    throw error;
-  }
-  await runStepsAsync(cleanupMaterializedWorktreeSteps(worktreeRemoveAsync, repoDir, path));
-  releaseReviewWorktree(path);
-  return { worktreePath: undefined, failure: { errorClass: "other", message: "plan round toolchain unavailable" } };
-}
-
-async function prepareWorktreeToolchainAsync(repoDir: string, worktreePath: string): Promise<boolean> {
-  const linked = linkWorktreeNodeModules(repoDir, worktreePath);
-  let commonDir: string | undefined;
-  try { commonDir = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(); }
-  catch { /* Preserve the existing best-effort exclusion when Git cannot name its directory. */ }
-  excludeNodeModulesFromGit(worktreePath, { commonDir: () => {
-    if (commonDir === undefined) throw new Error("git common dir unreadable");
-    return commonDir;
-  } });
-  return linked !== "no-source" && linked !== "failed";
 }
 
 export function materializePlanRoundWorktree(config: Config, repoDir: string, prNumber: number, headSha: string,
-  deps: Partial<Record<"materialize", typeof materializeReviewWorktree>> & { prepare?: FreshTreeReviewSeams["prepareWorktree"] } = {},
+  deps: Pick<ReviewCommandDeps, "materialize"> & { prepare?: FreshTreeReviewSeams["prepareWorktree"] } = {},
 ): MaterializeReviewWorktreeResult {
   const result = (deps.materialize ?? materializeReviewWorktree)(config, repoDir, prNumber, headSha);
   if (result.worktreePath && !(deps.prepare ?? prepareWorktreeToolchain)(repoDir, result.worktreePath)) {
@@ -18729,6 +18670,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true || rest.includes("--offline");
   const checkoutRoot = deps.repoRoot ?? resolve(flagValue(rest, "--repo-root") ?? repoRoot);
+  let localRepoName: string | undefined;
+  try { localRepoName = resolveOwnerRepoAt(checkoutRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
@@ -19098,6 +19041,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
     opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
+    opts.localRepoName = localRepoName;
     opts.knownRepos = knownRepos;
     // W1-T9292: an unminted id BLOCKS only on a task this diff adds; one already on the base, every one in a whole-plan
     // pass, and every one when the base plan does not load (`newTaskIds` undefined) only WARNS.
@@ -30511,35 +30455,21 @@ export function captureRegisteredFixOwnerSnapshot(
 
 /** W1-T6355: tracked modifications, staged paths or an interrupted merge/cherry-pick/revert. */
 function readOwnerHasTrackedWork(ownerPath: string): boolean {
-  return runStepsSync(readOwnerHasTrackedWorkSteps(hostWorktreeGit, ownerPath));
-}
-
-
-
-function* readOwnerHasTrackedWorkSteps(git: ReviewRecoveryGit, ownerPath: string): Steps<boolean> {
-  if ((yield* step(() => git(ownerPath, ["status", "--porcelain=v1", "--untracked-files=no"]))).length > 0) return true;
-  for (const marker of FIX_OWNER_OPERATION_MARKERS) {
+  if (hostWorktreeGit(ownerPath, ["status", "--porcelain=v1", "--untracked-files=no"]).length > 0) return true;
+  return FIX_OWNER_OPERATION_MARKERS.some((marker) => {
     try {
-      readFileSync(resolve(ownerPath, (yield* step(() => git(ownerPath, ["rev-parse", "--git-path", marker]))).trim()));
+      readFileSync(resolve(ownerPath, hostWorktreeGit(ownerPath, ["rev-parse", "--git-path", marker]).trim()));
       return true;
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
       throw e;
     }
-  }
-  return false;
+  });
 }
 
 export function removeAbandonedFixWorktreeOwner(repoDir: string, worktreePath: string): void {
   // No --force: a dirty owner is refused. The fix clone is pinned through the hardened leaf.
   hostWorktreeGit(repoDir, ["worktree", "remove", worktreePath]);
-  removeRunLock(worktreePath);
-  removeWorktreeBase(worktreePath);
-}
-
-export async function removeAbandonedFixWorktreeOwnerAsync(repoDir: string, worktreePath: string): Promise<void> {
-  // Metadata cleanup follows completion of the same pinned Git operation.
-  await hostWorktreeGitAsync(repoDir, ["worktree", "remove", worktreePath]);
   removeRunLock(worktreePath);
   removeWorktreeBase(worktreePath);
 }
@@ -30552,46 +30482,41 @@ const DIRTY_FIX_OWNER_RECOVERY_IDENTITY = {
   GIT_COMMITTER_EMAIL: "remudero-fleet[bot]@users.noreply.github.com",
 } as const;
 
-// The worker commit path is synchronous and shares the same temporary-index steps.
 function temporaryIndexTree(
-  repoDir: string, baseSha: string, mutate: (env: NodeJS.ProcessEnv) => void, seedIndexPath?: string,
+  repoDir: string,
+  baseSha: string,
+  mutate: (env: NodeJS.ProcessEnv) => void,
+  seedIndexPath?: string,
 ): string {
-  return runStepsSync(temporaryIndexTreeSteps(hostWorktreeGit, repoDir, baseSha,
-    function* (env) { yield* step(() => mutate(env)); }, seedIndexPath));
-}
-
-function* temporaryIndexTreeSteps(git: ReviewRecoveryGit, repoDir: string, baseSha: string, mutate: (env: NodeJS.ProcessEnv) => Steps<void>, seedIndexPath?: string): Steps<string> {
   const dir = mkdtempSync(join(tmpdir(), "rmd-dirty-fix-owner-index-"));
-  const env = {
-    ...process.env,
-    GIT_INDEX_FILE: join(dir, "index")
-  };
+  const env = { ...process.env, GIT_INDEX_FILE: join(dir, "index") };
   try {
-    if (seedIndexPath === undefined) yield* step(() => git(repoDir, ["read-tree", baseSha], {
-      env
-    }));else copyFileSync(seedIndexPath, env.GIT_INDEX_FILE);
-    yield* mutate(env);
-    return (yield* step(() => git(repoDir, ["write-tree"], {
-      env
-    }))).trim();
+    if (seedIndexPath === undefined) hostWorktreeGit(repoDir, ["read-tree", baseSha], { env });
+    else copyFileSync(seedIndexPath, env.GIT_INDEX_FILE);
+    mutate(env);
+    return hostWorktreeGit(repoDir, ["write-tree"], { env }).trim();
   } finally {
-    rmSync(dir, {
-      recursive: true,
-      force: true
-    });
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
-function* refCommitMatchesDirtyRecoverySteps(git: ReviewRecoveryGit, repoDir: string, recoveryRef: string, localSha: string, tree: string): Steps<boolean> {
+function refCommitMatchesDirtyRecovery(repoDir: string, recoveryRef: string, localSha: string, tree: string): boolean {
   try {
-    const commit = (yield* step(() => git(repoDir, ["rev-parse", "--verify", recoveryRef]))).trim();
-    const parent = (yield* step(() => git(repoDir, ["rev-parse", "--verify", `${recoveryRef}^1`]))).trim();
-    const recoveredTree = (yield* step(() => git(repoDir, ["rev-parse", "--verify", `${recoveryRef}^{tree}`]))).trim();
+    const commit = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", recoveryRef], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const parent = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", `${recoveryRef}^1`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const recoveredTree = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", `${recoveryRef}^{tree}`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
     return /^[0-9a-f]{40}$/i.test(commit) && parent === localSha && recoveredTree === tree;
   } catch (error) {
-    const stderr = String((error as {
-      stderr?: unknown;
-    }).stderr ?? "");
+    const stderr = String((error as { stderr?: unknown }).stderr ?? "");
     if (stderr.includes("Needed a single revision")) return false;
     throw error;
   }
@@ -30604,21 +30529,7 @@ export function preserveTrackedDirtyFixOwner(
   localSha: string,
   deps: CaptureRegisteredFixOwnerDeps = {},
 ): string {
-  return runStepsSync(preserveTrackedDirtyFixOwnerSteps(hostWorktreeGit, repoDir, ownerPath, branch, localSha, deps));
-}
-
-export function preserveTrackedDirtyFixOwnerAsync(
-  repoDir: string,
-  ownerPath: string,
-  branch: string,
-  localSha: string,
-  deps: CaptureRegisteredFixOwnerDeps = {},
-): Promise<string> {
-  return runStepsAsync(preserveTrackedDirtyFixOwnerSteps(hostWorktreeGitAsync, repoDir, ownerPath, branch, localSha, deps));
-}
-
-function* preserveTrackedDirtyFixOwnerSteps(git: ReviewRecoveryGit, repoDir: string, ownerPath: string, branch: string, localSha: string, deps: CaptureRegisteredFixOwnerDeps = {}): Steps<string> {
-  return yield* preserveTrackedDirtyPatchSteps(git, repoDir, ownerPath, branch, localSha, yield* readTrackedDirtyOwnerPatchSteps(git, ownerPath, localSha), deps);
+  return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, readTrackedDirtyOwnerPatch(ownerPath, localSha), deps);
 }
 
 /** W1-T5918: the production seam. An empty HEAD-relative diff returns the index/operation residue
@@ -30630,23 +30541,9 @@ export function preserveOrDiscardFixOwnerResidue(
   localSha: string,
   deps: CaptureRegisteredFixOwnerDeps = {},
 ): string | FixOwnerResidue {
-  return runStepsSync(preserveOrDiscardFixOwnerResidueSteps(hostWorktreeGit, repoDir, ownerPath, branch, localSha, deps));
-}
-
-export function preserveOrDiscardFixOwnerResidueAsync(
-  repoDir: string,
-  ownerPath: string,
-  branch: string,
-  localSha: string,
-  deps: CaptureRegisteredFixOwnerDeps = {},
-): Promise<string | FixOwnerResidue> {
-  return runStepsAsync(preserveOrDiscardFixOwnerResidueSteps(hostWorktreeGitAsync, repoDir, ownerPath, branch, localSha, deps));
-}
-
-function* preserveOrDiscardFixOwnerResidueSteps(git: ReviewRecoveryGit, repoDir: string, ownerPath: string, branch: string, localSha: string, deps: CaptureRegisteredFixOwnerDeps = {}): Steps<string | FixOwnerResidue> {
-  const patch = yield* readTrackedDirtyOwnerPatchSteps(git, ownerPath, localSha);
-  if (patch.length === 0) return yield* readFixOwnerResidueSteps(git, ownerPath, localSha);
-  return yield* preserveTrackedDirtyPatchSteps(git, repoDir, ownerPath, branch, localSha, patch, deps);
+  const patch = readTrackedDirtyOwnerPatch(ownerPath, localSha);
+  if (patch.length === 0) return readFixOwnerResidue(ownerPath, localSha);
+  return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps);
 }
 
 /** W1-T5974: a staged-only residue on a head the PR has moved past, preserved from the owner's
@@ -30659,31 +30556,13 @@ export function preserveStagedFixOwnerResidue(
   localSha: string,
   deps: CaptureRegisteredFixOwnerDeps = {},
 ): string {
-  return runStepsSync(preserveStagedFixOwnerResidueSteps(hostWorktreeGit, repoDir, ownerPath, branch, localSha, deps));
-}
-
-export function preserveStagedFixOwnerResidueAsync(
-  repoDir: string,
-  ownerPath: string,
-  branch: string,
-  localSha: string,
-  deps: CaptureRegisteredFixOwnerDeps = {},
-): Promise<string> {
-  return runStepsAsync(preserveStagedFixOwnerResidueSteps(hostWorktreeGitAsync, repoDir, ownerPath, branch, localSha, deps));
-}
-
-function* preserveStagedFixOwnerResidueSteps(git: ReviewRecoveryGit, repoDir: string, ownerPath: string, branch: string, localSha: string, deps: CaptureRegisteredFixOwnerDeps = {}): Steps<string> {
-  yield* readTrackedDirtyOwnerPatchSteps(git, ownerPath, localSha); // the HEAD and no-untracked guards; its diff is the working tree's
-  const gitOut = function* (args: string[]): Steps<string> {
-    return yield* step(() => git(ownerPath, args, {
-      maxBuffer: 1 << 26
-    }));
-  };
-  const patch = yield* gitOut(["diff", "--cached", "--binary", "--no-ext-diff", localSha]);
-  const ownerIndex = resolve(ownerPath, (yield* gitOut(["rev-parse", "--git-path", "index"])).trim());
-  return yield* preserveTrackedDirtyPatchSteps(git, repoDir, ownerPath, branch, localSha, patch, deps, function* (): Steps<string> {
-    return yield* temporaryIndexTreeSteps(git, ownerPath, localSha, function* (): Steps<void> {}, ownerIndex);
-  });
+  readTrackedDirtyOwnerPatch(ownerPath, localSha); // the HEAD and no-untracked guards; its diff is the working tree's
+  const gitOut = (args: string[]) => hostWorktreeGit(ownerPath, args, { maxBuffer: 1 << 26 });
+  const patch = gitOut(["diff", "--cached", "--binary", "--no-ext-diff", localSha]);
+  const ownerIndex = resolve(ownerPath, gitOut(["rev-parse", "--git-path", "index"]).trim());
+  return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps, () =>
+    temporaryIndexTree(ownerPath, localSha, () => {}, ownerIndex),
+  );
 }
 
 const FIX_OWNER_RESIDUE_PATH_BOUND = 20;
@@ -30693,16 +30572,14 @@ function nulPaths(raw: string): string[] {
   return raw.split("\0").filter((path) => path.length > 0);
 }
 
-function* readFixOwnerResidueSteps(git: ReviewRecoveryGit, ownerPath: string, localSha: string): Steps<FixOwnerResidue> {
-  const gitOut = function* (args: string[]): Steps<string> {
-    return yield* step(() => git(ownerPath, args));
-  };
+function readFixOwnerResidue(ownerPath: string, localSha: string): FixOwnerResidue {
+  const gitOut = (args: string[]) => hostWorktreeGit(ownerPath, args);
   let markerKind: FixOwnerResidue["markerKind"] = null;
   let markerSha: string | null = null;
   for (const marker of FIX_OWNER_OPERATION_MARKERS) {
     let raw: string;
     try {
-      raw = readFileSync(resolve(ownerPath, (yield* gitOut(["rev-parse", "--git-path", marker])).trim()), "utf8");
+      raw = readFileSync(resolve(ownerPath, gitOut(["rev-parse", "--git-path", marker]).trim()), "utf8");
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw e;
@@ -30713,10 +30590,10 @@ function* readFixOwnerResidueSteps(git: ReviewRecoveryGit, ownerPath: string, lo
     markerSha = markerLine;
     break;
   }
-  const unmerged = [...new Set(nulPaths(yield* gitOut(["diff", "--name-only", "--diff-filter=U", "-z"])))];
+  const unmerged = [...new Set(nulPaths(gitOut(["diff", "--name-only", "--diff-filter=U", "-z"])))];
   const unmergedSet = new Set(unmerged);
-  const staged = nulPaths(yield* gitOut(["diff", "--cached", "--name-only", "-z", localSha])).filter(path => !unmergedSet.has(path));
-  const bound = (paths: string[]) => paths.slice(0, FIX_OWNER_RESIDUE_PATH_BOUND).map(path => path.slice(0, 256));
+  const staged = nulPaths(gitOut(["diff", "--cached", "--name-only", "-z", localSha])).filter((path) => !unmergedSet.has(path));
+  const bound = (paths: string[]) => paths.slice(0, FIX_OWNER_RESIDUE_PATH_BOUND).map((path) => path.slice(0, 256));
   return {
     markerKind,
     markerSha,
@@ -30724,58 +30601,51 @@ function* readFixOwnerResidueSteps(git: ReviewRecoveryGit, ownerPath: string, lo
     unmergedMore: Math.max(0, unmerged.length - FIX_OWNER_RESIDUE_PATH_BOUND),
     stagedPaths: bound(staged),
     stagedMore: Math.max(0, staged.length - FIX_OWNER_RESIDUE_PATH_BOUND),
-    status: (yield* gitOut(["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL])).slice(0, 512),
-    ...(markerKind === null && staged.length > 0 ? {
-      refusal: "owner_dirty_staged_only_refused" as const
-    } : {})
+    status: gitOut(["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL]).slice(0, 512),
+    ...(markerKind === null && staged.length > 0 ? { refusal: "owner_dirty_staged_only_refused" as const } : {}),
   };
 }
 
-function* readTrackedDirtyOwnerPatchSteps(git: ReviewRecoveryGit, ownerPath: string, localSha: string): Steps<string> {
-  const observedHead = (yield* step(() => git(ownerPath, ["rev-parse", "HEAD"]))).trim();
+function readTrackedDirtyOwnerPatch(ownerPath: string, localSha: string): string {
+  const observedHead = hostWorktreeGit(ownerPath, ["rev-parse", "HEAD"]).trim();
   if (observedHead !== localSha) throw new Error(`dirty owner HEAD changed: expected ${localSha}, observed ${observedHead}`);
-  const untracked = yield* step(() => git(ownerPath, ["ls-files", "--others", "--exclude-standard", "-z"]));
+  const untracked = hostWorktreeGit(ownerPath, ["ls-files", "--others", "--exclude-standard", "-z"]);
   if (untracked.length > 0) throw new Error("dirty owner has untracked paths");
-  return yield* step(() => git(ownerPath, ["diff", "--binary", "--no-ext-diff", localSha], {
-    maxBuffer: 1 << 26
-  }));
+  return hostWorktreeGit(ownerPath, ["diff", "--binary", "--no-ext-diff", localSha], { maxBuffer: 1 << 26 });
 }
 
-function* preserveTrackedDirtyPatchSteps(git: ReviewRecoveryGit, repoDir: string, ownerPath: string, branch: string, localSha: string, patch: string, deps: CaptureRegisteredFixOwnerDeps, ownerTreeOf?: () => Steps<string>): Steps<string> {
+function preserveTrackedDirtyPatch(
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+  patch: string,
+  deps: CaptureRegisteredFixOwnerDeps,
+  ownerTreeOf?: () => string,
+): string {
   if (patch.length === 0) throw new Error("dirty owner has no HEAD-relative tracked diff");
   const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
-  const matchesDirtyRecovery = (...args: Parameters<NonNullable<CaptureRegisteredFixOwnerDeps["matchesDirtyRecovery"]>>) => deps.matchesDirtyRecovery ? step(() => deps.matchesDirtyRecovery!(...args)) : refCommitMatchesDirtyRecoverySteps(git, ...args);
-  const ownerTree = ownerTreeOf ? yield* ownerTreeOf() : yield* temporaryIndexTreeSteps(git, ownerPath, localSha, function* (env): Steps<void> {
-    const tracked = yield* step(() => git(ownerPath, ["ls-files", "--cached", "-z"], {
-      maxBuffer: 1 << 26
-    }));
-    if (tracked.length > 0) yield* step(() => git(ownerPath, ["--literal-pathspecs", "add", "--force", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"], {
-      env,
-      input: tracked,
-      maxBuffer: 1 << 26
-    }));
-    yield* step(() => git(ownerPath, ["add", "-A"], {
-      env
-    }));
+  const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
+  const ownerTree = ownerTreeOf ? ownerTreeOf() : temporaryIndexTree(ownerPath, localSha, (env) => {
+    const tracked = hostWorktreeGit(ownerPath, ["ls-files", "--cached", "-z"], { maxBuffer: 1 << 26 });
+    if (tracked.length > 0) hostWorktreeGit(ownerPath,
+      ["--literal-pathspecs", "add", "--force", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"], { env, input: tracked, maxBuffer: 1 << 26 });
+    hostWorktreeGit(ownerPath, ["add", "-A"], { env });
   });
-  const patchTree = yield* temporaryIndexTreeSteps(git, repoDir, localSha, function* (env): Steps<void> {
-    yield* step(() => git(repoDir, ["apply", "--cached", "--binary", "--whitespace=nowarn"], {
-      input: patch,
-      env,
-      maxBuffer: 1 << 26
-    }));
+  const patchTree = temporaryIndexTree(repoDir, localSha, (env) => {
+    hostWorktreeGit(repoDir, ["apply", "--cached", "--binary", "--whitespace=nowarn"], { input: patch, env, maxBuffer: 1 << 26 });
   });
   if (!treesMatch(patchTree, ownerTree)) {
     throw new Error(`dirty recovery patch tree ${patchTree} does not match owner tree ${ownerTree}`);
   }
+
   const recoveryRef = `${DIRTY_FIX_OWNER_RECOVERY_REF_PREFIX}/${branch}/${localSha}/${patchTree}`;
-  if (!(yield* matchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree))) {
-    const recoveryCommit = (yield* step(() => git(repoDir, ["commit-tree", patchTree, "-p", localSha, "-m", `chore(recovery): preserve dirty fix owner ${branch}`], {
-      env: DIRTY_FIX_OWNER_RECOVERY_IDENTITY
-    }))).trim();
-    yield* step(() => git(repoDir, ["update-ref", recoveryRef, recoveryCommit, ZERO_GIT_OID]));
+  if (!matchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree)) {
+    const recoveryCommit = hostWorktreeGit(repoDir, ["commit-tree", patchTree, "-p", localSha, "-m",
+      `chore(recovery): preserve dirty fix owner ${branch}`], { env: DIRTY_FIX_OWNER_RECOVERY_IDENTITY }).trim();
+    hostWorktreeGit(repoDir, ["update-ref", recoveryRef, recoveryCommit, ZERO_GIT_OID]);
   }
-  if (!(yield* matchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree))) {
+  if (!matchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree)) {
     throw new Error(`dirty recovery ref ${recoveryRef} is not the expected immutable commit`);
   }
   return recoveryRef;
@@ -30792,15 +30662,7 @@ function* preserveTrackedDirtyPatchSteps(git: ReviewRecoveryGit, repoDir: string
 // tracked state to its OWN already-preserved HEAD, never anywhere else, and only after the caller
 // has confirmed the recovery ref reproduces that exact tree.
 export function resetTrackedDirtyFixOwner(ownerPath: string, localSha: string): void {
-  return runStepsSync(resetTrackedDirtyFixOwnerSteps(hostWorktreeGit, ownerPath, localSha));
-}
-
-export function resetTrackedDirtyFixOwnerAsync(ownerPath: string, localSha: string): Promise<void> {
-  return runStepsAsync(resetTrackedDirtyFixOwnerSteps(hostWorktreeGitAsync, ownerPath, localSha));
-}
-
-function* resetTrackedDirtyFixOwnerSteps(git: ReviewRecoveryGit, ownerPath: string, localSha: string): Steps<void> {
-  yield* step(() => git(ownerPath, ["reset", "--hard", localSha]));
+  hostWorktreeGit(ownerPath, ["reset", "--hard", localSha]);
 }
 
 /** W1-T6355: an ended run's UNTRACKED-ONLY owner. The untracked paths are recorded into the same
@@ -30814,35 +30676,16 @@ export function preserveAndClearUntrackedFixOwner(
   localSha: string,
   deps: CaptureRegisteredFixOwnerDeps = {},
 ): string {
-  return runStepsSync(preserveAndClearUntrackedFixOwnerSteps(hostWorktreeGit, repoDir, ownerPath, branch, localSha, deps));
-}
-
-export function preserveAndClearUntrackedFixOwnerAsync(
-  repoDir: string,
-  ownerPath: string,
-  branch: string,
-  localSha: string,
-  deps: CaptureRegisteredFixOwnerDeps = {},
-): Promise<string> {
-  return runStepsAsync(preserveAndClearUntrackedFixOwnerSteps(hostWorktreeGitAsync, repoDir, ownerPath, branch, localSha, deps));
-}
-
-function* preserveAndClearUntrackedFixOwnerSteps(git: ReviewRecoveryGit, repoDir: string, ownerPath: string, branch: string, localSha: string, deps: CaptureRegisteredFixOwnerDeps = {}): Steps<string> {
-  const observedHead = (yield* step(() => git(ownerPath, ["rev-parse", "HEAD"]))).trim();
+  const observedHead = hostWorktreeGit(ownerPath, ["rev-parse", "HEAD"]).trim();
   if (observedHead !== localSha) throw new Error(`dirty owner HEAD changed: expected ${localSha}, observed ${observedHead}`);
-  if (yield* readOwnerHasTrackedWorkSteps(git, ownerPath)) throw new Error("dirty owner has tracked work beside its untracked paths");
+  if (readOwnerHasTrackedWork(ownerPath)) throw new Error("dirty owner has tracked work beside its untracked paths");
   let patch = "";
-  yield* temporaryIndexTreeSteps(git, ownerPath, localSha, function* (env): Steps<void> {
-    yield* step(() => git(ownerPath, ["add", "-A"], {
-      env
-    }));
-    patch = yield* step(() => git(ownerPath, ["diff", "--cached", "--binary", "--no-ext-diff", localSha], {
-      env,
-      maxBuffer: 1 << 26
-    }));
+  temporaryIndexTree(ownerPath, localSha, (env) => {
+    hostWorktreeGit(ownerPath, ["add", "-A"], { env });
+    patch = hostWorktreeGit(ownerPath, ["diff", "--cached", "--binary", "--no-ext-diff", localSha], { env, maxBuffer: 1 << 26 });
   });
-  const recoveryRef = yield* preserveTrackedDirtyPatchSteps(git, repoDir, ownerPath, branch, localSha, patch, deps);
-  yield* step(() => git(ownerPath, ["clean", "-fd"]));
+  const recoveryRef = preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps);
+  hostWorktreeGit(ownerPath, ["clean", "-fd"]);
   return recoveryRef;
 }
 
@@ -30855,111 +30698,65 @@ export function preserveStaleDirtyFixOwner(
   localSha: string,
   deps: CaptureRegisteredFixOwnerDeps = {},
 ): string {
-  return runStepsSync(preserveStaleDirtyFixOwnerSteps(hostWorktreeGit, root, repoDir, ownerPath, branch, localSha, deps));
-}
-
-export function preserveStaleDirtyFixOwnerAsync(
-  root: string,
-  repoDir: string,
-  ownerPath: string,
-  branch: string,
-  localSha: string,
-  deps: CaptureRegisteredFixOwnerDeps = {},
-): Promise<string> {
-  return runStepsAsync(preserveStaleDirtyFixOwnerSteps(hostWorktreeGitAsync, root, repoDir, ownerPath, branch, localSha, deps));
-}
-
-function* preserveStaleDirtyFixOwnerSteps(git: ReviewRecoveryGit, root: string, repoDir: string, ownerPath: string, branch: string, localSha: string, deps: CaptureRegisteredFixOwnerDeps = {}): Steps<string> {
-  const gitOut = function* (args: string[]): Steps<string> {
-    return yield* step(() => git(ownerPath, args, {
-      maxBuffer: 1 << 26
-    }));
-  };
-  const observedHead = (yield* gitOut(["rev-parse", "HEAD"])).trim();
+  const gitOut = (args: string[]) => hostWorktreeGit(ownerPath, args, { maxBuffer: 1 << 26 });
+  const observedHead = gitOut(["rev-parse", "HEAD"]).trim();
   if (observedHead !== localSha) throw new Error(`dirty owner HEAD changed: expected ${localSha}, observed ${observedHead}`);
-  if (yield* gitOut(["diff", "--cached", "--name-only", "--diff-filter=U", "-z"])) throw new Error("dirty owner index has unresolved stages");
-  const untracked = yield* gitOut(["ls-files", "--others", "--exclude-standard", "-z"]);
-  const indexPatch = yield* gitOut(["diff", "--cached", "--binary", localSha]);
-  const worktreePatch = yield* gitOut(["diff", "--binary"]);
-  const emptyTree = (yield* step(() => git(ownerPath, ["mktree"], {
-    input: ""
-  }))).trim();
+  if (gitOut(["diff", "--cached", "--name-only", "--diff-filter=U", "-z"]))
+    throw new Error("dirty owner index has unresolved stages");
+  const untracked = gitOut(["ls-files", "--others", "--exclude-standard", "-z"]);
+  const indexPatch = gitOut(["diff", "--cached", "--binary", localSha]);
+  const worktreePatch = gitOut(["diff", "--binary"]);
+  const emptyTree = hostWorktreeGit(ownerPath, ["mktree"], { input: "" }).trim();
   let untrackedPatch = "";
-  yield* temporaryIndexTreeSteps(git, ownerPath, localSha, function* (env): Steps<void> {
-    yield* step(() => git(ownerPath, ["read-tree", "--empty"], {
-      env
-    }));
+  temporaryIndexTree(ownerPath, localSha, (env) => {
+    hostWorktreeGit(ownerPath, ["read-tree", "--empty"], { env });
     for (const path of nulPaths(untracked)) {
       const absolute = join(ownerPath, path);
       const stat = lstatSync(absolute);
-      const blob = stat.isSymbolicLink() ? (yield* step(() => git(ownerPath, ["hash-object", "-w", "--stdin"], {
-        input: readlinkSync(absolute)
-      }))).trim() : (yield* step(() => git(ownerPath, ["hash-object", "--no-filters", "-w", "--", path]))).trim();
+      const blob = stat.isSymbolicLink()
+        ? hostWorktreeGit(ownerPath, ["hash-object", "-w", "--stdin"], { input: readlinkSync(absolute) }).trim()
+        : hostWorktreeGit(ownerPath, ["hash-object", "--no-filters", "-w", "--", path]).trim();
       const mode = stat.isSymbolicLink() ? "120000" : stat.mode & 0o111 ? "100755" : "100644";
-      yield* step(() => git(ownerPath, ["update-index", "--add", "--cacheinfo", mode, blob, path], {
-        env
-      }));
+      hostWorktreeGit(ownerPath, ["update-index", "--add", "--cacheinfo", mode, blob, path], { env });
     }
-    untrackedPatch = yield* step(() => git(ownerPath, ["diff", "--cached", "--binary", emptyTree], {
-      env,
-      maxBuffer: 1 << 26
-    }));
+    untrackedPatch = hostWorktreeGit(ownerPath, ["diff", "--cached", "--binary", emptyTree], { env, maxBuffer: 1 << 26 });
   });
   if (!untracked || !untrackedPatch) throw new Error("dirty owner untracked state is empty");
-  const recoveryRef = yield* preserveFixHeadSteps(git, repoDir, branch, localSha);
+  const recoveryRef = preserveFixHead(repoDir, branch, localSha);
   const recoveryRoot = join(root, "recovery");
   const parent = join(root, "recovery", "fix-owner", branch);
-  mkdirSync(parent, {
-    recursive: true
-  });
-  writeFileSync(join(recoveryRoot, ".rmd-scratch-keep"), "W1-T7719: preserved fix-owner state\n", {
-    flush: true
-  });
+  mkdirSync(parent, { recursive: true });
+  writeFileSync(join(recoveryRoot, ".rmd-scratch-keep"), "W1-T7719: preserved fix-owner state\n", { flush: true });
   const savedPath = mkdtempSync(join(parent, `${localSha}-${(deps.now ?? Date.now)()}-`));
-  const save = deps.saveRecoveryFile ?? ((path: string, content: string) => writeFileSync(path, content, {
-    flag: "wx",
-    flush: true
-  }));
-  for (const [name, content] of [["index.patch", indexPatch], ["worktree.patch", worktreePatch], ["untracked.patch", untrackedPatch], ["untracked.paths", untracked], ["head.ref", `${recoveryRef}\n`]]) {
+  const save = deps.saveRecoveryFile ?? ((path: string, content: string) => writeFileSync(path, content, { flag: "wx", flush: true }));
+  for (const [name, content] of [
+    ["index.patch", indexPatch], ["worktree.patch", worktreePatch],
+    ["untracked.patch", untrackedPatch], ["untracked.paths", untracked], ["head.ref", `${recoveryRef}\n`],
+  ]) {
     const path = join(savedPath, name);
     save(path, content);
     if (!readFileSync(path).equals(Buffer.from(content))) throw new Error(`saved owner state did not verify: ${name}`);
   }
   for (const path of [savedPath, parent, dirname(parent), recoveryRoot, root]) {
     const directory = openSync(path, "r");
-    try {
-      fsyncSync(directory);
-    } finally {
-      closeSync(directory);
-    }
+    try { fsyncSync(directory); } finally { closeSync(directory); }
   }
   return savedPath;
 }
 
 export function clearStaleDirtyFixOwner(ownerPath: string, localSha: string): void {
-  return runStepsSync(clearStaleDirtyFixOwnerSteps(hostWorktreeGit, ownerPath, localSha));
-}
-
-export function clearStaleDirtyFixOwnerAsync(ownerPath: string, localSha: string): Promise<void> {
-  return runStepsAsync(clearStaleDirtyFixOwnerSteps(hostWorktreeGitAsync, ownerPath, localSha));
-}
-
-function* clearStaleDirtyFixOwnerSteps(git: ReviewRecoveryGit, ownerPath: string, localSha: string): Steps<void> {
-  yield* resetTrackedDirtyFixOwnerSteps(git, ownerPath, localSha);
-  yield* step(() => git(ownerPath, ["clean", "-fd"]));
+  resetTrackedDirtyFixOwner(ownerPath, localSha);
+  hostWorktreeGit(ownerPath, ["clean", "-fd"]);
 }
 
 function preserveFixHead(repoDir: string, branch: string, localSha: string): string {
-  return runStepsSync(preserveFixHeadSteps(hostWorktreeGit, repoDir, branch, localSha));
-}
-
-
-
-function* preserveFixHeadSteps(git: ReviewRecoveryGit, repoDir: string, branch: string, localSha: string): Steps<string> {
   const recoveryRef = `refs/rmd-recovery/fix/${branch}/${localSha}`;
   let existing: string | null = null;
   try {
-    existing = (yield* step(() => git(repoDir, ["rev-parse", "--verify", recoveryRef]))).trim();
+    existing = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", recoveryRef], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
   } catch {
     // `rev-parse --verify` exits non-zero when the recovery ref does not exist, which is the
     // ORDINARY first-preserve case and not a fault: `null` here means "no ref yet", and the
@@ -30969,11 +30766,14 @@ function* preserveFixHeadSteps(git: ReviewRecoveryGit, repoDir: string, branch: 
     existing = null;
   }
   if (existing === null) {
-    yield* step(() => git(repoDir, ["update-ref", recoveryRef, localSha, ZERO_GIT_OID]));
+    execFileSync("git", ["-C", repoDir, "update-ref", recoveryRef, localSha, ZERO_GIT_OID], { stdio: "pipe" });
   } else if (existing !== localSha) {
     throw new Error(`recovery ref ${recoveryRef} resolves to ${existing}, expected ${localSha}`);
   }
-  const preserved = (yield* step(() => git(repoDir, ["rev-parse", "--verify", recoveryRef]))).trim();
+  const preserved = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", recoveryRef], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
   if (preserved !== localSha) throw new Error(`recovery ref ${recoveryRef} did not preserve ${localSha}`);
   return recoveryRef;
 }
@@ -34400,7 +34200,7 @@ export const TRIAGE_MAX_NEW_TASKS = 3;
 
 export async function triageCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
 ): Promise<number> {
   const cfg = opts.config ?? loadConfig();
   const lockPath = triageLockPath(cfg.root);
@@ -34432,7 +34232,7 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
 
 async function triageCommandLocked(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
 ): Promise<number> {
   const parsed = parseTriageArgs(rest);
   if ("error" in parsed) {
@@ -34672,6 +34472,7 @@ async function triageCommandLocked(
         { name: "feedback_raw", value: triageFeedbackBlock, external: true },
       ]),
     });
+    let changedTaskLint: PlanLintOutcome | undefined;
     const loop = await runRelintLoop<{ decision: ReturnType<typeof decideTriage>; changedFiles: string[] }>({
       lane: "triage",
       filedIds: reservedIds,
@@ -34707,19 +34508,27 @@ async function triageCommandLocked(
         const citation = verdict?.kind === "already_decided" ? unresolvedCitationReferents(verdict.citation, worktreeCitationEvidence(worktreePath)) : undefined;
         const decision = decideTriage({ verdict, changedFiles, citation });
         // A verdictless repair may retain only the proposal whose complete file scope it preserves.
-        if (decision.action === "error" && decision.cause === "unparseable_verdict" &&
-            previous?.decision.action === "propose" && changedFiles.length === previous.changedFiles.length &&
-            changedFiles.every(file => previous.changedFiles.includes(file))) {
-          return { decision: { ...previous.decision, files: changedFiles }, changedFiles };
+        const result = decision.action === "error" && decision.cause === "unparseable_verdict" &&
+          previous?.decision.action === "propose" && changedFiles.length === previous.changedFiles.length &&
+          changedFiles.every(file => previous.changedFiles.includes(file))
+          ? { decision: { ...previous.decision, files: changedFiles }, changedFiles }
+          : { decision, changedFiles };
+        changedTaskLint = result.decision.action === "propose"
+          ? await (opts.lintPlanForReviewFn ?? lintPlanForReview)(worktreePath)
+          : undefined;
+        if (changedTaskLint && !changedTaskLint.ran) {
+          log("triage.relint_plan_lint_unavailable", { attempt, reason: changedTaskLint.reason });
         }
-        return { decision, changedFiles };
+        return result;
       },
       filed: (r) => r.decision.action === "propose",
-      lint: () =>
-        lintFiledTasks(worktreePath, reservedIds, {
+      lint: () => [
+        ...lintFiledTasks(worktreePath, reservedIds, {
           taskRepoOwner: owner,
           newMonolithIds: newMonolithIdsAgainstBase(worktreePath),
         }),
+        ...(changedTaskLint ? planLintRelintViolations(changedTaskLint, reservedIds) : []),
+      ],
     });
     const { decision, changedFiles } = loop.decision;
     triageEnding = `verdict ${decision.action}`;
@@ -35087,7 +34896,7 @@ export const PLAN_MAX_NEW_TASKS = 5;
 
 export async function planCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
 ): Promise<number> {
   const parsed = parsePlanArgs(rest);
   if ("error" in parsed) {
@@ -35190,6 +34999,7 @@ export async function planCommand(
     // prompt drifted from `monolith-filing` for a fortnight, and the next drift will be found the
     // same way unless the linter itself is in the loop. `decidePlanArchitect` is UNCHANGED.
     let worker!: WorkerResult;
+    let changedTaskLint: PlanLintOutcome | undefined;
     const loop = await runRelintLoop({
       lane: "plan",
       filedIds: reservedIds,
@@ -35216,11 +35026,21 @@ export async function planCommand(
           ...workerLedgerFields(worker),
         });
         const changed = worktreeChangedFiles(worktreePath);
-        return { decision: decidePlanArchitect({ verdict: parsePlanVerdict(workerTranscript(worker)), changedFiles: changed }), changedFiles: changed };
+        const result = { decision: decidePlanArchitect({ verdict: parsePlanVerdict(workerTranscript(worker)), changedFiles: changed }), changedFiles: changed };
+        changedTaskLint = result.decision.action === "propose"
+          ? await (opts.lintPlanForReviewFn ?? lintPlanForReview)(worktreePath)
+          : undefined;
+        if (changedTaskLint && !changedTaskLint.ran) {
+          log("plan.relint_plan_lint_unavailable", { attempt, reason: changedTaskLint.reason });
+        }
+        return result;
       },
       filed: (r) => r.decision.action === "propose",
       // Only the ids THIS run reserved — the plan carries 193 tasks that already fail the linter.
-      lint: () => lintFiledTasks(worktreePath, reservedIds, { newMonolithIds: newMonolithIdsAgainstBase(worktreePath) }),
+      lint: () => [
+        ...lintFiledTasks(worktreePath, reservedIds, { newMonolithIds: newMonolithIdsAgainstBase(worktreePath) }),
+        ...(changedTaskLint ? planLintRelintViolations(changedTaskLint, reservedIds) : []),
+      ],
     });
 
     // Ground truth: what did the worker ACTUALLY touch, INCLUDING files it CREATED (impl-ER).
@@ -43847,8 +43667,7 @@ function reviewCommandHost(): ReviewCommandHost {
     ledgeredNonDispatchSpawn,
     lintPlanForReview,
     liveWorkerRunIds,
-    materializeReviewWorktree: materializeReviewWorktreeAsync,
-    reviewWorktreeAsync: realReviewWorktreeAsync(),
+    materializeReviewWorktree,
     readHeadShaRest,
     readMainPlanTreeSha: (repoDir) => {
       return execFileSync("git", ["-C", repoDir, "rev-parse", "origin/main:plan/tasks.d"], {
@@ -43880,7 +43699,7 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     realDeps,
     reviewCommandHost,
     fixCommandHost,
-    materializeReviewWorktree: materializeReviewWorktreeAsync,
+    materializeReviewWorktree,
     reviewPostedDescription,
     buildBaseReproductionProbe,
     buildImportClosureRead,
@@ -43889,15 +43708,15 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     reclaimAbandonedWorker,
     registeredFixWorktreeOwner,
     captureRegisteredFixOwnerSnapshot,
-    removeAbandonedFixWorktreeOwner: removeAbandonedFixWorktreeOwnerAsync,
+    removeAbandonedFixWorktreeOwner,
     publishAbandonedFixOwnerAhead,
     preserveAbandonedFixOwnerDivergence,
-    preserveOrDiscardFixOwnerResidue: preserveOrDiscardFixOwnerResidueAsync,
-    preserveStagedFixOwnerResidue: preserveStagedFixOwnerResidueAsync,
-    preserveAndClearUntrackedFixOwner: preserveAndClearUntrackedFixOwnerAsync,
-    preserveStaleDirtyFixOwner: preserveStaleDirtyFixOwnerAsync,
-    clearStaleDirtyFixOwner: clearStaleDirtyFixOwnerAsync,
-    resetTrackedDirtyFixOwner: resetTrackedDirtyFixOwnerAsync,
+    preserveOrDiscardFixOwnerResidue,
+    preserveStagedFixOwnerResidue,
+    preserveAndClearUntrackedFixOwner,
+    preserveStaleDirtyFixOwner,
+    clearStaleDirtyFixOwner,
+    resetTrackedDirtyFixOwner,
     depReviewCommand,
     dispatchFixPreflightStandDown,
     ghLiveStateAsync,
@@ -43906,7 +43725,7 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     captureWorktreeSnapshotViaGit,
     writeFixCensusSnapshotAsync,
     runPlanScopedFixRound,
-    materializePlanRoundWorktree: materializePlanRoundWorktreeAsync,
+    materializePlanRoundWorktree,
     pushSweepFixRound: (deps, wt, branch, sha, prior) =>
       pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior),
     buildFixRungDispatchArgs,
@@ -43958,4 +43777,14 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     reviewOnlyLightPassDeps,
     createLightPassCompareReader,
   };
+}
+/** W1-T11254: feed the review's changed-task lint back into a lane only for ids it reserved. */
+function planLintRelintViolations(outcome: PlanLintOutcome, filedIds: readonly string[]): RelintViolation[] {
+  if (!outcome.ran) return [];
+  const filed = new Set(filedIds);
+  return outcome.violations.flatMap((violation) => {
+    const row = /^(\S+) \[([^\]]+)\] (.*)$/.exec(violation);
+    if (!row || !filed.has(row[1])) return [];
+    return [{ check: row[2], severity: "block" as const, message: row[1] + ": " + row[3] }];
+  });
 }

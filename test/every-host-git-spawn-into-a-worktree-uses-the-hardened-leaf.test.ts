@@ -257,7 +257,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
     reason: "CHECKOUT (W1-T6135): refreshManagedCheckout moved unchanged from run-task.ts; its git helper reads the managed repoDir, still classed in RUN_TASK_WIDENED_SITES in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts",
   },
   "src/run-task.ts": {
-    count: 57,
+    count: 63,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",

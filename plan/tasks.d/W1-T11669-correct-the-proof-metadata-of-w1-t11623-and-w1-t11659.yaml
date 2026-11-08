@@ -1,0 +1,106 @@
+- id: W1-T11669
+  title: "Correct the proof metadata of W1-T11623 and W1-T11659 so each proof fails on base and passes on head — W1-T11623 criterion 1 names its new regression test title, W1-T11659 declares and proves the test/ci path rmd test-place computes; plan-only, no source or test code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: low  # two existing shards' metadata plus this shard; plan-only, no src/ or test/ path
+  priority: 1  # both target tasks are queued priority 1 and would be refused at review by proofs that cannot fail on base
+  origin: architect
+  plan_refs: [W1-T11623, W1-T11659, W1-T10389, W1-T9874]
+  files:
+    - plan/tasks.d/W1-T11623-the-failed-static-gate-fixture-runs-clear-of-an-inherited-slot-marker.yaml
+    - plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml
+    - plan/tasks.d/W1-T11669-correct-the-proof-metadata-of-w1-t11623-and-w1-t11659.yaml
+  status: queued
+  attempts: 0
+  rationale: |
+    The initiative asked for this task under "the reserved W1-T11668 id". The harness reserved
+    five IDs for this filing run, not W1-T11668, and W1-T11668 appears nowhere in plan/. So this task
+    uses W1-T11669, the first id actually reserved. Its scope is exactly what the initiative described.
+    TWO PROOFS THAT CANNOT DISCRIMINATE, READ ON THIS TREE:
+    - W1-T11623 criterion 1 is `unit test: test/author-preflight.test.ts`. Its own rationale records that the
+      file passes when run bare (with no slot marker). The reviewer's proof run is not guaranteed to sit inside
+      an author slot (W1-T11623 note), so the whole-file proof can pass on BASE. A whole-file proof over a file
+      that already passes on main fails proof-discrimination (src/lib/proof-grammar.ts, the W1-T8625 comment
+      citing #11096). The exact regression title in W1-T11623 design step 1 is absent on base and present on
+      head, so it does discriminate.
+    - W1-T11659 declares `test/ci/gates/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts` and
+      proves its one criterion with a title grep inside that file. The `gates/` folder is not one `rmd test-place`
+      can compute for this test (derivation below). The path-based `unit test:` proof on the corrected path reads
+      a missing file on base (fails) and runs the new suite on head (passes).
+    Settled by lookup: is this already filed or already decided? -> no. No shard or monolith task names
+      W1-T11623 or W1-T11659 except those two shards, and W1-T11659 lists W1-T11623 only in plan_refs. LEARNINGS.md
+      and DECISIONS.md say nothing about either task (plan/ grep; LEARNINGS.md; DECISIONS.md).
+    Settled by lookup: which folder does `rmd test-place` compute for the W1-T11659 suite? -> test/ci/
+      (src/lib/test-placement.ts placeTest; scripts/test-placement/subsystem-map.json). The test's only src
+      import, process-cwd-census, matches no module_subsystem key and no subsystem_seed_rules regex, so no import
+      scores. The fallback is a name keyword: "census" maps to ci-parity (weight 0.81), which folder_of_subsystem
+      maps to "ci". With the keyword fallback primaryModule is undefined, so no ci second level (gates, suites,
+      parity, coverage) can apply and the folder stays test/ci/. The existing sibling suite that imports the same
+      module, test/ci/a-foreign-pid-whose-cwd-is-unreadable-does-not-hold-a-dead-fix-worktree.test.ts (W1-T10389),
+      lives in test/ci/ for the same reason. `rmd test-place` refuses a path that does not exist yet (placePaths),
+      so the derivation is recorded here, and the W1-T11659 implementer re-runs the verb once the file exists.
+    Settled by lookup: will editing another task's claim:/proof: lines trip criteria tampering? -> not on a
+      plan-only diff. judgeReview computes `criteriaTampered = !planOnly && criterionFieldTampered(diff)`
+      (src/lib/review.ts:6098), and every path in files: is under plan/tasks.d/. The W1-T384 filing rule in
+      src/lib/task-linter.ts fires only when a record file sits beside an out-of-plan-scope path, and none does here.
+    Settled by lookup: what is the "existing skip behavior" for readable foreign UIDs? -> when the cwd read fails
+      with EACCES/EPERM and the status Uid is readable but differs from the census owner's uid, the pid is counted
+      in `skippedForeign` and the scan continues (src/lib/process-cwd-census.ts:137-141, W1-T10389). W1-T11659
+      must leave that unchanged; its design only says "foreign UID handling ... unchanged" today.
+    Settled by lookup: does this task's proof name its own shard (the self-path executed_stale trap)? -> no. Every
+      proof greps one of the two TARGET shards, which this task's PR edits
+      (src/lib/task-linter.ts self-path check).
+  design: |
+    PLAN-ONLY. Edit only the three shards in files:. Do not touch src/, test/, scripts/, MASTER-PLAN.md or any
+    other shard. Leave every claim: text, title, status, priority, risk, budget and behavioural sentence in the
+    two target shards exactly as it is.
+    1. W1-T11623 (plan/tasks.d/W1-T11623-...yaml), acceptance criterion 1 only. Keep its claim text exactly
+       ("the whole author-preflight suite passes, including the failed-static-gate case and the new
+       inherited-marker regression case"). Set its proof value to exactly
+         unit test: the failed static gate case runs clear of an inherited slot marker (W1-T11623)
+       That is the exact title W1-T11623 design step 1 fixes. Do not change criterion 2, files:, design or
+       falsifier. Add one sentence to its note saying criterion 1 names the regression title because the whole
+       file passes bare on base (W1-T11669).
+    2. W1-T11659 (plan/tasks.d/W1-T11659-...yaml):
+       a. In files:, replace
+          `test/ci/gates/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts` with
+          `test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts`. Keep
+          src/lib/process-cwd-census.ts.
+       b. In acceptance, keep the one claim's text exactly and set its proof value to exactly
+            unit test: test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts
+       c. In design, keep every existing sentence. Add this sentence after "Keep wall/entry bounds, foreign UID
+          handling, current unknown cases and occupied behavior unchanged.":
+            "A readable foreign-UID process keeps its existing skip behavior: an EACCES/EPERM cwd whose status
+            Uid is readable and differs from the census owner is still counted in skippedForeign and the scan
+            continues, unchanged by the manager classifier."
+          Change the sentence "The declared test folder is required by `rmd test-place`" so that it names test/ci/,
+          and keep the `@not-a-rule-suite` marker instruction (the name carries "census", which RULE_SUITE_NAME_RE
+          reads).
+       d. Add one line to its rationale:
+            "Settled by lookup: which folder does rmd test-place compute? -> test/ci/ (W1-T11669)".
+    3. VERIFY. Run `rmd lint-plan` on the branch and paste its complete output in the PR body. It must report no
+       error for W1-T11623, W1-T11659 or W1-T11669, and the PR's file list must contain only the three plan/tasks.d
+       paths above. That keeps the diff plan-only, so criteriaTampered stays false (src/lib/review.ts:6098).
+    4. NOT IN SCOPE: implementing either target task, writing either test, changing any production census or
+       author-preflight behaviour, editing either task's claim wording, or moving any existing test file.
+  acceptance:
+    - claim: "W1-T11623 criterion 1 proves the exact new regression test title instead of the whole test file"
+      proof: "grep: unit test: the failed static gate case runs clear of an inherited slot marker (W1-T11623) in plan/tasks.d/W1-T11623-the-failed-static-gate-fixture-runs-clear-of-an-inherited-slot-marker.yaml"
+    - claim: "W1-T11659 declares and proves the test/ci path rmd test-place computes, through a path-based unit-test proof"
+      proof: "grep: unit test: test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census\\.test\\.ts in plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml"
+    - claim: "W1-T11659 records that a readable foreign-UID process keeps its existing skip behavior"
+      proof: "grep: readable foreign-UID process keeps its existing skip behavior in plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml"
+  falsifier: |
+    On this tree all three greps read 0 (criterion 1 of W1-T11623 is a file path, W1-T11659 names
+    test/ci/gates/, and no sentence about readable foreign UIDs exists), so each proof fails on base. The
+    correction is wrong if any of these hold after it: `rmd lint-plan` refuses either target task; the PR diff
+    touches a path outside plan/tasks.d/ (criteriaTampered would then refuse it); or either target task's claim:
+    text differs from base. The folder derivation is wrong if, once W1-T11659's suite exists, `rmd test-place`
+    on it prints a folder other than test/ci/.
+  note: "risk:low — plan-only metadata in two shards, no behaviour change. verify:auto — all three proofs are greps
+    of text the change adds to the target shards, and the lint run is PR-body evidence. Filed as W1-T11669, the
+    first harness-reserved id; the initiative's W1-T11668 was not reserved for this run."

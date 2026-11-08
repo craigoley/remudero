@@ -1,0 +1,79 @@
+- id: W1-T11664
+  title: A replayed review awaits its lifecycle admission before restoring status
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "Operator-requested remaining daemon synchronous GitHub read audit after #17144, 2026-11-08"
+  plan_refs: [W1-T11458, W1-T9549, W1-T11162, W1-T5726, W1-T11631]
+  depends_on: [W1-T11631]
+  files: [src/cli/commands/review.ts, test/review/a-replayed-review-awaits-its-lifecycle-read.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    reviewCommand's replay-restoration options explicitly supply synchronous
+    fetchPrLifecycle(view.url) to postReviewStatusGuarded. Its awaited lifecycle read
+    occurs before the inner status-publication catch, so a typed synchronous pacer
+    refusal rejects this review attempt. The outer per-PR sweep boundary contains
+    this error: this finding does not establish daemon-process termination.
+    A private native TAP control on b6a1855751aed8fdfb8f52d755574e6b94216079
+    passes one diagnostic test: the real publisher plus real lifecycle default throws
+    actual GhPaceWouldBlockError during a pending 25ms shared admission gap, with
+    zero CLI children or publication. Opening only the gap runs exactly one qualified
+    private CLI child and preserves the closed-PR refusal and terminal ledger row.
+    The diagnostic positively asserts the actual CLI replay binding, but is not a
+    full reviewCommand execution, repair qualification or historical live-call trace.
+    Six normalized function ASTs and the callback were rechecked against main
+    568418dd179a8e7401fd6e2ecd2ad5286603edd8; this is not a complete dynamic-closure proof.
+    Evidence: Remudero-notes/sol/S5-replay-lifecycle-probe.tap.log and
+    S5-replay-lifecycle-source-controls-current.json. Main plus eight captured open
+    PR heads were subject-swept with a W1-T11458 positive control on each complete
+    tree; all retained the synchronous replay callback. W1-T9549 migrated the library
+    async API but explicitly preserved manual-CLI sync transport. W1-T11162 later
+    placed plan-only reviews in-process; runReview can return a claimed replay before
+    planOnlySkip. W1-T5726 establishes replay completion evidence, not this transport.
+    W1-T11631 changes only the initial view; W1-T11628/11629 cover clone reads and
+    daemon lane containment. None covers this later default-reference override.
+    The initial pending callback already has a best-effort catch and is a non-finding
+    for fatal escape; the legacy current-status callback is not the selected real
+    production reader. Keep these distinctions instead of migrating every sync read.
+  design: |
+    Change only the replay-restoration fetchLifecycle callback to the existing
+    fetchPrLifecycleAsync transport. Preserve lifecycle ordering, exact qualified URL,
+    closed/merged refusal, current-head/status identity, publisher and review-owner
+    checks, genuine auth/malformed error provenance and every later status/comment/arm
+    guard. Leave the initial pending best-effort callback, legacy injected defaults,
+    shared publisher API and other reads unchanged. Add no retry, wait constant, grace,
+    cache-shaped success, retry-cap reset, status bypass or daemon/runtime change.
+    Exercise the actual replay branch through reviewCommand with its real default
+    publisher and contained private transport/cache fixtures. A heartbeat must run
+    while lifecycle admission waits, then exactly one child uses the original target.
+    Closed/merged or unreadable lifecycle outcomes cannot publish success or reach
+    comments/arm/spend. Also preserve genuine open-replay restoration under its normal
+    review/status ownership checks. Existing assertions, inputs, expected values,
+    timeouts and skips remain untouched. Use repository aliases and repoRoot helpers;
+    test-place computes the new test's maintained folder before filing.
+    Dependency on W1-T11631 serializes the active review.ts owner; plan merge alone
+    grants no implementation, claim transfer, additional retries or runtime authority.
+  acceptance:
+    - claim: "The actual replay lifecycle read awaits admission with a live heartbeat, exactly one qualified child and unchanged replay publication guards"
+      proof: "grep: W1-T11664 criterion 1 in test/review/a-replayed-review-awaits-its-lifecycle-read.test.ts"
+    - claim: "Closed, merged, denied and malformed lifecycle reads retain honest outcomes without success publication, comments, arm or downstream work"
+      proof: "grep: W1-T11664 criterion 2 in test/review/a-replayed-review-awaits-its-lifecycle-read.test.ts"
+  note: |
+    Filing only under the operator's caller-audit instruction. Source implementation
+    needs separate explicit authority after normal plan merge and fresh ownership,
+    merge-credit, subject, history and selector checks. Commit before mapped coverage;
+    require physical related/census lists, actual real removal/restoration falsifiers,
+    source instrumentation, literal default, actual first-push author invocation and
+    ordinary hosted/native gates. Record Decisions and luna/REPORTS.md. Source-only:
+    no Core/Azure write, restart, recycle, registry/provider change, deployment,
+    activation, manual merge/review/arm or remudero-review status posting.
+  falsifier: |
+    Restore the synchronous replay callback: the real pending-gap replay consumer
+    fails with typed refusal or blocked heartbeat. Bypass lifecycle or change its
+    qualified target: closed/error/publication guard controls fail. Restore the fix
+    and require all named assertions green; parser failures are not semantic evidence.

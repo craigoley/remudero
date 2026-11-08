@@ -4,11 +4,12 @@ import { type WorkerStateSensor, type ReviewRunResult, type MaterializationError
 import { buildBaseProofDirAsync, hostWorktreeGitAtTopLevel, type BaseProofDir } from "../../lib/check-proof.js";
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow } from "../../lib/sweep.js";
+import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
+import { parseWhitelistedProof, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
-import { isWorkerProviderId, loadConfig, type Config } from "../../lib/config.js";
+import { isWorkerProviderId, loadConfig, type Config, type WorkerProviderId } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
@@ -39,7 +40,7 @@ import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib
 import { isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
-import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemoveAsync } from "../../lib/worker.js";
+import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemove } from "../../lib/worker.js";
 import { hostWorktreeGit } from "../../lib/worktree-git.js";
 import { releaseReviewWorktree } from "../../lib/review-worktree-reclaim.js";
 import { step } from "../../lib/git-push.js";
@@ -67,8 +68,7 @@ export interface ReviewCommandHost {
     options?: { signal?: AbortSignal; log?: (step: string, extra?: Record<string, unknown>) => void },
   ): Promise<PlanLintOutcome>;
   readonly liveWorkerRunIds: Set<string>;
-  materializeReviewWorktree(config: Config, repoDir: string, prNumber: number, headSha: string, deps?: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>): MaterializeReviewWorktreeResult | Promise<MaterializeReviewWorktreeResult>;
-  readonly reviewWorktreeAsync?: ReviewWorktreeDeps<string | Promise<string>, void | Promise<void>>;
+  materializeReviewWorktree(config: Config, repoDir: string, prNumber: number, headSha: string, deps?: ReviewWorktreeDeps): MaterializeReviewWorktreeResult;
   readHeadShaRest(prUrl: string, fetch?: GhApiFetcher): string;
   readMainPlanTreeSha(repoDir: string): string;
   realDeps(): ComposedRealGraph;
@@ -80,12 +80,23 @@ export interface ReviewCommandHost {
 
 export const PLAN_LINT_RETRY_FLAG = "--plan-lint-retry";
 
+function repeatedFlagValues(rest: string[], flag: string): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < rest.length - 1; i++) {
+    if (rest[i] === flag) values.push(rest[++i]!);
+  }
+  return values;
+}
+
 export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders" | "planLintRetryHead"> {
   const { JUDGE_AT_OWN_START_FLAG, acceptedReviewAttemptId } = host;
   const mode = flagValue(rest, "--execution-mode");
   const reviewAttemptId = acceptedReviewAttemptId(flagValue(rest, "--review-attempt-id"));
   const planLintRetryHead = flagValue(rest, PLAN_LINT_RETRY_FLAG);
-  const excludeProviders = [...new Set((flagValue(rest, "--exclude-providers") ?? "").split(",").filter(isWorkerProviderId))];
+  const excludeProviders = [...new Set([
+    ...repeatedFlagValues(rest, "--exclude-provider"),
+    ...(flagValue(rest, "--exclude-providers") ?? "").split(","),
+  ].map((provider) => provider.toLowerCase()).filter((provider): provider is WorkerProviderId => isWorkerProviderId(provider)))];
   return {
     ...(rest.includes(JUDGE_AT_OWN_START_FLAG) ? { judgeAtOwnStart: true } : {}),
     ...(rest.includes("--plan-only-filing") ? { planOnlyFiling: true } : rest.includes("--not-plan-only-filing") ? { planOnlyFiling: false } : {}),
@@ -428,6 +439,42 @@ export function failureRecordingPoster(): { post: (o: Parameters<typeof postRevi
     },
     failed: () => threw,
   };
+}
+
+/** W1-T11200: share the fix lane's exact-head, file-receipt reader with the review judge. */
+export async function reviewHostedCiFileEvidence(
+  args: { owner: string; repo: string; headSha: string; criteria: readonly AcceptanceCriterion[];
+    headCheckoutDir?: string; log: (step: string, extra?: Record<string, unknown>) => void },
+  read: HostedFixProofReader = (headSha, proofs) => readHostedFixProofResults({
+    owner: args.owner, repo: args.repo, headSha, proofs,
+  }),
+): Promise<ReadonlyMap<string, "passed" | "failed"> | undefined> {
+  try {
+    const files = new Set<string>();
+    for (const criterion of visibleCriteria([...args.criteria])) {
+      const text = args.headCheckoutDir
+        ? resolveProofTestPath(criterion.proof, args.headCheckoutDir, { target: args }).proof : criterion.proof;
+      const proof = parseWhitelistedProof(text, args);
+      if (proof?.kind !== "test") continue;
+      if (!proof.nameFiltered) files.add(proof.label);
+      else if (args.headCheckoutDir && proof.runner !== "vitest") {
+        const resolution = await resolveNameFilteredCandidatesAsync(args.headCheckoutDir, proof.label);
+        if (resolution.status === "resolved") for (const file of resolution.files) files.add(file);
+      }
+    }
+    if (files.size === 0) return undefined;
+    const results = await read(args.headSha, [...files].map(file => `unit test: ${file}`));
+    const evidence = new Map<string, "passed" | "failed">();
+    for (const result of results) {
+      if (result.headSha !== args.headSha || !files.has(result.testFile)) continue;
+      if (result.result === "fail") evidence.set(result.testFile, "failed");
+      else if (!evidence.has(result.testFile)) evidence.set(result.testFile, "passed");
+    }
+    return evidence.size > 0 ? evidence : undefined;
+  } catch (error) {
+    args.log("review.hosted_ci.unavailable", { head_sha: args.headSha, reason: String(error) });
+    return undefined;
+  }
 }
 
 export async function runReview(host: ReviewCommandHost, args: {
@@ -829,7 +876,10 @@ export async function runReview(host: ReviewCommandHost, args: {
     sessionId: null,
   };
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
+  const hostedCiFilePassed = await reviewHostedCiFileEvidence({ owner, repo, headSha, criteria,
+    headCheckoutDir: args.headCheckoutDir, log });
   const proofEvidence: Parameters<typeof preparedDecision.judge>[0] = {
+    hostedCiFilePassed,
     diff,
     report,
     headRefName: args.headRefName,
@@ -1682,7 +1732,7 @@ export interface ReviewCommandDeps {
    *  still runs its own, and a second fetch of an already-fetched ref is a no-op, so this adds an
    *  ordering guarantee rather than a second network cost. Injectable so a test can drive the
    *  unfetched-sha case without a network. */
-  fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => unknown;
+  fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => void;
   /** Operator CLI remains deterministic; only internal unattended callers opt in. */
   executionMode?: "deterministic" | "semantic";
   /** Providers to avoid on a re-admitted review after a reviewer-unavailable result. */
@@ -1853,14 +1903,14 @@ export async function withMaterializedWorktree<T>(
   worktreePath: string | undefined,
   repoDir: string,
   body: () => Promise<T>,
-  remove: (repoDir: string, worktreePath: string) => void | Promise<void> = worktreeRemoveAsync,
+  remove: (repoDir: string, worktreePath: string) => void = worktreeRemove,
 ): Promise<T> {
   try {
     return await body();
   } finally {
     if (worktreePath) {
       try {
-        await remove(repoDir, worktreePath);
+        remove(repoDir, worktreePath);
       } catch (e) {
         // Best-effort teardown: a removal failure must never mask `body`'s own
         // result or throw — the ledger/console already carry the review's
@@ -1901,7 +1951,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     postStatus: postReviewStatusGuarded,
     reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
     postReviewPending,
-    fetchHead: host.reviewWorktreeAsync?.fetch ?? realDeps().reviewWorktree.fetch,
+    fetchHead: realDeps().reviewWorktree.fetch,
     executionMode: "deterministic" as const,
     ...deps,
   };
@@ -1931,7 +1981,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // returns the `gh --json` shape and passes through untouched. Both arms yield the SAME five
   // fields, so nothing downstream of `body` can tell which transport served it.
   const args = reviewViewArgs(owner, repo, prArg);
-  const raw = fetchView(args);
+  const raw = await (deps.fetchView ?? ghJsonAsync)(args);
   // The sweep's open-PR snapshot can age while earlier reviews run. The numeric arm already
   // fetched the live REST row, so decline a closed PR before fetching its head or building a
   // worktree. The guarded poster still makes the final lifecycle check for an in-flight close.
@@ -2062,7 +2112,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // outage through its own `fetch-failure` class, which is the degradation path this command
   // already has. Failing here instead would invent a second one for the same condition.
   try {
-    await fetchHead(subjectRepoDir, view.number, view.headRefOid);
+    fetchHead(subjectRepoDir, view.number, view.headRefOid);
   } catch (e) {
     void e;
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
@@ -2257,7 +2307,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // never silently, and (W1-T233) the console line below now NAMES why,
   // instead of a bare "unavailable" with the real reason thrown away.
   const materializeStartedMs = systemClock.now();
-  const materialized = await materialize(config, subjectRepoDir, view.number, view.headRefOid);
+  const materialized = materialize(config, subjectRepoDir, view.number, view.headRefOid);
   if (materialized.worktreePath === undefined) {
     console.log(
       `(worktree materialization failed [${materialized.failure.errorClass}]: ` +

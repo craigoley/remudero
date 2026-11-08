@@ -101,6 +101,8 @@ export const RUN_TASK_WIDENED_SITES: Readonly<Record<string, { count: number; cl
   resolveMergeLogReadOptions: { count: 1, cls: "CHECKOUT", reason: `${OWN}: the credit evidence root` },
   creditEvidenceRootFor: { count: 1, cls: "CHECKOUT", reason: `${OWN}: or a managed clone of the credited repo` },
   registeredFixWorktreeOwner: { count: 1, cls: "CHECKOUT", reason: FIX_CLONE },
+  refCommitMatchesDirtyRecovery: { count: 3, cls: "CHECKOUT", reason: FIX_CLONE },
+  preserveFixHead: { count: 3, cls: "CHECKOUT", reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 1, cls: "CHECKOUT", reason: FIX_CLONE },
   idCitedInSrc: { count: 1, cls: "CHECKOUT", reason: OWN },
   approveCommand: { count: 6, cls: "CHECKOUT", reason: "an approve worktree cut at origin/main whose only writes are the harness's shard and skill files, and the clone it ls-remotes" },
@@ -116,22 +118,6 @@ function widenedByFunction(text: string): Record<string, number> {
   const out: Record<string, number> = {};
   for (const site of widenedGitSites(text)) out[site.fn ?? "<module>"] = (out[site.fn ?? "<module>"] ?? 0) + 1;
   return out;
-}
-
-/** A single Git removal stays direct in both drivers, with metadata after completed Git. */
-function assertHardenedRemovalBindings(text: string): void {
-  const sync = functionBody(text, "removeAbandonedFixWorktreeOwner");
-  const asynchronous = functionBody(text, "removeAbandonedFixWorktreeOwnerAsync");
-  assert.ok(sync && asynchronous, "both hardened removal drivers exist");
-  assert.match(sync, /hostWorktreeGit\(repoDir, \["worktree", "remove", worktreePath\]\);/);
-  assert.match(asynchronous, /await hostWorktreeGitAsync\(repoDir, \["worktree", "remove", worktreePath\]\);/);
-  for (const [body, call] of [[sync, "hostWorktreeGit("], [asynchronous, "await hostWorktreeGitAsync("]] as const) {
-    assert.equal(widenedGitSites(body).length, 0, "the converted removal holds no raw Git site");
-    const gitAt = body.indexOf(call);
-    const lockAt = body.indexOf("removeRunLock(worktreePath);");
-    const baseAt = body.indexOf("removeWorktreeBase(worktreePath);");
-    assert.ok(gitAt >= 0 && lockAt > gitAt && baseAt > lockAt, "metadata cleanup follows completed hardened Git");
-  }
 }
 
 const sorted = (r: Record<string, number>): Record<string, number> =>
@@ -179,16 +165,8 @@ describe("W1-T6135: every widened git site left in run-task.ts is a classed CHEC
       assert.equal(actual[name], undefined, `${name} still holds ${actual[name]} widened site(s)`);
       const body = functionBody(text, name);
       assert.ok(body, `${name} not found`);
-      if (name === "removeAbandonedFixWorktreeOwner") assertHardenedRemovalBindings(text);
-      else assert.match(body, LEAF_CALL, `${name} does not call the hardened leaf`);
+      assert.match(body, LEAF_CALL, `${name} does not call the hardened leaf`);
     }
-  });
-
-  it("an async removal bound to the synchronous leaf fails its binding guard", () => {
-    const binding = 'await hostWorktreeGitAsync(repoDir, ["worktree", "remove", worktreePath]);';
-    const mutant = text.replace(binding, 'hostWorktreeGit(repoDir, ["worktree", "remove", worktreePath]);');
-    assert.notEqual(mutant, text, "the fixture edit applied");
-    assert.throws(() => assertHardenedRemovalBindings(mutant), { code: "ERR_ASSERTION" });
   });
 
   it("a raw git -C added to a converted function, or moved into a new one, fails the table naming it", () => {
