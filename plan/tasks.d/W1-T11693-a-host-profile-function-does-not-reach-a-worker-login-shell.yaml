@@ -1,0 +1,123 @@
+- id: W1-T11693
+  title: "A function or alias sourced by the host's /etc/profile does not reach a worker login shell — the worker home's generated ~/.bash_profile clears every alias and function defined before it runs, with no name allowlist and no change to the fail-closed isolation probe"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium  # one subsystem (worker shell isolation); a wrong cleanup either leaks host state or strips post-startup functions
+  priority: 1  # the isolation probe fails closed on this host profile, so governed Azure dispatch stops before any worker runs
+  origin: architect
+  plan_refs: [W1-T18, W1-T2800, W1-T11687]
+  files:
+    - src/lib/worker-home.ts
+    - test/worker-home.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    DIRECT EVIDENCE (operator, 2026-11-08): Azure run W1-T11687-1794122603696 failed closed before worker execution.
+    Its isolation probe observed exactly six inherited functions: gawklibpath_append, gawklibpath_default,
+    gawklibpath_prepend, gawkpath_append, gawkpath_default, gawkpath_prepend, and zero aliases.
+    WHY AN EMPTY PROFILE DOES NOT ISOLATE: a login shell runs /etc/profile BEFORE it reads the first readable one of
+    ~/.bash_profile, ~/.bash_login or ~/.profile (GNU Bash, Startup Files). /etc/profile sources /etc/profile.d,
+    and Gawk installs gawk.sh there, which defines those six AWKPATH/AWKLIBPATH functions (GNU Gawk, Shell Startup
+    Files). materializeWorkerHome writes every rc file as zero bytes, so the worker's ~/.bash_profile runs and
+    removes nothing. Redirecting HOME (W1-T18) controls only the user-level files and never the system profile.
+    THE FIX GOES IN THE WORKER PROFILE, NOT THE PROBE OR THE HOST. Changing /etc/profile or /etc/profile.d would fix
+    only one host. An allowlist of today's six gawk names would let the next profile.d package back in. Excluding
+    them in src/lib/isolation.ts would weaken the gate. The cleanup clears everything defined before the worker
+    profile runs, so it holds for any host profile.
+    Settled by lookup: is this already filed or already decided? -> no. plan/ (monolith and shards), MASTER-PLAN.md,
+      LEARNINGS.md and DECISIONS.md have no entry for gawk, /etc/profile, /etc/profile.d or clearing host-profile
+      functions. W1-T2633 only lists the rc filenames. W1-T2805 item (14) covers probe rigging, not this leak.
+      W1-T11687 is the plan-only task whose dispatch surfaced the leak, and it is unrelated to the fix.
+    Settled by lookup: which startup file does a bash login shell read after /etc/profile? -> the first readable
+      one of ~/.bash_profile, ~/.bash_login, ~/.profile, in that order
+      (https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html).
+    Settled by lookup: where do the six gawk functions come from? -> gawk.sh, a shell startup file installed in
+      /etc/profile.d, defines gawkpath_{default,prepend,append} and gawklibpath_{default,prepend,append}
+      (https://www.gnu.org/software/gawk/manual/html_node/Shell-Startup-Files.html).
+    Settled by lookup: what does the isolation probe count, and does it fail closed? -> `alias | wc -l` and
+      `declare -F | wc -l`, excluding only CLAUDE_CODE_TOOL_WRAPPERS. assessIsolation refuses on any non-zero
+      count (src/lib/isolation.ts, isolationProbePrompt and assessIsolation). This task leaves that file untouched.
+    Settled by lookup: what does the worker home write today? -> materializeWorkerHome truncates every
+      WORKER_HOME_RC_FILES entry to "" on every materialization, .bash_profile included (src/lib/worker-home.ts,
+      WORKER_HOME_RC_FILES and the rc loop in materializeWorkerHome).
+    Settled by lookup: can the cleanup body live in a WORKER_HOME_RC_FILES entry? -> no.
+      test/worker-home-per-run.test.ts (per-run isolation test) and test/codex-worker-home-redirection.test.ts
+      (W1-T2800 blank-rc assertion) loop over WORKER_HOME_RC_FILES and require every entry to be "". Both files
+      are outside this task's test scope. So .bash_profile must leave that list and become its own named login
+      profile. The other seven entries stay blank and both suites stay green unchanged.
+    Settled by lookup: which existing tests in the allowed file assert blankness? -> test/worker-home.test.ts:
+      the "every rc file is created and EMPTY" test, the planted-alias truncation test, the idempotence test and
+      the rc loops near the placement tests. All of them loop over WORKER_HOME_RC_FILES or read .bashrc, so they
+      stay valid once .bash_profile leaves the list.
+  design: |
+    SOURCE: src/lib/worker-home.ts ONLY. TESTS: test/worker-home.test.ts ONLY. Do not touch src/lib/isolation.ts, the
+    probe prompt, CLAUDE_CODE_TOOL_WRAPPERS, /etc/profile, /etc/profile.d, any other src/ or test/ file, or any grant.
+    1. Remove ".bash_profile" from WORKER_HOME_RC_FILES. The remaining seven entries keep their zero-byte truncation
+       exactly as today.
+    2. Add a named export WORKER_HOME_LOGIN_PROFILE (the HOME-relative ".bash_profile") and a named export
+       WORKER_HOME_LOGIN_PROFILE_SCRIPT (its fixed body). Add the absolute path to WorkerHomePlan as
+       `loginProfile`, set by workerHomePlan. materializeWorkerHome writes the fixed body on EVERY materialization,
+       overwriting whatever sits in the slot, so the existing "never trust leftovers" rule still holds.
+    3. THE BODY: a few lines of bash with no ANTHROPIC_ text and no sourcing of any other file. It must:
+       (a) remove every alias (`unalias -a`);
+       (b) remove every function defined at that point, enumerated at runtime (for example from `compgen -A function`
+           or `declare -F`), with `unset -f --` per name. No allowlist or denylist of names, and gawk is never named;
+       (c) leave no helper variable or function of its own behind.
+       It must be safe under the operator's macOS /bin/bash 3.2 as well as Linux bash 5. Bash reads .bash_profile
+       first, so .bash_login and .profile stay blank and are never reached by bash. sh/dash reads .profile, which
+       stays blank, so no bash-only syntax reaches a POSIX shell.
+    4. ORDERING IS THE CONTRACT. The body runs after /etc/profile and before anything the worker's harness defines
+       afterwards. Claude Code's own wrappers and any function the worker command defines must therefore survive.
+       Do not add the cleanup to .bashrc or the zsh files.
+    5. Update the module header comment and the materializeWorkerHome doc comment, which say "empty rc files". State
+       the new invariant: user rc files are blank, and the login profile clears host-profile aliases and functions.
+       Cite both GNU URLs in that comment.
+    REGRESSION (test/worker-home.test.ts). Spawn a REAL bash, resolved by name as the W1-T2850 note in
+    test/codex-worker-home-redirection.test.ts requires. Inject host-profile state without touching /etc:
+      - FUNCTION through real login startup: a parent `bash -c` defines a function with a non-gawk name, `export -f`s
+        it (the encoding matches that bash), then execs `bash --login -c '<report>'` with HOME set to a
+        materialized worker home. Bash imports the function before /etc/profile and the profile, which is the same
+        point at which a profile.d function exists.
+      - ALIAS and a second function through a prelude: `bash --noprofile --norc -c '<define alias + fn>;
+        . "$HOME/.bash_profile"; <report>'`. Login startup offers no other hook to define an alias before the
+        user profile.
+      - RED CONTROL in the same test: run the same invocations against a home whose .bash_profile is zero bytes
+        (today's behaviour) and assert the injected alias and functions ARE reported. This proves the setup can
+        observe the leak, so the green assertions are not rigged (W1-T2805 item 14).
+      - GREEN: against the generated profile, the report shows zero aliases and zero of the injected functions.
+      - SURVIVAL: the `-c` command defines a function after startup, and the report shows it as present and
+        callable.
+    Keep every existing worker-home.test.ts test passing. Add assertions that WORKER_HOME_RC_FILES no longer contains
+    .bash_profile and that the generated profile's body never contains "ANTHROPIC_".
+    LIVE VERIFICATION, PR body and post-merge: once deployed to Azure, trigger a fresh governed W1-T11687 dispatch.
+    Paste the ledger rows showing the isolation preflight passed (0 aliases, 0 functions, or no inherited names)
+    and the run moving on to worker execution. The unit proof does not cover this step, so the PR body must say
+    whether it was observed or is still pending deployment.
+    NOT IN SCOPE: changing the probe, its wrapper exclusion or its fail-closed verdict; editing host system profiles;
+    zsh startup cleanup; any grant, credential, keychain or .claude behaviour; and docs/forensics/worker-home.md.
+  acceptance:
+    - claim: "a real bash login startup over the generated worker profile reports none of the injected host-profile aliases or functions, while the same injection survives an empty profile (red control) and a function defined after startup stays available"
+      proof: "unit test: test/worker-home.test.ts"
+    - claim: "the worker login profile is a named export distinct from the blank rc files"
+      proof: "grep: WORKER_HOME_LOGIN_PROFILE_SCRIPT in src/lib/worker-home.ts"
+    - claim: "the worker home's own comment cites the GNU Bash startup-file order that makes an empty profile insufficient"
+      proof: "grep: gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html in src/lib/worker-home.ts"
+  falsifier: |
+    On this tree the generated .bash_profile is zero bytes. The red-control case therefore reproduces the leak, and
+    neither grep matches src/lib/worker-home.ts. The change is wrong if any of these hold:
+    - the cleanup names gawk or any other fixed function;
+    - src/lib/isolation.ts changes;
+    - a function defined after login startup is missing from the report;
+    - test/worker-home-per-run.test.ts or test/codex-worker-home-redirection.test.ts goes red;
+    - any symlink grant or credential outcome differs from base.
+    The fix is wrong in place if a fresh governed W1-T11687 dispatch on Azure still reports the six gawk*
+    functions. That would show the worker shell does not read ~/.bash_profile after /etc/profile, and the cleanup
+    belongs at the point that shell does read.
+  note: "verify:auto. The behavior is proved by spawning a real bash against a materialized home, and the two greps
+    pin the named export and the cited startup-file order. The Azure dispatch is live evidence the reviewer cannot
+    run, so it goes in the PR body. risk:medium: worker shell isolation only, but a wrong body either leaves the
+    leak or strips functions the harness defines later. budget 30: one module, one test file, one fixed shell body."
