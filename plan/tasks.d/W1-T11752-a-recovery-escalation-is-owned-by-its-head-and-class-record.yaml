@@ -20,9 +20,9 @@
   attempts: 0
   acceptance:
     - claim: "For a review, ci or conflict escalation, an open recovery record whose owner is not none and whose deadline has not passed suppresses the needs-human filing and the disposed row names the owner and deadline; at wake_at the owner's next existing rung is taken once (one pr.recovery.woke row per key); after deadline_at with no pr.recovery.acted row the escalation is filed once per key and the record gets an escalated_to_human terminal receipt naming the issue; an unreadable record set files the escalation exactly as today"
-      proof: "unit test: test/sweep/a-recovery-escalation-is-owned-by-its-head-and-class-record.test.ts"
+      proof: "unit test: non-stall escalation defers, wakes once, escalates once and fails closed on unreadable recovery"
     - claim: "stage-stall escalations keep the one-question-per-PR ruling, and no record transition closes, edits or answers a human question"
-      proof: "unit test: test/sweep/a-recovery-escalation-is-owned-by-its-head-and-class-record.test.ts"
+      proof: "unit test: stage-stall escalation keeps the single question without mutating it"
     - claim: "the sweep's escalation site consults the record through one named gate"
       proof: "grep: recoveryEscalationGate( in src/lib/sweep.ts"
   rationale: |
