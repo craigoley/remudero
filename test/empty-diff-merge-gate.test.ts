@@ -3,17 +3,17 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { diffEmptyAgainstScope } from "../src/lib/review.js";
-import { triageDeclaredScope, triageEmptyScopeDisposition } from "../src/lib/triage.js";
-import { setFeedbackStatus } from "../src/lib/feedback.js";
-import { triageCommand } from "../src/run-task.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { diffEmptyAgainstScope } from "#src/lib/review.js";
+import { triageDeclaredScope, triageEmptyScopeDisposition } from "#src/lib/triage.js";
+import { triageLiveScopeDecision } from "#src/run-task.js";
+import { setFeedbackStatus } from "#src/lib/feedback.js";
+import { triageCommand } from "#src/run-task.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+import { repoRoot } from "#test/helpers/repo-root.js";
+const REPO_ROOT = repoRoot();
 
 // ── W1-T963: THE EMPTY-DIFF-TRIAGE-MERGE INCIDENT ────────────────────────────────────────────────
 //
@@ -39,6 +39,11 @@ test("W1-T963: an empty-diff PR is refused", () => {
   // declared scope — a sibling already landed the same change. Must be refused.
   assert.equal(diffEmptyAgainstScope([], SCOPE), true, "an empty diff list must be refused");
   assert.equal(diffEmptyAgainstScope(["plan/feedback/some-other-entry.yaml"], SCOPE), true, "a diff touching only UNRELATED paths must be refused");
+  const identity = { state: "open", headSha: "a".repeat(40), baseRef: "main", baseSha: "b".repeat(40) };
+  assert.equal(triageLiveScopeDecision({
+    action: "propose", scopeFiles: SCOPE, liveDiffFiles: [], complete: true,
+    expectedHeadSha: identity.headSha, fetchedBaseSha: identity.baseSha, before: identity, after: identity,
+  }).kind, "nonempty", "a proposal's new task shard prevents feedback-file-only terminalization");
 
   // The control, in the SAME test: a diff that DOES touch the declared scope must NOT be refused
   // — otherwise this "refuses empty diffs" claim is satisfied by an implementation that refuses
@@ -49,6 +54,11 @@ test("W1-T963: an empty-diff PR is refused", () => {
 test("W1-T963: a non-empty diff still passes in the same run", () => {
   // The positive control: a real diff against the declared scope passes.
   assert.equal(diffEmptyAgainstScope(SCOPE, SCOPE), false);
+  const identity = { state: "open", headSha: "a".repeat(40), baseRef: "main", baseSha: "b".repeat(40) };
+  assert.equal(triageLiveScopeDecision({
+    action: "no_task", scopeFiles: SCOPE, liveDiffFiles: SCOPE, complete: true,
+    expectedHeadSha: identity.headSha, fetchedBaseSha: identity.baseSha, before: identity,
+  }).kind, "nonempty", "real declared work must continue through CI and review");
   assert.equal(
     diffEmptyAgainstScope([...SCOPE, "plan/feedback/an-unrelated-entry.yaml"], SCOPE),
     false,
@@ -62,6 +72,30 @@ test("W1-T963: a non-empty diff still passes in the same run", () => {
   // No declared scope at all ⇒ nothing to check ⇒ never a false refusal (an ordinary PR with no
   // declared scope must never be caught by this mechanism).
   assert.equal(diffEmptyAgainstScope([], []), false, "an undeclared scope must never manufacture a refusal");
+
+  assert.deepEqual(triageLiveScopeDecision({
+    action: "no_task", scopeFiles: SCOPE, liveDiffFiles: [], complete: true,
+    expectedHeadSha: identity.headSha, fetchedBaseSha: identity.baseSha, before: identity, after: identity,
+  }), { kind: "empty", comment: triageEmptyScopeDisposition([], SCOPE).comment },
+    "a complete stable PR identity permits only the proven empty-scope close");
+  assert.equal(triageLiveScopeDecision({
+    action: "no_task", scopeFiles: SCOPE, complete: false,
+    expectedHeadSha: identity.headSha, fetchedBaseSha: identity.baseSha, before: identity,
+  }).kind, "unknown", "incomplete scope evidence must remain open, never become an empty diff");
+  assert.equal(triageLiveScopeDecision({
+    action: "no_task", scopeFiles: SCOPE, liveDiffFiles: [], complete: true,
+    expectedHeadSha: identity.headSha, fetchedBaseSha: identity.baseSha, before: identity,
+    after: { ...identity, headSha: "c".repeat(40) },
+  }).kind, "unknown", "a changed PR head must refuse the close");
+  assert.equal(triageLiveScopeDecision({
+    action: "no_task", scopeFiles: SCOPE, liveDiffFiles: [], complete: true,
+    expectedHeadSha: identity.headSha, fetchedBaseSha: identity.baseSha, before: identity,
+    after: { ...identity, baseSha: "d".repeat(40) },
+  }).kind, "unknown", "a changed PR base must refuse the close");
+  assert.equal(triageLiveScopeDecision({
+    action: "no_task", scopeFiles: SCOPE, liveDiffFiles: [], complete: true,
+    expectedHeadSha: identity.headSha, fetchedBaseSha: identity.baseSha, before: { ...identity, state: "closed" }, after: identity,
+  }).kind, "unknown", "a PR no longer open must not be closed from stale evidence");
 });
 
 test("W1-T963: an already-done triage PR is closed not merged", () => {
@@ -228,9 +262,9 @@ test("W1-T963: end-to-end — a sibling's landed fix closes an already-done tria
         `  *"--json headRefName"*) git -C ${JSON.stringify(bare)} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
         "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
         '  *"pr diff"*) echo "" ;;',
-        '  *"/check-runs"*) echo \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}\' ;;',
+        `  *"/check-runs"*) if [ ! -e ${JSON.stringify(join(shimDir, "sibling-pushed"))} ]; then git -C ${JSON.stringify(siblingDir)} push --quiet origin main; touch ${JSON.stringify(join(shimDir, "sibling-pushed"))}; fi; echo \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}\' ;;`,
         '  *"/commits/"*"/status"*) echo \'{"statuses":[]}\' ;;',
-        `  *"api repos/"*"/pulls/"*) git -C ${JSON.stringify(siblingDir)} push --quiet origin main; echo '{"number":998,"state":"open","merged":false,"merged_at":null,"head":{"sha":"deadbeef"}}' ;;`,
+        `  *"api repos/"*"/pulls/998"*) head=$(git -C ${JSON.stringify(bare)} for-each-ref --format="%(objectname)" refs/heads/run-* | tail -1); base=$(git -C ${JSON.stringify(bare)} rev-parse refs/heads/main); printf '{"number":998,"state":"open","merged":false,"head":{"sha":"%s"},"base":{"ref":"main","sha":"%s"}}\n' "$head" "$base" ;;`,
         '  *"pr close"*) exit 0 ;;',
         "  *) exit 0 ;;",
         "esac",
