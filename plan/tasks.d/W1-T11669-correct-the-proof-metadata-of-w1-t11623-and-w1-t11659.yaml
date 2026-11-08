@@ -91,7 +91,7 @@
     - claim: "W1-T11623 criterion 1 proves the exact new regression test title instead of the whole test file"
       proof: "grep: unit test: the failed static gate case runs clear of an inherited slot marker (W1-T11623) in plan/tasks.d/W1-T11623-the-failed-static-gate-fixture-runs-clear-of-an-inherited-slot-marker.yaml"
     - claim: "W1-T11659 declares and proves the test/ci path rmd test-place computes, through a path-based unit-test proof"
-      proof: "grep: unit test: test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts in plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml"
+      proof: "grep: unit test: test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census\\.test\\.ts in plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml"
     - claim: "W1-T11659 records that a readable foreign-UID process keeps its existing skip behavior"
       proof: "grep: readable foreign-UID process keeps its existing skip behavior in plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml"
   falsifier: |
