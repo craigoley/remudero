@@ -1,0 +1,23 @@
+- id: W1-T11745
+  title: Re-derive the W1-T11411 read-model census selection at current origin/main and record whether it matches the 83 listed suites
+  repo: remudero
+  depends_on:
+    - W1-T11411
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T11411-a-read-model-fixture-flushes-its-diagnostics-before-removing-its-state.yaml
+  acceptance:
+    - claim: "The W1-T11411 shard records the census selection re-derived at current origin/main: the test files that import createReadModelTicker, createReadModelWorker or openReadModelDb and remove a temp dir. It states the count and names every suite that is in the selection but not in files:, and every files: suite that is not in the selection. A mismatch is stated as a scope amendment the build needs before the census can land."
+      proof: "grep: census re-derived at origin/main in plan/tasks.d/W1-T11411-a-read-model-fixture-flushes-its-diagnostics-before-removing-its-state.yaml"
+  origin: followup:W1-T11411-1794140097907:2026-11-08T12:19:07.759Z:0
+  rationale: >-
+    From the 2026-11-08 follow-up on W1-T11411-1794140097907, ratified via rmd approve:
+  
+    follow-up harvest [research]: confirm that the census selection (imports of
+    `createReadModelTicker`, `createReadModelWorker` or `openReadModelDb`, plus a temp-dir
+    removal) matches exactly the 83 listed suites at current main. A mismatch would force a scope
+    amendment before the census can land. — from W1-T11411 (run W1-T11411-1794140097907)
