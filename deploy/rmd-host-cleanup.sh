@@ -1977,7 +1977,7 @@ sweep_codex_sessions() {
 # immediate children. A Git-holding child is the worktree sweep's to judge; any other child goes once
 # everything in it is idle and nothing holds it, unless it holds state, keys or coordination files.
 # On 2026-11-07, 693 such entries (903 MB) sat in Azure's rmd-work, some from August.
-AGENT_SCRATCH_HOLD=(-name .rmd-janitor-keep -o \( -type f \( -name ledger -o -name 'ledger.*' \) \) -o -name '*.ndjson'
+AGENT_SCRATCH_HOLD=(-name .rmd-janitor-keep -o -name .rmd-scratch-keep -o \( -type f \( -name ledger -o -name 'ledger.*' \) \) -o -name '*.ndjson'
   -o -name '*.jsonl' -o -name '*.json' -o -name state -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' -o -name .env -o -name '.env.*'
   -o -name '*.pem' -o -name '*.key' -o -name 'id_rsa*' -o -name 'id_ed25519*' -o -type s -o -type p)
 sweep_agent_scratch() {
@@ -1986,6 +1986,7 @@ sweep_agent_scratch() {
   for e in "$root"/* "$root"/.[!.]* "$root"/..?*; do
     { [ -e "$e" ] || [ -L "$e" ]; } || continue
     keep_container_path "$e" && continue
+    if keep_marker "$e"; then log "KEEP $e: scratch keep marker"; continue; fi
     if [ -d "$e" ] && [ ! -L "$e" ]; then
       found="$($FIND_CMD -P "$e" \( -name .git -o \( -type d -name objects -exec test -f '{}/../HEAD' \; -exec test -d '{}/../refs' \; \) \) -print -quit 2>/dev/null)" || { log "KEEP $e: repository scan failed (unknown)"; continue; }
       [ -z "$found" ] || continue

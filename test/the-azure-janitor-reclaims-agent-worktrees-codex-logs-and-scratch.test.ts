@@ -225,6 +225,27 @@ test("idle agent scratch in rmd-work is removed unless it holds state, keys or c
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
+test("idle non-Git rmd-work scratch keeps marked patch files", () => {
+  const fx = fixture();
+  try {
+    const work = join(fx.home, "rmd-work");
+    const direct = join(work, "marked-patches");
+    const nested = join(work, "nested-marker");
+    const directMarker = file(join(direct, ".rmd-scratch-keep"));
+    const directPatch = file(join(direct, "patches/fix.patch"), "direct patch\n");
+    const nestedMarker = file(join(nested, "notes/.rmd-scratch-keep"));
+    const nestedPatch = file(join(nested, "patches/fix.patch"), "nested patch\n");
+    age(direct, 7); age(nested, 7);
+    const r = run(fx, { RMD_CLEANUP_LIVE_CHECKOUTS: "" });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    for (const p of [directMarker, nestedMarker]) assert.ok(existsSync(p), p + r.stdout);
+    assert.equal(readFileSync(directPatch, "utf8"), "direct patch\n");
+    assert.equal(readFileSync(nestedPatch, "utf8"), "nested patch\n");
+    assert.match(r.stdout, /KEEP .*rmd-work\/marked-patches: scratch keep marker/);
+    assert.match(r.stdout, /KEEP .*rmd-work\/nested-marker: holds state, keys or coordination/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
 test("agent scratch stays when the complete repository scan cannot finish", () => {
   const fx = fixture();
   try {
