@@ -650,6 +650,7 @@ function setupFakeRetroFixture(
     [
       "#!/bin/bash",
       "set -e",
+      `if [[ "$1" == 'api' && "$2" == '--paginate' && "$3" == '--slurp' && "$4" == */commits/*/statuses'?per_page=100' ]]; then echo '[[]]'; exit 0; fi`,
       // Matched on POSITIONAL args ($1 subcommand, $2 verb, $5 the --json field name),
       // NEVER a substring of the whole "$*" -- a `--body <repaired text>` value can
       // itself legitimately contain words like "diff" (ensureJudgeableBody's own proof

@@ -13,7 +13,10 @@
     - test/triage-codex-weekly-limit-recovery.test.ts
   origin: feedback#fb-1794082767548-ccbff0
   plan_refs: ["W1-T3749", "W1-T3656", "W1-T3549"]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=75d8c170e84e1751
+  # backlog gardener: placed=2026-11-08T11:45:12.759Z
   attempts: 0
   rationale: |
     Operator-approved root-cause fix (feedback fb-1794082767548-ccbff0). Scope:

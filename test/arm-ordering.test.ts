@@ -195,9 +195,13 @@ test("W1-T4581 stack-parent refusal is non-armed and has a specific reason", () 
 test("the comment above the arm no longer claims postReviewStatusGuarded writes review.posted", () => {
   const guarded = readFileSync(new URL("../src/lib/review.ts", import.meta.url), "utf8");
   const i = guarded.indexOf("export async function postReviewStatusGuarded");
-  const body = guarded.slice(i, guarded.indexOf("\n}\n", i));
+  // The guarded entry point delegates the actual post (and its `review.post_failed` row) to
+  // `publishReviewStatusLocked` since the same-head history guard moved in front of it, so the
+  // "only ledger writes" claim covers both halves of the posting path.
+  const j = guarded.indexOf("async function publishReviewStatusLocked", i);
+  const body = guarded.slice(i, guarded.indexOf("\n}\n", j));
 
-  assert.ok(i > 0, "the function exists");
+  assert.ok(i > 0 && j > i, "the function and its locked publisher exist");
   assert.equal(body.includes('"review.posted"'), false, "it genuinely never writes review.posted — only the two refusal steps");
   assert.ok(body.includes('"review.post_refused"') && body.includes('"review.post_failed"'), "those are its only ledger writes");
   assert.equal(

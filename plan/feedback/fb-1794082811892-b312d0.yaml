@@ -12,20 +12,21 @@ raw: Add a separate native consent and resolver path for private offline model
   not create substitute private data.
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/17313
 summary:
   headline: Approve building a separate private consent path for offline model evaluation
   what_happened: Engineers want a new, separate consent receipt for private
     offline model evaluation, leaving the existing public field-trials consent
-    unchanged. The user authorized building a separate fail-closed path with synthetic-only
-    qualification; that chat authorization is not a native data-use receipt. No
-    trusted secondary-use authority or resolver exists, so the real field-trials
-    matrix stays NOT_RUN until approved authority and owner-provisioned data exist.
-  decision: Record whether to approve building the separate private consent path with
-    synthetic fixtures only; this decision never grants authority over private
-    field-trials data or permits substitute private data.
+    unchanged. The user authorized building a separate fail-closed path with
+    synthetic-only qualification; that chat authorization is not a native
+    data-use receipt. No trusted secondary-use authority or resolver exists, so
+    the real field-trials matrix stays NOT_RUN until approved authority and
+    owner-provisioned data exist.
+  decision: Record whether to approve building the separate private consent path
+    with synthetic fixtures only; this decision never grants authority over
+    private field-trials data or permits substitute private data.
   options:
     - label: Approve the build with synthetic fixtures only
       consequence: A native receipt and resolver are built and qualified on synthetic

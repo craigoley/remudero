@@ -50,6 +50,7 @@ function writeGhScript(binDir: string, opts: { sha: string; diff: string; commen
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *commits/*/statuses[?]*) echo '[[]]' ;;
       *pulls/*/reviews*)
         if [ "$2" = "-X" ] && [ "$3" = "POST" ]; then
           for arg in "$@"; do

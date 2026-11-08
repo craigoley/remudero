@@ -2920,6 +2920,7 @@ test("W1-T359: runReview posts the unmet-criteria PR comment, and folds the advi
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *"/statuses?"*) echo '[[]]' ;;
       *reviews\\?*) echo '[]' ;;
       *reviews*)
         for arg in "$@"; do case "$arg" in body=*) printf '%s' "\${arg#body=}" > ${commentFile} ;; esac; done
@@ -2997,6 +2998,7 @@ test("W1-T359: a throwing rubric judge degrades to today's review — no advisor
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *"/statuses?"*) echo '[[]]' ;;
       *reviews\\?*) echo '[]' ;;
       *reviews*)
         for arg in "$@"; do case "$arg" in body=*) printf '%s' "\${arg#body=}" > ${commentFile} ;; esac; done
