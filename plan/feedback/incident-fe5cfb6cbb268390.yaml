@@ -1,0 +1,30 @@
+id: incident-fe5cfb6cbb268390
+ts: 2026-11-08T06:57:39.245Z
+raw: >-
+  Incident fe5cfb6cbb26: anomaly run.running_long:triage
+
+  First seen: 2026-11-08T06:52:17.863Z
+
+  Last seen: 2026-11-08T06:52:18.283Z
+
+  Count: 208, burn: 208.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - task TRIAGE-cash-refusal-quality-evidence-20261023 (run TRIAGE-cash-refusal-quality-evidence-20261023-1794048350625) has run 72300069ms against class "triage"'s median 530443ms (×8, n=5)
+    - task TRIAGE-fb-1794064519788-9bda6c (run TRIAGE-fb-1794064519788-9bda6c-1794064552912) has run 56097782ms against class "triage"'s median 530443ms (×8, n=5)
+    - task TRIAGE-fb-1794064519788-9bda6c (run TRIAGE-fb-1794064519788-9bda6c-1794072732156) has run 47918538ms against class "triage"'s median 530443ms (×8, n=5)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#fe5cfb6cbb268390ea6f54cf119aa0e015b68b68d684b3eba904c4110d60c6d5
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
