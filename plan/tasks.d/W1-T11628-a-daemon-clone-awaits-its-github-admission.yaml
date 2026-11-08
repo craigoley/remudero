@@ -11,7 +11,10 @@
   plan_refs: [W1-T11458, W1-T4970, W1-T1062]
   depends_on: [W1-T11458]
   files: [src/cli/commands/daemon.ts, src/cli/commands/run-task-verb.ts, test/github/a-daemon-clone-awaits-its-github-admission.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=d157e5136b75f92f
+  # backlog gardener: placed=2026-11-08T03:20:54.967Z
   attempts: 0
   rationale: |
     At source 4f741eba69e7ec47be75812cc7633394c27ca2a3 after #17144, cold non-self
