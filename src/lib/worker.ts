@@ -4180,9 +4180,10 @@ export async function collectWorkerResult(
         // value wins (W1-T2572).
         const normalizedModel = typeof model === "string" ? model.trim() : "";
         const hasRealModel = normalizedModel.length > 0 && normalizedModel !== "<synthetic>";
-        if (hasRealModel) servedModel = normalizedModel;
-        if (rawAny.error === "cloud_credential_error") {
-          // SDK guarantees that this local credential failure reached no provider.
+        // Preserve the existing servedModel evidence verbatim; normalization is only for this new receipt.
+        if (typeof model === "string" && model.length > 0 && model !== "<synthetic>") servedModel = model;
+        if (rawAny.error === "cloud_credential_error" || rawAny.error === "unknown") {
+          // Credential errors are local; unknown has no provider-response guarantee.
         } else if (hasRealModel) {
           providerExchangeDetail = { outcome: "assistant-model", model: normalizedModel };
         } else if (isProviderResponseError(rawAny.error)) {

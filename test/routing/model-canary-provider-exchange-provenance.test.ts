@@ -25,15 +25,13 @@ async function collect(messages: unknown[]) {
 }
 
 test("W1-T11597: only a provider-originated assistant message with a real non-synthetic model, or an allowlisted provider response error actually received, seals provider-exchange evidence", async () => {
-  let transportCalls = 0, spendUsd = 0;
   const positive = await collect([assistant("claude-real"), terminal]);
   const receipt = positive.providerExchange;
   assert.deepEqual(receipt, { version: "canary-provider-exchange-v1", ...binding,
     outcome: "assistant-model", model: "claude-real" });
   const providerError = await collect([assistant("<synthetic>", { error: "rate_limit" }), terminal]);
   assert.equal(providerError.providerExchange?.error, "rate_limit");
-  assert.equal(transportCalls, 0);
-  assert.equal(spendUsd, 0);
+  // The reducer receives only scripted in-memory messages; no provider client or transport is constructed here.
 });
 
 test("W1-T11597 criterion 2: excluded signals issue no provider exchange evidence in test/routing/model-canary-provider-exchange-provenance.test.ts", async () => {
@@ -41,6 +39,7 @@ test("W1-T11597 criterion 2: excluded signals issue no provider exchange evidenc
     [assistant("<synthetic>", { error: "cloud_credential_error" }), terminal],
     [assistant("<synthetic>", { error: "unknown" }), terminal],
     [assistant("claude-real", { error: "cloud_credential_error" }), terminal],
+    [assistant("claude-real", { error: "unknown" }), terminal],
     [assistant("<synthetic>", { isApiErrorMessage: true }), terminal],
     [{ type: "assistant", message: { content: [] }, isApiErrorMessage: true }, terminal],
     [assistant("<synthetic>"), terminal],
@@ -80,10 +79,11 @@ test("W1-T11597 criterion 4: sealed evidence binds run canary attempt and worker
     outcome: "assistant-model", model: "claude-real" });
 });
 
-test("W1-T11597 criterion 5: offline provider exchange controls use zero transport and zero spend in test/routing/model-canary-provider-exchange-provenance.test.ts", () => {
-  const transportCalls = 0, spendUsd = 0;
-  assert.equal(transportCalls, 0);
-  assert.equal(spendUsd, 0);
+test("W1-T11597 criterion 5: offline provider exchange controls use zero transport and zero spend in test/routing/model-canary-provider-exchange-provenance.test.ts", async () => {
+  const observed = await collect([assistant("claude-offline-model"), terminal]);
+  assert.equal(observed.providerExchange?.model, "claude-offline-model");
+  assert.equal(observed.sdkReportedUsageRatedUsd, 0);
+  // This path consumes an in-memory script and does not construct a provider transport or billing client.
 });
 
 
@@ -100,7 +100,7 @@ test("W1-T11597: coding adapter forwards the provider receipt and runner preserv
   assert.equal(validation.state, "available");
   if (validation.state !== "available") throw new Error("offline-private-corpus-unavailable");
   const workerSpawnAttemptId = "019f5ab2-4420-4ea0-993f-470a56362e04";
-  let providerTransportCalls = 0, spendUsd = 0, workerCalls = 0;
+  let workerCalls = 0;
   let saved: unknown;
   const worker: CodingWorker = async args => {
     workerCalls++;
@@ -128,8 +128,8 @@ test("W1-T11597: coding adapter forwards the provider receipt and runner preserv
     assert.equal(receipt?.runId, outcome.run.id);
     assert.equal(receipt?.canaryAttemptId, outcome.run.attempts[0]?.id);
     assert.equal(receipt?.workerSpawnAttemptId, workerSpawnAttemptId);
-    assert.equal(providerTransportCalls, 0);
-    assert.equal(spendUsd, 0);
+    assert.equal(savedRun.attempts[0]?.usageRatedUsd, 0);
     assert.equal(workerCalls, 1);
+    // `worker` above is the only injected execution port: it consumes a scripted stream and has no network capability.
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
