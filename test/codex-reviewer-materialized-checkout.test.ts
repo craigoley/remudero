@@ -55,6 +55,7 @@ printf '%s\n' "$*" >> ${JSON.stringify(ghLog)}
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *"/statuses?"*) echo '[[]]' ;;
       *pulls/*) echo '{"number":2868,"html_url":"https://github.com/acme/remudero/pull/2868","updated_at":"t","body":"fixed","state":"open","head":{"ref":"b","sha":"${apiHead}"}}' ;;
       *) echo '{}' ;;
     esac ;;

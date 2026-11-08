@@ -1,0 +1,73 @@
+- id: W1-T11727
+  title: A reviewer terminal error cannot inherit a success subtype
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high
+  band_meaning: span
+  origin: operator-approved S6 incident follow-up 2026-11-08
+  plan_refs: [W1-T11631, W1-T11428, W1-T2564, W1-T11459]
+  depends_on: [W1-T11631]
+  files: [src/cli/commands/review.ts, test/review/a-reviewer-api-error-cannot-be-success.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    The Mac run review-PR17299-1794115661039 positively records worker.assignment
+    and worker.attempt, success=false, terminal isError=true and apiError=true,
+    zero observed tokens and no served model. Stderr identifies expired OAuth.
+    Yet runReview copies subtype=success into reviewerSubtype and the semantic
+    row reports success. The production health reader consequently labels the
+    withheld result withheld-success, a reviewer-code population, rather than
+    withheld-failure. This is not proof that S6 caused or did not cause an incident.
+    The same error is reported under the revert-labelled code; restoring auth alone
+    cannot repair this consumer's contradictory result classification.
+    Source at main 86d940cf823c: src/cli/commands/review.ts assigns reviewer.subtype
+    without preserving its error flags; reviewerOutcome in src/lib/review.ts
+    preserves signal/spawn/plan-only precedence but receives no worker flags.
+    Evidence: Remudero-notes/sol/S6-Mac-auth-incident-reconciliation.json and
+    S6-Mac-overlay-17299-worker-evidence.json. Main and eight captured open head
+    trees were swept, with W1-T11459 positive controls on each. W1-T2564 concerns
+    usage-refused drafts, W1-T11428 UNABLE verdicts, and W1-T11631 initial GitHub
+    admission; none owns this contradictory API-error reviewer consumer.
+    A sketch with the actual consumer, health classifier and fixture imports
+    computes test/review at high confidence. No existing test is edited.
+  design: |
+    Preserve structured terminal error evidence at the existing runReview worker
+    result boundary. When a result's subtype says success but apiError is true,
+    record api_error; when isError alone contradicts success, record worker_error.
+    Preserve existing non-success subtypes, plan-only and unattempted outcomes,
+    spawn failures, signal rerun/termination precedence, genuine UNABLE handling,
+    successful evaluations, proof execution and all publication/owner guards.
+    Required semantic review remains withheld for a failed evaluator, including
+    one that emitted superficially complete PASS lines. No retry, new provider,
+    health threshold/state/filter edit, allowance reset or credential handling.
+    Test the actual runReview consumer with contained fake worker envelopes and
+    real local Git/proof fixtures, then feed its emitted row to the existing
+    production health classifier. Check no publication or arm on error; normal
+    successful, non-success, signal and UNABLE controls retain their meanings.
+    No live model call is needed to diagnose or locally test the fix.
+  acceptance:
+    - claim: A contradictory API-error reviewer is withheld as provider failure through the real consumer and production health classifier
+      proof: "grep: W1-T11727 criterion 1 in test/review/a-reviewer-api-error-cannot-be-success.test.ts"
+    - claim: Non-API terminal errors cannot inherit success and existing successful and other reviewer outcomes are preserved
+      proof: "grep: W1-T11727 criterion 2 in test/review/a-reviewer-api-error-cannot-be-success.test.ts"
+  note: |
+    Human explicitly approved a NEW combined $6 envelope for both follow-ups,
+    split $2 here and $4 for W1-T11728, including Azure reviews and fix activity.
+    This is not an assertion of unspent original allowance. New IDs and retries
+    grant no extra budget. No cash fallback/provider-routing change is authorized.
+    Source build starts after filing merges and fresh claim, exact merged-credit,
+    scope-history, subject and runnable-selector checks. Preserve other owners.
+    Require semantic red/green and removal/restoration pairs, physical related and
+    census suites, mapped source instrumentation/diff coverage, literal default,
+    ordinary first-push author invocation and all hosted/native review gates.
+    Record Decisions and one-line REPORTS receipts; no manual merge/arm/approve.
+    Azure review is operator-authorized; other Azure/runtime writes remain held.
+  falsifier: |
+    Remove only the error-preserving assignment while keeping the new consumer
+    test: its API-error expectation fails because the real semantic row says
+    success and its health class is withheld-success. Restore the fix and require
+    green. Separately remove the isError-only branch to fail its control. A parse
+    error, missing module, fixture crash or timeout is not the intended red.

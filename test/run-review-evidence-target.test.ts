@@ -31,6 +31,7 @@ async function reviewSiteProof(options: { delayProofMs?: number; onProofTicks?: 
     "+});",
   ].join("\n");
   const gh = ghShim([
+    { when: "/statuses?", stdout: "[[]]" },
     { when: "headRefOid", stdout: '{"headRefOid":"abc1234def5678abc1234def5678abc1234def56"}' },
     { when: "state", stdout: '{"state":"OPEN"}' },
     { when: "pulls/", stdout: '{"number":1,"html_url":"https://github.com/craigoley/remudero-site/pull/7","updated_at":"t","body":"","head":{"ref":"b","sha":"abc1234def5678abc1234def5678abc1234def56"}}' },

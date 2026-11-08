@@ -26,7 +26,10 @@ import { REPAIR_LEASE_CONTEXT, fetchPrLifecycleAsync, postRepairLease, postRevie
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
-import { runReview } from "#src/run-task.js";
+import { runReview, buildSweepEffects, depReviewCommand } from "#src/run-task.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import type { OpenPrView } from "#src/lib/sweep.js";
+import { readFileSync } from "node:fs";
 import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 
 const HEAD_SHA = "9549aaaabbbbccccddddeeeeffff000011112222";
@@ -151,6 +154,7 @@ test("W1-T9549: a slow gh during the review arm does not delay a concurrent time
       when: "pulls/",
       stdout: JSON.stringify({ number: 9549, html_url: PR_URL, updated_at: "t", body: BODY, state: "open", head: { ref: `run-${TASK_ID}-1`, sha: HEAD_SHA } }),
     },
+    { when: "/statuses?", stdout: "[[]]" },
     { when: "/status", stdout: JSON.stringify({ state: "success", statuses: [] }) },
   ], { kind: "t9549-review" });
   const order: string[] = [];
@@ -264,3 +268,97 @@ test("W1-T9549: the awaited review arm keeps the sync gate order and rows", asyn
     }
   }
 });
+
+
+const sharedFailureHead = "90be1a69eaea5510184cf6eec69f7c72afd13c39";
+const sharedFailureBody = `**remudero-review=failure**\n\n1. laneTarget's CPU bound is measured\n   - proof executed and PASSED on the PR head — NOTE: reviewer judged the proof non-responsive: an in-memory runDaemon replay adopting a review child in shadow mode throws ReferenceError at daemon.ts:4218. The proof omits review-child adoption.`;
+const sharedHistory = [{ context: "remudero-review", state: "failure" }, { context: "remudero-review", state: "success" }];
+const sharedComputed = {
+  state: "success", summary: "PASS", criteria: [{ claim: "laneTarget's CPU bound is measured", proof: "unit test: laneTarget", met: true,
+    floorMet: true, reason: "proof passed", proof_exec: "executed_pass" }],
+  testTheater: false, floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+};
+
+test("W1-T11443 criteria 1/2: direct sweep and dependency publishers guard exact-head shared history", async t => {
+  for (const lane of ["reuse", "discriminate-only", "dependency"] as const) {
+    for (const scenario of ["sticky", "unreadable", "clear", "unreproduced", "other-head"] as const) {
+      await t.test(`${lane}/${scenario}`, async st => {
+        const ledger = writeLedger([], { scope: st });
+        const prUrl = "https://github.com/acme/remudero/pull/1";
+        const body = "Bumps [example](https://example.com) from 1.0.0 to 1.0.1.";
+        const rows = scenario === "clear" ? [] : sharedHistory;
+        const findings = scenario === "unreproduced" ? [{ commit_id: sharedFailureHead, body: "remudero-review=failure: unable to inspect" }]
+          : [{ commit_id: scenario === "other-head" ? "older-head" : sharedFailureHead, body: sharedFailureBody }];
+        const shim = ghShim([
+          { when: `/commits/${sharedFailureHead}/statuses?`, stdout: scenario === "unreadable" ? "{}" : JSON.stringify([rows]) },
+          { when: "pulls/1/reviews?", stdout: JSON.stringify([findings]) },
+          { when: "pulls/1", stdout: JSON.stringify({ state: "open", merged: false, head: { sha: sharedFailureHead }, body }) },
+          { when: "pr diff", stdout: "diff --git a/src/changed.ts b/src/changed.ts\n+laneTarget\n" },
+          { when: "api ", stdout: "{}" },
+        ], { kind: "direct-publisher-history" });
+        const oldPath = process.env.PATH;
+        process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+        let arms = 0;
+        try {
+          let code: number | void;
+          if (lane === "dependency") {
+            code = await withLiveWritesAllowed(() => depReviewCommand("1", ["--repo", "acme/remudero"], {
+              config: { root: ledger.dir, ledger: ledger.path } as never,
+              gh: args => args[0] === "api"
+                ? { state: "open", merged: false, head: { sha: sharedFailureHead }, body }
+                : { number: 1, url: prUrl, title: "build(deps): bump example from 1.0.0 to 1.0.1", body,
+                  headRefOid: sharedFailureHead, author: { login: "app/dependabot" }, statusCheckRollup: [{ name: "ci", conclusion: "SUCCESS" }] },
+              prDiff: () => 'diff --git a/package.json b/package.json\n-"example": "1.0.0"\n+"example": "1.0.1"\n',
+              arm: () => { arms++; return "armed"; },
+            }));
+          } else {
+            const prior = { ...sharedComputed, criteria: [{ ...sharedComputed.criteria[0], proof: "grep: laneTarget in src/changed.ts" }] };
+            ledger.append([{ run_id: "prior", task_id: "W1-T11443", step: "review.posted", state: "success",
+              head_sha: "older-head", pr_url: prUrl, decision_verdict: prior }]);
+            const effects = buildSweepEffects({ owner: "acme", repo: "remudero", localRepoName: "other",
+              config: { root: ledger.dir } as never, ledgerPath: ledger.path, runId: "direct-history",
+              plan: { tasks: [], byId: new Map() } as never, log: () => {},
+              reviewRunner: async () => { assert.fail("direct publishing must not fall back to a full review"); },
+              materializeReviewWorktreeImpl: () => ({ worktreePath: "/head" }),
+              buildBaseProofDirImpl: () => ({ baseCheckoutDir: "/base", baseUnreadablePaths: new Set(), baseIsCheckout: true, addedTestFiles: new Set() }),
+              reviewReuseExecProofImpl: (_proof, cwd) => cwd === "/head" ? "pass" : "fail",
+              worktreeRemoveImpl: () => {},
+            });
+            const pr = { prNumber: 1, prUrl, taskId: "W1-T11443", headSha: sharedFailureHead, reviewState: "none", checksState: "green",
+              unmetCriteria: [], priorStrikes: 0, lastActivityAt: new Date().toISOString(), autoMergeArmed: false, body,
+              currentOwnDiffDigest: "current-diff", currentMergeBaseSha: "current-base" } as OpenPrView;
+            code = await withLiveWritesAllowed(() => effects.postReview!(pr, { kind: lane, judgedHeadSha: "older-head" }));
+          }
+          const calls = shim.calls();
+          assert.ok(calls.some(call => call.includes(`/commits/${sharedFailureHead}/statuses?`)), "each direct publisher reads the exact-head statuses list");
+          const posts = calls.filter(call => call.includes(`statuses/${sharedFailureHead}`));
+          const recorded = readFileSync(lane === "dependency" ? join(ledger.dir, "state", "ledger.ndjson") : ledger.path, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+          const terminal = recorded.findLast(row => row.step === "review.posted" && row.head_sha === sharedFailureHead);
+          if (scenario === "sticky") {
+            if (lane === "dependency") assert.equal(code, 1);
+            assert.ok(posts.some(call => call.includes("state=failure") && call.includes("ReferenceError at daemon.ts:4218")), posts.join("\n"));
+            assert.equal(terminal?.state, "failure", "callers ledger the effective failure");
+            assert.ok(recorded.some(row => row.step === "review.history_guarded" && row.findings[0].finding.includes("shadow mode throws ReferenceError")));
+          } else if (scenario === "unreadable") {
+            if (lane === "dependency") assert.equal(code, 1);
+            assert.equal(posts.length, 0);
+            assert.equal(terminal, undefined);
+            assert.ok(recorded.some(row => row.step === "review.post_refused" && /pending:.*status history unreadable/.test(row.reason)));
+          } else {
+            if (lane === "dependency") assert.equal(code, 0);
+            assert.ok(posts.some(call => call.includes("state=success")));
+            assert.equal(terminal?.state, "success");
+          }
+          if (scenario === "sticky" || scenario === "unreadable") {
+            assert.equal(posts.some(call => call.includes("state=success")), false);
+            assert.equal(arms, 0, "dependency review cannot arm a held or failed result");
+          } else if (lane === "dependency") assert.equal(arms, 1, "healthy history preserves dependency arming");
+        } finally {
+          if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+          rmSync(shim.dir, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+});
+

@@ -1,0 +1,69 @@
+- id: W1-T11682
+  title: "NO NATIVE SECONDARY-USE CONSENT OR RESOLVER EXISTS for private offline model evaluation — field-trials-consent-v1 covers only aggregate/public release, so its chat authorization cannot be treated as data-use consent"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 30.00
+  risk: high  # private data boundary: resolving inputs without verified authority is a disclosure
+  band_meaning: blast-radius
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "feedback#fb-1794082811892-b312d0"
+  plan_refs: [W1-T10831, W1-T10832]
+  files:
+    - src/lib/secondary-use-receipt.ts
+    - src/lib/offline-eval-resolver.ts
+    - src/lib/field-trials-flow.ts
+    - test/routing/secondary-use-receipt.test.ts
+    - test/routing/offline-eval-resolver.test.ts
+  rationale: |
+    Feedback fb-1794082811892-b312d0. The user authorized building a separate fail-closed path
+    and synthetic-only qualification. That chat authorization is not a native data-use receipt.
+    Existing field-trials-consent-v1 grants aggregate/public-release rights only; no trusted
+    secondary-use authority or private resolver exists. Do NOT widen the existing consent or
+    treat a structurally valid receipt, synthetic fixture, repo role, or account login as authority.
+  design: |
+    - First probe the production host for an already-provisioned, trusted secondary-use
+      authority capability and its secure resolver contract. Current repository evidence shows
+      neither exists. Do not infer the capability from chat authorization, GitHub role, a
+      structurally valid receipt, public field-trials consent, canary corpus keys, or a caller
+      supplied verifier. Do not create a trust root, signing key, owner allowlist, registry,
+      resolver store, sample receipt, or default private-data path in this task.
+    - If the host capability is absent, unavailable, or cannot authenticate the issuer, owner,
+      source, purpose, permitted offline analysis/privacy boundary, and current revocation state,
+      the production opt-in path must return NOT_RUN before path resolution, file open/read,
+      parsing, or resolver invocation. A receipt-local revoked field is never authoritative.
+      Keep the safe NOT_RUN path and machine-readable reason; do not make up a capability so
+      implementation can proceed.
+    - Only when that pre-existing host authority and secure resolver are discovered may the
+      production flow pass their unforgeable capability into the resolver. Verify authority and
+      current revocation first, then compare exact snapshot, analysis-input and corpus digests
+      before parsing. Emit only private digest-linked aggregate/evaluation metadata.
+    - Qualification may use synthetic byte fixtures and a fake authority injected below the
+      production boundary only. Prove absent authority yields NOT_RUN with zero path-resolution
+      or loader calls; prove aggregate-only consent, untrusted/revoked authority and digest
+      mismatch cannot reach parsing; prove the authorized synthetic path emits aggregates only.
+      No provider calls, network egress, upload, training, or publication.
+    - Keep field-trials-consent-v1 and existing --consent/--field-note behavior unchanged.
+      The public aggregate receipt cannot authorize private secondary use.
+    - The real field-trials matrix remains NOT_RUN until the existing data steward/host authority
+      provisions a native receipt and the exact snapshot, analysis input and corpus through its
+      secure resolver. This is an external readiness dependency, not a request for the operator
+      to invent or attach private files; never create substitute evaluation data.
+  acceptance:
+    - claim: "without an existing host authority, the production path returns NOT_RUN before resolving or loading any private input"
+      proof: "unit test: absent host authority returns NOT_RUN before private path resolution"
+    - claim: "the host authority authenticates scope and current revocation and exact bound digests gate parsing; output is aggregate-only"
+      proof: "unit test: trusted host authority gates parsing and emits digest-linked aggregates only"
+    - claim: "aggregate-only public consent cannot authorize private evaluation and refusal happens before resolver invocation"
+      proof: "unit test: aggregate-only public consent is refused before resolver invocation"
+    - claim: "the production flow calls the separate native secondary-use authority verifier"
+      proof: "grep: verifySecondaryUseReceipt[(] in src/lib/field-trials-flow.ts"
+    - claim: "the production flow calls the private offline resolver only through the verified opt-in path"
+      proof: "grep: resolvePrivateOfflineEval[(] in src/lib/field-trials-flow.ts"
+  falsifier: |
+    A private input read before the native verifier succeeds, acceptance of the public aggregate
+    receipt, any synthetic/default authority accepted in production, a digest mismatch, revocation,
+    provider/network activity, or raw/identifying output must each fail a case.

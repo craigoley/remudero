@@ -68,6 +68,7 @@ case "$1 $2" in
     # \`pr view --json headRefOid\` — answered in REST's own shape, since mapRestPr reads
     # head.sha. Same sha as the pr-view arm below so every assertion here is unchanged.
     case "$*" in
+      *commits/*/statuses[?]*) echo '[[]]' ;;
       *reviews\\?*) echo '[]' ;;
       *reviews*)
         for arg in "$@"; do case "$arg" in body=*) printf '%s' "\${arg#body=}" >> ${commentFile} ;; esac; done

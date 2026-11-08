@@ -2,13 +2,8 @@ import { visibleCriteria, type AcceptanceCriterion, type Task } from "./plan.js"
 import { checkpointCommitSubject } from "./unfinished-checkpoint.js";
 
 /**
- * One compaction event observed in an SDK message stream (MASTER-PLAN §8B:
- * "Compaction is a SAFETY NET, never a strategy... it WILL fire (observed
- * mean 19.8 turns, tasks at 36+), and today we do not even MEASURE it").
- * Mirrors the SDK's own `SDKCompactBoundaryMessage.compact_metadata` shape
- * (sdk.d.ts 0.3.210 ground truth: `{type:"system", subtype:"compact_boundary"}`)
- * — camelCase here to match `WorkerResult`'s own field-naming convention;
- * `workerLedgerFields` (worker.ts) re-exposes it verbatim on the ledger line.
+ * SDK compact_boundary metadata (sdk.d.ts 0.3.210; MASTER-PLAN §8B).
+ * CamelCase matches WorkerResult; workerLedgerFields exposes it verbatim on the ledger.
  */
 export interface CompactionEvent {
   trigger: "manual" | "auto";
@@ -18,12 +13,8 @@ export interface CompactionEvent {
 }
 
 /**
- * Scan a raw SDK message stream for `compact_boundary` system messages. Pure
- * and total over `type`/`subtype` string checks — any other message shape
- * (the vast majority of a stream) is silently skipped, so a RECORDED test
- * fixture never needs to be a complete/valid stream to be scannable.
- * `collectWorkerResult` (worker.ts) calls this LIVE, per message, on every
- * real worker spawn — this is not fixture-only plumbing.
+ * Scan compact_boundary messages, skipping other shapes. collectWorkerResult calls
+ * this per live message; recorded fixtures need not form a complete SDK stream.
  */
 export function detectCompactionEvents(messages: unknown[]): CompactionEvent[] {
   const events: CompactionEvent[] = [];
@@ -48,25 +39,16 @@ export function detectCompactionEvents(messages: unknown[]): CompactionEvent[] {
 }
 
 /**
- * One compaction ATTEMPT that FAILED (W1-T2245). `sdk.d.ts:4684` ground truth (0.3.233):
- * `SDKStatusMessage` (`{type:"system", subtype:"status"}`) carries `compact_result?: 'success' |
- * 'failed'` and `compact_error?: string` — a channel `detectCompactionEvents` above NEVER reads,
- * because it matches only `subtype:"compact_boundary"`. A compaction that fails emits no boundary
- * message, so before this it produced NO event, NO `quality_suspect`, NO row — indistinguishable
- * from a call that never attempted compaction at all. `error` is the SDK's own `compact_error`
- * string when present; absent (never guessed) when the status message carried none.
+ * W1-T2245: failed attempts emit status, not boundary (SDKStatusMessage, sdk.d.ts 0.3.233).
+ * Without this channel they look like no attempt. Preserve compact_error only when supplied.
  */
 export interface CompactionFailure {
   error?: string;
 }
 
 /**
- * Scan a raw SDK message stream for `{type:"system", subtype:"status"}` messages whose
- * `compact_result` reads `"failed"`. Same discipline as {@link detectCompactionEvents}: pure,
- * total over `type`/`subtype`/`compact_result` string checks, any other message shape silently
- * skipped. `collectWorkerResult` (worker.ts) calls this LIVE, per message, alongside the boundary
- * detector — this reads an existing channel already arriving in the stream; it adds no SDK option
- * and changes no spawn behaviour.
+ * Scan failed system/status messages, skipping other shapes. collectWorkerResult calls
+ * this alongside the boundary detector on the existing stream; no spawn option changes.
  */
 export function detectCompactionFailures(messages: unknown[]): CompactionFailure[] {
   const failures: CompactionFailure[] = [];
@@ -81,29 +63,18 @@ export function detectCompactionFailures(messages: unknown[]): CompactionFailure
 }
 
 /**
- * A call/run is QUALITY-SUSPECT (MASTER-PLAN §8B) the moment ONE compaction
- * fired — its acceptance proofs must be re-verified against repo state
- * (W1-T3F), never trusted from a possibly-lossy REPORT.
+ * One compaction makes a run quality-suspect: re-verify proofs against repo state,
+ * never a possibly-lossy REPORT (MASTER-PLAN §8B; W1-T3F).
  */
 export function isQualitySuspect(events: CompactionEvent[]): boolean {
   return events.length > 0;
 }
 
 /**
- * The COMMIT MESSAGE contract — ONE literal shared by every prompt that asks a worker
- * to commit (the implement OUTPUT CONTRACT above, and `renderFixPrompt`'s fix-rung
- * footer in run-task.ts), so the two can never drift.
- *
- * HOSTED commitlint reads the PR title live (W1-T129/W1-T351). LOCAL preflight-author and
- * preflight run commitlintStep over the range with configured ignores and emitterChecksStep
- * over its non-merge commits; a commit hook
- * validates an individual message. Squashing branch history does not waive these local gates.
- * Checkpoints are conventional yet unfinished; both the final subject and explicit PR title
- * must name the finished work, never its checkpoint. No history or validation policy changes.
- *
- * The rules below are MEASURED against the real CLI (see test/commit-message.test.ts),
- * not inferred. In particular there is NO acronym exemption: `SSE stream severed`,
- * `URL round-trips` and `FIND layer …` are all REJECTED by `subject-case`.
+ * Shared implement/fix commit contract (W1-T129/W1-T351; test/commit-message.test.ts).
+ * Hosted commitlint reads the live PR title; local gates validate the commit range and hooks
+ * validate individual messages. Squashing exempts none; final subjects describe finished work.
+ * subject-case rejects uppercase acronyms too.
  */
 export function commitMessageContractLines(): string[] {
   return [
@@ -138,28 +109,10 @@ export function commitMessageContractLines(): string[] {
 }
 
 /**
- * The hard-constraints block, shared VERBATIM by the initial prompt
- * (`renderImplementPrompt`, run-task.ts) and the post-compaction ANCHOR
- * (`renderAnchorBlock`, below) — ONE source of literal text so the two can
- * never drift apart, and the anchor is provably byte-identical to what the
- * worker was told at turn 0 (never re-derived, never paraphrased).
- */
-/**
- * THE BODY-VERSUS-DIFF CONTRACT (impl-FV) — shared VERBATIM by the implement contract above and by
- * the fix rung (`renderFixPrompt`, run-task.ts), the two prompts whose worker authors a PR body.
- * Shared for the same reason {@link commitMessageContractLines} is: two literals of one rule drift.
- *
- * WHY THIS EXISTS. `bodyContradictsDiff` (lib/review.ts) folds into `judgeReview`'s state, so a
- * contradiction is a REQUIRED-check failure with no floor to fall back on — and until now NO prompt
- * in this repository mentioned it (recon-FT). It landed 2026-07-31; its zero observed failures are
- * its AGE, not compliance. It exists for a measured reason: #974 claimed one file over a 3-file
- * diff, and #1025's claim rode a -515-line source revert that silently reverted three merged PRs.
- *
- * WHY IT STATES THE RULE RATHER THAN A WORD LIST. The check is deliberately SUBJECT-SENSITIVE —
- * both predicates are anchored (`claimsChangesetContext` backward, `noClaimIsAboutChangeset`
- * forward) precisely so a sentence about something OTHER than the changeset stays silent. A "never
- * write these words" instruction would be false, would make bodies worse, and would still not stop
- * the failures, because the ones that fired were about subject, not vocabulary.
+ * Shared verbatim by implement, fix and anchor prompts (impl-FV; recon-FT).
+ * bodyContradictsDiff feeds judgeReview as a required failure (#974, #1025).
+ * Its anchored predicates judge a sentence's subject, not a forbidden-word list:
+ * claimsChangesetContext looks backward; noClaimIsAboutChangeset looks forward.
  */
 export function bodyVsDiffContractLines(): string[] {
   return [
@@ -181,82 +134,24 @@ export function bodyVsDiffContractLines(): string[] {
 }
 
 /**
- * REMOVED (W1-T295 added it, W1-T464 removed it): a WORKER-facing contract line telling a
- * worker to run `rmd preflight --ci-parity` before its first push. `ciParityContractLines()`
- * used to live here and was spread into both `outputContractLines` (below) and the fix rung's
- * footer (`renderFixPrompt`, run-task.ts).
- *
- * WHY IT'S GONE. Re-measured on the Azure host's full ledger (W1-T464's shard): the
- * orchestrator's handling of a failed worker preflight (`run-task.ts`) has NO branch, NO early
- * return, NO gate — it logs `preflight.failed` and keeps going, so the two prompt lines below
- * never stopped a push. Of the 17 `preflight.failed` rows on that host, only 2 were genuine
- * (the other 15 were `test/preflight.test.ts`'s fake spawn writing into the worker's tree, a
- * defect W1-T455 owns, not evidence of the gate firing); of those 2, one was UNDECIDABLE (CI
- * never ran on a superseded sha) and the other was WRONG (CI passed 21/22 checks, 1 neutral,
- * on the identical sha the preflight had flagged). Earned cost: 0. It also was NOT cheap: one
- * `--ci-parity` pass runs ~15-17 minutes (a 4-6 minute non-coverage suite plus a ~10 minute
- * coverage suite plus 21 cheaper steps) against a ~61-minute lane — roughly a quarter of it,
- * paid on every implement and every fix-rung round, for a check that could not have blocked
- * anything even when it was wrong.
- *
- * WHAT THIS DOES NOT REMOVE. `rmd preflight --ci-parity` remains a fully intact CLI verb
- * (lib/ci-parity.ts, docs/cli-reference.md) — it is the HAND route's own gate (W1-T221 built
- * the verb, W1-T294 added the flag), and an operator making a hand-authored push is a
- * different caller with different economics: no `blocked_ci` fix rung runs behind them if CI
- * catches something after the fact. Only the WORKER's obligation to run it pre-push is gone;
- * a worker that pushes now and lets CI judge is not unprotected — `blocked_ci` is a
- * first-class, non-halting verdict (`src/lib/drain.ts`) whose fix rung already exists for
- * exactly this case.
- *
- * The base `rmd preflight` (no flags) — commitlint, `tsc --noEmit`, and the commit-message
- * checks — is untouched by this shard; it was never part of this contract to begin with (see
- * `commitMessageContractLines`, above, for the one piece of it a worker IS told about).
+ * W1-T464 removed W1-T295's worker ciParityContractLines obligation: a 15–17 minute
+ * run logged preflight.failed without gating a push. W1-T455 owns fake-spawn ledger pollution.
+ * The hand-route CLI remains (W1-T221/W1-T294; lib/ci-parity.ts, docs/cli-reference.md),
+ * as do base preflight checks. Workers instead have the non-halting blocked_ci fix rung.
  */
 
 /**
- * W1-T2997 — THE BOUNDED PRE-PUSH GATE, WHICH DOES NOT BRING BACK WHAT W1-T464 REMOVED.
- *
- * Read the tombstone above first. `ciParityContractLines()` went because the orchestrator never
- * gated on a preflight failure and the step cost ~15-17 minutes of a ~61-minute lane. All of that
- * stands: `--ci-parity` stays gone, and the ratchets named here run in SECONDS.
- *
- * WHAT THE TOMBSTONE ASSUMED, AND WHAT WAS MEASURED. It concluded a worker "is not unprotected"
- * because "`blocked_ci` is a first-class, non-halting verdict whose fix rung already exists for
- * exactly this case". MEASURED 2026-09-07: eight open PRs, every one a fleet build, verdict census
- * `blocked_ci` 7, `blocked` 1, merged by the fleet itself ZERO. The fix rung exists and was not
- * closing them. Four were repaired by hand and needed no judgement — #4330, #4324, #4343 and #4333
- * were red on ratchets the change itself moved and never recorded.
- *
- * AND THE HOUSE RULE CANNOT REACH A WORKER. CLAUDE.md's first bullet is "before your FIRST push, run
- * `scripts/preflight-author.mjs`", and its own header states a dispatched worker never loads the
- * file, since `spawnWorker` passes `settingSources: []`. A rule only humans read cannot bind the lane
- * that keeps breaking it — precisely what that header warns about.
+ * W1-T2997: cheap pre-push ratchets, not the removed full preflight. The fix rung failed
+ * to close fleet PRs (#4330, #4324, #4343, #4333); workers need the rule in their prompt
+ * because spawnWorker uses settingSources: [] rather than loading CLAUDE.md.
  */
 export function ratchetContractLines(): string[] {
   /*
-   * THE SPLIT BELOW IS LOAD-BEARING AND MUST NOT BE FLATTENED. `comment-load-ratchet` and
-   * `source-size-ratchet` print the exact line to write and call recording "an ordinary, reviewed
-   * outcome, not a defeat" — recording IS the fix. `negative-reachability-ratchet` and
-   * `catch-erasure-ratchet` say in their own text "no allowlist to add it to": a recorded number there
-   * BANKS the debt rather than paying it, and the real repairs this session made for them were a
-   * two-armed regex fixture and a bound error, neither derivable from the failure output. Telling a
-   * worker to "record the baseline" against those would teach it to hide the defect they exist to
-   * surface, so this names both classes and what each one actually wants. Naming them BY NAME means
-   * the list must be re-read whenever a no-allowlist gate is added: source-text-assertion-census was
-   * missed on the first ship (#4351), so that suite asserts all three names are present.
-   *
-   * WHY THE RULE-15 LINE DOES NOT SPELL THE PLAN'S PATH, for the same reason and a different guard.
- * test/run-task.test.ts asserts a fix worker's prompt never matches /plan\/tasks\.yaml/ — W1-T58's
- * own guard that a worker is never DIRECTED AT the plan, because it may not correct a mis-specified
- * task. This line directs it AWAY from the plan and the literal match cannot tell the two apart.
- * Weakening that guard to fit new prose would be the wrong trade, so the path is described rather
- * than spelled, exactly as the ci-parity line below is.
- *
- * WHY THE LAST LINE DOES NOT SPELL THE COMMAND. test/ci-parity-contract.test.ts asserts the
-   * worker contract `doesNotMatch(/rmd preflight --ci-parity/)` — W1-T464's own guard against the
-   * obligation creeping back. This line is a PROHIBITION, not an obligation, but the guard is a
-   * literal match and cannot tell them apart, and weakening a guard to fit new prose is the wrong
-   * trade. It is worded around instead, deliberately: the guard keeps its full force.
+   * Keep baseline-recording gates separate from no-allowlist gates: the latter need repairs,
+   * not recorded debt. Name all three; source-text-assertion-census was missed in #4351.
+   * Preserve literal guards: W1-T58's test/run-task.test.ts forbids the plan's path even in
+   * prohibitions, and test/ci-parity-contract.test.ts forbids spelling the removed command.
+   * Describe both indirectly rather than weakening those assertions.
    */
   return [
     "- BEFORE YOUR FIRST PUSH, run the two CHEAP ratchets over your own change — seconds, not",
@@ -305,39 +200,10 @@ export function ratchetContractLines(): string[] {
 }
 
 /**
- * THE ROLE SENTENCE — the one thing `renderImplementPrompt` never said.
- *
- * MEASURED (state/recon-implement-acts-as-recon.md, re-derived at db4e110): `renderReconPrompt`'s
- * FIRST SENTENCE is "You are a RECON worker. Do NOT modify anything." The implement prompt opened
- * with the literal string "# CONTEXT" and contained no role assignment anywhere — no "implement",
- * no "build", no "you". There is no system prompt on either spawn (`systemPrompt`/
- * `appendSystemPrompt` have zero occurrences in run-task.ts and worker.ts), so the prompt text was
- * the ONLY thing distinguishing the two roles, and it did not.
- *
- * WHAT THE WORKER SAW INSTEAD. `# TASK` renders `task.prompt ?? task.title`, and zero task records
- * carry `prompt:`, so it is always the title — which for a well-written shard is a DIAGNOSIS in the
- * same register a recon report is written in. Above it, the CONTEXT block is recon's own OBSERVED
- * lines, each stamped `[src: recon#<taskId>]`. A worker reading top-down met a colleague's findings
- * and a statement of a defect, and was never addressed as the one who fixes it. Five dispatches
- * across the two best-specified tasks in the plan ended in recon reports; one filed its own
- * assignment as a `task:` follow-up, which is the only output grammar the contract actually teaches
- * (`parseFollowups` accepts exactly research|task|action — there is no type meaning "I did it").
- *
- * WHY IT LIVES HERE rather than in run-task.ts. This module is where the literal text SHARED
- * between the turn-0 prompt and the post-compaction anchor lives, and the role has to survive a
- * compaction: the runs that failed ran 43-109 turns, which is the regime where the anchor exists to
- * matter at all. ONE constant, rendered at the head of {@link renderAnchorBlock} and at the head of
- * `renderImplementPrompt` — so the two can never drift, exactly as the output contract already
- * cannot.
- *
- * IT IS NOT RENDERED BY RECON. `outputContractLines` and `renderAnchorBlock` have exactly two
- * consumers between them, both on the implement path; `renderReconPrompt` renders neither. That
- * asymmetry IS the fix — a role sentence both spawns carried would distinguish nothing.
- *
- * DELIBERATELY BEFORE `# CONTEXT` in the prompt. `extractContext` (lib/provenance.ts) scans from
- * the first `CONTEXT` heading to the next heading, so text above it is outside the provenance
- * linter's region and needs no `[src:]` — while a bullet added INSIDE that block would need one on
- * every block, and `assertProvenance` throws at render time.
+ * Explicit implement role, shared by renderImplementPrompt and renderAnchorBlock, never recon.
+ * Five dispatches returned recon reports without it (state/recon-implement-acts-as-recon.md;
+ * db4e110). Keep it before # CONTEXT: extractContext/assertProvenance require [src:] inside
+ * that region. The role must survive compaction without drifting from the turn-0 prompt.
  */
 export const IMPLEMENT_ROLE_LINES: readonly string[] = [
   "You are an IMPLEMENT worker: YOU write the code in this run.",
@@ -347,19 +213,15 @@ export const IMPLEMENT_ROLE_LINES: readonly string[] = [
   "accurate the report.",
 ];
 
-/** Shared authority boundary for both PR-authoring worker prompts. The command hook enforces the
- * ordinary CLI paths; this line keeps a compliant worker from attempting an operation it cannot
- * own and receiving an avoidable refusal at the end of an otherwise successful run. */
+/** Shared PR-authoring authority boundary; the command hook enforces ordinary CLI paths. */
 export const WORKER_PR_AUTHORITY_LINES: readonly string[] = [
   "- You may create or update the PR, but NEVER merge it or arm auto-merge. The orchestrator owns",
   "  that decision after CI and semantic review; stop after reporting the PR URL.",
 ];
 
-/** W1-T4268 — shared by both PR-authoring worker prompts, spliced beside {@link WORKER_PR_AUTHORITY_LINES}.
- * `gh pr edit` can fail on this repo/token with a Projects (classic) GraphQL error even for a body-only
- * edit. That is a TRANSPORT defect, so a worker must neither assume the edit was rejected nor that it
- * landed. The substitute is the REST PATCH `prBodyRestArgs` (run-task.ts, W1-T2948) already proved;
- * `-f`, never `-F`, because `-F` reads a leading `@` value as a filename and expands `{owner}`/`{repo}`. */
+/** W1-T4268: both PR-authoring prompts use W1-T2948's prBodyRestArgs fallback for GraphQL
+ * transport failures. Never infer whether an edit landed; use -f because -F reads @files
+ * and expands placeholders. Splice beside WORKER_PR_AUTHORITY_LINES. */
 export const GH_PR_EDIT_FALLBACK_LINES: readonly string[] = [
   "- If `gh pr edit` fails with \"Projects (classic) is being deprecated\" /",
   "  `repository.pullRequest.projectCards`, that is a TRANSPORT failure of gh's GraphQL query, never",
@@ -370,24 +232,14 @@ export const GH_PR_EDIT_FALLBACK_LINES: readonly string[] = [
 ];
 
 /**
- * W1-T3696 step (2), per-provider: the contract a worker gets when the HARNESS owns git.
- *
- * A worker whose tool bound carries no shell cannot run `git commit`, `git push` or `gh pr create`,
- * and telling it to would spend its whole turn budget failing at them. It edits files and names a
- * commit subject; the harness commits, and the fallback push and PR creation that already exist
- * carry the run home.
- *
- * NOT A WEAKER CONTRACT, A DIFFERENT ONE. The worker still reports, still declares follow-ups and
- * learnings, and still gets the ALREADY_SATISFIED exit. What changes is who performs the git
- * effects — which is the security direction W1-T3572 asked for anyway: forge authority leaves the
- * worker rather than being granted to a cheaper one.
+ * W1-T3696 step (2)/W1-T3572: when the harness owns git, shell-less workers save edits and
+ * name a commit subject; the harness commits, pushes and opens the PR. Reporting, follow-ups,
+ * learnings and ALREADY_SATISFIED remain required; forge authority stays with the harness.
  */
 export function outputContractLines(taskId: string, harnessCommits = false): string[] {
   return [
     "# OUTPUT CONTRACT",
-    // THE SCOPE-TIME CHECK, ordered up front: it used to live only in hand-written briefs, and its
-    // absence cost dispatches whose work had already shipped. Read and Grep only, so it rides the
-    // shell-less variant too (IMPLEMENT_CASH_TOOLS carries both). Exit names are the real ones.
+    // Check scope before editing, including in the shell-less variant (IMPLEMENT_CASH_TOOLS).
     "- BEFORE EDITING, open your task record and, using Read and Grep at this HEAD: (a) re-verify",
     "  every file:line it cites — cited lines drift, and a record that names a symbol that no longer",
     "  exists is premise-rotted (REFUSED, class `premise-rotted`); (b) check whether each acceptance",
@@ -395,16 +247,8 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     "  Then act on what you found.",
     "- Make ONLY the change described in TASK; one concern.",
     ...ratchetContractLines(),
-    // W1-T502: THE CADENCE INSTRUCTION. Until this line, the contract taught exactly one
-    // terminal act ("stage the changed file(s) and commit", below) — for the whole life of a
-    // run, everything a worker produced existed ONLY as dirty files and index entries in its
-    // worktree, which `reapStaleWorktrees` (worker.ts) `rm -rf`s without `git worktree prune`
-    // the moment it judges the run terminal. A linked worktree shares the PARENT CLONE's object
-    // store and refs — only HEAD and the index are per-worktree — so a commit made in here
-    // writes its objects into the parent's `.git/objects` and moves `refs/heads/<branch>`, both
-    // outside the reaper's reach; an uncheckpointed wipe leaves index archaeology or nothing, a
-    // checkpointed one leaves `git log <branch>`. The conventional marker keeps local message gates
-    // and unfinished-work recognition compatible; squash merging does not exempt branch history.
+    // W1-T502: checkpoint objects/refs survive reapStaleWorktrees in the parent clone;
+    // dirty files do not. Conventional checkpoint subjects still pass local message gates.
     "- CHECKPOINT AS YOU GO: after each meaningful unit of work — a test newly green, a decision",
     "  taken, an approach abandoned — commit everything on THIS run's branch with subject",
     `  \`${checkpointCommitSubject("<what>")}\` and a body carrying a \`[remudero-context]\` block: one line each for decided /`,
@@ -412,11 +256,7 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     "  work until you commit it — checkpoints land in the parent clone's shared object store and",
     "  survive a worktree wipe; nothing else does. Checkpoints are ADDITIONAL commits, never a",
     "  substitute for the terminal commit below.",
-    // W1-T105 — the operator's requirement, verbatim: "ensure that if any
-    // implementations come back with follow-up research, actions, tasks, etc —
-    // they get added to the plan." Anything discovered that is OUT OF SCOPE for
-    // this one concern goes HERE, never into the diff; the retro's follow-up
-    // harvest (lib/retro.ts) mines this section into cited proposal candidates.
+    // W1-T105: retro.ts harvests out-of-scope follow-ups as plan proposal candidates.
     "- FOLLOW-UPS (optional): anything you discover that is OUT OF SCOPE for this",
     "  one concern — a research question, a follow-up task, or an action someone",
     "  should take — goes in a '## Follow-ups' section of your REPORT, NEVER into",
@@ -425,13 +265,8 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     "- If a filename/approach choice is needed, FIRST emit a DECISION_REQUEST",
     "  (exactly two options, one marked RECOMMENDED, a reversibility note, and a line",
     "  `FALSIFIER: <what you would observe if RECOMMENDED is the wrong choice>`) and STOP.",
-    // W1-T272: the output contract's third exit. Before this, a worker that correctly found
-    // the task's acceptance ALREADY TRUE on origin/main had no PR-less exit that didn't halt
-    // the drain (`no_pr` is the only PR-less verdict, and it stops the drain as anomalous) —
-    // so five separate runs each manufactured a no-op closure PR just to comply. This line
-    // gives that honest finding a sanctioned exit, gated on NAMING the merged PR that already
-    // did the work: an unverifiable "already done" claim is refused (falls through to `no_pr`,
-    // unchanged) exactly as it should be — see run-task.ts's `resolveAlreadySatisfied`.
+    // W1-T272: resolveAlreadySatisfied requires a named merged PR; unverifiable claims
+    // still fall through to no_pr. This avoids manufacturing no-op closure PRs.
     "- If the task's acceptance is ALREADY SATISFIED on origin/main — nothing left to change —",
     "  say so and STOP without opening a PR: end your REPORT with a line",
     "  `ALREADY_SATISFIED: <the PR number or url that already merged and satisfies this task>`.",
@@ -452,15 +287,8 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
         "  NOT committed, so the run produces nothing.",
       ]
       : ["- Otherwise: stage the changed file(s) and commit."]),
-    // W1-T465: THE MECHANISM, NOT JUST THE PROHIBITION. Five runs on the mini and three on Azure
-    // backgrounded a long job (`--ci-parity` is 15-17 minutes) and ENDED THE TURN expecting a
-    // wake-up; all eight produced `no_pr` with `commits_ahead: 0` and `subtype: "success"`, and the
-    // three Azure ones alone cost $49.36. NOTHING IN ANY PROMPT TAUGHT THIS — the worker inferred it
-    // from the harness's real backgrounding affordance, which genuinely DOES notify in an
-    // INTERACTIVE session and cannot reach a headless run. So the reason is stated with the rule: a
-    // prohibition whose mechanism is absent gets re-derived away by the next model that reasons
-    // about it, and a worker facing a fifteen-minute job will background it anyway. No polling
-    // helper exists in this repo to cite (measured), so the SHAPE is spelled out rather than named.
+    // W1-T465: headless runs have no background wake-up; eight runs ended with no_pr.
+    // Explain the mechanism and polling shape so interactive affordances do not mislead.
     "- NEVER background a long job and then end your turn to wait for it. THERE IS NO NOTIFICATION",
     "  CHANNEL in this run: nothing will wake you when a background task finishes, and the run ENDS",
     "  the moment you stop issuing tool calls — your work is discarded with it, however far you got.",
@@ -477,37 +305,23 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     ...GH_PR_EDIT_FALLBACK_LINES,
     ...commitMessageContractLines(),
     `- Include this exact trailer as the LAST line of the PR body: Remudero-Task: ${taskId}`,
-    // W1-T81/T82 class (PRs #677/#683): a correct, fully-tested PR still FAILED review because
-    // its body did not engage each acceptance PROOF — remudero-review executes each proof and,
-    // when a proof is not executable, judges the body against that proof's own text (a keyword
-    // floor). This guidance lived ONLY in the fix rung (renderFixPrompt), so every first attempt
-    // on a prose-proof task predictably stalled at review. Stated here, at turn 0, the first PR
-    // clears the floor. Same requirement the fix rung repeats — kept in sync deliberately.
+    // W1-T81/T82 (#677/#683): review requires the body to engage every acceptance proof.
+    // Keep turn-0 guidance in sync with renderFixPrompt, including prose-proof handling.
     "- Your PR body MUST substantiate EVERY task acceptance criterion: for each, say how the",
     "  diff satisfies it and NAME the test or grep that proves it. remudero-review executes each",
     "  proof and, when a proof is not executable, judges your body against that proof's own text —",
     "  a body that does not engage each proof is scored UNMET even when the work is correct.",
     ...bodyVsDiffContractLines(),
-    // W1-T2760: THE PRODUCER THE CITATION MINER WAS MISSING. `mineGitLogCitations` (retro.ts)
-    // scans commit history for `learnings#<id>` and finds effectively none, because no prompt
-    // — until this line — ever asked a worker to write one; so the retro's `cited_count` measured
-    // only INJECTION (was this fact put in the prompt?), never USE (did the worker act on it?),
-    // and the budget ratchet's compression order ranked on that same proxy. This is the other
-    // half of the same dialect PR_URL/Follow-ups already use: one more anchored REPORT line, no
-    // new vocabulary. `parseLearningsUsed` (worker.ts) reads it back; an id it names that was
-    // never injected is refused BY NAME rather than silently trusted — the same fabrication the
-    // PR-body keyword floor already catches on the other channel.
+    // W1-T2760: report use, not just injection, for mineGitLogCitations/retro ranking.
+    // parseLearningsUsed rejects IDs absent from the injected context.
     "- Your REPORT must ALSO include a line naming the learnings you actually ACTED ON this run —",
     "  anchored to its own line start, exactly like PR_URL: `LEARNINGS_USED: learnings#<id>,",
     "  learnings#<id>` for one or more, or `LEARNINGS_USED: none` if you used none. REQUIRED: a",
     "  silent report must be distinguishable from one that explicitly claims none. Only cite an id",
     "  that was actually injected into your CONTEXT above — an id you were never shown is refused",
     "  by name and never counted as used.",
-    // W1-T4114: SKILLS_USED is LEARNINGS_USED's own mirror for the `## skill: <name>` procedures
-    // above — `skills.selection` already ledgers which skills were OFFERED (selected into the
-    // prompt); nothing until this line ever asked a worker whether an offered skill was USED, so
-    // the knowledge gardener's SKILL-LIFECYCLE class had only a selection count to judge a skill
-    // by. `parseSkillsUsed` (worker.ts) reads this back the same way `parseLearningsUsed` does.
+    // W1-T4114: parseSkillsUsed mirrors parseLearningsUsed; skills.selection records offers,
+    // while this records actual use for the knowledge gardener's SKILL-LIFECYCLE class.
     "- Your REPORT must ALSO name the skills you actually USED this run — anchored to its own line",
     "  start, exactly like PR_URL: `SKILLS_USED: skill#<name>, skill#<name>` for one or more, or",
     "  `SKILLS_USED: none` if you used none. REQUIRED: a silent report must be distinguishable from",
@@ -522,34 +336,17 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
 }
 
 /**
- * The ANCHOR block (MASTER-PLAN §8B): "the task goal, acceptance criteria,
- * and hard constraints are re-injected VERBATIM after any compaction — never
- * handed to a summarizer, never paraphrased." Built ONCE per run and reused
- * byte-identical for every compaction event in that run (see
- * `anchorReinjections`) — deliberately excludes the volatile CONTEXT block
- * (recon/matched-learnings, §8A Tier 1/3), which a compaction is free to
- * lose; only the three §8B-named anchor components survive it.
- *
- * W1-T166: the "acceptance criteria" component is filtered through
- * {@link visibleCriteria} — this re-injects into the SAME worker's own
- * context, so a `holdout: true` criterion belongs here exactly as little as
- * it belongs in the turn-0 prompt: never re-injected, never re-derived, never
- * shown, across a compaction any more than before one.
- *
- * `ruleHeadlinesPart` (W1-T2761, design (iii)): the SAME `rule_headlines` string
- * `run-task.ts`'s `buildRuleHeadlinesPart` handed the turn-0 prompt — the headline index IS
- * stable (§8A), unlike the volatile recon/matched-learnings pair this anchor otherwise excludes,
- * so it is re-injected too, byte-identical to what turn 0 said (never re-derived here). Defaults
- * to `""` — every existing 2-arg caller renders EXACTLY what it always has, with no new section.
+ * MASTER-PLAN §8B: build once per run; re-inject goal, criteria and constraints verbatim.
+ * Exclude volatile recon/matched-learnings CONTEXT (§8A). visibleCriteria also excludes
+ * holdouts here, exactly as at turn 0 (W1-T166).
+ * W1-T2761 (iii): reuse buildRuleHeadlinesPart's stable turn-0 string unchanged;
+ * the empty default preserves existing two-argument callers' output.
  */
 export function renderAnchorBlock(
   task: Pick<Task, "id" | "title" | "prompt" | "acceptance">,
   runId: string,
   ruleHeadlinesPart = "",
-  // W1-T3696: MUST match the value the initial prompt was built with. The anchor is re-injected
-  // VERBATIM after every compaction, so a shell-less run whose anchor carried the shell contract
-  // would be told to `git commit` again the moment its context compacted — the one point where a
-  // worker is most likely to act on the re-injected text rather than what it was first told.
+  // W1-T3696: match turn 0 or compaction tells a shell-less worker to commit again.
   harnessCommits = false,
 ): string {
   const goal = (task.prompt ?? task.title).split("${RUN_ID}").join(runId).split("${TASK_ID}").join(task.id);
@@ -561,8 +358,7 @@ export function renderAnchorBlock(
     "",
     "# ANCHOR (re-injected verbatim after compaction — MASTER-PLAN §8B)",
     "",
-    // Empty (the row absent/off) contributes NOTHING, same discipline `renderImplementPrompt`
-    // keeps for this same string at turn 0.
+    // Empty headlines add nothing, matching renderImplementPrompt at turn 0.
     ...(ruleHeadlinesPart ? ["## RULE HEADLINES (CLAUDE.md, re-injected unchanged)", ruleHeadlinesPart, ""] : []),
     "## GOAL",
     goal,
@@ -575,14 +371,8 @@ export function renderAnchorBlock(
 }
 
 /**
- * Given a message stream and the run's pre-built anchor block, return the
- * continuation message a duplex spawn sends after EACH compaction event —
- * always `anchor`, unchanged, never re-derived/re-summarized per event. A
- * stream with N compactions yields N byte-identical entries. Wiring this
- * into an actual in-flight (streaming-input) spawn — so a LIVE compaction
- * gets re-anchored mid-run — is W1-T12e's operator-golden drill; this module
- * proves the detection + anchor mapping are correct over a recorded stream
- * fixture (verify:auto), per the W1-T36 redesign note (Rules 18/20).
+ * Return N unchanged anchors for N boundaries. Recorded-stream detection/mapping is
+ * verify:auto (W1-T36, Rules 18/20); live duplex wiring is W1-T12e's operator-golden drill.
  */
 export function anchorReinjections(messages: unknown[], anchor: string): string[] {
   return detectCompactionEvents(messages).map(() => anchor);

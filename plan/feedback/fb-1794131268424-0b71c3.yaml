@@ -1,0 +1,27 @@
+id: fb-1794131268424-0b71c3
+ts: 2026-11-08T09:47:48.424Z
+raw: 'W1-T11665 plan clarification: Codex CLI 0.166.0 root --search is parsed
+  but the Subcommand::Exec handler does not forward interactive.web_search;
+  codex --search exec therefore does not prove native web_search is enabled for
+  the noninteractive worker. The actual argv builder is
+  src/lib/worker-provider.ts:codexExecArgs, outside W1-T11665 files. Before
+  implementation, clarify whether a scoped explicit -c web_search="live"
+  override/profile is the intended supported path; include worker-provider.ts or
+  another proven in-scope seam; add synthetic assertions on exact argv and
+  fail-closed behavior for unsupported/missing capability. Keep search
+  TRIAGE-only, keep PLAN pinned to Claude, preserve no WebFetch/cash/provider
+  calls, and retain existing refusal eligibility/provenance guards. Evidence:
+  official OpenAI Codex rust-v0.166.0 source in codex-rs/cli/src/main.rs (Exec
+  arm forwards shared root options/config overrides but not
+  interactive.web_search) and codex-rs/exec/src/cli.rs (exec options include
+  config overrides but no search flag).'
+attachments: []
+origin: cli
+status: proposed
+reply_to: null
+proposal_pr: https://github.com/craigoley/remudero/pull/17380
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
+answered_by: null

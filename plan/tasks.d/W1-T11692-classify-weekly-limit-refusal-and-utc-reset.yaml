@@ -12,7 +12,10 @@
     - test/classify.test.ts
   origin: feedback#fb-1794119415247-cd7ad1
   plan_refs: ["W1-T11665"]
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=7a364037d0f67ab3
+  # backlog gardener: placed=2026-11-08T11:45:12.759Z
   attempts: 0
   rationale: |
     Follow-up to fb-1794083152653-a10df6 (native triage exhausted three attempts; Rule 19
@@ -33,4 +36,4 @@
 
   acceptance:
     - claim: "the weekly-limit refusal text and bare UTC reset suffix are classified, with positive and negative cases in the existing suite"
-      proof: "unit test: test/classify.test.ts"
+      proof: "unit test: classify weekly-limit usage refusal: exact text and bare UTC reset"

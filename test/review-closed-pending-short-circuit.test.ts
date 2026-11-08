@@ -39,6 +39,7 @@ function stubGh(lifecycle: Lifecycle): GhShim {
   // then the diff fetch whose absence the stand-down tests assert.
   return ghShim(
     [
+      { when: "/statuses?", stdout: "[[]]" },
       { when: "pulls/", stdout: row },
       { when: "api ", stdout: "{}" },
       { when: "headRefOid", stdout: JSON.stringify({ headRefOid: HEAD_SHA }) },

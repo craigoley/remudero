@@ -173,6 +173,7 @@ advance_clock() {
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *commits/*/statuses[?]*) echo '[[]]' ;;
       *pulls/*) advance_clock 101; echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"}}' ;;
       *statuses/*state=pending*) advance_clock 203; echo '{}' ;;
       *statuses/*state=*) advance_clock 601; echo '{}' ;;
