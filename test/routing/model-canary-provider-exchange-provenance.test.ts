@@ -29,6 +29,9 @@ test("W1-T11597: only a provider-originated assistant message with a real non-sy
   const receipt = positive.providerExchange;
   assert.deepEqual(receipt, { version: "canary-provider-exchange-v1", ...binding,
     outcome: "assistant-model", model: "claude-real" });
+  const padded = await collect([assistant(" claude-real "), terminal]);
+  assert.equal(padded.servedModel, " claude-real ");
+  assert.equal(padded.providerExchange?.model, "claude-real");
   const providerError = await collect([assistant("<synthetic>", { error: "rate_limit" }), terminal]);
   assert.equal(providerError.providerExchange?.error, "rate_limit");
   // The reducer receives only scripted in-memory messages; no provider client or transport is constructed here.
