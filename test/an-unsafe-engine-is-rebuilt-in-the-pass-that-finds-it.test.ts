@@ -53,7 +53,10 @@ function plantRun(f: ReturnType<typeof fixture>, kind: RunKind) {
   const runId = "run-9838";
   const dir = join(f.state, "runs", runId);
   mkdirSync(dir, { recursive: true });
-  if (kind === "undecidable") return;
+  if (kind === "undecidable") {
+    writeFileSync(join(dir, "worker-output"), "content without run metadata");
+    return;
+  }
   const identity = childIdentity(process.pid);
   assert.ok(identity, "the real test process has a live child identity");
   writeStatus(dir, {

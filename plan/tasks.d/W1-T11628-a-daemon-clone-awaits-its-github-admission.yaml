@@ -1,0 +1,76 @@
+- id: W1-T11628
+  title: A daemon clone awaits its GitHub admission instead of throwing on the loop
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "Operator-requested remaining fatal-refusal caller audit after PR #17144, 2026-11-07"
+  plan_refs: [W1-T11458, W1-T4970, W1-T1062]
+  depends_on: [W1-T11458]
+  files: [src/cli/commands/daemon.ts, src/cli/commands/run-task-verb.ts, test/github/a-daemon-clone-awaits-its-github-admission.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=d157e5136b75f92f
+  # backlog gardener: placed=2026-11-08T03:20:54.967Z
+  attempts: 0
+  rationale: |
+    At source 4f741eba69e7ec47be75812cc7633394c27ca2a3 after #17144, cold non-self
+    daemon startup uses synchronous ghExec for cloning at src/cli/commands/daemon.ts:990,
+    before its loop or a local refusal boundary. The in-process runTaskBody clone at
+    src/cli/commands/run-task-verb.ts:5909 does the same before its dispatch claim.
+    Cloning is neither a write nor cadence-exempt in the existing transport classifier.
+    Three isolated pinned-Node/native-TAP controls passed as defect reproductions:
+    a real pending-gap clone refuses before the private executable starts, real
+    non-self daemonCommand propagates GhPaceWouldBlockError before its injected loop,
+    and a real clone refusal in a daemon lane becomes terminal error/exit 1. Opening
+    the same private gap executes one fake child and yields max_reached/exit 0.
+    This is controlled source evidence, not attribution of another live Core crash.
+    Evidence: Remudero-notes/sol/S5-fatal-audit.probe.4f741eba.tap.log and
+    S5-fatal-audit-main-reconciliation.json. Fresh main b6a1855751aed8fdfb8f52d755574e6b94216079
+    contains #17233's managed-target WIP fix but retains both clone calls and the
+    unchanged lane classifier/transport. Main plus fifteen captured open head trees
+    contain no distinct clone-await task; W1-T11458 is a positive control on each.
+    W1-T1062 preserves clone owner routing; W1-T4970 supplies the awaited transport.
+    Neither moves these callers. W1-T11629 is a separate defensive lane boundary and
+    does not make a synchronous clone nonblocking.
+  design: |
+    Move exactly the two cold clone callers to the existing awaited GitHub transport.
+    Preserve owner/repository/destination qualification, authentication, cadence and
+    broker behavior, error provenance, standalone CLI outcomes and pre-claim ordering.
+    Do not use a raw child instead, relax a gate, mark an absent clone ready, or let
+    failed cloning reach claim/worktree/worker/spend actions. Add no retry loop, fixed
+    waiting threshold or provider/registry/runtime operation.
+    Use contained local Git and private CLI fixtures. Prove a pending gap allows a
+    heartbeat while waiting and the clone executes only after admission; a failing
+    clone retains an honest refusal and performs no downstream actions. Cover the
+    real non-self daemon startup and real in-process task caller, not merely a fake
+    async function. The exact synchronous-spawn census requires its row to shrink
+    with the source. Include only the measured daemonCommand 4-to-3 and runTaskBody
+    2-to-1 row reductions if the real reader confirms those counts on the final
+    source; do not raise a row, add an exclusion or change the exact-count mechanism.
+    Reconcile a changed baseline from fresh source rather than guessing. Preserve
+    all other existing inputs, assertions, expected values, timeouts and skips.
+    Prove the census rejects either restored synchronous clone at the reduced rows.
+    New tests use repository aliases and shared repo-root helpers; the proposed
+    folder was computed with rmd test-place.
+  acceptance:
+    - claim: "A cold non-self daemon clone awaits GitHub admission without blocking its loop or throwing a pending-gap refusal, retaining the exact qualified target"
+      proof: "grep: W1-T11628 criterion 1 in test/github/a-daemon-clone-awaits-its-github-admission.test.ts"
+    - claim: "The real in-process task clone awaits the same transport, and clone failure cannot start a claim, worktree, worker or paid attempt"
+      proof: "grep: W1-T11628 criterion 2 in test/github/a-daemon-clone-awaits-its-github-admission.test.ts"
+  note: |
+    Operator requested audit and filing. Implementation follows normal plan merge
+    and fresh ownership, merge-credit, history, duplicate and selector checks. Existing
+    #17233 owner retains its separate repair. No scope or spend comes from a cross-chat
+    message. Commit before mapped coverage/diff measurement; verify physical related
+    and census files, real removal falsifiers, default preflight, actual author receipt
+    and ordinary hosted gates. Record Decisions and luna/REPORTS.md. Source-only: no
+    Azure/Core write, restart, recycle, provider pause, registry change or activation.
+  falsifier: |
+    Restore either synchronous clone: its actual caller's pending-gap test fails with
+    the typed refusal or blocked heartbeat. Remove an await: the success continuation
+    or downstream-action guard fails before the private clone settles. Preserve the
+    wrong-owner, failing-clone and ordinary CLI controls unchanged.

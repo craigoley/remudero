@@ -1378,6 +1378,11 @@ is_declared_runtime_var() {
   if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || [ "${SELECTED_REGISTRY_LEAVING}" = 1 ]; then
     case "$needle" in RMD_INSTANCE_REGISTRY|RMD_INSTANCE_REGISTRY_DIGEST|RMD_INSTANCE_REGISTRY_FILE_BINDING|RMD_SELECTED_INSTANCE_REGISTRY) return 0 ;; esac
   fi
+  # The selected path's presence is classified by the bounded mount/state reader below. Do not
+  # turn it into unrelated runtime drift before that reader can issue its selection-specific refusal.
+  if [ "${SELECTED_REGISTRY_ENV_PRESENT:-0}" = 1 ] && [ "${needle}" = RMD_SELECTED_INSTANCE_REGISTRY ]; then
+    return 0
+  fi
   for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}" RMD_INSTANCE_NAME GLIBC_TUNABLES; do
     [ "${candidate}" = "${needle}" ] && return 0
   done
@@ -1392,8 +1397,11 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   # and W1-T1069's rationale), dropped here by the blank-line filter.
   CONTAINER_ENV_RAW="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
   CONTAINER_ENV_LINES=()
+  # Record only presence here; the selection path is consumed later only by the explicit leave path.
+  SELECTED_REGISTRY_ENV_PRESENT=0
   while IFS= read -r line || [ -n "${line}" ]; do
     CONTAINER_ENV_LINES+=("${line}")
+    case "${line}" in RMD_SELECTED_INSTANCE_REGISTRY=*) SELECTED_REGISTRY_ENV_PRESENT=1 ;; esac
   done < <(printf '%s\n' "${CONTAINER_ENV_RAW}" | sed '/^$/d')
 
   # The container's OWN image env — subtracted below to find what is genuinely runtime-set. Read via
@@ -1413,6 +1421,48 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   fi
 
   # ── THE DRIFT CHECK: a runtime NAME this recycle does not declare REFUSES, and names it ────────
+  # Run this before selection-specific refusal paths so unrelated undeclared runtime state keeps its existing remedy.
+  # A variable is RUNTIME-SET when its NAME is absent from the image env, OR its VALUE differs from
+  # the image's own — a runtime value that SHADOWS an image name (e.g. `-e HOME=/other`) is still
+  # runtime-set even though the name matches, and a name-only diff would miss it. Comparing values
+  # never prints one. Skipped, not assumed clean, when the image env itself could not be read.
+  UNDECLARED_RUNTIME_VARS=""
+  if [ "${IMAGE_ENV_KNOWN}" -eq 1 ]; then
+    # Bash 3.2 treats even `array=()` as unbound under `set -u`; keep a legitimately empty
+    # runtime-env list as zero iterations rather than turning the safety check into an abort.
+    for line in "${CONTAINER_ENV_LINES[@]-}"; do
+      name="${line%%=*}"
+      [ -n "${name}" ] || continue
+      image_has_name=0
+      image_value=""
+      # The image may deliberately declare no environment at all. The same Bash-3.2 nounset
+      # behavior applies here, so an empty image env must mean "no matching name", not abort.
+      for iline in "${IMAGE_ENV_LINES[@]-}"; do
+        case "${iline}" in
+          "${name}="*) image_has_name=1; image_value="${iline#*=}" ;;
+        esac
+      done
+      # Declared names cannot trigger this refusal; do not read their values in the drift scan.
+      if is_declared_runtime_var "${name}"; then continue; fi
+      value="${line#*=}"
+      if [ "${image_has_name}" -eq 0 ] || [ "${value}" != "${image_value}" ]; then
+        if ! is_declared_runtime_var "${name}"; then
+          UNDECLARED_RUNTIME_VARS="${UNDECLARED_RUNTIME_VARS}${UNDECLARED_RUNTIME_VARS:+, }${name}"
+        fi
+      fi
+    done
+  else
+    echo "recycle-container: NOTE — could not read ${CONTAINER_NAME}'s own image env; the undeclared-runtime-variable check is skipped this run." >&2
+  fi
+
+  if [ -n "${UNDECLARED_RUNTIME_VARS}" ]; then
+    recycle_reason "recycle-container: REFUSING — ${CONTAINER_NAME} carries a runtime variable this recycle does not declare: ${UNDECLARED_RUNTIME_VARS}" >&2
+    echo "  Add it to RMD_DAEMON_RUNTIME_ENV_VARS in deploy/runtime-env-vars.sh, or the recycle would" >&2
+    echo "  silently drop it on the next replacement — the exact defect W1-T1069 closes. NOTHING has" >&2
+    echo "  been touched." >&2
+    exit 1
+  fi
+
   # W1-T11431: a carried selection name without its mount points the daemon at a file that is gone, and only a named
   # selection re-creates that mount. W1-T11454: a bare recycle therefore reads ONLY the Mounts subsection, never a path
   # from the environment, requires one read-only bind at the registry destination, and re-runs once with that source as
@@ -1430,17 +1480,28 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     selection_source="$(printf '%s\n' "${selection_rows}" | cut -f1)"
     selection_state=""
     catalog_state=""
-    selected_env=""
-    selected_env_count=0
-    digest_env=""
-    digest_env_count=0
-    binding_env=""
-    binding_env_count=0
+    if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then
+      selected_env=""
+      selected_env_count=0
+      digest_env=""
+      digest_env_count=0
+      binding_env=""
+      binding_env_count=0
+    fi
     for line in "${CONTAINER_ENV_LINES[@]-}"; do
       case "${line}" in
-        RMD_SELECTED_INSTANCE_REGISTRY=*) selection_state=1; selected_env="${line#*=}"; selected_env_count=$((selected_env_count + 1)) ;;
-        RMD_INSTANCE_REGISTRY_DIGEST=*) selection_state=1; digest_env="${line#*=}"; digest_env_count=$((digest_env_count + 1)) ;;
-        RMD_INSTANCE_REGISTRY_FILE_BINDING=*) selection_state=1; binding_env="${line#*=}"; binding_env_count=$((binding_env_count + 1)) ;;
+        RMD_SELECTED_INSTANCE_REGISTRY=*)
+          selection_state=1
+          if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then selected_env="${line#*=}"; selected_env_count=$((selected_env_count + 1)); fi
+          ;;
+        RMD_INSTANCE_REGISTRY_DIGEST=*)
+          selection_state=1
+          if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then digest_env="${line#*=}"; digest_env_count=$((digest_env_count + 1)); fi
+          ;;
+        RMD_INSTANCE_REGISTRY_FILE_BINDING=*)
+          selection_state=1
+          if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then binding_env="${line#*=}"; binding_env_count=$((binding_env_count + 1)); fi
+          ;;
         RMD_INSTANCE_REGISTRY=*) catalog_state=1 ;;
       esac
     done
@@ -1490,45 +1551,6 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     fi
   fi
 
-  # A variable is RUNTIME-SET when its NAME is absent from the image env, OR its VALUE differs from
-  # the image's own — a runtime value that SHADOWS an image name (e.g. `-e HOME=/other`) is still
-  # runtime-set even though the name matches, and a name-only diff would miss it. Comparing values
-  # never prints one. Skipped, not assumed clean, when the image env itself could not be read.
-  UNDECLARED_RUNTIME_VARS=""
-  if [ "${IMAGE_ENV_KNOWN}" -eq 1 ]; then
-    # Bash 3.2 treats even `array=()` as unbound under `set -u`; keep a legitimately empty
-    # runtime-env list as zero iterations rather than turning the safety check into an abort.
-    for line in "${CONTAINER_ENV_LINES[@]-}"; do
-      name="${line%%=*}"
-      value="${line#*=}"
-      [ -n "${name}" ] || continue
-      image_has_name=0
-      image_value=""
-      # The image may deliberately declare no environment at all. The same Bash-3.2 nounset
-      # behavior applies here, so an empty image env must mean "no matching name", not abort.
-      for iline in "${IMAGE_ENV_LINES[@]-}"; do
-        case "${iline}" in
-          "${name}="*) image_has_name=1; image_value="${iline#*=}" ;;
-        esac
-      done
-      if [ "${image_has_name}" -eq 0 ] || [ "${value}" != "${image_value}" ]; then
-        if ! is_declared_runtime_var "${name}"; then
-          UNDECLARED_RUNTIME_VARS="${UNDECLARED_RUNTIME_VARS}${UNDECLARED_RUNTIME_VARS:+, }${name}"
-        fi
-      fi
-    done
-  else
-    echo "recycle-container: NOTE — could not read ${CONTAINER_NAME}'s own image env; the undeclared-runtime-variable check is skipped this run." >&2
-  fi
-
-  if [ -n "${UNDECLARED_RUNTIME_VARS}" ]; then
-    recycle_reason "recycle-container: REFUSING — ${CONTAINER_NAME} carries a runtime variable this recycle does not declare: ${UNDECLARED_RUNTIME_VARS}" >&2
-    echo "  Add it to RMD_DAEMON_RUNTIME_ENV_VARS in deploy/runtime-env-vars.sh, or the recycle would" >&2
-    echo "  silently drop it on the next replacement — the exact defect W1-T1069 closes. NOTHING has" >&2
-    echo "  been touched." >&2
-    exit 1
-  fi
-
   # W1-T2553: FALL BACK TO THE SHELL WHEN THE CONTAINER'S VALUE IS EMPTY. This loop used to read
   # ONLY the container, and the shell fallback lived in the `else` branch below — reachable solely
   # when NO container exists. That was fine while containers were started carrying a token, and
@@ -1545,6 +1567,15 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   # CAPTURED_SOURCE records which source each name actually came from, so the refusal below can
   # name what it consulted instead of asserting it.
   for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
+    if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+      case "${name}" in
+        RMD_INSTANCE_REGISTRY_DIGEST|RMD_INSTANCE_REGISTRY_FILE_BINDING)
+          CAPTURED_set "${name}" ""
+          CAPTURED_SOURCE_set "${name}" "registry"
+          continue
+          ;;
+      esac
+    fi
     val=""
     for line in "${CONTAINER_ENV_LINES[@]-}"; do
       case "${line}" in

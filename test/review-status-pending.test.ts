@@ -285,7 +285,7 @@ test("W1-T913 criterion 1 (rmd review's own start): reviewCommand posts remudero
   const body = reviewSrc.slice(start, end);
 
   const pendingIdx = body.indexOf("await postReviewPendingDep({");
-  const materializeIdx = body.indexOf("const materialized = materialize(");
+  const materializeIdx = body.indexOf("const materialized = await materialize(");
   const runReviewIdx = body.indexOf("runReviewDep({");
 
   assert.ok(pendingIdx > -1, "reviewCommand must call postReviewPendingDep");

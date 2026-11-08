@@ -447,7 +447,7 @@ test("outside any checkout an idle dump is compressed, an old one expires and id
 
     const dry = helper(fx, []);
     assert.equal(dry.status, 0, dry.stderr + dry.stdout);
-    assert.match(dry.stdout, /housekeeping repacked=0 compressed=1 dumps-expired=1 build-dirs-removed=2 codex-sessions-removed=0 apply=0/);
+    assert.match(dry.stdout, /housekeeping repacked=0 compressed=1 dumps-expired=1 build-dirs-removed=2 codex-sessions-removed=0 codex-threads-removed=0 apply=0/);
     assert.equal(existsSync(join(run, "subjects.json")), true, "a dry run changes nothing");
 
     const r = helper(fx);
@@ -573,7 +573,7 @@ test("codex session logs idle past codex_session_days are removed; recent, open 
     writeFileSync(fx.lsof, open + "\n");
 
     const dry = helper(fx, [], {}, later);
-    assert.match(dry.stdout, /housekeeping .*codex-sessions-removed=2 apply=0/);
+    assert.match(dry.stdout, /housekeeping .*codex-sessions-removed=2 codex-threads-removed=0 apply=0/);
     assert.equal(existsSync(idle), true);
     const r = helper(fx, ["--apply"], {}, later);
     assert.equal(r.status, 0, r.stderr + r.stdout);

@@ -1,0 +1,25 @@
+id: fb-1794074610595-ba4ea7
+ts: 2026-11-07T18:03:30.595Z
+raw: Re-evaluate the global triage serialization ceiling using current
+  reservation controls. Current triage acquires one per-host state/triage.lock
+  around the entire lane, so different feedback IDs on one host cannot run in
+  parallel. Newer code takes W1-T1132 shared per-feedback claim before the
+  Architect call, then reserves a local task-ID block and a remote refs/rmd-id
+  block with contention advancing before spawn. W1-T311 explicitly says keep the
+  global triage lock, so do not assume it is obsolete or remove it by hand.
+  Please research whether those mechanisms fully close same-host, cross-host,
+  rmd plan, and cross-repo task-ID collisions; propose safe per-feedback or
+  parallel lock scope only with concurrency tests proving distinct feedback runs
+  get disjoint reserved IDs and same-feedback runs refuse, plan PRs cannot
+  create duplicate IDs, failures clean up safely, and W1-T6117 crash recovery
+  remains correct. If parallelization is not safe, name the exact remaining
+  collision and minimum necessary lock scope.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
