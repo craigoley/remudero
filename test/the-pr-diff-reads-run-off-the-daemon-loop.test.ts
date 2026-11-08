@@ -54,6 +54,9 @@ function onPath(delaySeconds: number): { shim: GhShim; restore(): void } {
     { when: "pulls/3704", stdout: '{"state":"open","merged":false}\n' },
     // The shim prints its own trailing newline, so this answers exactly DIFF.
     { when: "pr diff", stdout: DIFF.slice(0, -1), delaySeconds },
+    // A SUCCESS post reads the head's remudero-review status history first (W1-T11443); an empty
+    // list is a readable history with no prior failure, so the reuse verdict is not withheld.
+    { when: "statuses", stdout: "[]\n" },
     { when: "", stdout: "{}\n" },
   ], { kind: "prdiff-gh" });
   const saved = process.env.PATH;

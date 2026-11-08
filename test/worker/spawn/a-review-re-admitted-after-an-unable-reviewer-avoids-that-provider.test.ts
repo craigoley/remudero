@@ -115,7 +115,8 @@ test("W1-T11432 criterion 2: review spawn receives and records the unavailable p
   repoFixture.git("add", "src/marker.ts", "settings.json");
   repoFixture.git("commit", "--quiet", "-m", "review fixture");
   const headSha = repoFixture.git("rev-parse", "HEAD");
-  const shim = ghShim([{ when: "pulls/16758", stdout: JSON.stringify({ number: 16758, state: "open", body: "review body",
+  // W1-T11443: a SUCCESS reads the head's status history first; this head has no prior FAILURE.
+  const shim = ghShim([{ when: "/statuses?", stdout: "[[]]" }, { when: "pulls/16758", stdout: JSON.stringify({ number: 16758, state: "open", body: "review body",
     head: { ref: "run-W1-T9716-1", sha: headSha }, html_url: "https://github.com/acme/remudero/pull/16758" }) },
     { when: "pr diff", stdout: "" }, { when: "pr view", stdout: JSON.stringify({ state: "OPEN" }) }, { when: "", stdout: "{}" }]);
   const spawned: SpawnWorkerArgs[] = [];

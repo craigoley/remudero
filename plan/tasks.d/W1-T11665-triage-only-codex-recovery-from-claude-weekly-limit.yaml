@@ -10,10 +10,15 @@
   files:
     - src/run-task.ts
     - src/lib/worker.ts
+    - src/lib/worker-provider.ts
     - test/triage-codex-weekly-limit-recovery.test.ts
-  origin: feedback#fb-1794082767548-ccbff0
+  origin: feedback#fb-1794131268424-0b71c3
+  # originally: feedback#fb-1794082767548-ccbff0
   plan_refs: ["W1-T3749", "W1-T3656", "W1-T3549"]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=75d8c170e84e1751
+  # backlog gardener: placed=2026-11-08T11:45:12.759Z
   attempts: 0
   rationale: |
     Operator-approved root-cause fix (feedback fb-1794082767548-ccbff0). Scope:
@@ -28,6 +33,17 @@
     verified CLI search flag (verify against the installed CLI, do not guess) and the declared
     lane bounds. Unsupported CLI version or missing tool FAILS CLOSED.
 
+    CODEX SEARCH SEAM (clarified by feedback fb-1794131268424-0b71c3). Codex CLI 0.166.0 parses
+    root `--search` but the Exec arm does not forward interactive.web_search, so `codex --search
+    exec` does NOT prove native web_search for the noninteractive worker. Do NOT rely on the root
+    flag. The supported path is a scoped explicit config override `-c web_search="live"` placed in
+    the argv built by `codexExecArgs` in src/lib/worker-provider.ts (now in scope), emitted ONLY
+    for the TRIAGE research profile (TRIAGE_CODEX_SEARCH in src/lib/worker.ts); implement/review
+    argv stay byte-identical. Synthetic tests assert the EXACT argv (override present for triage,
+    absent elsewhere) and FAIL CLOSED when the installed CLI version/capability is unsupported or
+    missing. Search stays TRIAGE-only, PLAN stays pinned to Claude, no WebFetch/cash/provider
+    calls, and the refusal eligibility/provenance guards are retained unchanged.
+
     PROVENANCE. Preserve both attempt assignments and the original refusal provenance in the
     receipt/ledger.
 
@@ -39,5 +55,7 @@
   acceptance:
     - claim: "recovery, eligibility gating, fail-closed paths and provenance are pinned by synthetic-fixture tests"
       proof: "unit test: test/triage-codex-weekly-limit-recovery.test.ts"
+    - claim: "codexExecArgs emits the scoped web_search live override for triage only"
+      proof: "grep: web_search= in src/lib/worker-provider.ts"
     - claim: "the Codex WebSearch flag is wired only in the triage research profile"
       proof: "grep: TRIAGE_CODEX_SEARCH in src/lib/worker.ts"

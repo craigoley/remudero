@@ -1,0 +1,30 @@
+- id: W1-T11708
+  title: "Repoint W1-T9813's three acceptance proofs at the unit tests it will write, and place that test in its computed folder"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=cf332ccf8db52291
+  # backlog gardener: placed=2026-11-08T11:45:12.759Z
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T9813-an-abandoned-restart-closes-its-latch-drain.yaml
+  acceptance:
+    - claim: "W1-T9813's first acceptance proof is a unit test proof naming its stop-after-latch test title"
+      proof: "grep: proof: 'unit test: W1-T9813: a stop after the latch closes the latch drain in plan/tasks.d/W1-T9813-an-abandoned-restart-closes-its-latch-drain.yaml"
+    - claim: "W1-T9813 declares its test under test/daemon/ instead of directly under test/"
+      proof: "grep: test/daemon/an-abandoned-restart-closes-its-latch-drain.test.ts in plan/tasks.d/W1-T9813-an-abandoned-restart-closes-its-latch-drain.yaml"
+    - claim: "W1-T9813 no longer carries a grep proof at the test file it has not yet written"
+      proof: "grep: -c 'grep: test(' in plan/tasks.d/W1-T9813-an-abandoned-restart-closes-its-latch-drain.yaml"
+  origin: "architect"
+  rationale: >-
+    From the 2026-11-08 proposal on proof-debt:W1-T9813, ratified via rmd approve:
+  
+    proof-debt: W1-T9813 has 3 criterion(s) whose proof cannot resolve against the checkout (rmd
+    proof-queue-audit): criterion 0 (grep-path-absent) — "a stop after the latch closes the latch
+    drain with an abandoned row"; criterion 1 (grep-path-absent) — "a pause after the latch closes
+    the latch drain, and a later latch starts its own"; criterion 2 (grep-path-absent) — "a
+    restart that fires writes one completed row and no abandoned row".

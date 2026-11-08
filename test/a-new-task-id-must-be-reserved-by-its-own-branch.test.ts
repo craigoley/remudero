@@ -220,6 +220,7 @@ test("W1-T4414: a withheld ownership verdict posts no terminal review status", a
   const sha = head.git("rev-parse", "HEAD");
   const gh = ghShim(
     [
+      { when: "/statuses?", stdout: "[[]]" },
       { when: "api repos/", stdout: JSON.stringify({ number: 1, html_url: "https://github.com/acme/console/pull/1", updated_at: "t", body: "", head: { ref: HEAD, sha }, state: "open" }) },
       { when: "pr diff", stdout: T60 },
       { when: "pr view", stdout: JSON.stringify({ state: "OPEN" }) },

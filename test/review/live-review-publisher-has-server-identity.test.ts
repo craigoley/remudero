@@ -105,7 +105,8 @@ test("the default publisher reader confirms the existing review without rejudgin
     } });
   const originalLedger = readFileSync(ledgerPath, "utf8");
   let posts = 0;
-  const result = await postReviewStatusGuarded({ owner: "acme", repo: "portal", sha: SHA, state: "success",
+  const result = await postReviewStatusGuarded({
+    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }), owner: "acme", repo: "portal", sha: SHA, state: "success",
     taskId: "PR-8", evidence: "executed", ledgerPath, runId: "retry", prUrl, reviewInputDigest: "same-input",
     reviewDecisionDigest: "v2:identity-fixture",
     fetchLifecycle: () => ({ merged: false, closed: false, reviewInputDigest: "same-input", baseRef: "main" }),
