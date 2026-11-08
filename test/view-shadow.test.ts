@@ -10,7 +10,6 @@ import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-p
 import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
 import { createReadModelTicker, createReadModelWorker, readModelStatusView, runReadModelWorker, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { legacyRepositories, repositoriesSourcesPath } from "#src/lib/repositories-view.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { snapshotCursor } from "#src/lib/read-page.js";
 import {
   VIEW_SHADOW_DIFF_STEP,
@@ -38,6 +37,7 @@ import {
 import { buildReadModelViewRoutes, viewKey, type ViewBodyEntry, type ViewDefinition } from "#src/lib/views.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 import { SPEC, violations } from "#test/helpers/openapi-strict.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const HOUR = 3_600_000;
@@ -47,7 +47,6 @@ type TestCtx = Pick<TestContext, "after" | "diagnostic">;
 const VIEW_SHADOW_CLEANUP_NOTE = "view-shadow cleanup:";
 interface Cleanup {
   closers: Array<[string, () => unknown]>;
-  dirs: string[];
 }
 const cleanups = new WeakMap<TestCtx, Cleanup>();
 
@@ -56,27 +55,26 @@ const cleanups = new WeakMap<TestCtx, Cleanup>();
  * skips the rest once one throws, so the `rmSync` hook `scratch` registered ran while a live
  * read-model thread still wrote (ENOTEMPTY on `.../read-model`) and the stop registered behind it
  * never ran; the live thread held coverage-shard (3/8) open to its bound, twice. Everything holding a
- * scratch dir closes first, and the retries outlast the view thread's READ_MODEL_STOP_WAIT_MS terminate.
+ * scratch dir closes first; W1-T11411: the shared read-model fixture then flushes the diagnostic publisher and removes it.
  */
 function cleanupOf(t: TestCtx): Cleanup {
   const known = cleanups.get(t);
   if (known) return known;
-  const cleanup: Cleanup = { closers: [], dirs: [] };
+  const cleanup: Cleanup = { closers: [] };
   cleanups.set(t, cleanup);
-  t.after(() => {
+  onReadModelClose(t, () => {
     for (const [what, close] of cleanup.closers) {
       close();
       t.diagnostic(`${VIEW_SHADOW_CLEANUP_NOTE} ${what}`);
     }
-    for (const dir of cleanup.dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
     t.diagnostic(`${VIEW_SHADOW_CLEANUP_NOTE} scratch removed`);
   });
   return cleanup;
 }
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  cleanupOf(t).dirs.push(dir);
+  const { dir } = readModelFixtureDir(t, kind);
+  cleanupOf(t);
   return dir;
 }
 
@@ -528,7 +526,7 @@ test("the sampler passes one request per minute per key and counts the rest", ()
 
 function serve(t: TestCtx, handler: Parameters<typeof createServer>[1]): Promise<number> {
   const server: Server = createServer(handler);
-  t.after(() => server.close());
+  onReadModelClose(t, () => server.close());
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve((server.address() as AddressInfo).port)));
 }
 

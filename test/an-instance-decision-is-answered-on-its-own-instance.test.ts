@@ -3,7 +3,7 @@
 // in the instance's own ledger, and the decision leaves that instance's body. Core-level routes write
 // core's ledger, so an answer through them never reached the instance it was about.
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -16,7 +16,7 @@ import { loadPlan } from "#src/lib/plan.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import { buildServeRoutes, buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 import type { GitHub } from "#src/lib/status.js";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 // The routes stamp rows at real time, and the projector quarantines a row ahead of its clock: so the clock is real.
 const T0 = systemClock.now();
@@ -31,8 +31,7 @@ function planText(ids: string[], repo: string): string {
 
 /** core (the gateway's own root) and site (a mounted instance), each with a ledger and a plan. */
 function fleet(t: { after: (fn: () => void) => void }) {
-  const base = makeTempDir("instance-answer");
-  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const base = readModelFixtureDir(t, "instance-answer").dir;
   const coreRoot = join(base, "core-root");
   const coreCheckout = join(coreRoot, "repos", "remudero");
   mkdirSync(join(coreRoot, "state"), { recursive: true });
@@ -84,7 +83,7 @@ function fleet(t: { after: (fn: () => void) => void }) {
 function nowOf(t: { after: (fn: () => void) => void }, f: ReturnType<typeof fleet>) {
   const clock = systemClock;
   const db = openProjectorReadModel(join(f.base, "read-model-home"), "site", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const acquired = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(acquired.ok);
   const projector = createLedgerProjector({ ledgerDir: f.siteState, db, lease: acquired.lease, clock });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
@@ -9,7 +9,7 @@ import { createNowView, nowActions, type NowAction, type NowViewContext, type No
 import type { Plan } from "../src/lib/plan.js";
 import { acquireLease } from "../src/lib/read-model-db.js";
 import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const AT = "2026-10-04T12:00:00.000Z";
 const URL = "https://github.com/example/repo/pull/12";
@@ -104,8 +104,7 @@ test("missing PR source evidence is retained even with no visible actions", () =
 });
 
 function production(t: { after(fn: () => void): void }, readFailed = false, open = false) {
-  const root = makeTempDir("human-gate-change-management");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "human-gate-change-management").dir;
   const clock = fixedClock(Date.parse(AT));
   const plan: Plan = { tasks: [], byId: new Map() };
   const github = {
@@ -119,7 +118,7 @@ function production(t: { after(fn: () => void): void }, readFailed = false, open
     const ledgerDir = join(root, name, "state");
     mkdirSync(ledgerDir, { recursive: true });
     const db = openProjectorReadModel(join(root, "read-model"), name, clock);
-    t.after(() => db.close());
+    onReadModelClose(t, () => db.close());
     const lease = acquireLease(db, { clock });
     assert.ok(lease.ok);
     const projector = createLedgerProjector({ ledgerDir, db, lease: lease.lease, clock });

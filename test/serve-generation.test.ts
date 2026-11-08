@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,13 +28,14 @@ import {
   supervisedRole,
   type GenerationMessage,
 } from "#src/lib/serve-generation.js";
-import { makeTempDir, RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { systemClock } from "#src/lib/clock.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification } from "#src/lib/inbox-view.js";
 import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "#src/lib/needs-you-view.js";
 import type { PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { createReadModelTicker, createReadModelWorker, loadCommittedViewBodies, readModelStatusView, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 function overSocket(socketPath: string, path: string): Promise<{ status?: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -188,9 +189,9 @@ test("a restore request re-warms the generation after an abandoned handoff", () 
 });
 
 test("a converged population meets the original standby warm-body floor", async (t) => {
-  const root = makeTempDir("converged-standby-floor"), active = join(root, "state"), thin = join(root, "thin"), repository = "craigoley/remudero";
+  const root = readModelFixtureDir(t, "converged-standby-floor").dir, active = join(root, "state"), thin = join(root, "thin"), repository = "craigoley/remudero";
   const workers: Array<ReturnType<typeof createReadModelWorker>> = [];
-  t.after(() => { for (const worker of workers) worker.stop(); rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  onReadModelClose(t, () => { for (const worker of workers) worker.stop(); });
   for (const stateDir of [active, thin]) {
     mkdirSync(join(stateDir, "read-model"), { recursive: true }); writeFileSync(join(stateDir, "ledger.ndjson"), "");
     writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: "auto" } }));

@@ -3,7 +3,7 @@
   repo: remudero-console
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 60.00
   rationale: "Reported in feedback fb-1794064519788-9bda6c against Console main 71cf77c141c7ee0584fd5e0704fe44184bf2231f.
@@ -47,3 +47,14 @@
   # backlog gardener: placed=2026-11-08T15:36:33.922Z
   attempts: 0
   note: "verify: human — acceptance tests are in remudero-console/tests/plan-recovery-timeout.test.ts. These proofs name the exact Console test titles; run and review them from that repository checkout."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.78
+    reasons:
+      - "The description shows a timeout/receipt reconciliation fix in client-request.ts and rmd-control.ts with unit-test acceptance; it names no secrets, credentials, auth, permissions, deletions, or merge/deploy/review policy changes."
+      - "The acceptance criteria are concrete, named unit tests, so the finding can be verified. No operator-only decision is requested."
+      - "The harness reports the declared files are absent at the base, which suggests the work belongs to the separate remudero-console checkout. The declared files and acceptance criteria are otherwise coherent."
+      - "The operator author and a strong family track record (24 merged, Beta mean 0.87) support low risk."
+    judged_at: "2026-11-08T15:02:42.267Z"
+    pin: "a7ff6a3b2115806d1dbdced64ced9b469bf30d640325153b659bc8a8082fd577"
