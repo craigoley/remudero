@@ -1,0 +1,22 @@
+id: incident-09abd6837c2c6d40
+ts: 2026-11-08T02:33:32.428Z
+raw: |-
+  Incident 09abd6837c2c: flow pr-stage-stall:escalated:already escalated (reason unreadable: no escalation of this PR at head <sha> is in the ledger); this pass: post-review attempts for input:["PR-<n>","https://github.com/craigoley/remudero/pull/<n>","<sha>","v2:c7dd5598eec49587a2b99f2ef3387207409f867b219971e4c493323a704fb18f"] have thrown <n> time(s), exceeding the <n>-strike retry cap for this unchanged review input — escalating
+  First seen: 2026-11-08T01:49:27.543Z
+  Last seen: 2026-11-08T01:49:27.543Z
+  Count: 1, burn: 1.00/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=17240 escalated: already escalated (reason unreadable: no escalation of this PR at head 9fb3183 is in the ledger); this pass: post-review attempts for input:["PR-17240","https://github.com/craigoley/remudero/pull/17240","9fb31830aad246c6c10024c5f2fe3e9f4dff41a7","v2:c7dd5598eec49587a2b99f2ef3387207409f867b219971e4c493323a704fb18f"] have thrown 3 time(s), exceeding the 2-strike retry cap for this unchanged review input — escalating
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#09abd6837c2c6d40dd635749af0fa63454ba0e48483f6ead6bc6ad2326a7780c
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
