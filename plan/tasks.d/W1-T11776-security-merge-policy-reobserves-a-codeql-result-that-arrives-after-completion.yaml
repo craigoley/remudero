@@ -104,3 +104,11 @@
     check_run-triggered producer run appears for a trusted CodeQL completion at an open PR head after merge, the
     trigger is inert on this repository. Step 1 then remains the only re-evaluation, and the task reopens for a
     different wake. Red must never be turned green without one.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/security-merge-policy.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-08T21:51:55.476Z"
+    pin: "abe0a24276f4cb118bcd30289c616fd32fd2543ca4f449a085a485aba6c9effb"
