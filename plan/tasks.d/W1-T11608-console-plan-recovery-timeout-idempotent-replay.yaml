@@ -1,0 +1,46 @@
+- id: W1-T11608
+  title: "Console Wreckterra plan recovery aborts with no receipt: 8000 ms browser budget vs 5000 ms upstream write timeout leaves the frozen plan command unreconciled and Resume enabled"
+  repo: remudero-console
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "Reported in feedback fb-1794064519788-9bda6c against Console main 71cf77c141c7ee0584fd5e0704fe44184bf2231f.
+    Resuming a saved plan command after a verified operator session shows 'This operation was aborted' and leaves
+    Resume enabled, with the command still awaiting reconciliation. The browser request budget is 8000 ms
+    (src/lib/client-request.ts) and the upstream write timeout is 5000 ms (lib/rmd-control.ts
+    postOperatorJsonToTarget). A Vercel runtime error query found no errors, which does NOT prove Core received the
+    write: a timed-out write may have been delivered and its response lost. The abort is therefore ambiguous
+    between 'not delivered' and 'delivered, receipt lost'."
+  design: |
+    NARROW CONSOLE REPAIR. Do not change the command shape.
+    1. Reconcile the two timeouts: the upstream write budget must not abort a write the browser is still willing to
+       wait on, and an upstream timeout must surface as an explicit 'outcome unknown' state, not a generic abort.
+    2. Replay MUST reuse the existing frozen command and the SAME request identity (idempotency key). Never mint a
+       new identity on Resume.
+    3. A Core response delayed beyond five seconds must be reconciled EXACTLY ONCE: a replay of an already-admitted
+       request returns the original receipt and never produces a second admission.
+    4. Build stays locked until Core returns an admitted plan receipt. An abort, timeout or unknown outcome must
+       never unlock Build, and Resume stays available only while no receipt exists.
+    NOT IN SCOPE: Core changes, new command types, changing the operator-session check."
+  acceptance:
+    - claim: "a Core response delayed beyond five seconds is reconciled exactly once with the original receipt"
+      proof: "unit test: a delayed Core response replays the original receipt exactly once"
+    - claim: "resume replays the existing frozen command with the same request identity"
+      proof: "unit test: Resume reuses the frozen command and request identity"
+    - claim: "Build stays locked until an admitted plan receipt is returned, including after abort or timeout"
+      proof: "unit test: Build remains locked until an admitted receipt after timeout"
+    - claim: "an upstream timeout surfaces as an unknown-outcome state rather than a generic abort"
+      proof: "unit test: upstream timeout returns an unknown-outcome state"
+  risk: high
+  band_meaning: span
+  # span rationale (#588 merits test): one cross-file invariant, unsatisfiable piecewise — a delayed Core response
+  # must be reconciled exactly once across the browser budget (client-request), the upstream timeout (rmd-control)
+  # and the replay path, all asserted by the single tests/plan-recovery-timeout.test.ts.
+  origin: feedback#fb-1794064519788-9bda6c
+  plan_refs: ["§7B"]
+  files: [src/lib/client-request.ts, lib/rmd-control.ts, tests/plan-recovery-timeout.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify: human — acceptance tests are in remudero-console/tests/plan-recovery-timeout.test.ts. These proofs name the exact Console test titles; run and review them from that repository checkout."
