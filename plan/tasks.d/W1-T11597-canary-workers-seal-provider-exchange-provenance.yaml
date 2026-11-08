@@ -17,7 +17,7 @@
     - src/lib/worker.ts
     - src/lib/model-canary-coding-adapter.ts
     - src/lib/model-canary-runner.ts
-    - test/worker/spawn/model-canary-provider-exchange-provenance.test.ts
+    - test/routing/model-canary-provider-exchange-provenance.test.ts
   rationale: >-
     Plan-only replacement for the provider-exchange slice of held PR #17194. PR #17194 was made
     conflicting by merged plan amendment PR #17193, which changed the W1-T11119 shard (widened files,
@@ -46,17 +46,44 @@
     W1-T11213, W1-T11264 or W1-T11265 (dependency grep of plan/tasks.d), keeping the graph acyclic.
     Settled by lookup: does the held PR's adapter grep prove a literal? -> no; its unescaped dot in
     result.providerExchange matches any character under the BRE executor, so criterion 7 escapes it.
+    Architect clarification (plan-only, run PLAN-clarify-1794114029181, 2026-11-08), answering feedback
+    fb-1794069970699-fdd8e9 within the existing four files.
+    Settled by lookup: where does the new test belong? -> test/routing, not test/worker/spawn; the
+    native placeTest selector (src/lib/test-placement.ts, scripts/test-placement/subsystem-map.json)
+    maps model-.* basenames to models-routing -> routing, every existing model-canary test already lives
+    there (test/routing/model-canary-coding-command.test.ts and siblings), and draft lint
+    (src/lib/inbox.ts draft-test-unplaced) blocks a new test outside its computed folder.
+    Settled by lookup: is cloud_credential_error ever on the allowlist? -> no; the official SDK reference
+    (https://code.claude.com/docs/en/agent-sdk/typescript) says credentials could not be obtained "so no
+    request reached the cloud provider".
+    Settled by lookup: is unknown ever on the allowlist? -> no; the same reference lists 'unknown' in the
+    SDKAssistantMessageError union with no description and no provider-response guarantee, so it reads
+    unavailable (no seal), never a provider exchange.
+    Settled by lookup: what shape does the durable receipt take? -> a local typed attempt subtype declared
+    in src/lib/model-canary-runner.ts over the existing CanaryAttempt resources
+    (src/lib/model-canary-metrics.ts CanaryAttempt, already carrying optional executionEvidence and
+    workerExecutionJoin), JSON-serialisable with no casts and no caller-authored JSON, proven by a JSON
+    round-trip across the owner boundary; model-canary-metrics.ts is NOT added to files.
+    Settled by lookup: who validates and consumes the receipt? -> W1-T11119 (its shard depends on
+    W1-T11597 and owns the clustered-analysis readers); this task only produces and carries it.
+    Settled by lookup: does scope grow? -> no; files stay the same four paths, only the test path moves.
   design: >-
     Leave workerExecutionEvidence() and WorkerExecutionEvidenceV1 unchanged. Add a private
     sealProviderExchange( inside collectWorkerResult() that issues positive-only provider-exchange
-    evidence: only for a provider-originated assistant message naming a real non-synthetic model, or an
-    allowlisted provider response error that the stream actually received. Every other outcome issues
-    nothing (absent, never false): cloud_credential_error, a bare isApiErrorMessage flag, the <synthetic>
-    model, an empty stream, query-start only, abort, timeout, local spawn or tool failure, and every
-    ambiguous or local-only outcome. The evidence is opaque and binds runId, the canary attemptId and the
-    worker-spawn attempt; any mismatch reads unavailable. The coding port forwards it unread and the
-    runner carries it through existing resources. Offline tests use scripted streams with zero
-    transport and zero spend.
+    evidence: only for a provider-originated assistant message naming a real non-synthetic model, or a
+    provider response error the stream actually received whose SDKAssistantMessageError value is on a
+    closed allowlist. cloud_credential_error (no request reached the provider) and unknown (no
+    provider-response guarantee; treated as unavailable) are never on that allowlist. Every other outcome
+    issues nothing (absent, never false): cloud_credential_error, unknown, a bare isApiErrorMessage flag,
+    the <synthetic> model, an empty stream, query-start only, abort, timeout, local spawn or tool failure,
+    and every ambiguous or local-only outcome. The durable producer receipt is a local typed attempt
+    subtype declared in src/lib/model-canary-runner.ts that extends the existing CanaryAttempt resources
+    with an optional providerExchange receipt binding runId, the canary attemptId and the worker-spawn
+    attempt id. It is plain JSON-serialisable data built without casts or caller-authored JSON, and the
+    test proves it survives JSON.stringify/JSON.parse across the owner boundary with every binding intact.
+    The coding port forwards it unread and the runner carries it through existing resources; neither
+    validates nor consumes it. Validation (mismatch reads unavailable) and consumption belong to
+    W1-T11119. Offline tests use scripted streams with zero transport and zero spend.
   note: >-
     Grants no consent, native-owner, admission, source-qualification or spend release, and changes no
     privacy control. The first live pilot keeps its separate USD 25 total cap with no retries or top-ups.
@@ -64,22 +91,26 @@
     untouched; no source task is dispatched by this filing.
   acceptance:
     - claim: Only a provider-originated assistant message with a real non-synthetic model, or an allowlisted provider response error actually received, seals provider-exchange evidence
-      proof: 'unit test: test/worker/spawn/model-canary-provider-exchange-provenance.test.ts'
-    - claim: cloud_credential_error, a bare api-error flag, synthetic messages, empty streams, query-start only, aborts, timeouts, local failures and every ambiguous or local-only outcome issue no evidence
-      proof: 'grep: W1-T11597 criterion 2: excluded signals issue no provider exchange evidence in test/worker/spawn/model-canary-provider-exchange-provenance.test.ts'
+      proof: 'unit test: test/routing/model-canary-provider-exchange-provenance.test.ts'
+    - claim: cloud_credential_error, unknown, a bare api-error flag, synthetic messages, empty streams, query-start only, aborts, timeouts, local failures and every ambiguous or local-only outcome issue no evidence
+      proof: 'grep: W1-T11597 criterion 2: excluded signals including cloud_credential_error and unknown issue no provider exchange evidence in test/routing/model-canary-provider-exchange-provenance.test.ts'
     - claim: WorkerExecutionEvidenceV1 providerInvoked stays unavailable for ordinary results and observed false only for admission-abandoned
-      proof: 'grep: W1-T11597 criterion 3: workerExecutionEvidence providerInvoked contract is unchanged in test/worker/spawn/model-canary-provider-exchange-provenance.test.ts'
-    - claim: The sealed evidence is opaque and binds runId, canary attemptId and the worker-spawn attempt, so any mismatch reads unavailable
-      proof: 'grep: W1-T11597 criterion 4: sealed evidence binds run canary attempt and worker spawn attempt in test/worker/spawn/model-canary-provider-exchange-provenance.test.ts'
+      proof: 'grep: W1-T11597 criterion 3: workerExecutionEvidence providerInvoked contract is unchanged in test/routing/model-canary-provider-exchange-provenance.test.ts'
+    - claim: The sealed receipt binds runId, canary attemptId and the worker-spawn attempt id; mismatch validation belongs to W1-T11119
+      proof: 'grep: W1-T11597 criterion 4: sealed evidence binds run canary attempt and worker spawn attempt in test/routing/model-canary-provider-exchange-provenance.test.ts'
     - claim: Offline tests perform zero provider transport and zero spend
-      proof: 'grep: W1-T11597 criterion 5: offline provider exchange controls use zero transport and zero spend in test/worker/spawn/model-canary-provider-exchange-provenance.test.ts'
+      proof: 'grep: W1-T11597 criterion 5: offline provider exchange controls use zero transport and zero spend in test/routing/model-canary-provider-exchange-provenance.test.ts'
     - claim: The real stream reducer issues the seal
       proof: 'grep: sealProviderExchange( in src/lib/worker.ts'
     - claim: The coding request port forwards the sealed value without decoding it
       proof: 'grep: providerExchange: result\.providerExchange in src/lib/model-canary-coding-adapter.ts'
+    - claim: The durable producer receipt is a local typed attempt subtype that survives a JSON round-trip across the owner boundary with every binding intact, built without casts or caller-authored JSON
+      proof: 'grep: W1-T11597 criterion 8: provider exchange receipt round-trips through JSON at the owner boundary as a typed attempt subtype in test/routing/model-canary-provider-exchange-provenance.test.ts'
   falsifier: >-
     Replay scripted message streams through collectWorkerResult. Real-model and allowlisted-error
-    streams must seal; every excluded stream must not. Widening the allowlist to cloud_credential_error,
-    or accepting a bare isApiErrorMessage flag, must fail criterion 2. Changing providerInvoked or the
-    WorkerExecutionEvidenceV1 shape must fail criterion 3. Swapping the canary attempt id must read
-    unavailable under criterion 4. Any transport call or nonzero spend must fail criterion 5.
+    streams must seal; every excluded stream must not. Widening the allowlist to cloud_credential_error
+    or unknown, or accepting a bare isApiErrorMessage flag, must fail criterion 2. Changing
+    providerInvoked or the WorkerExecutionEvidenceV1 shape must fail criterion 3. Sealing with a
+    swapped canary attempt id must yield a receipt whose binding differs from the request context under
+    criterion 4. Any transport call or nonzero spend must fail criterion 5. A receipt that loses a binding,
+    or needs a cast, after JSON.stringify/JSON.parse at the owner boundary must fail criterion 8.
