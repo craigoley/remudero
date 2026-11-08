@@ -1,0 +1,24 @@
+id: fb-1794064519788-9bda6c
+ts: 2026-11-07T15:15:19.789Z
+raw: Console Wreckterra plan recovery aborts with no receipt after verified
+  operator session. The saved product plan command remains awaiting
+  reconciliation. Resume saved plan command once; the UI reports This operation
+  was aborted and leaves Resume enabled. Production source at Console main
+  71cf77c141c7ee0584fd5e0704fe44184bf2231f has an 8000 ms browser request budget
+  in src/lib/client-request.ts and a 5000 ms upstream write timeout in
+  lib/rmd-control.ts postOperatorJsonToTarget. A Vercel runtime error query for
+  the production route found no errors, which does not prove the Core write was
+  delivered. Please diagnose and file a narrowly scoped Console timeout and
+  idempotent-replay repair through normal review and CI. Keep the existing
+  frozen command and request identity, prove a delayed response beyond five
+  seconds is reconciled exactly once, and do not unlock Build until Core returns
+  an admitted plan receipt.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

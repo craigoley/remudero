@@ -122,7 +122,9 @@ test("W1-T9077: a run directory that names no engine defers the prune", async ()
   const state = tmp();
   const old = plantEngine(state, 1, 1000);
   plantEngine(state, 2, 2000);
-  mkdirSync(join(state, "runs", "torn"), { recursive: true });
+  const torn = join(state, "runs", "torn");
+  mkdirSync(torn, { recursive: true });
+  writeFileSync(join(torn, "worker-output"), "content without run metadata");
   const { rows, log } = collect();
   assert.deepEqual(await pruneEngineTrees(state, { repoDir: state, log, probe, git: async () => "" }), []);
   assert.ok(existsSync(old), "an answer that cannot be known removes nothing");

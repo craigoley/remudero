@@ -5,10 +5,17 @@ selected_registry_refuse() {
   case "$reason" in ""|*[!a-z_]*) reason=reader_unavailable ;; esac
   if [ "${SELECTED_REGISTRY_CALLER:-}" = recycle-container ] && declare -F recycle_reason >/dev/null; then
     recycle_reason "recycle-container: REFUSING -- selected registry unavailable (${reason})." >&2
+    selected_registry_print_remedy >&2
   else
     echo "${SELECTED_REGISTRY_CALLER:-launcher}: REFUSING -- selected registry unavailable (${reason})." >&2
   fi
   return 2
+}
+selected_registry_print_remedy() {
+  [ "${SELECTED_REGISTRY_CALLER:-}" = recycle-container ] || return 0
+  local instance="${SELECTED_REGISTRY_NAME:-<instance>}"
+  case "${instance}" in ""|*[!a-zA-Z0-9_-]*) instance="<instance>" ;; esac
+  echo "  Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy/recycle-container.sh --instance ${instance}, or add --leave-selected-registry with no selection to leave it."
 }
 selected_registry_packet() (
   cd "${SELECTED_REGISTRY_READER_ROOT}" || exit 2
@@ -77,12 +84,14 @@ selected_registry_init() {
   fi
 }
 selected_registry_docker_read() {
-  node --input-type=module -e '
+  printf '%s\0' "$@" | node --input-type=module -e '
     const {execFile}=await import("node:child_process");
-    execFile("docker",process.argv.slice(1),{timeout:10000,killSignal:"SIGKILL",maxBuffer:65536},(error,out)=>{
+    let input=""; for await (const chunk of process.stdin) input+=chunk;
+    const args=input.split("\0").slice(0,-1);
+    execFile("docker",args,{timeout:10000,killSignal:"SIGKILL",maxBuffer:65536},(error,out)=>{
       if(error) process.exitCode=2; else process.stdout.write(out);
     });
-  ' "$@" 2>/dev/null
+  ' 2>/dev/null
 }
 selected_registry_mounts() {
   [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
@@ -171,7 +180,11 @@ selected_registry_diagnostic_filter() {
     const emit=line=>{ if(count++<64) process.stdout.write(caller+": "+line+"\n"); };
     const line=text=>{
       const reason=/REFUSING -- selected registry unavailable \(([a-z_]+)\)[.]$/.exec(text)?.[1];
-      if(reason && reasons.has(reason)) emit("REFUSING -- selected registry unavailable ("+reason+").");
+      const remedy=/^\s*Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy\/recycle-container\.sh --instance ([a-zA-Z0-9_-]+|<instance>), or add --leave-selected-registry with no selection to leave it\.$/.exec(text);
+      if(remedy && caller==="recycle-container"){
+        if(count++<64) process.stdout.write("Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy/recycle-container.sh --instance "+remedy[1]+", or add --leave-selected-registry with no selection to leave it.\n");
+      }
+      else if(reason && reasons.has(reason)) emit("REFUSING -- selected registry unavailable ("+reason+").");
       else if(text.includes("REFUSING")||text.includes("FAILED")) emit("selected lifecycle reported refusal/failure (private details withheld).");
       else if(text.includes("--dry-run")) emit("selected lifecycle dry-run; image capability and live effects NOT RUN.");
       else if(text.trim()) emit("selected lifecycle diagnostic (private details withheld).");
@@ -1007,6 +1020,10 @@ run_docker_control() {
 # same opt-in for an interactive operator. Either form is read identically below — see section 1.5.
 FIRST_BOOT="${RMD_RECYCLE_FIRST_BOOT:-0}"
 
+# W1-T11454: an inherited selection re-runs this script with the same arguments, before anything is touched.
+RECYCLE_ORIGINAL_ARGS=("$@")
+LEAVE_SELECTED_REGISTRY=0
+SELECTED_REGISTRY_LEAVING=0
 CLI_RETARGET=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -1016,11 +1033,17 @@ while [ $# -gt 0 ]; do
     --container)   CONTAINER_NAME="${2:?--container needs a value}"; CLI_RETARGET="${CLI_RETARGET} --container"; shift 2 ;;
     --instance)    shift 2 ;;
     --first-boot)  FIRST_BOOT=1; shift ;;
+    --leave-selected-registry) LEAVE_SELECTED_REGISTRY=1; shift ;;
     --commission-git-author) shift ;;
     -h|--help)     COMMISSION_GIT_AUTHOR=0; sed -n '1,72p' "$0"; exit 0 ;;
     *) recycle_reason "recycle-container: unknown argument '$1' (try --help)" >&2; exit 2 ;;
   esac
 done
+
+if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ] && [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+  recycle_reason "recycle-container: REFUSING -- --leave-selected-registry contradicts an explicit registry selection; NOTHING has been touched." >&2
+  exit 2
+fi
 
 REF="${REGISTRY}.azurecr.io/${IMAGE}:${TAG}"
 echo "recycle-container: container ${CONTAINER_NAME}, target image ${REF}"
@@ -1352,8 +1375,13 @@ CAPTURED_SOURCE_get() { local ref="CAPTURED_SOURCE__$1"; printf '%s' "${!ref-}";
 # policy's build args set it at every launch, so it is never captured and carrying it is not drift.
 is_declared_runtime_var() {
   local needle="$1" candidate
-  if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+  if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || [ "${SELECTED_REGISTRY_LEAVING}" = 1 ]; then
     case "$needle" in RMD_INSTANCE_REGISTRY|RMD_INSTANCE_REGISTRY_DIGEST|RMD_INSTANCE_REGISTRY_FILE_BINDING|RMD_SELECTED_INSTANCE_REGISTRY) return 0 ;; esac
+  fi
+  # The selected path's presence is classified by the bounded mount/state reader below. Do not
+  # turn it into unrelated runtime drift before that reader can issue its selection-specific refusal.
+  if [ "${SELECTED_REGISTRY_ENV_PRESENT:-0}" = 1 ] && [ "${needle}" = RMD_SELECTED_INSTANCE_REGISTRY ]; then
+    return 0
   fi
   for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}" RMD_INSTANCE_NAME GLIBC_TUNABLES; do
     [ "${candidate}" = "${needle}" ] && return 0
@@ -1369,8 +1397,11 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   # and W1-T1069's rationale), dropped here by the blank-line filter.
   CONTAINER_ENV_RAW="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
   CONTAINER_ENV_LINES=()
+  # Record only presence here; the selection path is consumed later only by the explicit leave path.
+  SELECTED_REGISTRY_ENV_PRESENT=0
   while IFS= read -r line || [ -n "${line}" ]; do
     CONTAINER_ENV_LINES+=("${line}")
+    case "${line}" in RMD_SELECTED_INSTANCE_REGISTRY=*) SELECTED_REGISTRY_ENV_PRESENT=1 ;; esac
   done < <(printf '%s\n' "${CONTAINER_ENV_RAW}" | sed '/^$/d')
 
   # The container's OWN image env — subtracted below to find what is genuinely runtime-set. Read via
@@ -1390,22 +1421,7 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   fi
 
   # ── THE DRIFT CHECK: a runtime NAME this recycle does not declare REFUSES, and names it ────────
-  # W1-T11431: declaring the selection names only carries them, and a carried name without its mount points the
-  # daemon at a file that is gone. Only an explicit selection re-creates that mount, so a bare recycle of a selected
-  # container refuses here, before anything is touched, until W1-T11454 inherits the selection. Prints no source path.
-  if [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ]; then
-    if ! live_registry_mounts="$(docker inspect --format '{{range .Mounts}}{{printf "%s\t%s\t%t\n" .Source .Destination .RW}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null)"; then
-      recycle_reason "recycle-container: REFUSING -- selected registry mounts of ${CONTAINER_NAME} are unreadable; NOTHING has been touched." >&2
-      exit 1
-    fi
-    case "${live_registry_mounts}" in
-      *$'\t'"${SELECTED_REGISTRY_CONTAINER_FILE:-/home/node/.config/remudero/selected-registry.yaml}"$'\t'*)
-        recycle_reason "recycle-container: REFUSING -- ${CONTAINER_NAME} runs a selected registry and this recycle names none, so its private mount would be dropped." >&2
-        echo "  Recycle it with RMD_SELECTED_INSTANCE_REGISTRY set to its host registry path and --instance. NOTHING has been touched." >&2
-        exit 1 ;;
-    esac
-  fi
-
+  # Run this before selection-specific refusal paths so unrelated undeclared runtime state keeps its existing remedy.
   # A variable is RUNTIME-SET when its NAME is absent from the image env, OR its VALUE differs from
   # the image's own — a runtime value that SHADOWS an image name (e.g. `-e HOME=/other`) is still
   # runtime-set even though the name matches, and a name-only diff would miss it. Comparing values
@@ -1416,7 +1432,6 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     # runtime-env list as zero iterations rather than turning the safety check into an abort.
     for line in "${CONTAINER_ENV_LINES[@]-}"; do
       name="${line%%=*}"
-      value="${line#*=}"
       [ -n "${name}" ] || continue
       image_has_name=0
       image_value=""
@@ -1427,6 +1442,9 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
           "${name}="*) image_has_name=1; image_value="${iline#*=}" ;;
         esac
       done
+      # Declared names cannot trigger this refusal; do not read their values in the drift scan.
+      if is_declared_runtime_var "${name}"; then continue; fi
+      value="${line#*=}"
       if [ "${image_has_name}" -eq 0 ] || [ "${value}" != "${image_value}" ]; then
         if ! is_declared_runtime_var "${name}"; then
           UNDECLARED_RUNTIME_VARS="${UNDECLARED_RUNTIME_VARS}${UNDECLARED_RUNTIME_VARS:+, }${name}"
@@ -1445,6 +1463,94 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     exit 1
   fi
 
+  # W1-T11431: a carried selection name without its mount points the daemon at a file that is gone, and only a named
+  # selection re-creates that mount. W1-T11454: a bare recycle therefore reads ONLY the Mounts subsection, never a path
+  # from the environment, requires one read-only bind at the registry destination, and re-runs once with that source as
+  # its selection, so every reader and launch check still applies. All of this precedes the lock and PAUSE. Prints no source.
+  if [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ]; then
+    selection_file="${SELECTED_REGISTRY_CONTAINER_FILE:-/home/node/.config/remudero/selected-registry.yaml}"
+    selection_remedy="Remedy: RMD_SELECTED_INSTANCE_REGISTRY=<host registry path> deploy/recycle-container.sh --instance ${INSTANCE_NAME:-<instance>}, or add --leave-selected-registry with no selection to leave it."
+    if ! live_registry_mounts="$(selected_registry_docker_read inspect --format '{{range .Mounts}}{{printf "%s\t%s\t%t\t%s\n" .Source .Destination .RW .Type}}{{end}}' "${CONTAINER_NAME}")"; then
+      recycle_reason "recycle-container: REFUSING -- selected registry mounts of ${CONTAINER_NAME} are unreadable; NOTHING has been touched." >&2
+      echo "  ${selection_remedy}" >&2
+      exit 1
+    fi
+    selection_rows="$(printf '%s\n' "${live_registry_mounts}" | awk -F'\t' -v dst="${selection_file}" '$2 == dst')"
+    selection_count="$(printf '%s' "${selection_rows}" | grep -c . || true)"
+    selection_source="$(printf '%s\n' "${selection_rows}" | cut -f1)"
+    selection_state=""
+    catalog_state=""
+    if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then
+      selected_env=""
+      selected_env_count=0
+      digest_env=""
+      digest_env_count=0
+      binding_env=""
+      binding_env_count=0
+    fi
+    for line in "${CONTAINER_ENV_LINES[@]-}"; do
+      case "${line}" in
+        RMD_SELECTED_INSTANCE_REGISTRY=*)
+          selection_state=1
+          if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then selected_env="${line#*=}"; selected_env_count=$((selected_env_count + 1)); fi
+          ;;
+        RMD_INSTANCE_REGISTRY_DIGEST=*)
+          selection_state=1
+          if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then digest_env="${line#*=}"; digest_env_count=$((digest_env_count + 1)); fi
+          ;;
+        RMD_INSTANCE_REGISTRY_FILE_BINDING=*)
+          selection_state=1
+          if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then binding_env="${line#*=}"; binding_env_count=$((binding_env_count + 1)); fi
+          ;;
+        RMD_INSTANCE_REGISTRY=*) catalog_state=1 ;;
+      esac
+    done
+    if [ "${LEAVE_SELECTED_REGISTRY}" = 1 ]; then
+      if [ -n "${catalog_state}" ]; then
+        recycle_reason "recycle-container: REFUSING -- leaving this selected registry would retain RMD_INSTANCE_REGISTRY and reactivate its selected-reader fallback (catalog_fallback); NOTHING has been touched." >&2
+        echo "  Remedy: keep the qualified selection active; this catalog combination has no safe leave command under the current compatibility contract." >&2
+        exit 1
+      fi
+      if [ "${selection_count}" -gt 0 ] || [ -n "${selection_state}" ]; then
+        if [ "${selection_count}" -ne 1 ] || [ "$(printf '%s\n' "${selection_rows}" | cut -f3,4)" != "false"$'\t'"bind" ] \
+          || [ "${selection_source#/}" = "${selection_source}" ] \
+          || [ "${selected_env_count}" -ne 1 ] || [ "${selected_env}" != "${selection_file}" ] \
+          || [ "${digest_env_count}" -ne 1 ] || [ "${#digest_env}" -ne 64 ] || [[ "${digest_env}" == *[!a-f0-9]* ]] \
+          || [ "${binding_env_count}" -ne 1 ] || [ "${#binding_env}" -ne 64 ] || [[ "${binding_env}" == *[!a-f0-9]* ]]; then
+          recycle_reason "recycle-container: REFUSING -- selected registry state is not one qualified packet that can be left safely (leave_unqualified); NOTHING has been touched." >&2
+          echo "  ${selection_remedy}" >&2
+          exit 1
+        fi
+        if ! leave_packet="$(SELECTED_REGISTRY_READER_ROOT="${SCRIPT_DIR%/deploy}" SELECTED_REGISTRY_NAME="${INSTANCE_NAME}" \
+          SELECTED_REGISTRY_INPUT="${selection_source}" SELECTED_REGISTRY_DIGEST="${digest_env}" selected_registry_packet)" \
+          || [ "$(printf '%s\n' "${leave_packet}" | sed -n '3p')" != "${digest_env}" ] \
+          || [ "$(printf '%s\n' "${leave_packet}" | sed -n '5p')" != "${binding_env}" ]; then
+          recycle_reason "recycle-container: REFUSING -- selected registry packet does not match its mounted file and runtime binding (leave_unqualified); NOTHING has been touched." >&2
+          echo "  ${selection_remedy}" >&2
+          exit 1
+        fi
+        SELECTED_REGISTRY_LEAVING=1
+      fi
+    elif [ "${selection_count}" -eq 0 ]; then
+      if [ -n "${selection_state}" ]; then
+        recycle_reason "recycle-container: REFUSING -- ${CONTAINER_NAME} carries selected registry state with no qualifying mount; NOTHING has been touched." >&2
+        echo "  ${selection_remedy}" >&2
+        exit 1
+      fi
+    else
+      if [ "${selection_count}" -ne 1 ] || [ "$(printf '%s\n' "${selection_rows}" | cut -f3,4)" != "false"$'\t'"bind" ] \
+        || [ "${selection_source#/}" = "${selection_source}" ] || [ -n "${RMD_RECYCLE_SELECTION_INHERITED:-}" ]; then
+        recycle_reason "recycle-container: REFUSING -- selected registry mount of ${CONTAINER_NAME} is not one read-only bind this recycle can inherit; NOTHING has been touched." >&2
+        echo "  ${selection_remedy}" >&2
+        exit 1
+      fi
+      echo "recycle-container: inheriting ${CONTAINER_NAME}'s selected registry mount (source withheld)"
+      RMD_RECYCLE_SELECTION_INHERITED=1 RMD_SELECTED_INSTANCE_REGISTRY="${selection_source}" exec bash "${BASH_SOURCE[0]:-$0}" \
+        ${RECYCLE_ORIGINAL_ARGS[@]+"${RECYCLE_ORIGINAL_ARGS[@]}"} ${registry_shadow_session:+--selected-registry-shadow "${registry_shadow_session}"} \
+        ${registry_shadow_pin:+--selected-registry-pin "${registry_shadow_pin}"}
+    fi
+  fi
+
   # W1-T2553: FALL BACK TO THE SHELL WHEN THE CONTAINER'S VALUE IS EMPTY. This loop used to read
   # ONLY the container, and the shell fallback lived in the `else` branch below — reachable solely
   # when NO container exists. That was fine while containers were started carrying a token, and
@@ -1461,6 +1567,15 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   # CAPTURED_SOURCE records which source each name actually came from, so the refusal below can
   # name what it consulted instead of asserting it.
   for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
+    if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+      case "${name}" in
+        RMD_INSTANCE_REGISTRY_DIGEST|RMD_INSTANCE_REGISTRY_FILE_BINDING)
+          CAPTURED_set "${name}" ""
+          CAPTURED_SOURCE_set "${name}" "registry"
+          continue
+          ;;
+      esac
+    fi
     val=""
     for line in "${CONTAINER_ENV_LINES[@]-}"; do
       case "${line}" in
@@ -1767,6 +1882,10 @@ for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
   elif [ "${name}" = "RMD_INSTANCE_REGISTRY" ] || [ "${name}" = "RMD_INSTANCE_REGISTRY_DIGEST" ] || [ "${name}" = "RMD_INSTANCE_REGISTRY_FILE_BINDING" ]; then
     # W1-T11431: an empty value here reads as an invalid selection, so these three are never passed empty, and an
     # active selection is their one source (SELECTED_REGISTRY_LAUNCH_ARGS, shared with serve).
+    if [ "${SELECTED_REGISTRY_LEAVING}" = 1 ] && { [ "${name}" != "RMD_INSTANCE_REGISTRY" ] \
+      || [ "$(CAPTURED_get "${name}")" = "${SELECTED_REGISTRY_CONTAINER_FILE:-/home/node/.config/remudero/selected-registry.yaml}" ]; }; then
+      continue # W1-T11454: qualified leave has no legacy catalog fallback to preserve.
+    fi
     if [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ] && [ -n "$(CAPTURED_get "${name}")" ]; then
       RUN_ENV_ARGS+=(-e "${name}=$(CAPTURED_get "${name}")")
     fi
@@ -3139,6 +3258,11 @@ EOF_REPLACEMENT_ENV
 fi
 
 recycle_reason "recycle-container: OK — ${CONTAINER_NAME} recycled onto ${PULLED_IMAGE_ID}"
+# W1-T11454: written only here, after the replacement succeeded, and it names no path or value.
+if [ "${SELECTED_REGISTRY_LEAVING}" = 1 ]; then
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.selection_left","lane":"deploy","container":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "${CONTAINER_NAME}" >> "${LEDGER_FILE}" 2>/dev/null || true
+fi
 
 # W1-T9071: the post-start actions run once the replacement has proved itself above.
 if command -v recycle_actions_run >/dev/null 2>&1; then

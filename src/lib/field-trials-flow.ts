@@ -141,6 +141,8 @@ export interface FlowRow {
   action: string | null;
   reviewModel: string | null;
   findingId: string | null;
+  /** Round-independent finding identity from the receipt; null when the receipt predates it. */
+  lineageKey: string | null;
   findingCategory: string | null;
   findingAnchorStatus: "verified" | "unsupported" | null;
   findingCaptureState: "unavailable" | "zero" | "captured" | "partial" | null;
@@ -249,7 +251,7 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     prRepo: url?.[1] ?? null, prNumber: url ? Number(url[2]) : Number.isSafeInteger(row.pr_number) ? row.pr_number as number : null,
     headSha: text(row.head_sha), verdict: text(row.verdict), action: text(row.action),
     reviewModel: text(evaluator?.servedModel) ?? text(evaluator?.requestedModel) ?? (row.step === "review.finding" ? text(row.served_model) : null),
-    findingId: text(row.finding_id), findingCategory: text(row.category),
+    findingId: text(row.finding_id), lineageKey: text(row.lineage_key), findingCategory: text(row.category),
     findingAnchorStatus: row.capture_state === "verified" || row.capture_state === "unsupported" ? row.capture_state : null,
     findingCaptureState: ["unavailable", "zero", "captured", "partial"].includes(String(row.finding_capture_state))
       ? row.finding_capture_state as FlowRow["findingCaptureState"] : null,
