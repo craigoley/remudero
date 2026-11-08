@@ -23,7 +23,7 @@ import { HEADROOM_LIMIT_PCT, type UsageSnapshot } from "#src/lib/headroom.js";
 import { loadPlan } from "#src/lib/plan.js";
 import { runDaemon } from "#src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import type { RunResult } from "#src/lib/run-result.js";
+import type { RunResult } from "#src/run-task.js";
 
 const NOW = new Date(2026, 6, 20, 12, 0, 0, 0);
 const STORE_UUID = "11111111-1111-4111-8111-111111111111";
