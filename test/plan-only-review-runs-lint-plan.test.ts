@@ -334,6 +334,8 @@ async function retryFixture(t: TestContext, seed: SeedOptions = { planLint: INCO
         reviewDecisionDigest: digest, reopenedDegradedTerminal: true, fetchLifecycle: () => f.lifecycle,
         fetchPublisher: f.fetchPublisher, readRequiredContexts: readRequiredStatusCheckContextsAsync,
         post: (o) => { f.posts.push({ state: o.state, description: o.description }); },
+        // W1-T11443: a SUCCESS reads the head's status history first; this head has no reproduced prior FAILURE.
+        readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
         ...(retry ? { planLintRetry: { attemptId: "attempt-1", observe: f.observe, ...retry } } : {}), ...over,
       }),
     /** The whole pipeline a caller drives. `release` always runs, so one attempt never blocks the next. */

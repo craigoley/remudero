@@ -349,6 +349,7 @@ test("postReviewStatusGuarded: ACCEPTANCE 1 — a CAPPED success posted over an 
 
     const posts: Array<{ state: string }> = [];
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o",
       repo: "r",
       sha: "833561d",
@@ -400,6 +401,7 @@ test("postReviewStatusGuarded: a body edit on the same sha resets prior-evidence
     const posts: unknown[] = [];
 
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o",
       repo: "r",
       sha: "833561d",
@@ -430,6 +432,7 @@ test("postReviewStatusGuarded: ACCEPTANCE 2 — a post to a merged PR is refused
     const ledgerPath = join(dir, "ledger.ndjson");
     const posts: unknown[] = [];
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o",
       repo: "r",
       sha: "deadbeef",
@@ -461,6 +464,7 @@ test("postReviewStatusGuarded: a post to a CLOSED (unmerged) PR is refused too",
   try {
     const ledgerPath = join(dir, "ledger.ndjson");
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o",
       repo: "r",
       sha: "deadbeef",
@@ -487,6 +491,7 @@ test("postReviewStatusGuarded: an ordinary post with no prior and an open PR suc
     const ledgerPath = join(dir, "ledger.ndjson");
     const posts: Array<{ sha: string; state: string }> = [];
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o",
       repo: "r",
       sha: "sha1",
@@ -524,6 +529,7 @@ test("postReviewStatusGuarded: ACCEPTANCE 3 — N concurrent posters on one PR s
     // across concurrent posters depends on this, not just on the lock.
     function makeAttempt(state: "success" | "failure", evidence: "executed" | "no_evidence", runId: string) {
       return postReviewStatusGuarded({
+        readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
         owner: "o",
         repo: "r",
         sha,
@@ -723,6 +729,7 @@ test("postReviewStatusGuarded: ACCEPTANCE 2 — a post that throws after exhaust
   try {
     const ledgerPath = join(dir, "ledger.ndjson");
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o",
       repo: "r",
       sha: "sha1",
@@ -758,6 +765,7 @@ test("postReviewStatusGuarded: ACCEPTANCE 3 — a permanent-error post failure i
   try {
     const ledgerPath = join(dir, "ledger.ndjson");
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o",
       repo: "r",
       sha: "sha2",
@@ -863,6 +871,7 @@ test("a transient lifecycle read retries inside the status lock and publishes on
   let reads = 0, posts = 0;
   try {
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o", repo: "r", sha: "sha1", state: "success", taskId: "lifecycle-retry",
       evidence: "executed", ledgerPath: join(dir, "ledger.ndjson"), runId: "retry-read",
       fetchLifecycle: () => {
@@ -882,6 +891,7 @@ test("an exhausted lifecycle read releases the lock without publishing a verdict
   const dir = tmpDir();
   let reads = 0, posts = 0;
   const opts = {
+      readReviewStatusHistory: async () => ({ kind: "readable" as const, failures: [] }),
     owner: "o", repo: "r", sha: "sha1", state: "success" as const, taskId: "lifecycle-exhausted",
     evidence: "executed" as const, ledgerPath: join(dir, "ledger.ndjson"), runId: "exhausted-read",
     fetchLifecycle: (): PrLifecycleState => { reads++; throw ghHttpError("gh: Service Unavailable (HTTP 503)"); },
@@ -904,6 +914,7 @@ test("a lifecycle retry uses the fresh response and never publishes after closur
       reviewInputDigest: reviewInputDigest("sha1", "changed") }]] as const) {
       let reads = 0, posts = 0;
       const result = await postReviewStatusGuarded({
+        readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
         owner: "o", repo: "r", sha: "sha1", state: "success", taskId: id, evidence: "executed",
         ledgerPath: join(dir, "ledger.ndjson"), runId: id, prUrl: PR_URL,
         reviewInputDigest: reviewInputDigest("sha1", "original"),
@@ -925,6 +936,7 @@ test("lifecycle auth, pacing, unknown errors and longer Retry-After waits retain
       "gh: secondary rate limit exceeded", "unknown read failure", "gh: Service Unavailable (HTTP 503) retry-after: 60"]) {
       let reads = 0, posts = 0;
       await assert.rejects(postReviewStatusGuarded({
+        readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
         owner: "o", repo: "r", sha: "sha1", state: "success", taskId: "lifecycle-hold", evidence: "executed",
         ledgerPath: join(dir, "ledger.ndjson"), runId: "held-read",
         fetchLifecycle: (): PrLifecycleState => { reads++; throw ghHttpError(text); },
@@ -947,6 +959,7 @@ test("a lifecycle retry reaches the real default REST reader and gh executable b
   let posts = 0;
   try {
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "craigoley", repo: "remudero", sha: "sha1", state: "success", taskId: "default-lifecycle-retry",
       evidence: "executed", ledgerPath: join(dir, "ledger.ndjson"), runId: "default-reader",
       prUrl: PR_URL, reviewInputDigest: reviewInputDigest("sha1", "reviewed body"),

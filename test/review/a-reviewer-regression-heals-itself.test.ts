@@ -260,6 +260,8 @@ test("W1-T10269: the healed reviewer is origin/main plus the revert and W1-T228 
     owner: "acme", repo: "remudero", sha, state: "success", description: "PASS", taskId: "PR-205", evidence: "executed",
     ledgerPath: publishLedger, runId: `publish-${sha.slice(0, 7)}`, prUrl: `${REPO_URL}/205`, reviewerCodeFreshness: freshness,
     fetchLifecycle: () => ({ merged: false, closed: false }), post: ({ state }: { state: string }) => { posts.push(state); },
+    // W1-T11443: a SUCCESS reads the head's status history first; this head has no prior FAILURE.
+    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
   } as never);
   const published = await publish(fresh, fake("head-205"));
   assert.equal(published.posted, true, `the healed verdict publishes: ${published.reason ?? ""}`);

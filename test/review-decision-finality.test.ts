@@ -77,6 +77,7 @@ test("a replay restores a final review displaced by pending, but never overwrite
     };
     const fetchPublisher = async (): Promise<unknown> => ({ contexts: [], checks: [{ context: "remudero-review", app_id: null }] });
     const options = {
+      readReviewStatusHistory: async () => ({ kind: "readable" as const, failures: [] }),
       fetchPublisher,
       // Every terminal-posting caller injects status.ts's reader (review.ts cannot import it: a cycle).
       readRequiredContexts: readRequiredStatusCheckContextsAsync,
@@ -194,6 +195,7 @@ test("W1-T3835: an exact-head checkout reopens only a prior CAPPED keyword-only 
       proofExecutions++;
       const posted: string[] = [];
       const status = await postReviewStatusGuarded({
+        readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
         owner: "o", repo: "r", sha: HEAD, state: "success", taskId: TASK, evidence: "executed",
         ledgerPath, runId: "executed", prUrl: PR, reviewDecisionDigest: digest,
         reopenedDegradedTerminal: retry.reopenedDegradedTerminal,
@@ -247,6 +249,7 @@ async function conflictCase(priorState: ReviewState, attemptedState: ReviewState
       reviewer_outcome: "reviewer_completed", evaluator_provenance: provenance("session-prior"),
     });
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o", repo: "r", sha: HEAD, state: attemptedState, taskId: TASK, evidence: "executed",
       ledgerPath, runId: "review-attempt", prUrl: PR, reviewDecisionDigest: digest,
       evaluatorProvenance: provenance("session-attempt"), fetchLifecycle: () => ({ merged: false, closed: false }),
@@ -281,6 +284,7 @@ test("W1-T2722: a failed conflict-hold post is not reported as posted", async ()
       review_decision_digest: digest, decision_verdict: verdict("success"),
     });
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o", repo: "r", sha: HEAD, state: "failure", taskId: TASK, evidence: "executed",
       ledgerPath, runId: "attempt", prUrl: PR, reviewDecisionDigest: digest,
       fetchLifecycle: () => ({ merged: false, closed: false }), post: () => { throw new Error("offline"); },
@@ -306,6 +310,7 @@ test("W1-T2722: a changed decision digest is posted normally", async () => {
       reviewer_outcome: "reviewer_completed", evaluator_provenance: provenance("old-session"),
     });
     const result = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o", repo: "r", sha: HEAD, state: "success", taskId: TASK, evidence: "executed",
       ledgerPath, runId: "new", prUrl: PR, reviewDecisionDigest: newDigest,
       evaluatorProvenance: provenance("new-session"), fetchLifecycle: () => ({ merged: false, closed: false }),
