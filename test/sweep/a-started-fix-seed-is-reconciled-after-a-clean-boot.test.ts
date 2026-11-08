@@ -57,7 +57,8 @@ test("a started fix seed never releases a live or indeterminate adopted child", 
 test("a started fix seed keeps current-run ownership and a newer rung intact", () => {
   assert.equal(fixSeedRead(timeline(), pr, OLD)?.kind, "live");
   assert.equal(fixSeedRead([...timeline(), { ...dispatch, run_id: CURRENT }], pr, CURRENT)?.kind, "live");
-  assert.equal(fixSeedRead([...timeline(), { ...boot, run_id: "a-later-daemon" }], pr, CURRENT)?.kind, "live");
+  assert.equal(fixSeedRead([...timeline(), { ...boot, run_id: "a-later-daemon" }], pr, CURRENT)?.kind, "orphaned",
+    "a later boot does not erase the earlier readable adoption pass");
 });
 
 test("a started fix seed still recognizes an explicit terminal outcome before boot recovery", () => {

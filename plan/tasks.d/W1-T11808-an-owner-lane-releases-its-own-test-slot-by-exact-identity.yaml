@@ -1,0 +1,52 @@
+- id: W1-T11808
+  title: "An owner lane can release its own test-slot reservation by exact identity — a supported command, run inside the owner's PID namespace and uid, that calls `releaseTestSlotForOwner` with the observed nonce/pid/start and prints its outcome, so an aged-hold diagnostic can name a real recovery action instead of a hand `mv`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # one concern: an operator-run release; it adds no new release basis, it only exposes W1-T9928's identity-checked one
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T9928, W1-T10251, W1-T11807]
+  files:
+    - scripts/test-slot-owner-release.mjs
+    - test/ci/suites/an-owner-lane-releases-its-own-test-slot-by-exact-identity.test.ts
+  status: queued
+  priority: 1  # the aged-hold diagnostic (W1-T11809) must name an action that exists
+  attempts: 0
+  rationale: |
+    READ at this worktree's HEAD: src/lib/test-slot.ts `releaseTestSlotForOwner(path, {ownerNonce, pid, processStart})`
+    is W1-T9928's identity-checked owner-assisted release. It takes the slot mutation guard, refuses another host, boot,
+    pid namespace or uid, refuses a nonce/pid/start mismatch ("PID reuse or a replaced reservation"), refuses a live owner,
+    requires `verifiedTerminalEvidence` from `probeReservedTree`, and unlinks through `unlinkObservedTestSlot`. Nothing
+    calls it outside tests: a grep of src/ and scripts/ finds no caller and no `rmd` verb.
+    W1-T10251's rationale records the cost: a dead owner's slot was freed only "after a builder moved the slot file
+    aside by hand" (logs-8864/10048-stale-test-slot-1.json).
+    Settled by lookup: is an owner-lane release command already filed? -> no; no shard names releaseTestSlotForOwner as
+      a caller or adds a test-slot command (plan/tasks.d sweep for releaseTestSlotForOwner, owner-lane, owner release).
+    Settled by lookup: script or new `rmd` verb? -> script. src/run-task.ts is a 43k-line verb table; the existing
+      operator tools for the author preflight live in scripts/ (scripts/preflight-author.mjs). A script keeps the seam
+      bounded and needs no CLI-reference change.
+  design: |
+    1. `node --import tsx scripts/test-slot-owner-release.mjs --slot-dir <dir> --slot <n> --nonce <ownerNonce>
+       --pid <pid> --start <processStart>` resolves `<dir>/slot-<n>.json` and calls `releaseTestSlotForOwner` with the
+       exact identity given. All five flags are required; no pattern, glob or "latest" form exists.
+    2. It prints one JSON line `{step: "test_slot.owner_release_cli", outcome, reason, evidence?}` and exits 0 only
+       on `released`. `refused`, `deferred` and `held` exit non-zero with the library's reason verbatim.
+    3. It adds no release basis. It inherits every refusal of `releaseTestSlotForOwner` (live owner, foreign namespace
+       from where it runs, unproven terminal evidence, private-capacity-v1 records). Run from the owner's own PID
+       namespace and uid, it sees what the owner saw; that is the "owner lane".
+    4. It never signals, never edits another record, never touches the mutation guard except through the library.
+    5. TESTS in the new file, driving the script as a child process against a private slot dir: a matching identity
+       with proven-ended evidence releases and exits 0; a wrong nonce, a live owner, and a missing flag each refuse
+       non-zero and leave the record byte-identical.
+  acceptance:
+    - claim: "the owner-lane command releases only an exactly identified reservation with proven-ended evidence and leaves every refused record unchanged"
+      proof: "unit test: test/ci/suites/an-owner-lane-releases-its-own-test-slot-by-exact-identity.test.ts"
+    - claim: "the command calls the identity-checked owner release"
+      proof: "grep: releaseTestSlotForOwner( in scripts/test-slot-owner-release.mjs"
+  falsifier: |
+    At HEAD the script does not exist and the test's child process fails to start. Replace the exact-identity call with
+    an unlink of the slot file and the wrong-nonce and live-owner tests fail, because the record is removed.

@@ -7654,7 +7654,7 @@ export function checksStateFromRollup(
   rollup: RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
 ): OpenPrView["checksState"] {
-  const { all, knownRequired, gate } = requiredCheckGate(rollup, requiredContexts);
+  const { all, knownRequired, gate, missingRequired } = requiredCheckGate(rollup, requiredContexts);
   if (all.length === 0) return "none";
   // Required contexts are configured but none has registered on this head yet
   // (e.g. the workflow hasn't started) — waiting, not "no checks at all".
@@ -7670,7 +7670,10 @@ export function checksStateFromRollup(
     if (REQUIRED_CHECK_FAIL.has(s)) return "red";
     if (!ok.has(s)) anyPending = true;
   }
-  return anyPending ? "pending" : "green";
+  // W1-T11606: a present green member does not settle the gate while another configured context
+  // has not registered on this head yet. Branch protection requires every named context; treating
+  // only the present subset as green let an early status merge a PR before ci-gate appeared.
+  return anyPending || missingRequired ? "pending" : "green";
 }
 
 /** The entries {@link checksStateFromRollup} judges, shared so every reading of a head's checks
@@ -7678,7 +7681,7 @@ export function checksStateFromRollup(
 function requiredCheckGate(
   rollup: RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
-): { all: RollupCheckEntry[]; knownRequired: boolean; gate: RollupCheckEntry[] } {
+): { all: RollupCheckEntry[]; knownRequired: boolean; gate: RollupCheckEntry[]; missingRequired: boolean } {
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const required = new Set(requiredContexts ?? []);
   const knownRequired = required.size > 0;
@@ -7688,7 +7691,9 @@ function requiredCheckGate(
   const gate = dedupeRollupByLatestAttempt(
     knownRequired ? all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")) : all,
   );
-  return { all, knownRequired, gate };
+  const missingRequired = knownRequired && [...required]
+    .some((name) => name !== REVIEW_CONTEXT && !gate.some((entry) => entry.name === name || entry.context === name));
+  return { all, knownRequired, gate, missingRequired };
 }
 
 /** W1-T4054 — earliest pending required start, so PR activity cannot reset the CI clock.
@@ -16259,6 +16264,47 @@ function continuationEndedAtEmptyBoot(
       ["run_child.adopted", "run_child.adoption_unreadable", "run_child.adoption_misidentified"].includes(String(line.step)));
 }
 
+/** W1-T11169 — a dead run's continuation ended once ANY later boot by another run has a readable, self-consistent
+ *  adoption pass that adopted no child naming THIS task; other tasks' adopted children never keep it live. */
+function continuationEndedAtTaskBoot(
+  lines: ReadonlyArray<Record<string, unknown>>, from: number, ownerRunId: string, taskId: string, runId: string,
+): boolean {
+  if (ownerRunId === runId) return false;
+  const childSteps = ["run_child.adopted", "run_child.adoption_unreadable", "run_child.adoption_misidentified"];
+  let previousBoot = from;
+  for (let bootAt = from + 1; bootAt < lines.length; bootAt++) {
+    const boot = lines[bootAt];
+    if (boot.step !== "daemon.boot") continue;
+    const censusFrom = previousBoot + 1;
+    const census = lines.slice(censusFrom, bootAt);
+    previousBoot = bootAt;
+    if (typeof boot.run_id !== "string" || boot.run_id === "" || boot.run_id === ownerRunId) continue;
+    const passAt = census.findLastIndex(line => line.step === "run_child.adoption_pass" && line.run_id === boot.run_id);
+    if (passAt < 0) continue;
+    const pass = census[passAt];
+    if (!["live", "adopted", "unreadable", "misidentified"].every(key =>
+      typeof pass[key] === "number" && Number.isSafeInteger(pass[key]) && Number(pass[key]) >= 0)) continue;
+    const children = census.slice(0, passAt).filter(line => childSteps.includes(String(line.step)));
+    // Counts corroborate the per-child rows; a missing identity never proves another task owns it.
+    if (children.some(line => typeof line.task_id !== "string" || line.task_id === "") ||
+        pass.adopted !== children.filter(line => line.step === childSteps[0]).length ||
+        pass.unreadable !== children.filter(line => line.step === childSteps[1]).length ||
+        pass.misidentified !== children.filter(line => line.step === childSteps[2]).length ||
+        pass.live !== Number(pass.adopted) + Number(pass.misidentified)) continue;
+    if (!children.some(line => line.task_id === taskId) &&
+        !lines.slice(censusFrom + passAt + 1).some(line =>
+          line.task_id === taskId && childSteps.includes(String(line.step)))) return true;
+  }
+  return false;
+}
+
+function fixSeedSettlementAt(
+  lines: ReadonlyArray<Record<string, unknown>>, pr: Pick<OpenPrView, "prNumber" | "headSha">, seed: FixSeed,
+): number {
+  return seed.ts === undefined ? -1 : lines.findLastIndex(line => line.step === FIX_SEED_ORPHANED_STEP &&
+    line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.seed_ts === seed.ts);
+}
+
 /** W1-T9999 — WHICH RUNG SPEAKS FOR THIS HEAD'S FIX SEED, and is it still live? The seed is the newest acted
  *  `sweep.disposed` blocked-fixable/conflicted row at the head. Its rung is the task's `fix.*` rows after the PR's
  *  previous `sweep.disposed` row, since a synchronous dispatch writes its rung before the seed, so an earlier rung
@@ -16284,6 +16330,13 @@ export function fixSeedRead(
   // exact-head dispatch before reading that identity; absent evidence stays unknown.
   if (pr.taskId === undefined && !window.some(line => line.step === "fix.dispatch" &&
       line.task_id === taskId && line.head_sha === pr.headSha)) return undefined;
+  // W1-T11169: a written settlement for this (PR, head, seed) is read back until a later dispatch starts a new seed.
+  const settledAt = fixSeedSettlementAt(lines, pr, seed);
+  if (seed.runId !== runId && settledAt > seedAt && !lines.slice(settledAt + 1).some(line => line.step === "fix.dispatch" &&
+      line.task_id === taskId && line.head_sha === pr.headSha)) {
+    return { kind: "orphaned", seed,
+      ...(lines[settledAt].reason === "owner-run-ended" ? { orphanReason: "owner-run-ended" as const } : {}) };
+  }
   const rung = (line: Record<string, unknown>) => line.task_id === taskId && String(line.step).startsWith("fix.");
   const dispatchAt = window.findLastIndex(line => rung(line) && line.step === "fix.dispatch");
   const dispatchOwner = dispatchAt < 0 ? undefined : window[dispatchAt].run_id;
@@ -16319,9 +16372,9 @@ export function fixSeedRead(
   // A started in-process rung also loses its continuation when its daemon dies (#12904).
   // Re-enter the ordinary owner/checkout claim, never clear it here: a surviving worker,
   // dirty unpublished tree or unreadable process census must still refuse there. Require
-  // this boot's explicit empty adoption receipt; a different run id or age alone proves nothing.
+  // a readable per-task adoption receipt; a different run id or age alone proves nothing.
   if (!ownerHandedOff && seed.runId !== undefined &&
-      continuationEndedAtEmptyBoot(lines, seedAt, seed.runId, taskId, runId) &&
+      continuationEndedAtTaskBoot(lines, seedAt, seed.runId, taskId, runId) &&
       window.every((line, index) => {
         if (!rung(line) || line.step !== "fix.dispatch" ||
             (typeof line.head_sha === "string" && line.head_sha !== pr.headSha)) return true;
@@ -21687,7 +21740,7 @@ export async function runSweep(
         alreadyDone = terminalDesignHold?.amended === true || terminalDesignHold?.mainAdoption === true || designReleasedByBody || metadataRed || emptyDiffReviewFailure(pr)
           ? false
           : dispatchedThisHead && (seedRead?.kind ?? "live") === "live"; // no read: a taskless PR's key (W1-T9955)
-        if (seedRead?.kind === "orphaned" && !deps.dryRun) {
+        if (seedRead?.kind === "orphaned" && !deps.dryRun && fixSeedSettlementAt(ledgerLines, pr, seedRead.seed) < 0) {
           appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: FIX_SEED_ORPHANED_STEP,
             pr_number: pr.prNumber, head_sha: pr.headSha, seed_ts: seedRead.seed.ts, seed_run_id: seedRead.seed.runId,
             reason: seedRead.orphanReason ?? "earlier-run-without-rung" });
