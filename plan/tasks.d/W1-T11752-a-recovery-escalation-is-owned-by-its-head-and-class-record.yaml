@@ -1,0 +1,61 @@
+- id: W1-T11752
+  title: "A NON-STALL PR ESCALATION IS GOVERNED BY ITS (PR, HEAD, FAILURE CLASS) RECOVERY RECORD — while a named owner holds the key before its deadline the sweep files no needs-human issue, the deadline wakes that owner exactly once, and only a second missed deadline escalates to a human, once per key, with the record's terminal receipt naming the issue"
+  repo: remudero
+  depends_on: [W1-T11751, W1-T11168]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern (when a non-stall escalation may be filed); spans the record module, the sweep's escalation site and escalate.ts
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T11751, W1-T11168, W1-T5690, W1-T5537, W1-T514, W1-T4659, W1-T8621]
+  files:
+    - src/lib/pr-recovery-record.ts
+    - src/lib/sweep.ts
+    - src/lib/escalate.ts
+    - test/sweep/a-recovery-escalation-is-owned-by-its-head-and-class-record.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  acceptance:
+    - claim: "For a review, ci or conflict escalation, an open recovery record whose owner is not none and whose deadline has not passed suppresses the needs-human filing and the disposed row names the owner and deadline; at wake_at the owner's next existing rung is taken once (one pr.recovery.woke row per key); after deadline_at with no pr.recovery.acted row the escalation is filed once per key and the record gets an escalated_to_human terminal receipt naming the issue; an unreadable record set files the escalation exactly as today"
+      proof: "unit test: test/sweep/a-recovery-escalation-is-owned-by-its-head-and-class-record.test.ts"
+    - claim: "stage-stall escalations keep the one-question-per-PR ruling, and no record transition closes, edits or answers a human question"
+      proof: "unit test: test/sweep/a-recovery-escalation-is-owned-by-its-head-and-class-record.test.ts"
+    - claim: "the sweep's escalation site consults the record through one named gate"
+      proof: "grep: recoveryEscalationGate( in src/lib/sweep.ts"
+  rationale: |
+    ORIGIN: the operator's 2026-11-08 PR-flow request, item (2), the cut-over half. W1-T11751 is the shadow record.
+    The recovery report (reports/Remudero PR flow recovery.md) could not be opened from this worktree (confinement
+    hook). The evidence is #17211's issue trail, recorded in W1-T11751's rationale: three heads and three classes
+    produced #17236, #17259 and #17283, each superseded or reconciled, and one read "owner: none".
+    The fail-closed direction is deliberate. A missing or unreadable record never suppresses an escalation, so the
+    human boundary can only be reached later when an owner is provably named, never skipped.
+    Settled by lookup: is this already filed or already decided? -> No. W1-T11168 (queued) escalates once per (PR,
+    head, cause) on a progress-judge verdict, for fix-dispatch holds only, and this task depends on it so its
+    cause classes are reused. W1-T514 made escalation dedup head-keyed. It deduplicates an issue already filed
+    and names no owner or deadline. W1-T5690 (merged) climbs rungs by blocker age. It is the rung the wake takes,
+    not a filing gate (plan/tasks.d/W1-T11168-*, W1-T514-*, W1-T5690-*).
+    Settled by lookup: does the stage-stall one-question ruling change? -> No (operator ruling 2026-11-01,
+    test/sweep/one-stalled-pr-keeps-one-stall-question-across-heads-and-blockers.test.ts). Stage-stall is out of scope.
+    Settled by lookup: may an automated path close a human question? -> Only through the existing revalidation
+    garden rules (src/lib/issue-revalidation-garden.ts, W1-T4659 supersession). This task adds no close.
+  design: |
+    1. recoveryEscalationGate(record, nowMs) in src/lib/pr-recovery-record.ts returns one of three results:
+       `defer {owner, deadline_at}`, `wake {action}` (once, when nowMs >= wake_at and no woke row exists), or
+       `escalate` (nowMs >= deadline_at, the woke row exists, and no acted row is newer than it). No record, an
+       owner of none, or an unreadable set returns `escalate`, which is today's behaviour.
+    2. The sweep's non-stall escalation site (the escalate call for EscalationCause review, ci or conflict) asks the
+       gate first. defer: no issue, and the disposed row carries recovery_owner and recovery_deadline_at. wake: take
+       the owner's next rung through W1-T5690's existing decideSloRung and append pr.recovery.woke. escalate: file
+       as today, then append pr.recovery.terminal escalated_to_human with the issue number.
+    3. The pr.recovery.* steps join the rotation-retained step set (W1-T8621) in this task, since a decision now
+       reads them.
+    4. Tests drive the escalation site with injected record rows: owner live before the deadline (no issue), the
+       wake taken once across two passes, the second missed deadline escalating once (a third pass files nothing
+       new), an unreadable set filing as today, and a stage-stall untouched.
+  falsifier: |
+    Remove the gate call: the owner-live fixture files an issue, and criterion 1 fails. Let an unreadable record
+    set return defer: the unreadable fixture files nothing, so the fail-closed case fails. If W1-T11168's escalation
+    is the only non-stall filing left by the time this is built, shrink the task to that site and say so in the PR.
