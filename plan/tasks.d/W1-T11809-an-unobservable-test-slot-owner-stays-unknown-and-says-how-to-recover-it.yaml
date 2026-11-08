@@ -1,0 +1,66 @@
+- id: W1-T11809
+  title: "An unobservable test-slot owner on the same kernel stays UNKNOWN and says how to recover it — retire the heartbeat-lease rung as a release basis for same-boot foreign-host/namespace records, and emit one actionable `test_slot.owner_aged` diagnostic per aged hold naming host, namespaces, age, the missing evidence and the owner-lane recovery command"
+  repo: remudero
+  depends_on: [W1-T11807, W1-T11808]  # same isStale hunk as W1-T11807; the diagnostic names W1-T11808's command
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, the release basis for foreign records; removing the lease can only hold MORE, never double-book
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T9928, W1-T11807, W1-T11808, W1-T9950]
+  files:
+    - src/lib/test-slot.ts
+    - test/ci/suites/an-unobservable-test-slot-owner-stays-unknown-and-says-how-to-recover-it.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ at this worktree's HEAD (src/lib/test-slot.ts): `testSlotHolderStale` returns true for a foreign-host or
+    foreign-namespace record when its boot id differs (a positive basis: every process of that boot ended) OR when
+    `now - heartbeatAt > TEST_SLOT_LEASE_MS`. The second is heartbeat expiry alone. A same-boot container or sandbox
+    owner that is live but blocked (W1-T9928's observed failure: a synchronous step starved the beat for hours) is
+    then freed and double-booked. W1-T9928's amendment says "A missed heartbeat measures missing progress reporting,
+    not process-tree quiescence"; its design kept the foreign lease only because it said "Do not introduce a shorter
+    foreign-host/namespace lease ... in this task", a scope note, not a ruling for the lease.
+    The waiter's only output for such a hold is a `holders` entry "slot N: pid P on H (label)" and, at 45 min,
+    `test_slot.wait_bound_exceeded`. It names no namespace, no age, no missing evidence and no recovery step.
+    Settled by lookup: is retiring the lease already filed or forbidden? -> neither. No shard changes TEST_SLOT_LEASE_MS
+      (plan/tasks.d grep), and DECISIONS.md / LEARNINGS.md / MASTER-PLAN.md carry no test-slot lease ruling. This
+      initiative's brief states "heartbeat expiry alone must never free a slot".
+    Settled by lookup: are queue tickets in scope? -> no. W1-T9950 ticket reaping holds no capacity and keeps its own
+      derived bound; the brief forbids unrelated queue changes.
+    Settled by lookup: is there a supported recovery action to name? -> yes once W1-T11808 lands
+      (scripts/test-slot-owner-release.mjs over `releaseTestSlotForOwner`).
+  design: |
+    1. THE LEASE STOPS FREEING. In `testSlotHolderStale`, for a foreign-host or foreign-namespace record whose boot id
+       equals the waiter's (same kernel), heartbeat age no longer returns stale. A differing boot id stays stale (a
+       positive basis). Where the waiter has no boot id (macOS) or the record has none, today's lease judgment is
+       KEPT and named in a comment as outside this Linux seam. Same-namespace judgment and private-capacity-v1 rules
+       are unchanged. Queue tickets are unchanged.
+    2. AGED IS A DIAGNOSTIC, NEVER A RELEASE. A retained foreign record is AGED when its heartbeat silence exceeds
+       `TEST_SLOT_SILENT_BEATS` times its recorded `heartbeatIntervalMs`, or `TEST_SLOT_LEASE_MS` when it records no
+       cadence (the existing constant changes meaning from release bound to diagnostic bound; no new number).
+    3. ONE ACTIONABLE ROW. Once per ownerNonce per waiter (`observeOnce`), log `test_slot.owner_aged` with slot, label,
+       host, ownerUid, pidNs (record and waiter), cgroupNs (record and waiter), bootId match, startedAt, heartbeatAt,
+       ageMs, silentMs, `missingEvidence` (a list such as "pid namespace differs: owner pid unprobeable from here",
+       "no pinned cgroup identity recorded", "cgroup namespace differs", the W1-T11807 probe reason), and `recovery`:
+       the exact W1-T11808 command line filled with this record's slot dir, slot, nonce, pid and start, plus
+       "run as uid <ownerUid> inside pid namespace <pidNs>". Write the same as one human stderr line. The `holders`
+       entry for that slot gains "UNKNOWN (aged <age>)". The hold is NOT cleared.
+    4. Export the aged judgment as `judgeTestSlotHoldAge(held, waiterFacts, now)` returning the fields above, so
+       W1-T11810's doctor check reuses it rather than re-deriving them.
+    5. TESTS in the new file: a same-boot foreign-namespace owner whose heartbeat is past TEST_SLOT_LEASE_MS keeps its
+       slot and logs one `test_slot.owner_aged` with every field and a runnable recovery line; a different boot id
+       is still reclaimed; a namespace-mismatch record names that as missing evidence; a later waiter behind it keeps
+       its FIFO position (W1-T9950 queue order unchanged) and the aged row is not repeated each poll.
+  acceptance:
+    - claim: "a same-kernel foreign owner is never freed by heartbeat age; its aged hold is logged once with host, namespaces, age, missing evidence and the owner-lane recovery command, and FIFO order is unchanged"
+      proof: "unit test: test/ci/suites/an-unobservable-test-slot-owner-stays-unknown-and-says-how-to-recover-it.test.ts"
+    - claim: "the aged-hold judgment is a named export"
+      proof: "grep: export function judgeTestSlotHoldAge( in src/lib/test-slot.ts"
+  falsifier: |
+    At HEAD the same-boot fixture whose heartbeat is 91 min old is reclaimed by `testSlotHolderStale`'s lease rung and
+    a second waiter acquires its capacity, so the first test fails. Restore the lease rung and it fails again; drop the
+    `recovery` field and the diagnostic test fails.
