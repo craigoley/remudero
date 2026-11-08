@@ -115,6 +115,7 @@ function corpus(): Array<Record<string, unknown>> {
     rows.push({ step, run_id: `brain-${step}`, cost_usd: 0.1, ...call(), ts: at(m++) });
   }
   rows.push({ step: "ci.polling", run_id: "daemon", attempt: 1, ts: at(m++) }, { step: "followup.harvested", run_id: "daemon", body: "y".repeat(200), ts: at(m++) });
+  fallback(["review.history_guarded"], "pr_url", 400);
   return rows;
 }
 
