@@ -1578,7 +1578,7 @@ export interface BuildSweepEffectsDeps {
     excludeProviders?: readonly WorkerProviderId[]) => Promise<number>;
   /** W1-T3798 — reuse/discrimination is an explicit mode, so the adapter can run the cheap
    *  deterministic path instead of silently treating both dispositions as a full review. */
-  reviewReuseRunner?: (pr: OpenPrView, mode: ReviewDispatchMode, reviewAttemptId?: string, onPhase?: (phase: string) => void) => Promise<number>;
+  reviewReuseRunner?: (pr: ReviewDispatchPr, mode: ReviewDispatchMode, reviewAttemptId?: string, onPhase?: (phase: string) => void) => Promise<number>;
   /** The command the DEFAULT `reviewRunner` above calls. Separate from `reviewRunner` on purpose:
    *  overriding `reviewRunner` replaces the default outright and leaves its opt-in untested, while
    *  this seam keeps the default arm itself — the one that names `executionMode: "semantic"` — as
@@ -1719,6 +1719,11 @@ export type ReviewDispatchMode =
   | { kind: "full-review" }
   | { kind: "reuse"; judgedHeadSha: string }
   | { kind: "discriminate-only"; judgedHeadSha: string };
+
+/** Options derived when admitting this review, rather than facts read by the PR-view producer. */
+export interface ReviewDispatchPr extends OpenPrView {
+  excludeProviders?: readonly WorkerProviderId[];
+}
 
 /**
  * The default `gh` invocation for {@link buildSweepEffects}' `ghRunImpl` seam — a NAMED function
@@ -7191,8 +7196,6 @@ export interface OpenPrView {
   reviewPendingOwnerDead?: boolean;
   reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load";
   reviewPendingOwnerGoneReason?: string;
-  /** Re-admission only: provider whose UNABLE review made the current pending verdict cannot-evaluate. */
-  excludeProviders?: WorkerProviderId[];
   /** W1-T2299 — when the current `reviewState` reading was posted, read off the same rollup entry
    *  already scanned. NOT A BODY-EDIT TIMESTAMP, and must never be documented as one: GitHub
    *  exposes no body-specific time field, so this detects ACTIVITY AFTER A VERDICT and a gaming
@@ -14385,7 +14388,7 @@ export interface SweepDeps {
    *  per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
    *  W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
    *  with each review-input key claimed synchronously before scheduling. */
-  postReview?: (pr: OpenPrView, mode?: ReviewDispatchMode, reviewAttemptId?: string, onPhase?: (phase: string) => void) => void | Promise<void>;
+  postReview?: (pr: ReviewDispatchPr, mode?: ReviewDispatchMode, reviewAttemptId?: string, onPhase?: (phase: string) => void) => void | Promise<void>;
   /** W1-T3581 — provenance of the module graph THIS daemon process loaded at boot. A stale
    * reviewer-code refusal may bypass its ordinary time backoff only when this narrow predicate
    * proves the loaded code is at or after the refusal's recorded origin/main target. Omitted
@@ -17243,7 +17246,7 @@ export interface DetachedWorkHost {
   mode: () => "off" | "shadow" | "on";
   /** Starts one review as a child, or `undefined` when it stays in process (the mode, the placement, no engine, no admission). */
   spawnReview: (input: {
-    pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean };
+    pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean; excludeProviders?: readonly WorkerProviderId[] };
     reviewKey: string;
     reviewAttemptId: string | undefined;
   }) => Promise<ReviewChildLaunch | undefined>;
@@ -20272,7 +20275,7 @@ export async function runSweep(
     // each other, bounded by `reviewLanes` after the loop.
   const pendingReviews: Array<{
     index: number;
-    pr: OpenPrView;
+    pr: ReviewDispatchPr;
     reason: string;
     question: ClarificationQuestion | undefined;
     // W1-T513: carried alongside the job so both release sites release the SAME key they claimed;
@@ -23795,7 +23798,7 @@ export async function runSweep(
       // the pool, where `claimReview` atomically claims it immediately before the attempt.
       const reviewKey = reviewOutcomeKeyForPr(pr);
       const excludedProviders = reviewerUnavailableProvidersForReadmission(pr, ledgerLines);
-      const dispatchPr = excludedProviders?.length ? { ...pr, excludeProviders: excludedProviders } : pr;
+      const dispatchPr: ReviewDispatchPr = excludedProviders?.length ? { ...pr, excludeProviders: excludedProviders } : pr;
       // W1-T9047: discriminate-only is then decided by main's reach.
       const requested = reviewDispatchModeFor(pr, disposition);
       const mode = await reviewModeWithReach(dispatchPr, requested);

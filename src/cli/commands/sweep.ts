@@ -297,7 +297,7 @@ export function buildSweepEffects(
   const reviewFallbackRunner =
     deps.reviewRunner ??
     ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void,
-      excludeProviders?: OpenPrView["excludeProviders"]) => {
+      excludeProviders?: ReviewCommandDeps["excludeProviders"]) => {
       const args = ["--repo", deps.repo];
       const opts = { executionMode: "semantic" as const, planOnlyFiling: isPlanFiling,
         ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),

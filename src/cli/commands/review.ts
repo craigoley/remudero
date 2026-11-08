@@ -7,7 +7,7 @@ import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheld
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
-import { loadConfig, type Config } from "../../lib/config.js";
+import { isWorkerProviderId, loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
@@ -76,15 +76,17 @@ export interface ReviewCommandHost {
   reviewSubjectGit(repoDir: string, argv: string[]): string;
 }
 
-export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId"> {
+export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders"> {
   const { JUDGE_AT_OWN_START_FLAG, acceptedReviewAttemptId } = host;
   const mode = flagValue(rest, "--execution-mode");
   const reviewAttemptId = acceptedReviewAttemptId(flagValue(rest, "--review-attempt-id"));
+  const excludeProviders = [...new Set((flagValue(rest, "--exclude-providers") ?? "").split(",").filter(isWorkerProviderId))];
   return {
     ...(rest.includes(JUDGE_AT_OWN_START_FLAG) ? { judgeAtOwnStart: true } : {}),
     ...(rest.includes("--plan-only-filing") ? { planOnlyFiling: true } : rest.includes("--not-plan-only-filing") ? { planOnlyFiling: false } : {}),
     ...(mode === "semantic" || mode === "deterministic" ? { executionMode: mode } : {}),
     ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
+    ...(excludeProviders.length ? { excludeProviders } : {}),
   };
 }
 
