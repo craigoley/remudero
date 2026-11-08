@@ -417,6 +417,14 @@ test("W1-T11383 criterion 7 a heap stand-down is named as fleet-withheld memory 
   for (const row of run.rows.filter((r) => r.step === "dispatch.lane_refill_held")) {
     assert.equal(idleLaneCauseForStep(row.step, row.fields), "memory");
   }
+  // The row flag is per episode: a second latch writes each surface's row again, once.
+  const episodes = latchFixture("enforce");
+  assert.equal(episodes.read(0.70)?.episode, 1);
+  assert.deepEqual([episodes.hold.firstHeld("intake"), episodes.hold.firstHeld("intake")], [true, false]);
+  episodes.read(0.31);
+  assert.equal(episodes.read(0.31, "dispatch", 3 * minute), undefined, "released");
+  assert.equal(episodes.read(0.70)?.episode, 2);
+  assert.deepEqual([episodes.hold.firstHeld("intake"), episodes.hold.firstHeld("intake")], [true, false]);
   // The idle-lane cause is memory.
   assert.equal(idleLaneCauseForRefillReason("fleet HEAP hold: heap latched"), "memory");
   assert.equal(idleLaneCauseForStep("daemon.admission_held", { control: "HEAP", reason: "fleet HEAP hold: x" }), "memory");

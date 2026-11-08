@@ -2788,7 +2788,7 @@ function heapWorkerAdmissionHold(
   const heap = heapAdmissionHold(deps, surface, sample);
   if (!heap || resolveFleetControlHold(deps)) return undefined;
   const reason = `fleet HEAP hold: ${heap.detail}`;
-  if (heap.first) log("daemon.admission_held", { surface, control: "HEAP", detail: heap.detail, reason, episode: heap.episode });
+  if (heapAdmissionLatches.get(deps)?.firstHeld(surface)) log("daemon.admission_held", { surface, control: "HEAP", detail: heap.detail, reason, episode: heap.episode });
   return { control: "HEAP", detail: heap.detail, reason };
 }
 

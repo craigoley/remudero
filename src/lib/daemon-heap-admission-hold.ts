@@ -225,11 +225,11 @@ export interface HeapAdmissionHoldVerdict {
   control: "HEAP";
   detail: string;
   episode: number;
-  /** True on this surface's first held read of the episode: the one read that writes its row. */
-  first: boolean;
 }
 export interface HeapAdmissionHoldLatch {
   read(surface: string, sample: NearLimitSample | undefined): HeapAdmissionHoldVerdict | undefined;
+  /** True once per surface per latch episode: the one held read that writes the surface's row. */
+  firstHeld(surface: string): boolean;
   readiness(): HeapHoldReadiness;
   latched(): boolean;
 }
@@ -301,11 +301,14 @@ export function createHeapAdmissionHold(opts: HeapAdmissionHoldOptions): HeapAdm
         }
       }
       if (!latch.latched || !pinned?.live) return undefined;
-      const first = !surfaces.has(surface);
-      surfaces.add(surface);
       const { high, low, dwell_ms } = pinned.pair;
-      return { control: "HEAP", episode, first,
+      return { control: "HEAP", episode,
         detail: `heap latched at ${high.toFixed(4)} of its limit; releases below ${low.toFixed(4)} held ${dwell_ms} ms` };
+    },
+    firstHeld(surface) {
+      if (surfaces.has(surface)) return false;
+      surfaces.add(surface);
+      return true;
     },
     readiness: () => readiness,
     latched: () => latch.latched,
