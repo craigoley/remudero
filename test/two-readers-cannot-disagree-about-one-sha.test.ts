@@ -97,7 +97,6 @@ test("W1-T2793: one body and one plan blob cannot yield opposite criteria-presen
     const ledgerPath = join(ledgerDir, "ledger.ndjson");
     const posts: string[] = [];
     const stale = await postReviewStatusGuarded({
-    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "craigoley",
       repo: "remudero",
       sha: HEAD,
