@@ -20,9 +20,9 @@
     EXPLICITLY NOT IN SCOPE: any change to broker policy, read allow-lists, or gates; restarting the daemon.
   acceptance:
     - claim: "the broker child starts and serves a read under plain Node with an empty execArgv"
-      proof: "unit test: test/github/broker-child-entry-runs-without-a-loader.test.ts"
+      proof: "unit test: broker child starts and serves a read under plain Node with an empty execArgv"
     - claim: "a child that cannot start is reported, not swallowed"
-      proof: "unit test: test/github/broker-child-entry-runs-without-a-loader.test.ts"
+      proof: "unit test: broker child startup failure is reported instead of swallowed"
   risk: high
   band_meaning: span
   band_rationale: "one cross-file invariant: the real child entry and the spawn selector in the client must work together, so a single real-child test needs all files and is unsatisfiable piecewise"

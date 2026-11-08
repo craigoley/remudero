@@ -16,9 +16,9 @@
     EXPLICITLY NOT IN SCOPE: changing verdict grammar, gates or policy; the broker child fix (W1-T11741).
   acceptance:
     - claim: "a no-verdict planner outcome records evidence, owner and a route"
-      proof: "unit test: test/plan/planner-no-verdict-routes-to-an-owner.test.ts"
+      proof: "unit test: no-verdict planner outcome records evidence, owner and a route"
     - claim: "the retry or follow-up is bounded and does not loop"
-      proof: "unit test: test/plan/planner-no-verdict-routes-to-an-owner.test.ts"
+      proof: "unit test: no-verdict retry and follow-up routes are bounded"
   risk: high
   band_meaning: span
   band_rationale: "one invariant: the no-verdict path in plan-architect and its routing test are the same falsifier (test/plan/planner-no-verdict-routes-to-an-owner.test.ts), unsatisfiable piecewise"
