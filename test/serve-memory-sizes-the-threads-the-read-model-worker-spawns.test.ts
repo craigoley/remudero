@@ -45,7 +45,8 @@ function scratch(t: TestContext, kind: string, book: Book): { dir: string; stops
   const stops: Array<() => void> = [];
   onReadModelClose(t, async () => {
     for (const stop of stops) stop();
-    await Promise.all(book.live().map(({ thread }) => (thread as Worker).terminate()));
+    // The shared transaction publisher is not this test's thread: terminating it would fail every later flush in the process.
+    await Promise.all(book.live().filter(({ kind }) => !kind.startsWith("read-model-db:")).map(({ thread }) => (thread as Worker).terminate()));
     book.stop();
   });
   writeFileSync(join(dir, "ledger.ndjson"), LEDGER_ROW);

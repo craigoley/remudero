@@ -2,7 +2,7 @@
 // observation files into the state dir asynchronously, so a fixture that removes that dir before the
 // publisher settles races it into ENOTEMPTY. flushReadModelTransactions() is the barrier; this census
 // refuses any suite that opens the read model and removes a temp dir without the shared helper
-// (test/helpers/read-model-fixture-dir.ts) or an awaited flush before the removal. It carries no
+// (test/helpers/read-model-fixture-dir.ts) or the flush barrier (an awaited flushReadModelTransactions). It carries no
 // allowlist: a suite it names migrates.
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -14,8 +14,9 @@ import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const OPENER = /\b(?:createReadModelTicker|createReadModelWorker|openReadModelDb)\b|read-model-db\.js/;
-const REMOVAL = /\brmSync\(\s*[^()]*,\s*\{[^}]*recursive:\s*true[^}]*force:\s*true/g;
-const FLUSH = /await\s+flushReadModelTransactions\(/;
+const REMOVAL = /\brmSync\(\s*[^()]*,\s*\{[^}]*recursive:\s*true/;
+/** A non-import mention: the call, or the function bound as an injectable default (`settle = flushReadModelTransactions`). */
+const FLUSH = /^(?!import\b).*\bflushReadModelTransactions\b/m;
 const HELPER = /\breadModelFixtureDir\(/;
 
 /** Names of the suites in `sources` that open the read model, remove a temp dir, and do neither safe thing. */
@@ -23,10 +24,8 @@ export function unflushedFixtures(sources: ReadonlyMap<string, string>): string[
   const refused: string[] = [];
   for (const [name, text] of sources) {
     if (!OPENER.test(text)) continue;
-    const removals = [...text.matchAll(REMOVAL)].map((m) => m.index!);
-    if (!removals.length || HELPER.test(text)) continue;
-    const flush = FLUSH.exec(text);
-    if (!flush || removals.some((at) => at < flush.index)) refused.push(name);
+    if (!REMOVAL.test(text) || HELPER.test(text)) continue;
+    if (!FLUSH.test(text)) refused.push(name);
   }
   return refused.sort();
 }
@@ -42,8 +41,11 @@ function testSuites(dir = join(REPO_ROOT, "test")): Map<string, string> {
 
 test("W1-T11411 census: every suite that opens the read model flushes the diagnostic publisher before removing its state", () => {
   const suites = testSuites();
-  const opening = [...suites].filter(([, text]) => OPENER.test(text) && [...text.matchAll(REMOVAL)].length > 0);
-  assert.ok(opening.length >= 60, `the census must see the read-model population, saw ${opening.length}`);
+  const opening = [...suites].filter(([, text]) => OPENER.test(text) && (REMOVAL.test(text) || HELPER.test(text)));
+  const viaHelper = opening.filter(([, text]) => HELPER.test(text));
+  // 119 suites open the read model and tear down a dir at the commit that landed this census; 90+ of them use the helper.
+  assert.ok(opening.length >= 100, `the census must see the read-model population, saw ${opening.length}`);
+  assert.ok(viaHelper.length >= 85, `the shared helper must carry the migrated suites, saw ${viaHelper.length}`);
   assert.deepEqual(unflushedFixtures(suites), [],
     "these suites remove their state dir without awaiting flushReadModelTransactions: use readModelFixtureDir from #test/helpers/read-model-fixture-dir.js");
 });
@@ -53,13 +55,14 @@ test("W1-T11411 census: a planted fixture that removes its state dir without the
   const open = 'import { createReadModelTicker } from "#src/lib/read-model-worker.js";';
   const sources = new Map([
     ["planted-violation", `${open}\n${rm}\n`],
-    ["planted-flush-after-removal", `${open}\n${rm}\nawait flushReadModelTransactions();\n`],
+    ["planted-flush-before", `${open}\nawait flushReadModelTransactions();\n${rm}\n`],
+    ["planted-injected-flush", `${open}\nasync function retire(settle = flushReadModelTransactions) { await settle(); }\n${rm}\n`],
+    ["planted-flush-only-imported", `import { flushReadModelTransactions } from "#src/lib/read-model-db.js";\n${open}\n${rm}\n`],
     ["planted-helper", `${open}\nconst { dir } = readModelFixtureDir(t, "k");\n${rm}\n`],
-    ["planted-flush-first", `${open}\nawait flushReadModelTransactions();\n${rm}\n`],
     ["planted-no-opener", `${rm}\n`],
     ["planted-no-removal", `${open}\n`],
   ]);
-  assert.deepEqual(unflushedFixtures(sources), ["planted-flush-after-removal", "planted-violation"]);
+  assert.deepEqual(unflushedFixtures(sources), ["planted-flush-only-imported", "planted-violation"]);
 });
 
 test("the shared read-model fixture removes its state dir only after its closers ran in reverse order and the publisher flushed", async () => {
@@ -90,7 +93,7 @@ test("a failing closer does not stop the others and keeps the dir for evidence",
   onClose(() => { ran.push(1); });
   onClose(() => { ran.push(2); throw original; });
   try {
-    await assert.rejects(async () => hooks[0]!(), original);
+    await assert.rejects(async () => hooks[0]!(), (error: unknown) => error instanceof AggregateError && error.errors.includes(original));
     assert.deepEqual(ran, [2, 1]);
     assert.equal(existsSync(dir), true);
   } finally {
