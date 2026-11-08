@@ -3297,8 +3297,6 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
   // NO PREDICATE ⇒ NO OPINION. Whether a module already exists, or whether an export line is new,
   // is the caller's to answer; a wrong guess here would flag every task that merely EDITS a module.
   if (!opts.moduleExists) return [];
-  const taskRepoName = task.repo?.split("/").at(-1)?.replace(/\.git$/i, "").toLowerCase();
-  if (opts.localRepoName && taskRepoName && taskRepoName !== opts.localRepoName.toLowerCase()) return [];
   const severity: LintSeverity = opts.callSite ?? "warn";
   const declaredSrc = (task.files ?? []).filter((f) => f.startsWith("src/") && (f.endsWith(".ts") || f.endsWith(".tsx")) && !f.includes("*"));
   const declaredSrcSet = new Set(declaredSrc);
@@ -3463,9 +3461,6 @@ export function unmintedTaskIdViolations(task: Task, opts: LintOpts = {}): LintV
 }
 
 export interface LintOpts {
-  /** Resolved repository name of this checkout; when known, call-site analysis skips tasks
-   *  targeting a different repository because their source tree is not present here. */
-  localRepoName?: string;
   /** Resolved owner of the task's repository; absent retains the parser's legacy core default. */
   taskRepoOwner?: string;
   /** The task's resolved mount turn-budget — only needed to opt INTO budget-sanity. */
