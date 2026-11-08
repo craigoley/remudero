@@ -23,9 +23,11 @@
     or a bare "UTC" suffix) via the existing reset parsing in detectUsageLimitRefusal.
 
     TESTS go in the EXISTING test/classify.test.ts only — do NOT create a new test path. Add
-    positive cases (exact text; bare UTC reset parsed) and negative cases (near-miss text such
-    as "weekly limit" without "hit your", unrelated text) under a UNIQUE test title, e.g.
-    "classify weekly-limit usage refusal: exact text and bare UTC reset". Synthetic fixtures
+    positive cases (the exact Claude weekly-limit text and parsed bare UTC reset) and negative
+    near-miss cases in the existing test named "detectUsageLimitRefusal: pinned Codex subscription
+    refusal families are provider-neutral". Keep the acceptance proof on that currently
+    resolvable literal title because plan lint refuses an unbuilt title in an already-existing
+    test file; the added assertions must fail if the classifier fix is removed. Synthetic fixtures
     only; no live model-evaluation provider calls or spend.
 
     NON-GOALS: no triage reauction, no WebSearch/WebFetch, no fallback routing — that is
@@ -33,4 +35,4 @@
 
   acceptance:
     - claim: "the weekly-limit refusal text and bare UTC reset suffix are classified, with positive and negative cases in the existing suite"
-      proof: "unit test: test/classify.test.ts"
+      proof: "unit test: detectUsageLimitRefusal: pinned Codex subscription refusal families are provider-neutral"
