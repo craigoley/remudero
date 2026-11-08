@@ -1,0 +1,52 @@
+- id: W1-T11605
+  title: A selected-registry read that times out ledgers which hop it was waiting on, the hop times and the loop's active/idle split, so the daemon's recurring "selected instance registry unavailable (timeout)" can be attributed
+  repo: remudero
+  depends_on: []
+  priority: 0.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # observability only; the read's outcome, its 1,500 ms budget and every identity/digest/revision check are unchanged
+  band_meaning: blast-radius
+  origin: operator-session#merge-latency-2026-11-07
+  plan_refs:
+    - W1-T11463
+  files:
+    - src/lib/instance-registry-selection.ts
+    - src/cli/commands/daemon.ts
+    - test/deploy/a-timed-out-selected-registry-read-names-its-pending-hop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A selected-registry read whose open never settles still returns exactly unknown/timeout, and hands one trace to the process sink naming pending_hop open, hops_completed 1, a numeric lstat hop time, the budget, wall time, reads in flight and an active/idle split that fits inside the window; the trace carries no path or registry content
+      proof: "grep: W1-T11605 criterion 1 in test/deploy/a-timed-out-selected-registry-read-names-its-pending-hop.test.ts"
+    - claim: When every hop settles but the loop is held for 10 ms on each turn (below the deadline's budget/20 re-arm threshold), the read still times out and its trace shows more than 3 completed hops, timed read hops and loop_active_ms above loop_idle_ms
+      proof: "grep: W1-T11605 criterion 2 in test/deploy/a-timed-out-selected-registry-read-names-its-pending-hop.test.ts"
+    - claim: ledgerSelectedRegistryReadTimeouts writes one instance_registry.read_timeout row per timed-out read and none for a ready read, and a throwing sink never changes the read's timeout outcome
+      proof: "grep: W1-T11605 criterion 3 in test/deploy/a-timed-out-selected-registry-read-names-its-pending-hop.test.ts"
+    - claim: The daemon command installs the ledger sink with its own log right after that log is defined
+      proof: "grep: ledgerSelectedRegistryReadTimeouts(log) in src/cli/commands/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-07, core daemon (host 581d95b7a871, actor_pid 109), 14:30Z-17:11Z:
+    - 136 ledger rows carry "selected instance registry unavailable (timeout)", from 65 distinct events.
+    - sre_lane makes exactly one runtime recheck per run, and failed it 32 times against 48 sre_lane.filed. That is about 40% of reads over the 1,500 ms budget, not a rare tail.
+    - W1-T11463 (#17078) made the deadline loop-available and the rate did not fall.
+    - The daemon DOES write stall rows, under daemon.loop_stall_profile rather than runtime.loop_stall_profile: 8 rows, each lag 101-225 s with 15-135 s of profiled sync time. Top frames are writeSync/Buffer.concat (syncBufferWrapper), scanLedgerBuffer parsing, GC and spawn. daemon.loop_lag rows show async spawns costing about 220 ms of sync time each (13 s over 59 calls) and execFileSync ghJson about 700 ms a call.
+    - The timeouts are NOT concentrated inside those long stalls: 8 of 65 events fall inside them, which matches the 12.6% of the window they cover.
+    MEASURED (scratch experiment with this module, real files, on the Azure host):
+    - A read is about 10 sequential awaited hops: lstat, open, fstat, read, a zero-byte read, fstat, lstat, realpath, lstat, close.
+    - With the loop held B ms each turn, the read took about 10 x B: 50 ms gave about 0.5 s, 100 ms about 1.0 s, 150 ms about 1.5 s with 2 of 6 timing out, and 300 ms gave 6 of 6 timeouts.
+    - Saturating the 4-thread libuv pool with 4, 16 and 64 concurrent gunzip streams of real ledger archives kept the read at 430 ms or less, so the UV_THREADPOOL_SIZE hypothesis is not supported.
+    INFERRED: loopAvailableDeadline discounts only its own timer's lateness at the moment it fires. Turns held between the read's hops count as available time, so a loop busy in many short chunks times the read out. A single long stall, which W1-T11463 fixed, does not.
+    No per-read production evidence exists yet, so this task records it.
+  design: |
+    In readBounded, time every awaited hop through one helper that records its name, ms, completed count and the pending hop. readWithDeadline captures performance.eventLoopUtilization() at the start. On deadline expiry it hands a frozen trace (subject, budget_ms, wall_ms, loop_active_ms, loop_idle_ms, hops_completed, pending_hop, hop_ms, max_hop_ms, concurrent_reads) to one process-wide sink, setSelectedRegistryReadTimeoutObserver. A sink error is swallowed. The daemon command installs ledgerSelectedRegistryReadTimeouts(log), which writes instance_registry.read_timeout.
+    NOT IN SCOPE:
+    - the 1,500 ms budget, loopAvailableDeadline in src/lib/clock.ts, UV_THREADPOOL_SIZE;
+    - any change to the identity, digest or revision checks, or to the hop order;
+    - rows from run_child processes, which do not run the daemon command.
+  note: |
+    Proof that counts: instance_registry.read_timeout rows from the core daemon. If loop_active_ms is close to wall_ms with hops_completed above 0, the loop-turn cause is confirmed. If loop_idle_ms reaches the budget on one pending hop, I/O is the cause.
+    reservation hand-off: run-unfiled-1794071228916 -> run-unfiled-1794071228916
+    Reserved with rmd next-task-id (W1-T11605 on run-unfiled-1794071228916). From the operator session's 2026-11-07 merge-latency investigation, after W1-T11463 left the timeout rate unchanged.

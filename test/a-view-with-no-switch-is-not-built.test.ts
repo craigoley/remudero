@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
@@ -17,14 +17,13 @@ import {
   type ReadModelViewReaders,
   type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { READ_MODEL_STATUS_VIEW } from "#src/lib/views.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-10-05T12:00:00.000Z");
 
 function scratch(t: { after: (fn: () => void) => void }, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -60,7 +59,7 @@ function fixture(t: { after: (fn: () => void) => void }, views: ReadModelView[],
     stateDir, instances: [{ name: "core", ledgerDir }], post: (m) => void messages.push(m), oracle: "off", views, readers,
     ...(extra.advance ? { clock: extra.advance } : {}), ...(extra.passBudgetMs !== undefined ? { passBudgetMs: extra.passBudgetMs } : {}),
   });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   const bodies = (): string[] => [...new Set(messages.flatMap((m) => (m.type === "body" ? [m.entry.view] : [])))].sort();
   const logs = (step: string) => messages.flatMap((m) => (m.type === "log" && m.step === step ? [m.extra] : []));
   return { ticker, bodies, logs };

@@ -1,21 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath, type ReadModelBodyEntry, type ReadModelSwitches, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { createService } from "#src/lib/service.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { withViewShadow, type ShadowRequest } from "#src/lib/view-shadow.js";
 import { buildReadModelViewRoutes, viewEtag, type ViewBodySource, type ViewDefinition } from "#src/lib/views.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 const SILENT_WORKER = new URL("data:text/javascript,setInterval(() => {}, 1000)");
 
 function scratch(t: TestCtx, kind: string): string {
-  const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = readModelFixtureDir(t, kind).dir;
   return dir;
 }
 
@@ -34,7 +33,7 @@ async function views(t: TestCtx, switches: ReadModelSwitches["views"]): Promise<
   }));
   const server = createService({ tokens: { read: "r", write: "w" }, routes });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => server.close());
+  onReadModelClose(t, () => server.close());
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   return {
     samples,
@@ -79,7 +78,7 @@ test("an absent or unreadable switch file is ledgered once and leaves every view
   let refresh: (() => void) | undefined;
   const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], workerUrl: SILENT_WORKER, stopWaitMs: 20,
     log: (step, extra) => void logged.push([step, extra]), every: (run) => ((refresh = run), () => undefined) });
-  t.after(() => handle.stop());
+  onReadModelClose(t, () => handle.stop());
   handle.start();
   refresh?.();
   const switchRows = (): string[] => logged.filter(([step]) => step.startsWith("read_model.switch_")).map(([step]) => step);
@@ -106,7 +105,7 @@ test("a projector tick is judged from when it completed and a slow one is ledger
   const clock = { now: () => (ms += 1_900), date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir: dir, instances: [{ name: "core", ledgerDir: dir }], clock, post: (m) => void posted.push(m), oracle: "off" });
-  t.after(() => ticker.release());
+  onReadModelClose(t, () => ticker.release());
   ticker.tick();
   const state = posted.find((m) => m.type === "state");
   assert.ok(state?.type === "state");

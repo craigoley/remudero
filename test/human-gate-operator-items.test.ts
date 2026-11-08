@@ -15,7 +15,7 @@ import { createNowView, NOW_DAEMON_SILENT_MS, type NowViewData } from "../src/li
 import { acquireLease } from "../src/lib/read-model-db.js";
 import type { GitHub, StatusProjection } from "../src/lib/status.js";
 import { costAnomalyUsd, deriveOperatorItems } from "../src/lib/status-board.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const AT = "2026-10-04T12:00:00.000Z";
 const NOW = Date.parse(AT);
@@ -170,15 +170,14 @@ test("operator records remain visible without multiplying the human decision cou
 });
 
 function nowFixture(t: TestContext) {
-  const root = makeTempDir("human-gate-operator-items");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "human-gate-operator-items").dir;
   const ledgerDir = join(root, "state");
   const planDir = join(root, "plan");
   mkdirSync(ledgerDir, { recursive: true });
   mkdirSync(planDir, { recursive: true });
   const clock = fixedClock(NOW);
   const db = openProjectorReadModel(join(root, "read-model"), "core", clock);
-  t.after(() => db.close());
+  onReadModelClose(t, () => db.close());
   const lease = acquireLease(db, { clock });
   assert.ok(lease.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: lease.lease, clock });

@@ -1,19 +1,18 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const exec = promisify(execFile);
 const repo = resolve(import.meta.dirname, "..");
 const moduleUrl = (name: string) => JSON.stringify(pathToFileURL(join(repo, "src/lib", `${name}.ts`)).href);
 
 test("production worker adapters survive a parent heap flag and retain the TypeScript loader", async (t) => {
-  const root = makeTempDir("worker-heap-inheritance");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = readModelFixtureDir(t, "worker-heap-inheritance").dir;
   const stateDir = join(root, "state");
   mkdirSync(stateDir);
   mkdirSync(join(root, "plan"));

@@ -1,0 +1,34 @@
+- id: W1-T11741
+  title: "The gh-read broker child entry fails with ERR_MODULE_NOT_FOUND under plain Node in the bundled daemon — it needs a no-loader entry and a real child-process test"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "REPORTED at origin/main 7cac4f4: launching src/gh-read-broker-client-main.ts with plain Node and no
+    loader exits 1 with ERR_MODULE_NOT_FOUND for src/lib/gh-read-broker-client.js. ghBrokerClientSpawn in
+    src/lib/gh-read-broker-client.ts forwards loader flags only from process.execArgv, which is empty in the bundled
+    daemon. The existing test/github/every-mac-session-reads-github-through-one-broker.test.ts passes only because its
+    parent runs under tsx. Effect: the Mac fix-lane gardener emitted 12 inventory failures over 11h while the daemon
+    stayed up. Reproduction was recorded read-only by the reporter; this triage did not re-run it."
+  design: |
+    Give the broker child a entry that runs under plain Node with no loader (bundled or compiled form), and have
+    ghBrokerClientSpawn select it when execArgv carries no loader flags. Add a test that spawns the REAL child
+    process with an empty execArgv (no tsx in the parent chain) and proves a broker read round-trips, plus a
+    fallback case proving a child that fails to start is surfaced rather than silent.
+    EXPLICITLY NOT IN SCOPE: any change to broker policy, read allow-lists, or gates; restarting the daemon.
+  acceptance:
+    - claim: "the broker child starts and serves a read under plain Node with an empty execArgv"
+      proof: "unit test: broker child starts and serves a read under plain Node with an empty execArgv"
+    - claim: "a child that cannot start is reported, not swallowed"
+      proof: "unit test: broker child startup failure is reported instead of swallowed"
+  risk: high
+  band_meaning: span
+  band_rationale: "one cross-file invariant: the real child entry and the spawn selector in the client must work together, so a single real-child test needs all files and is unsatisfiable piecewise"
+  origin: feedback#fb-1794149944233-e4c97f
+  plan_refs: ["§7B"]
+  files: [src/gh-read-broker-client-main.ts, src/lib/gh-read-broker-client.ts, test/github/broker-child-entry-runs-without-a-loader.test.ts]
+  status: queued
+  attempts: 0
+  note: "Split from the planner no-verdict routing task (W1-T11742) per the feedback's request for separate scopes."

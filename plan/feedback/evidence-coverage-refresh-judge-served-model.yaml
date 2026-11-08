@@ -1,0 +1,25 @@
+id: evidence-coverage-refresh-judge-served-model
+ts: 2026-11-08T14:21:19.658Z
+raw: >-
+  Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+  `refresh-judge`, field `servedModel`.
+
+  Coverage: 4/35 joined worker calls (11.4%) in the trailing 7-day window; below
+  the field's 90.0% floor — a chronic gap no baseline excuses.
+
+  First seen: 2026-11-08T14:19:45.156Z.
+
+
+  This follow-up never gates a PR or blocks work. Restore the field at the
+  lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+  reads), or record why this lane legitimately lacks it. The evidence-coverage
+  gardener updates this entry in place while the gap persists.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
