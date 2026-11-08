@@ -1718,7 +1718,9 @@ export interface BuildSweepEffectsDeps {
 export type ReviewDispatchMode =
   | { kind: "full-review" }
   | { kind: "reuse"; judgedHeadSha: string }
-  | { kind: "discriminate-only"; judgedHeadSha: string };
+  | { kind: "discriminate-only"; judgedHeadSha: string }
+  /** W1-T11729 — re-post the DELIVERED verdict of this exact head and input after GitHub's status regressed. Never a review. */
+  | { kind: "restore"; judgedHeadSha: string; regressionKey: string };
 
 /** Options derived when admitting this review, rather than facts read by the PR-view producer. */
 export interface ReviewDispatchPr extends OpenPrView {
@@ -3254,6 +3256,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
           }, log);
           log("sweep.post_review.child", { pr_number: pr.prNumber, head_sha: pr.headSha, review_key: reviewKey, child_run_id: hosted.runId });
+          return;
+        }
+        // W1-T11729: a restore never falls back to a full review; without its runner it does nothing.
+        if (mode.kind === "restore" && !deps.reviewReuseRunner) {
+          log("sweep.post_review.restore_unwired", { pr_number: pr.prNumber, head_sha: pr.headSha });
           return;
         }
         const exit = await reviewPhaseObserver.run(phase, async () =>
@@ -5950,6 +5957,36 @@ function reviewDemandLooping(pr: OpenPrView): boolean {
  *  never reached the status; deduping on it would strand the PR on "re-running" without a re-run. */
 export function deliveredVerdictDedupsPostReview(pr: Pick<OpenPrView, "reviewState">, delivered: boolean): boolean {
   return delivered && pr.reviewState !== "pending";
+}
+
+/** W1-T11729 — the step a restored status is ledgered under, written only AFTER the status post succeeded. */
+export const REVIEW_STATUS_RESTORED_STEP = "review.status_restored";
+
+/** W1-T11729 — a DELIVERED verdict dedups a re-post, but when GitHub's status has regressed to `pending` on the SAME head and
+ *  input digest the delivery never reached (or no longer holds on) the status. The restorable verdict is the LATEST review row
+ *  of that exact head and digest, and only when it is a full success/failure verdict. The regression is identified by the
+ *  pending status's own stamp, so one restore is spent per observed regression and a new regression earns its own. */
+export function restorableDeliveredVerdict(
+  pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha" | "taskId" | "reviewState" | "reviewPendingSince" | "reviewInputDigest">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  reviewKey: string,
+): { row: Record<string, unknown>; regressionKey: string } | { refusal: string } {
+  if (pr.reviewState !== "pending") return { refusal: "GitHub's status is not pending" };
+  if (pr.reviewInputDigest === undefined) return { refusal: "the review input digest is unread" };
+  const taskId = reviewOutcomeTaskIdFor(pr);
+  const row = lines.findLast(r => r.task_id === taskId && r.pr_url === pr.prUrl && r.head_sha === pr.headSha &&
+    r.review_input_digest === pr.reviewInputDigest &&
+    (r.step === "review.posted" || r.step === "review.pending_posted" || r.step === "review.post_refused"));
+  if (row?.step !== "review.posted") return { refusal: "the latest review row of this head and input is not a delivered verdict" };
+  const verdict = row.decision_verdict as ReviewVerdict | undefined;
+  if ((row.state !== "success" && row.state !== "failure") || verdict?.state !== row.state || verdict.cannotEvaluate === true) {
+    return { refusal: "the delivered verdict is not a full success or failure" };
+  }
+  const regressionKey = `${reviewKey}|${pr.reviewPendingSince ?? "unstamped"}`;
+  if (lines.some(r => r.step === REVIEW_STATUS_RESTORED_STEP && r.regression_key === regressionKey)) {
+    return { refusal: "this regression was already restored once" };
+  }
+  return { row, regressionKey };
 }
 
 /** One of the dispositions every open PR is reconciled into. */
@@ -20033,7 +20070,8 @@ export async function runSweep(
    *  after `add` makes the mutex and the durable outcome one atomic decision boundary. */
   async function claimReview(
     reviewKey: string, pr: OpenPrView,
-  ): Promise<{ ok: true; release: () => void } | { ok: false; deduped: boolean; reason: string }> {
+  ): Promise<{ ok: true; release: () => void; restore?: { judgedHeadSha: string; regressionKey: string } } |
+    { ok: false; deduped: boolean; reason: string }> {
     if (claimedReviewKeys.has(reviewKey)) {
       return {
         ok: false,
@@ -20050,6 +20088,14 @@ export async function runSweep(
       const retryBackoff =
         retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
         await freshnessBackoff(fresh.reviewFreshnessRefusals, pr);
+      // W1-T11729: a delivered verdict GitHub's pending status contradicts is restored, not re-reviewed and not deduped silently.
+      if (delivered && !durableRefusal && retryBackoff === undefined) {
+        const restorable = restorableDeliveredVerdict(pr, freshLines, reviewKey);
+        if ("row" in restorable) {
+          return { ok: true, release: () => claimedReviewKeys.delete(reviewKey),
+            restore: { judgedHeadSha: pr.headSha, regressionKey: restorable.regressionKey } };
+        }
+      }
       if (delivered || durableRefusal || retryBackoff !== undefined) {
         claimedReviewKeys.delete(reviewKey);
         return {
@@ -23911,6 +23957,7 @@ export async function runSweep(
     const jobDisposition: Disposition =
       job.mode.kind === "full-review" ? "post-review" : job.mode.kind === "reuse" ? "review-reused" : "discriminate-only";
     const claim = await claimReview(job.reviewKey, job.pr);
+    const reviewMode: ReviewDispatchMode = claim.ok && claim.restore !== undefined ? { kind: "restore", ...claim.restore } : job.mode;
     if (!claim.ok) {
       await finalizeDisposition(
         job.index,
@@ -23930,7 +23977,8 @@ export async function runSweep(
     }
     const reviewAttemptId = `review-PR${job.pr.prNumber}-${randomUUID()}`;
     const hostGapSkips = hostGapReviews.get(job.reviewKey);
-    appendLine(deps.ledgerPath, {
+    // W1-T11729: a restore is no admitted review, so it never counts toward the per-input admission backstop.
+    if (reviewMode.kind !== "restore") appendLine(deps.ledgerPath, {
       run_id: deps.runId,
       task_id: job.pr.taskId ?? "SWEEP",
       step: "sweep.review_admitted",
@@ -23939,7 +23987,7 @@ export async function runSweep(
       head_sha: job.pr.headSha,
       review_key: job.reviewKey,
       review_input_digest: job.pr.reviewInputDigest,
-      review_mode: job.mode.kind,
+      review_mode: reviewMode.kind,
       review_attempt_id: reviewAttemptId,
       host_gap_rereview: hostGapSkips !== undefined,
       ...(hostGapSkips === undefined ? {} : { skips: [...hostGapSkips] }),
@@ -23976,7 +24024,7 @@ export async function runSweep(
         if (postReview) {
           try {
           const reviewStartedAtMs = performance.now();
-          await postReview(job.pr, job.mode, reviewAttemptId, onPhase);
+          await postReview(job.pr, reviewMode, reviewAttemptId, onPhase);
           noteReviewDuration(performance.now() - reviewStartedAtMs);
           } catch (e) {
             acted = false;
