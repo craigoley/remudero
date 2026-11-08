@@ -14053,7 +14053,7 @@ function codeqlBlockerDispatched(lines: ReadonlyArray<Record<string, unknown>>, 
 /** W1-T9433 — a stand-down the FLEET placed on itself (a fleet PAUSE/STOP hold, worker-admission or host
  *  capacity, a light-pass deferral). The stage's owner could not act during a pass that read this. */
 const FLEET_WITHHELD_STAND_DOWN =
-  /fleet (?:PAUSE|STOP) hold|live host capacity|host worker budget|deferred to full sweep \(light pass\)/;
+  /fleet (?:PAUSE|STOP|HEAP) hold|live host capacity|host worker budget|deferred to full sweep \(light pass\)/;
 
 /** W1-T9433 — how much of a stage's age its own `sweep.disposed` rows show the fleet withholding the repair:
  *  each un-acted row that read a fleet-placed stand-down covers the time until the next row (the last, until `nowMs`). */
@@ -14417,7 +14417,7 @@ export interface SweepDeps {
   continueReviewAdmissions?: (reviewClass?: ReviewLaneClass) => boolean;
   /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
   workerAdmissionHold?: (kind?: "review") => string | undefined;
-  restartAdmission?: (kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean;
+  restartAdmission?: ((kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean) & { readonly heldBy?: string };
   /** W1-T11148: the head diff (reviewer's source) and the plan-lane bound's readings; absent: code lane, review-width bound. */
   readPrHeadDiff?: (pr: OpenPrView) => Promise<string>;
   readPlanLaneCapacity?: (policy: SweepPolicy) => PlanLaneCapacityReading;
@@ -25324,7 +25324,8 @@ async function runSweepLightPassCore(
               standDownReasonFor: (d) =>
                 isReviewLaneDisposition(d)
                   ? (latchHeld.has(pr.prNumber)
-                      ? "not admitted this pass: restart latched, and the review would outlast its drain"
+                      ? (deps.restartAdmission?.heldBy !== undefined ? `not admitted this pass: ${deps.restartAdmission.heldBy}`
+                        : "not admitted this pass: restart latched, and the review would outlast its drain")
                       : heldElsewhere.has(lightPassHeadKey(pr))
                       // W1-T7955: the review is running, admitted by an overlapping pass — not a lost admission.
                       ? "review already in flight for this head (admitted by an overlapping light pass)"
