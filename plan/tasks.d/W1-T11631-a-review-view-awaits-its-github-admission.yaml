@@ -1,0 +1,77 @@
+- id: W1-T11631
+  title: A review view awaits its GitHub admission before inspecting the pull request
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "Operator-requested remaining daemon sync-read audit after PR #17144, 2026-11-07"
+  plan_refs: [W1-T11458, W1-T11162, W1-T4970, W1-T11459]
+  depends_on: [W1-T11458]
+  files: [src/cli/commands/review.ts, test/review/a-review-view-awaits-its-github-admission.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=12847d1012e5040c
+  # backlog gardener: placed=2026-11-08T01:30:50.207Z
+  attempts: 0
+  rationale: |
+    At b6a1855751aed8fdfb8f52d755574e6b94216079, reviewCommand defaults fetchView
+    to synchronous ghJson re-exported by worker.ts and calls it before reading the
+    qualified PR state. W1-T11162 keeps plan-only review in-process, so W1-T11458's
+    loop marker can reach this default. A private pinned-Node native TAP diagnostic
+    proves the real reviewCommand default throws actual GhPaceWouldBlockError before
+    its private CLI child on a pending shared gap. Opening only the gap reads one
+    valid closed PR and returns the existing decline code 2, without materialization
+    or head fetch. One test passes with literal TAP summary, no skip or cancellation.
+    The three relevant review/worker/transport blobs are identical on fresh main
+    657b1e80a303e98f259b9839f5ac3bb4ac203f6f. Evidence is in Remudero-notes/sol/
+    S5-review-startup-probe.tap.log and S5-review-view-source-reconciliation.json.
+    Live positive ledger rows for #17227 record post-review refusal at 22:17:08Z
+    with a 25ms pacer gap, then retryable backoff at 22:29:31Z. Those rows prove
+    a transport refusal blocked that attempt, but do not pin its exact read site;
+    the isolated default-call control supplies this task's source counterexample.
+    Main plus fourteen captured open-head plan trees were searched with W1-T11458
+    positive controls on every head. No distinct initial-review-view migration was
+    added by those heads. W1-T4970 supplies awaited transport; W1-T11459 changes
+    review-worktree Git, not this GitHub read. W1-T11628's clone leaves and W1-T11629's
+    daemon lane boundary are separate. The earlier inventory followed transport and
+    worker-facade bindings at direct calls; this default function reference was not
+    a direct call. Default-reference tracking is an explicit audit extension.
+  design: |
+    Make exactly reviewCommand's initial qualified PR-view read use the existing
+    awaited GitHub transport and await its result before raw state, mapping or body
+    access. Preserve dependency injection for existing synchronous fixtures while
+    allowing async readers. Preserve owner/repository/PR qualification, REST versus
+    branch normalization, closed-before-fetch refusal, auth/rate-limit/error provenance,
+    cadence/broker admission and every later review/claim/worktree/status guard.
+    Add no retry loop, fixed wait, retry-ceiling change, status bypass or false empty
+    result. A denied or malformed read cannot materialize, spawn, spend, claim, post
+    pending/terminal status, comment or arm. This task does not convert other reads.
+    Exercise the real default seam using contained private CLI/cache/local fixtures.
+    A heartbeat must run while admission waits; exactly one child runs after genuine
+    admission, with the original target. Test numeric and branch view normalization,
+    safe closed decline and auth/malformed-read failures. Keep every existing test
+    input, assertion, expected value, timeout and skip unchanged. New tests use
+    repository aliases and shared repo-root helpers. rmd test-place computed test/review/.
+    Preserve the active W1-T11459 owner and reconcile any overlapping source work
+    before building; a filing does not transfer ownership or authorize competing edits.
+  acceptance:
+    - claim: "The real initial review view awaits admission with a live heartbeat and retains the exact qualified target before inspecting or mapping its result"
+      proof: "grep: W1-T11631 criterion 1 in test/review/a-review-view-awaits-its-github-admission.test.ts"
+    - claim: "Closed, denied or malformed reads preserve honest outcomes and cannot reach downstream work, review publication, claim or spend"
+      proof: "grep: W1-T11631 criterion 2 in test/review/a-review-view-awaits-its-github-admission.test.ts"
+  note: |
+    Audit and filing only. Build follows normal plan merge and fresh ownership,
+    merge-credit, duplicate, history and selector checks. No authority to implement
+    comes from another chat. Commit before mapped coverage/diff measurement; verify
+    physical related and census files, real removal falsifiers, default preflight,
+    actual author receipt and ordinary hosted/native gates. Record Decisions and
+    luna/REPORTS.md. Source-only: no Core/Azure write, restart, recycle, registry or
+    provider change, deployment, activation, manual merge or remudero-review posting.
+  falsifier: |
+    Restore the synchronous default: the real pending-gap startup control fails with
+    typed refusal or a blocked heartbeat. Remove the await: closed/state/normalization
+    assertions fail before a settled response. Permit downstream work on an unreadable
+    view or change qualification: criterion 2 fails. Restore and require all assertions green.

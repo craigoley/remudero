@@ -296,11 +296,13 @@ export function buildSweepEffects(
     reviewerHealthRoute ? reviewerHealthRoute(prArg, rest, opts, () => reviewerCodeGate.call(prArg, rest, opts)) : reviewerCodeGate.call(prArg, rest, opts);
   const reviewFallbackRunner =
     deps.reviewRunner ??
-    ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void) => {
+    ((_prNumber: number, isPlanFiling?: boolean, reviewAttemptId?: string, onPhase?: (phase: string) => void,
+      excludeProviders?: ReviewCommandDeps["excludeProviders"]) => {
       const args = ["--repo", deps.repo];
       const opts = { executionMode: "semantic" as const, planOnlyFiling: isPlanFiling,
         ...(reviewAttemptId === undefined ? {} : { reviewAttemptId }),
-        ...(onPhase === undefined ? {} : { onPhase }) };
+        ...(onPhase === undefined ? {} : { onPhase }),
+        ...(excludeProviders?.length ? { excludeProviders: [...excludeProviders] } : {}) };
       return deps.reviewCommandImpl
         ? deps.reviewCommandImpl(String(_prNumber), args, opts)
         : reviewGateCall(String(_prNumber), args, opts);
@@ -330,7 +332,7 @@ export function buildSweepEffects(
         fallback_reason: reason,
         ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase, pr.excludeProviders);
     };
 
     if (mode.kind === "discriminate-only") {
@@ -471,7 +473,7 @@ export function buildSweepEffects(
     const verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl, { prCreatedAt: pr.createdAt }))?.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase, pr.excludeProviders);
     }
     const poster = failureRecordingPoster();
     const reusedStatus = await postReviewStatusGuarded({

@@ -134,8 +134,29 @@ test("W1-T9649: a ledger lineage_key survives projectFlowRow and is classified p
   const outcomes = new Map(deriveReviewFindingOutcomes(rows, []).findings.map((item) => [item.findingId, item.outcome]));
   assert.equal(outcomes.get("moved-r1"), "persisted");
   assert.equal(outcomes.get("gone-r1"), "not-re-raised");
-  assert.equal(outcomes.get("legacy-r1"), "unknown");
+  assert.equal(outcomes.get("legacy-r1"), "legacy-superseded");
   const cell = deriveReviewFindingOutcomes(rows, []).cells.find((candidate) => candidate.category === "wiring")!;
   assert.equal(cell.persisted, 1);
   assert.equal(cell.notReRaised, 1);
+  assert.equal(cell.legacySuperseded, 1);
+});
+test("W1-T11627: legacy superseded receipts keep unknown counts stable", () => {
+  const oldHead = "c".repeat(40);
+  const latestHead = "d".repeat(40);
+  const oldReview = row("review.posted", { head_sha: oldHead, ts: "2026-10-01T00:00:00Z",
+    finding_capture_state: "captured", finding_invalid_count: 0, finding_dropped_count: 0,
+    finding_verified_count: 1, finding_unverified_count: 0, evaluator_provenance: { servedModel: "model-a" } }, 20);
+  const legacy = row("review.finding", { head_sha: oldHead, ts: "2026-10-01T00:00:01Z",
+    finding_id: "legacy-old", category: "wiring", capture_state: "verified" }, 21);
+  const laterReview = row("review.posted", { head_sha: latestHead, ts: "2026-10-01T01:00:00Z",
+    finding_capture_state: "captured", finding_invalid_count: 0, finding_dropped_count: 0,
+    finding_verified_count: 1, finding_unverified_count: 0, evaluator_provenance: { servedModel: "model-a" } }, 22);
+  const latest = row("review.finding", { head_sha: latestHead, ts: "2026-10-01T01:00:01Z",
+    finding_id: "latest", category: "wiring", capture_state: "verified", lineage_key: "latest-key" }, 23);
+  const result = deriveReviewFindingOutcomes([oldReview, legacy, laterReview, latest], []);
+  const cell = result.cells.find((candidate) => candidate.category === "wiring")!;
+  assert.equal(result.findings.find((item) => item.findingId === "legacy-old")?.outcome, "legacy-superseded");
+  assert.equal(result.findings.find((item) => item.findingId === "latest")?.outcome, "unknown");
+  assert.equal(cell.legacySuperseded, 1);
+  assert.equal(cell.unknown, 1);
 });

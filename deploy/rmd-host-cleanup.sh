@@ -25,7 +25,9 @@
 #                  archive could be made. Fresh remote refs, not task trailers, prove publication.
 #                  Unknown ignored data is kept; only node_modules and coverage are disposable.
 #                  Dirty/ignored-only holds may lose regenerable caches after all safety checks;
-#                  unpublished, locked, lending and unreadable repositories keep their caches too.
+#                  a held linked or agent worktree (dirty, unpublished, locked) loses its
+#                  node_modules/coverage once idle too (2026-11-07). Unpublished, lending and
+#                  unreadable scratch units and clones keep their caches.
 #                  Git metadata itself is excluded from recency checks because Git refreshes it.
 #                  tsx's transpile cache (`tsx-*` directly under a tmp root) is a protected UNIT —
 #                  the directory itself is never removed — but its stale FILES are (prune_tsx_cache).
@@ -87,6 +89,14 @@
 #   RMD_CLEANUP_LSOF            the lsof command (must accept -Fn and print n<path> lines)
 #   RMD_CLEANUP_CONTAINER_MAP   host_prefix:container_prefix — a held container-side name also counts
 #   RMD_CLEANUP_NO_FETCH       legacy no-op: publication never fetches objects
+#   RMD_CLEANUP_GH_TOKEN_FILE   token file read into GH_TOKEN when it is unset (default ~/.gh-token),
+#                               so the GitHub publication proof works under cron (2026-11-07)
+#   RMD_CLEANUP_CODEX_SESSION_DAYS  Codex rollout logs idle this many days (mtime and ctime) and not
+#                               open are deleted from ~/.codex/sessions and archived_sessions (default
+#                               7, 0 = off; the Mac's preserve-retire uses the same 7)
+#   RMD_CLEANUP_AGENT_SCRATCH   colon-separated roots whose immediate non-Git entries are reaped once
+#                               idle, unless they hold state, keys or coordination files (default
+#                               ~/rmd-work; empty = off)
 #   RMD_CLEANUP_WATCH_ROOTS     roots scanned for WATCH: lines (files >= WATCH_MB, never removed)
 #   RMD_CLEANUP_ONLY_TMP=1      run the guarded temporary-root and scratch sweeps
 #   RMD_CLEANUP_SCRATCH_ROOTS   colon-separated roots whose immediate scratch units are swept;
@@ -228,6 +238,14 @@ else RULING_NAMESPACES=""; fi
 if [ -n "${RMD_CLEANUP_DUMP_RESUMABLE_ROOTS+x}" ]; then DUMP_RESUMABLE_ROOTS="$RMD_CLEANUP_DUMP_RESUMABLE_ROOTS"
 elif [ "$HOST_LAYOUT" = 1 ]; then DUMP_RESUMABLE_ROOTS="$STATE_DISK/agent-codex/sessions"  # Codex may resume these
 else DUMP_RESUMABLE_ROOTS=""; fi
+CODEX_SESSION_DAYS="${RMD_CLEANUP_CODEX_SESSION_DAYS:-7}"
+AGENT_SCRATCH="${RMD_CLEANUP_AGENT_SCRATCH-$CLEAN_HOME/rmd-work}"
+# The GitHub publication proof (workspace-retirement-guard.sh) asks gh, which cron runs with no
+# login: every Claude worktree whose commits GitHub held stayed "not-proven-published" for days.
+GH_TOKEN_FILE="${RMD_CLEANUP_GH_TOKEN_FILE:-$CLEAN_HOME/.gh-token}"
+if [ -z "${GH_TOKEN:-}" ] && [ -f "$GH_TOKEN_FILE" ] && [ ! -L "$GH_TOKEN_FILE" ] && [ -r "$GH_TOKEN_FILE" ]; then
+  GH_TOKEN="$(head -n 1 -- "$GH_TOKEN_FILE" 2>/dev/null)"; [ -n "$GH_TOKEN" ] && export GH_TOKEN
+fi
 # Not /tmp: a root-created 0644 lock there could not be opened for write by the user cron, and
 # with fs.protected_regular=2 root cannot O_CREAT-open a user's file in a sticky directory either.
 if ! SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]:-}")" && pwd -P)"; then
@@ -236,7 +254,7 @@ fi
 LOCK_FILE="${RMD_CLEANUP_LOCK_FILE:-$SCRIPT_DIR/rmd-host-cleanup.lock}"
 FLOCK_CMD="${RMD_CLEANUP_FLOCK:-flock}"
 
-case "$HIGH_WATER$ARCHIVE_DAYS$BIG_MB$MAX_UNTRACKED_MB$DUMP_MIN_MB" in
+case "$HIGH_WATER$ARCHIVE_DAYS$BIG_MB$MAX_UNTRACKED_MB$DUMP_MIN_MB$CODEX_SESSION_DAYS" in
   ""|*[!0-9]*) echo "rmd-host-cleanup: FATAL thresholds must be non-negative integers" >&2; exit 2 ;;
 esac
 case "$DRY_RUN_RAW:$DRY_RUN_ALIAS" in
@@ -511,13 +529,18 @@ git_head_idle() {
   head_file=$(rgit "$repo" rev-parse --path-format=absolute --git-path HEAD 2>/dev/null) || return 2
   is_idle "$head_file"
 }
+# A Claude Code agent worktree (~/*/.claude/worktrees/*) also leaves the ignored run scratch its
+# test runs write into the checkout (`tmp/`, `state/`); it dies with the agent's worktree.
 worktree_ignored_safe() {
-  local status unknown tree found
+  local status unknown tree found agent=0
+  case "$1" in */.claude/worktrees/*) agent=1 ;; esac
   status="$(GIT_OPTIONAL_LOCKS=0 rgit "$1" status --porcelain --ignored=matching 2>/dev/null)" || return 2
-  unknown="$(printf '%s\n' "$status" | awk '
+  unknown="$(printf '%s\n' "$status" | awk -v agent="$agent" '
     substr($0, 1, 2) == "!!" {
       path=substr($0, 4); sub(/\/$/, "", path)
-      if (path != "node_modules" && path != "coverage") print path
+      if (path == "node_modules" || path == "coverage") next
+      if (agent == 1 && (path == "tmp" || path == "state")) next
+      print path
     }
   ')" || return 2
   [ -z "$unknown" ] || return 1
@@ -561,6 +584,40 @@ clone_live_worktree() {
   done
   return 1
 }
+# A worktree kept for a work reason (uncommitted changes, unpublished HEAD, unknown ignored data, a
+# lock) still loses its generated node_modules/ and coverage/ once it is idle, unheld and unmounted:
+# generated output never holds the checkout's work (the Mac janitor's rule since 2026-11-02). On
+# 2026-11-07, 17 such Claude worktrees on / held about 9 GB of private installs. Each tree goes only
+# by exact name, never through a symlink, while Git confirms it is ignored and tracks nothing in it,
+# and never one holding a nested .git or a *.bundle.
+prune_held_worktree() {
+  local wt="$1" reason="$2" name tree found tracked bytes
+  log "KEEP $wt: $reason"
+  is_worktree_idle "$wt" || return 0
+  if is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt"; then return 0; fi
+  for name in node_modules coverage; do
+    tree="$wt/$name"
+    [ -d "$tree" ] && [ ! -L "$tree" ] || continue
+    if ! rgit "$wt" check-ignore -q -- "$name" 2>/dev/null || \
+       ! tracked="$(rgit "$wt" ls-files -- "$name" 2>/dev/null)" || [ -n "$tracked" ]; then
+      log "KEEP $tree: Git does not confirm it is ignored and untracked"; continue
+    fi
+    if ! found="$(find "$tree" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null)" || [ -n "$found" ]; then
+      log "KEEP $tree: holds a bundle or repository, or its scan failed"; continue
+    fi
+    if rmd_dependency_seed_risk "$tree" >/dev/null; then log "KEEP $tree: dependency seed"; continue; fi
+    if [ "$DRY_RUN" != 1 ]; then snapshot_open; snapshot_docker; fi
+    if ! is_idle "$tree" || is_open "$tree" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$tree"; then
+      log "KEEP $tree: recent, active or unverified cache"; continue
+    fi
+    bytes="$(du_bytes "$tree")"
+    log "PRUNE $tree: ${bytes:-unknown} bytes, worktree kept for $reason"
+    if act rm -rf -- "$tree"; then
+      PRUNED_COUNT=$((PRUNED_COUNT + 1)); PRUNED_BYTES=$((PRUNED_BYTES + ${bytes:-0}))
+      tally "prune ${wt%/*}" "$bytes"
+    fi
+  done
+}
 sweep_worktree() {
   local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0 seed_reason bytes
   if seed_reason=$(rmd_dependency_seed_risk "$wt"); then log "KEEP $wt: $seed_reason"; return; fi
@@ -573,7 +630,7 @@ sweep_worktree() {
     if [ "$kind" = "linked worktree" ]; then orphaned=1
     else log "KEEP $wt: Git metadata is unreadable or missing"; return; fi
   fi
-  if [ "$orphaned" = 0 ] && [ -f "$gitdir/locked" ]; then log "KEEP $wt: Git worktree is locked"; return; fi
+  if [ "$orphaned" = 0 ] && [ -f "$gitdir/locked" ]; then prune_held_worktree "$wt" "Git worktree is locked"; return; fi
   if [ "$orphaned" = 0 ] && ! git_head_idle "$wt"; then log "KEEP $wt: recent or unverified Git HEAD activity"; return; fi
   is_worktree_idle "$wt"; idle_status=$?
   case "$idle_status" in
@@ -591,17 +648,21 @@ sweep_worktree() {
   worktree_clean "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
-    1) log "KEEP $wt: uncommitted changes"; return ;;
+    1) prune_held_worktree "$wt" "uncommitted changes"; return ;;
     *) log "KEEP $wt: Git status failed (unknown)"; return ;;
   esac
   worktree_ignored_safe "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
-    1) log "KEEP $wt: ignored data includes paths beyond node_modules/coverage"; return ;;
+    1) prune_held_worktree "$wt" "ignored data includes paths beyond node_modules/coverage"; return ;;
     *) log "KEEP $wt: ignored-data scan failed (unknown)"; return ;;
   esac
   head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
-  if ! worktree_saved "$wt"; then log "KEEP $wt: $RMD_PUB_REASON HEAD=$head"; return; fi
+  if ! worktree_saved "$wt"; then
+    if [ "$kind" = "linked worktree" ]; then prune_held_worktree "$wt" "$RMD_PUB_REASON HEAD=$head"
+    else log "KEEP $wt: $RMD_PUB_REASON HEAD=$head"; fi
+    return
+  fi
   if [ "$kind" = "standalone clone" ]; then
     if ! rmd_remote_outside_retirement "$wt" "$wt"; then log "KEEP $wt: remote publication lender is inside removal unit or unverified"; return; fi
     # A clone is the git dir of every linked worktree built on it, and holds every local ref: judging
@@ -676,6 +737,7 @@ fs_id() {
 
 DOCKER_OK=1
 DOCKER_MOUNTS=""
+DOCKER_IDS=""
 container_path_identity() {
   [ -e "$1" ] || return 1
   stat -Lc '%d:%i' -- "$1" 2>/dev/null || stat -Lf '%d:%i' -- "$1" 2>/dev/null
@@ -684,6 +746,7 @@ snapshot_docker() {
   local ids id mounts mount identity
   DOCKER_IDENTITIES="|"; DOCKER_PATH_REASON="Docker mount snapshot failed"
   if ! ids="$($DOCKER_CMD ps -q 2>/dev/null)"; then DOCKER_OK=0; return; fi
+  DOCKER_IDS="$ids"
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     if ! mounts="$($DOCKER_CMD inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$id" 2>/dev/null)"; then
@@ -1855,6 +1918,92 @@ expire_preserved_copies() {
     esac
   done
 }
+# Codex rollout logs. On Azure ~/.codex IS $STATE_DISK/agent-codex (one bind mount), so these are
+# the same files DUMP_RESUMABLE_ROOTS keeps uncompressed for a resume; a resume happens within its
+# run, never a week later. On 2026-11-07 18,426 logs idle over 7 days held 10 GB of /mnt/rmd.
+sweep_codex_sessions() {
+  local dir f bytes id mounts source dest extra resolved identity held i cursor suffix
+  local -a source_ids=() destinations=()
+  [ "$CODEX_SESSION_DAYS" -gt 0 ] || return 0
+  [ -d "$CLEAN_HOME/.codex/sessions" ] || [ -d "$CLEAN_HOME/.codex/archived_sessions" ] || return 0
+  snapshot_docker
+  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $CLEAN_HOME/.codex: $DOCKER_PATH_REASON (fail closed)"; return; fi
+  snapshot_open
+  if [ "$OPEN_OK" != 1 ]; then log "KEEP $CLEAN_HOME/.codex: $OPEN_FAILURE (fail closed)"; return; fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if ! mounts="$($DOCKER_CMD inspect --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' "$id" 2>/dev/null)"; then
+      log "KEEP $CLEAN_HOME/.codex: container log aliases unreadable (fail closed)"; return
+    fi
+    while IFS=$'\t' read -r source dest extra; do
+      [ -n "$source$dest$extra" ] || continue
+      case "$source:$dest" in /*:/*) ;; *) log "KEEP $CLEAN_HOME/.codex: container log aliases invalid (fail closed)"; return ;; esac
+      [ -z "$extra" ] || { log "KEEP $CLEAN_HOME/.codex: container log aliases invalid (fail closed)"; return; }
+      [ -d "$source" ] || continue
+      identity="$(container_path_identity "$source")" || { log "KEEP $CLEAN_HOME/.codex: mount source unreadable (fail closed)"; return; }
+      source_ids+=("$identity"); destinations+=("${dest%/}")
+    done <<< "$mounts"
+  done <<< "$DOCKER_IDS"
+  for dir in "$CLEAN_HOME/.codex/sessions" "$CLEAN_HOME/.codex/archived_sessions"; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    while IFS= read -r -d '' f; do
+      # A mounted Codex HOME is expected; a bind-mounted log itself must still stay in place.
+      identity="$(container_path_identity "$f")" || { log "KEEP $f: log identity unreadable (unknown)"; continue; }
+      case "$DOCKER_IDENTITIES" in *"|$identity|"*) log "KEEP $f: running container mount"; continue ;; esac
+      resolved="$(cd -P -- "${f%/*}" 2>/dev/null && pwd -P)" || { log "KEEP $f: log path unreadable (unknown)"; continue; }
+      resolved="$resolved/${f##*/}"; held=0
+      if is_open "$f" || is_open "$resolved"; then held=1; fi
+      if [ "${#source_ids[@]}" -gt 0 ]; then
+        cursor="${resolved%/*}"; suffix="/${resolved##*/}"
+        while :; do
+          identity="$(container_path_identity "$cursor")" || { held=1; break; }
+          for i in "${!source_ids[@]}"; do
+            if [ "$identity" = "${source_ids[$i]}" ] && is_open "${destinations[$i]}$suffix"; then held=1; fi
+          done
+          [ "$cursor" = / ] && break
+          suffix="/${cursor##*/}$suffix"; cursor="${cursor%/*}"; [ -n "$cursor" ] || cursor=/
+        done
+      fi
+      if [ "$held" = 1 ]; then log "KEEP $f: held open by a process"; continue; fi
+      bytes="$(du_bytes "$f")"
+      log "REMOVE $f: Codex session log idle ${CODEX_SESSION_DAYS} days"
+      act rm -f -- "$f" && tally "codex-sessions $dir" "$bytes"
+    done < <($FIND_CMD -P "$dir" -xdev -type f \( -name 'rollout-*.jsonl' -o -name 'rollout-*.jsonl.zst' -o -name 'rollout-*.jsonl.gz' \) \
+               -mmin "+$(( CODEX_SESSION_DAYS * 1440 ))" -cmin "+$(( CODEX_SESSION_DAYS * 1440 ))" -print0 2>/dev/null)
+  done
+}
+
+# Agent scratch roots (~/rmd-work): operators leave notes, logs, probe scripts and copied trees as
+# immediate children. A Git-holding child is the worktree sweep's to judge; any other child goes once
+# everything in it is idle and nothing holds it, unless it holds state, keys or coordination files.
+# On 2026-11-07, 693 such entries (903 MB) sat in Azure's rmd-work, some from August.
+AGENT_SCRATCH_HOLD=(-name .rmd-janitor-keep -o -name .rmd-scratch-keep -o \( -type f \( -name ledger -o -name 'ledger.*' \) \) -o -name '*.ndjson'
+  -o -name '*.jsonl' -o -name '*.json' -o -name state -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' -o -name .env -o -name '.env.*'
+  -o -name '*.pem' -o -name '*.key' -o -name 'id_rsa*' -o -name 'id_ed25519*' -o -type s -o -type p)
+sweep_agent_scratch() {
+  local root="${1%/}" e found idle_status bytes
+  [ -d "$root" ] && [ ! -L "$root" ] || return 0
+  for e in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+    { [ -e "$e" ] || [ -L "$e" ]; } || continue
+    keep_container_path "$e" && continue
+    if keep_marker "$e"; then log "KEEP $e: scratch keep marker"; continue; fi
+    if [ -d "$e" ] && [ ! -L "$e" ]; then
+      found="$($FIND_CMD -P "$e" \( -name .git -o \( -type d -name objects -exec test -f '{}/../HEAD' \; -exec test -d '{}/../refs' \; \) \) -print -quit 2>/dev/null)" || { log "KEEP $e: repository scan failed (unknown)"; continue; }
+      [ -z "$found" ] || continue
+    fi
+    is_idle "$e"; idle_status=$?
+    case "$idle_status" in 0) ;; 1) continue ;; *) log "KEEP $e: activity probe failed (unknown)"; continue ;; esac
+    if is_open "$e"; then log "KEEP $e: held open by a process"; continue; fi
+    if ! found="$(find -P "$e" \( "${AGENT_SCRATCH_HOLD[@]}" \) -print -quit 2>/dev/null)"; then
+      log "KEEP $e: content scan failed (unknown)"; continue
+    fi
+    if [ -n "$found" ]; then log "KEEP $e: holds state, keys or coordination ($found)"; continue; fi
+    bytes="$(du_bytes "$e")"
+    log "REMOVE $e: agent scratch idle $(fmt_minutes "$IDLE_MINUTES")"
+    act rm -rf -- "$e" && tally "agent-scratch $root" "$bytes"
+  done
+}
+
 retention() {
   local root
   while IFS= read -r root; do
@@ -2037,6 +2186,10 @@ if [ "$ONLY_TMP" != 1 ]; then
     fi
   fi
   expire_preserved_copies
+  sweep_codex_sessions
+  while IFS= read -r root; do
+    [ -n "$root" ] && sweep_agent_scratch "$root"
+  done < <(printf '%s\n' "$AGENT_SCRATCH" | tr ':' '\n')
 
   for wr in $WATCH_ROOTS; do
     [ -d "$wr" ] || continue

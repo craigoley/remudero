@@ -2154,19 +2154,20 @@ function acceptedReviewAttemptId(value: unknown, prNumber?: number): string | un
     (prNumber === undefined || value.startsWith(`review-PR${prNumber}-`)) ? value : undefined;
 }
 
-export function reviewOptionFlags(opts: Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "reviewAttemptId">): string[] {
+export function reviewOptionFlags(opts: Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "reviewAttemptId" | "excludeProviders">): string[] {
   const attemptId = acceptedReviewAttemptId(opts.reviewAttemptId);
   return [
     ...(opts.planOnlyFiling === undefined ? [] : [opts.planOnlyFiling ? "--plan-only-filing" : "--not-plan-only-filing"]),
     ...(opts.executionMode === undefined ? [] : ["--execution-mode", opts.executionMode]),
     ...(attemptId === undefined ? [] : ["--review-attempt-id", attemptId]),
+    ...(opts.excludeProviders?.length ? ["--exclude-providers", [...new Set(opts.excludeProviders)].join(",")] : []),
   ];
 }
 
 /** W1-T9727 — a fresh-tree review child is handed no start reading, so it takes its own (see {@link reviewCommand}). */
 export const JUDGE_AT_OWN_START_FLAG = "--judge-at-own-start";
 
-export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId"> {
+export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders"> {
   return reviewOptionsFromFlagsFromModule(reviewCommandHost(), rest);
 }
 
