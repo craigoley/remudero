@@ -91,6 +91,7 @@ async function reviewWith(
       runReview: async (args) => {
         onReview();
         const posted = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
           owner: "acme",
           repo: "remudero",
           sha: head,

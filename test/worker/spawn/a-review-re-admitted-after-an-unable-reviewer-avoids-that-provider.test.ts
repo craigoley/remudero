@@ -11,7 +11,7 @@ import type { ProviderCapacity } from "#src/lib/worker-provider.js";
 import type { EffectiveProviderRoutingPolicy } from "#src/lib/provider-routing-policy.js";
 import { buildSweepEffects, reviewerUnavailableProvidersForReadmission, REVIEW_REQUEUED_STEP, runSweep, type OpenPrView, type ReviewDispatchPr } from "#src/lib/sweep.js";
 import { createDetachedWorkHost, runDetachedReview, type DetachedWorkSpec, type spawnRunChild } from "#src/lib/run-child.js";
-import { selectWorkerProviderWithExclusions, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { createClaudeExecutableCache, selectWorkerProviderWithExclusions, spawnWorker, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { buildReviewerCodeFreshnessGate, reviewOptionFlags, reviewOptionsFromFlags, runReview } from "#test/helpers/run-task-test.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -115,7 +115,8 @@ test("W1-T11432 criterion 2: review spawn receives and records the unavailable p
   repoFixture.git("add", "src/marker.ts", "settings.json");
   repoFixture.git("commit", "--quiet", "-m", "review fixture");
   const headSha = repoFixture.git("rev-parse", "HEAD");
-  const shim = ghShim([{ when: "pulls/16758", stdout: JSON.stringify({ number: 16758, state: "open", body: "review body",
+  // W1-T11443: a SUCCESS reads the head's status history first; this head has no prior FAILURE.
+  const shim = ghShim([{ when: "/statuses?", stdout: "[[]]" }, { when: "pulls/16758", stdout: JSON.stringify({ number: 16758, state: "open", body: "review body",
     head: { ref: "run-W1-T9716-1", sha: headSha }, html_url: "https://github.com/acme/remudero/pull/16758" }) },
     { when: "pr diff", stdout: "" }, { when: "pr view", stdout: JSON.stringify({ state: "OPEN" }) }, { when: "", stdout: "{}" }]);
   const spawned: SpawnWorkerArgs[] = [];
@@ -234,17 +235,69 @@ test("W1-T11432 criterion 2: review CLI exclusions round-trip as a set and rejec
     ["claude", "codex"]);
   assert.deepEqual(reviewOptionsFromFlags(["--exclude-providers", "claude,not-a-provider,codex"]).excludeProviders,
     ["claude", "codex"]);
+  assert.deepEqual(reviewOptionsFromFlags(["--exclude-provider", "claude", "--exclude-provider", "codex"]).excludeProviders,
+    ["claude", "codex"]);
   assert.equal(reviewOptionsFromFlags(["--exclude-providers"]).excludeProviders, undefined);
   assert.deepEqual(reviewOptionsFromFlags([]), {});
 });
 
-test("W1-T11432 criterion 2: a detached child consumes only valid provider exclusions", async () => {
-  let received: readonly string[] | undefined;
-  await runDetachedReview({ kind: "review", prNumber: 16758,
+test("W1-T11432 criterion 2: a detached child rejects malformed provider exclusions", async () => {
+  await assert.rejects(runDetachedReview({ kind: "review", prNumber: 16758,
     inputs: { excludeProviders: ["claude", "not-a-provider", null, "codex"] } },
-  { runId: "detached-review", taskId: "W1-T9716" }, async (_pr, _rest, opts) => {
-    received = opts.excludeProviders;
-    return 0;
+  { runId: "detached-review", taskId: "W1-T9716" }, async () => 0), /malformed provider exclusions/);
+});
+
+test("W1-T11432 criterion 1: overflow fallback retains an excluded Claude mount and records the unhonoured exclusion", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-t11432-overflow-exclusion-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settingsFile = join(root, "settings.json");
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
+  const config: Config = {
+    root, claudeBin: "/unused", dailyCapUsd: 20, overflow: "api_key",
+    workerProviders: { enabled: ["claude", "codex", "cash"], cashFallbackWhenBlocked: true, cashEndpoint: "https://foundry.example.test/" },
+  };
+  let claudeReads = 0;
+  let codexReads = 0;
+  let queryCalls = 0;
+  const assignments: WorkerSelectionAssignment[] = [];
+  const result = await spawnWorker({
+    cwd: root, permissionMode: "bypassPermissions", prompt: "bounded review", settingsFile, config,
+    env: { ANTHROPIC_API_KEY: "fixture-only" },
+    keychain: { readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "fixture-only", expiresAt: NOW + 86_400_000 } }) },
+    excludeProviders: ["claude"], onSelectionAssignment: assignment => assignments.push(assignment),
+    providerRouting: {
+      readClaudeHealth: async () => ({ degradedModels: [], source: "fresh", observedAtMs: NOW }),
+      readClaude: async () => {
+        claudeReads++;
+        // On an erroneous second auction, make Claude eligible so the falsifier fails a bounded read-count assertion
+        // instead of looping indefinitely through the same overflow fallback.
+        return claudeReads > 1 ? capacity("claude", 15)
+          : { provider: "claude", readable: false, windows: [], detail: "blocked" };
+      },
+      readCodex: async () => { codexReads++; return { provider: "codex", readable: false, windows: [], detail: "blocked" }; },
+      writeStatus: () => {},
+    },
+    claudeExecutable: { cache: createClaudeExecutableCache(), deps: {
+      env: { RMD_CLAUDE_BIN: "/fixture/claude" }, home: root, exists: () => true,
+      which: () => "/fixture/claude", canExecute: () => true, locations: [],
+    } },
+    queryFn: ((input: { prompt: string; options: { resume?: string } }) => {
+      assert.match(input.prompt, /bounded review/);
+      queryCalls++;
+      return (async function* () {
+        yield { type: "result", subtype: "success", is_error: false, result: "done",
+          session_id: "overflow-review", total_cost_usd: 0, num_turns: 1 };
+      })();
+    }) as SpawnWorkerArgs["queryFn"],
   });
-  assert.deepEqual(received, ["claude", "codex"]);
+  assert.equal(result.isError, false, JSON.stringify(result));
+  assert.equal(claudeReads, 1, "the retry must skip the blocked subscription auction");
+  assert.equal(codexReads, 1, "the retry must skip the blocked subscription auction");
+  assert.equal(queryCalls, 1, "the Claude overflow fallback runs once");
+  assert.equal(assignments.length, 1);
+  assert.equal(assignments[0]?.selected.provider, "claude");
+  assert.equal(result.selectionAssignmentId, assignments[0]?.id);
+  assert.deepEqual(assignments[0]?.routing.exclusion_unhonoured, {
+    reason: "no-eligible-alternative", excludedProviders: ["claude"],
+  });
 });

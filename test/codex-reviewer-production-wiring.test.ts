@@ -44,6 +44,7 @@ test("W1-T2946: runReview gives Codex a test-capable disposable review sandbox",
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *"/statuses?"*) echo '[[]]' ;;
       *pulls/*) echo '{"number":2829,"html_url":"https://github.com/acme/remudero/pull/2829","updated_at":"t","body":"","head":{"ref":"b","sha":"${headSha}"}}' ;;
       *) echo '{}' ;;
     esac ;;
@@ -236,6 +237,7 @@ for (const requireSemanticReview of [false, true]) test(`W1-T3960: an abandoned 
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *"/statuses?"*) echo '[[]]' ;;
       *pulls/*) echo '{"number":3960,"html_url":"https://github.com/acme/remudero/pull/3960","updated_at":"t","body":"","head":{"ref":"b","sha":"${headSha}"}}' ;;
       *) echo '{}' ;;
     esac ;;

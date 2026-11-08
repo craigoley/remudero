@@ -2627,7 +2627,10 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     args.excludeProviders = [...new Set(args.excludeProviders.map((provider) => canonicalWorkerProviderId(provider) as WorkerProviderId))];
   }
   // A reviewer mount normally pins its provider. A re-admission exclusion takes precedence only when it names that provider.
-  if (args.mountProvider && args.excludeProviders?.includes(args.mountProvider)) args.mountProvider = undefined;
+  // Overflow is reached only after the auction has no eligible alternative; keep its explicit Claude mount so the
+  // API-credit last resort runs once instead of re-entering the same excluded-provider auction.
+  if (args.mountProvider && args.excludeProviders?.includes(args.mountProvider) &&
+      args.routingFallback?.rule !== "overflow-fallback") args.mountProvider = undefined;
   if (args.mountProvider && !enabledWorkerProviders(config).includes(args.mountProvider)) {
     throw new Error(`mount provider '${args.mountProvider}' is not enabled by the committed host config`);
   }

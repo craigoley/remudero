@@ -196,6 +196,7 @@ function adapterFixture(options: AdapterFixtureOptions = {}) {
     [
       "#!/bin/sh",
       'case "$*" in',
+      '  *"/statuses?"*) printf \'[[]]\\n\' ;;',
       `  *"pulls/3704"*) printf '${lifecycle}\\n' ;;`,
       '  *"pr diff"*) printf \'diff --git a/src/review-reuse.ts b/src/review-reuse.ts\\n+W1-T3901\\n\' ;;',
       "  *) printf '{}\\n' ;;",
@@ -387,6 +388,7 @@ test("W1-T3901 run-task adapter posts proof-only discrimination and records effe
     [
       "#!/bin/sh",
       'case "$*" in',
+      '  *"/statuses?"*) printf \'[[]]\\n\' ;;',
       '  *"pulls/3704"*) printf \'{"state":"open","merged":false,"head":{"sha":"cafef00dcafef00dcafef00dcafef00dcafef00d"},"body":"W1-T3901 proof discrimination observes the current head."}\\n\' ;;',
       '  *"pr diff"*) printf \'diff --git a/src/review-reuse.ts b/src/review-reuse.ts\\n+W1-T3901\\n\' ;;',
       "  *) printf '{}\\n' ;;",
@@ -505,6 +507,7 @@ test("W1-T3901 run-task adapter posts proof-only discrimination and records effe
       [
         "#!/bin/sh",
         'case "$*" in',
+        '  *"/statuses?"*) printf \'[[]]\\n\' ;;',
         `  *"pulls/${PR_NUMBER}"*) printf '{"state":"open","merged":false}\\n' ;;`,
         `  *"pr diff"*) printf '%s' '${options.planFiling ? PLAN_DIFF : CODE_DIFF}' ;;`,
         "  *) printf '{}\\n' ;;",

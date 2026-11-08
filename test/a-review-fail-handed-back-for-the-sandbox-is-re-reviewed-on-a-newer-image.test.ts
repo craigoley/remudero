@@ -156,6 +156,7 @@ test("W1-T9970: review.posted records the reviewer image, and a requested re-rev
   try {
     const ledgerPath = join(root, "ledger.ndjson");
     const github = ghShim([
+      { when: "/statuses?", stdout: "[[]]" },
       { when: "comments", stdout: "[]" }, { when: "reviews", stdout: "[]" },
       { when: "commits/", stdout: '{"statuses":[]}' },
       { when: "pulls/", stdout: JSON.stringify({ number: 12409, html_url: PR_URL, updated_at: "t", body: "", head: { ref: "b", sha: HEAD } }) },
