@@ -41,7 +41,10 @@
   origin: feedback#fb-1794064519788-9bda6c
   plan_refs: ["§7B"]
   files: [src/lib/client-request.ts, lib/rmd-control.ts, tests/plan-recovery-timeout.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=ae9c7416af347931
+  # backlog gardener: placed=2026-11-08T15:36:33.922Z
   attempts: 0
   note: "verify: human — acceptance tests are in remudero-console/tests/plan-recovery-timeout.test.ts. These proofs name the exact Console test titles; run and review them from that repository checkout."
   risk_ruling:
