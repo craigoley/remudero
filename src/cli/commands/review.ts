@@ -32,7 +32,7 @@ import { visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk 
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, applyReviewStatusHistoryGuard, reproducedReviewFailuresFromHistory, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, reviewDecisionDigest, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -408,70 +408,7 @@ export async function readChecksGreenReviewedAtHead(
 /** W1-T11151: the raw status poster, recording whether a publication threw. That is the one non-terminal outcome (the
  *  guarded post ledgers `review.post_failed`), so it alone keeps the review's slot until it settles; a posted, refused,
  *  withheld or replayed verdict is terminal and reports `posted`. */
-export type ReviewStatusHistoryReader = (owner: string, repo: string, prUrl: string, headSha: string) => Promise<ReviewStatusHistory>;
-
-function rowsFromPaginatedApi(value: unknown): unknown[] {
-  if (!Array.isArray(value)) throw new Error("GitHub returned a non-list response");
-  if (value.every((row) => row === null || typeof row !== "object" || Array.isArray(row))) {
-    return value.flatMap((row) => rowsFromPaginatedApi(row));
-  }
-  return value;
-}
-
-/** Read the shared status history and the same-PR review bodies that explain its failures. */
-export async function readReviewStatusHistory(
-  owner: string,
-  repo: string,
-  prUrl: string,
-  headSha: string,
-  readJson: (args: string[], options: { fresh: true }) => unknown | Promise<unknown> =
-    (args, options) => ghJsonAsync(args, undefined, undefined, options),
-): Promise<ReviewStatusHistory> {
-  try {
-    const number = reviewPrNumber(prUrl);
-    if (number === undefined) throw new Error("PR number is unavailable from review URL");
-    const statuses = rowsFromPaginatedApi(await readJson([
-      "api", "--paginate", "--slurp", `repos/${owner}/${repo}/commits/${headSha}/statuses?per_page=100`,
-    ], { fresh: true }));
-    if (statuses.some((row) => typeof row !== "object" || row === null ||
-        typeof (row as Record<string, unknown>).context !== "string" ||
-        typeof (row as Record<string, unknown>).state !== "string" ||
-        !["success", "failure", "pending", "error"].includes(String((row as Record<string, unknown>).state).toLowerCase()))) {
-      throw new Error("GitHub returned an incomplete commit status history");
-    }
-    const hasFailure = statuses.some((row) =>
-      (row as Record<string, unknown>).context === REVIEW_CONTEXT &&
-      String((row as Record<string, unknown>).state).toLowerCase() === "failure");
-    const reviews = hasFailure
-      ? rowsFromPaginatedApi(await readJson(["api", "--paginate", "--slurp", `repos/${owner}/${repo}/pulls/${number}/reviews?per_page=100`], { fresh: true }))
-      : [];
-    if (reviews.some((row) => typeof row !== "object" || row === null ||
-        typeof (row as Record<string, unknown>).commit_id !== "string" ||
-        (typeof (row as Record<string, unknown>).body !== "string" && (row as Record<string, unknown>).body !== null))) {
-      throw new Error("GitHub returned an incomplete pull request review history");
-    }
-    const failures = reproducedReviewFailuresFromHistory(statuses, reviews, headSha);
-    // Pending and repeated PASS rows are bookkeeping; a PASS after new failures reopens the decision.
-    const terminal = statuses.find((row) => {
-      const status = row as Record<string, unknown>;
-      return status.context === REVIEW_CONTEXT && String(status.state).toLowerCase() !== "pending";
-    }) as Record<string, unknown> | undefined;
-    const failureHistory = statuses.filter((row) => {
-      const status = row as Record<string, unknown>;
-      return status.context === REVIEW_CONTEXT && String(status.state).toLowerCase() === "failure";
-    }).map((row) => {
-      const status = row as Record<string, unknown>;
-      return { id: status.id ?? null, createdAt: status.created_at ?? null,
-        description: status.description ?? null, targetUrl: status.target_url ?? null };
-    });
-    const revision = terminal !== undefined && String(terminal.state).toLowerCase() === "success"
-      ? createHash("sha256").update(JSON.stringify(failureHistory)).digest("hex")
-      : String(terminal?.state ?? "none").toLowerCase();
-    return { kind: "readable", failures, ...(failures.length ? { revision } : {}) };
-  } catch (error) {
-    return { kind: "unreadable", reason: `GitHub remudero-review status history unreadable: ${String((error as Error)?.message ?? error)}` };
-  }
-}
+export { readReviewStatusHistory, type ReviewStatusHistoryReader } from "../../lib/review.js";
 
 export function failureRecordingPoster(): { post: (o: Parameters<typeof postReviewStatus>[0]) => Promise<void>; failed: () => boolean } {
   let threw = false;
@@ -789,7 +726,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     { maxRotations: 0, step: REVIEW_REQUEUED_STEP, keep: (line) => line.includes(headSha) })).rawLines.flatMap((line) => {
     try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; /* deliberate: a torn line requests nothing */ }
   });
-  const decisionDigest = reviewerImageDecisionDigest(requiredSemanticDecisionDigest(preparedDecision.decisionDigest,
+  let decisionDigest = reviewerImageDecisionDigest(requiredSemanticDecisionDigest(preparedDecision.decisionDigest,
     args.requireSemanticReview === true), { headSha, runtimeImageSha, requeues });
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
@@ -1228,36 +1165,7 @@ export async function runReview(host: ReviewCommandHost, args: {
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
 
-  if (!args.shadow) {
-    const latestStatusHistory = await readStatusHistory(owner, repo, prUrl, headSha);
-    const guarded = applyReviewStatusHistoryGuard(verdict, headSha, latestStatusHistory, reviewerFindingText ?? "", undefined,
-      initialStatusHistory.kind === "readable" ? initialStatusHistory.failures.map((finding) => finding.id) : []);
-    if (guarded.kind === "pending") {
-      const reason = `pending: ${guarded.reason}`;
-      log("review.stood_down", { context: REVIEW_CONTEXT, state: "pending", head_sha: headSha, pr_url: prUrl, reason });
-      say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${reason}`);
-      (args.onPhase ?? reportReviewPhase)("posted");
-      return { ...guarded.verdict, headSha, reviewerOutcome: outcome, verdictWithheld: reason,
-        reviewDecisionDigest: decisionDigest, decisionDisposition: "computed", evaluatorProvenance };
-    }
-    verdict = guarded.verdict;
-  }
 
-  if (suppressed && verdict.state === "success") {
-    // VISIBLE, not silently swallowed: names the sha + both verdicts + the
-    // floor result a suppression relied on, distinct from the review.posted
-    // line below (which now carries the SUCCESS actually posted).
-    log("review.downgrade_suppressed", {
-      head_sha: headSha,
-      predecessor_state: prior!.state,
-      suppressed_state: computed.state,
-      floor_state: computed.floorState,
-    });
-    say(
-      `remudero-review: semantic downgrade SUPPRESSED on unchanged head ${headSha.slice(0, 7)} — ` +
-        `deterministic floor still passes; prior verdict (success) stands (verdict-stability, W1-T178)`,
-    );
-  }
 
   // W1-T233: keep the published description aligned with the final guarded verdict.
   const description = reviewPostedDescription(verdict, args.materializationFailure);
@@ -1317,12 +1225,17 @@ export async function runReview(host: ReviewCommandHost, args: {
   phases.postStart = systemClock.now();
   reportPhase("posting");
   const poster = failureRecordingPoster();
+  const publishingState = verdict.state;
   const posted = await postReviewStatusGuarded({
     post: poster.post,
     owner,
     repo,
     sha: headSha,
     state: verdict.state,
+    verdict,
+    reviewerTranscript: reviewerFindingText ?? "",
+    presentedFailureIds: initialStatusHistory.kind === "readable" ? initialStatusHistory.failures.map(finding => finding.id) : [],
+    readReviewStatusHistory: readStatusHistory,
     description,
     taskId: task.id,
     evidence: reviewEvidenceStrength(verdict.criteria),
@@ -1343,6 +1256,30 @@ export async function runReview(host: ReviewCommandHost, args: {
   // W1-T11151: `posted` releases admission once the outcome is terminal: posted, refused (review.post_refused) or a
   // replayed terminal. Only a publication that threw (review.post_failed) holds its slot until the review settles.
   if (!poster.failed()) (args.onPhase ?? reportReviewPhase)("posted");
+  decisionDigest = posted.effectiveReviewDecisionDigest ?? decisionDigest;
+  if (posted.effectiveVerdict) verdict = { ...verdict, ...posted.effectiveVerdict, state: posted.effectiveState ?? posted.effectiveVerdict.state };
+  if (posted.effectiveState === "pending") {
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason,
+      reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
+  if (suppressed && verdict.state === "success") {
+    // VISIBLE, not silently swallowed: names the sha + both verdicts + the
+    // floor result a suppression relied on, distinct from the review.posted
+    // line below (which now carries the SUCCESS actually posted).
+    log("review.downgrade_suppressed", {
+      head_sha: headSha,
+      predecessor_state: prior!.state,
+      suppressed_state: computed.state,
+      floor_state: computed.floorState,
+    });
+    say(
+      `remudero-review: semantic downgrade SUPPRESSED on unchanged head ${headSha.slice(0, 7)} — ` +
+        `deterministic floor still passes; prior verdict (success) stands (verdict-stability, W1-T178)`,
+    );
+  }
+
+  if (publishingState === "success" && verdict.state === "failure") withdrawArmIfVerdictRefuses(verdict,
+    { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
   if (posted.conflict) {
     decisionDisposition = "conflict";
     verdict = {
@@ -1719,6 +1656,7 @@ export function reviewLedgerReasonFields(args: {
  * be a brand-new, never-invoked-under-test line this same gate would then flag).
  */
 export interface ReviewCommandDeps {
+  disarm?: (prUrl: string) => DisarmOutcome | void;
   onPhase?: (phase: string) => void;
   /** Bounded admission identity, separate from the existing worker/run and ownership conventions. */
   reviewAttemptId?: string;
@@ -2340,7 +2278,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // head goes first and the base follows on every exit path too; a grep tree is
   // deleted there the same way, and a blob-only fallback dir is not a worktree and
   // is left to the boot sweep (src/lib/tmp.ts) exactly as before.
-  const verdict = await withMaterialized(
+  let verdict = await withMaterialized(
     baseProof?.baseIsCheckout || baseProof?.baseIsGrepTree ? baseProof.baseCheckoutDir : undefined,
     subjectRepoDir,
     () =>
@@ -2409,9 +2347,11 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   if (verdict.decisionDisposition === "replayed" && verdict.reviewDecisionDigest) {
     if (verdict.verdictWithheld) return 2;
     const restorePoster = failureRecordingPoster();
+    const restoringState = verdict.state;
     const restored = await postStatusDep({
       post: restorePoster.post,
-      owner, repo, sha: view.headRefOid, state: verdict.state,
+      owner, repo, sha: view.headRefOid, state: verdict.state, verdict,
+      readReviewStatusHistory: deps.readReviewStatusHistory,
       description: reviewPostedDescription(verdict),
       taskId: reviewKey, evidence: reviewEvidenceStrength(verdict.criteria),
       ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
@@ -2425,6 +2365,10 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       readRequiredContexts: readRequiredStatusCheckContextsAsync,
       cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
     });
+    verdict.reviewDecisionDigest = restored.effectiveReviewDecisionDigest ?? verdict.reviewDecisionDigest;
+    if (restored.effectiveVerdict) verdict = { ...verdict, ...restored.effectiveVerdict, state: restored.effectiveState ?? restored.effectiveVerdict.state };
+    if (restoringState === "success" && verdict.state === "failure") withdrawArmIfVerdictRefuses(verdict,
+      { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
     if (restored.posted) {
       replayStatusAction = "restored";
       log("review.posted", {

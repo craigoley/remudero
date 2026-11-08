@@ -4,6 +4,7 @@ import * as review from "#src/lib/review.js";
 import * as reviewCommand from "#src/cli/commands/review.js";
 import { rmSync } from "node:fs";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const SHA = "90be1a69eaea5510184cf6eec69f7c72afd13c39";
 const computed = {
@@ -30,6 +31,28 @@ test("W1-T11443 criterion 2: unreadable status history withholds SUCCESS and nam
   assert.equal(result.kind, "pending");
   assert.equal(result.verdict.state, "success");
   assert.match(result.reason, /status history unreadable: offline/);
+});
+
+test("W1-T11443 criterion 2: the common publisher fails closed on returned and thrown history outages", async t => {
+  for (const failure of ["returned", "thrown"] as const) {
+    const ledger = writeLedger([], { scope: t });
+    const posted: string[] = [];
+    const result = await review.postReviewStatusGuarded({ owner: "acme", repo: "remudero", sha: SHA,
+      state: "success", verdict: computed as never, taskId: "W1-T11443", evidence: "executed",
+      ledgerPath: ledger.path, runId: failure, prUrl: "https://github.com/acme/remudero/pull/1",
+      fetchLifecycle: () => ({ headSha: SHA, closed: false, merged: false }),
+      readReviewStatusHistory: async (_owner, _repo, _url, head) => {
+        assert.equal(head, SHA);
+        if (failure === "thrown") throw new Error("history transport offline");
+        return { kind: "unreadable", reason: "history transport offline" };
+      },
+      post: status => { posted.push(status.state); },
+    });
+    assert.equal(result.posted, false);
+    assert.equal(result.effectiveState, "pending");
+    assert.match(result.reason ?? "", /pending:.*history transport offline/);
+    assert.deepEqual(posted, [], "the publisher never blindly posts SUCCESS");
+  }
 });
 
 test("W1-T11443 criterion 2: a failed GitHub history read returns an explicit unreadable reason", async () => {

@@ -86,7 +86,8 @@ test("repaired reservation posts success without a verdict conflict", async () =
   const posts: string[] = [];
   try {
     appendLedger(ledgerPath, { run_id: "old", task_id: ID, pr_url: PR, step: "review.posted", head_sha: "same-head", review_decision_digest: before, state: "failure", decision_verdict: { state: "failure", criteria: [], capped: false, keywordOnly: false } });
-    const result = await postReviewStatusGuarded({ owner: "acme", repo: "remudero", sha: "same-head", state: "success", taskId: ID, evidence: "executed", ledgerPath, runId: "repaired", prUrl: PR, reviewDecisionDigest: after, fetchLifecycle: () => ({ merged: false, closed: false }), post: ({ state }) => void posts.push(state) });
+    const result = await postReviewStatusGuarded({
+    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }), owner: "acme", repo: "remudero", sha: "same-head", state: "success", taskId: ID, evidence: "executed", ledgerPath, runId: "repaired", prUrl: PR, reviewDecisionDigest: after, fetchLifecycle: () => ({ merged: false, closed: false }), post: ({ state }) => void posts.push(state) });
     assert.deepEqual(result, { posted: true });
     assert.deepEqual(posts, ["success"]);
   } finally {

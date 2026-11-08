@@ -636,6 +636,7 @@ test("W1-T913: the terminal state REPLACES the pending on completion — postRev
     assert.equal(pending.posted, true);
 
     const terminal = await postReviewStatusGuarded({
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
       owner: "o",
       repo: "r",
       sha: "deadbeef",

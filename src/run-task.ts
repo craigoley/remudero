@@ -12563,6 +12563,13 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       console.log(`no remudero-review posted (refused: ${posted.reason}): ${view.url}`);
       return 1;
     }
+    if (posted.effectiveState !== undefined && posted.effectiveState !== "success") {
+      log("review.posted", { context: REVIEW_CONTEXT, state: posted.effectiveState, head_sha: view.headRefOid,
+        pr_url: view.url, review_input_digest: inputDigest, review_engine_revision: DEP_REVIEW_ENGINE_REVISION,
+        dep_review: true, proof_exec: [], decision_verdict: posted.effectiveVerdict });
+      console.log(`remudero-review=${posted.effectiveState}: ${posted.effectiveVerdict?.summary ?? posted.reason}: ${view.url}`);
+      return 1;
+    }
     // W1-T230: armAutoMerge no longer trusts the live status just posted above
     // (display/branch-protection only from here on) — it keys off this
     // orchestrator's OWN ledgered `review.posted` verdict. This second judge

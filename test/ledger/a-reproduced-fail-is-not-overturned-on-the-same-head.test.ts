@@ -8,6 +8,7 @@ import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 function reviewFixtureHost(head: string): reviewCommand.ReviewCommandHost {
   const unrelatedHostPort = (): never => { throw new Error("unexpected unrelated orchestration port"); };
@@ -91,6 +92,62 @@ test("W1-T11443 criterion 1: an addressed marker needs a resolution clause on th
   assert.equal(result.verdict.state, "failure", "a bare PASS never explains the reproduction");
 });
 
+test("W1-T11443 criterion 1: an unrelated PASS clause cannot clear a presented reproduction", () => {
+  const failures = review.reproducedReviewFailuresFromHistory(history, reviews, SHA);
+  for (const clause of ["the exported symbol exists", "re-ran an exported symbol check; it now passes", "re-ran the reproduction; it now passes", "re-ran an unrelated adoption probe; now passes", "re-ran the shadow adoption replay; not fixed", "re-ran the shadow adoption replay; still throws ReferenceError, now passes"]) {
+    const result = review.applyReviewStatusHistoryGuard(computed as never, SHA, { kind: "readable", failures },
+      `REVIEW_ADDRESSED_FAILURE 1: ${failures[0].id}\nREVIEW_VERDICT 1: PASS (${clause})`, [], [failures[0].id]);
+    assert.equal(result.verdict.state, "failure", clause);
+  }
+});
+
+test("W1-T11443 criterion 1: a resolution receipt is bound to its exact head", () => {
+  const failures = review.reproducedReviewFailuresFromHistory(history, reviews, SHA);
+  const resolved = review.applyReviewStatusHistoryGuard(computed as never, SHA, { kind: "readable", failures },
+    `REVIEW_ADDRESSED_FAILURE 1: ${failures[0].id}\nREVIEW_VERDICT 1: PASS (re-ran the shadow adoption replay; no ReferenceError)`, [], [failures[0].id]);
+  assert.equal(resolved.verdict.state, "success");
+  const otherHead = "new-head";
+  const replay = review.applyReviewStatusHistoryGuard(resolved.verdict, otherHead,
+    { kind: "readable", failures: failures.map(failure => ({ ...failure, headSha: otherHead })) });
+  assert.equal(replay.verdict.state, "failure");
+});
+
+test("W1-T11443 criterion 1: a lowercase counterexample is resolved by naming its finding in the verdict clause", () => {
+  const body = "remudero-review=failure\n1. claim\n   - proof executed and PASSED — NOTE: reviewer judged the proof non-responsive: a classifier check returned an incorrect lifetime";
+  const failures = review.reproducedReviewFailuresFromHistory(history, [{ commit_id: SHA, body }], SHA);
+  assert.equal(failures.length, 1);
+  const result = review.applyReviewStatusHistoryGuard({ ...computed, criteria: [{ ...computed.criteria[0], claim: "claim" }] } as never,
+    SHA, { kind: "readable", failures },
+    `REVIEW_ADDRESSED_FAILURE 1: ${failures[0].id}\nREVIEW_VERDICT 1: PASS (re-ran reproduction ${failures[0].id}; it now passes)`, [], [failures[0].id]);
+  assert.equal(result.verdict.state, "success");
+});
+
+test("W1-T11443 criterion 1: the common publisher validates the affected reproduction before posting SUCCESS", async t => {
+  const failures = review.reproducedReviewFailuresFromHistory(history, reviews, SHA);
+  for (const explanation of ["the exported symbol exists", "re-ran the shadow adoption replay; no ReferenceError"] as const) {
+    const ledger = writeLedger([], { scope: t });
+    const posts: string[] = [];
+    const result = await review.postReviewStatusGuarded({ owner: "acme", repo: "remudero", sha: SHA,
+      state: "success", verdict: computed as never, taskId: "W1-T11443", evidence: "executed",
+      ledgerPath: ledger.path, runId: "publisher-reproduction", prUrl: "https://github.com/acme/remudero/pull/1",
+      fetchLifecycle: () => ({ headSha: SHA, closed: false, merged: false }),
+      readReviewStatusHistory: async (_owner, _repo, _url, head) => {
+        assert.equal(head, SHA);
+        return { kind: "readable", failures };
+      },
+      reviewerTranscript: `REVIEW_ADDRESSED_FAILURE 1: ${failures[0].id}\nREVIEW_VERDICT 1: PASS (${explanation})`,
+      presentedFailureIds: [failures[0].id],
+      post: status => { posts.push(status.state); },
+    });
+    const expected = explanation === "the exported symbol exists" ? "failure" : "success";
+    assert.equal(result.posted, true);
+    assert.equal(result.effectiveState, expected);
+    assert.deepEqual(posts, [expected]);
+    if (expected === "failure") assert.match(result.effectiveVerdict?.summary ?? "", /ReferenceError at daemon.ts:4218/);
+  }
+});
+
+
 test("W1-T11443 criterion 1: another criterion cannot acknowledge the affected finding", () => {
   const failures = review.reproducedReviewFailuresFromHistory(history, reviews, SHA);
   const twoCriteria = { ...computed, criteria: [computed.criteria[0], computed.criteria[0]] };
@@ -113,7 +170,7 @@ test("W1-T11443 criterion 1: compressed unmet numbering maps back to the affecte
   assert.equal(blocked.verdict.criteria[1].met, false, "the finding concerns acceptance criterion 2 despite being the first unmet item");
   assert.equal(blocked.verdict.criteria[0].met, true);
   const cleared = review.applyReviewStatusHistoryGuard(twoCriteria as never, SHA, { kind: "readable", failures },
-    `REVIEW_ADDRESSED_FAILURE 2: ${failures[0].id}\nREVIEW_VERDICT 2: PASS (re-ran the shadow adoption reproduction)`, [], [failures[0].id]);
+    `REVIEW_ADDRESSED_FAILURE 2: ${failures[0].id}\nREVIEW_VERDICT 2: PASS (re-ran the shadow adoption reproduction; it no longer throws ReferenceError)`, [], [failures[0].id]);
   assert.equal(cleared.verdict.state, "success");
 });
 
@@ -165,7 +222,7 @@ test("W1-T11443 criteria 1/2: production publication guards shared history and p
           prompts.push(args.prompt);
           const acknowledgement = scenario === "addressed" || scenario === "late"
             ? `REVIEW_ADDRESSED_FAILURE 1: ${failures[0].id}\n` : "";
-          return successfulReviewWorker(`${acknowledgement}REVIEW_VERDICT 1: PASS (re-ran the shadow adoption reproduction and it no longer throws)`);
+          return successfulReviewWorker(`${acknowledgement}REVIEW_VERDICT 1: PASS (re-ran the shadow adoption reproduction and it no longer throws ReferenceError)`);
         },
         reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120_000 }, reviewerClockBoundMs: 120_000,
         headCheckoutDir: root, ledgerPath: join(root, "ledger.ndjson"), runId: `history-${scenario}`,
