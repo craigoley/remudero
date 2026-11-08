@@ -21,6 +21,7 @@
     - src/lib/run-child.ts
     - src/run-task.ts
     - test/worker/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
+    - test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -37,7 +38,7 @@
     1. src/lib/worker.ts: the auction input gains excludeProviders (a set). Candidates whose provider is in it are ineligible while any other candidate is eligible. With none left, the auction selects as today and the assignment records exclusion_unhonoured with the reason, so a single-provider host still reviews. No fixed thresholds.
     2. src/lib/sweep.ts: on re-admitting a head whose last review was cannot-evaluate with reviewer-unavailable criteria (W1-T11428's marker on review.posted / review.reviewer), carry the provider named on that run's review.reviewer row into the re-admitted review's spawn.
     3. src/cli/commands/review.ts: the reviewer spawn passes excludeProviders through, and review.reviewer records the exclusion and whether it was honoured.
-    Tests: an auction with two eligible providers and one excluded selects the other; with only the excluded one eligible it selects it and records exclusion_unhonoured; a re-admission after an UNABLE review spawns with the prior provider excluded (at base the option does not exist, so the file cannot link).
+    Tests: an auction with two eligible providers and one excluded selects the other; with only the excluded one eligible it selects it and records exclusion_unhonoured; a re-admission after an UNABLE review spawns with the prior provider excluded (at base the option does not exist, so the file cannot link). The detached and fresh/healed child-route regression is added to the existing reviewer child-start suite because `rmd test-place` places its production-boundary imports under `test/worker/`.
   falsifier: |
     At origin/main, a review that went cannot-evaluate because its codex reviewer could not launch its sandbox is re-admitted and routed to codex again by the same auction pressure, and is unable again.
   note: |
