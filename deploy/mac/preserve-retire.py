@@ -1147,8 +1147,15 @@ def purge_archived_threads(cfg, now, apply, verb):
         say("HOLD", f"codex-threads (state unreadable: {error.__class__.__name__})", db)
         return 0
     removed = 0
-    env = dict(os.environ, CODEX_HOME=os.path.join(cfg["home"], ".codex"))
+    codex_home = os.path.join(cfg["home"], ".codex")
+    env = dict(os.environ, CODEX_HOME=codex_home)
     for tid in ids:
+        # Deletion mutates the shared database and can cascade to other threads' rollouts.
+        # Hold the whole operation if any part of the Codex tree has a keep declaration.
+        why = keep_scope(codex_home)
+        if why:
+            say("HOLD", f"codex-threads {why}", codex_home)
+            break
         if apply:
             require_action_authorized()
             try:

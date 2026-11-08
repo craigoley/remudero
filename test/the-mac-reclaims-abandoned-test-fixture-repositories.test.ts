@@ -7,7 +7,8 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -34,6 +35,11 @@ function fixtureRepo(dir: string) {
   writeFileSync(join(dir, "a.txt"), "fixture\n");
   git(dir, "add", "a.txt"); git(dir, "commit", "-q", "-m", "fixture");
   writeFileSync(join(dir, "dirty.txt"), "fixture edit\n");
+}
+function fileContents(dir: string) {
+  return readdirSync(dir, { recursive: true, encoding: "utf8" }).sort()
+    .filter(path => statSync(join(dir, path)).isFile())
+    .map(path => [path, createHash("sha256").update(readFileSync(join(dir, path))).digest("hex")]);
 }
 
 test("an idle temp tree of remote-less fixture repositories is removed while network-remote, outside-remote, spend-holding and young trees stay", () => {
@@ -67,7 +73,10 @@ test("an idle temp tree of remote-less fixture repositories is removed while net
     const young = join(root, "rmd-s4-running.ghi789");
     fixtureRepo(join(young, "repo"));
     for (const e of [shard, real, borrower, cash]) age(e, 8);
-    age(young, 2);
+    age(young, 8);
+    // Recent work holds the tree while older working files and Git metadata remain intact.
+    age(join(young, "repo/dirty.txt"), 2);
+    const youngBefore = fileContents(young);
 
     const report = join(base, "kept.txt");
     const r = spawnSync("bash", [SCRIPT, "--apply"], { encoding: "utf8", env: {
@@ -79,6 +88,8 @@ test("an idle temp tree of remote-less fixture repositories is removed while net
     const kept = existsSync(report) ? readFileSync(report, "utf8") : "";
     assert.equal(existsSync(shard), false, kept + r.stdout);
     for (const p of [real, borrower, cash, young]) assert.ok(existsSync(p), p + kept);
+    assert.deepEqual(fileContents(young), youngBefore, "a mixed-age repository keeps every file");
+    git(join(young, "repo"), "fsck", "--no-dangling");
     assert.match(kept, /Git checkout\/worktree: .*remudero-pr-1/);
     assert.match(kept, /Git checkout\/worktree: .*rmd-s3-borrower/);
   } finally {

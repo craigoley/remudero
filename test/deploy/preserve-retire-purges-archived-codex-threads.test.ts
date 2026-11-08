@@ -57,6 +57,17 @@ test("archived, unpinned Codex threads archived a day ago are deleted through th
   try {
     threads(fx, [["old", 1, NOW - 2 * DAY, 0], ["cascade", 1, NOW - 3 * DAY, 0], ["stuck", 1, NOW - 3 * DAY, 0],
       ["recent", 1, NOW - 3600, 0], ["pinned", 1, NOW - 9 * DAY, 1], ["live", 0, null, 0]]);
+    const keep = join(fx.home, ".codex/.rmd-janitor-keep");
+    writeFileSync(keep, "operator work\n");
+    const before = readFileSync(fx.db);
+    for (const apply of [false, true]) {
+      const kept = helper(fx, apply);
+      assert.equal(kept.status, 0, kept.stderr + kept.stdout);
+      assert.match(kept.stdout, /codex-threads-removed=0/);
+      assert.equal(existsSync(fx.calls), false, "a kept Codex home never calls the CLI");
+      assert.deepEqual(readFileSync(fx.db), before, "the kept database stays byte-for-byte intact");
+    }
+    rmSync(keep);
     const dry = helper(fx, false);
     assert.equal(dry.status, 0, dry.stderr + dry.stdout);
     assert.match(dry.stdout, /codex-threads-removed=3 apply=0/);
@@ -68,6 +79,33 @@ test("archived, unpinned Codex threads archived a day ago are deleted through th
     assert.match(r.stdout, /HOLD.*codex-thread delete-failed.*stuck/);
     assert.match(readFileSync(fx.calls, "utf8"), new RegExp(`delete --force old ${join(fx.home, ".codex")}`));
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a keep declaration inside either Codex rollout tree holds shared database deletion and its logs", () => {
+  for (const rel of [".codex/archived_sessions", ".codex/sessions/2026/11/01"]) {
+    const fx = setup({ codex_session_days: 1 });
+    try {
+      threads(fx, [["old", 1, NOW - 2 * DAY, 0]]);
+      const dir = join(fx.home, rel);
+      mkdirSync(dir, { recursive: true });
+      const rollout = join(dir, "rollout-2026-11-01T10-00-00-old.jsonl");
+      writeFileSync(rollout, "kept history\n");
+      const keep = join(dir, ".rmd-janitor-keep");
+      writeFileSync(keep, "operator work\n");
+      const before = readFileSync(fx.db);
+      const kept = helper(fx, true, NOW + 2 * DAY);
+      assert.equal(kept.status, 0, kept.stderr + kept.stdout);
+      assert.equal(existsSync(fx.calls), false, "the CLI can cascade into kept rollout trees");
+      assert.deepEqual(readFileSync(fx.db), before);
+      assert.equal(readFileSync(rollout, "utf8"), "kept history\n");
+      rmSync(keep);
+      const released = helper(fx, true, NOW + 2 * DAY);
+      assert.equal(released.status, 0, released.stderr + released.stdout);
+      assert.deepEqual(remaining(fx), []);
+      assert.equal(existsSync(rollout), false, released.stdout);
+      assert.match(readFileSync(fx.calls, "utf8"), /delete --force old/);
+    } finally { rmSync(fx.root, { recursive: true, force: true }); }
+  }
 });
 
 test("an archived rollout log expires on codex_archived_days though live session logs keep codex_session_days", () => {

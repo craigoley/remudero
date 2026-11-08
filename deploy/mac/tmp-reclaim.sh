@@ -344,10 +344,10 @@ artifact_risk() {
   found=$(find "$path" -xdev -name .git -print -quit 2>/dev/null); status=$?
   [ "$status" -eq 0 ] || { echo 'Git metadata scan unavailable'; return 0; }
   if [ -n "$found" ]; then
-    # Only a whole top-level temp entry can be a fixture tree; session scratch and
-    # anything nested keep every checkout.
+    # Only whole-tree retirement of a top-level temp entry can use the fixture exception;
+    # leaf pruning, session scratch and anything nested keep every checkout.
     case "$path" in "${TEMP_ROOT_REAL:-/-}"/*/*|./*/*) top=0 ;; "${TEMP_ROOT_REAL:-/-}"/*|./*) top=1 ;; *) top=0 ;; esac
-    [ "${ROOT_REAL:-}" = "${TEMP_ROOT_REAL:-}" ] && [ "$top" = 1 ] && ! found=$(fixture_git_risk "$path") || {
+    [ "$structure_only" = 0 ] && [ "${ROOT_REAL:-}" = "${TEMP_ROOT_REAL:-}" ] && [ "$top" = 1 ] && ! found=$(fixture_git_risk "$path") || {
       echo "Git checkout/worktree: $found"; return 0; }
   fi
   case "${path##*/}" in
