@@ -1,0 +1,90 @@
+- id: W1-T11687
+  title: "Apply the three proof-metadata corrections W1-T11669 designed but never landed — W1-T11623 criterion 1 proves its exact regression test title; W1-T11659 declares and proves test/ci/ and records the readable foreign-UID skip behavior; plan-only, no source or test code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: low  # two existing shards' metadata only; plan-only, no src/ or test/ path
+  priority: 1  # both target tasks are queued priority 1 and carry proofs that cannot discriminate base from head
+  origin: architect
+  plan_refs: [W1-T11669, W1-T11623, W1-T11659, W1-T10389]
+  files:
+    - plan/tasks.d/W1-T11623-the-failed-static-gate-fixture-runs-clear-of-an-inherited-slot-marker.yaml
+    - plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml
+  status: queued
+  attempts: 0
+  rationale: |
+    SUCCESSOR TO W1-T11669. Initiative evidence (operator, 2026-11-08): merged PR #17311 (merge 48b17ae) only
+    added the W1-T11669 task record, its trace shows no task run, and its merged commit carries a
+    `Remudero-Task: W1-T11669` trailer from a rationale-only follow-up commit. That trailer makes the W1-T11669 id
+    look already worked, so this task carries the work under its own id instead of reusing W1-T11669.
+    READ ON THIS TREE: both target shards are unchanged from what W1-T11669 describes.
+    - W1-T11623 acceptance[0].proof is still `unit test: test/author-preflight.test.ts`. Its own note says the
+      reviewer's proof run may not sit inside an author slot, and its rationale says the file passes bare. So a
+      whole-file proof can pass on base, which fails proof-discrimination (src/lib/proof-grammar.ts, whole-file
+      form comment). The exact title fixed by W1-T11623 design step 1 is absent on base and present on head.
+    - W1-T11659 files: and acceptance[0].proof still name
+      test/ci/gates/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts, and its design has no
+      sentence about readable foreign UIDs beyond "foreign UID handling ... unchanged".
+    Settled by lookup: is this already filed or already decided? -> filed as W1-T11669 but not applied. No other
+      shard, monolith task, LEARNINGS.md, DECISIONS.md or MASTER-PLAN.md entry names W1-T11623, W1-T11659 or
+      W1-T11669 except those three shards (plan/ grep; LEARNINGS.md; DECISIONS.md; MASTER-PLAN.md).
+    Settled by lookup: is a test-title `unit test:` proof legal? -> yes, when it is the exact title of a test the
+      change adds (src/lib/proof-grammar.ts, "unit test: <exact title of a test this change adds>"). W1-T11623
+      design step 1 fixes that title.
+    Settled by lookup: which folder does `rmd test-place` compute for the W1-T11659 suite? -> test/ci/. Its only
+      src import, process-cwd-census, scores no subsystem, so the "census" name keyword maps to ci-parity and the
+      ci folder, with no second level (src/lib/test-placement.ts; scripts/test-placement/subsystem-map.json; the
+      W1-T10389 sibling test/ci/a-foreign-pid-whose-cwd-is-unreadable-does-not-hold-a-dead-fix-worktree.test.ts;
+      derivation recorded in W1-T11669).
+    Settled by lookup: what is the existing readable foreign-UID skip behavior? -> when the cwd read fails and the
+      status Uid is readable but differs from the census owner's uid, the pid is counted in skippedForeign and the
+      scan continues (src/lib/process-cwd-census.ts:137-141, W1-T10389).
+    Settled by lookup: will editing another task's proof:/files: lines trip criteria tampering? -> not on a
+      plan-only diff. judgeReview computes criteriaTampered only when the diff is not plan-only
+      (src/lib/review.ts, `criteriaTampered = !planOnly && ...`), and every path in files: is under plan/tasks.d/.
+    Settled by lookup: does any proof name this task's own shard (the self-path executed_stale trap)? -> no. Every
+      proof greps one of the two TARGET shards (src/lib/task-linter.ts self-path check).
+  design: |
+    PLAN-ONLY. Edit only the two target shards in files:. Do not touch src/, test/, scripts/, MASTER-PLAN.md,
+    the W1-T11669 shard or any other shard. In both targets keep id, title, status, priority, risk, budget,
+    origin, plan_refs, every claim: text, rationale, note, falsifier and every existing behavioural sentence
+    byte-for-byte. Make exactly these three edits and nothing else:
+    1. W1-T11623 (plan/tasks.d/W1-T11623-the-failed-static-gate-fixture-runs-clear-of-an-inherited-slot-marker.yaml):
+       in acceptance criterion 1 only, keep the claim text and replace the proof value with exactly
+         unit test: the failed static gate case runs clear of an inherited slot marker (W1-T11623)
+       Criterion 2 stays as it is.
+    2. W1-T11659 (plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml), test path:
+       a. In files:, replace the test/ci/gates/... entry with
+          test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts
+          and keep src/lib/process-cwd-census.ts.
+       b. In acceptance, keep the one claim's text and replace its proof value with exactly
+            unit test: test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts
+    3. W1-T11659 design, foreign-UID note: insert this sentence directly after "Keep wall/entry bounds, foreign UID
+       handling, current unknown cases and occupied behavior unchanged." and change no other design text:
+         A readable foreign-UID process keeps its existing skip behavior: an EACCES/EPERM cwd whose status Uid is
+         readable and differs from the census owner is still counted in skippedForeign and the scan continues,
+         unchanged by the manager classifier.
+    VERIFY in the PR body: paste the complete `rmd lint-plan` output, which must show no error for W1-T11623 or
+    W1-T11659, and paste `git diff --stat`, which must list only the two target shard paths. Also state that
+    `git diff` for the two shards shows only the three edits above.
+    NOT IN SCOPE: implementing W1-T11623 or W1-T11659, writing either test, moving any test file, changing
+    production census or author-preflight behaviour, or editing or retiring the W1-T11669 shard.
+  acceptance:
+    - claim: "W1-T11623 criterion 1 proves the exact new regression test title instead of the whole test file"
+      proof: "grep: unit test: the failed static gate case runs clear of an inherited slot marker (W1-T11623) in plan/tasks.d/W1-T11623-the-failed-static-gate-fixture-runs-clear-of-an-inherited-slot-marker.yaml"
+    - claim: "W1-T11659 proves its suite at the test/ci path rmd test-place computes, through a path-based unit-test proof"
+      proof: "grep: unit test: test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census\\.test\\.ts in plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml"
+    - claim: "W1-T11659 records that a readable foreign-UID process keeps its existing skip behavior"
+      proof: "grep: readable foreign-UID process keeps its existing skip behavior in plan/tasks.d/W1-T11659-a-verified-systemd-user-manager-does-not-block-cwd-census.yaml"
+  falsifier: |
+    On this tree all three greps read 0: W1-T11623 criterion 1 is a file-path proof, W1-T11659 names only the
+    gates/ subfolder, and no readable-foreign-UID sentence exists. So each proof fails on base. The change is
+    wrong if, after it, `rmd lint-plan` refuses either target task, the diff touches any path other than the two
+    target shards, any claim: text or status in either target differs from base, or W1-T11659 files: still lists
+    a test path other than test/ci/a-verified-systemd-user-manager-does-not-block-cwd-census.test.ts.
+  note: "risk:low — plan-only metadata in two shards, no behaviour change. verify:auto — all three proofs grep text
+    the change adds to the target shards; lint and diff-stat are PR-body evidence. W1-T11669 stays as filed; it is
+    superseded in practice by this task, and retiring its record is an operator call outside this task's scope."

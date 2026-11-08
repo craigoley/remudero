@@ -13,7 +13,8 @@ import { resolveInstallRoot } from "./install-root.js";
 /** Provider transport stays outside the candidate namespace; no worker tools see the owner store. */
 export type CodingWorker = (args: SpawnWorkerArgs) => Promise<Pick<WorkerResult,
   "exit" | "text" | "isError" | "apiError" | "workerDurationMs" | "workerFirstTextMs" | "tokens"
-  | "tokenUsageState" | "sdkReportedUsageRatedUsd" | "notionalCostUsd" | "servedModel" | "executionEvidence">>;
+  | "tokenUsageState" | "sdkReportedUsageRatedUsd" | "notionalCostUsd" | "servedModel" | "executionEvidence"
+  | "providerExchange">>;
 
 export function codingWorkerRequestPorts(config: Config, ownerDirectory: string,
   worker: CodingWorker): CanaryExecutionPorts {
@@ -40,7 +41,7 @@ export function codingWorkerRequestPorts(config: Config, ownerDirectory: string,
           model: request.pin.model, effort: request.pin.effort,
           mountProvider: "claude", mcpIsolation: "repo-knowledge-only",
           tools: [], cashTools: [], maxTurns: 1, signal: request.signal,
-          runId: context.runId, taskId: "MODEL-CANARY-CODING" });
+          runId: context.runId, canaryAttemptId: context.canaryAttemptId, taskId: "MODEL-CANARY-CODING" });
         if (!result.exit || result.exit.kind === "unobserved") throw new Error("coding-worker-closure-unavailable");
         closed = true;
         const tokens = result.tokenUsageState === "observed" ? result.tokens : null;
@@ -52,7 +53,7 @@ export function codingWorkerRequestPorts(config: Config, ownerDirectory: string,
           billing: request.pin.billing, servedModel: result.servedModel ?? null,
           terminal: result.isError || result.apiError || result.exit.kind === "signal"
             || result.exit.kind === "exit" && result.exit.code !== 0 ? "error" as const : "complete" as const,
-          executionEvidence: result.executionEvidence,
+          executionEvidence: result.executionEvidence, providerExchange: result.providerExchange,
         } };
       } finally {
         // A rejected/ambiguous worker retains its scratch beside its held slot for native recovery.

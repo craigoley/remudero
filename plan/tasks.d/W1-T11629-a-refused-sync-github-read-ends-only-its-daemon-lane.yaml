@@ -11,7 +11,10 @@
   plan_refs: [W1-T11458, W1-T3791, W1-T4466, W1-T3165]
   depends_on: [W1-T11458]
   files: [src/lib/daemon.ts, test/daemon.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=a14429dc4cd1f72e
+  # backlog gardener: placed=2026-11-08T03:20:54.967Z
   attempts: 0
   rationale: |
     PR #17144 correctly makes an actual positive synchronous GitHub wait throw
