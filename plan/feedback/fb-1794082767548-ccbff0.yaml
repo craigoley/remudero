@@ -1,0 +1,22 @@
+id: fb-1794082767548-ccbff0
+ts: 2026-11-07T20:19:27.548Z
+raw: "Scope a triage-only provider recovery: when Claude returns an explicitly
+  classified subscription weekly-limit refusal, reauction at most once to an
+  already enabled subscription provider only when exact attempt evidence proves
+  no task-side tool effects or workspace change and usage/cost are zero. Add
+  Codex native WebSearch only to the triage research profile using the verified
+  CLI search flag and declared lane bounds; fail closed on unsupported CLI
+  versions, missing tools, ambiguous receipts or ineligible capacity. Preserve
+  both attempt assignments and refusal provenance. Do not route PLAN through
+  Codex, add WebFetch, use cash, or broaden tools for implement/review lanes.
+  User explicitly approved this root-cause fix; tests must use synthetic
+  fixtures, no live provider calls."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
