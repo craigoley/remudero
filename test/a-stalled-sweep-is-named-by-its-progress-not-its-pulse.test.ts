@@ -14,6 +14,9 @@ import {
 } from "../src/lib/progress-watchdog.js";
 import { progressWatchdogCommand } from "../src/run-task.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+import { allowGhRefusals } from "#test/setup/tmp-hygiene.js";
+
+allowGhRefusals("the spawned verb reads the live open-PR list (W1-T11750); the refused read is its unreachable-board arm, which the ledger count then decides");
 
 const NOW = Date.parse("2026-10-05T12:00:00.000Z");
 const MIN = 60_000;
@@ -197,7 +200,9 @@ function runVerb(
   console.log = (...a: unknown[]) => void out.push(a.map(String).join(" "));
   console.error = (...a: unknown[]) => void err.push(a.map(String).join(" "));
   try {
-    return { code: progressWatchdogCommand(["--state-root", dir, ...args], run), out, err };
+    // W1-T11750: the verb reads GitHub live; this fixture's board is unreachable, so the ledger count decides.
+    const unreachable = { ownerRepo: () => ({ owner: "o", repo: "r" }), fetch: (): never => { throw new Error("offline fixture"); } };
+    return { code: progressWatchdogCommand(["--state-root", dir, ...args], run, unreachable), out, err };
   } finally {
     console.log = realLog;
     console.error = realError;
@@ -232,7 +237,7 @@ test("rmd progress-watchdog prints the rendered verdict in text mode and writes 
     const result = runVerb(dir, [], (file, a) => (calls.push([file, ...a]), ""));
     assert.equal(result.code, 0);
     assert.equal(result.out.length, 1);
-    assert.match(result.out[0], /^progress-watchdog: STALLED action=recycle progress_age=(39|40) min failed_boots_15m=0 — /);
+    assert.match(result.out[0], /^progress-watchdog: STALLED action=recycle progress_age=(39|40) min failed_boots_15m=0 open_prs_live=unknown \(control not_run\) open_prs_last_full_pass=3 .* — /);
     assert.deepEqual(calls, [], "a recycle verdict spawns no docker call");
     assert.equal(existsSync(join(dir, "diagnostics")), false);
   } finally {

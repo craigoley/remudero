@@ -15,6 +15,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { fixedClock } from "./clock.js";
 import { LEDGER_FUTURE_STAMP_TOLERANCE_MS } from "./ledger.js";
+import { openPrsRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
 
 export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "IN_PASS" | "IN_RECYCLE" | "RECOVERING" | "CRASH_LOOP" | "UNKNOWN";
 export type ProgressWatchdogAction = "none" | "capture-diagnostics" | "recycle" | "hold-revive";
@@ -56,6 +57,13 @@ export const REVIVAL_LOG_ENV = "RMD_REVIVAL_LOG";
 /** bound kind: physical — the revival-log tail one verdict reads (~3,000 lines, days of 5-minute revives); the log is append-only for the host's life. */
 export const REVIVAL_LOG_TAIL_BYTES = 256 * 1024;
 
+/** W1-T11750: one live read of the board's open PRs, kept apart from the last full pass's ledger count.
+ *  `control` says whether the same invocation's closed-PR read proved the credential and route can see PRs. */
+export type LiveOpenPrInventory =
+  | { state: "read"; count: number; numbers: number[]; control: "ok" }
+  | { state: "control_failed"; control: "failed"; reason: string }
+  | { state: "unknown"; control: "not_run"; reason: string };
+
 export interface ProgressWatchdogVerdict {
   state: ProgressWatchdogState;
   action: ProgressWatchdogVerdictAction;
@@ -70,7 +78,11 @@ export interface ProgressWatchdogVerdict {
   failedBoots15m: number;
   /** W1-T9627: the trailing run of revived containers that died before node wrote `daemon.paths`. */
   preNodeDeaths?: number;
+  /** The last full pass's ledger count; never merged with {@link liveOpenPrInventory}. */
+  openPrCount?: number;
   openPrCountSource?: OpenPrCountSource;
+  /** W1-T11750: the live open-PR read and its control, present when the verb consulted GitHub. */
+  liveOpenPrInventory?: LiveOpenPrInventory;
   /** W1-T11324: progress, boot and loop-resume rows skipped as stamped past the future-stamp tolerance. */
   futureStampedSkipped?: number;
   reason: string;
@@ -86,6 +98,58 @@ export interface ProgressWatchdogInput {
   revivalLog?: string;
   openPrCountSource?: OpenPrCountSource;
   liveRecyclePausePid?: number;
+  /** W1-T11750: absent means GitHub was not consulted (the ledger count decides alone, as before); present,
+   *  IDLE needs `state: "read"` with count 0. */
+  liveOpenPrInventory?: LiveOpenPrInventory;
+}
+
+/** bound kind: physical — pages of 100 one tick walks (1,000 open PRs); a longer walk is unknown, never a count. */
+export const LIVE_OPEN_PR_MAX_PAGES = 10;
+const LIVE_OPEN_PR_PAGE_SIZE = 100;
+
+function numberedRows(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const numbers: number[] = [];
+  for (const row of value) {
+    const n = (row as { number?: unknown } | null)?.number;
+    if (typeof n !== "number" || !Number.isInteger(n)) return undefined;
+    numbers.push(n);
+  }
+  return numbers;
+}
+
+/**
+ * W1-T11750: read the board's open PRs now, and prove the reader can see PRs before a 0 is believed.
+ * The walk follows `page=` to a short page ("read" only when complete); the control reads ONE closed PR of the
+ * same repo in the same call and must get a row with an integer `number` back. A thrown walk or one past
+ * {@link LIVE_OPEN_PR_MAX_PAGES} is "unknown"; a failed control is "control_failed". Never throws.
+ */
+export function readLiveOpenPrInventory(owner: string, repo: string, fetch: GhApiFetcher): LiveOpenPrInventory {
+  const numbers: number[] = [];
+  const base = openPrsRestArgs(owner, repo);
+  let complete = false;
+  for (let page = 1; page <= LIVE_OPEN_PR_MAX_PAGES && !complete; page += 1) {
+    let rows: number[] | undefined;
+    try {
+      rows = numberedRows(fetch([base[0], `${base[1]}&page=${page}`]));
+    } catch (error) {
+      return { state: "unknown", control: "not_run", reason: `open-PR page ${page} unreadable: ${(error as Error).message}` };
+    }
+    if (rows === undefined) return { state: "unknown", control: "not_run", reason: `open-PR page ${page} was not a list of numbered PRs` };
+    numbers.push(...rows);
+    complete = rows.length < LIVE_OPEN_PR_PAGE_SIZE;
+  }
+  if (!complete) return { state: "unknown", control: "not_run", reason: `the open-PR walk passed ${LIVE_OPEN_PR_MAX_PAGES} pages without reaching the end` };
+  let control: number[] | undefined;
+  try {
+    control = numberedRows(fetch(["api", `repos/${owner}/${repo}/pulls?state=closed&per_page=1`]));
+  } catch (error) {
+    return { state: "control_failed", control: "failed", reason: `the closed-PR control read failed: ${(error as Error).message}` };
+  }
+  if (control === undefined || control.length !== 1) {
+    return { state: "control_failed", control: "failed", reason: "the closed-PR control read returned no numbered PR, so a 0 would be unseen" };
+  }
+  return { state: "read", count: numbers.length, numbers, control: "ok" };
 }
 
 /** W1-T11319: verify the recycle writer's identity before excluding its PAUSE from stall handling. */
@@ -350,7 +414,8 @@ export function loopResumeFromRows(rows: ReadonlyArray<Record<string, unknown>>,
 }
 
 export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWatchdogVerdict {
-  const { rows, nowMs, openPrCount, openPrCountSource } = input;
+  const { rows, nowMs, openPrCountSource, liveOpenPrInventory: live } = input;
+  const ledgerCount = input.openPrCount;
   const failedBoots15m = failedBootTimes(rows, nowMs).filter((ms) => nowMs - ms <= CRASH_LOOP_WINDOW_MS).length;
   let newestProgressMs: number | undefined;
   let futureStampedSkipped = 0;
@@ -371,7 +436,9 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
   const preNode = preNodeDeathRun(input.revivalLog ?? readRevivalLogTail(process.env[REVIVAL_LOG_ENV]), rows);
   const verdict = (state: ProgressWatchdogState, action: ProgressWatchdogAction, reason: string): ProgressWatchdogVerdict =>
     ({ state, action, progressAgeMs, generationBootMs, loopResumedMs, failedBoots15m, preNodeDeaths: preNode.count,
-      ...(openPrCountSource ? { openPrCountSource } : {}), futureStampedSkipped, reason });
+      ...(ledgerCount !== undefined ? { openPrCount: ledgerCount } : {}),
+      ...(openPrCountSource ? { openPrCountSource } : {}), ...(live ? { liveOpenPrInventory: live } : {}),
+      futureStampedSkipped, reason });
 
   // W1-T11319: a live recycle's own PAUSE is not evidence of a stalled fleet.
   if (input.liveRecyclePausePid !== undefined) {
@@ -389,8 +456,17 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
     );
   }
   if (rows.length === 0) return verdict("UNKNOWN", "none", "no ledger rows were read");
+  // W1-T11750: a live read of the board outranks the last full pass; a live read that is not a seen number never says IDLE.
+  let openPrCount = ledgerCount;
+  let counted = openPrCountSource ? ` (count: ${openPrCountSource})` : "";
+  if (live?.state === "read") {
+    openPrCount = live.count;
+    counted = " (count: live)";
+  } else if (live && (ledgerCount === undefined || ledgerCount === 0)) {
+    return verdict("UNKNOWN", "none", `the live open-PR inventory is ${live.state} (${live.reason}) and the last full pass's count is ` +
+      `${ledgerCount ?? "unknown"}; IDLE needs a live read of 0 with its control passing`);
+  }
   if (openPrCount === undefined) return verdict("UNKNOWN", "none", "the open-PR count is unknown (no sweep.pass row with an enumerated count)");
-  const counted = openPrCountSource ? ` (count: ${openPrCountSource})` : "";
   if (openPrCount === 0) return verdict("IDLE", "none", `no open PRs${counted}, so no progress is owed`);
   if (generationBootMs !== null) {
     // Bounded startup allowance: the existing STALL_* bounds, run from this generation's own boot.
@@ -550,5 +626,9 @@ export function captureDiagnosticsBundle(
 
 export function renderProgressWatchdogVerdict(verdict: ProgressWatchdogVerdict): string {
   const age = verdict.progressAgeMs === null ? "none" : `${Math.floor(verdict.progressAgeMs / 60_000)} min`;
-  return `progress-watchdog: ${verdict.state} action=${verdict.action} progress_age=${age} failed_boots_15m=${verdict.failedBoots15m} — ${verdict.reason}`;
+  const live = verdict.liveOpenPrInventory;
+  const counts = live === undefined ? "" :
+    ` open_prs_live=${live.state === "read" ? live.count : "unknown"} (control ${live.control})` +
+    ` open_prs_last_full_pass=${verdict.openPrCount ?? "unknown"} (${verdict.openPrCountSource ?? "none"})`;
+  return `progress-watchdog: ${verdict.state} action=${verdict.action} progress_age=${age} failed_boots_15m=${verdict.failedBoots15m}${counts} — ${verdict.reason}`;
 }

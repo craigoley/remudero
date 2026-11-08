@@ -12,6 +12,9 @@ import {
 } from "#src/lib/progress-watchdog.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { allowGhRefusals } from "#test/setup/tmp-hygiene.js";
+
+allowGhRefusals("the spawned verb reads the live open-PR list (W1-T11750); the refused read is its unreachable-board arm, which the ledger count then decides");
 
 const reason = "container recycle (deploy/recycle-container.sh)";
 const nowMs = Date.now();

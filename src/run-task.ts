@@ -1293,8 +1293,10 @@ import {
   captureDiagnosticsBundle,
   decideProgressWatchdog,
   openPrCountReadingFromRows,
+  readLiveOpenPrInventory,
   readLiveRecyclePausePid,
   renderProgressWatchdogVerdict,
+  type LiveOpenPrInventory,
 } from "./lib/progress-watchdog.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
@@ -2942,7 +2944,7 @@ import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchRea
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
-import { resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
+import { readDaemonTargetRecord, resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
 import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
@@ -41150,11 +41152,22 @@ export async function loadHeavyVerb(name: HeavyVerbName): Promise<void> {
   }
 }
 
+/** The repository the daemon drains: its boot record's target, else this checkout's origin. */
+function watchdogOwnerRepo(stateDir: string): { owner: string; repo: string } {
+  const target = readDaemonTargetRecord(stateDir);
+  return target.kind === "record" ? { owner: target.record.owner, repo: target.record.repo } : resolveOwnerRepo();
+}
+
 // W1-T5687: capture-diagnostics writes a bundle under <state>/diagnostics/, at most one per 15 min.
 // Runs docker; recycles nothing (W1-T5688).
 export function progressWatchdogCommand(
   rest: string[],
   run: (file: string, args: string[]) => string = (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 30_000 }),
+  // W1-T11750: the open-PR truth is read live, with a closed-PR control, and kept apart from the last pass's count.
+  live: {
+    fetch?: (args: string[]) => unknown;
+    ownerRepo?: (stateDir: string) => { owner: string; repo: string };
+  } = {},
 ): number {
   const badArg = unknownArgError("progress-watchdog", rest, ["--state-root"], ["--json", "--request-restart"]);
   if (badArg) {
@@ -41171,8 +41184,15 @@ export function progressWatchdogCommand(
   });
   const count = openPrCountReadingFromRows(read.rows);
   const liveRecyclePausePid = readLiveRecyclePausePid(stateDir, run);
+  let liveOpenPrInventory: LiveOpenPrInventory;
+  try {
+    const { owner, repo } = (live.ownerRepo ?? watchdogOwnerRepo)(stateDir);
+    liveOpenPrInventory = readLiveOpenPrInventory(owner, repo, live.fetch ?? ((args) => ghJson(args)));
+  } catch (error) {
+    liveOpenPrInventory = { state: "unknown", control: "not_run", reason: `the repository is unresolved: ${(error as Error).message}` };
+  }
   const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: count.count,
-    openPrCountSource: count.source, liveRecyclePausePid });
+    openPrCountSource: count.source, liveRecyclePausePid, liveOpenPrInventory });
   const bundle = verdict.action === "capture-diagnostics"
     ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, { run })
     : undefined;
@@ -41579,7 +41599,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "progress-watchdog",
     syntax: "rmd progress-watchdog [--json] [--state-root <dir>]",
     summary: "Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.",
-    detail: "W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), IN_PASS (over 30 min, but the daemon's own full pass is in flight: its daemon.sweep.started row is unended, inside its learned bound_ms, and its daemon still pulses; capture-diagnostics, never recycle, W1-T9779), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest full pass's sweep.pass enumerated field, raised by a newer pass that saw more, or the largest one read when no full pass row carries a surface (W1-T9702); the verdict names which as openPrCountSource. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. It recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.",
+    detail: "W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), IN_PASS (over 30 min, but the daemon's own full pass is in flight: its daemon.sweep.started row is unended, inside its learned bound_ms, and its daemon still pulses; capture-diagnostics, never recycle, W1-T9779), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest full pass's sweep.pass enumerated field, raised by a newer pass that saw more, or the largest one read when no full pass row carries a surface (W1-T9702); the verdict names which as openPrCountSource. W1-T11750: the verb also reads the live open-PR list (every page, plus a closed-PR control read in the same call) and keeps it apart as liveOpenPrInventory; IDLE needs that live read to be 0 with its control passing, a live count above 0 replaces a ledger 0 or unknown for the age judgment, and a failed control, an incomplete walk or an unreadable read with a ledger 0 or unknown is UNKNOWN, never IDLE. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. It recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.",
   },
   {
     name: "live-edits",
