@@ -13,10 +13,11 @@ raw: "Scope a triage-only provider recovery: when Claude returns an explicitly
   fixtures, no live provider calls."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
