@@ -1,7 +1,7 @@
 - id: W1-T11750
   title: "THE PROGRESS WATCHDOG READS A LIVE OPEN-PR INVENTORY WITH A POSITIVE CONTROL, KEPT APART FROM THE LAST FULL PASS'S COUNT — progressWatchdogCommand takes its open-PR count only from ledger sweep.pass rows (openPrCountReadingFromRows), so a wedged or never-run full pass leaves the count as old as the newest full pass, and a 0 there reads IDLE with no live read proving the board is empty"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T10913, W1-T11319, W1-T11774]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -9,12 +9,13 @@
   risk: high  # Rule 19: one concern (where the watchdog's open-PR truth comes from); it changes when IDLE may be said
   band_meaning: span
   origin: architect
-  plan_refs: [W1-T9702, W1-T5687, W1-T6361, W1-T9669, W1-T11319, W1-T11324, W1-T11327]
+  plan_refs: [W1-T9702, W1-T5687, W1-T6361, W1-T9669, W1-T10913, W1-T11319, W1-T11324, W1-T11327]
   files:
     - src/lib/progress-watchdog.ts
     - src/run-task.ts
     - docs/cli-reference.md
     - test/daemon/the-progress-watchdog-counts-open-prs-from-a-controlled-live-inventory.test.ts
+    - test/a-stalled-sweep-is-named-by-its-progress-not-its-pulse.test.ts
   status: queued
   priority: 2
   attempts: 0
@@ -23,6 +24,8 @@
       proof: "unit test: test/daemon/the-progress-watchdog-counts-open-prs-from-a-controlled-live-inventory.test.ts"
     - claim: "progressWatchdogCommand reads the live inventory through one named seam"
       proof: "grep: readLiveOpenPrInventory( in src/run-task.ts"
+    - claim: "the host inventory call uses the credential narrowed for this repository"
+      proof: "grep: hostGithubReadToken( in src/run-task.ts"
     - claim: "the verdict names the live inventory's control result beside the ledger count's source"
       proof: "grep: liveOpenPrInventory in src/lib/progress-watchdog.ts"
   rationale: |
@@ -52,6 +55,19 @@
     (https://github.com/craigoley/remudero/pulls).
     Settled by lookup: is there a reader for the open-PR list? -> Yes, fetchOpenPrsRest / openPrsRestArgs
     (src/lib/open-prs-rest.ts), so the task adds no new GitHub endpoint family.
+    OVERLAP ORDER: W1-T10913 owns the `field-trials` command registry and docs generated from it. It shares
+    `src/run-task.ts` and `docs/cli-reference.md`; this watchdog task only changes the progress-watchdog command
+    surface. W1-T11319 owns the live-recycle PAUSE decision and its daemon test; this task keeps that verdict
+    unchanged, but must update the spawned-verb fixtures because the verb now reads GitHub. The dependency edges
+    serialize both overlapping surfaces, so workers cannot race these files.
+    FILES-CORRECTION PROOF (2026-11-08): on source head eed03417, restoring both omitted test files to their
+    merge-base versions (546a93e7) and running both exact paths with the live-inventory source changed produced
+    `# tests 41, # pass 40, # fail 1`; the old text assertion in
+    test/a-stalled-sweep-is-named-by-its-progress-not-its-pulse.test.ts rejected the newly rendered live and
+    last-full-pass counts. Restoring the branch version produced `# tests 41, # pass 41, # fail 0`, so that test
+    belongs in this task's scope. The other omitted file only added an `allowGhRefusals` opt-in; its merge-base
+    version passed all 25 tests even with GH_TOKEN and GITHUB_TOKEN unset and an empty GH_CONFIG_DIR. Leave it
+    unchanged in the rebuilt implementation rather than widening this task for a non-load-bearing edit.
   design: |
     1. LIVE READ. `readLiveOpenPrInventory(owner, repo, fetch)` in src/lib/progress-watchdog.ts walks the open-PR
        list (openPrsRestArgs, every page to the end) and returns `{ state: "read", count, numbers }` only when the
@@ -68,13 +84,19 @@
        never yields IDLE: if the ledger also says 0 or undefined, the verdict is UNKNOWN with action none. Otherwise
        today's ledger path decides. Recycle, restart and diagnostics actions are not widened: a live count can only
        turn IDLE into UNKNOWN or into the existing age path.
-    4. CREDENTIAL AND COST. The repo comes from the instance config the verb already loads. The read uses the host's
-       existing read credential. The builder confirms from the host unit (W1-T9669) that one is present; if none
-       is, stop and report. Mint no credential and add no write. One list walk plus one control read per tick, and
-       W1-T6361's nothing-changed skip still applies.
-    5. Tests (new file) over injected fetch: a complete walk of 0 with the control passing is IDLE; a 0 with the
+    4. CREDENTIAL AND COST. The repo comes from the instance config the verb already loads. Use the host credential
+       propagation and `hostGithubReadToken(repo)` seam delivered by W1-T11774; it narrows the existing App grant to
+       pull-request read for this repository. Do not proceed with a host live read unless that prerequisite is
+       merged. Mint no credential and add no write. One list walk plus one control read per tick, and W1-T6361's
+       nothing-changed skip still applies.
+    5. TIME BUDGET. Start one 45 s deadline at verb entry and pass it through token exchange, every list page and
+       the control read, with a 10 s timeout per request. Do not start a request past the deadline; return UNKNOWN
+       with reason `live-read-deadline`. Leave the remaining part of the launcher's 120 s for the ledger read and
+       diagnostics. W1-T6361's nothing-changed skip still applies.
+    6. Tests (new file) over injected fetch: a complete walk of 0 with the control passing is IDLE; a 0 with the
        control failing is UNKNOWN; a truncated walk is UNKNOWN; live 3 beside ledger 0 is judged by age; ledger 31
-       with live unknown keeps today's path; the rendered line names both counts.
+       with live unknown keeps today's path; the rendered line names both counts. A request timeout or exhausted
+       45 s deadline returns UNKNOWN and never IDLE.
   falsifier: |
     At origin/main, a ledger whose newest full pass enumerated 0, with the live board holding open PRs, makes
     decideProgressWatchdog say IDLE without any live read. The first test's "a 0 with the control failing is

@@ -22,7 +22,7 @@
     - src/run-task.ts
     - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
     - test/worker/a-review-child-start-is-attributed-and-starts-from-a-bundle.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The worker auction accepts a set of providers to exclude and never selects an excluded provider while another candidate is eligible; with no eligible alternative it selects as today and records that the exclusion could not be honoured
