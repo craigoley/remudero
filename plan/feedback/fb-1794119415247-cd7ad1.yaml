@@ -1,0 +1,26 @@
+id: fb-1794119415247-cd7ad1
+ts: 2026-11-08T06:30:15.247Z
+raw: "Follow-up to feedback fb-1794083152653-a10df6: native triage exhausted
+  three attempts and the Rule 19 linter rejected its classifier task because a
+  new test/classify-weekly-limit-usage-refused.test.ts module ID did not match
+  src/lib/classify.ts module ID classify. File one single-concern classifier
+  correction only: recognize the exact refusal text You have hit your weekly
+  limit and parse its bare UTC reset suffix. Add positive and negative cases to
+  the existing test/classify.test.ts with a unique test title; do not create a
+  new test path. Point the acceptance proof to that exact test title in the
+  existing suite. Keep medium risk and files limited to src/lib/classify.ts and
+  test/classify.test.ts. W1-T11665 already covers separate fallback and Codex
+  WebSearch work; keep triage reauction, WebSearch and WebFetch out of this
+  classifier task. Since W1-T11665 requires a classified weekly refusal, ensure
+  its implementation cannot outrun the classifier prerequisite through the
+  normal native plan dependency amendment if needed. No live model-evaluation
+  provider calls or spend; use synthetic fixtures."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
