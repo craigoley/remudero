@@ -1,0 +1,96 @@
+- id: W1-T11775
+  title: "A RUN WHOSE DIFF LEAVES ITS DECLARED FILES, OR WHOSE TASK PRECONDITION IS UNMET AT PUBLICATION, IS HELD UNPUBLISHED WITH ITS BRANCH KEPT AND A RECEIPT — run-task's fallback ledgers scope_guard.overrun, prints SCOPE OVERRUN, then pushes and `gh pr create`s anyway. That is how W1-T11750 opened PR #17416 with two undeclared test files, a PR that W1-T11571's merge-admission rule makes unmergeable by design"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern (what the orchestrator publishes); detection, scope policy and the fix rung are unchanged
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T434, W1-T142, W1-T401, W1-T11571, W1-T10919, W1-T11750]
+  files:
+    - src/cli/commands/run-task-verb.ts
+    - src/lib/task-linter.ts
+    - test/scope-guard-overrun.test.ts
+    - test/an-out-of-scope-or-unmet-precondition-run-is-held-unpublished.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  acceptance:
+    - claim: "an out-of-scope fallback diff, or a task whose precondition or not_before reads unmet at publication, is neither pushed nor opened as a PR; its head is kept at a local recovery ref that survives worktree teardown, and one durable receipt names the paths or the unmet precondition, the owner, the wake condition and the restore command; an in-scope diff with a met precondition pushes and opens exactly as today"
+      proof: "unit test: test/an-out-of-scope-or-unmet-precondition-run-is-held-unpublished.test.ts"
+    - claim: "the W1-T434 overrun suite now asserts hold-not-push, with detection and its exact-match comparison unchanged"
+      proof: "unit test: test/scope-guard-overrun.test.ts"
+    - claim: "the publication hold is one named ledger step at the push site"
+      proof: "grep: run.publication_held in src/cli/commands/run-task-verb.ts"
+  rationale: |
+    ORIGIN: the operator's 2026-11-08 follow-up from the PR #17211 recovery and run W1-T11750, item (2). The
+    operator asked for this gate and asked that scope policy not be weakened.
+    OBSERVED: W1-T11750 declares four files (plan/tasks.d/W1-T11750-*.yaml). Its implementation also changed two
+    existing test files it did not declare. The run reported SCOPE OVERRUN, and the fallback still pushed and opened
+    PR #17416 (https://github.com/craigoley/remudero/pull/17416, head run-W1-T11750-1794159061177).
+    READ in this worktree (symbols, not lines), src/cli/commands/run-task-verb.ts:
+    - The implement-rung fallback push computes scopeGuardOutOfScopeFiles over MERGE_BASE_DIFF_ARGS, then logs
+      scope_guard.overrun with the reason "pushed and flagged rather than refused", says SCOPE OVERRUN, and pushes.
+    - Below it, `ghPrCreateFillCommandAsync` opens the PR when the worker reported none. A PrOpenRefusedError
+      already has a receipt path: recordRefusedPrOpen (issue with changedFiles/declaredFiles) and writePriorRefusal
+      (W1-T10919's hold until the task is amended).
+    - src/lib/plan.ts unmetTaskPrecondition evaluates a task's `precondition:` and `not_before:`, but only drain.ts
+      calls it, at dispatch (dispatch.precondition_unmet). Nothing re-reads it before publication.
+    Settled by lookup: is this already filed or already decided? -> W1-T434 (merged, oper#scope-guard-refusal-
+    2026-08-11) decided push-and-flag at this one site for two reasons. First, a refusal reaped the branch, the only
+    evidence. Second, containment belonged to the merge gate with a human adjudicating. W1-T11571 (queued,
+    operator:scope-gate-after-W1-T11431) has since made the required acceptance-author-gate refuse any task PR with
+    a path outside its merged files:, with a separately merged amendment as the only correction. Under that rule a
+    flagged out-of-scope PR is a stuck PR by construction. This task answers W1-T434's evidence reason with a kept
+    local ref instead of a push, and it leaves detection exactly as W1-T434 left it. It reverses only what an
+    overrun DOES at this site, as the operator directed on 2026-11-08 (plan/tasks.d/W1-T434-*.yaml,
+    plan/tasks.d/W1-T11571-*.yaml).
+    Settled by lookup: is it a duplicate of W1-T11571? -> No. W1-T11571 refuses at merge admission, after the push
+    and PR. This task stops publication earlier, at the orchestrator, so no stuck PR exists. The two are
+    complementary, with disjoint files (scripts/acceptance-author-gate.mjs vs src/cli/commands/run-task-verb.ts).
+    Settled by lookup: does an open PR already do this? -> No. None of the 12 open PRs on 2026-11-08 touches
+    run-task-verb.ts's fallback push (https://github.com/craigoley/remudero/pulls).
+    Settled by lookup: does a non-branch ref survive the run's worktree teardown? -> Yes. Every ref under refs/
+    except refs/bisect, refs/worktree and refs/rewritten is shared by all worktrees of one repository
+    (https://git-scm.com/docs/git-worktree). So refs/rmd-recovery/held/<branch>/<sha> in the main repository
+    outlives the reaped worktree, which W1-T434 named as the evidence loss.
+    Settled by lookup: can "unmet prerequisites" be read by machine? -> Only those declared as `precondition:` or
+    `not_before:` (src/lib/plan.ts). A prose "confirm X first" such as W1-T11750's design step 4 cannot be checked.
+    Its remedy is declaring it as a precondition when filing, not a parser of design prose.
+  design: |
+    1. GATE, BEFORE ANY PUBLICATION. At the implement-rung fallback site, after scopeGuardOutOfScopeFiles and before
+       dropTierRowsBeforePush or any push, also re-evaluate unmetTaskPrecondition(task) against the plan record the
+       run holds. If outOfScope is non-empty or the precondition is unmet, do not push and do not call
+       ghPrCreateFillCommandAsync. scopeGuardOutOfScopeFiles, its exact-match semantics, the three-dot merge base and
+       readRegistrationChanges do not change. The diff_unreadable arm is unchanged (an unreadable diff is not a
+       detected overrun).
+    2. KEEP THE BRANCH. Write `refs/rmd-recovery/held/<branch>/<headSha>` in the main repository (config.root's
+       git, not the worktree), local only. Refuse to report the run held unless that ref resolves to headSha after
+       the write. If the write fails, keep the worktree and report the failure. Never discard.
+    3. ONE DURABLE RECEIPT. Ledger `run.publication_held` with task, branch, head_sha, recovery_ref,
+       declared_files, out_of_scope (or unmet_precondition), owner and wake. For a scope hold, the owner is "plan: a
+       separately merged files: amendment" and the wake is "origin/main's task files: covers every out_of_scope
+       path", matching W1-T11571's correction. For a precondition hold, the owner is the precondition's declared
+       reader and the wake is "the precondition read returns expect". The row also carries the restore command
+       (`git push origin <recovery_ref>:refs/heads/<branch>`). Reuse recordRefusedPrOpen's issue receipt for the
+       follow-up issue and writePriorRefusal (W1-T10919) to hold the task until its contract revision changes, so
+       the identical build is not redispatched. The run's verdict is not success.
+    4. WHAT IS NOT GATED HERE. A worker that pushes or opens its own PR in its sandbox is outside this site, as
+       W1-T434 measured. W1-T11571's merge-admission rule stays its containment. The fix rung's own scope rules
+       (prompt-render.ts W1-T1227 text) are unchanged. Update task-linter.ts's proof-scope message, which today tells
+       authors the guard "pushes the branch", so it names the hold.
+    5. TESTS. The new file uses an injected push recorder and PR-create seam on a temporary repo, and covers:
+       W1-T11750's shape (four declared, two undeclared existing tests) gives no push, no PR, a resolvable recovery
+       ref after worktree removal, and one run.publication_held row naming both paths; an unmet `precondition:`
+       gives the same hold with unmet_precondition; an unmet not_before gives the same; a failed ref write keeps the
+       worktree and reports it; an in-scope diff with a met precondition pushes and opens one PR with no
+       publication_held row. Update test/scope-guard-overrun.test.ts's push-and-flag assertions to hold-not-push,
+       keeping its detection cases byte-identical.
+  falsifier: |
+    At origin/main, the W1-T11750 fixture shape reaches the injected push recorder and the PR-create seam, so the
+    first test fails. Restore the old push after the gate: the recorder sees a push and the test fails again.
+    If the in-scope, met-precondition case stops publishing, the gate over-fires and the task is wrong. If the
+    recovery ref is gone after the worktree is removed, the evidence W1-T434 protected is lost and the task fails.
