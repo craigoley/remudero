@@ -31,10 +31,11 @@ async function fixture<T>(routes: GhShimRoute[], body: (f: {
   const root = mkdtempSync(join(tmpdir(), "rmd-initial-review-"));
   const shim = ghShim([...routes, { when: "", stderr: "unexpected private gh invocation", exit: 93 }]);
   const saved = { ...process.env };
-  const counts = { identity: 0, fetch: 0, materialize: 0, review: 0, pending: 0, terminal: 0, admission: 0 };
+  const counts = { fetch: 0, materialize: 0, review: 0, pending: 0, terminal: 0, admission: 0 };
   const forbidden = (kind: keyof typeof counts): never => { counts[kind]++; throw new Error(`unexpected downstream ${kind}`); };
   const host = {
-    acceptedReviewAttemptId: () => { counts.identity++; return undefined; },
+    // Reading an existing attempt id during flag parsing neither acquires a claim nor starts work.
+    acceptedReviewAttemptId: () => undefined,
     materializeReviewWorktree: () => forbidden("materialize"),
     realDeps: () => ({ reviewWorktree: { fetch: () => forbidden("fetch") } }),
     reviewPostedDescription: () => "private initial view fixture",
@@ -65,7 +66,7 @@ async function fixture<T>(routes: GhShimRoute[], body: (f: {
 }
 
 function noDownstream(counts: Record<string, number>) {
-  assert.deepEqual(counts, { identity: 0, fetch: 0, materialize: 0, review: 0, pending: 0, terminal: 0, admission: 0 });
+  assert.deepEqual(counts, { fetch: 0, materialize: 0, review: 0, pending: 0, terminal: 0, admission: 0 });
 }
 
 test("W1-T11631 criterion 1: real initial view waits for shared admission with a heartbeat and one qualified CLI child", async () => {
