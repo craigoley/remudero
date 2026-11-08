@@ -1,11 +1,11 @@
 - id: W1-T11682
-  title: "NO NATIVE SECONDARY-USE CONSENT OR RESOLVER EXISTS for private offline model evaluation — field-trials-consent-v1 covers only aggregate/public release, so the owner's authorized secondary use cannot be expressed or enforced"
+  title: "NO NATIVE SECONDARY-USE CONSENT OR RESOLVER EXISTS for private offline model evaluation — field-trials-consent-v1 covers only aggregate/public release, so its chat authorization cannot be treated as data-use consent"
   repo: remudero
   type: implement
   verify: auto
   principles: { tdd: strict }
   budget_usd: 30.00
-  risk: high  # private data boundary: resolving inputs without a bound receipt is a disclosure
+  risk: high  # private data boundary: resolving inputs without verified authority is a disclosure
   band_meaning: blast-radius
   priority: 2
   status: queued
@@ -19,28 +19,39 @@
     - test/secondary-use-receipt.test.ts
     - test/offline-eval-resolver.test.ts
   rationale: |
-    Feedback fb-1794082811892-b312d0. The user authorized secondary use, but core has only
-    field-trials-consent-v1 (aggregate-opt-in, public semantics; DECISIONS.md field-trials section,
-    FIELD_TRIALS_CONSENT_VERSION in src/lib/field-trials-flow.ts). No native receipt or resolver
-    contract exists. Do NOT widen field-trials-consent-v1.
+    Feedback fb-1794082811892-b312d0. The user authorized building a separate fail-closed path
+    and synthetic-only qualification. That chat authorization is not a native data-use receipt.
+    Existing field-trials-consent-v1 grants aggregate/public-release rights only; no trusted
+    secondary-use authority or private resolver exists. Do NOT widen the existing consent or
+    treat a structurally valid receipt, synthetic fixture, repo role, or account login as authority.
   design: |
-    - New versioned secondary-use receipt (separate schema and file from field-trials-consent-v1) binding:
-      owner, repo/source, purpose, exact snapshot digest, exact corpus digest, allowed offline analysis,
-      privacy boundary, and revocation. Any mismatch, missing field or revoked receipt refuses.
-    - New resolver verifies the receipt BEFORE resolving any snapshot, analysis input or corpus, and emits
-      only private digest-linked aggregate/evaluation metadata (no raw rows, ids, paths or prompts).
-    - field-trials-consent-v1 behaviour and the --consent/--field-note paths stay byte-for-byte unchanged.
-    - Qualification uses SYNTHETIC fixtures only. The real field-trials matrix stays NOT_RUN until an
-      owner-provisioned receipt and actual snapshot, analysis input and corpus exist. Never create
-      substitute private data or a stand-in receipt.
+    - Add a separate versioned receipt contract binding owner, source, purpose, exact snapshot,
+      analysis-input and corpus digests, allowed offline analysis, privacy boundary, issuer and
+      revocation state. Require a trusted verifier supplied by the host's existing authority;
+      the receipt's fields alone never establish authority. Do not create a trust root, signing
+      key, owner allowlist, sample receipt or default data path.
+    - Add an explicit opt-in private offline-evaluation entrypoint that verifies native authority
+      before the resolver can read any snapshot, analysis input or corpus. The production default
+      has no authority/input provider and returns NOT_RUN without resolving paths.
+    - The resolver emits only private digest-linked aggregate/evaluation metadata. No raw rows,
+      participant identifiers, prompts, private paths, provider calls, network egress, upload,
+      training, or publication. Qualification uses synthetic fixtures and injected test-only
+      authorities; the receipt test must prove aggregate-only public consent is refused before
+      the resolver can read any path. Test authorities must never be accepted by production.
+    - Keep field-trials-consent-v1 and existing --consent/--field-note behavior unchanged. The
+      public aggregate receipt cannot authorize private secondary use.
+    - The real field-trials matrix remains NOT_RUN until a trusted native receipt and the exact
+      owner-provisioned snapshot, analysis input and corpus are available through a secure resolver.
   acceptance:
-    - claim: "a receipt missing or mismatching any bound field (owner, source, purpose, snapshot digest, corpus digest, analysis, privacy boundary) or revoked is refused before any input is resolved"
+    - claim: "missing, untrusted, mismatched, revoked, or aggregate-only authority refuses before any private input is resolved"
       proof: "unit test: test/secondary-use-receipt.test.ts"
-    - claim: "the resolver emits only private digest-linked aggregate metadata from synthetic fixtures, and reports NOT_RUN when no owner receipt exists"
+    - claim: "without trusted authority the resolver reports NOT_RUN, and synthetic output contains only private digest-linked aggregates"
       proof: "unit test: test/offline-eval-resolver.test.ts"
-    - claim: "field-trials-consent-v1 semantics are unchanged"
-      proof: "unit test: test/field-trials-flow.test.ts"
+    - claim: "the production flow calls the separate native secondary-use receipt verifier"
+      proof: "grep: verifySecondaryUseReceipt[(] in src/lib/field-trials-flow.ts"
+    - claim: "the production flow calls the private offline resolver only through the verified opt-in path"
+      proof: "grep: resolvePrivateOfflineEval[(] in src/lib/field-trials-flow.ts"
   falsifier: |
-    At base no receipt or resolver exists. Resolving before checking the receipt, accepting a digest
-    mismatch, honouring a revoked receipt, or accepting field-trials-consent-v1 as secondary-use consent
-    must each fail a case.
+    A private input read before the native verifier succeeds, acceptance of the public aggregate
+    receipt, any synthetic/default authority accepted in production, a digest mismatch, revocation,
+    provider/network activity, or raw/identifying output must each fail a case.
