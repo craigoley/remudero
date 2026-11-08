@@ -1,0 +1,22 @@
+id: fb-1794083152653-a10df6
+ts: 2026-11-07T20:25:52.654Z
+raw: "Clarified correction for fb-1794082767548-ccbff0 and
+  fb-1794083100761-692da2: the exact Claude CLI refusal says You have hit your
+  weekly limit, resets 5am UTC. The detector patterns in src/lib/classify.ts do
+  not include weekly limit wording. The PLAN-create-1794080980584
+  plan-synthesized ledger record has verdict success, usage_refused absent,
+  served_model null, observed zero tokens, cost zero and stderr containing the
+  quota refusal. Add a regression case for this exact weekly-limit language,
+  classify it as usage_refused before a fallback can trigger, and keep generic
+  or transient failures separate. The triage fallback feedback depends on this
+  classifier fix. Preserve no-retry semantics elsewhere; any fallback remains
+  triage-only, bounded and conditional on no task-side effects."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -1,0 +1,40 @@
+- id: W1-T11627
+  title: "LEGACY REVIEW FINDING RECEIPTS LOST THEIR SUPERSEDED COUNT — keep receipts without lineage keys in a separate legacy-superseded bucket when a later reviewed head exists"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19 span: outcome folding and tests; no gate, status, or repair label reads this bucket
+  band_meaning: span
+  origin: "follow-up to the W1-T9649 outcome-fold change; preserve historical counts for receipts written before lineage_key existed"
+  plan_refs: [W1-T9649]
+  files: [src/lib/review-finding-outcomes.ts, test/a-review-finding-is-tracked-across-rounds.test.ts, test/review-finding-outcomes.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    W1-T9649 adds lineage for new receipts but does not restore historical counts for older receipts
+    whose lineage_key is absent. The current fold labels those records unknown even when the older
+    implementation counted them as superseded because a later reviewed head existed. That moves
+    historical counts into unknown and makes the time series incomparable. This follow-up handles
+    that compatibility case only, while retaining unknown for unsupported, incomplete, and
+    latest-head findings.
+  design: |
+    1. When a verified finding receipt has no lineage_key and a later reviewed head of the same PR
+       exists, classify it as legacy-superseded.
+    2. Count legacy-superseded separately from unknown, persisted, and not-re-raised. Keep evidence
+       outcomes such as confirmed-repair higher precedence.
+    3. Keep all outcomes as flow telemetry. No gate, status, or repair label may read them.
+    4. Add a regression through the real projectFlowRow path and prove the legacy bucket increments
+       while an unrelated latest-head finding remains unknown.
+  acceptance:
+    - claim: "a legacy receipt with a later reviewed head uses its own bucket and leaves unknown unchanged"
+      proof: "unit test: W1-T11627: legacy superseded receipts keep unknown counts stable"
+  falsifier: |
+    Remove the legacy-superseded fallback. The new test must fail because the old receipt moves into
+    unknown and the legacySuperseded count becomes zero, while the separate latest-head finding stays
+    unknown. This demonstrates that the compatibility bucket carries the old superseded case.
+  note: |
+    reservation hand-off: run-W1-T11626-1794089307555 -> plan-file-W1-T11627-1794106928000

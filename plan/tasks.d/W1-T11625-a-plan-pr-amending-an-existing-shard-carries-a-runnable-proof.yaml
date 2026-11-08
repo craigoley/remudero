@@ -1,0 +1,116 @@
+- id: W1-T11625
+  title: "A PLAN PR THAT AMENDS AN EXISTING TASK SHARD CARRIES A RUNNABLE, DISCRIMINATING PROOF, OR OPENS NO PR — `rmd plan` passes its RESERVED ids to filingAcceptanceCriteria, which pairs shards only with those ids, so an amendment of an existing task (clarify on W1-T9649) falls through to bare prose that acceptance-author-gate refuses"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  priority: 1.5
+  status: queued
+  attempts: 0
+  origin: architect
+  plan_refs: [W1-T3383b, W1-T4263, W1-T10473, W1-T5348, W1-T5619, W1-T3362]
+  files:
+    - src/lib/plan-pr-emitter.ts
+    - src/run-task.ts
+    - test/a-plan-pr-amending-an-existing-shard-carries-a-runnable-proof.test.ts
+  rationale: |
+    READ in this checkout. `rmd plan`'s propose branch (src/run-task.ts, the `buildPlanPrBody` call
+    right after `applyPlanProposalCommit`) passes `filingAcceptanceCriteria(reservedIds, planPrFiles)`.
+    `filingAcceptanceCriteria` (src/lib/plan-pr-emitter.ts) pairs a changed file with a task id ONLY
+    when the file is a shard named for one of the ids it was given. A clarify/rewire run edits an
+    EXISTING shard (W1-T9649's) while the harness has reserved NEW ids the worker never used, so no
+    shard pairs and the function returns its legacy prose criterion ("this diff's only files are …;
+    commitlint and lint-plan both pass …"). That proof has no `grep:`/`unit test:` dialect prefix,
+    and `buildPlanPrBody` runs its author-time check-proof only when SOME criterion parses through
+    `parseWhitelistedProof` — so an all-prose body skips the author-time check, is pushed, and opens a
+    PR that acceptance-author-gate refuses (proof-shape). It merged only after a person hand-wrote an
+    exact unit-test title into the body. W1-T10473 (retired) records three earlier hand repairs of this
+    same emitter; that is a recurrence in one file, not proof of one shared cause, so this task fixes
+    the one producer path whose defect is verified above and claims nothing about the other three.
+
+    WHY THE OBVIOUS FIX IS WRONG: pairing the amended shard and emitting `grep: id: W1-T9649 in <shard>`
+    (the new-filing shape) is a proof that passes at the merge base too, because the record already
+    exists there. `refuseNonDiscriminatingCriteria` (src/lib/body-repair.ts) refuses check-proof exit 5,
+    and proof-discrimination allows zero stale proofs for a PR with no `Remudero-Task:` trailer
+    (W1-T4263's rationale). The proof for an amendment must grep a line the amendment ADDS to that
+    shard. W1-T4263 already built that safety bar for whole-PR fallbacks (`diffAnchor` in
+    src/run-task.ts: minimum length, no ` in `, no blocking BRE metacharacters, `parseWhitelistedProof`
+    non-null, render/parse round trip); this task scopes the same bar to a changed shard's own added
+    lines instead of re-inventing it.
+
+    WHY FAIL CLOSED BEFORE THE PR: GitHub blocks a merge while a required status check is failing,
+    pending or never reported on the latest commit, and a check from an earlier commit does not count
+    (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
+    A body whose only proof is prose fails the required acceptance check by construction, so opening
+    it produces a PR that cannot merge without a person, not a signal. Refusing before the push loses
+    nothing that PR could have delivered, and the ledger line says why.
+
+    Settled by lookup: is this already filed or decided? -> no. W1-T3383b gave NEW filings a runnable
+    `grep: id:` proof and pinned the prose fallback for unpairable filings (test/a-ratification-pr-can-actually-land.test.ts);
+    W1-T4263 (merged) anchors the PR-open, body-repair and retro fallbacks in run-task.ts but not
+    filingAcceptanceCriteria; W1-T5619 (merged) fixes preflight reading of a repaired shard's base
+    proofs, not body generation; W1-T10473 is retired; no task in plan/tasks.d or plan/tasks.yaml
+    covers an amendment of an existing shard. (grep of plan/ for filingAcceptanceCriteria and
+    "existing shard"; DECISIONS.md and LEARNINGS.md carry no ruling on it.)
+    Settled by lookup: would the amended task's `id:` grep pass proof-discrimination? -> no, it passes
+    at base, so check-proof exits 5 (refuseNonDiscriminatingCriteria, src/lib/body-repair.ts).
+    Settled by lookup: does the plan run already validate proofs before pushing? -> only when a
+    criterion parses: buildPlanPrBody gates its check on `parseWhitelistedProof(...) !== null`
+    (src/lib/plan-pr-emitter.ts), and buildPlanPrBody runs before `gitPushRunBranchAsync`, so a throw
+    there stops the push and the PR.
+    Settled by lookup: must the shared prose fallback change for every caller? -> no. `rmd approve`
+    and inbox (run-task.ts openPlanPr, src/lib/inbox.ts) pass ids they actually wrote, and
+    test/plan-pr-emitter.test.ts plus test/a-ratification-pr-can-actually-land.test.ts pin that
+    behaviour. This task adds a plan-run-scoped producer and leaves those callers unchanged, which keeps
+    the change bounded. Retiring their prose fallback is a separate filing if it is ever observed to fire.
+  design: |
+    ONE new exported, pure producer in src/lib/plan-pr-emitter.ts:
+    `planPrAcceptanceCriteria(reservedIds: string[], files: string[], diffText: string | undefined): AcceptanceCriterion[]`.
+    (1) NEW FILINGS, UNCHANGED: for each reserved id whose shard is in `files`, emit exactly the
+        criterion filingAcceptanceCriteria emits today (`grep: id: <id> in <shard>`). A new filing's
+        record is absent at base, so it stays discriminating.
+    (2) AMENDED SHARDS: for each changed `plan/tasks.d/` shard that no reserved id pairs with, take the
+        task id from the shard's own `- id:` line (cross-checked against the filename with
+        isTaskShardName, never inferred from the filename alone), and derive a `grep: <literal> in <that
+        shard>` from the first line THAT SHARD's hunks add which clears W1-T4263's safety bar. Move the
+        bar's pure core out of src/run-task.ts's `diffAnchor` into plan-pr-emitter.ts as a path-scoped
+        helper and have `diffAnchor` delegate to it, so there is one bar and not two. The claim names
+        the task id and says the shard is amended, not implemented.
+    (3) NEVER PROSE: a criterion leaves this function only if `parseWhitelistedProof` accepts its proof
+        and it survives renderAcceptanceBlock -> parseAcceptanceBlock verbatim. If no criterion
+        survives (no shard changed, a deletion-only amendment, or no added line clears the bar), THROW
+        a named error, `plan PR refused: no runnable acceptance proof derivable from <files>`. Never
+        fall back to filingAcceptanceCriteria's prose.
+    WIRE IT at the `rmd plan` propose site in src/run-task.ts: read the branch diff with the existing
+    `diffSinceMergeBase(worktreePath)` and pass it in, replacing `filingAcceptanceCriteria(reservedIds,
+    planPrFiles)`. buildPlanPrBody keeps running its author-time check-proof, which now always fires
+    because every criterion parses. Either throw (no derivable proof, or check-proof refusing a
+    non-discriminating one) is caught BEFORE `gitPushRunBranchAsync`: ledger `plan.error` with the
+    reason, remove the worktree, return 1, push nothing, open no PR.
+    DO NOT TOUCH: filingAcceptanceCriteria, its callers in `rmd approve` and inbox, the tests pinning
+    them, proof-discrimination-gate, acceptance-author-gate, or branch protection.
+  acceptance:
+    - claim: "an amended-shard plan PR with no used reserved id emits a stored parser-valid and base-discriminating proof for an added line in that shard, preserves new-filing and combined-filing behavior, and refuses without push or PR when no safe proof exists"
+      proof: "unit test: test/a-plan-pr-amending-an-existing-shard-carries-a-runnable-proof.test.ts"
+    - claim: "the plan-run producer is a named export of the emitter"
+      proof: "grep: export function planPrAcceptanceCriteria( in src/lib/plan-pr-emitter.ts"
+    - claim: "the rmd plan propose site in run-task.ts calls the new producer, so the program actually reaches it"
+      proof: "grep: planPrAcceptanceCriteria( in src/run-task.ts"
+  falsifier: |
+    Point the `rmd plan` site back at `filingAcceptanceCriteria(reservedIds, planPrFiles)`. The
+    amended-shard fixture then yields the prose criterion, which parseWhitelistedProof rejects, so the
+    stored-body test fails. Make the amended shard emit `grep: id: <id> in <shard>` instead: the fake
+    check-proof's base run matches, exits 5, and the discrimination case fails. Make the no-proof
+    branch return prose instead of throwing: the fail-closed case fails.
+  note: |
+    risk: high, band_meaning: span (Rule 19 / #588 merits test: YES). The acceptance asserts ONE
+    cross-file invariant, "an amending plan PR carries a runnable discriminating proof or opens no PR",
+    that is unsatisfiable piecewise: the producer in plan-pr-emitter.ts alone is unreached and changes
+    no stored body, and the run-task.ts wiring alone has nothing to call and no fail-closed throw to
+    catch; the fail-closed test needs both files together. Its failure mode is a plan run that refuses
+    to open a PR it used to open. The refusal only replaces PRs that could not have merged without hand repair.
+    The approve/inbox prose fallback stays as it is, on purpose (see rationale).

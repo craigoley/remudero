@@ -1,0 +1,43 @@
+- id: W1-T11665
+  title: "TRIAGE-ONLY PROVIDER RECOVERY — a classified Claude subscription weekly-limit refusal reauctions once to an enabled Codex subscription provider, with native WebSearch on the triage research profile only"
+  repo: remudero
+  depends_on: ["W1-T11692"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files:
+    - src/run-task.ts
+    - src/lib/worker.ts
+    - test/triage-codex-weekly-limit-recovery.test.ts
+  origin: feedback#fb-1794082767548-ccbff0
+  plan_refs: ["W1-T3749", "W1-T3656", "W1-T3549"]
+  status: queued
+  attempts: 0
+  rationale: |
+    Operator-approved root-cause fix (feedback fb-1794082767548-ccbff0). Scope:
+
+    RECOVERY TRIGGER. Only an explicitly CLASSIFIED Claude subscription weekly-limit refusal
+    on the TRIAGE lane. Reauction AT MOST ONCE, only to an already-enabled subscription
+    provider (Codex). Eligibility requires exact attempt evidence: no task-side tool effects,
+    no workspace change, and usage/cost both zero. Ambiguous receipts, missing evidence or
+    ineligible capacity FAIL CLOSED (no reauction).
+
+    CODEX WEBSEARCH. Add Codex native WebSearch to the triage research profile only, using the
+    verified CLI search flag (verify against the installed CLI, do not guess) and the declared
+    lane bounds. Unsupported CLI version or missing tool FAILS CLOSED.
+
+    PROVENANCE. Preserve both attempt assignments and the original refusal provenance in the
+    receipt/ledger.
+
+    NON-GOALS. Do not route PLAN through Codex; no WebFetch; no cash; no tool broadening for
+    implement or review lanes.
+
+    TESTS use synthetic fixtures only; no live provider calls.
+
+  acceptance:
+    - claim: "recovery, eligibility gating, fail-closed paths and provenance are pinned by synthetic-fixture tests"
+      proof: "unit test: test/triage-codex-weekly-limit-recovery.test.ts"
+    - claim: "the Codex WebSearch flag is wired only in the triage research profile"
+      proof: "grep: TRIAGE_CODEX_SEARCH in src/lib/worker.ts"

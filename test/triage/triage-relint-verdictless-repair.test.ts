@@ -87,6 +87,12 @@ async function runRepair(t: TestContext, rounds: Round[]) {
     process.env.PATH = `${shim.dir}:${savedPath ?? ""}`;
     await triageCommand([FEEDBACK_ID], {
       config: { root, installRoot: REPO_ROOT, claudeBin: "/usr/bin/true" },
+      lintPlanForReviewFn: async () => ({
+        ran: true,
+        label: "fixture changed-task lint",
+        checked: 1,
+        violations: [],
+      }),
       spawn: async (args) => {
         const round = rounds[prompts.length];
         assert.ok(round, "the relint loop must respect the expected attempt bound");

@@ -7,7 +7,8 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # the relint loop's lint widens to the push gate's own; the loop, its bound and the verdicts are unchanged
+  risk: high # the changed-task gate now drives both lanes' relint decisions and their regression fixtures
+  band_meaning: span
   origin: operator-session#wreckterra-pr6-lint-recon-2026-11-03
   plan_refs:
     - W1-T4423
@@ -15,13 +16,14 @@
   files:
     - src/run-task.ts
     - test/relint-loop.test.ts
+    - test/triage/triage-relint-verdictless-repair.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: The plan lane redrafts a locally clean filing when the review's changed-task lint reports push-gate violations
-      proof: "unit test: PLAN LANE: a dirty filing is relinted, and the clean redraft proceeds"
+      proof: "unit test: PLAN LANE: changed-task lint relints clean filings"
     - claim: The triage lane redrafts a locally clean filing when the review's changed-task lint reports push-gate violations
-      proof: "unit test: TRIAGE LANE: a dirty filing is relinted with the real violations, and the clean redraft proceeds"
+      proof: "unit test: TRIAGE LANE: changed-task lint relints clean filings"
     - claim: Both lane relint callbacks read the review's changed-task lint for their reserved task ids
       proof: "grep: lintPlanForReview)(worktreePath in src/run-task.ts"
   rationale: |

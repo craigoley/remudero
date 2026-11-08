@@ -1,4 +1,5 @@
 import type { LifetimeIndexFailure } from "../../lib/lifetime-identity-index.js";
+import { createTargetWipMemory } from "../../lib/target-wip-ownership.js";
 import { pendingImprovementActions } from "../../lib/improvement-thread.js";
 import type { RatifyCliGateway } from "../../lib/panel-graph.js";
 /**
@@ -47,7 +48,7 @@ import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type Pr
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
-import { sweepStrandedReviewWorktrees } from "../../lib/review-worktree-reclaim.js";
+import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
 import { defaultListCandidates, defaultReadMarkers, killProcessGroup, sweepOrphanWorkers, workerInstallationScope } from "../../lib/worker-containment.js";
@@ -1112,6 +1113,8 @@ export async function daemonCommand(
   // W1-T3144: identical to drainCommand — complete board depth from the projection's existing
   // batch read, with the old projection count retained only for gateways that omit that method.
   // W1-T4465 design (i): the SAME batch, split by fleet ownership — never a second GitHub read.
+  // A refused managed-target read reuses its last good count, or holds dispatch, never ends the daemon.
+  const readTargetWip = createTargetWipMemory();
   const openPrOwnership = () => {
     const own = boardOpenPrCount.readOwnership(() => {
       let projected = 0;
@@ -1125,24 +1128,31 @@ export async function daemonCommand(
     for (const managed of loadManagedRepos(effectiveRepoRoot)) {
       if (managed.repo.toLowerCase() === target.repo.toLowerCase()) continue;
       const admission = nativeTargetAdmission(managed.repo, { repoRoot: effectiveRepoRoot });
-      if (admission.state === "unreadable") throw new Error("managed target ownership unreadable");
-      if (admission.state !== "native") continue;
-      // A new board snapshot sees a PR just handed off, even while the lane gateway's cache is warm.
-      const github = githubFactory(managed.owner, managed.repo);
-      const rows = github.listOpenHeadBranches?.();
-      if (!rows) throw new Error(`target WIP unreadable: ${managed.owner}/${managed.repo}`);
-      const observation = createOpenPrCountObservation();
-      observation.observe(rows);
-      const counts = observation.readOwnership(() => 0);
-      owned += counts.owned;
-      foreign += counts.foreign;
-      for (const job of jobs) {
-        if (job.status !== "admitted" || job.repo.toLowerCase() !== managed.repo.toLowerCase()) continue;
-        if (rows.some((pr: PrRef) => taskIdFromRunBranch(pr.headRefName ?? "") === job.taskId)) continue;
-        const execution = readTargetExecution(join(config.root, "state"), { taskId: job.taskId, origin: job.origin, repo: job.repo,
-          requestedAt: fixedClock(Date.parse(job.updatedAt) - 60_000).iso(), nowMs: (deps.now ?? Date.now)(), runId: job.runId });
-        if (execution.state !== "ended") owned++;
+      if (admission.state !== "native" && admission.state !== "unreadable") continue;
+      const reading = readTargetWip(managed.repo, () => {
+        if (admission.state === "unreadable") return undefined;
+        // A new board snapshot sees a PR just handed off, even while the lane gateway's cache is warm.
+        const github = githubFactory(managed.owner, managed.repo);
+        const rows = github.listOpenHeadBranches?.();
+        if (!rows) return undefined;
+        const observation = createOpenPrCountObservation();
+        observation.observe(rows);
+        const counts = observation.readOwnership(() => 0);
+        let targetOwned = counts.owned;
+        for (const job of jobs) {
+          if (job.status !== "admitted" || job.repo.toLowerCase() !== managed.repo.toLowerCase()) continue;
+          if (rows.some((pr: PrRef) => taskIdFromRunBranch(pr.headRefName ?? "") === job.taskId)) continue;
+          const execution = readTargetExecution(join(config.root, "state"), { taskId: job.taskId, origin: job.origin, repo: job.repo,
+            requestedAt: fixedClock(Date.parse(job.updatedAt) - 60_000).iso(), nowMs: (deps.now ?? Date.now)(), runId: job.runId });
+          if (execution.state !== "ended") targetOwned++;
+        }
+        return { owned: targetOwned, foreign: counts.foreign };
+      });
+      if (reading.source !== "fresh") {
+        log("daemon.target_wip_unreadable", { repo: managed.repo, source: reading.source, admission: admission.state });
       }
+      owned += reading.counts.owned;
+      foreign += reading.counts.foreign;
     }
     // Target PR numbers have their own namespace; Core's adaptive flow must retain only Core's numbers.
     return { ...own, owned, foreign };
@@ -1962,7 +1972,7 @@ export async function daemonCommand(
         // W1-T3378: the daemon core owns the tick; this command owns the real filesystem/git
         // effect. Supplying the closure here makes the reviewed `review-PR*` reclaimer reachable
         // on every live daemon rather than leaving an optional DaemonDeps hook dead.
-        sweepStrandedReviewWorktrees: () => sweepStrandedReviewWorktrees(config, log),
+        sweepStrandedReviewWorktrees: async () => { await sweepStrandedReviewWorktreesAsync(config, log); },
         // W1-T3528: same reasoning, different unit — this one frees regenerable build output
         // inside checkouts that must be kept, which every whole-tree rung is right to refuse.
         sweepReclaimableArtifacts: () => sweepReclaimableArtifacts(config, log),

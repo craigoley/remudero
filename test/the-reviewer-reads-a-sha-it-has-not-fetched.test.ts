@@ -181,7 +181,7 @@ test("CRITERION 5: a fetch failure is still named through the same degradation p
   // The hoisted fetch must be BEST-EFFORT: a throw here must not invent a second failure path for a
   // condition materializeReviewWorktree already reports as `fetch-failure`.
   const hoisted = src.slice(
-    src.indexOf("try {\n    fetchHead(subjectRepoDir, view.number, view.headRefOid);"),
+    src.indexOf("try {\n    await fetchHead(subjectRepoDir, view.number, view.headRefOid);"),
     src.indexOf("let resolverDivergence"),
   );
   assert.match(hoisted, /catch\s*(?:\([^)]*\))?\s*\{/, "the hoisted fetch swallows its own failure");

@@ -1,0 +1,32 @@
+id: incident-cc9c2abfc6dfd99c
+ts: 2026-11-08T02:40:16.842Z
+raw: >-
+  Incident cc9c2abfc6df: flow pr-stage-stall:own-red:required checks red —
+  ci-log fix, fix round <n> — judge: unavailable (harness judgment lacks
+  corroborating off-host proof results) — NOT DISPATCHED this pass: another CI
+  run for this head is still queued or in progress — waiting for its result,
+  never re-queueing over it
+
+  First seen: 2026-11-08T02:36:18.397Z
+
+  Last seen: 2026-11-08T02:36:18.397Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=17217 own-red: repeat: "required checks red — ci-log fix, fix round <n> — judge: unavailable (harness judgment lacks corroborating off-host proof results) — NOT DISPATCHED this pass: another CI run for this head is still queued or in progress — waiting for its result, never re-queueing over it" x3
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#cc9c2abfc6dfd99c69a6085ce88b567f4aac47f357c261b5e6591ca798509edc
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
