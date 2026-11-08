@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -9,6 +9,7 @@ import { test, type TestContext } from "node:test";
 import { main, AUTHOR_MAX_WORKERS } from "#scripts/preflight-author.mjs";
 // @ts-expect-error This JavaScript CLI module has no declaration file; refusal behavior is asserted below.
 import { MacAuthorCapacityRefusal } from "#scripts/lib/mac-author-admission.mjs";
+import { testSlotQueueDir } from "#src/lib/test-slot-queue.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -78,6 +79,7 @@ function runAuthor(t: TestContext, input: {
   load1: number;
   headroomBytes: number;
   refuse?: "pressure" | "disk";
+  emptySelection?: "plan-only" | "full-fallback";
 }) {
   const f = authorFixture(t);
   const dir = slotEnvironment(t);
@@ -89,11 +91,17 @@ function runAuthor(t: TestContext, input: {
   };
   const exitCode = main([], {
     root: f.root,
-    select: selection,
+    select: input.emptySelection ? () => ({
+      fullRun: input.emptySelection === "full-fallback",
+      planOnly: input.emptySelection === "plan-only",
+      suites: [],
+      reasons: ["W1-T11583 empty selection fixture"],
+    }) : selection,
     host: () => host,
     spawn,
     testSlot: {
       dir,
+      queue: true,
       slots: 4,
       waitBoundMs: 0,
       pollMs: 5,
@@ -111,8 +119,37 @@ function runAuthor(t: TestContext, input: {
       return undefined;
     },
   });
-  return { exitCode, affectedArgs, receipt: f.receipt() };
+  return { exitCode, affectedArgs, receipt: f.receipt(), dir };
 }
+
+test("W1-T11583: empty selections cancel their ticket without requiring a suite slot", async (t) => {
+  for (const emptySelection of ["plan-only", "full-fallback"] as const) {
+    await t.test(emptySelection, (t) => {
+      const { exitCode, affectedArgs, receipt, dir } = runAuthor(t, {
+        cores: 8, load1: 0, headroomBytes: 32 * 1024 ** 3, emptySelection,
+      });
+      assert.equal(exitCode, emptySelection === "plan-only" ? 0 : 3);
+      assert.equal(receipt.verdict, emptySelection === "plan-only" ? "passed" : "over-capacity");
+      assert.equal(receipt.suiteQueue.ticketed, true);
+      assert.equal(receipt.suiteQueue.outcome, "cancelled");
+      assert.equal(receipt.suiteQueue.reason, "the selection names no suite");
+      assert.equal(receipt.testSlot, undefined);
+      assert.equal(existsSync(testSlotQueueDir(dir)), false, "cancellation removes the last ticket and its empty queue");
+      assert.deepEqual(readdirSync(dir).filter(name => /^slot-[0-9]+\.json$/.test(name)), []);
+      assert.deepEqual(affectedArgs, []);
+      assert.deepEqual(receipt.steps.map((step: { name: string }) => step.name), [
+        "census-precheck", "static-preflight", ...(emptySelection === "plan-only" ? ["lint-plan-fast"] : []),
+      ]);
+      if (emptySelection === "plan-only") {
+        assert.match(receipt.affectedTestsNotRunReason, /plan lint is its check/);
+      } else {
+        assert.deepEqual(receipt.partial.ran, []);
+        assert.equal(receipt.partial.leftToCi, 1);
+        assert.match(receipt.affectedTestsNotRunReason, /full-fallback: PARTIAL — ran 0 of 1 suite/);
+      }
+    });
+  }
+});
 
 test("W1-T11583 criterion 1: an idle eight-core host uses more than one author test worker", (t) => {
   const { exitCode, affectedArgs, receipt } = runAuthor(t, {
