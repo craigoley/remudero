@@ -594,6 +594,8 @@ export async function daemonSreLaneEnabled(
 export async function daemonCommand(
   rest: string[],
   deps: {
+    /** Optional caller-parsed catalog; forwarding installs no source reader or default provider. */
+    secondaryPlanForShadow?: DaemonDeps["secondaryPlanForShadow"];
     /** Injectable GitHub-gateway constructor for the merged-status projection. Defaults to the
      *  BATCHED {@link buildBatchedGithub} — one NON-search `gh pr list` per projection, which is
      *  what keeps merge state derivable while GitHub's GraphQL `search()` connection is
@@ -1728,6 +1730,7 @@ export async function daemonCommand(
     const summary = await runDaemonFn(
       plan,
       {
+        ...(deps.secondaryPlanForShadow === undefined ? {} : { secondaryPlanForShadow: deps.secondaryPlanForShadow }),
         refreshMerged,
         refreshMergedAsync: readTick ? buildDaemonReadRefresher({
           read: readTick, plan: () => activePlanRef.current, previous: () => lastProj,

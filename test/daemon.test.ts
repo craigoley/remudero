@@ -4130,7 +4130,7 @@ test("W1-T11600 criterion 1: absent secondary snapshot preserves single-plan can
   assert.equal(lines.some((line) => line.step === "dispatch.secondary_catalog_shadow"), false);
 });
 
-test("W1-T11600 criterion 2: composed catalogs use shared eligibility and priority", () => {
+test("W1-T11600 criterion 2: composed catalogs use shared eligibility and priority", async () => {
   const primary = fixturePlan();
   const child: Task = {
     ...primary.byId.get("D")!,
@@ -4162,6 +4162,47 @@ test("W1-T11600 criterion 2: composed catalogs use shared eligibility and priori
   assert.equal(compared?.secondary_candidate_count, 1, "the dependency resolves against the primary catalog");
   assert.equal(compared?.displaced_primary_count, 1, "the existing priority comparator ranks both catalogs together");
   assert.equal(child.repo, "remudero", "catalog provenance never rewrites the task's execution target");
+
+  const { home, planPath } = claudeWiringFixtureHome();
+  const oldHome = process.env.HOME, oldOverride = process.env[CLAUDE_BIN_ENV_OVERRIDE];
+  const priorResolved = claudeExecutableCache.resolved;
+  process.env.HOME = home; process.env[CLAUDE_BIN_ENV_OVERRIDE] = process.execPath; claudeExecutableCache.resolved = undefined;
+  try {
+    for (const snapshot of [undefined, null, secondary]) {
+      let reached = false;
+      const loopStub: typeof runDaemon = async (_plan, deps) => {
+        reached = true;
+        assert.equal(deps.secondaryPlanForShadow, snapshot, "the production command forwards the caller's parsed snapshot unchanged");
+        assert.equal(Object.hasOwn(deps, "secondaryPlanForShadow"), snapshot !== undefined);
+        if (snapshot) {
+          const ran: string[] = [];
+          const observations: Record<string, unknown>[] = [];
+          const summary = await runDaemon(primary, {
+            secondaryPlanForShadow: deps.secondaryPlanForShadow,
+            targetRepo: "remudero", refreshMerged: () => isMerged,
+            runOne: async (id) => { ran.push(id); return okResult(id); },
+            sleep: fakeClock().sleep,
+            log: (step, extra = {}) => { if (step === "dispatch.secondary_catalog_shadow") observations.push(extra); },
+          }, { max: 1, headroomEnabled: false });
+          assert.equal(observations[0]?.outcome, "compared");
+          assert.equal(observations[0]?.secondary_candidate_count, 1);
+          assert.equal(observations[0]?.displaced_primary_count, 1);
+          assert.deepEqual(ran, [primaryCandidates[0].id]);
+          return summary;
+        }
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      };
+      assert.equal(await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+        ...(snapshot === undefined ? {} : { secondaryPlanForShadow: snapshot }), runDaemon: loopStub,
+      }), 0);
+      assert.equal(reached, true, "the real command reaches its daemon caller");
+    }
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldOverride === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE]; else process.env[CLAUDE_BIN_ENV_OVERRIDE] = oldOverride;
+    claudeExecutableCache.resolved = priorResolved;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("W1-T11600 criterion 3: invalid secondary snapshot is rejected atomically", () => {
@@ -4179,6 +4220,23 @@ test("W1-T11600 criterion 3: invalid secondary snapshot is rejected atomically",
     [invalidTaskType, "malformed"],
     [duplicate, "duplicate_task_id"],
   ];
+  const invalidFields = [
+    { not_before: "definitely-not-a-date" },
+    { not_before: "2026-02-30" },
+    { not_before: "2026-11-07T12:00:00" },
+    { not_before: 123 },
+    { precondition: { read: ["daemon"], expect: "clean" } },
+    { band_meaning: "unknown" },
+    { retirement: "unknown" },
+    { symptom_query: { pattern: "[", direction: "increase" } },
+    { acceptance: "not-a-list" },
+    { risk_ruling: { verdict: "invalid" } },
+  ];
+  for (const fields of invalidFields) {
+    const invalid = { ...validSecondary, id: "W1-T11600-INVALID", ...fields } as unknown as Task;
+    cases.push([shadowPlanOf([validSecondary, invalid]), "malformed"]);
+    cases.push([shadowPlanOf([invalid, validSecondary]), "malformed"]);
+  }
   for (const [secondary, outcome] of cases) {
     const result = compareSecondaryCatalogShadow(primary, secondary, primaryCandidates, NONE_MERGED, 1, {});
     assert.equal(result?.outcome, outcome);
@@ -4212,6 +4270,10 @@ test("W1-T11600 criterion 3: invalid secondary snapshot is rejected atomically",
   );
   assert.equal(deferred?.outcome, "comparison_deferred", "shadow never adds a precondition subprocess");
   assert.equal(primaryCandidates[0], primary.byId.get("A"), "refusal never mutates the primary dispatch candidates");
+  const validDate = compareSecondaryCatalogShadow(primary, shadowPlanOf([
+    { ...validSecondary, not_before: "2000-02-29T12:00:00+01:00" },
+  ]), primaryCandidates, NONE_MERGED, 1, {});
+  assert.equal(validDate?.outcome, "compared", "valid dated snapshots remain usable");
 });
 
 test("W1-T11600 criterion 4: secondary catalog shadow cannot alter dispatch", async () => {
@@ -4269,4 +4331,42 @@ test("W1-T11600 criterion 4: secondary catalog shadow cannot alter dispatch", as
   );
   assert.equal(matchingBranch?.outcome, "comparison_deferred", "a catalog task with a run branch is deferred safely");
   assert.equal(branchProbeCalls, 0);
+
+  const { breakerGateFor } = await import("#src/run-task.js");
+  const ledgerDir = mkdtempSync(join(tmpdir(), "daemon-shadow-breaker-"));
+  try {
+    const ledgerPath = join(ledgerDir, "ledger.ndjson");
+    writeFileSync(ledgerPath, Array.from({ length: 5 }, () => JSON.stringify({
+      step: "run.start", task_id: sensitiveTask.id,
+    })).join("\n") + "\n");
+    let branchReads = 0;
+    const gate = breakerGateFor(ledgerPath, () => { branchReads++; return []; });
+    for (const snapshot of [undefined, secondaryPlan]) {
+      let observation: Record<string, unknown> | undefined;
+      const workers: string[] = [];
+      await runDaemon(plan, {
+        ...(snapshot === undefined ? {} : { secondaryPlanForShadow: snapshot }),
+        refreshMerged: () => NONE_MERGED, targetRepo: "remudero",
+        beginSelectionPass: gate.beginSelectionPass,
+        isIndeterminate: gate.isIndeterminate, isCircuitTripped: gate.isTripped,
+        runOne: async (id) => { workers.push(id); return okResult(id); },
+        sleep: fakeClock().sleep,
+        log: (step, extra = {}) => { if (step === "dispatch.secondary_catalog_shadow") observation = extra; },
+      }, { max: 1, headroomEnabled: false });
+      assert.deepEqual(workers, ["A"]);
+      assert.equal(branchReads, 0, "a secondary-only tripped task cannot activate the real breaker's lazy GitHub reader");
+      assert.equal(observation?.outcome, snapshot ? "comparison_deferred" : undefined);
+      if (observation) assert.equal(JSON.stringify(observation).includes(sensitiveTask.id), false);
+    }
+    gate.isIndeterminate(sensitiveTask.id);
+    assert.equal(branchReads, 1, "positive control: the secondary task really does require the lazy branch read");
+    for (const reader of ["isIndeterminate", "isCircuitTripped", "isLifetimeCapExceeded"] as const) {
+      let calls = 0;
+      const deferred = compareSecondaryCatalogShadow(plan, secondaryPlan, primaryCandidates, NONE_MERGED, 1, {
+        [reader]: () => { calls++; return false; },
+      });
+      assert.equal(deferred?.outcome, "comparison_deferred");
+      assert.equal(calls, 0, `${reader} cannot run additional eligibility reads`);
+    }
+  } finally { rmSync(ledgerDir, { recursive: true, force: true }); }
 });

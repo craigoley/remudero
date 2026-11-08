@@ -134,7 +134,7 @@ import {
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
-import { assertRunnable, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { assertRunnable, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
@@ -2077,6 +2077,8 @@ function isParsedPlanSnapshot(value: unknown): value is Plan {
     for (const [id, task] of plan.byId) {
       if (typeof id !== "string" || !seen.has(id) || task?.id !== id) return false;
     }
+    // Reuse field validation without resolving dependencies until the catalogs are composed.
+    parseTasksFromYaml(JSON.stringify(plan.tasks), "secondary-catalog-shadow");
     return true;
   } catch (error: unknown) {
     // A hostile snapshot getter/proxy is malformed; never expose its value or partially trust it.
@@ -2114,6 +2116,9 @@ export function compareSecondaryCatalogShadow(
     if (secondary.tasks.some((task) => primaryIds.has(task.id))) return result("duplicate_task_id");
     // Precondition evaluation may spawn an rmd reader. Do not repeat or add that read in a shadow pass.
     if ([...primary.tasks, ...secondary.tasks].some((task) => task.precondition !== undefined)) return result("comparison_deferred");
+    // These eligibility predicates can lazily read ledger/GitHub evidence for a new task. Absence
+    // is the only proof here that the shadow will not activate a reader the primary pass never used.
+    if (opts.isIndeterminate || opts.isCircuitTripped || opts.isLifetimeCapExceeded) return result("comparison_deferred");
     // The live run-branch predicate lazily reads closed-unmerged PRs and can log an exception. Only
     // compare through the selector when its existing snapshot proves no catalog task has such a ref.
     if (opts.hasPushedRunBranch) {
@@ -2140,10 +2145,7 @@ export function compareSecondaryCatalogShadow(
       isCreditIndeterminate: opts.isCreditIndeterminate,
       excludeIds: opts.excludeIds,
       isTerminalPreDispatchRefusalHeld: opts.isTerminalPreDispatchRefusalHeld,
-      isIndeterminate: opts.isIndeterminate,
       isIndependentFailureBlocked: opts.isIndependentFailureBlocked,
-      isCircuitTripped: opts.isCircuitTripped,
-      isLifetimeCapExceeded: opts.isLifetimeCapExceeded,
       releasedIds: opts.releasedIds,
       targetRepo: opts.targetRepo,
       isSinglePathCredit: opts.isSinglePathCredit,
