@@ -23,7 +23,18 @@ test("a refused or throwing target WIP read after a good one reuses that target'
   const read = createTargetWipMemory();
   read("craigoley/wreckterra", () => ({ owned: 3, foreign: 0 }));
   read("craigoley/other", () => ({ owned: 7, foreign: 2 }));
-  assert.deepEqual(read("CRAIGOLEY/WRECKTERRA", () => undefined), { counts: { owned: 3, foreign: 0 }, source: "last-known" });
+  assert.deepEqual(read("CRAIGOLEY/WRECKTERRA", () => undefined), { counts: { owned: Infinity, foreign: 0 }, source: "unreadable", lastKnownCounts: { owned: 3, foreign: 0 } });
   const threw = read("craigoley/wreckterra", () => { throw new Error("gh call pacer refused to sleep 1011ms on this thread"); });
-  assert.deepEqual(threw, { counts: { owned: 3, foreign: 0 }, source: "last-known" });
+  assert.deepEqual(threw, { counts: { owned: Infinity, foreign: 0 }, source: "unreadable", lastKnownCounts: { owned: 3, foreign: 0 } });
+});
+
+
+test("cached target history is diagnostic only through refusal, recovery and target isolation", () => {
+  const read = createTargetWipMemory();
+  read("audit/zero", () => ({ owned: 0, foreign: 2 }));
+  read("audit/other", () => ({ owned: 4, foreign: 1 }));
+  assert.deepEqual(read("AUDIT/ZERO", () => undefined), { counts: { owned: Infinity, foreign: 0 }, source: "unreadable", lastKnownCounts: { owned: 0, foreign: 2 } });
+  assert.deepEqual(read("audit/zero", () => ({ owned: 1, foreign: 3 })), { counts: { owned: 1, foreign: 3 }, source: "fresh" });
+  assert.deepEqual(read("audit/zero", () => { throw new Error("private refused read"); }), { counts: { owned: Infinity, foreign: 0 }, source: "unreadable", lastKnownCounts: { owned: 1, foreign: 3 } });
+  assert.deepEqual(read("audit/other", () => undefined), { counts: { owned: Infinity, foreign: 0 }, source: "unreadable", lastKnownCounts: { owned: 4, foreign: 1 } });
 });

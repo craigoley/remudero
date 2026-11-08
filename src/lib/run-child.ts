@@ -38,10 +38,10 @@ import { waitingStarts } from "./host-memory-admission.js";
 import { copySelectedRegistryIntent, qualifySelectedRegistryIntent } from "./selected-registry-consumers.js";
 import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservation.js";
 import type { RunResult } from "./run-result.js";
+import { isWorkerProviderId, type WorkerProviderId } from "./config.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { killProcessGroup } from "./worker-containment.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
-import { isWorkerProviderId, type WorkerProviderId } from "./config.js";
 
 export const RUN_CHILD_SHADOW_STEP = "run_child.shadow";
 export const RUN_CHILD_SHADOW_SKIPPED_STEP = "run_child.shadow_skipped";
@@ -1270,12 +1270,18 @@ export type DetachedReviewCommand = (prArg: string, rest: string[], opts: {
 export async function runDetachedReview(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void },
   review: DetachedReviewCommand): Promise<RunResult> {
   const inputs = work.inputs ?? {};
-  const excludeProviders = Array.isArray(inputs.excludeProviders) ? inputs.excludeProviders.filter(isWorkerProviderId) : [];
+  let excludeProviders: WorkerProviderId[] | undefined;
+  if (inputs.excludeProviders !== undefined) {
+    if (!Array.isArray(inputs.excludeProviders) || inputs.excludeProviders.some((provider) => !isWorkerProviderId(provider))) {
+      throw new Error("detached review has malformed provider exclusions");
+    }
+    excludeProviders = [...new Set(inputs.excludeProviders as WorkerProviderId[])];
+  }
   const code = await review(String(work.prNumber), typeof inputs.repo === "string" ? ["--repo", inputs.repo] : [], {
     executionMode: "semantic",
     ...(typeof inputs.planOnlyFiling === "boolean" ? { planOnlyFiling: inputs.planOnlyFiling } : {}),
     ...(typeof inputs.reviewAttemptId === "string" ? { reviewAttemptId: inputs.reviewAttemptId } : {}),
-    ...(excludeProviders.length ? { excludeProviders } : {}),
+    ...(excludeProviders?.length ? { excludeProviders } : {}),
     ...(ctx.onPhase === undefined ? {} : { onPhase: ctx.onPhase }),
   });
   if (code !== 0) {
@@ -1534,8 +1540,8 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = {
         kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey,
         inputs: { repo: input.repo, ...(reviewAttemptId !== undefined ? { reviewAttemptId } : {}),
-          ...(pr.excludeProviders?.length ? { excludeProviders: [...pr.excludeProviders] } : {}),
-          ...(typeof pr.isPlanFiling === "boolean" ? { planOnlyFiling: pr.isPlanFiling } : {}) },
+          ...(typeof pr.isPlanFiling === "boolean" ? { planOnlyFiling: pr.isPlanFiling } : {}),
+          ...(pr.excludeProviders?.length ? { excludeProviders: [...pr.excludeProviders] } : {}) },
       };
       if (current === "shadow") {
         if (!probing) {
