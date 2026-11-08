@@ -361,12 +361,15 @@ test("W1-T11383 criterion 5 a latch aborts nothing and admitted work finishes on
 });
 
 test("W1-T11383 criterion 6 STOP and PAUSE win over a set heap latch and resolveFleetControlHold stays STOP and PAUSE", async () => {
-  // A PAUSE read with no wired admission hold: the heap latch is set but the existing PAUSE branch answers.
+  // A PAUSE placed after the top-of-tick read, with no wired admission hold: the latch is set by the gate's read,
+  // and the existing recheck PAUSE branch still answers it.
   let paused = false;
-  const pause = await heldDaemon({ share: 0.70, mode: "enforce", ticks: 3, extra: {
-    workerAdmissionHold: undefined, checkPause: () => { const was = paused; paused = true; return was ? "operator hold" : undefined; },
-  } });
-  assert.ok(pause.rows.some((r) => r.step === "daemon.pause" && r.fields.detail === "operator hold"));
+  const pause = await heldDaemon({ share: 0.70, mode: "enforce", ticks: 3,
+    onSample: (surface) => { if (surface === "admission:dispatch") paused = true; },
+    extra: { workerAdmissionHold: undefined, checkPause: () => paused ? "operator hold" : undefined } });
+  assert.ok(pause.rows.some((r) => r.step === "daemon.pause" && r.fields.detail === "operator hold" && r.fields.recheck === true));
+  assert.equal(pause.rows.some((r) => r.step === "daemon.admission_held"), false, "no heap hold was written beside the PAUSE");
+  assert.equal(pause.rows.find((r) => r.step === "daemon.heap_admission_hold")?.fields.transition, "latched");
   // The wired seam: a PAUSE read wins with its own row, and no heap row is written beside it.
   const wired = await heldDaemon({ share: 0.70, mode: "enforce", extra: {
     workerAdmissionHold: () => ({ control: "PAUSE", detail: "operator hold" }) } });
