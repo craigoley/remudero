@@ -7,7 +7,7 @@
  * still not an atomic POSIX inode CAS against arbitrary actors bypassing this protocol.
  */
 import { spawn } from "node:child_process";
-import { closeSync, fstatSync, lstatSync, mkdtempSync, openSync, readdirSync, readSync, rmdirSync, statSync, unlinkSync, type Stats } from "node:fs";
+import { closeSync, fstatSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmdirSync, statSync, unlinkSync, type Stats } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fixedClock } from "./clock.js";
@@ -131,7 +131,34 @@ export function defaultGuardHolderProbe(guardPath: string, guard: Stats, platfor
   }
 }
 
-function procFdProbe(guard: Stats, procRoot = "/proc"): GuardHolderEvidence {
+/** BACKSTOP — `btime` has one-second granularity; a process starting inside this margin of the guard's birth may be its writer. */
+export const GUARD_WRITER_START_MARGIN_MS = 5_000;
+const USER_HZ = 100;
+
+/** Wall-clock start of `pid` from `stat` field 22 and `btime`; undefined when either is unreadable. */
+function processStartMs(procRoot: string, pid: string): number | undefined {
+  try {
+    const btime = /^btime (\d+)$/m.exec(readFileSync(join(procRoot, "stat"), "utf8"));
+    const stat = readFileSync(join(procRoot, pid, "stat"), "utf8");
+    const ticks = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]);
+    return btime && Number.isFinite(ticks) ? Number(btime[1]) * 1000 + (ticks / USER_HZ) * 1000 : undefined;
+  } catch { return undefined; }
+}
+
+/**
+ * Whether a process the scan cannot read is nonetheless excluded as the guard's writer (W1-T11925): only a Node runtime
+ * writes the guard and it opens it close-on-exec, so a readable command name that is not node excludes it, as does a start
+ * later than the guard's birth. An unreadable name and start leave it a possible writer.
+ */
+function cannotBeWriter(procRoot: string, pid: string, guard: Stats): boolean {
+  try {
+    if (!/^node(js)?$/.test(readFileSync(join(procRoot, pid, "comm"), "utf8").trim())) return true;
+  } catch { /* an unreadable name decides nothing */ }
+  const start = processStartMs(procRoot, pid);
+  return start !== undefined && guard.birthtimeMs > 0 && start > guard.birthtimeMs + GUARD_WRITER_START_MARGIN_MS;
+}
+
+export function procFdProbe(guard: Stats, procRoot = "/proc"): GuardHolderEvidence {
   const uid = process.getuid?.();
   const deadline = performance.now() + 2_000;
   let pids: string[];
@@ -150,7 +177,9 @@ function procFdProbe(guard: Stats, procRoot = "/proc"): GuardHolderEvidence {
       fds = readdirSync(join(procRoot, pid, "fd"));
     } catch (error) {
       // A process that exited mid-scan holds nothing; any other failure leaves the scan incomplete.
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ESRCH") unreadable.push(pid);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EACCES" || code === "EPERM") { if (!cannotBeWriter(procRoot, pid, guard)) unreadable.push(pid); }
+      else if (code !== "ENOENT" && code !== "ESRCH") unreadable.push(pid);
       continue;
     }
     for (const fd of fds) {
@@ -161,7 +190,7 @@ function procFdProbe(guard: Stats, procRoot = "/proc"): GuardHolderEvidence {
         if (open.dev === guard.dev && open.ino === guard.ino) return { state: "open", probe: "proc-fd", reason: `held open by pid ${pid}` };
       } catch (error) {
         // A descriptor closed between listing and reading is not a holder; anything else is unknown.
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadable.push(`${pid}/fd/${fd}`);
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !cannotBeWriter(procRoot, pid, guard)) unreadable.push(`${pid}/fd/${fd}`);
       }
     }
     scanned += 1;
