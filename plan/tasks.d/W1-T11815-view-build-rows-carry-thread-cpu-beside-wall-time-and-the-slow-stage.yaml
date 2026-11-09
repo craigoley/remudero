@@ -2,7 +2,7 @@
   title: Each view build row and slow-view row carries the build thread's own CPU milliseconds beside its wall milliseconds, so a 639-second board stage can be told apart as work or as waiting for a busy host
   repo: remudero
   depends_on: []
-  priority: 0.3
+  priority: 1.2
   type: implement
   verify: auto
   principles:

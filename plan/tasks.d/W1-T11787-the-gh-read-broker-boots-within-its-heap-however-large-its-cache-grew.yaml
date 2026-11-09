@@ -2,7 +2,7 @@
   title: The gh read broker's boot parses at most a declared heap-sized byte bound of its cache, newest first, and evicts the rest unparsed, so a cache that outgrew its heap cannot crash-loop the broker
   repo: remudero
   depends_on: []
-  priority: 0.3
+  priority: 1.2
   type: implement
   verify: auto
   principles:

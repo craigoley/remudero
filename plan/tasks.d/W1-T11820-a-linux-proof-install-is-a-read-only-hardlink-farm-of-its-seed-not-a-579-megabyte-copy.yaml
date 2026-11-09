@@ -2,7 +2,7 @@
   title: On Linux a proof install is a hardlink farm of its seed with read-only files and real directories, so a worktree reaches a preflight-admissible install in seconds without 579 MB of new data
   repo: remudero
   depends_on: []
-  priority: 0.3
+  priority: 1.2
   type: implement
   verify: auto
   principles:
@@ -38,5 +38,5 @@
   falsifier: |
     Copy the data and criterion 1 must fail on inode identity; leave files writable and criterion 2 must fail; swallow a link error without the fallback and criterion 3 must fail; change a macOS or non-proof method and criterion 4 must fail. Restore and require all four to pass.
   note: |
-    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794186053317
+    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794173043382
     Reserved with rmd next-task-id (W1-T11820 on run-unfiled-1794186053317). Complements W1-T10739 (one named command): build either first. Proof that counts: a proof install's new disk bytes under 5 MB and its prime time in seconds.

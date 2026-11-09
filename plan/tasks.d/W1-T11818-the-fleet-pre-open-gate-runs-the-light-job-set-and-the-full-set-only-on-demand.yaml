@@ -39,5 +39,5 @@
   falsifier: |
     Run the full job set in light mode and criterion 1 must fail; read a never-recorded unit as passed and criterion 3 must fail; ignore the revert switch and criterion 4 must fail; drop gate_mode from the row and criterion 2 must fail. Restore and require all four to pass.
   note: |
-    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794186053317
+    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794173043382
     Reserved with rmd next-task-id (W1-T11818 on run-unfiled-1794186053317). src/run-task.ts forces the full suite set (W1-T10740). Proof that counts: implement.preopen_gate rows with gate_mode light, their durations, and no rise in hosted rule-checks or census failures on fleet PRs.

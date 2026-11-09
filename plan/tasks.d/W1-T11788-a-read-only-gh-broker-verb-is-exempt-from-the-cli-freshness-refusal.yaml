@@ -2,7 +2,7 @@
   title: The gh-broker verb is exempt from the CLI freshness refusal, so a dirty or behind checkout cannot stop the read broker from starting or answering status
   repo: remudero
   depends_on: []
-  priority: 0.3
+  priority: 1.2
   type: implement
   verify: auto
   principles:

@@ -2,7 +2,7 @@
   title: Serve ledgers one aggregate demand row per window, counting requests, status classes, latency and client aborts per route family, so the console's real load and its cancelled calls are measured before any serve redesign
   repo: remudero
   depends_on: []
-  priority: 0.3
+  priority: 1.2
   type: implement
   verify: auto
   principles:

@@ -2,7 +2,7 @@
   title: A Linux seed store whose account directory no other account can enter is swept with the owner's own open-file scan, so seeds stop reading "administrator scan required" and idle ones are reclaimed
   repo: remudero
   depends_on: []
-  priority: 0.3
+  priority: 1.2
   type: implement
   verify: auto
   principles:
@@ -37,5 +37,5 @@
   falsifier: |
     Accept a mode 775 directory and criterion 3 must fail; keep throwing for an owner-only directory and criterion 2 must fail; leave enable creating 775 and criterion 4 must fail. Restore and require all four to pass.
   note: |
-    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794186053317
+    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794173043382
     Reserved with rmd next-task-id (W1-T11821 on run-unfiled-1794186053317). Rollout: after it merges, the operator runs the enable command once so the existing 775 directory is tightened. Proof that counts: a dry-run sweep listing idle seeds as removable.

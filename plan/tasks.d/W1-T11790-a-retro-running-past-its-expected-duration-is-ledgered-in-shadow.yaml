@@ -2,7 +2,7 @@
   title: A detached retro that runs past a declared shadow duration is ledgered once as overrunning, and every retro ledgers its duration, so a hung retro stops silently holding recycles and reviews and the enforcing bound can be ruled from data
   repo: remudero
   depends_on: []
-  priority: 0.3
+  priority: 1.2
   type: implement
   verify: auto
   principles:

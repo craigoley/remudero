@@ -2,7 +2,7 @@
   title: Each rule suite has a recorded read set, and the author preflight reports in shadow which of the 136 rule suites a diff could skip, still running them all, so 11 minutes of repo-wide checks can later be scoped by what a change can reach
   repo: remudero
   depends_on: []
-  priority: 0.3
+  priority: 1.2
   type: implement
   verify: auto
   principles:
@@ -39,5 +39,5 @@
   falsifier: |
     Record absolute paths or drop a root and criterion 1 must fail; skip a suite with no record or a stale hash and criterion 2 must fail; let the shadow line change the exit status or skip a run and criterion 3 must fail. Restore and require all four to pass.
   note: |
-    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794186053317
+    reservation hand-off: run-unfiled-1794186053317 -> run-unfiled-1794173043382
     Reserved with rmd next-task-id (W1-T11819 on run-unfiled-1794186053317). Proof that counts: the would-skip line on preflights after deploy, then the count of hosted rule-check failures a skipped suite would have hidden.
