@@ -21,6 +21,11 @@
     - packages/api-client/src/schema.d.ts
     - test/dispatch/product-plan-runner-config.test.ts
     - test/console-api/serve/product-routes.test.ts
+    - test/dispatch/product-plan-operation.test.ts
+    - test/plan/product-case-managed-checkout.test.ts
+  # refusal-amendment (W1-T11195, run W1-T11195-1794171535104, 2026-11-09T07:18:22.717Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T11195: a filed proof already passes at the merge base, so branch run-W1-T11195-1794171535104 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   rationale: >-
