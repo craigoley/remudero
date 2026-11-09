@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { inspect, promisify } from "node:util";
 import { RmdError } from "./errors.js";
 import { ghJsonAsync, createGhCallPacer, type GhCallPacer } from "./github-transport.js";
-import { mergePlanBlobs, PlanError, type Plan } from "./plan.js";
-import { freezeReadGeneration } from "./read-plane.js";
+import { PlanError, type Plan } from "./plan.js";
+import { createPlanRevisionStore, type PlanRevisionStore } from "./plan-revision-store.js";
 
 /**
  * W1-T11768: a private ops task catalog read read-only at one pinned commit, or refused with a stable code.
@@ -64,16 +66,33 @@ class Refusal extends RmdError {
 }
 
 const AUTH_TEXT = /auth login|GH_TOKEN|GITHUB_TOKEN|HTTP 401|authentication/i;
+const execFileAsync = promisify(execFile);
+const snapshotStore = createPlanRevisionStore({ strict: true });
+
+/** Private handles remain available to the shadow composer, but ordinary logging cannot traverse them. */
+function privateHandles<T extends object>(summary: T, handles: object): T {
+  const safe = Object.freeze({ ...summary });
+  Object.defineProperties(summary, {
+    ...Object.fromEntries(Object.entries(handles).map(([key, value]) => [key, { value }])),
+    toJSON: { value: () => safe },
+    [inspect.custom]: { value: () => safe },
+  });
+  return Object.freeze(summary);
+}
 
 /** The default GET-only api: `ghJsonAsync` behind the existing pacer. Errors are reduced to a code-bearing class. */
 export function defaultOpsCatalogApi(
   opts: { pacer?: GhCallPacer; exec?: Parameters<typeof ghJsonAsync>[1] } = {},
 ): OpsCatalogApi {
   const pacer = opts.pacer ?? createGhCallPacer();
+  // An explicit executor keeps ghJsonAsync off the broker's persistent response cache. The child has
+  // no --cache flag; each mutable ref check reaches upstream. Pacing remains local to this source.
+  const exec = opts.exec ?? ((...args: Parameters<typeof execFileAsync>) => execFileAsync(...args)) as typeof execFileAsync;
   return async (path) => {
     try {
-      await pacer.waitAsync?.();
-      return await ghJsonAsync(["api", path], opts.exec);
+      if (pacer.waitAsync) await pacer.waitAsync();
+      else pacer.wait();
+      return await ghJsonAsync(["api", path], exec, undefined, { fresh: true });
     } catch (error) {
       // gh's message carries URLs and bodies: classify it here and let it go.
       const text = error instanceof Error ? `${error.message}\n${String((error as { stderr?: unknown }).stderr ?? "")}` : "";
@@ -150,7 +169,9 @@ function digestOf(binding: OpsCatalogBinding): string {
   ])).digest("hex");
 }
 
-async function read(target: OpsCatalogTarget, api: OpsCatalogApi, counts: OpsCatalogCounts): Promise<OpsCatalogSnapshot> {
+async function read(
+  target: OpsCatalogTarget, api: OpsCatalogApi, counts: OpsCatalogCounts, store: PlanRevisionStore,
+): Promise<OpsCatalogSnapshot> {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(target.repository)) throw new Refusal("unreadable");
   const repo = `repos/${target.repository}`;
   const meta = rec(await get(api, repo));
@@ -184,23 +205,18 @@ async function read(target: OpsCatalogTarget, api: OpsCatalogApi, counts: OpsCat
   // The ref must still name the commit every read above was bound to.
   if (await readBranchSha(api, repo, branch) !== commit) throw new Refusal("ref_moved");
   const shardTreeSha = shardDir ? shardDir.sha : "";
-  let plan: Plan;
-  try {
-    // The strict merge: no quarantine, so a duplicate or invalid shard refuses the whole snapshot. The Plan is frozen
-    // with the freeze the plan revision store uses, and is this snapshot's own, never the primary plan's. This module
-    // does not import the store: the store's module reaches the daemon, so importing it here would put this module
-    // inside the daemon's import cycle (the affected-reach ratchet's largest-component bound). A later per-tick source
-    // (W1-T11769) that wants unchanged blobs reused injects the store at the daemon.
-    plan = freezeReadGeneration(mergePlanBlobs(blobs));
-  } catch (error) {
-    if (error instanceof Refusal) throw error;
-    throw new Refusal(error instanceof PlanError && /^duplicate task id /.test(error.message) ? "duplicate_task_id" : "malformed");
-  }
   const binding: OpsCatalogBinding = Object.freeze({
     repositoryId, ref: `refs/heads/${branch}`, commit, tasksYamlBlob: monolith.sha, shardTreeSha,
     shardBlobs: Object.freeze(Object.fromEntries(shardEntries.map((e) => [e.path, e.sha]))) as Record<string, string>,
   });
-  return { outcome: "ok", plan, binding, identityDigest: digestOf(binding), counts };
+  const identityDigest = digestOf(binding);
+  let plan: Plan;
+  try {
+    plan = store.adopt({ key: `${commit}:${identityDigest}`, commit, repoDir: "", relPath: "" }, blobs).plan;
+  } catch (error) {
+    throw new Refusal(error instanceof PlanError && /^duplicate task id /.test(error.message) ? "duplicate_task_id" : "malformed");
+  }
+  return privateHandles({ outcome: "ok" as const, identityDigest, counts: Object.freeze(counts) }, { plan, binding });
 }
 
 /**
@@ -211,8 +227,14 @@ export async function readOpsCatalogSnapshotAsync(
   target: OpsCatalogTarget,
   api: OpsCatalogApi = defaultOpsCatalogApi(),
 ): Promise<OpsCatalogSnapshot> {
+  return readSnapshot(target, api, snapshotStore);
+}
+
+async function readSnapshot(
+  target: OpsCatalogTarget, api: OpsCatalogApi, store: PlanRevisionStore,
+): Promise<OpsCatalogSnapshot> {
   const counts: OpsCatalogCounts = { treeEntries: 0, shards: 0, bytes: 0 };
-  try { return await read(target, api, counts); }
+  try { return await read(target, api, counts, store); }
   catch (error) {
     // The outcome code is the reason: the error's own message may hold a URL or body, so it is dropped here.
     return { outcome: error instanceof Refusal ? error.outcome : "unreadable", counts };
@@ -228,12 +250,14 @@ export function createOpsCatalogShadowSource(
   api: OpsCatalogApi = defaultOpsCatalogApi(),
 ): { refresh(): Promise<OpsCatalogShadowInput> } {
   let everOk = false;
+  const store = createPlanRevisionStore({ strict: true, retainLatest: true });
   return {
     async refresh() {
-      const snap = await readOpsCatalogSnapshotAsync(target, api);
+      const snap = await readSnapshot(target, api, store);
       if (snap.outcome === "ok") {
         everOk = true;
-        return { outcome: "ok", plan: snap.plan, opsCommit: snap.binding?.commit, identityDigest: snap.identityDigest };
+        return privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest },
+          { plan: snap.plan, opsCommit: snap.binding?.commit });
       }
       return { outcome: everOk ? "stale" : snap.outcome };
     },

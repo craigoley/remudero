@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import net from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { GhReadBroker } from "#src/lib/gh-read-broker.js";
+import { ghBrokerDir, ghBrokerRouteFor } from "#src/lib/gh-read-broker-client.js";
+import { ghJsonAsync } from "#src/lib/github-transport.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 import {
   OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_SHARDS, OPS_CATALOG_MAX_TREE_ENTRIES, OPS_CATALOG_OUTCOMES,
-  OpsCatalogAuthMissingError, createOpsCatalogShadowSource, readOpsCatalogSnapshotAsync, type OpsCatalogApi,
+  OpsCatalogAuthMissingError, createOpsCatalogShadowSource, defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi,
 } from "#src/lib/ops-catalog-source.js";
 
 const REPO = "acme-private/ops-secret-slug";
@@ -172,4 +183,86 @@ test("W1-T11768 criterion 2: a blob with a wrong size, bad base64 or non-utf8 by
 
 test("W1-T11768 criterion 2: the outcome set is closed and stable", () => {
   assert.deepEqual([...OPS_CATALOG_OUTCOMES], ["ok", "auth_missing", "unreadable", "source_absent", "stale", "ref_moved", "malformed", "duplicate_task_id"]);
+});
+
+test("W1-T11768 criterion 2: a live broker cannot hide a moved ref or persist private responses", async (t) => {
+  const root = fs.mkdtempSync(join(tmpdir(), "rmd-ops-broker-"));
+  const previous = { PATH: process.env.PATH, RMD_GH_CACHE_HOME: process.env.RMD_GH_CACHE_HOME };
+  let shim: ReturnType<typeof ghShim> | undefined;
+  try {
+    process.env.RMD_GH_CACHE_HOME = root;
+    const dir = ghBrokerDir()!;
+    const fx = fixture({ monolith: taskYaml("OPS-T1"), shards: { "private.yaml": taskYaml("OPS-T2") } });
+    const refPath = `repos/${REPO}/git/ref/heads/main`;
+    const originalRef = { object: { type: "commit", sha: fx.commit } };
+    const movedRef = { object: { type: "commit", sha: sha1("commit-2") } };
+    const refFile = join(root, "upstream-ref.json");
+    fs.writeFileSync(refFile, JSON.stringify(originalRef));
+    await readOpsCatalogSnapshotAsync({ repository: REPO }, fx.api);
+    const routes: GhShimRoute[] = [];
+    for (const path of new Set(fx.calls)) {
+      routes.push(path === refPath ? { when: path, stdoutFile: refFile } : {
+        when: path, stdout: JSON.stringify(await fx.api(path)),
+        ...(path.includes("/git/blobs/") ? { writes: { path: refFile, content: JSON.stringify(movedRef) } } : {}),
+      });
+    }
+    shim = ghShim(routes.sort((a, b) => b.when.length - a.when.length));
+    process.env.PATH = `${shim.dir}:${previous.PATH ?? ""}`;
+    let now = 0;
+    let upstream = 0;
+    const broker = new GhReadBroker(dir, async (args) => {
+      if (args[1] === "user") return { stdout: "fixture-user\n", stderr: "", exitCode: 0 };
+      upstream++;
+      return { stdout: `HTTP/2.0 200 OK\r\nCache-Control: max-age=3600\r\n\r\n${JSON.stringify(originalRef)}`, stderr: "", exitCode: 0 };
+    }, clockFromMillisFn(() => now), async (ms) => { now += ms; }, () => 1e12, { sharedPaceRoot: null });
+    fs.writeFileSync(join(dir, "heartbeat"), "60\n");
+    // Use the real broker/cache through its socket protocol without requiring a Unix listener.
+    t.mock.method(net, "connect", () => {
+      const socket = new EventEmitter() as EventEmitter & {
+        setEncoding(): void; destroy(): void; write(data: string): void;
+      };
+      socket.setEncoding = () => {};
+      socket.destroy = () => {};
+      socket.write = (data) => {
+        void broker.read(JSON.parse(data)).then(
+          (result) => socket.emit("data", `${JSON.stringify({ type: "result", ...result })}\n`),
+          (error) => socket.emit("error", error),
+        );
+      };
+      queueMicrotask(() => socket.emit("connect"));
+      return socket as never;
+    });
+    syncBuiltinESMExports();
+    assert.equal(ghBrokerRouteFor(), join(dir, "broker.sock"), "positive control: the broker is live");
+    assert.deepEqual(await ghJsonAsync(["api", refPath]), originalRef);
+    assert.deepEqual(await ghJsonAsync(["api", refPath]), originalRef);
+    assert.equal(upstream, 1, "positive control: the second ordinary ref read is cached");
+    const cache = () => Object.fromEntries(fs.readdirSync(join(dir, "cache"))
+      .map((name) => [name, fs.readFileSync(join(dir, "cache", name), "utf8")]));
+    const before = cache();
+    assert.ok(Object.keys(before).length > 0, "positive control: the broker persists ordinary responses");
+    const api = defaultOpsCatalogApi({ pacer: { wait() {}, recordResult() {}, async waitAsync() {} } });
+    refused("ref_moved", await readOpsCatalogSnapshotAsync({ repository: REPO }, api));
+    assert.deepEqual(await ghJsonAsync(["api", refPath]), originalRef, "the broker still holds the old ref");
+    assert.equal(upstream, 1);
+    assert.deepEqual(cache(), before, "catalog responses never enter the persistent broker cache");
+    fs.writeFileSync(refFile, JSON.stringify(originalRef));
+    for (const path of new Set(fx.calls.filter((path) => path.includes("/git/blobs/")))) {
+      shim.addRoute({ when: path, stdout: JSON.stringify(await fx.api(path)) });
+    }
+    const snap = await readOpsCatalogSnapshotAsync({ repository: REPO }, api);
+    assert.equal(snap.outcome, "ok");
+    assert.equal(snap.plan?.tasks.length, 2);
+    assert.deepEqual(cache(), before, "successful private reads also remain in memory");
+    assert.ok(shim.calls().every((call) => !/--cache|--method|-X/.test(call)), "direct children use uncached GETs");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    if (shim) fs.rmSync(shim.dir, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

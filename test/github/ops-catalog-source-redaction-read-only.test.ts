@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
+import net from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { inspect } from "node:util";
 import { test } from "node:test";
 // The daemon and the live analytics cache import each other and the cache reads a daemon constant at load,
 // so the cache loads first and the daemon (the module under test) finishes before the cache evaluates.
 import "#src/lib/live-analytics-snapshot-cache.js";
 import { runDaemon } from "#src/lib/daemon.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { ghBrokerDir, ghBrokerRouteFor } from "#src/lib/gh-read-broker-client.js";
 import { mergePlanBlobs, type Plan } from "#src/lib/plan.js";
 import {
   OpsCatalogAuthMissingError, createOpsCatalogShadowSource, defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi,
@@ -68,10 +73,10 @@ function fixture(c: Catalog, hooks: { fail?: (path: string) => unknown; moveRefA
 }
 
 const target = { repository: REPO };
-const SENTINELS = ["PRIVATE_TITLE_SENTINEL", "PRIVATE_PATH_SENTINEL", "PRIVATE_BODY_SENTINEL", REPO, "ops-secret-slug", "ghp_SECRET_TOKEN_SENTINEL", "tasks.d", "plan/tasks"];
+const SENTINELS = ["PRIVATE_TITLE_SENTINEL", "PRIVATE_PATH_SENTINEL", "PRIVATE_BODY_SENTINEL", "private-shard.yaml", REPO, "ops-secret-slug", "ghp_SECRET_TOKEN_SENTINEL", "tasks.d", "plan/tasks"];
 
 function sweep(label: string, value: unknown): void {
-  const text = JSON.stringify(value);
+  const text = [JSON.stringify(value), inspect(value), inspect(value, { showHidden: true, depth: null })].join("\n");
   for (const s of SENTINELS) assert.equal(text.includes(s), false, `${label} carries ${s}`);
 }
 
@@ -87,7 +92,7 @@ test("W1-T11768 criterion 3: a transport error's message never reaches a result"
 test("W1-T11768 criterion 3: every outcome's serialized result is clean of private content", async () => {
   const mono = taskYaml("OPS-T1");
   const cases: Array<[string, OpsCatalogApi]> = [
-    ["ok", fixture({ monolith: mono, shards: { "a.yaml": taskYaml("OPS-T2") } }).api],
+    ["ok", fixture({ monolith: mono, shards: { "private-shard.yaml": taskYaml("OPS-T2") } }).api],
     ["source_absent", fixture({ noPlanDir: true }).api],
     ["ref_moved", fixture({ monolith: mono }, { moveRefAfterBlobs: true }).api],
     ["malformed", fixture({ monolith: "- id: PRIVATE_TITLE_SENTINEL\n  title: [" }).api],
@@ -97,7 +102,14 @@ test("W1-T11768 criterion 3: every outcome's serialized result is clean of priva
   ];
   for (const [label, api] of cases) {
     const snap = await readOpsCatalogSnapshotAsync(target, api);
-    sweep(label, { ...snap, plan: undefined });
+    sweep(label, snap);
+    sweep(`${label} spread`, { ...snap });
+    sweep(`${label} shadow`, await createOpsCatalogShadowSource(target, api).refresh());
+    if (label === "ok") {
+      assert.equal(snap.plan?.tasks[0].title, "PRIVATE_TITLE_SENTINEL", "private handles remain usable internally");
+      assert.ok(snap.binding?.shardBlobs["private-shard.yaml"]);
+      assert.deepEqual(Object.keys(snap).sort(), ["counts", "identityDigest", "outcome"]);
+    }
   }
 });
 
@@ -169,6 +181,45 @@ test("W1-T11768 criterion 3: the real default api shells out to gh and its answe
     sweep("real default", snap);
   } finally {
     process.env.PATH = priorPath;
+    fs.rmSync(shim.dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T11768 criterion 3: the private transport bypasses a live broker without filesystem writes", async (t) => {
+  const root = fs.mkdtempSync(join(tmpdir(), "rmd-ops-private-"));
+  const shim = ghShim([{ when: "repos/", stdout: JSON.stringify({ title: "PRIVATE_TITLE_SENTINEL" }) }]);
+  const previous = { PATH: process.env.PATH, RMD_GH_CACHE_HOME: process.env.RMD_GH_CACHE_HOME };
+  const attempts: string[] = [];
+  try {
+    process.env.PATH = `${shim.dir}:${previous.PATH ?? ""}`;
+    process.env.RMD_GH_CACHE_HOME = root;
+    const dir = ghBrokerDir()!;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(join(dir, "heartbeat"), "60\n");
+    assert.equal(ghBrokerRouteFor(), join(dir, "broker.sock"), "positive control: broker routing is active");
+    t.mock.method(net, "connect", () => {
+      attempts.push("broker");
+      throw new Error("private responses must not reach the broker");
+    });
+    t.mock.method(fs, "writeFileSync", () => {
+      attempts.push("write");
+      throw new Error("private transport must not persist responses");
+    });
+    syncBuiltinESMExports();
+    const response = await defaultOpsCatalogApi()("repos/o/r");
+    assert.deepEqual(response, { title: "PRIVATE_TITLE_SENTINEL" }, "the real child returns private bytes in memory");
+    assert.deepEqual(attempts, [], "no broker or filesystem write is attempted, even if its error is caught");
+    assert.equal(shim.calls().length, 1);
+    assert.ok(!/--cache|--method|-X/.test(shim.calls()[0]));
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(shim.dir, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
