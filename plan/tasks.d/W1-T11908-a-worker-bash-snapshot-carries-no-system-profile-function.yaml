@@ -70,6 +70,7 @@
        W1-T11693, the injected function IS reported. This proves the harness can observe the leak (W1-T2805 item 14).
     4. GREEN: against the materialized home, the report has zero aliases and none of the injected function names.
        Feed the report through assessIsolation in the probe's report shape. It must return isolated:true.
+       Assert the green verdict on one physical line: `assert.equal(assessIsolation(report).isolated, true);`.
     5. STILL REFUSES: plant `alias rmd_planted_alias=true` and a function `rmd_planted_fn` in the materialized
        ~/.bashrc after materialization, then rerun the harness. Both names reach the report, and assessIsolation
        returns isolated:false naming them. A wrapper-named function (find) stays excluded exactly as today.
@@ -77,7 +78,10 @@
     green and unchanged.
   acceptance:
     - claim: "the snapshot-path suite proves a pre-profile function leaks into a blank-profile home, is absent from the materialized home, and that ~/.bashrc state still makes assessIsolation refuse"
+      kind: guard
       proof: "unit test: test/worker-bash-snapshot-isolation.test.ts"
+    - claim: "the green snapshot case asserts a clean isolation verdict"
+      proof: "grep: assert.equal(assessIsolation(report).isolated, true); in test/worker-bash-snapshot-isolation.test.ts"
   falsifier: |
     Before W1-T11693 merges, the green case fails because the materialized ~/.bash_profile is zero bytes, which is why
     this task depends on it. The proof is rigged or wrong if any of these hold:
