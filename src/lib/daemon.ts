@@ -2300,6 +2300,13 @@ export function lightPassFixAdmitted(scope?: LightPassScope): boolean {
   return scope?.reviewOnly !== true && scope?.admit?.("fix-dispatch", "light") !== false;
 }
 
+/** W1-T11510: may this light pass arm a ready PR? The ordinary pass, and of the review-only scopes only an
+ * interphase-review pass (operator ruling 2026-11-06): an allowlist of one, so pause, drain, boot, idle and any
+ * later scope stay held. Arming only — its repair lanes stay closed ({@link lightPassFixAdmitted}). */
+export function lightPassArmAdmitted(scope?: LightPassScope): boolean {
+  return scope?.reviewOnly !== true || scope.scope === "interphase-review";
+}
+
 interface InterphaseReviewClock {
   /** Stops new admission, waits up to the stop bound for started passes, and reports whether this clock
    * consumed an event edge that the ordinary full-sweep gate still needs to reconcile, and how
@@ -2492,7 +2499,8 @@ export function startInterphaseReviewClock(
           if (!eventWakePending && elapsedMs < pollIntervalMs) continue;
           // W1-T4732: a long reviewer must not hold a newly green head out of the next
           // pass. Keep at most two passes alive; only the first may take the ordinary light
-          // actions. When both slots are occupied, retain the wake/time debt for a later tick.
+          // actions, and a follow-up may only review and arm (W1-T11510). When both slots are
+          // occupied, retain the wake/time debt for a later tick.
           if (activePasses.size >= 2) continue;
 
           const halt = deps.checkStop?.() ?? (scope === "pause" ? undefined : deps.checkPause?.());
