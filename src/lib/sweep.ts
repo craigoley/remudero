@@ -5495,8 +5495,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     withdrawStaleJudgePr: (pr) => withdrawStaleConflictedJudgePr({
       stateDir: join(config.root, "state"), prUrl: pr.prUrl, log,
       readMain: async (paths) => {
-        const git = deps.planRepairGitImpl ?? defaultGitCaptureAsync;
-        const at = (args: string[]) => git("git", ["-C", repoDir, ...args]);
+        const at = (args: string[]) => hostWorktreeGitAsync(repoDir, args, { maxBuffer: 1 << 24 });
         await at(["fetch", "--quiet", "origin", "main"]);
         const target = (await at(["rev-parse", "origin/main"])).trim();
         const present = new Set((await at(["ls-tree", "-r", "--name-only", target, "--", ...paths])).trim().split("\n"));
