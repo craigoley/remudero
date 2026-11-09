@@ -12,10 +12,10 @@
  * the next fire (which reads the merged flips as no longer drifted) simply takes what follows.
  */
 
-/** Half of GitHub's 300-file review ceiling (`PLAN_RECONCILE_REVIEW_FILE_CEILING`, W1-T3761). */
+/** PRIMARY CONTROL: half of GitHub's 300-file review ceiling (`PLAN_RECONCILE_REVIEW_FILE_CEILING`, W1-T3761). */
 export const PLAN_RECONCILE_LANDING_FILE_LIMIT = 150;
 
-/** Characters of pull-request body one landing may use; GitHub refuses a body over 65,536. */
+/** PRIMARY CONTROL: characters of pull-request body one landing may use; GitHub refuses a body over 65,536. */
 export const PLAN_RECONCILE_LANDING_BODY_BUDGET = 60_000;
 
 /** The proof a flipped shard's Acceptance bullet carries when nothing sharper is derived. */

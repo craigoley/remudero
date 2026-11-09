@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildPlanReconcileCadenceInput, planReconcileCadence } from "../../src/lib/measurement-cadence.js";
+import { buildPlanReconcileCadenceInput, planReconcileCadence } from "#src/lib/measurement-cadence.js";
 import {
   PLAN_RECONCILE_LANDING_BODY_BUDGET,
   PLAN_RECONCILE_LANDING_FILE_LIMIT,
   planReconcileProofTemplate,
   planReconcilePrBody,
   takePlanReconcileBatch,
-} from "../../src/lib/plan-reconcile-batch.js";
+} from "#src/lib/plan-reconcile-batch.js";
 
 const GITHUB_BODY_LIMIT = 65_536;
 type Landed = { relPath: string; content: string };
