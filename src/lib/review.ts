@@ -6732,9 +6732,7 @@ export function applyVerdictStability(
       summary: passSummary(
         criteria.length,
         computed.keywordOnly,
-        // W1-T305: the suppressed rebuild carries the SAME partial-execution facts `computed`
-        // already measured (suppression only replaces `state`/`criteria`/`summary`, never
-        // re-executes anything), so a re-review's "PARTIAL" tag survives verdict stability too.
+        // W1-T305: the suppressed rebuild keeps `computed`'s partial-execution facts (nothing re-executes).
         computed.partiallyExecuted
           ? { executed: computed.executedProofCount ?? 0, executable: computed.executableProofCount ?? 0 }
           : undefined,
@@ -6758,13 +6756,19 @@ export type ReviewStatusHistory =
 
 export type ReviewStatusHistoryReader = (owner: string, repo: string, prUrl: string, headSha: string) => Promise<ReviewStatusHistory>;
 
-/** BACKSTOP: a head or PR with more than 1,000 status or review rows is refused as unreadable, never truncated;
- * a healthy history is a few dozen rows, so this bounds the page loop without ever firing in normal operation. */
+function rowsFromPaginatedApi(value: unknown): unknown[] {
+  if (!Array.isArray(value)) throw new Error("GitHub returned a non-list response");
+  if (value.every((row) => row === null || typeof row !== "object" || Array.isArray(row))) {
+    return value.flatMap((row) => rowsFromPaginatedApi(row));
+  }
+  return value;
+}
+
+/** BACKSTOP: over 1,000 rows is unreadable, never truncated. */
 const REVIEW_HISTORY_MAX_PAGES = 10;
 const REVIEW_HISTORY_PAGE_SIZE = 100;
 
-/** Read an endpoint page by page with a plain page parameter: the host CLI's slurp flag needs a newer version than
- * the operator host runs, and each page is an ordinary JSON array on every version. Newest-first order is kept. */
+/** Plain page reads: the slurp flag needs a newer host CLI. */
 async function readHistoryPages(
   readJson: (args: string[], options: { fresh: true }) => unknown | Promise<unknown>,
   endpoint: string,
@@ -6772,9 +6776,8 @@ async function readHistoryPages(
   const rows: unknown[] = [];
   for (let page = 1; page <= REVIEW_HISTORY_MAX_PAGES; page += 1) {
     const value = await readJson(["api", `${endpoint}?per_page=${REVIEW_HISTORY_PAGE_SIZE}&page=${page}`], { fresh: true });
-    if (!Array.isArray(value)) throw new Error("GitHub returned a non-list response");
-    rows.push(...value);
-    if (value.length < REVIEW_HISTORY_PAGE_SIZE) return rows;
+    rows.push(...rowsFromPaginatedApi(value));
+    if ((value as unknown[]).length < REVIEW_HISTORY_PAGE_SIZE) return rows;
   }
   throw new Error(`GitHub history still full after ${REVIEW_HISTORY_MAX_PAGES} pages`);
 }
