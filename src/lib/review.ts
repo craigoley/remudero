@@ -1710,11 +1710,9 @@ export function matchedLinesAreAllComments(
   return matchedLines.every(dialectGrepMatchedLineIsComment);
 }
 
-/** Literal comment openers per grammar. A pattern that BEGINS with one can only ever match inside a comment. */
 const COMMENT_OPENERS: Record<CommentGrammar, readonly string[]> = { js: ["//", "/*"], yaml: ["#"], none: [] };
 
-/** The `n:text` lines of `fileText` that `pattern` (a BRE, as grep runs it) matches. Bisects on the
- *  whole-chunk verdict of {@link classifyGrepZeroHit}, so a large file costs a few compiles, not one per line. */
+/** The `n:text` lines `pattern` matches, bisecting to stay cheap. */
 function grepMatchedLines(pattern: string, fileText: string): string[] {
   const lines = fileText.split("\n").map((line) => line.replace(/\r$/, ""));
   const out: string[] = [];
@@ -1732,10 +1730,8 @@ function grepMatchedLines(pattern: string, fileText: string): string[] {
   return out;
 }
 
-/** (W1-T11376) True when a `grep:` proof over `pattern` in `path` can only certify comment text, which review grades
- *  `executed_stale` (matchedLinesAreAllComments). Either the pattern's literal text opens with a comment opener of the
- *  path's grammar (no match can be code; no file read needed), or `fileText` is given and every line the pattern
- *  matches there is a comment, read with the same comment context review builds. */
+/** A grep proof that can only certify comments (review: `executed_stale`): its pattern opens with the
+ *  path's comment opener, or every line it matches in `fileText` is a comment. */
 export function grepProofCanOnlyCertifyComments(pattern: string, path: string, fileText?: string): boolean {
   const literal = pattern.replace(/^[\s"'`]+/, "");
   if (COMMENT_OPENERS[commentGrammarForPath(path)].some((opener) => literal.startsWith(opener))) return true;
@@ -1743,14 +1739,14 @@ export function grepProofCanOnlyCertifyComments(pattern: string, path: string, f
   return matchedLinesAreAllComments(grepMatchedLines(pattern, fileText), { pattern, fileText, path });
 }
 
-/** (W1-T11376) The reason a proof's text is a comment-only `grep:` proof, or undefined for every other proof. `readFile`
- *  supplies the target's text at head; without it, or for an absent target, only the opener arm is judged. */
+/** Why `proof` is comment-only, or undefined; without `readFile` only the opener arm runs. */
 export function commentOnlyGrepProofRefusal(proof: string, readFile?: (path: string) => string | undefined): string | undefined {
   const whitelisted = parseWhitelistedProof(proof);
   const path = whitelisted === null ? undefined : dialectGrepTargetPath(whitelisted);
   if (whitelisted === null || path === undefined) return undefined;
   const pattern = whitelisted.args[2]!;
-  if (!grepProofCanOnlyCertifyComments(pattern, path, readFile?.(path))) return undefined;
+  const fileText = readFile?.(path);
+  if (!grepProofCanOnlyCertifyComments(pattern, path, fileText)) return undefined;
   return `\`grep:\` pattern "${pattern.slice(0, 70)}" can only match comment text in ${path}, which review grades ` +
     "executed_stale (every matching line is a comment), so the criterion can never pass. Use a `unit test:` proof " +
     "or a grep on a code line the build adds.";

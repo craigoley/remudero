@@ -901,9 +901,7 @@ export function checkProofCommand(
   // base, so say the same here rather than let a base-absent or base-miss line read "discriminates".
   if (
     outcome === "pass" && w.kind === "grep" &&
-    commentOnlyGrepProofRefusal(proof, (rel) => {
-      try { return readFileSync(join(process.cwd(), rel), "utf8"); } catch { return undefined; }
-    }) !== undefined
+    commentOnlyGrepProofRefusal(proof, (rel) => existsSync(join(process.cwd(), rel)) ? readFileSync(join(process.cwd(), rel), "utf8") : undefined) !== undefined
   ) {
     console.log("discrimination: executed_stale — every matching line is a comment");
     return CHECK_PROOF_EXIT.executedStale;

@@ -6,7 +6,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import type { AcceptanceCriterion, Task } from "#src/lib/plan.js";
-import { redesignEditRefusal } from "#src/lib/redesign-gardener.js";
+import type { GardenerDeps } from "#src/lib/gardener.js";
+import { buildRedesignSources, redesignEditRefusal } from "#src/lib/redesign-gardener.js";
 import { grepProofCanOnlyCertifyComments } from "#src/lib/review.js";
 import { lintTask, proofGrepCommentOnlyViolations } from "#src/lib/task-linter.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -118,4 +119,21 @@ test("W1-T11376: the redesign Architect refuses a comment-only grep proof", () =
   assert.equal(redesignEditRefusal(t, edit("grep: const marker in src/lib/plan.ts"), none, reader({ [TARGET]: CODE_AND_COMMENT })), undefined);
   assert.equal(redesignEditRefusal(t, edit("grep: marker phrase in src/lib/plan.ts"), none, reader({})), undefined);
   assert.equal(redesignEditRefusal(t, edit("unit test: a comment-only proof is refused"), none), undefined);
+});
+
+test("W1-T11376: the redesign Architect reads a proof's target from the checkout it runs in", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-comment-only-read-"));
+  try {
+    mkdirSync(join(dir, "src", "lib"), { recursive: true });
+    writeFileSync(join(dir, TARGET), CODE_AND_COMMENT);
+    const { readTarget } = buildRedesignSources({ repoRoot: dir } as GardenerDeps);
+    assert.equal(readTarget!(TARGET), CODE_AND_COMMENT);
+    assert.equal(readTarget!("src/lib/absent.ts"), undefined);
+    assert.equal(readTarget!("src/lib"), undefined, "a directory is not a file");
+    const t = task([crit("grep: something in src/lib/plan.ts")]);
+    const edit = { filesAdd: [], proofs: [{ criterion: 1, proof: "grep: marker phrase in src/lib/plan.ts" }], amendment: "a", reason: "r" };
+    assert.match(String(redesignEditRefusal(t, edit, () => "file" as const, readTarget)), /can only match comment text/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
