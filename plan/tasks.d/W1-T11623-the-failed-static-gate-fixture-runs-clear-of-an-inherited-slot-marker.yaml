@@ -75,4 +75,5 @@
     that case, the cause is not the inherited marker and this task's diagnosis is wrong.
   note: "risk:low — one test file, env save/restore already proven by the sibling case. verify:auto — the suite
     and the grep are both mechanical. The real-slot run is PR-body evidence because a unit-test proof run by the
-    reviewer may or may not itself sit inside an author slot."
+    reviewer may or may not itself sit inside an author slot. Criterion 1 names the regression title rather than the
+    whole file because the whole file already passes bare on base, so a file-level proof cannot discriminate (W1-T11669)."

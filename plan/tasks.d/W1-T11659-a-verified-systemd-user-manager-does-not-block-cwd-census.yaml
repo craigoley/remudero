@@ -27,6 +27,7 @@
     acceptable workaround because it changes which task processes the same-UID guard observes.
     The implementation task must therefore recognize only this positively identified infrastructure
     process and keep every other unreadable same-UID process fail-closed.
+    Settled by lookup: which folder does rmd test-place compute? -> test/ci/ (W1-T11669)
   design: |
     Touch only the two declared paths. Add a narrow identity reader for the process command line and
     cgroup, with injectable readers for a synthetic process table and real `/proc` defaults.
@@ -43,7 +44,7 @@
     A readable foreign-UID process keeps its existing skip behavior: an EACCES/EPERM cwd whose status Uid is readable and differs from the census owner is still counted in skippedForeign and the scan continues, unchanged by the manager classifier.
     Add an auditable count for verified
     managers skipped, but never include command lines, cwd values or private paths in logs.
-    The declared test folder is required by `rmd test-place`; mark the suite
+    The declared test folder is test/ci/, the folder `rmd test-place` computes; mark the suite
     `@not-a-rule-suite: a process-cwd utility fixture, not a CI rule suite` because it does not test a CI
     rule or census roster. First add the positive manager-control and negative near-match controls against the production
     census seam. Prove the exact manager no longer blocks a clear census, a same-UID child in the owner
