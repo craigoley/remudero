@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { RmdError } from "./errors.js";
 import { ghJsonAsync, createGhCallPacer, type GhCallPacer } from "./github-transport.js";
 import { mergePlanBlobs, PlanError, type Plan } from "./plan.js";
-import { createPlanRevisionStore, type PlanRevisionStore } from "./tick-read-worker.js";
+import { freezeReadGeneration } from "./read-plane.js";
 
 /**
  * W1-T11768: a private ops task catalog read read-only at one pinned commit, or refused with a stable code.
@@ -143,9 +143,6 @@ async function readBranchSha(api: OpsCatalogApi, repo: string, branch: string): 
   return sha(ref.sha);
 }
 
-/** This module's own store: the primary plan's store is never shared with a private catalog. */
-let catalogStore: PlanRevisionStore | undefined;
-
 function digestOf(binding: OpsCatalogBinding): string {
   return createHash("sha256").update(JSON.stringify([
     binding.repositoryId, binding.ref, binding.commit, binding.tasksYamlBlob, binding.shardTreeSha,
@@ -189,13 +186,12 @@ async function read(target: OpsCatalogTarget, api: OpsCatalogApi, counts: OpsCat
   const shardTreeSha = shardDir ? shardDir.sha : "";
   let plan: Plan;
   try {
-    // The strict merge first: no quarantine, so a duplicate or invalid shard refuses the whole snapshot.
-    mergePlanBlobs(blobs);
-    catalogStore ??= createPlanRevisionStore();
-    const key = `${commit}:${monolith.sha}:${shardTreeSha}`;
-    const load = catalogStore.adopt({ key, commit, repoDir: "", relPath: "plan/tasks.yaml" }, blobs);
-    if (load.quarantined.length > 0) throw new Refusal("malformed");
-    plan = load.plan;
+    // The strict merge: no quarantine, so a duplicate or invalid shard refuses the whole snapshot. The Plan is frozen
+    // with the freeze the plan revision store uses, and is this snapshot's own, never the primary plan's. This module
+    // does not import the store: the store's module reaches the daemon, so importing it here would put this module
+    // inside the daemon's import cycle (the affected-reach ratchet's largest-component bound). A later per-tick source
+    // (W1-T11769) that wants unchanged blobs reused injects the store at the daemon.
+    plan = freezeReadGeneration(mergePlanBlobs(blobs));
   } catch (error) {
     if (error instanceof Refusal) throw error;
     throw new Refusal(error instanceof PlanError && /^duplicate task id /.test(error.message) ? "duplicate_task_id" : "malformed");
