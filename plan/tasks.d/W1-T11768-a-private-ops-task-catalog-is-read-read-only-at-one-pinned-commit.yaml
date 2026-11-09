@@ -13,7 +13,7 @@
   priority: 1
   status: queued
   attempts: 0
-  files: [src/lib/ops-catalog-source.ts, src/lib/daemon.ts, test/github/ops-catalog-source-snapshot-identity.test.ts, test/github/ops-catalog-source-fail-closed-outcomes.test.ts, test/github/ops-catalog-source-redaction-read-only.test.ts]
+  files: [src/lib/ops-catalog-source.ts, src/lib/daemon.ts, test/github/ops-catalog-source-snapshot-identity.test.ts, test/github/ops-catalog-source-fail-closed-outcomes.test.ts, test/github/ops-catalog-source-redaction-read-only.test.ts, "src/lib/plan-revision-store.ts", "src/lib/tick-read-worker.ts"]
   rationale: |
     Stage 2 of the operator-approved remudero-ops migration: the source adapter that W1-T11600 deferred.
     W1-T11600 merged a daemon-only shadow composer (`compareSecondaryCatalogShadow`, src/lib/daemon.ts) that
