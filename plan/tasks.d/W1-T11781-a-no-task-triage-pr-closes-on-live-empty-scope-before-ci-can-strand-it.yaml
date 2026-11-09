@@ -17,7 +17,6 @@
     - test/triage/no-task-triage-close-before-ci.test.ts
     - test/empty-diff-merge-gate.test.ts
     - test/helpers/gh-shim.ts
-    - test/helpers/gh-shim.test.ts
   rationale: |
     PR #17348 was a closed, unmerged triage PR with zero changed files. Its feedback entry already
     had `status: rejected` at the base, head and current main; W1-T10625 already owns the accepted
@@ -45,9 +44,9 @@
     sibling landing during CI, proving the post-wait scope recheck still catches it. The new early-close
     fixture also needs the exact head and base SHAs produced by the triage branch push. The shared `ghShim`
     currently emits only fixed response text, so add a route that streams the current contents of a response
-    file and verify that capability in its helper suite. The bare-origin post-receive fixture writes the PR
-    identity response when the branch is pushed. This keeps the test on the shared shim and avoids adding
-    another hand-rolled shell fixture to the census.
+    file. The bare-origin post-receive fixture writes the PR identity response after shim creation, and the
+    early-close end-to-end test proves the shim reads that current file while checking the exact head and base.
+    This keeps the test on the shared shim and avoids adding another hand-rolled shell fixture to the census.
   acceptance:
     - claim: "A no_task or grill triage PR with a complete empty live declared scope closes before a red CI wait can strand it, after a fresh read confirms the expected open PR head and base"
       proof: "unit test: W1-T963: an already-done triage PR is closed not merged"
