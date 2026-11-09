@@ -34,8 +34,9 @@ export type ReadPlaneSampler = (() => ReadPlaneSample) & { takeLagInterval(consu
 const STALL_PROFILE_CONSUMER = "loop_stall_profile";
 
 /** The shared spawn leaves: frames that only forward a spawn for someone else, so none is the caller. Declared
- *  once here: a module path, or plan.ts's named default runner (`loadPlanAtRef`'s `runGit` arrow). */
-export const SYNC_SPAWN_LEAF_FRAME_NAMES: ReadonlySet<string> = new Set(["ghExecFile"]);
+ *  once here: a module path, or plan.ts's named default runner (`loadPlanAtRef`'s `runGit` arrow). The name set
+ *  covers a single-file bundle, where the module path is lost and only the function name survives (W1-T11795). */
+export const SYNC_SPAWN_LEAF_FRAME_NAMES: ReadonlySet<string> = new Set(["ghExecFile", "hostWorktreeGit", "vetPinnedConfig"]);
 
 export const SYNC_SPAWN_LEAF_FRAMES: readonly RegExp[] = [
   /[/\\]worktree-git\.[cm]?[jt]s/,
