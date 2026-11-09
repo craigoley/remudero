@@ -47,6 +47,8 @@
       proof: "unit test: capable Linux and Darwin author runs match the measured slot grant above four workers"
     - claim: CPU load or measured memory headroom lowers the width; missing pre-slot memory stays at one, and an unavailable Darwin vm_stat cannot widen the slot request.
       proof: "unit test: CPU memory and unavailable vm_stat inputs never exceed measured author bounds"
+    - claim: Author execution stays within the test-slot CPU grant after reserved-core, load, and active-slot accounting, while exceeding four only when that measured CPU grant permits it.
+      proof: "unit test: author execution preserves reserved core and measured CPU bounds above four"
     - claim: deadlineHostBudget refuses invalid, missing, stale or exceeded measured bounds; unmeasured memory uses one before admission or a real slot grant after admission.
       proof: "unit test: deadline capacity refuses widths outside the measured author bounds"
     - claim: Actual runtime deadline checks require the admitted worker width and recheck it after slot acquisition, while the plan CLI remains estimate-only above four.
