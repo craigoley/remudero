@@ -355,8 +355,14 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       return stat === undefined ? "none" : stat.isFile() ? "file" : "dir";
     },
     readTarget: (rel) => {
-      const path = join(deps.repoRoot, rel);
-      return statSync(path, { throwIfNoEntry: false })?.isFile() ? readFileSync(path, "utf8") : undefined;
+      // Read directly and take the absence from the read itself: no stat-then-read window.
+      try {
+        return readFileSync(join(deps.repoRoot, rel), "utf8");
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "EISDIR" || code === "ENOTDIR") return undefined;
+        throw error;
+      }
     },
     judgeText: () => Promise.reject(new Error("the redesign Architect's spawn is not wired")),
     // backlogLandingGuard's two arms over the drafted text: a machine record is linted whole with admission, any
