@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator follow-up to PR #17212: a compatibility guarantee was in design prose but had no independent acceptance proof"
   plan_refs: [W1-T9649, W1-T11627, W1-T120]
-  files: [src/lib/task-linter.ts, src/run-task.ts, .remudero/skills/plan.yaml, test/plan/design-invariants-have-executable-acceptance-proofs.test.ts]
+  files: [src/lib/task-linter.ts, src/run-task.ts, .remudero/skills/plan.yaml, test/plan/design-invariants-have-executable-acceptance-proofs.test.ts, test/a-blocked-task-must-name-its-disposition.test.ts, test/a-suffixed-draft-placeholder-is-minted-and-an-unminted-id-never-lands.test.ts, test/lint-plan-fast-scopes-to-the-merge-base.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -31,6 +31,10 @@
     Distinct from W1-T120, which proves lint-plan read the intended plan file. This task checks that each invariant
     declared inside that correctly-read task file has its own acceptance proof. It depends on W1-T120 because both
     changes edit the plan-lint path; serializing them avoids overlapping builders.
+
+    Settled by lookup: may files: grow to cover the three synthetic-fixture tests that regressed in exact-head
+    preflight? -> yes, operator-approved files-only expansion; their fixture builders now declare NO-INVARIANTS
+    with reasons, and implementation intent and acceptance scope are unchanged (PLAN-clarify-1794239724670 focus).
   design: |
     1. In an implementation task's design, authors declare each behavior-preservation or intentional-compatibility
        contract as INVARIANT <slug>: <statement>. When source behavior is entirely new, they explicitly write

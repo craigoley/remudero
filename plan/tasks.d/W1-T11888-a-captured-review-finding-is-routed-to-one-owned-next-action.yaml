@@ -1,0 +1,159 @@
+- id: W1-T11888
+  title: "A captured exact-head review finding is routed to one owned next action: the same-PR fix it already has, one evidence-linked follow-up candidate, or a named UNKNOWN"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 30.00
+  risk: high # Rule 19 span: the review command's post-record step, the fix-prompt finding join and the retro follow-up harvest input. One concern: handing each captured finding to an authority that already exists. No gate, verdict, status, arm or merge reads the route
+  band_meaning: span
+  origin: architect
+  plan_refs: [W1-T4848, W1-T4849, W1-T4928, W1-T5019, W1-T9649, W1-T11746, W1-T2617, W1-T964]
+  files:
+    - src/lib/review-finding-routes.ts
+    - src/cli/commands/review.ts
+    - src/cli/commands/fix.ts
+    - src/lib/prompt-render.ts
+    - src/lib/retro.ts
+    - src/lib/ledger.ts
+    - src/run-task.ts
+    - test/review-finding-next-actions.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: PR #17212 review #5814165194 found that the change broke a legacy compatibility rule. Legacy
+    receipts moved from `superseded` into `unknown`, against design constraint 2. The PR merged anyway, and the
+    defect was repaired only by a separate later PR (W1-T11627/#17270). W1-T11746 fixes the plan-shape half of
+    that failure, so a compatibility rule now needs its own acceptance proof. Nothing yet fixes the routing half:
+    a captured finding has no owned next action.
+    READ on this checkout:
+    - `recordReviewFindings` (src/lib/review-findings.ts:140) writes a `review.finding` row. Each row carries
+      finding_id, lineage_key, head_sha, review_decision_digest, criterion_index and capture_state. The review
+      command calls it after posting and arming (src/cli/commands/review.ts:1584).
+    - Only two readers consume these rows: the private Field Trials fold (W1-T4849/W1-T4928) and
+      `verifiedReviewFindingsForFix` (src/cli/commands/fix.ts:1778). The fix reader keeps only rows at the same
+      head. `renderFixPrompt` (src/lib/prompt-render.ts:224) then keeps only findings whose criterionIndex is
+      unmet. `FixReviewFinding` carries no finding id or lineage key.
+    - So a verified finding on a criterion the review rated met is dropped without a trace. That is exactly the
+      #17212 shape: the issue was real but sat outside the accepted criteria. Neither the fix worker nor any
+      follow-up path ever sees it.
+    - The follow-up pipeline already exists. `mineFollowups` (src/lib/retro.ts:3001) feeds the proposal registry
+      through its single writer, and `followupProposalId` (retro.ts:3242) names each proposal
+      `followup:<entryId>`. A filed task carries that string as its `origin` (e.g. W1-T9384), and machine-origin
+      filings go to the machine filing judge (src/lib/machine-filing-judge.ts). It reads only `report.followups`.
+    PLATFORM FACTS: a GitHub pull-request review and each review comment are bound to a `commit_id`. A later commit
+    that changes the line can make the comment outdated
+    (https://docs.github.com/en/rest/pulls/reviews, https://docs.github.com/en/rest/pulls/comments). Review
+    evidence is therefore a claim about one head. Once the PR has moved on, the same evidence is stale, so a route
+    must stay keyed to the exact head. Applying it to a later head silently would be wrong.
+    Settled by lookup: is this already filed or already decided? -> no. No task, MASTER-PLAN.md line,
+      DECISIONS.md entry or LEARNINGS.md entry routes a met-criterion finding anywhere. W1-T5019 joins unmet
+      criteria only. W1-T4928 produces private evidence only. W1-T9649 is lineage telemetry and bars every
+      gate, status and repair reader. W1-T10846 repairs human CHANGES_REQUESTED reviews, not native
+      review.finding rows. W1-T11746 checks plan shape and changes no worker's authority (plan/tasks.d).
+    Settled by lookup: does this overlap W1-T11839 or W1-T11111? -> no. W1-T11111 measures right-censored
+      open-queue stage age in shadow (plan/tasks.d/W1-T11111-*). W1-T11839 consumes due exact-head PR recovery
+      records for repair or rebuild. It is not on this checkout, and its scope comes from the filing ask. This
+      task reads neither recovery records nor stage ages.
+    Settled by lookup: is there a same-PR fix launcher to reuse? -> yes. A failed review already dispatches the
+      fix rung with `verifiedReviewFindingsForFix` evidence (src/cli/commands/fix.ts:3999,4007). This task adds
+      no launcher. It only carries the identity through.
+    Settled by lookup: is there a follow-up authority to reuse? -> yes: the harvest in `mineFollowups`, the
+      registry writer in `routeFollowups` (retro.ts:3246) and the machine filing judge. Their refusal arms
+      (settled-question, self-referential, title-dedup) apply unchanged.
+    Settled by lookup: does the receipt already carry a round-independent key? -> yes. `lineage_key` is written
+      today (src/lib/review-findings.ts:149), so this task does not wait on W1-T9649's fold.
+    Settled by lookup: must a new ledger step be retained across rotation? -> yes. `mineFollowups` needs its
+      source rows to outlive the recency window (src/lib/ledger.ts:967-977, W1-T964). The new step goes before
+      the W1-T964 trio, which must stay last.
+  design: |
+    1. ROUTER (new src/lib/review-finding-routes.ts, pure). `routeReviewFindingNextActions(capture, verdict,
+       ctx, priorRoutes)` takes one review's capture, its verdict criteria, and prior `review.finding_routed` rows
+       for that PR. It returns one route for each finding. A verified anchor proves PROVENANCE only. The router
+       never claims the reviewer is right, and it never reads `severity`.
+       - `same-pr-fix`: anchor verified at this exact head, and the finding's criterion is unmet in this
+         decision (the same criterion-index join W1-T5019 uses).
+       - `follow-up`: anchor verified at this exact head, and the criterion is met. The finding names work
+         outside the accepted task.
+       - `unknown`: anything else. Each case has a fixed reason and next action:
+         - unsupported anchor, or partial/unavailable capture -> next action: re-review at the current head;
+         - criterion index not in the verdict, or verdict unreadable -> next action: inspect the receipt;
+         - same key already routed differently -> contradictory.
+       Every route records an owner: the source task id and PR URL. It also records PR URL, full head sha,
+       finding_id, lineage_key and review_decision_digest. Mechanism text is bounded and kept as untrusted text.
+    2. IDEMPOTENT. The route key is (finding_id, head_sha, review_decision_digest).
+       - A prior row with the same key and the same route appends nothing.
+       - The same key with a different route appends one `unknown`/contradictory row and nothing else.
+       The review command calls the router right after `recordReviewFindings` and logs each new route as
+       `review.finding_routed`. A logging failure is reported and changes no posted result, just as
+       `recordReviewFindings` behaves today.
+    3. SAME-PR FIX: carry the identity through. The existing launcher is untouched. `verifiedReviewFindingsForFix`
+       also returns `findingId` and `lineageKey`, and `FixReviewFinding` gains both fields. The fix prompt shows PR,
+       full head, finding id and lineage key beside the path:line, mechanism and remedy W1-T5019 already
+       renders. Everything stays advisory. Stale, unverified and unmatched rows are still left out.
+    4. FOLLOW-UP: feed the existing harvest. `mineFollowups` also reads `review.finding_routed` rows whose route
+       is `follow-up`. Each becomes one `task` candidate:
+       - entryId is `finding:<finding_id>`, so the existing processed set and `followupProposalId` make it
+         idempotent across retros;
+       - the text is concise and evidence-linked: PR URL, head, finding id, path:line and the bounded mechanism;
+       - the text never asks to implement the source task, so the self-referential arm is not tripped by wording.
+       Title dedup, settled-question and type routing still apply. The machine judge and ratify paths are
+       unchanged. Add `review.finding_routed` to the rotation-retained steps in ledger.ts, before the W1-T964 trio.
+    5. OWNERSHIP UNTIL LINKED. Pure `findingNextActionStates(routedRows, planOrigins)` reports each follow-up
+       route in one of two states:
+       - `follow-up-pending`, owned by the source task and PR;
+       - `follow-up-linked <task id>`, once a task whose `origin` is `followup:finding:<finding_id>` is on the
+         plan the retro loads.
+       The retro gather gets `planOrigins` from the same plan load that already supplies `openTitles`
+       (src/run-task.ts) and shows the state next to the follow-up harvest. No route closes, satisfies, releases
+       or re-owns the source PR or its task.
+    6. UNKNOWN STAYS UNKNOWN. An `unknown` route is never harvested and never reaches a fix prompt. It cannot
+       authorize a close, a new gate, or a write to a task file. It stays visible, with its owner and its next
+       action.
+    OUT OF SCOPE: a new gardener, a finding taxonomy, an age threshold, a merge gate, severity filtering,
+    posting to GitHub, resolving or dismissing threads, PR recovery records (W1-T11839), stage-age measurement
+    (W1-T11111), human CHANGES_REQUESTED repair (W1-T10846), and lineage telemetry (W1-T9649).
+
+    INVARIANT same-pr-fix-identity: a verified exact-head finding on an unmet criterion reaches the existing fix prompt with PR, full head, finding id and lineage key, and is routed once per key.
+    INVARIANT follow-up-harvest: a verified exact-head finding on a met criterion becomes exactly one evidence-linked harvest candidate through mineFollowups.
+    INVARIANT source-owned: a follow-up route stays owned by the source task and PR until a task with origin followup:finding:<finding_id> is on the loaded plan.
+    INVARIANT unknown-preserved: stale, unverified, malformed, contradictory or unreadable evidence routes to UNKNOWN with an owner and next action, and is neither harvested nor sent to a fix prompt.
+    INVARIANT no-authority-change: routing writes no verdict, status, arm, merge, claim or task file, and never reads severity.
+  acceptance:
+    - claim: "the new routing test file passes"
+      proof: "unit test: test/review-finding-next-actions.test.ts"
+    - claim: "invariant:same-pr-fix-identity — a verified exact-head finding on an unmet criterion reaches the existing fix prompt with PR, full head, finding id and lineage key, and a replay routes it once"
+      proof: 'grep: test("W1-T11888: an unmet-criterion finding reaches the same-PR fix prompt with its id and lineage once" in test/review-finding-next-actions.test.ts'
+    - claim: "invariant:follow-up-harvest — a verified exact-head finding on a met criterion becomes exactly one evidence-linked mineFollowups candidate across repeated retros"
+      proof: 'grep: test("W1-T11888: a met-criterion finding becomes one evidence-linked follow-up candidate" in test/review-finding-next-actions.test.ts'
+    - claim: "invariant:source-owned — a follow-up route reads pending and owned by the source task until a task with its followup:finding origin is on the loaded plan, then reads linked"
+      proof: 'grep: test("W1-T11888: the source PR stays owner until a linked task lands on origin/main" in test/review-finding-next-actions.test.ts'
+    - claim: "invariant:unknown-preserved — stale, unverified, malformed, contradictory or unreadable evidence is UNKNOWN with an owner and next action and is neither harvested nor sent to a fix prompt"
+      proof: 'grep: test("W1-T11888: stale, unverified, contradictory or unreadable evidence stays UNKNOWN with an owner and next action" in test/review-finding-next-actions.test.ts'
+    - claim: "invariant:no-authority-change — routing writes no verdict, status, arm, merge, claim or task file and a severity change does not change any route"
+      proof: 'grep: test("W1-T11888: routing changes no verdict, status, arm, merge or task file and ignores severity" in test/review-finding-next-actions.test.ts'
+    - claim: "the review command's production path invokes the router after recording findings"
+      proof: "grep: routeReviewFindingNextActions( in src/cli/commands/review.ts"
+    - claim: "the follow-up harvest reads routed finding rows"
+      proof: "grep: review.finding_routed in src/lib/retro.ts"
+    - claim: "the fix prompt's finding type carries the lineage key"
+      proof: "grep: lineageKey in src/lib/prompt-render.ts"
+    - claim: "routed finding rows survive ledger rotation alongside the follow-up trio"
+      proof: "grep: review.finding_routed in src/lib/ledger.ts"
+  falsifier: |
+    Route on the anchor alone, without the criterion join. The met-criterion finding then lands on the fix
+    prompt, and the follow-up test fails.
+    Drop the prior-route check. A replayed review appends a second route row and mints a second candidate, so the
+    idempotency assertions fail.
+    Treat a stale-head or unsupported-anchor row as verified. The UNKNOWN test then sees a harvest candidate and
+    fails.
+    Mark a follow-up linked whenever any task names the PR. The ownership test's unrelated task flips the state,
+    and the test fails.
+    Delete the router call from review.ts, and the production-wiring proof fails.
+  note: |
+    Telemetry-to-authority handoff only. Each finding goes to an authority that already exists: the same-PR fix
+    rung, or the follow-up harvest, then the proposal registry, then the machine judge. A verified anchor is
+    provenance, not correctness. Shares paths with W1-T10846 (fix.ts, prompt-render.ts, run-task.ts), and dispatch
+    overlap detection serialises the two.

@@ -1,0 +1,43 @@
+- id: W1-T11865
+  title: A required-check set whose only member is remudero-review judges every reported non-review check, instead of reading pending forever, so a repository like wreckterra shows green CI as green and its plan-lint retry guard can pass
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # checksStateFromRollup gates auto-merge and the retry guard for every repository; only a required set holding nothing but the review changes, and mixed sets and unreadable protection keep today's results
+  band_meaning: blast-radius
+  origin: operator ruling 2026-11-09 "File and hand-build"
+  plan_refs:
+    - W1-T394
+    - W1-T11606
+    - W1-T11429
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-required-set-holding-only-the-review-judges-the-reported-checks.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: With a required set whose only member is remudero-review, the rollup's non-review checks are judged as the gate, so all-success reads green, any failure reads red, any pending reads pending, and a rollup holding only the review reads none
+      proof: "grep: W1-T11865 criterion 1 in test/sweep/a-required-set-holding-only-the-review-judges-the-reported-checks.test.ts"
+    - claim: A required set that names another context besides the review is judged exactly as before, including a named context that has not registered reading pending, and unreadable protection still judges every reported non-review context
+      proof: "grep: W1-T11865 criterion 2 in test/sweep/a-required-set-holding-only-the-review-judges-the-reported-checks.test.ts"
+    - claim: The review context never counts as a gating check in any required set, so a red or pending remudero-review cannot change the checks state, and a freshly re-run rollup reads the same state as the original for the same results
+      proof: "grep: W1-T11865 criterion 3 in test/sweep/a-required-set-holding-only-the-review-judges-the-reported-checks.test.ts"
+    - claim: The retry guard's passing reading and the sweep's checks state agree for a wreckterra-shaped head (ci-gate and quality green, remudero-review failure, required set remudero-review only), both reading green
+      proof: "grep: W1-T11865 criterion 4 in test/sweep/a-required-set-holding-only-the-review-judges-the-reported-checks.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (wreckterra#6, live): wreckterra main's branch protection requires only the context remudero-review (and its App-pinned form). The plan-lint retry guard (W1-T11390/W1-T11429, src/cli/commands/review.ts observe) computes passing as `checksStateFromRollup(rollup, required.contexts) === "green"`; the ledger holds exactly two refusals for the head 367f7ffe02ab, merge base 8dcce032af9c (2026-11-08T17:15:48Z and 21:00:09Z): "the head's check set is not fresh, complete and passing". Its `fresh` is only "head unchanged" and its `complete` is trivially true for this repo, so the refusal is the `passing` reading.
+    - Mechanism: checksStateFromRollup excludes remudero-review from the entries it judges (W1-T394, so a red review is not read as red CI), and requiredCheckGate then filters those entries to the required set. For a set holding only remudero-review the gate is empty, `knownRequired` is still true, and the rule "required contexts are configured but none has registered yet" returns pending. Evaluated in-process 2026-11-09T13:41Z with the real function: required=[remudero-review] gives pending for today's rollup and pending for a freshly re-run rollup; required=[ci-gate,quality] gives green; unreadable protection gives green. So refreshing CI cannot satisfy the guard, and the retry cannot run for this repository.
+    - The same function feeds the sweep and the board (tick-read-worker.ts), so every wreckterra PR reads pending where its ci-gate and quality are green.
+    - CALLERS AUDITED (git grep checksStateFromRollup): src/cli/commands/review.ts:425 and :826, src/cli/commands/fix.ts:2197 (passes undefined, unaffected) and :5680, src/lib/sweep.ts (the pending-start read at the call near 7771), src/lib/tick-read-worker.ts:2189, :2263, :2314, :2356, src/run-task.ts:12366. Each passes branch protection's own list; only a list whose sole member is remudero-review changes result. A repository whose protection names other required contexts, and an unreadable protection, are unchanged.
+  design: |
+    In requiredCheckGate (src/lib/sweep.ts), build the required set without the review context: `const required = new Set([...(requiredContexts ?? [])].filter((name) => name !== REVIEW_CONTEXT))`. `knownRequired` is then true only when another context is required; a set holding only the review falls into the existing path where `gate` is every reported non-review entry, the same fail-closed fallback unreadable protection already uses. `missingRequired` already skips the review and now reads the filtered set. Update the doc comment above checksStateFromRollup to say the review is excluded from both the rollup and the required set. No change to REQUIRED_CHECK_OK, REQUIRED_CHECK_FAIL, dedupe, or any caller.
+    NOT IN SCOPE: the retry guard's separate publisher-credential refusal (the credential must publish as the pinned App), why wreckterra#6's lint exits 1 with no summary in the daemon (W1-T11225), and re-running the retry itself.
+  falsifier: |
+    Restore the review in the required set and criterion 1 and criterion 4 must fail (pending); also drop the filter and criterion 3 must show the review leaking into the gate; widen the change to every required set and criterion 2 must fail (a named but unregistered context would read green). Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794231839789 -> run-unfiled-1794231839789
+    Reserved with rmd next-task-id (W1-T11865 on run-unfiled-1794231839789). Hand-built by the operator's choice; check refs/rmd-dispatch/W1-T11865 and any run branch before building. The author preflight for this filing runs normally (the operator's waiver covered only the W1-T11848 filing).

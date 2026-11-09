@@ -1,0 +1,91 @@
+- id: W1-T11840
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:test-slow-shard:unknown-runner-failure-location cost 4.7 PR minute(s) across 3 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.33
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:test-slow-shard:unknown-runner-failure-location"
+  files:
+    - src/lib/affected-suites.ts
+    - test/ci/suites/check-ci-log-test-slow-shard-unknown-runner-failure-location.test.ts
+  acceptance:
+    - claim: "a recorded check:ci-log:test-slow-shard:unknown-runner-failure-location round, replayed through the real code path in src/lib/affected-suites.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11840: check:ci-log:test-slow-shard:unknown-runner-failure-location is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:test-slow-shard:unknown-runner-failure-location's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:test-slow-shard:unknown-runner-failure-location cost 4.7 PR minute(s) (seven-day half-life) across 3 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/affected-suites.ts: test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts imports it
+    - test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts: named by the failing check
+    - the rounds name a failing test: test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #17263 (https://github.com/craigoley/remudero/pull/17263) at 2026-11-08T03:06:05.211Z: ci-log round — test-slow-shard (2/3): test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts; test-slow-shard (3/3): test/a-full-fallback-author-selection-is-never-run-whole.test
+        failing tests: W1-T7809: a plan-only selection that names no suite runs no tests and says plan lint is its check; W1-T9953: a full-fallback run says it is partial and is never green; a selection naming no suite cancels its ticket after static and plan lint pass; W1-T9951: a failed static stage cancels its suite ticket
+        log excerpt:
+          | not ok 1915 - W1-T7809: a plan-only selection that names no suite runs no tests and says plan lint is its check
+          |   ---
+          |   duration_ms: 571.9714
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts:1:7968'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     Expected values to be strictly equal:
+          | 
+          |     1 !== 0
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+    - PR #16468 (https://github.com/craigoley/remudero/pull/16468) at 2026-11-03T16:53:27.476Z: ci-log round — test-slow-shard (1/2): unknown runner failure location
+        failing tests: the memory tuner fixture keeps its rate assertions under the census control and future shift; a nav-badge inbox diff from a classification rewritten after the worker read it is timing, not real
+        log excerpt:
+          | not ok 1894 - the memory tuner fixture keeps its rate assertions under the census control and future shift
+          |   ---
+          |   duration_ms: 4797.843829
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/gardeners/the-memory-tuner-fixture-shares-a-clock-with-its-shell.test.ts:1:206'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     existing rate and safety assertions must pass at shift 0.001: {"passed":false,"pass":10,"tests":37}
+          | 
+          |     false !== true
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+    - PR #15043 (https://github.com/craigoley/remudero/pull/15043) at 2026-10-28T05:21:27.719Z: ci-log round — test-slow-shard (2/2): unknown runner failure location
+        failing tests: gpt-6-luna; cash429 cannot exceed existing turns or infer a cooldown from missing invalid zero or over-window headers
+        log excerpt:
+          | not ok 1 - gpt-6-luna
+          |       ---
+          |       duration_ms: 192.491535
+          |       type: 'test'
+          |       location: '/home/runner/work/remudero/remudero/test/worker/spawn/cash-http-failures-retain-safe-evidence.test.ts:1:9895'
+          |       failureType: 'testCodeFailure'
+          |       error: |-
+          |         Expected values to be strictly equal:
+          | 
+          |         0 !== 1
+          | 
+          |       code: 'ERR_ASSERTION'
+          |       name: 'AssertionError'
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 2 occurrence(s) across 7 day(s), last seen 2026-11-08T03:06:05.211Z, and the record declares no privileged path"
+    judged_at: "2026-11-09T14:02:09.380Z"
+    pin: "dbb1a5c9b2dbe4eb5348e7bcb4e2d250b257f06167928e1fec9d2e3def261d08"

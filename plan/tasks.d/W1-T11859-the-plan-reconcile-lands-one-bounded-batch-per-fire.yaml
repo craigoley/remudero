@@ -1,0 +1,49 @@
+- id: W1-T11859
+  title: The plan-status reconcile lands at most one bounded batch of shards per cadence fire, so a drift larger than one pull request can hold drains over several fires instead of failing every fire
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, how many credited shards one cadence landing hands the bridge; it spans the batch choice, the cadence call that uses it and the PR body line it budgets, and a wrong bound lands nothing or refuses every fire
+  origin: operator-session#reconcile-gap-2026-11-09
+  plan_refs:
+    - W1-T3043
+    - W1-T3226
+    - W1-T3761
+    - W1-T9695
+  files:
+    - src/lib/plan-reconcile-batch.ts
+    - src/lib/measurement-cadence.ts
+    - src/lib/feedback-landing.ts
+    - test/plan/the-plan-reconcile-landing-is-one-bounded-batch.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A reconcile drift larger than the batch limit hands the landing bridge only that many shards, lowest task number first, and reports that many as landed; a drift within the limit hands over every shard unchanged
+      proof: "unit test: test/plan/the-plan-reconcile-landing-is-one-bounded-batch.test.ts"
+    - claim: The pull-request body the landing builds for a full batch of the longest legal shard paths stays under GitHub's 65,536-character body limit, and a batch is cut short before its body would pass the budget
+      proof: "grep: W1-T11859 criterion 2 in test/plan/the-plan-reconcile-landing-is-one-bounded-batch.test.ts"
+    - claim: The cadence landing takes its batch through the new module
+      proof: "grep: takePlanReconcileBatch( in src/lib/measurement-cadence.ts"
+    - claim: The plan-reconcile PR body is built by the same function the batch budgets with
+      proof: "grep: planReconcilePrBody( in src/lib/feedback-landing.ts"
+    - claim: Repeated cadence fires over a 397-shard drift land every shard exactly once, in ceil(397 / limit) fires, each within the file limit
+      proof: "grep: W1-T11859 criterion 3 in test/plan/the-plan-reconcile-landing-is-one-bounded-batch.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (Azure host ledger union, gh): the plan-status reconciler has not landed since PR #14125 on 2026-10-25, and 397 shards read `status: queued` with a merged code commit carrying their own Remudero-Task trailer. An operator session picked three of them as open work, and all three were already merged (#16645, #16257, #16413).
+    - 12 measurement-cadence fires between 2026-11-03 and 2026-11-08 failed with the same refusal (the latest, 2026-11-09 03:35, failed differently: its child exited without a result): the landing pushed its branch, then `gh pr create` failed with "GraphQL: Body is too long (maximum is 65536 characters)". The body carries one Acceptance bullet per shard (about 237 characters each): 397 shards is about 94,000 characters.
+    - Before that, 8 fires from 2026-10-27 to 2026-10-30 were refused by the pre-push shard census (W1-T3086); W1-T11175 (#16414) fixed that on 2026-11-03. The drift that accumulated meanwhile is what the body limit now refuses.
+    - The manual verb already knows the rule: W1-T3761 makes `rmd plan-reconcile` say a drift over 300 shards "must be split across multiple plan-only PRs" (PLAN_RECONCILE_REVIEW_FILE_CEILING). The cadence landing, which builds the same diff unattended, never applied it: `buildPlanReconcileCadenceInput` hands the bridge every landable shard in one call.
+  design: |
+    - A new pure module `src/lib/plan-reconcile-batch.ts` owns the limits and the choice: `PLAN_RECONCILE_LANDING_FILE_LIMIT` (150, half the 300-file review ceiling), `PLAN_RECONCILE_LANDING_BODY_BUDGET` (60,000 characters, under the 65,536 limit), `planReconcileProofTemplate(file)`, `planReconcilePrBody(files, proofFor)` (the whole body text, moved out of feedback-landing.ts) and `takePlanReconcileBatch(items, fileOf)`. The batch is the longest prefix, in ascending task-number order, that fits both limits; it never skips an item to fit a later one, so every fire is deterministic.
+    - `buildPlanReconcileCadenceInput`'s `land` takes the batch from the lint-landable writes, hands those to `deps.land`, and returns `landed: batch.length`. `held` is unchanged. The next fire reads the merged flips as no longer drifted and takes the next batch; nothing is stored between fires.
+    - feedback-landing.ts's plan-reconcile `prBody` calls `planReconcilePrBody`, so the body the bridge builds and the budget the batch is cut to are one function.
+    - NOT IN SCOPE: the credit projection, the lint hold, the landing branch and PR reuse, the threshold, the manual `rmd plan-reconcile`, and what happens when a landing is refused (W1-T11860).
+  falsifier: |
+    Remove the batch (hand `deps.land` every landable write): criterion 1 must see more than the limit handed over, criterion 2 must see the 150-shard body of 160-character paths or the budget cut disappear, and criterion 3 must see a single fire hand over all 397. Restore it and require all three. Do not change the credit predicate or the lint hold to make a count fit.
+  note: |
+    reservation hand-off: run-unfiled-1794228339000 -> run-unfiled-1794228339000
+    Reserved with rmd next-task-id --count 2 (W1-T11859, W1-T11860) from a fresh worktree at origin/main 6aa5ff280. Operator ruling 2026-11-09: "fix the reconcile gap - it seems like there is a need for a gardener or janitor here". The measurement cadence is already that janitor; its landing was unbounded.
