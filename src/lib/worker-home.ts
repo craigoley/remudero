@@ -70,6 +70,7 @@ export const WORKER_HOME_LOGIN_PROFILE = ".bash_profile";
  * Keep this Bash 3.2-compatible: no arrays, namerefs, or non-POSIX shell extensions beyond Bash's
  * process substitution and function enumeration. The helper removes itself as part of the sweep. */
 export const WORKER_HOME_LOGIN_PROFILE_SCRIPT = [
+  "# GNU Bash startup files: /etc/profile runs before this user login profile (https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html)",
   "unalias -a",
   "_rmd_clear_host_profile_functions() {",
   "  local function_name",

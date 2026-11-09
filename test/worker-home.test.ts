@@ -116,6 +116,7 @@ test("W1-T11693: login startup removes host-profile aliases and functions, but p
     writeFileSync(join(generatedHome, WORKER_HOME_LOGIN_PROFILE), "stale profile content\n");
     materializeWorkerHome({ workerHome: generatedHome, realHome });
     assert.equal(readFileSync(join(generatedHome, WORKER_HOME_LOGIN_PROFILE), "utf8"), WORKER_HOME_LOGIN_PROFILE_SCRIPT);
+    assert.match(WORKER_HOME_LOGIN_PROFILE_SCRIPT, /^# GNU Bash startup files:.*Bash-Startup-Files\.html\)$/m);
     assert.ok(!WORKER_HOME_LOGIN_PROFILE_SCRIPT.includes("ANTHROPIC_"));
     writeFileSync(join(blankProfileHome, WORKER_HOME_LOGIN_PROFILE), "");
 
