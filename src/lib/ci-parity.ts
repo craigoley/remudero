@@ -3420,7 +3420,7 @@ export const LIGHT_GATE_SKIPPED_JOBS: readonly string[] = ["rule-checks", "censu
  */
 export interface PreflightStepLog {
   path: string;
-  plan(phases: readonly string[], fastJobs: readonly string[]): void;
+  plan(phases: readonly string[], fastJobs: readonly string[], lightSkipped?: readonly string[]): void;
   phase(name: string, value: unknown, ms: number): void;
   job(job: string, ok: boolean, ms: number): void;
 }
@@ -3438,7 +3438,9 @@ export function createPreflightStepLog(path: string): PreflightStepLog {
   };
   return {
     path,
-    plan: (phases, fastJobs) => write({ plan: { phases: [...phases], fast_jobs: [...fastJobs] } }),
+    plan: (phases, fastJobs, lightSkipped) => write({
+      plan: { phases: [...phases], fast_jobs: [...fastJobs], ...(lightSkipped ? { light: true, skipped_jobs: [...lightSkipped] } : {}) },
+    }),
     phase: (name, value, ms) => {
       const result = value as { ok?: unknown; steps?: unknown } | undefined;
       const steps = Array.isArray(result?.steps) ? (result.steps as Array<{ name?: unknown; ok?: unknown }>) : [];
@@ -3454,18 +3456,23 @@ export function createPreflightStepLog(path: string): PreflightStepLog {
 }
 
 /** W1-T11105: the phases and fast-gate jobs one `rmd preflight` invocation runs, as its step log's first line names them. */
-export function preflightStepLogPlan(rest: readonly string[], core: boolean): { phases: string[]; fastJobs: string[] } {
+export function preflightStepLogPlan(rest: readonly string[], core: boolean): { phases: string[]; fastJobs: string[]; lightSkipped?: string[] } {
   const fastTier = core && !rest.includes("--no-fast");
+  // W1-T11818: `--light` runs every fast job but LIGHT_GATE_SKIPPED_JOBS, and its plan says so.
+  const light = fastTier && rest.includes("--light");
   const fullTiers = core ? ["--ci-parity", "--coverage", "--proofs"].filter((flag) => rest.includes(flag)).map((flag) => flag.slice(2)) : [];
   return {
     phases: ["default", ...(fastTier ? ["fast", "ci-checks", "fast-coverage"] : []), ...fullTiers],
-    fastJobs: fastTier ? FAST_GATE_STEPS.map(({ job }) => job) : [],
+    fastJobs: fastTier ? FAST_GATE_STEPS.map(({ job }) => job).filter((job) => !light || !LIGHT_GATE_SKIPPED_JOBS.includes(job)) : [],
+    ...(light ? { lightSkipped: [...LIGHT_GATE_SKIPPED_JOBS] } : {}),
   };
 }
 
 export interface PreflightFastDeps {
   /** W1-T11105: each job's result is appended as it finishes; the census-precheck leaf hands the script the same log. */
   stepLog?: PreflightStepLog;
+  /** W1-T11818: the light job set. `rule-checks` is not run and `census-precheck` answers its cheap counts only; both stay required in hosted CI. */
+  light?: boolean;
   spawn?: PreflightSpawn;
   /** Test seam — production reads the repo's real package.json. */
   packageJsonText?: string;
@@ -3538,7 +3545,7 @@ function censusAnswerHead(repoRoot: string): { head: string } | { unreadable: st
   }
 }
 
-function censusPrecheckLeaf(repoRoot: string, spawn: PreflightSpawn, stepLog?: PreflightStepLog): CiParityLeafResult {
+function censusPrecheckLeaf(repoRoot: string, spawn: PreflightSpawn, stepLog?: PreflightStepLog, countsOnly = false): CiParityLeafResult {
   const recorded = process.env[AUTHOR_CENSUS_ANSWERED_ENV];
   const head = recorded ? censusAnswerHead(repoRoot) : undefined;
   const answered = authorCensusAnswer(recorded, head && "head" in head ? head.head : undefined);
@@ -3547,8 +3554,9 @@ function censusPrecheckLeaf(repoRoot: string, spawn: PreflightSpawn, stepLog?: P
     stepLog?.job(CENSUS_COUNTS_STEP_JOB, true, 0);
     return { ok: true, detail: `PASS — census-precheck answered by the author preflight's census-precheck step at ${answered.sha} (${answered.outcome}); not run again` };
   }
-  const label = "node scripts/census-precheck.mjs --base origin/main";
-  const args = ["scripts/census-precheck.mjs", "--base", "origin/main"];
+  // W1-T11818: the light gate asks the cheap static counts only (W1-T11098); the census suites stay a hosted-CI job.
+  const label = `node scripts/census-precheck.mjs --base origin/main${countsOnly ? " --counts-only" : ""}`;
+  const args = ["scripts/census-precheck.mjs", "--base", "origin/main", ...(countsOnly ? ["--counts-only"] : [])];
   const res = withoutNodeTestContext(() =>
     spawn(process.execPath, args, { cwd: repoRoot, ...(stepLog ? { env: { [CENSUS_COUNTS_LOG_ENV]: stepLog.path } } : {}) }));
   const spawnFailed = spawnFailureDetail(label, res);
@@ -3588,8 +3596,10 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // refused on cost here: the threshold is derived from the population, which is not complete
   // until the last entry has run.
   const censusCosts = new Map<number, number>();
+  const lightSkips = (job: string) => deps.light === true && LIGHT_GATE_SKIPPED_JOBS.includes(job);
   const logged = (i: number, step: CiParityStepResult) => {
-    deps.stepLog?.job(gateSteps[i].job, step.ok, timings[i].snapshot().durationMs ?? 0);
+    // A job the light gate skips names no unit of it, so it leaves no record.
+    if (!lightSkips(gateSteps[i].job)) deps.stepLog?.job(gateSteps[i].job, step.ok, timings[i].snapshot().durationMs ?? 0);
     return step;
   };
   const steps = gateSteps.map(({ job, script, runner, boundMs, retainSuccessOutput, skipWhenAbsent }, i) => {
@@ -3604,6 +3614,9 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       if (consumer && runner === undefined && !scriptNames.has(script)) {
         return { ok: true, detail: `SKIPPED — ${job}: "${script}" is core's step and this repo does not define it` };
       }
+      if (deps.light === true && runner === "rule-checks") {
+        return { ok: true, detail: `SKIPPED — light gate: ${job} stays a required hosted-CI job and is not run here` };
+      }
       if (runner === "rule-checks") {
         return withoutNodeTestContext(() =>
           withoutAuthorCensusAnswer(() =>
@@ -3617,7 +3630,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
           ),
         );
       }
-      if (runner === "census-precheck") return censusPrecheckLeaf(repoRoot, spawn, deps.stepLog);
+      if (runner === "census-precheck") return censusPrecheckLeaf(repoRoot, spawn, deps.stepLog, deps.light === true);
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
       }
