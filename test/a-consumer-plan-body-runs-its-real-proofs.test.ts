@@ -22,7 +22,7 @@ function consumerCheckout(): { dir: string; base: string } {
   git(dir, "commit", "-qm", "chore: seed");
   const base = git(dir, "rev-parse", "HEAD").trim();
   git(dir, "update-ref", "refs/remotes/origin/main", base);
-  writeFileSync(join(dir, SHARD), "- id: CONSOLE-T100\n  # refusal-amendment (CONSOLE-T100): owner decision required\n  status: queued\n");
+  writeFileSync(join(dir, SHARD), "- id: CONSOLE-T100\n  hold: \"refusal-amendment (CONSOLE-T100): owner decision required\"\n  status: queued\n");
   git(dir, "commit", "-qam", "chore: record the refusal");
   return { dir, base };
 }
