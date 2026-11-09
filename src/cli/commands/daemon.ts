@@ -885,7 +885,6 @@ export async function daemonCommand(
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
     onMainEntryStep?.(step);
   };
-  // W1-T11605: a timed-out selected-registry read ledgers its pending hop, hop times and loop split.
   ledgerSelectedRegistryReadTimeouts(log);
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
