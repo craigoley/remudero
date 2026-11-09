@@ -35078,10 +35078,11 @@ async function triageCommandLocked(
         return 0;
       }
       if (beforeCi.kind === "unknown") {
+        // Unknown evidence cannot authorize an early close. Keep the ordinary CI path, then let
+        // the post-CI identity/scope check refuse any later terminalization or merge.
         log("triage.live_scope_unknown", { scope: declaredScope, phase: "before_ci", reason: beforeCi.reason });
-        say(`triage PR left OPEN — live empty-scope evidence is unavailable or changed (${beforeCi.reason}): ${prUrl}`);
-        worktreeRemove(repoDir, worktreePath);
-        return 1;
+        say(`triage could not prove the declared scope is empty before CI (${beforeCi.reason}); ` +
+          `retaining the ordinary CI and review gates: ${prUrl}`);
       }
     }
 
