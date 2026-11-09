@@ -27,6 +27,7 @@ import { withTempDir } from "#src/lib/tmp.js";
 import {
   DEFAULT_SWEEP_POLICY, drainInFlightReviews, runSweepLightPass, type OpenPrView, type SweepDeps,
 } from "#test/helpers/sweep-test.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const minute = 60_000;
 const LIMIT = 1_000;
@@ -177,7 +178,15 @@ test("W1-T11383 criterion 2 the hold ships disabled and NOT READY holds nothing 
   assert.match(String(parseHeapAdmissionHoldMode({ heapAdmissionHold: { mode: "on" } }).error), /shadow or enforce/);
   assert.equal(readHeapAdmissionHoldMode("/unused", () => { throw Error("unreadable"); }).mode, "shadow");
   assert.equal(readHeapAdmissionHoldMode("/unused", () => "daemonMemory:\n  heapAdmissionHold:\n    mode: enforce\n").mode, "enforce");
-  assert.equal(readHeapAdmissionHoldMode("plan/policy.yaml").mode, "shadow", "the shipped policy enables nothing");
+  assert.equal(readHeapAdmissionHoldMode(join(REPO_ROOT, "plan/policy.yaml")).mode, "shadow", "the shipped policy enables nothing");
+  assert.equal(parseHeapAdmissionHoldMode({ heapAdmissionHold: "enforce" }).mode, "shadow", "a scalar section is not a mode");
+  // Each catch arm: a trace that throws is the named trace_unread item, and a log sink that throws decides nothing.
+  const unreadable = latchFixture("enforce", () => { throw Error("trace store unreadable"); });
+  assert.deepEqual(unreadable.hold.readiness().missing, ["trace_unread"]);
+  assert.equal(unreadable.read(0.70), undefined, "an unread trace holds nothing");
+  const deaf = createHeapAdmissionHold({ mode: "enforce", readTrace: () => readyTrace(), clock: clockFromMillisFn(() => 1_000),
+    log: () => { throw Error("ledger sink down"); } });
+  assert.equal(deaf.read("dispatch", { ...sample("9:9", 0, 0.70), at: minute })?.control, "HEAP", "a failed row still holds");
   // A default daemon dispatches at a high reading, and writes only the shadow row.
   const daemon = await heldDaemon({ share: 0.70 });
   assert.equal(daemon.runs, 1, "the shadow hold admitted the dispatch");
