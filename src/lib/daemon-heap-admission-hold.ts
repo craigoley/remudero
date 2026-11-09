@@ -300,7 +300,7 @@ export function createHeapAdmissionHold(opts: HeapAdmissionHoldOptions): HeapAdm
           }
         }
       }
-      if (!latch.latched || !pinned?.live) return undefined;
+      if (!latch.latched || pinned === undefined || !pinned.live) return undefined;
       const { high, low, dwell_ms } = pinned.pair;
       return { control: "HEAP", episode,
         detail: `heap latched at ${high.toFixed(4)} of its limit; releases below ${low.toFixed(4)} held ${dwell_ms} ms` };
