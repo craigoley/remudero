@@ -16,7 +16,7 @@ import { hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError, typ
 import { resolveTestPath, type TestPathResolverGit } from "./test-path-resolver.js";
 import {
   explainGrepProofRefusal, explainUnitTestProofRefusal, materialiseBaseProofBlobs,
-  parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs, resolveProofTestPath, wrappedGrepPattern,
+  commentOnlyGrepProofRefusal, parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs, resolveProofTestPath, wrappedGrepPattern,
   execWhitelistedProof, defaultProofSpawner, proofFailureTail, registerReviewerCheckout, type ProofSpawner,
 } from "./review.js";
 
@@ -896,6 +896,15 @@ export function checkProofCommand(
     const causeLine = grepZeroHitCauseLine();
     if (causeLine) console.log(causeLine);
     if (grepPatternHasBlockingMetachar) console.log(GREP_METACHAR_NOTE);
+  }
+  // W1-T11376: review grades a grep proof whose every head match is a comment `executed_stale` BEFORE it compares against
+  // base, so say the same here rather than let a base-absent or base-miss line read "discriminates".
+  if (
+    outcome === "pass" && w.kind === "grep" &&
+    commentOnlyGrepProofRefusal(proof, (rel) => existsSync(join(process.cwd(), rel)) ? readFileSync(join(process.cwd(), rel), "utf8") : undefined) !== undefined
+  ) {
+    console.log("discrimination: executed_stale — every matching line is a comment");
+    return CHECK_PROOF_EXIT.executedStale;
   }
   const headExit =
     outcome === "pass" ? CHECK_PROOF_EXIT.pass : outcome === "fail" ? CHECK_PROOF_EXIT.fail : CHECK_PROOF_EXIT.noMatch;
