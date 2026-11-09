@@ -6715,12 +6715,25 @@ export type ReviewStatusHistory =
 
 export type ReviewStatusHistoryReader = (owner: string, repo: string, prUrl: string, headSha: string) => Promise<ReviewStatusHistory>;
 
-function rowsFromPaginatedApi(value: unknown): unknown[] {
-  if (!Array.isArray(value)) throw new Error("GitHub returned a non-list response");
-  if (value.every((row) => row === null || typeof row !== "object" || Array.isArray(row))) {
-    return value.flatMap((row) => rowsFromPaginatedApi(row));
+/** BACKSTOP: a head or PR with more than 1,000 status or review rows is refused as unreadable, never truncated;
+ * a healthy history is a few dozen rows, so this bounds the page loop without ever firing in normal operation. */
+const REVIEW_HISTORY_MAX_PAGES = 10;
+const REVIEW_HISTORY_PAGE_SIZE = 100;
+
+/** Read an endpoint page by page with a plain page parameter: the host CLI's slurp flag needs a newer version than
+ * the operator host runs, and each page is an ordinary JSON array on every version. Newest-first order is kept. */
+async function readHistoryPages(
+  readJson: (args: string[], options: { fresh: true }) => unknown | Promise<unknown>,
+  endpoint: string,
+): Promise<unknown[]> {
+  const rows: unknown[] = [];
+  for (let page = 1; page <= REVIEW_HISTORY_MAX_PAGES; page += 1) {
+    const value = await readJson(["api", `${endpoint}?per_page=${REVIEW_HISTORY_PAGE_SIZE}&page=${page}`], { fresh: true });
+    if (!Array.isArray(value)) throw new Error("GitHub returned a non-list response");
+    rows.push(...value);
+    if (value.length < REVIEW_HISTORY_PAGE_SIZE) return rows;
   }
-  return value;
+  throw new Error(`GitHub history still full after ${REVIEW_HISTORY_MAX_PAGES} pages`);
 }
 
 /** Read the shared status history and the same-PR review bodies that explain its failures. */
@@ -6735,9 +6748,7 @@ export async function readReviewStatusHistory(
   try {
     const number = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/([1-9]\d*)\/?$/.exec(prUrl)?.[1];
     if (number === undefined) throw new Error("PR number is unavailable from review URL");
-    const statuses = rowsFromPaginatedApi(await readJson([
-      "api", "--paginate", "--slurp", `repos/${owner}/${repo}/commits/${headSha}/statuses?per_page=100`,
-    ], { fresh: true }));
+    const statuses = await readHistoryPages(readJson, `repos/${owner}/${repo}/commits/${headSha}/statuses`);
     if (statuses.some((row) => typeof row !== "object" || row === null ||
         typeof (row as Record<string, unknown>).context !== "string" ||
         typeof (row as Record<string, unknown>).state !== "string" ||
@@ -6748,7 +6759,7 @@ export async function readReviewStatusHistory(
       (row as Record<string, unknown>).context === REVIEW_CONTEXT &&
       String((row as Record<string, unknown>).state).toLowerCase() === "failure");
     const reviews = hasFailure
-      ? rowsFromPaginatedApi(await readJson(["api", "--paginate", "--slurp", `repos/${owner}/${repo}/pulls/${number}/reviews?per_page=100`], { fresh: true }))
+      ? await readHistoryPages(readJson, `repos/${owner}/${repo}/pulls/${number}/reviews`)
       : [];
     if (reviews.some((row) => typeof row !== "object" || row === null ||
         typeof (row as Record<string, unknown>).commit_id !== "string" ||
