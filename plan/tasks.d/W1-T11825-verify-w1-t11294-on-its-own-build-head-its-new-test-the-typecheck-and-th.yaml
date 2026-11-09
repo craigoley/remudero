@@ -6,7 +6,10 @@
   type: recon
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=f36de3e1d51732a0
+  # backlog gardener: placed=2026-11-09T09:28:54.018Z
   attempts: 0
   files:
     - plan/tasks.d/W1-T11294-a-no-commit-fix-on-a-moved-main-refreshes-instead-of-replaying-the-old-merge.yaml
