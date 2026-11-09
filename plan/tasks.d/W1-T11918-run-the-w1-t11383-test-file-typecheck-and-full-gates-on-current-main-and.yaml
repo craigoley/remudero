@@ -1,0 +1,28 @@
+- id: W1-T11918
+  title: "Run the W1-T11383 test file, typecheck and full gates on current main, and record the result on the task"
+  repo: remudero
+  depends_on:
+    - W1-T11383
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T11383-a-held-heap-closes-new-worker-starts-only.yaml
+  design: |
+    The earlier "suite green" evidence for W1-T11383 predates the merge of main and the recycle-yield commit.
+    Run test/memory/a-held-heap-closes-new-worker-starts-only.test.ts, then the typecheck, then the full gates
+    (rmd preflight --ci-parity) on the current origin/main head. Append a note to the W1-T11383 shard that begins
+    "head-verification:" and names the head sha, each command run and its result. If any command fails, the note
+    names the failing test or check and the work stops there. No source or test code changes.
+  acceptance:
+    - claim: "the W1-T11383 shard records a head-verification note naming the head sha and the result of the test file, the typecheck and the full gates"
+      proof: "grep: head-verification: in plan/tasks.d/W1-T11383-a-held-heap-closes-new-worker-starts-only.yaml"
+  origin: "followup:W1-T11383-1794186722494:2026-11-09T01:17:40.915Z:1"
+  rationale: >-
+    From the 2026-11-09 follow-up on W1-T11383-1794186722494, ratified via rmd approve:
+  
+    follow-up harvest [task]: Run the W1-T11383 test file, then the typecheck and full gates, on
+    this HEAD, because the "suite green" evidence predates the main merge and the recycle-yield
+    commit. — from W1-T11383 (run W1-T11383-1794186722494)

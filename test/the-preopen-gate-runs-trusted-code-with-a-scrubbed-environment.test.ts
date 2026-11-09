@@ -178,7 +178,7 @@ test("W1-T9619: a gate run never executes bin/rmd from the worktree", async () =
   fakeHarnessRmd(join(harness, "bin"), { exit: 0, steps: [] });
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const result = await runPreopenGate(work, {
-    runGate: (cwd) => defaultRunGate(cwd, undefined, (step, extra) => rows.push({ step, extra }), {}, { contain: contained(fakeSandbox(harness)), harnessRoot: harness }),
+    runGate: (cwd) => defaultRunGate(cwd, undefined, (step, extra) => rows.push({ step, extra }), {}, { parentEnv: { ...process.env, RMD_PREOPEN_GATE: "full" }, contain: contained(fakeSandbox(harness)), harnessRoot: harness }),
   });
   assert.equal(result.kind, "pass", JSON.stringify(result));
   assert.ok(!existsSync(join(work, "worktree-rmd-ran")), "the worktree's own bin/rmd ran");

@@ -35,6 +35,7 @@ async function childGate(exit: number, measurement?: unknown, writeSummary = tru
     return await runPreopenGate(dir, {
       runGate: cwd => defaultRunGate(cwd, maintainedLauncher ? undefined : launcher, () => {}, {}, {
         harnessRoot: dir,
+        parentEnv: { ...process.env, RMD_PREOPEN_GATE: "full" },
         contain: () => ({ mode: "sandboxed", file: sandbox, argv: ["--"] }),
       }),
       runPushGate: async () => ({ kind: "skipped", reason: "fixture has no remote" }),
