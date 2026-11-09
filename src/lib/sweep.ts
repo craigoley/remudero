@@ -1730,7 +1730,9 @@ export interface BuildSweepEffectsDeps {
 export type ReviewDispatchMode =
   | { kind: "full-review" }
   | { kind: "reuse"; judgedHeadSha: string }
-  | { kind: "discriminate-only"; judgedHeadSha: string };
+  | { kind: "discriminate-only"; judgedHeadSha: string }
+  /** W1-T11729 — re-post the DELIVERED verdict of this exact head and input after GitHub's status regressed. Never a review. */
+  | { kind: "restore"; judgedHeadSha: string; regressionKey: string };
 
 /** Options derived when admitting this review, rather than facts read by the PR-view producer. */
 export interface ReviewDispatchPr extends OpenPrView {
@@ -2318,6 +2320,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readArmTimeline",
   "readActionsStatusSummary", // W1-T5939
   "rerunFailedChecks",
+  "readFailedRunBase",
   // remudero-console #2035: the task contract an escalated fix-progress latch stands on.
   "readTaskContractRevision",
   "readTaskSemanticRevision",
@@ -2452,6 +2455,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "withdrawStackAutoMerge"
   | "requeueCheck"
   | "rerunFailedChecks"
+  | "readFailedRunBase"
   | "escalateCancelledCheck"
   | "escalateInfrastructureCheck"
   | "readCiGateRollup"
@@ -2764,6 +2768,23 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const readMainRepair = async (): Promise<MainRepairEvidence | undefined> => {
     const main = await readMainCommit();
     return main?.sha && main.committedAt ? { sha: main.sha, committedAt: main.committedAt } : undefined;
+  };
+  const readFailedRuns = async (pr: OpenPrView) => {
+    type Run = { id?: number; head_sha?: string; status?: string; conclusion?: string;
+      pull_requests?: Array<{ number?: number; base?: { sha?: unknown } }> };
+    const runs = new Map<number, Run>();
+    for (let page = 1; ; page++) {
+      const body = await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=100&page=${page}`]) as
+        { total_count?: number; workflow_runs?: Run[] } | undefined;
+      if (!body || !Array.isArray(body.workflow_runs)) throw new Error("failed workflow runs could not be read");
+      for (const run of body.workflow_runs) {
+        if (run.head_sha === pr.headSha && run.status === "completed" && run.conclusion === "failure" && typeof run.id === "number") {
+          runs.set(run.id, run);
+        }
+      }
+      if (body.workflow_runs.length < 100 || (body.total_count !== undefined && page * 100 >= body.total_count)) break;
+    }
+    return runs;
   };
 
   /**
@@ -3270,6 +3291,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           log("sweep.post_review.child", { pr_number: pr.prNumber, head_sha: pr.headSha, review_key: reviewKey, child_run_id: hosted.runId });
           return;
         }
+        // W1-T11729: a restore never falls back to a full review; without its runner it does nothing.
+        if (mode.kind === "restore" && !deps.reviewReuseRunner) {
+          log("sweep.post_review.restore_unwired", { pr_number: pr.prNumber, head_sha: pr.headSha });
+          return;
+        }
         const exit = await reviewPhaseObserver.run(phase, async () =>
           mode.kind === "full-review" || !deps.reviewReuseRunner
             ? await reviewRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, phase, pr.excludeProviders)
@@ -3454,25 +3480,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     },
 
+    readFailedRunBase: async (pr) => {
+      for (const run of (await readFailedRuns(pr)).values()) {
+        const base = run.pull_requests?.find(pull => pull.number === pr.prNumber)?.base?.sha;
+        if (typeof base === "string" && base.length > 0) return base;
+      }
+      return undefined;
+    },
     rerunFailedChecks: async (pr) => {
       const live = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as
         { state?: string; head?: { sha?: string } } | undefined;
       if (live?.state !== "open" || live.head?.sha !== pr.headSha) {
         return { outcome: "head-moved", runIds: [], reason: "the PR is no longer open at the attempted head" };
       }
-      const runIds = new Set<number>();
-      for (let page = 1; ; page++) {
-        const body = await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=100&page=${page}`]) as
-          { total_count?: number; workflow_runs?: Array<{ id?: number; head_sha?: string; status?: string; conclusion?: string }> } | undefined;
-        if (!body || !Array.isArray(body.workflow_runs)) throw new Error("failed workflow runs could not be read");
-        for (const run of body.workflow_runs) {
-          if (run.head_sha === pr.headSha && run.status === "completed" && run.conclusion === "failure" && typeof run.id === "number") {
-            runIds.add(run.id);
-          }
-        }
-        if (body.workflow_runs.length < 100 || (body.total_count !== undefined && page * 100 >= body.total_count)) break;
-      }
-      if (runIds.size === 0) return { outcome: "unavailable", runIds: [], reason: "no completed failed workflow run at this head" };
+      const runIds = [...(await readFailedRuns(pr)).keys()];
+      if (runIds.length === 0) return { outcome: "unavailable", runIds: [], reason: "no completed failed workflow run at this head" };
       for (const id of runIds) ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/runs/${id}/rerun-failed-jobs`]);
       return { outcome: "rerun", runIds: [...runIds] };
     },
@@ -5984,6 +6006,36 @@ export function deliveredVerdictDedupsPostReview(pr: Pick<OpenPrView, "reviewSta
   return delivered && pr.reviewState !== "pending";
 }
 
+/** W1-T11729 — the step a restored status is ledgered under, written only AFTER the status post succeeded. */
+export const REVIEW_STATUS_RESTORED_STEP = "review.status_restored";
+
+/** W1-T11729 — a DELIVERED verdict dedups a re-post, but when GitHub's status has regressed to `pending` on the SAME head and
+ *  input digest the delivery never reached (or no longer holds on) the status. The restorable verdict is the LATEST review row
+ *  of that exact head and digest, and only when it is a full success/failure verdict. The regression is identified by the
+ *  pending status's own stamp, so one restore is spent per observed regression and a new regression earns its own. */
+export function restorableDeliveredVerdict(
+  pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha" | "taskId" | "reviewState" | "reviewPendingSince" | "reviewInputDigest">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  reviewKey: string,
+): { row: Record<string, unknown>; regressionKey: string } | { refusal: string } {
+  if (pr.reviewState !== "pending") return { refusal: "GitHub's status is not pending" };
+  if (pr.reviewInputDigest === undefined) return { refusal: "the review input digest is unread" };
+  const taskId = reviewOutcomeTaskIdFor(pr);
+  const row = lines.findLast(r => r.task_id === taskId && r.pr_url === pr.prUrl && r.head_sha === pr.headSha &&
+    r.review_input_digest === pr.reviewInputDigest &&
+    (r.step === "review.posted" || r.step === "review.pending_posted" || r.step === "review.post_refused"));
+  if (row?.step !== "review.posted") return { refusal: "the latest review row of this head and input is not a delivered verdict" };
+  const verdict = row.decision_verdict as ReviewVerdict | undefined;
+  if ((row.state !== "success" && row.state !== "failure") || verdict?.state !== row.state || verdict.cannotEvaluate === true) {
+    return { refusal: "the delivered verdict is not a full success or failure" };
+  }
+  const regressionKey = `${reviewKey}|${pr.reviewPendingSince ?? "unstamped"}`;
+  if (lines.some(r => r.step === REVIEW_STATUS_RESTORED_STEP && r.regression_key === regressionKey)) {
+    return { refusal: "this regression was already restored once" };
+  }
+  return { row, regressionKey };
+}
+
 /** One of the dispositions every open PR is reconciled into. */
 export type Disposition =
   | "mergeable"
@@ -7670,7 +7722,7 @@ export function checksStateFromRollup(
   rollup: RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
 ): OpenPrView["checksState"] {
-  const { all, knownRequired, gate } = requiredCheckGate(rollup, requiredContexts);
+  const { all, knownRequired, gate, missingRequired } = requiredCheckGate(rollup, requiredContexts);
   if (all.length === 0) return "none";
   // Required contexts are configured but none has registered on this head yet
   // (e.g. the workflow hasn't started) — waiting, not "no checks at all".
@@ -7686,7 +7738,10 @@ export function checksStateFromRollup(
     if (REQUIRED_CHECK_FAIL.has(s)) return "red";
     if (!ok.has(s)) anyPending = true;
   }
-  return anyPending ? "pending" : "green";
+  // W1-T11606: a present green member does not settle the gate while another configured context
+  // has not registered on this head yet. Branch protection requires every named context; treating
+  // only the present subset as green let an early status merge a PR before ci-gate appeared.
+  return anyPending || missingRequired ? "pending" : "green";
 }
 
 /** The entries {@link checksStateFromRollup} judges, shared so every reading of a head's checks
@@ -7694,7 +7749,7 @@ export function checksStateFromRollup(
 function requiredCheckGate(
   rollup: RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
-): { all: RollupCheckEntry[]; knownRequired: boolean; gate: RollupCheckEntry[] } {
+): { all: RollupCheckEntry[]; knownRequired: boolean; gate: RollupCheckEntry[]; missingRequired: boolean } {
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const required = new Set(requiredContexts ?? []);
   const knownRequired = required.size > 0;
@@ -7704,7 +7759,9 @@ function requiredCheckGate(
   const gate = dedupeRollupByLatestAttempt(
     knownRequired ? all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")) : all,
   );
-  return { all, knownRequired, gate };
+  const missingRequired = knownRequired && [...required]
+    .some((name) => name !== REVIEW_CONTEXT && !gate.some((entry) => entry.name === name || entry.context === name));
+  return { all, knownRequired, gate, missingRequired };
 }
 
 /** W1-T4054 — earliest pending required start, so PR activity cannot reset the CI clock.
@@ -14558,6 +14615,8 @@ export interface SweepDeps {
     pr: OpenPrView,
     check: CancelledRequiredCheck | CiFailure,
   ) => boolean | void | JobRequeueOutcome | Promise<boolean | void | JobRequeueOutcome>;
+  /** W1-T11294: base recorded on a completed failed workflow run for this PR and head. */
+  readFailedRunBase?: (pr: OpenPrView) => Promise<string | undefined>;
   /** W1-T6353: retry failed jobs after a successful ci-log round left the head unchanged. */
   rerunFailedChecks?: (pr: OpenPrView) => Promise<{
     outcome: "rerun" | "head-moved" | "unavailable"; runIds: number[]; reason?: string;
@@ -16278,6 +16337,47 @@ function continuationEndedAtEmptyBoot(
       ["run_child.adopted", "run_child.adoption_unreadable", "run_child.adoption_misidentified"].includes(String(line.step)));
 }
 
+/** W1-T11169 — a dead run's continuation ended once ANY later boot by another run has a readable, self-consistent
+ *  adoption pass that adopted no child naming THIS task; other tasks' adopted children never keep it live. */
+function continuationEndedAtTaskBoot(
+  lines: ReadonlyArray<Record<string, unknown>>, from: number, ownerRunId: string, taskId: string, runId: string,
+): boolean {
+  if (ownerRunId === runId) return false;
+  const childSteps = ["run_child.adopted", "run_child.adoption_unreadable", "run_child.adoption_misidentified"];
+  let previousBoot = from;
+  for (let bootAt = from + 1; bootAt < lines.length; bootAt++) {
+    const boot = lines[bootAt];
+    if (boot.step !== "daemon.boot") continue;
+    const censusFrom = previousBoot + 1;
+    const census = lines.slice(censusFrom, bootAt);
+    previousBoot = bootAt;
+    if (typeof boot.run_id !== "string" || boot.run_id === "" || boot.run_id === ownerRunId) continue;
+    const passAt = census.findLastIndex(line => line.step === "run_child.adoption_pass" && line.run_id === boot.run_id);
+    if (passAt < 0) continue;
+    const pass = census[passAt];
+    if (!["live", "adopted", "unreadable", "misidentified"].every(key =>
+      typeof pass[key] === "number" && Number.isSafeInteger(pass[key]) && Number(pass[key]) >= 0)) continue;
+    const children = census.slice(0, passAt).filter(line => childSteps.includes(String(line.step)));
+    // Counts corroborate the per-child rows; a missing identity never proves another task owns it.
+    if (children.some(line => typeof line.task_id !== "string" || line.task_id === "") ||
+        pass.adopted !== children.filter(line => line.step === childSteps[0]).length ||
+        pass.unreadable !== children.filter(line => line.step === childSteps[1]).length ||
+        pass.misidentified !== children.filter(line => line.step === childSteps[2]).length ||
+        pass.live !== Number(pass.adopted) + Number(pass.misidentified)) continue;
+    if (!children.some(line => line.task_id === taskId) &&
+        !lines.slice(censusFrom + passAt + 1).some(line =>
+          line.task_id === taskId && childSteps.includes(String(line.step)))) return true;
+  }
+  return false;
+}
+
+function fixSeedSettlementAt(
+  lines: ReadonlyArray<Record<string, unknown>>, pr: Pick<OpenPrView, "prNumber" | "headSha">, seed: FixSeed,
+): number {
+  return seed.ts === undefined ? -1 : lines.findLastIndex(line => line.step === FIX_SEED_ORPHANED_STEP &&
+    line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.seed_ts === seed.ts);
+}
+
 /** W1-T9999 — WHICH RUNG SPEAKS FOR THIS HEAD'S FIX SEED, and is it still live? The seed is the newest acted
  *  `sweep.disposed` blocked-fixable/conflicted row at the head. Its rung is the task's `fix.*` rows after the PR's
  *  previous `sweep.disposed` row, since a synchronous dispatch writes its rung before the seed, so an earlier rung
@@ -16303,6 +16403,13 @@ export function fixSeedRead(
   // exact-head dispatch before reading that identity; absent evidence stays unknown.
   if (pr.taskId === undefined && !window.some(line => line.step === "fix.dispatch" &&
       line.task_id === taskId && line.head_sha === pr.headSha)) return undefined;
+  // W1-T11169: a written settlement for this (PR, head, seed) is read back until a later dispatch starts a new seed.
+  const settledAt = fixSeedSettlementAt(lines, pr, seed);
+  if (seed.runId !== runId && settledAt > seedAt && !lines.slice(settledAt + 1).some(line => line.step === "fix.dispatch" &&
+      line.task_id === taskId && line.head_sha === pr.headSha)) {
+    return { kind: "orphaned", seed,
+      ...(lines[settledAt].reason === "owner-run-ended" ? { orphanReason: "owner-run-ended" as const } : {}) };
+  }
   const rung = (line: Record<string, unknown>) => line.task_id === taskId && String(line.step).startsWith("fix.");
   const dispatchAt = window.findLastIndex(line => rung(line) && line.step === "fix.dispatch");
   const dispatchOwner = dispatchAt < 0 ? undefined : window[dispatchAt].run_id;
@@ -16338,9 +16445,9 @@ export function fixSeedRead(
   // A started in-process rung also loses its continuation when its daemon dies (#12904).
   // Re-enter the ordinary owner/checkout claim, never clear it here: a surviving worker,
   // dirty unpublished tree or unreadable process census must still refuse there. Require
-  // this boot's explicit empty adoption receipt; a different run id or age alone proves nothing.
+  // a readable per-task adoption receipt; a different run id or age alone proves nothing.
   if (!ownerHandedOff && seed.runId !== undefined &&
-      continuationEndedAtEmptyBoot(lines, seedAt, seed.runId, taskId, runId) &&
+      continuationEndedAtTaskBoot(lines, seedAt, seed.runId, taskId, runId) &&
       window.every((line, index) => {
         if (!rung(line) || line.step !== "fix.dispatch" ||
             (typeof line.head_sha === "string" && line.head_sha !== pr.headSha)) return true;
@@ -20084,7 +20191,8 @@ export async function runSweep(
    *  after `add` makes the mutex and the durable outcome one atomic decision boundary. */
   async function claimReview(
     reviewKey: string, pr: OpenPrView,
-  ): Promise<{ ok: true; release: () => void } | { ok: false; deduped: boolean; reason: string }> {
+  ): Promise<{ ok: true; release: () => void; restore?: { judgedHeadSha: string; regressionKey: string } } |
+    { ok: false; deduped: boolean; reason: string }> {
     if (claimedReviewKeys.has(reviewKey)) {
       return {
         ok: false,
@@ -20101,6 +20209,14 @@ export async function runSweep(
       const retryBackoff =
         retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
         await freshnessBackoff(fresh.reviewFreshnessRefusals, pr);
+      // W1-T11729: a delivered verdict GitHub's pending status contradicts is restored, not re-reviewed and not deduped silently.
+      if (delivered && !durableRefusal && retryBackoff === undefined) {
+        const restorable = restorableDeliveredVerdict(pr, freshLines, reviewKey);
+        if ("row" in restorable) {
+          return { ok: true, release: () => claimedReviewKeys.delete(reviewKey),
+            restore: { judgedHeadSha: pr.headSha, regressionKey: restorable.regressionKey } };
+        }
+      }
       if (delivered || durableRefusal || retryBackoff !== undefined) {
         claimedReviewKeys.delete(reviewKey);
         return {
@@ -20541,7 +20657,8 @@ export async function runSweep(
       const rerunReceipt = ledgerLines.findLast(row => row.step === "sweep.disposed" &&
         row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true);
       const rerunMemory = rerunReceipt === undefined ? {} : Object.fromEntries(
-        Object.entries(rerunReceipt).filter(([key]) => key.startsWith("no_commit_rerun_")));
+        Object.entries(rerunReceipt).filter(([key]) => key.startsWith("no_commit_") ||
+          (rerunReceipt.no_commit_refresh_attempted === true && (key === "run_base_sha" || key === "main_sha"))));
       const disposedLine = {
         run_id: deps.runId,
         task_id: pr.taskId ?? "SWEEP",
@@ -21720,7 +21837,7 @@ export async function runSweep(
         alreadyDone = terminalDesignHold?.amended === true || terminalDesignHold?.mainAdoption === true || designReleasedByBody || metadataRed || emptyDiffReviewFailure(pr)
           ? false
           : dispatchedThisHead && (seedRead?.kind ?? "live") === "live"; // no read: a taskless PR's key (W1-T9955)
-        if (seedRead?.kind === "orphaned" && !deps.dryRun) {
+        if (seedRead?.kind === "orphaned" && !deps.dryRun && fixSeedSettlementAt(ledgerLines, pr, seedRead.seed) < 0) {
           appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: FIX_SEED_ORPHANED_STEP,
             pr_number: pr.prNumber, head_sha: pr.headSha, seed_ts: seedRead.seed.ts, seed_run_id: seedRead.seed.runId,
             reason: seedRead.orphanReason ?? "earlier-run-without-rung" });
@@ -22466,13 +22583,25 @@ export async function runSweep(
               if (noCommitRound !== undefined && !rerunAttempted && !pendingDeferral &&
                   flakeClaimsForHead(ledgerLines, pr.taskId, pr.headSha, pr.prNumber).length === 0) {
                 acted = false;
-                if (!deps.rerunFailedChecks) {
+                let runBaseSha: string | undefined;
+                try {
+                  if (mainTipSha) runBaseSha = await deps.readFailedRunBase?.(pr);
+                } catch (error) {
+                  log("sweep.no_commit_run_base.error", { pr_number: pr.prNumber, error: String(error) });
+                }
+                const refresh = runBaseSha !== undefined && mainTipSha !== undefined && runBaseSha !== mainTipSha;
+                if (refresh && !deps.updateBranch) {
+                  standDownReason = "no-commit CI fix awaits a branch-update gateway for the moved main";
+                  break;
+                }
+                if (!refresh && !deps.rerunFailedChecks) {
                   standDownReason = "no-commit CI fix awaits a failed-job rerun gateway";
                   break;
                 }
                 // Claim before the write: a crash or partial rerun must never retry this head.
                 const receipt = { run_id: deps.runId, task_id: pr.taskId!, step: "sweep.disposed",
                   pr_number: pr.prNumber, head_sha: pr.headSha, disposition: "wait", acted: true,
+                  ...(refresh ? { no_commit_refresh_attempted: true, run_base_sha: runBaseSha, main_sha: mainTipSha } : {}),
                   no_commit_rerun_attempted: true, no_commit_rerun_round_id: noCommitRound, snapshot_age_ms: snapshotAgeMs(prIndex) };
                 if (readLedger(deps.ledgerPath).some(row => row.step === "sweep.disposed" &&
                     row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true)) {
@@ -22482,9 +22611,20 @@ export async function runSweep(
                 appendLine(deps.ledgerPath, receipt);
                 acted = true;
                 spent = false;
+                if (refresh) {
+                  let result: { outcome: string; reason?: string };
+                  try { result = { outcome: await deps.updateBranch!(pr) }; }
+                  catch (error) { result = { outcome: "failed", reason: String(error) }; }
+                  extraDisposedFields = { ...extraDisposedFields,
+                    no_commit_rerun_attempted: true, no_commit_rerun_round_id: noCommitRound,
+                    no_commit_refresh_attempted: true, run_base_sha: runBaseSha, main_sha: mainTipSha,
+                    no_commit_refresh_outcome: result.outcome, no_commit_refresh_reason: result.reason };
+                  standDownReason = `no-commit CI fix: branch refresh ${result.outcome}` + (result.reason ? ` — ${result.reason}` : "");
+                  break;
+                }
                 let result: { outcome: string; runIds: number[]; reason?: string };
                 try {
-                  result = await deps.rerunFailedChecks(pr);
+                  result = await deps.rerunFailedChecks!(pr);
                 } catch (error) {
                   result = { outcome: "failed", runIds: [], reason: String(error) };
                 }
@@ -23976,6 +24116,7 @@ export async function runSweep(
     const jobDisposition: Disposition =
       job.mode.kind === "full-review" ? "post-review" : job.mode.kind === "reuse" ? "review-reused" : "discriminate-only";
     const claim = await claimReview(job.reviewKey, job.pr);
+    const reviewMode: ReviewDispatchMode = claim.ok && claim.restore !== undefined ? { kind: "restore", ...claim.restore } : job.mode;
     if (!claim.ok) {
       await finalizeDisposition(
         job.index,
@@ -23995,7 +24136,8 @@ export async function runSweep(
     }
     const reviewAttemptId = `review-PR${job.pr.prNumber}-${randomUUID()}`;
     const hostGapSkips = hostGapReviews.get(job.reviewKey);
-    appendLine(deps.ledgerPath, {
+    // W1-T11729: a restore is no admitted review, so it never counts toward the per-input admission backstop.
+    if (reviewMode.kind !== "restore") appendLine(deps.ledgerPath, {
       run_id: deps.runId,
       task_id: job.pr.taskId ?? "SWEEP",
       step: "sweep.review_admitted",
@@ -24004,7 +24146,7 @@ export async function runSweep(
       head_sha: job.pr.headSha,
       review_key: job.reviewKey,
       review_input_digest: job.pr.reviewInputDigest,
-      review_mode: job.mode.kind,
+      review_mode: reviewMode.kind,
       review_attempt_id: reviewAttemptId,
       host_gap_rereview: hostGapSkips !== undefined,
       ...(hostGapSkips === undefined ? {} : { skips: [...hostGapSkips] }),
@@ -24041,7 +24183,7 @@ export async function runSweep(
         if (postReview) {
           try {
           const reviewStartedAtMs = performance.now();
-          await postReview(job.pr, job.mode, reviewAttemptId, onPhase);
+          await postReview(job.pr, reviewMode, reviewAttemptId, onPhase);
           noteReviewDuration(performance.now() - reviewStartedAtMs);
           } catch (e) {
             acted = false;

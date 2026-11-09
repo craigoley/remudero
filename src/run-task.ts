@@ -34441,6 +34441,104 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
   );
 }
 
+export interface TriagePrLifecycleIdentity {
+  state: string;
+  headSha: string;
+  baseRef: string;
+  baseSha: string;
+}
+
+/** Read the PR fields needed to prove an empty-scope close still targets the classified PR. */
+async function readTriagePrLifecycleIdentity(prUrl: string, owner: string, repo: string): Promise<TriagePrLifecycleIdentity> {
+  const number = prUrl.match(/\/pull\/(\d+)/)?.[1];
+  if (!number) throw new Error(`triage PR identity: cannot resolve a pull number from ${JSON.stringify(prUrl)}`);
+  const row = await ghJsonAsync(["api", `repos/${owner}/${repo}/pulls/${number}`]) as {
+    state?: unknown;
+    head?: { sha?: unknown };
+    base?: { ref?: unknown; sha?: unknown };
+  };
+  const { state, head, base } = row;
+  if (typeof state !== "string" || typeof head?.sha !== "string" || !/^[0-9a-f]{40}$/i.test(head.sha) ||
+      typeof base?.ref !== "string" || !base.ref || typeof base.sha !== "string" || !/^[0-9a-f]{40}$/i.test(base.sha)) {
+    throw new Error(`triage PR identity: ${prUrl} returned incomplete state/head/base evidence`);
+  }
+  return { state, headSha: head.sha, baseRef: base.ref, baseSha: base.sha };
+}
+
+/** Close an empty-scope triage PR through async GitHub transport so the daemon loop never blocks on gh. */
+async function closeTriagedEmptyScopePr(prUrl: string, comment: string): Promise<void> {
+  await ghTextAsync(["pr", "close", prUrl, "--comment", comment]);
+}
+
+export type TriageLiveScopeCheck =
+  | { kind: "empty"; comment: string }
+  | { kind: "nonempty" }
+  | { kind: "unknown"; reason: string };
+
+/** Pure safety decision shared by the live triage path and its admission tests. */
+export function triageLiveScopeDecision(input: {
+  action: string;
+  scopeFiles: readonly string[];
+  liveDiffFiles?: readonly string[];
+  complete: boolean;
+  expectedHeadSha?: string;
+  fetchedBaseSha?: string;
+  before?: TriagePrLifecycleIdentity;
+  after?: TriagePrLifecycleIdentity;
+}): TriageLiveScopeCheck {
+  if (input.action !== "no_task" && input.action !== "grill") return { kind: "nonempty" };
+  if (!input.complete || !input.liveDiffFiles || !input.before || !input.expectedHeadSha || !input.fetchedBaseSha ||
+      input.scopeFiles.length === 0) {
+    return { kind: "unknown", reason: "live scope or PR identity evidence is incomplete" };
+  }
+  const before = input.before;
+  if (before.state !== "open" || before.headSha !== input.expectedHeadSha || before.baseRef !== "main" ||
+      before.baseSha !== input.fetchedBaseSha) {
+    return { kind: "unknown", reason: "PR state, head, or base differs from the fetched classification snapshot" };
+  }
+  const disposition = triageEmptyScopeDisposition(input.liveDiffFiles, input.scopeFiles);
+  if (disposition.action !== "close" || !disposition.comment) return { kind: "nonempty" };
+  const after = input.after;
+  if (!after || after.state !== "open" || after.headSha !== before.headSha || after.baseRef !== before.baseRef ||
+      after.baseSha !== before.baseSha) {
+    return { kind: "unknown", reason: "PR identity changed after empty-scope classification" };
+  }
+  return { kind: "empty", comment: disposition.comment };
+}
+
+/** Classify a declared scope and re-read identity immediately before any empty-scope close. */
+async function checkTriageLiveScope(
+  worktreePath: string,
+  prUrl: string,
+  owner: string,
+  repo: string,
+  action: string,
+  scopeFiles: readonly string[],
+): Promise<TriageLiveScopeCheck> {
+  try {
+    await hostWorktreeGitAsync(worktreePath, ["fetch", "origin", "main"], { stdio: "inherit-stdout" });
+    const baseSha = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "origin/main"])).trim();
+    const headSha = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "HEAD"])).trim();
+    if (!/^[0-9a-f]{40}$/i.test(baseSha) || !/^[0-9a-f]{40}$/i.test(headSha)) {
+      return { kind: "unknown", reason: "live base/head revision is incomplete" };
+    }
+    const before = await readTriagePrLifecycleIdentity(prUrl, owner, repo);
+    const liveDiffFiles = (await hostWorktreeGitAsync(worktreePath, ["diff", "--name-only", "origin/main", "HEAD", "--", ...scopeFiles]))
+      .split("\n").map((line) => line.trim()).filter(Boolean);
+    const evidence = {
+      action, scopeFiles, liveDiffFiles, complete: true, expectedHeadSha: headSha,
+      fetchedBaseSha: baseSha, before,
+    };
+    if (triageEmptyScopeDisposition(liveDiffFiles, scopeFiles).action !== "close") {
+      return triageLiveScopeDecision(evidence);
+    }
+    const after = await readTriagePrLifecycleIdentity(prUrl, owner, repo);
+    return triageLiveScopeDecision({ ...evidence, after });
+  } catch (error) {
+    return { kind: "unknown", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+  }
+}
+
 async function triageCommandLocked(
   rest: string[],
   opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps; lintPlanForReviewFn?: typeof lintPlanForReview } = {},
@@ -34966,8 +35064,29 @@ async function triageCommandLocked(
       log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
     }
 
-    // Gate: ci green -> post remudero-review -> arm auto-merge (identical shape to every other
-    // Architect skill's output — "PROPOSES anything, MERGES nothing" until the gate clears it).
+    const declaredScope = decision.action === "no_task" || decision.action === "grill"
+      ? triageDeclaredScope(feedbackId)
+      : undefined;
+    if (declaredScope) {
+      const beforeCi = await checkTriageLiveScope(worktreePath, prUrl, owner, repo, decision.action, declaredScope);
+      if (beforeCi.kind === "empty") {
+        log("triage.already_done", { scope: declaredScope, before_ci: true });
+        say(`triage PR's declared scope (${declaredScope.join(", ")}) is EMPTY against the LIVE origin/main — ` +
+          `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`);
+        await closeTriagedEmptyScopePr(prUrl, beforeCi.comment);
+        worktreeRemove(repoDir, worktreePath);
+        return 0;
+      }
+      if (beforeCi.kind === "unknown") {
+        // Unknown evidence cannot authorize an early close. Keep the ordinary CI path, then let
+        // the post-CI identity/scope check refuse any later terminalization or merge.
+        log("triage.live_scope_unknown", { scope: declaredScope, phase: "before_ci", reason: beforeCi.reason });
+        say(`triage could not prove the declared scope is empty before CI (${beforeCi.reason}); ` +
+          `retaining the ordinary CI and review gates: ${prUrl}`);
+      }
+    }
+
+    // Confirmed no-op triage PRs terminalize above; every substantive scope still passes CI.
     const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
@@ -34975,38 +35094,23 @@ async function triageCommandLocked(
       return 1;
     }
 
-    // W1-T963 (empty-diff-triage-merge incident: #2075/#2077/#2078 merged and passed review
-    // despite changing nothing). `diff` above is `gh pr diff` — frozen against THIS branch's own
-    // fork point, so it stays non-empty even once a SIBLING triage PR for the SAME feedback entry
-    // has already landed the identical change on `origin/main`. Re-diff the declared scope (the
-    // feedback entry this decision writes) against a FRESH fetch of the LIVE default branch tip
-    // instead — `no_task`/`grill` only: a `propose` decision's entire contribution is never just
-    // this one file (it also adds a new plan/tasks.d/ shard), so this narrower scope would refuse
-    // a genuinely-new proposal whose feedback-file edit happens to look identical to a sibling's.
-    if (decision.action !== "propose") {
-      const scopeFiles = triageDeclaredScope(feedbackId);
-      let liveDiffFiles: string[] | undefined;
-      try {
-        hostWorktreeGit(worktreePath, ["fetch", "origin", "main"], { stdio: "inherit-stdout" });
-        liveDiffFiles = hostWorktreeGit(worktreePath, ["diff", "--name-only", "origin/main", "HEAD", "--", ...scopeFiles])
-          .split("\n")
-          .map((l) => l.trim())
-          .filter(Boolean);
-      } catch (e) {
-        // Fail OPEN, never a false positive (mirrors buildBaseProofDir's own "unresolvable base ⇒
-        // no staleness signal"): an unreadable/unfetchable live tip is never treated as "already done".
-        log("triage.live_scope_check_error", { error: String((e as Error)?.message ?? e) });
-      }
-      const disposition = liveDiffFiles !== undefined ? triageEmptyScopeDisposition(liveDiffFiles, scopeFiles) : undefined;
-      if (disposition?.action === "close") {
-        log("triage.already_done", { scope: scopeFiles });
-        say(
-          `triage PR's declared scope (${scopeFiles.join(", ")}) is EMPTY against the LIVE origin/main — ` +
-            `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`,
-        );
-        ghExec(["pr", "close", prUrl, "--comment", disposition.comment!], { stdio: "inherit" });
+    // Keep the W1-T963 recheck after CI: a sibling may land the declared feedback update while
+    // checks are running. The same complete-evidence and exact-identity rule applies here.
+    if (declaredScope) {
+      const afterCi = await checkTriageLiveScope(worktreePath, prUrl, owner, repo, decision.action, declaredScope);
+      if (afterCi.kind === "empty") {
+        log("triage.already_done", { scope: declaredScope, after_ci: true });
+        say(`triage PR's declared scope (${declaredScope.join(", ")}) is EMPTY against the LIVE origin/main — ` +
+          `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`);
+        ghExec(["pr", "close", prUrl, "--comment", afterCi.comment], { stdio: "inherit" });
         worktreeRemove(repoDir, worktreePath);
-        return 0; // terminal, deliberate — the work is already done, not a failure (design (v))
+        return 0;
+      }
+      if (afterCi.kind === "unknown") {
+        log("triage.live_scope_unknown", { scope: declaredScope, phase: "after_ci", reason: afterCi.reason });
+        say(`triage PR left OPEN — live empty-scope evidence is unavailable or changed (${afterCi.reason}): ${prUrl}`);
+        worktreeRemove(repoDir, worktreePath);
+        return 1;
       }
     }
 

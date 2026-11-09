@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { CONFIG_GARDEN_LEDGER_STEPS } from "#src/lib/config-gardener.js";
+import { CONFIG_GARDEN_LEDGER_STEPS, readConfigGardenLedgerRows } from "#src/lib/config-gardener.js";
 import { gatherRuns, type LedgerRecord } from "#src/lib/retro.js";
 
 /**
@@ -61,6 +61,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "main-repair.revert_pr_opened": A_LANE_RUN_ID,
   // W1-T10269: a reviewer-health shadow's would-be terminal, under the review's review-PR run id and renamed shadow.*.
   "review.shadow_verdict": A_LANE_RUN_ID,
+  "review.status_restored": A_LANE_RUN_ID, // W1-T11729: written under the review lane run_id, after the status post succeeded
   "main-repair.ratchet_pr_opened": A_LANE_RUN_ID,
   "main-repair.ratchet_pr_superseded": A_LANE_RUN_ID,
   "main-repair.ratchet_standing": A_LANE_RUN_ID,
@@ -162,7 +163,6 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "review.diff_unreadable": AFTER_PR_OPENED,
   "review.finding": AFTER_PR_OPENED,
   "review.plan_lint_retry": AFTER_PR_OPENED, // W1-T11390: an explicit retry of a review that already ran
-  "review.history_guarded": AFTER_PR_OPENED, // W1-T11443: a SUCCESS turned back to FAILURE by a reproduced prior failure on the head
   "review.post_failed": AFTER_PR_OPENED,
   "review.posted_reappended": AFTER_PR_OPENED,
   "review.skipped_closed_lifecycle": AFTER_PR_OPENED,
@@ -347,4 +347,16 @@ test("the priced-step census sees owned settlement adapters but not unrelated re
   ]));
   assert.deepEqual([...found.keys()].sort(), ["daemon.block.parked", "daemon.blocked", "drain.continued"]);
   assert.deepEqual([...found.get("daemon.blocked")!], ["src/lib/daemon.ts"]);
+});
+
+test("W1-T11756 criterion 1: the config garden's bounded ledger read requests the history-guard receipt step", () => {
+  const requested: Array<string | readonly string[] | undefined> = [];
+  const rows = readConfigGardenLedgerRows("state", ((_dir: string, opts: { step?: string | readonly string[] }) => {
+    requested.push(opts.step);
+    return { ok: true, rows: [{ step: "review.history_guarded" }], unread: [] };
+  }) as never);
+  assert.equal(requested.length, 1, "the adapter reads the union once");
+  assert.ok(Array.isArray(requested[0]) && (requested[0] as string[]).includes("review.history_guarded"), "the receipt step is in the requested step set");
+  assert.deepEqual(rows, [{ step: "review.history_guarded" }], "the adapter returns the rows the reader gave");
+  assert.ok(!Object.hasOwn(EXEMPT, "review.history_guarded"), "the listed step carries no census exemption");
 });

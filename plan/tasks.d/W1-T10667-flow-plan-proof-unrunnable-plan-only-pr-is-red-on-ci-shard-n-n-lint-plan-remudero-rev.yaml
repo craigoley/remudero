@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   priority: 1.27
   # refusal-amendment (W1-T10667, run W1-T10667-1793723377515, 2026-11-03T17:19:39.474Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
@@ -71,3 +71,12 @@
     Settled by lookup: do existing tests lock NONE in? -> yes. test/every-open-pr-names-one-blocker-and-its-owner.test.ts does in the split-cases table, the blockerFields(…, false) assertion, the final-write table and the capped-green branch. test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts does in "an ownerless blocker is stalled at once" and "an ownerless stage reuses an escalation made by its disposition". Both files are now in `files:`, which answers the outside-declared-files refusal.
     Settled by lookup: does naming `operator` lose the stall report? -> for this class, yes. sweep.ts reportStuckStage stalls at once only when blocker_owner is "NONE", and DEFAULT_SWEEP_POLICY.stageBackstops has no plan-proof-unrunnable entry. The PR is still not left unattended: blocked-ambiguous still escalates through the disposition in an actionable pass (W1-T8267 test "reuses an escalation made by its disposition"), and plan-proof-unrunnable stays in SLO_CLIMBING_BLOCKERS, so the SLO ladder climbs whatever the owner (src/lib/pr-blocker.ts). sweep.ts is out of scope, so W1-T8267's fixtures move to a still-ownerless blocker and its titles stay.
     Settled by lookup: should this auto-clear verify:human? -> no. W1-T10431 is verify:human, and admission, approval and gates are out of scope. The earlier "cleared by its owner without manual intervention" acceptance was wrong and is replaced by "names the responsible owner".
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-11-08T21:51:55.470Z"
+    pin: "a3ab9a6703e50b20ee0b69c4ac7758028203939cf139d30ee8e422e230029d21"
+    operator_release_pin: "2b488c306b4dc7d08268e58d8edf1dff63754b7badd08e31751f6006cf7289c4"

@@ -404,7 +404,7 @@ test("W1-T511: the rollup read is left on the graph path", () => {
 // real transport bug this test must keep catching.
 const REQUIRED_WITH_OTHER_STATUS = ["ci", "codecov/project"];
 
-test("falsifier — dropping the commit-status half of the REST composition manufactures a FALSE green, because checksStateFromRollup grades only the required contexts actually PRESENT", () => {
+test("W1-T11606: dropping a required commit-status half cannot manufacture green while that required context is missing", () => {
   const runs = [{ name: "ci", status: "completed", conclusion: "success" }];
   const statuses = [{ context: "codecov/project", state: "failure" }];
 
@@ -413,12 +413,11 @@ test("falsifier — dropping the commit-status half of the REST composition manu
   assert.equal(checksStateFromRollup(whole, REQUIRED_WITH_OTHER_STATUS), "red");
 
   // A mapper that read only /check-runs would emit an array that still looks plausible, but
-  // codecov/project vanishes from it entirely — and an ABSENT required context is not graded,
-  // so the failing gate reads as green. This is the specific mis-derivation the two-endpoint
-  // composition exists to prevent.
+  // codecov/project vanishes from it entirely. The missing required status remains pending, so an
+  // incomplete rollup can never turn the incomplete required set green.
   const runsOnly = rollupFromRest(runs, []);
   assert.equal(runsOnly.some((c) => (c.name ?? c.context) === "codecov/project"), false);
-  assert.equal(checksStateFromRollup(runsOnly, REQUIRED_WITH_OTHER_STATUS), "green");
+  assert.equal(checksStateFromRollup(runsOnly, REQUIRED_WITH_OTHER_STATUS), "pending");
   assert.equal(whole.some((c) => c.context === "codecov/project" && c.state === "FAILURE"), true);
 });
 
