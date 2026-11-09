@@ -2,7 +2,6 @@
   title: Explicit console wording corrections become deduplicated replay candidates through existing feedback intake
   repo: remudero
   depends_on: []
-  dispatch_hold: true
   priority: 1.2
   type: implement
   verify: auto
@@ -99,6 +98,10 @@
     accept an unbound source or collapse an unknown into pass: the named checks must fail. Retain
     control/mutant/restored receipts. Pure formatting scores cannot satisfy semantic criteria.
   note: |
-    Held until W1-T11096 and W1-T11103 are merged/served with current owners reconciled. A separate
-    console consumer must be scoped against the served correction capability before exposing the
-    control. This task grants no new model budget, merge permission, schedule or deployment authority.
+    RELEASED 2026-11-09 after W1-T11096 (#16221, merge c22a39b) and W1-T11103 (#16839, merge
+    1b559f0) were confirmed ancestors of the live Serve generation 6455aeb896c6ac0c8bc01ab5c65860a7572b40ba.
+    CONSOLE-T166 is separately scoped to the wording-correction capability. The old W1-T11103 plan-only
+    branch remains preserved; fresh checks found no active claim, worktree or matching process. No branch
+    or work was adopted. This removes only the dispatch hold: the $20 cap, owners, files, acceptance,
+    review gates, and deployment gates remain unchanged. CONSOLE-T166 stays held until this capability
+    is merged and served. No new model budget, merge permission, schedule or deployment authority is granted.
