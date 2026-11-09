@@ -30,7 +30,7 @@ import type { ComposedRealGraph } from "../../lib/composition-root.js";
 import type { EscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { readEscalationAnswers } from "../../lib/escalation-answers.js";
 import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSequence, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
-import { DEFAULT_SWEEP_POLICY, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
 import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { failureRecordingPoster, reviewCommand as reviewCommandFromModule, runReview as runReviewFromModule, type ReviewCommandDeps, type ReviewCommandHost } from "./review.js";
@@ -317,6 +317,53 @@ export function buildSweepEffects(
   const removeReviewWorktree = deps.reviewWorktreeRemoveImpl ?? deps.worktreeRemoveImpl ?? worktreeRemoveAsync;
   const reviewReuseRunner: NonNullable<BuildSweepEffectsDeps["reviewReuseRunner"]> = async (pr, mode, reviewAttemptId, onPhase): Promise<number> => {
     const reuseRunId = reviewAttemptId === undefined ? deps.runId : `review-PR${pr.prNumber}-${systemClock.now()}`;
+    if (mode.kind === "restore") {
+      // W1-T11729: no review runs here. The delivered verdict of this exact head and input is re-posted as it stood, and the
+      // restore row is written only after the status post succeeded, so a failed post leaves no row and is retried next pass.
+      const delivered = restorableDeliveredVerdict(pr, readLedgerLines(deps.ledgerPath),
+        mode.regressionKey.slice(0, mode.regressionKey.lastIndexOf("|")));
+      if (!("row" in delivered) || delivered.regressionKey !== mode.regressionKey) return 1;
+      const verdict = delivered.row.decision_verdict as ReviewVerdict;
+      const poster = failureRecordingPoster();
+      const restored = await postReviewStatusGuarded({
+        post: poster.post,
+        owner: deps.owner,
+        repo: deps.repo,
+        sha: pr.headSha,
+        state: verdict.state,
+        verdict,
+        description: reviewPostedDescription(verdict),
+        taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
+        evidence: reviewEvidenceStrength(verdict.criteria ?? []),
+        ledgerPath: deps.ledgerPath,
+        runId: reuseRunId,
+        prUrl: pr.prUrl,
+        reviewInputDigest: pr.reviewInputDigest,
+        reviewEngineRevision: REVIEW_ENGINE_REVISION,
+        fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
+        readRequiredContexts: readRequiredStatusCheckContextsAsync,
+        cannotEvaluateEscalation: (e, issues) => tryEscalate(e, { issues: issues ?? ghIssueGateway(deps.owner, deps.repo), ledgerPath: deps.ledgerPath, runId: reuseRunId }),
+      });
+      if (poster.failed() || (!restored.posted && !restored.replayed)) return 1;
+      onPhase?.("posted");
+      appendLedger(deps.ledgerPath, {
+        run_id: reuseRunId,
+        task_id: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
+        step: REVIEW_STATUS_RESTORED_STEP,
+        context: REVIEW_CONTEXT,
+        head_sha: pr.headSha,
+        pr_url: pr.prUrl,
+        review_input_digest: pr.reviewInputDigest,
+        regression_key: mode.regressionKey,
+        old_state: pr.reviewState,
+        new_state: restored.effectiveState ?? verdict.state,
+        delivered_state: verdict.state,
+        delivered_run_id: delivered.row.run_id,
+        delivered_at: delivered.row.ts,
+        ...(pr.reviewPendingSince === undefined ? {} : { regression_since: pr.reviewPendingSince }),
+      });
+      return verdict.state === "success" ? 0 : 1;
+    }
     if (reviewAttemptId !== undefined) {
       const key = { taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber), prUrl: pr.prUrl, headSha: pr.headSha };
       appendLedger(deps.ledgerPath, { run_id: reuseRunId, task_id: key.taskId, step: "review.provider_provenance",
