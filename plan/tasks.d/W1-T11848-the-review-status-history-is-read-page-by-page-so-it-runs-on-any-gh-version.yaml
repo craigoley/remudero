@@ -16,6 +16,44 @@
   files:
     - src/lib/review.ts
     - test/review/a-review-status-history-reads-pages-without-slurp-or-paginate.test.ts
+    # Companion fixtures: each fakes the status or review history in the slurped shape
+    # ([[]], [rows], or a gh shim keyed on "api --paginate"), and has to switch to plain pages.
+    - test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts
+    - test/review/an-unreproduced-fail-or-unreadable-status-history-keeps-its-rule.test.ts
+    - test/review/a-reviewers-explanation-reaches-the-binding-verdict.test.ts
+    - test/review/a-reviewer-api-error-cannot-be-success.test.ts
+    - test/review/the-cpu-bound-counts-only-reviews-running-their-proofs.test.ts
+    - test/review/a-review-path-change-replays-recorded-reviews.test.ts
+    - test/event-driven-semantic-review.test.ts
+    - test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts
+    - test/run-review-holdout-integration.test.ts
+    - test/a-lost-review-posted-row-is-reappended-before-the-arm-gate-reads.test.ts
+    - test/review-skips-spawn-on-plan-only.test.ts
+    - test/review-reservation-replay.test.ts
+    - test/a-signal-ended-reviewer-is-re-run-once.test.ts
+    - test/rubric-authorship-wiring.test.ts
+    - test/ships-unwired-floor.test.ts
+    - test/review-reuse-discrimination-outcome.test.ts
+    - test/run-review-evidence-target.test.ts
+    - test/wiring-ordering-behaviour.test.ts
+    - test/codex-reviewer-production-wiring.test.ts
+    - test/a-failed-proof-records-why-it-failed.test.ts
+    - test/a-new-task-id-must-be-reserved-by-its-own-branch.test.ts
+    - test/review-closed-pending-short-circuit.test.ts
+    - test/codex-reviewer-materialized-checkout.test.ts
+    - test/every-worker-call-carries-its-assignment.test.ts
+    - test/a-held-review-names-the-claim-it-stood-down-for.test.ts
+    - test/every-lane-records-how-its-worker-ended.test.ts
+    - test/review-finding-receipts.test.ts
+    - test/review-status-pending.test.ts
+    - test/worker.test.ts
+    - test/worker/spawn/a-review-re-admitted-after-an-unable-reviewer-avoids-that-provider.test.ts
+    - test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts
+    - test/console-api/board/a-status-regressed-to-pending-on-a-delivered-head-is-restored.test.ts
+    - test/live-write-guard-command-sites.test.ts
+    - test/review.test.ts
+    - test/a-review-fail-handed-back-for-the-sandbox-is-re-reviewed-on-a-newer-image.test.ts
+    - test/a-stale-gate-cannot-publish-a-verdict.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -32,8 +70,12 @@
     - Cause: readReviewStatusHistory (src/lib/review.ts) reads the history with `gh api --paginate --slurp` at two call sites (commit statuses, then PR reviews). That arrived on 2026-11-08 in #17156 (W1-T11443). `--slurp` needs gh 2.51; this fleet's operator host runs gh 2.45.0, and src/lib/escalate.ts already documents the trap and dropped --slurp in August (#2522). The daemon container has a newer gh, so only host runs fail, and they fail closed over the existing status.
     - W1-T1208 ("gh flags the operator's gh does not have") exists as a guard but did not catch it, because the flag is passed as an array element to ghJsonAsync.
     - Why page-by-page and not reassembly: bare --paginate prints concatenated arrays that are not one JSON document (escalate.ts needs splitConcatenatedJsonPages for it), and importing escalate.ts into review.ts risks an import cycle. Plain pages are ordinary JSON arrays that every gh version and the read broker's cache handle, with fresh: true as today.
+    - Settled by lookup: is this already filed or decided? -> yes, W1-T11848 itself; this clarify pass widens only its files: and design, with no new task and no change to the four acceptance criteria (plan/tasks.d/W1-T11848-*.yaml).
+    - Settled by lookup: does the ledger test's fake need the slurped shape? -> yes, lines 62, 101 and 238 return [history]/[reviews]/[sharedStatuses], and lines 106-107 assert the URLs without &page=1 (test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts).
+    - Settled by lookup: is the ledger test the only fixture on the slurped shape? -> no, about 35 more test files fake statuses as "[[]]" or [rows], and event-driven-semantic-review.test.ts keys its gh shim on "api --paginate". rowsFromPaginatedApi flattens them today (src/lib/review.ts), but they become unreadable once each page is checked as a plain list. They are listed in files: so the build does not hit file-scope refusals.
   design: |
     Add a module-private helper in review.ts that reads an endpoint page by page: for page 1 up to REVIEW_HISTORY_MAX_PAGES (a declared constant, 10, so 1,000 rows, declared as a BACKSTOP), call readJson with ["api", `${endpoint}?per_page=100&page=${n}`] and { fresh: true }; require each page to be an array; concatenate in order; stop at the first page with fewer than 100 rows; if the last permitted page is still full, throw (the existing catch makes it unreadable). readReviewStatusHistory uses it for the commit statuses and, only when a remudero-review failure exists, for the PR reviews, replacing both `--paginate --slurp` calls. Remove rowsFromPaginatedApi if nothing else uses it. Keep every validation, the failure revision and reproducedReviewFailuresFromHistory unchanged. Import nothing new into review.ts.
+    COMPANION FIXTURES (test-only, no runtime effect): every listed companion test fakes the history in the slurped shape, and a plain page of nested arrays fails the existing row validation as unreadable. Convert each fake to one plain page: stdout "[[]]" becomes "[]"; a fake returning [rows] returns rows; JSON.stringify([rows]) becomes JSON.stringify(rows); a gh shim branch keyed on "api --paginate" becomes a branch on the statuses URL (in event-driven-semantic-review.test.ts it otherwise falls through to the "api repos/" PR-object branch). Exact-URL asserts on `statuses?per_page=100` or `reviews?per_page=100` get `&page=1`, as at test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts lines 106-107. Do not change any other assertion in those files. The fixtures move to the new shape; the reader does not keep the old one.
     NOT IN SCOPE: the other --slurp callers (backlog-gardener, comment-compression, fix-lane-gardener, github-posture; they run in the container), upgrading the host gh, and a guard for flags passed as array elements (a possible follow-up).
   falsifier: |
     Put --slurp back and criterion 1 must fail; drop the page cap check and criterion 2 must fail (a full capped page returns a truncated history); read the PR reviews unconditionally and criterion 3 must fail; reorder rows across pages and criterion 4 must fail. Restore and require all four to pass.
