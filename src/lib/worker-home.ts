@@ -35,9 +35,9 @@ import { systemClock, type Clock } from "./clock.js";
 
 /**
  * Isolate worker shells with a scratch HOME, blank user rc files, and a generated login profile that
- * clears host-profile aliases and functions (W1-T18, W1-T11693). Bash reads /etc/profile before
- * ~/.bash_profile, so blank rc files alone cannot stop functions added by the host profile. See
- * https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html and
+ * clears host-profile aliases and functions (W1-T18, W1-T11693). Bash startup order puts /etc/profile
+ * before ~/.bash_profile, so a blank profile leaks host functions (GNU Bash: https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html).
+ * gawk.sh is installed by GNU Gawk, documented at
  * https://www.gnu.org/software/gawk/manual/html_node/Shell-Startup-Files.html.
  *
  * Only {@link WORKER_HOME_RC_FILES} and named {@link WORKER_HOME_SYMLINKS} grants belong here,
