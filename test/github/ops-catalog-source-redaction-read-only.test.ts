@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { test } from "node:test";
 // The daemon and the live analytics cache import each other and the cache reads a daemon constant at load,
 // so the cache loads first and the daemon (the module under test) finishes before the cache evaluates.
@@ -101,13 +101,38 @@ test("W1-T11768 criterion 3: every outcome's serialized result is clean of priva
   }
 });
 
-test("W1-T11768 criterion 3: only GET read endpoints are requested and nothing is written", async () => {
+test("W1-T11768 criterion 3: only GET read endpoints are requested and nothing is written", async (t) => {
   const fx = fixture({ monolith: taskYaml("OPS-T1"), shards: { "a.yaml": taskYaml("OPS-T2") } });
-  const before = readdirSync(tmpdir()).length;
-  await readOpsCatalogSnapshotAsync(target, fx.api);
+  const writes: string[] = [];
+  const forbid = (method: string) => () => {
+    writes.push(method);
+    throw new Error("filesystem mutation forbidden");
+  };
+  // Observe this process's mutation attempts; other test processes may clean up the shared temp directory.
+  for (const method of ["appendFile", "copyFile", "cp", "link", "mkdir", "mkdtemp", "open", "rename",
+    "rm", "rmdir", "symlink", "truncate", "unlink", "write", "writeFile", "writev"] as const) {
+    t.mock.method(fs, method, forbid(method));
+    t.mock.method(fs, `${method}Sync`, forbid(`${method}Sync`));
+  }
+  for (const method of ["appendFile", "copyFile", "cp", "link", "mkdir", "mkdtemp", "open", "rename",
+    "rm", "rmdir", "symlink", "truncate", "unlink", "writeFile"] as const) {
+    t.mock.method(fs.promises, method, forbid(`promises.${method}`));
+  }
+  t.mock.method(fs, "createWriteStream", forbid("createWriteStream"));
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => fs.writeFileSync("PRIVATE_PATH_SENTINEL", "PRIVATE_BODY_SENTINEL"), /filesystem mutation forbidden/);
+    assert.deepEqual(writes, ["writeFileSync"], "positive control observes a write without persisting private bytes");
+    writes.length = 0;
+    const snap = await readOpsCatalogSnapshotAsync(target, fx.api);
+    assert.equal(snap.outcome, "ok", "the read completes while filesystem mutations are forbidden");
+    assert.deepEqual(writes, [], "no filesystem mutation is attempted, even if its error would be caught");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
   assert.ok(fx.calls.length > 0);
   assert.ok(fx.calls.every((p) => /^repos\/[^/]+\/[^/]+(\/git\/(ref\/heads\/main|commits\/[a-f0-9]{40}|trees\/[a-f0-9]{40}|blobs\/[a-f0-9]{40}))?$/.test(p)), "only read endpoints of the git data API");
-  assert.equal(readdirSync(tmpdir()).length, before, "no file is written");
   assert.equal(fx.api.length, 1, "the api seam takes a path and no method or body");
 });
 
