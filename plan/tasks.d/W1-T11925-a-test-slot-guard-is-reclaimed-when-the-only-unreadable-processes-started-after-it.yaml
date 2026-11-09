@@ -1,0 +1,43 @@
+- id: W1-T11925
+  title: A test-slot guard no readable process holds is proven closed and reclaimed even when unreadable same-uid processes exist that cannot be its writer (not node, or started after it), so a dead writer cannot wedge every author preflight
+  repo: remudero
+  depends_on: []
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # src/lib/test-slot-mutation.ts decides when a live test-slot guard may be unlinked; a wrong closed verdict risks a double mutation of the slot file
+  band_meaning: blast-radius
+  origin: operator ruling 2026-11-09 "fix the root cause too in parallel"
+  plan_refs:
+    - W1-T9928
+    - W1-T9919
+  files:
+    - src/lib/test-slot-mutation.ts
+    - test/ci/suites/a-guard-writer-the-probe-cannot-read-is-ruled-out-by-its-name-or-start.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A same-uid process whose fd directory or descriptors cannot be read does not make the proc-fd scan unknown when its command name is readable and is not node, or it started later than the guard's birth by more than the declared margin, so a guard no readable process holds reads closed
+      proof: "grep: W1-T11925 criterion 1 in test/ci/suites/a-guard-writer-the-probe-cannot-read-is-ruled-out-by-its-name-or-start.test.ts"
+    - claim: An unreadable same-uid node process that started before the guard was created, or whose command name and start time are both unreadable, keeps the scan unknown and the guard kept
+      proof: "grep: W1-T11925 criterion 2 in test/ci/suites/a-guard-writer-the-probe-cannot-read-is-ruled-out-by-its-name-or-start.test.ts"
+    - claim: A readable process holding the guard still reads open, and an unreadable descriptor inside a readable node process still reads unknown
+      proof: "grep: W1-T11925 criterion 3 in test/ci/suites/a-guard-writer-the-probe-cannot-read-is-ruled-out-by-its-name-or-start.test.ts"
+    - claim: The reclaim path keeps its identity-changed recheck, so a guard that moved during the probe is kept
+      proof: "grep: W1-T11925 criterion 4 in test/ci/suites/a-guard-writer-the-probe-cannot-read-is-ruled-out-by-its-name-or-start.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (Azure host, operator session): the test-slot mutation guard /mnt/scratch/rmd/test-slots/.slot-1.json.mutation was left by a dead writer (0 bytes, mtime 20:38:59Z, no readable process held it) and stayed for about 100 minutes. Every author preflight waiting on the slot ended NOT_RUN after the 45-minute wait bound (test_slot.wait_bound_exceeded), about ten were queued behind it, and the operator had to approve removing the file by exact path.
+    - Mechanism: reclaimOrphanedSlotMutation (W1-T9928) unlinks an abandoned guard only when procFdProbe returns closed, and procFdProbe returns closed only if every same-uid process's fd directory and every descriptor is readable. systemd --user (and sshd, (sd-pam), esbuild) are same-uid and always return EACCES, so on this host the probe is always unknown and the reclaim path never fires. The log rows say so (test_slot.mutation_guard_unproven, "descriptors unreadable for same-uid 1009412,1060665,1220/fd/0").
+    - Effect: a healthy condition (idle slot, dead writer) refuses every preflight, the repo's recurring defect (doctrine/investigation-discipline/healthy-condition-bound.md).
+  design: |
+    In procFdProbe (src/lib/test-slot-mutation.ts), an EACCES or EPERM on a same-uid process's fd directory, or an unreadable descriptor inside a readable one, no longer makes the scan unknown when cannotBeWriter holds for that process: its /proc/<pid>/comm is readable and is not node or nodejs (only a Node runtime writes the guard, and it opens it close-on-exec, so no other command can hold it, and nothing in src, scripts or bin sets process.title), or its start time (/proc/<pid>/stat field 22 with btime from /proc/stat, USER_HZ 100) is later than the guard's birthtime by more than GUARD_WRITER_START_MARGIN_MS (5000, BACKSTOP: btime has one-second granularity). A node process that started earlier, one whose name and start time are both unreadable, and a guard with no birthtime stay in the unreadable list, so the result is unknown as today. ENOENT and ESRCH handling, the 2 s observation bound and the identity-changed recheck in reclaimOrphanedSlotMutation are unchanged. procFdProbe is exported with its existing procRoot parameter so a fixture proc root can drive it.
+    MEASURED on the host 2026-11-09: the same-uid processes the scan cannot read are sshd session processes (started before the guard), (sd-pam), systemd --user, esbuild, git and a sandboxed bash; none is node. A start-time-only rule would not clear them (sshd and systemd started days before the guard), which is why the command name is the primary test. Against the real /proc a fresh guard reads closed among 199 processes, and a guard this process holds reads open.
+    RESIDUAL RISK, stated: a node process in a sandbox the scan cannot read that started before the guard keeps the answer unknown (a deliberate false negative). The guard is an empty advisory marker its writer holds for milliseconds.
+    NOT IN SCOPE: the 45-minute wait bound, the CPU-full gate, the darwin lsof path, and hand removal of a marker.
+  falsifier: |
+    Delete the exclusion and criterion 1 must fail. Exclude every unreadable process regardless of name and start time and criterion 2 must fail. Skip the recheck and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794262749575 -> run-unfiled-1794262749575
+    Reserved with rmd next-task-id. Hand-built by the operator's direction; check refs/rmd-dispatch/W1-T11925 and any run branch before building. Test folder from rmd test-place of the nearest existing test (W1-T9928's) is test/ci/suites/; re-run test-place on the real file when it exists.
