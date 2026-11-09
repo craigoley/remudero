@@ -9,6 +9,7 @@ import {
   explainUnitTestProofRefusal,
   GREP_PROOF_FILE_TARGET_REQUIREMENT,
   grepProofTargetNamesNoFile,
+  grepProofCanOnlyCertifyComments,
   isDialectPrefixed,
   parseWhitelistedProof,
   type NameFilterResolution,
@@ -53,6 +54,7 @@ export type LintCheck =
   | "proof-grep-unmatchable"
   | "proof-grep-self-certifying"
   | "proof-grep-already-true"
+  | "proof-grep-comment-only"
   | "proof-engine-divergence"
   | "proof-scope"
   | "proof-self-path"
@@ -1057,6 +1059,41 @@ export function proofGrepAlreadyTrueViolations(task: Task, opts: LintOpts = {}):
         "the merge base and pass at head) grades it executed_stale and the build can never go green. " +
         "Re-anchor the pattern on text the build ADDS, or declare `kind: guard` on the criterion when " +
         "preservation of existing text is the point.",
+    });
+  });
+  return violations;
+}
+
+/** (W1-T11376) Every NEW or CHANGED `grep:` proof that can only certify comment text in its target: the pattern opens
+ *  with the target's comment opener, or every line it matches at head is a comment ({@link
+ *  grepProofCanOnlyCertifyComments}, review's own rule). Review grades such a proof `executed_stale` whatever the build
+ *  does, so it is refused where it is written. A target not on disk yet is judged by the opener arm alone. A `kind: guard`
+ *  criterion is out of scope, as it is for {@link proofGrepAlreadyTrueViolations}. */
+export function proofGrepCommentOnlyViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const { readGrepProofFile, baseAcceptance } = opts;
+  if (!baseAcceptance || task.verify !== "auto") return [];
+  const current = task.acceptance ?? [];
+  const judged = new Set([
+    ...criteriaAdded(baseAcceptance, current),
+    ...criteriaProofChanged(baseAcceptance, current).map((pair) => pair.current),
+  ]);
+  const violations: LintViolation[] = [];
+  current.forEach((c, i) => {
+    if (!judged.has(c) || c.satisfied_by || (c as { kind?: unknown }).kind === "guard") return;
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    const target = whitelisted && proofGrepPatternAndPath(whitelisted);
+    if (!target) return;
+    const rawFileText = readGrepProofFile?.(target.path);
+    const fileText = rawFileText === undefined ? undefined : (ownPlanRecordOutsideAcceptance(task.id, target.path, rawFileText) ?? rawFileText);
+    if (!grepProofCanOnlyCertifyComments(target.pattern, target.path, fileText)) return;
+    violations.push({
+      check: "proof-grep-comment-only",
+      severity: "block",
+      message:
+        `criterion ${i + 1} ("${(c.claim ?? "").slice(0, 60)}") \`grep:\` pattern "${target.pattern.slice(0, 70)}" can only ` +
+        `match comment text in ${target.path}: review grades a grep proof whose every matching line is a comment ` +
+        "executed_stale, so the criterion can never pass whatever the build does. Use a `unit test:` proof, or grep " +
+        "a code line the build adds.",
     });
   });
   return violations;
@@ -3626,6 +3663,7 @@ const BUILD_VERIFICATION_CHECKS = new Set<LintCheck>([
   "proof-grep-unmatchable",
   "proof-grep-self-certifying",
   "proof-grep-already-true",
+  "proof-grep-comment-only",
   "proof-engine-divergence",
   "proof-scope",
   "proof-self-path",
@@ -3711,6 +3749,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...unboundCriterionViolations(task, opts));
   violations.push(...proofBaseDiscriminationViolations(task, opts));
   violations.push(...proofGrepAlreadyTrueViolations(task, opts));
+  violations.push(...proofGrepCommentOnlyViolations(task, opts));
   violations.push(...proofUnitTestBaseWrapperViolations(task, opts));
   violations.push(...proofTestOnlyDiscriminationViolations(task));
   violations.push(...newShardRuleSuiteViolations(task, opts));

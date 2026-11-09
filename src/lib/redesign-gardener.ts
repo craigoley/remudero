@@ -11,7 +11,7 @@ import { machineShardFilingRefusal, reparkStaleRuling } from "./machine-filing.j
 import { parseTasksFromYaml, type Task } from "./plan.js";
 import { planCheapFingerprint, planInventory, type PlanInventory } from "./plan-gardener.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
-import { INSTRUMENT_SURFACE, isDialectPrefixed } from "./review.js";
+import { INSTRUMENT_SURFACE, commentOnlyGrepProofRefusal, isDialectPrefixed } from "./review.js";
 import { lintTask } from "./task-linter.js";
 
 /**
@@ -99,6 +99,9 @@ export interface RedesignSources {
   landingRefusal: (rel: string, text: string) => string | undefined;
   /** Signatures a landed PR carried, an open PR carries, or an operator's close declined: none is asked again. */
   settled: () => ReadonlySet<string>;
+  /** A repo file's text at the Architect's head, or undefined when it is absent; lets the edit guard read a grep proof's
+   *  target. Without it only a pattern that opens with a comment opener is judged. */
+  readTarget?: (rel: string) => string | undefined;
 }
 
 const signatureOf = (id: string, evidence: readonly string[]): string =>
@@ -238,7 +241,7 @@ export function parseRedesignAnswer(text: string): Parsed {
 }
 
 /** Rule 16 and the operator's grants, checked in code: the reason an edit is refused, or undefined. */
-export function redesignEditRefusal(task: Task, edit: RedesignEdit, pathKind: (rel: string) => PathKind): string | undefined {
+export function redesignEditRefusal(task: Task, edit: RedesignEdit, pathKind: (rel: string) => PathKind, readTarget?: (rel: string) => string | undefined): string | undefined {
   const instruments = INSTRUMENT_SURFACE.map((re) => new RegExp(re));
   for (const path of edit.filesAdd) {
     // Only the canonical spelling is compared against the grant lists: ./deploy/x or src//lib/x would slip a prefix match.
@@ -252,6 +255,9 @@ export function redesignEditRefusal(task: Task, edit: RedesignEdit, pathKind: (r
   for (const { criterion, proof } of edit.proofs) {
     if (criterion < 1 || criterion > criteria.length) return `proof for criterion ${criterion}, which the task does not have`;
     if (!isDialectPrefixed(proof) || proof.includes("\n")) return `criterion ${criterion}'s proof has no dialect prefix or spans lines`;
+    // W1-T11376: lint-plan's comment-only rule, applied before the edit is written, so a proof review can only grade executed_stale is a recorded refusal.
+    const commentOnly = commentOnlyGrepProofRefusal(proof, readTarget);
+    if (commentOnly !== undefined) return `criterion ${criterion}'s proof is refused: ${commentOnly}`;
   }
   if (edit.filesAdd.length === 0 && edit.proofs.length === 0 && task.amendment?.includes(edit.amendment)) return "the edit changes nothing";
   return undefined;
@@ -318,7 +324,7 @@ export async function redesignInventory(sources: RedesignSources, deps: Gardener
     let outcome: RedesignInventory["outcomes"][number];
     if (parsed.verdict === "amend") {
       const dryRun = applyRedesignEdit(candidate.text, candidate.shard, parsed.edit, candidate.signature, "0000-00-00");
-      const refused = redesignEditRefusal(task, parsed.edit, sources.pathKind) ??
+      const refused = redesignEditRefusal(task, parsed.edit, sources.pathKind, sources.readTarget) ??
         ("refused" in dryRun ? dryRun.refused : sources.landingRefusal(candidate.shard, dryRun.text));
       outcome = refused === undefined
         ? { task_id: candidate.id, outcome: "amend", reason: parsed.edit.reason }
@@ -347,6 +353,10 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
     pathKind: (rel) => {
       const stat = statSync(join(deps.repoRoot, rel), { throwIfNoEntry: false });
       return stat === undefined ? "none" : stat.isFile() ? "file" : "dir";
+    },
+    readTarget: (rel) => {
+      const path = join(deps.repoRoot, rel);
+      return statSync(path, { throwIfNoEntry: false })?.isFile() ? readFileSync(path, "utf8") : undefined;
     },
     judgeText: () => Promise.reject(new Error("the redesign Architect's spawn is not wired")),
     // backlogLandingGuard's two arms over the drafted text: a machine record is linted whole with admission, any
