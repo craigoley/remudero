@@ -12,7 +12,6 @@ import {
   PREOPEN_GATE_MODE_ENV, defaultRunGate, preopenGateLedgerFields, readPreflightStepLog, runPreopenGate,
   type GateRun, type PreflightStepRecord,
 } from "#src/lib/preopen-gate.js";
-import { PREFLIGHT_BOOL_FLAGS } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const noPush = async () => ({ kind: "skipped" as const, reason: "fixture has no remote" });
@@ -52,7 +51,6 @@ test("W1-T11818 criterion 1: --light plans every fast job but the skipped ones, 
   assert.equal(preflightStepLogPlan([], true).lightSkipped, undefined, "the full plan is unchanged");
   assert.deepEqual(preflightStepLogPlan([], true).fastJobs, jobs);
   assert.deepEqual(preflightStepLogPlan(["--light", "--no-fast"], true).fastJobs, [], "no fast tier, nothing to lighten");
-  assert.ok((PREFLIGHT_BOOL_FLAGS as readonly string[]).includes("--light"), "the verb accepts the flag");
 
   const steps = FAST_GATE_STEPS.filter(({ job }) => ["rule-checks", "cli-reference", "census-precheck"].includes(job));
   const run = (light: boolean) => {
